@@ -90,7 +90,8 @@ class TestFinalResultsJournal:
         result UPDATE had been discarded with the WAL, and clear the
         owner token, as the kernel does when the owning process dies."""
         th._get_db().execute(
-            "UPDATE task_history SET result = ?, owner = '' WHERE id = ?",
+            "UPDATE task_history SET result = ?, success = NULL, owner = '' "
+            "WHERE id = ?",
             (_SENTINEL, task_id),
         )
 
@@ -100,7 +101,7 @@ class TestFinalResultsJournal:
         th._save_task_result("<p>done</p>", task_id=task_id)
         assert self._row_result(task_id) == "<p>done</p>"
         assert th._load_final_results(self._sidecar()) == {
-            task_id: "<p>done</p>",
+            task_id: {"result": "<p>done</p>", "success": None},
         }
 
     def test_legacy_save_without_task_id_does_not_journal(self) -> None:
@@ -117,16 +118,27 @@ class TestFinalResultsJournal:
         row swept in the same pass still gets the kill message.
         """
         finished_id = self._add_sentinel_task("finished, then WAL lost")
+        verdict_id = self._add_sentinel_task("finish(success=False), then WAL lost")
         killed_id = self._add_sentinel_task("killed mid-task")
         th._save_task_result("<h3>real summary</h3>", task_id=finished_id)
+        th._save_task_result("<p>could not</p>", task_id=verdict_id, success=False)
         self._simulate_wal_loss(finished_id)
+        self._simulate_wal_loss(verdict_id)
         self._simulate_wal_loss(killed_id)  # never had a saved result
 
         n = th._recover_orphaned_tasks(set())
 
-        assert n == 2
+        assert n == 3
         assert self._row_result(finished_id) == "<h3>real summary</h3>"
         assert self._row_result(killed_id) == _KILLED
+        # The agent's verdict is restored with the text, so the history
+        # still shows the run as failed (``success`` column, not text).
+        assert self._row_result(verdict_id) == "<p>could not</p>"
+        row = th._get_db().execute(
+            "SELECT success FROM task_history WHERE id IN (?, ?) ORDER BY id = ?",
+            (finished_id, verdict_id, verdict_id),
+        ).fetchall()
+        assert [r["success"] for r in row] == [None, 0]
         # The journal survives the sweep (entries are fresh).
         assert finished_id in th._load_final_results(self._sidecar())
 
@@ -150,7 +162,9 @@ class TestFinalResultsJournal:
             stream.write(
                 json.dumps({"task_id": "ok", "result": "<p>ok</p>"}) + "\n"
             )
-        assert th._load_final_results(sidecar) == {"ok": "<p>ok</p>"}
+        assert th._load_final_results(sidecar) == {
+            "ok": {"result": "<p>ok</p>", "success": None},
+        }
 
     def test_load_missing_file_returns_empty(self) -> None:
         assert th._load_final_results(self._sidecar()) == {}
@@ -165,7 +179,9 @@ class TestFinalResultsJournal:
             stream.write('{"task_id":"torn')  # no trailing newline
         task_id = self._add_sentinel_task("after torn tail")
         th._save_task_result("<p>intact</p>", task_id=task_id)
-        assert th._load_final_results(sidecar) == {task_id: "<p>intact</p>"}
+        assert th._load_final_results(sidecar) == {
+            task_id: {"result": "<p>intact</p>", "success": None},
+        }
 
     def test_journal_append_failure_is_swallowed(self) -> None:
         """An unwritable sidecar must not break result persistence."""
@@ -186,7 +202,9 @@ class TestFinalResultsJournal:
             stream.write(json.dumps(
                 {"task_id": "new", "result": "y", "ts": time.time()}) + "\n")
         th._recover_orphaned_tasks(set())
-        assert th._load_final_results(sidecar) == {"new": "y"}
+        assert th._load_final_results(sidecar) == {
+            "new": {"result": "y", "success": None},
+        }
 
     def test_prune_without_journal_or_changes_is_a_no_op(self) -> None:
         """No sidecar, then an all-fresh sidecar: both leave the file

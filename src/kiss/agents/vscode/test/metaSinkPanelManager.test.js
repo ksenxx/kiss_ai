@@ -7,14 +7,15 @@
 // (out/SorcarPanelManager.js + out/SorcarSidebarView.js) against a
 // REAL local-WSS daemon stub:
 //  - setMetaSink pushes the current state right away (the (null, null)
-//    placeholders when no panel reported yet);
-//  - a panel webview's `metaUpdate` {values, taskUpdate} reaches the
-//    sink while that panel is active, is cached while it is not, and
-//    the cache repaints the sink on panel activation and on the active
-//    panel's close;
-//  - refreshActiveTaskUpdate posts `refreshTaskUpdate` to the ACTIVE
-//    panel's webview only, and is a no-op without panels;
-//  - a panel webview's `getTaskUpdate` is forwarded to the daemon with
+//    placeholders when no panel exists or none reported yet);
+//  - the chat panel webview's `metaUpdate` {values, taskUpdate} reaches
+//    the sink, and the sink falls back to the placeholders when the
+//    panel closes (no `closeTab` goes to the daemon: closing the panel
+//    closes the surface only);
+//  - open() reveals the one existing panel instead of creating another;
+//  - refreshActiveTaskUpdate posts `refreshTaskUpdate` to the panel's
+//    webview, and is a no-op without a panel;
+//  - the panel webview's `getTaskUpdate` is forwarded to the daemon with
 //    exactly {tabId, knownSig, token, refresh}, and the daemon's direct
 //    `taskUpdate` reply is relayed back into the webview;
 //  - SorcarSidebarView.postMetaState before the webview resolves is
@@ -197,12 +198,6 @@ const {SorcarSidebarView} = require(
   path.join(OUT_DIR, 'SorcarSidebarView.js'),
 );
 
-function tabIdOf(panel) {
-  const m = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html);
-  assert.ok(m, 'panel html must carry data-kiss-tab-id');
-  return m[1];
-}
-
 async function runTest() {
   server.listen(endpointPath);
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
@@ -218,18 +213,24 @@ async function runTest() {
     'no panels: the sink starts on the placeholder state',
   );
 
-  // --- refreshActiveTaskUpdate without panels is a no-op ---------------
+  // --- refreshActiveTaskUpdate without a panel is a no-op --------------
   manager.refreshActiveTaskUpdate();
   assert.strictEqual(createdPanels.length, 0, 'no panel is created by a refresh');
 
-  // --- the active panel's metaUpdate reaches the sink -------------------
-  manager.openNewChat();
+  // --- the panel's metaUpdate reaches the sink --------------------------
+  const controllerA = manager.open();
+  assert.strictEqual(createdPanels.length, 1, 'open() creates the panel');
+  assert.strictEqual(
+    manager.controller(),
+    controllerA,
+    'controller() is the panel controller open() returned',
+  );
   const panelA = createdPanels[0];
-  const tabA = tabIdOf(panelA);
+  assert.strictEqual(panelA.viewType, 'kissSorcar.chatTab');
   assert.deepStrictEqual(
     sinkCalls[sinkCalls.length - 1],
     {values: null, taskUpdate: null},
-    'a fresh active panel has no cached values yet',
+    'a fresh panel has no cached values yet',
   );
   const valuesA = {
     tokens: '1.00K',
@@ -237,7 +238,6 @@ async function runTest() {
     steps: '3',
     time: '5.0s',
     timeColor: 'var(--red)',
-    machine: 'hostA',
     workdir: '/a',
     maxBudget: '$10.00',
   };
@@ -262,85 +262,65 @@ async function runTest() {
     'the task-update state rides along with the values',
   );
 
-  // --- refreshActiveTaskUpdate reaches the ACTIVE panel only -----------
+  // --- refreshActiveTaskUpdate reaches the panel ------------------------
   manager.refreshActiveTaskUpdate();
   assert.deepStrictEqual(
     panelA._posted.filter(m => m.type === 'refreshTaskUpdate'),
     [{type: 'refreshTaskUpdate'}],
-    'the active panel gets one refreshTaskUpdate',
+    'the panel gets one refreshTaskUpdate',
   );
 
-  // --- a second (active) panel repaints the sink; a BACKGROUND panel's
-  // report is cached without repainting --------------------------------
-  manager.openNewChat();
-  const panelB = createdPanels[1];
-  panelA.active = false;
-  assert.deepStrictEqual(
-    sinkCalls[sinkCalls.length - 1],
-    {values: null, taskUpdate: null},
-    'activating an unreported panel shows the placeholders',
-  );
-  const valuesB = {...valuesA, tokens: '2.00K', workdir: '/b'};
-  panelB._recv.fire({type: 'metaUpdate', values: valuesB, taskUpdate: null});
-  await waitFor(
-    () =>
-      sinkCalls[sinkCalls.length - 1].values &&
-      sinkCalls[sinkCalls.length - 1].values.tokens === '2.00K',
-    'the new active panel metaUpdate must reach the sink',
-  );
-  assert.strictEqual(sinkCalls[sinkCalls.length - 1].taskUpdate, null);
-  const sinkLenAfterB = sinkCalls.length;
+  // --- open() again reveals the same panel; the sink keeps its values --
+  let reveals = 0;
+  panelA.reveal = () => reveals++;
+  assert.strictEqual(manager.open(), controllerA, 'open() reuses the panel');
+  assert.strictEqual(createdPanels.length, 1, 'no second panel is created');
+  assert.strictEqual(reveals, 1, 'the existing panel is revealed');
+  assert.deepStrictEqual(sinkCalls[sinkCalls.length - 1].values, valuesA);
+
+  // A later report repaints the sink with the new values.
   const updateA2 = {...updateA, content: '<p>a2</p>', running: true};
   panelA._recv.fire({
     type: 'metaUpdate',
     values: {...valuesA, tokens: '1.50K'},
     taskUpdate: updateA2,
   });
-  await new Promise(r => setTimeout(r, 200));
-  assert.strictEqual(
-    sinkCalls.length,
-    sinkLenAfterB,
-    'a background panel report must not repaint the sink',
-  );
-
-  // The refresh goes to the active panel (B), not the background one.
-  manager.refreshActiveTaskUpdate();
-  assert.strictEqual(
-    panelB._posted.filter(m => m.type === 'refreshTaskUpdate').length,
-    1,
-    'the now-active panel B gets the refresh',
-  );
-  assert.strictEqual(
-    panelA._posted.filter(m => m.type === 'refreshTaskUpdate').length,
-    1,
-    'the background panel A gets no further refresh',
-  );
-
-  // --- switching back to panel A pushes its cached values ---------------
-  panelB.active = false;
-  panelA.active = true;
-  panelA._viewState.fire({webviewPanel: panelA});
-  assert.strictEqual(sinkCalls[sinkCalls.length - 1].values.tokens, '1.50K');
-  assert.deepStrictEqual(
-    sinkCalls[sinkCalls.length - 1].taskUpdate,
-    updateA2,
-    'the cached task update repaints on activation',
-  );
-
-  // --- closing the active panel repaints from the remaining one ---------
-  panelA.dispose();
   await waitFor(
     () =>
       sinkCalls[sinkCalls.length - 1].values &&
-      sinkCalls[sinkCalls.length - 1].values.tokens === '2.00K',
-    'closing the active panel must fall back to the remaining panel',
+      sinkCalls[sinkCalls.length - 1].values.tokens === '1.50K',
+    'a later metaUpdate must repaint the sink',
   );
-  const closeTabCmd = () =>
-    daemonCommands.find(c => c.type === 'closeTab' && c.tabId === tabA);
-  await waitFor(closeTabCmd, 'the user close retires the chat tab');
+  assert.deepStrictEqual(sinkCalls[sinkCalls.length - 1].taskUpdate, updateA2);
+
+  // --- closing the panel falls back to the placeholders -----------------
+  panelA.dispose();
+  await waitFor(
+    () =>
+      sinkCalls[sinkCalls.length - 1].values === null &&
+      sinkCalls[sinkCalls.length - 1].taskUpdate === null,
+    'closing the panel must show the placeholders',
+  );
+  assert.strictEqual(manager.controller(), undefined, 'no controller left');
+  manager.refreshActiveTaskUpdate();
+  assert.strictEqual(
+    panelA._posted.filter(m => m.type === 'refreshTaskUpdate').length,
+    1,
+    'a refresh after the close posts nothing',
+  );
+  await new Promise(r => setTimeout(r, 200));
+  assert.ok(
+    !daemonCommands.some(c => c.type === 'closeTab'),
+    'closing the panel closes the surface only: no closeTab to the daemon',
+  );
 
   // --- getTaskUpdate forwards to the daemon; taskUpdate relays back -----
-  const tabB = tabIdOf(panelB);
+  // A new panel after the close: the chats stayed in the registry, so
+  // the webview addresses the one on screen by its registry tab id.
+  manager.open();
+  assert.strictEqual(createdPanels.length, 2, 'open() after a close creates a panel');
+  const panelB = createdPanels[1];
+  const tabB = 'tab-b';
   panelB._recv.fire({
     type: 'getTaskUpdate',
     tabId: tabB,
@@ -396,6 +376,7 @@ async function runTest() {
     bodyAttrs: ' class="editor-tab-mode meta-panel-mode"',
     onEvent: () => {},
   });
+  const valuesB = {...valuesA, tokens: '2.00K', workdir: '/b'};
   const cachedUpdate = {
     content: '<p>cached</p>',
     running: false,

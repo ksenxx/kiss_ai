@@ -131,12 +131,12 @@ class TestAgentToggle(unittest.TestCase):
         cls._js = cls._JS_PATH.read_text()
         cls._ts = cls._TS_PATH.read_text()
 
-    def test_worktree_action_rejected_when_not_enabled(self) -> None:
-        """Worktree action fails gracefully when worktree mode is off."""
+    def test_worktree_action_rejected_without_a_pending_worktree(self) -> None:
+        """Worktree action fails gracefully when no task left a worktree."""
         server = VSCodeServer()
         result = server._handle_worktree_action("merge")
         assert result["success"] is False
-        assert "not enabled" in result["message"]
+        assert "No pending worktree" in result["message"]
 
 class TestTabStateRestore(unittest.TestCase):
     """Test that tab state is persisted correctly for cross-restart restore.

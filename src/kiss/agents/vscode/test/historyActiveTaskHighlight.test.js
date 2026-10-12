@@ -127,13 +127,8 @@ function lastMessage(posted, type) {
   return msgs.length ? msgs[msgs.length - 1] : null;
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function session(overrides) {
@@ -251,7 +246,7 @@ function clickChevron(win, chatId) {
 
 function testRelayHighlightsAndScrolls() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, threeSessions());
   assert.strictEqual(highlighted(win).length, 0, 'nothing highlighted yet');
   assert.ok(
@@ -325,7 +320,7 @@ function testRelayHighlightsAndScrolls() {
 
 function testRelayBeforeHistoryAppliesOnRender() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '1'});
   assert.strictEqual(rows(win).length, 0, 'no rows yet');
   scrolled.length = 0;
@@ -345,7 +340,7 @@ function testRelayBeforeHistoryAppliesOnRender() {
 
 function testRefreshAndRebuildKeepHighlight() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, threeSessions());
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '1'});
   // The user unfolds the chat: the row itself becomes the scroll
@@ -393,7 +388,7 @@ function testRefreshAndRebuildKeepHighlight() {
 
 function testFoldIsTheUsersAlone() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, threeSessions());
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
   assert.ok(collapsed(win, 'chat-1'), 'folded while on screen');
@@ -446,7 +441,7 @@ function testFoldIsTheUsersAlone() {
 
 function testRunningTaskDoesNotUnfold() {
   const {win, posted} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
   const running = threeSessions();
   running[1].is_running = true;
@@ -473,7 +468,7 @@ function testRunningTaskDoesNotUnfold() {
 
 function testFilteredRowWaitsForTheFilter() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, threeSessions());
   // The user unfolds the chat so the row (not the header) is the
   // scroll target.
@@ -506,7 +501,7 @@ function testFilteredRowWaitsForTheFilter() {
 
 function testRemoteWebappPaintsFromOwnTabs() {
   const {win, posted, scrolled} = makeWebview(REMOTE_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const mine = byType(posted, 'ready')[0].tabId;
   send(win, {
     type: 'tabs_state',
@@ -603,7 +598,7 @@ function testHistoryPanelIgnoresOwnPlaceholderTab() {
   // The history panel's own placeholder tab must never paint a
   // highlight: only the host relay decides.
   const {win, posted} = makeWebview(HISTORY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, threeSessions());
   send(win, {
     type: 'task_settings',

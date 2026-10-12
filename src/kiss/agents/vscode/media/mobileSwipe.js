@@ -7,7 +7,7 @@
 // main.js turns each swipe into a step between its four mobile screens
 // (chats, chat, file, task info):
 //
-//   const dispose = MobileSwipe.install(document, direction => {...}, {
+//   MobileSwipe.install(document, direction => {...}, {
 //     ignore: '#task-input, .browser-view',   // touches here never swipe
 //     scrollPositions: () => [...],           // sideways scroll offsets
 //   });                                       // the DOM cannot report
@@ -106,7 +106,7 @@
    *   matching element never swipes.  `scrollPositions`: returns the
    *   sideways scroll offsets of scrollers the DOM cannot report; a
    *   change during the touch means it scrolled.
-   * @returns {function(): void} Removes the listeners.
+   *   The listeners live as long as *root* (a page installs once).
    */
   function install(root, onSwipe, options) {
     const ignore = (options && options.ignore) || '';
@@ -164,12 +164,6 @@
     root.addEventListener('touchmove', onMove, opts);
     root.addEventListener('touchend', onEnd, opts);
     root.addEventListener('touchcancel', cancel, opts);
-    return function dispose() {
-      root.removeEventListener('touchstart', onStart, opts);
-      root.removeEventListener('touchmove', onMove, opts);
-      root.removeEventListener('touchend', onEnd, opts);
-      root.removeEventListener('touchcancel', cancel, opts);
-    };
   }
 
   /** Report a swipe made inside a preview iframe to its parent. */

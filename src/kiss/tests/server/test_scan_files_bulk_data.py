@@ -30,6 +30,7 @@ from kiss.server.file_index import (
     FileIndex,
     _bulk_data_dirs,
 )
+from kiss.tests.server.conftest import touch
 
 MANY = _BULK_DATA_MIN_FILES + 50
 
@@ -38,14 +39,6 @@ def _touch_many(directory: Path, count: int, suffix: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for i in range(count):
         (directory / f"f{i:04d}{suffix}").write_text("x")
-
-
-def _touch(root: Path, *rel: str) -> None:
-    """Create empty files at each *rel* path below *root*."""
-    for r in rel:
-        p = root / r
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("")
 
 
 def _search(root: Path, query: str, usage: dict[str, int], limit: int = 20) -> list[str]:
@@ -164,7 +157,7 @@ class TestBulkDataHelpers:
 
 class TestShallowerPathsRankFirstAmongEqualMatches:
     def test_equal_matches_are_ordered_by_depth(self, tmp_path: Path) -> None:
-        _touch(
+        touch(
             tmp_path,
             "artifacts/run_0001/README.md",
             "artifacts/run_0002/README.md",
@@ -180,19 +173,19 @@ class TestShallowerPathsRankFirstAmongEqualMatches:
 
     def test_match_position_still_beats_depth(self, tmp_path: Path) -> None:
         """A closer-to-the-end match wins even when it is deeper."""
-        _touch(tmp_path, "config_loader.py", "src/kiss/core/config.py")
+        touch(tmp_path, "config_loader.py", "src/kiss/core/config.py")
         ranked = _search(tmp_path, "config", {})
         assert ranked == ["src/kiss/core/config.py", "config_loader.py"]
 
     def test_empty_query_lists_root_entries_before_nested_ones(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "a/deep/x.py", "README.md", "a/y.py")
+        touch(tmp_path, "a/deep/x.py", "README.md", "a/y.py")
         (tmp_path / "b").mkdir()
         ranked = _search(tmp_path, "", {})
         assert ranked == ["README.md", "a/", "b/", "a/y.py", "a/deep/", "a/deep/x.py"]
 
     def test_wide_container_contents_rank_last_but_stay_reachable(self, tmp_path: Path) -> None:
         runs = [f"papers/artifacts/run_{i:03d}/" for i in range(WIDE_DIR_MIN_CHILDREN)]
-        _touch(
+        touch(
             tmp_path,
             "src/tests/test_cli.py",
             "papers/notes/test_cli.py",
@@ -215,7 +208,7 @@ class TestShallowerPathsRankFirstAmongEqualMatches:
         # Even a better match position inside the container loses to a
         # project file: ``test`` ends ``runs/.../tests`` but not the
         # project's ``test_long_descriptive_name.py``.
-        _touch(tmp_path, "src/tests/test_long_descriptive_name.py")
+        touch(tmp_path, "src/tests/test_long_descriptive_name.py")
         index = FileIndex.scan(str(tmp_path))
         ranked = [r["text"] for r in index.view("").search("test", {}, limit=100)]
         assert "src/tests/test_long_descriptive_name.py" in ranked[:4]
@@ -230,14 +223,14 @@ class TestShallowerPathsRankFirstAmongEqualMatches:
         # ``pkg/sub00/a.py`` is three levels deep, ``other/deep/er/a.py`` four.
         few = tmp_path / "few"
         subs = [f"pkg/sub{i:02d}/a.py" for i in range(WIDE_DIR_MIN_CHILDREN - 1)]
-        _touch(few, "other/deep/er/a.py", *subs)
+        touch(few, "other/deep/er/a.py", *subs)
         paths = FileIndex.scan(str(few)).paths
         assert paths.index("pkg/sub00/a.py") < paths.index("other/deep/er/a.py"), (
             "below the threshold pkg/ is not a container: shallow entries stay first"
         )
 
         wide = tmp_path / "wide"
-        _touch(wide, "other/deep/er/a.py", *subs, f"pkg/sub{WIDE_DIR_MIN_CHILDREN - 1:02d}/a.py")
+        touch(wide, "other/deep/er/a.py", *subs, f"pkg/sub{WIDE_DIR_MIN_CHILDREN - 1:02d}/a.py")
         paths = FileIndex.scan(str(wide)).paths
         assert paths.index("other/deep/er/a.py") < paths.index("pkg/sub00/")
         assert paths.index("pkg/") < paths.index("other/deep/er/a.py"), (
@@ -249,7 +242,7 @@ class TestShallowerPathsRankFirstAmongEqualMatches:
         # container's contents.
         root = tmp_path / "root"
         tops = [f"top{i:02d}" for i in range(WIDE_DIR_MIN_CHILDREN)]
-        _touch(
+        touch(
             root, "top.py", "src/deep/test_cli.py", *[f"{t}/a.py" for t in tops],
             *[f"top00/runs/run{i:03d}/test_cli.py" for i in range(WIDE_DIR_MIN_CHILDREN)],
         )
@@ -261,7 +254,7 @@ class TestShallowerPathsRankFirstAmongEqualMatches:
         assert ranked[0] == "src/deep/test_cli.py"
 
     def test_frequent_files_keep_their_usage_order(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "deep/a/b/used.py", "used.py")
+        touch(tmp_path, "deep/a/b/used.py", "used.py")
         usage = {"deep/a/b/used.py": 3}
         ranked = FileIndex.scan(str(tmp_path)).view("").search("used", usage)
         assert [r["text"] for r in ranked] == ["deep/a/b/used.py", "used.py"]

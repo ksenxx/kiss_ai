@@ -27,8 +27,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -89,8 +89,8 @@ class TestBaselineCommitFailure:
             _install_failing_prepare_commit_msg_hook(repo)
             (repo / "README.md").write_text("# Test\nuser edit\n")
 
-            agent = WorktreeSorcarAgent("bh4-baseline-fail")
-            result = agent._try_setup_worktree(repo, None)
+            agent = ChatSorcarAgent("bh4-baseline-fail")
+            result = agent._try_setup_worktree(repo, str(repo))
 
             assert result is None, (
                 "expected graceful fallback (None) when the baseline "
@@ -117,8 +117,8 @@ class TestBaselineCommitFailure:
             repo = _make_repo(Path(tmp) / "repo")
             _install_failing_prepare_commit_msg_hook(repo)
 
-            agent = WorktreeSorcarAgent("bh4-baseline-clean")
-            result = agent._try_setup_worktree(repo, None)
+            agent = ChatSorcarAgent("bh4-baseline-clean")
+            result = agent._try_setup_worktree(repo, str(repo))
 
             assert result is not None
             assert agent._wt is not None

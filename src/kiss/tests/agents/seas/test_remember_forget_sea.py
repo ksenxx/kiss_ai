@@ -50,8 +50,6 @@ _FORGET_PATH = Path(forget_sea.__file__).resolve()
 _WORKER_SETTINGS: dict[str, Any] = {
     "tool_profile": "bash",
     "max_budget": 1.0,
-    "use_worktree": False,
-    "auto_commit": False,
     "auto_classify": False,
     "use_web_tools": False,
     "use_memory": False,

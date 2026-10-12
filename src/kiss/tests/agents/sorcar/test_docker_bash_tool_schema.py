@@ -26,20 +26,9 @@ import unittest
 from collections.abc import Callable
 from typing import Any, cast
 
-import docker
-
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-
-def is_docker_available() -> bool:
-    """Return True when a docker daemon is reachable."""
-    try:
-        client = docker.from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")

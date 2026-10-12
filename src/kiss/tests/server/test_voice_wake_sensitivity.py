@@ -34,7 +34,6 @@ file moved from tests/agents/vscode to tests/server.
 from __future__ import annotations
 
 import shutil
-import socket
 import subprocess
 import tempfile
 import unittest
@@ -175,13 +174,6 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
                 proc.returncode, 2,
                 msg=f"--sensitivity {bad}: {proc.stderr[-500:]}",
             )
-
-
-def _free_port() -> int:
-    """Return an OS-assigned free TCP port."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 if __name__ == "__main__":

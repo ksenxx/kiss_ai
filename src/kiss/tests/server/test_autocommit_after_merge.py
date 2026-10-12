@@ -2,17 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the non-worktree post-task auto-commit.
+"""Integration tests for the manual "Git Commit" of the main tree.
 
-With the interactive diff/merge review workflow removed, a non-worktree
-task that leaves the main working tree dirty is always committed
-directly: :meth:`_MergeFlowMixin._autocommit_changes` stages
-everything, generates a commit message and commits to the current
-branch, reporting progress through ``autocommit_progress`` /
-``autocommit_done`` events.  The old ``autocommit_prompt`` event and
+:meth:`_MergeFlowMixin._commit_main_tree` stages everything, generates
+a commit message and commits to the current branch, reporting a
+``notification`` while the message is generated and the result
+through ``autocommit_done``.  The old ``autocommit_prompt`` event and
 the ``mergeAction`` command no longer exist; ``autocommitAction`` is
-back as the settings panel's manual "Git Commit" command and runs
-``_autocommit_changes`` directly (see
+the settings panel's manual "Git Commit" command and runs
+``_commit_main_tree`` directly (see
 ``test_settings_git_commit_button.py``).
 
 These tests drive :class:`VSCodeServer` with real ``git`` state — no
@@ -26,7 +24,6 @@ dependency internals.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,23 +31,7 @@ from pathlib import Path
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    """Create a git repo with one committed file so HEAD exists."""
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
+from kiss.tests.server.conftest import init_repo, run_git
 
 
 class _ServerHarness(unittest.TestCase):
@@ -58,7 +39,7 @@ class _ServerHarness(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        _init_repo(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server = VSCodeServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
@@ -85,7 +66,7 @@ class _ServerHarness(unittest.TestCase):
 
 
 class TestAutocommitChanges(_ServerHarness):
-    """``_autocommit_changes`` stages everything (including untracked),
+    """``_commit_main_tree`` stages everything (including untracked),
     generates a commit message, and commits to the current branch."""
 
     def setUp(self) -> None:
@@ -106,16 +87,16 @@ class TestAutocommitChanges(_ServerHarness):
         Path(self.tmpdir, "seed.txt").write_text("updated seed\n")
         Path(self.tmpdir, "new.txt").write_text("brand new\n")
 
-        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        self.server._autocommit_changes("t1")
-        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        before = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        self.server._commit_main_tree("t1")
+        after = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
         assert before != after
-        status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
+        status = run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == ""
-        log = _run_git(self.tmpdir, "log", "-1", "--pretty=%s").stdout.strip()
+        log = run_git(self.tmpdir, "log", "-1", "--pretty=%s").stdout.strip()
         assert log == "feat: deterministic test commit"
-        show = _run_git(
+        show = run_git(
             self.tmpdir, "show", "--name-only", "--pretty=", "HEAD",
         ).stdout
         assert "seed.txt" in show
@@ -128,27 +109,26 @@ class TestAutocommitChanges(_ServerHarness):
         assert evt["committed"] is True
         assert evt["tabId"] == "t1"
 
-    def test_progress_events_precede_done(self) -> None:
-        """The webview shows a staged progress toast before the result."""
+    def test_progress_notification_precedes_done(self) -> None:
+        """The webview shows a progress toast before the result."""
         Path(self.tmpdir, "seed.txt").write_text("progress\n")
 
-        self.server._autocommit_changes("t1")
+        self.server._commit_main_tree("t1")
 
         types = self._types()
-        assert "autocommit_progress" in types
-        assert types.index("autocommit_progress") < types.index(
-            "autocommit_done",
-        )
+        assert "notification" in types
+        assert types.index("notification") < types.index("autocommit_done")
+        assert self._event("notification")["tabId"] == "t1"
 
     def test_commit_with_only_untracked(self) -> None:
         """Commit handles the case with only untracked files."""
         Path(self.tmpdir, "only_new.txt").write_text("hi\n")
 
-        self.server._autocommit_changes("t1")
+        self.server._commit_main_tree("t1")
 
-        status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
+        status = run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == ""
-        show = _run_git(
+        show = run_git(
             self.tmpdir, "show", "--name-only", "--pretty=", "HEAD",
         ).stdout
         assert "only_new.txt" in show
@@ -159,11 +139,11 @@ class TestAutocommitChanges(_ServerHarness):
     def test_commit_when_nothing_to_commit(self) -> None:
         """If there's nothing to commit (race), broadcast success with
         ``committed: False`` instead of failing."""
-        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        before = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
-        self.server._autocommit_changes("t1")
+        self.server._commit_main_tree("t1")
 
-        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        after = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         assert before == after
         evt = self._event("autocommit_done")
         assert evt["success"] is True
@@ -174,7 +154,7 @@ class TestAutocommitChanges(_ServerHarness):
         non_git = tempfile.mkdtemp()
         try:
             self.server.work_dir = non_git
-            self.server._autocommit_changes("t1")
+            self.server._commit_main_tree("t1")
             evt = self._event("autocommit_done")
             assert evt["success"] is False
             assert evt["committed"] is False
@@ -187,11 +167,11 @@ class TestAutocommitChanges(_ServerHarness):
         try:
             self.server.work_dir = non_git
             Path(self.tmpdir, "seed.txt").write_text("via keyword\n")
-            self.server._autocommit_changes("t1", work_dir=self.tmpdir)
+            self.server._commit_main_tree("t1", work_dir=self.tmpdir)
             evt = self._event("autocommit_done")
             assert evt["success"] is True
             assert evt["committed"] is True
-            status = _run_git(
+            status = run_git(
                 self.tmpdir, "status", "--porcelain",
             ).stdout.strip()
             assert status == ""
@@ -208,7 +188,7 @@ class TestRemovedCommandsAreUnknown(_ServerHarness):
         unknown command."""
         import time
 
-        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        before = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         self.server._handle_command(
             {"type": "autocommitAction", "tabId": "t1",
              "workDir": self.tmpdir},
@@ -223,7 +203,7 @@ class TestRemovedCommandsAreUnknown(_ServerHarness):
         assert evt["success"] is True
         assert evt["committed"] is False
         assert evt["message"] == "Nothing to commit."
-        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        after = run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         assert before == after, "a clean tree must not gain a commit"
 
     def test_merge_action_is_unknown(self) -> None:

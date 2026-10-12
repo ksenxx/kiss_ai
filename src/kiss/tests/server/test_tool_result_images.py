@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, cast
 from kiss.server import agent_state
 
 if TYPE_CHECKING:
-    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server.json_printer import (
     _MAX_RESULT_IMAGE_BYTES,
     JsonPrinter,
@@ -162,11 +162,11 @@ class TestResultImagesEmbedded:
 
         printer = _new_printer()
         task_id = printer._task_key()
-        # The registry annotates ``agent`` as WorktreeSorcarAgent, but
+        # The registry annotates ``agent`` as ChatSorcarAgent, but
         # the printer bridge reads it duck-typed (see _task_work_dir);
         # cast keeps this end-to-end test free of a full agent stack.
         state = agent_state.AgentState(
-            task_id, agent=cast("WorktreeSorcarAgent", _WorkDirOnlyAgent())
+            task_id, agent=cast("ChatSorcarAgent", _WorkDirOnlyAgent())
         )
         agent_state.register(state)
         try:

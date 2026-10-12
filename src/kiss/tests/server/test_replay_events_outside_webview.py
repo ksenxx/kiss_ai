@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression test: a ChatSorcarAgent / WorktreeSorcarAgent run from
+"""Regression test: a ChatSorcarAgent / ChatSorcarAgent run from
 OUTSIDE a chat webview still records a replayable event stream.
 
 When the agent runs inside a chat webview, the VS Code server's

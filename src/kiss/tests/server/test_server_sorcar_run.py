@@ -21,7 +21,6 @@ import inspect
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 import textwrap
 import threading
@@ -38,6 +37,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import init_repo
 
 
 def _sea_tools(agent: Any) -> list[Any]:
@@ -66,22 +66,6 @@ def _task_chat_id(task_id: str) -> str:
     return ""
 
 
-def _init_repo(repo: str) -> None:
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True,
-            check=False,
-        )
-
-    git("init", "-q")
-    git("config", "user.email", "test@example.com")
-    git("config", "user.name", "Test User")
-    git("config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    git("add", "seed.txt")
-    git("commit", "-q", "-m", "seed")
-
-
 class SorcarRunApiTest(unittest.TestCase):
     """Drive ``kiss.server.sorcar.run`` against a real daemon over its local endpoint."""
 
@@ -90,7 +74,7 @@ class SorcarRunApiTest(unittest.TestCase):
         self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -1118,7 +1102,6 @@ class SorcarRunApiTest(unittest.TestCase):
                 result = sorcar.run(
                     "task with a classification override",
                     work_dir=self.repo,
-                    use_worktree=False,
                     auto_classify=override,
                     endpoint_file=self.endpoint_file,
                     timeout=60,
@@ -1128,7 +1111,6 @@ class SorcarRunApiTest(unittest.TestCase):
             result = sorcar.run(
                 "task without a classification override",
                 work_dir=self.repo,
-                use_worktree=False,
                 endpoint_file=self.endpoint_file,
                 timeout=60,
             )
@@ -1168,7 +1150,6 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "run under the persisted web-tools setting",
             work_dir=self.repo,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -1181,7 +1162,6 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "run with an explicit per-run override",
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -1225,7 +1205,6 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "run under the persisted memory-off setting",
             work_dir=self.repo,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -1239,7 +1218,6 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "run with an explicit per-run memory override",
             work_dir=self.repo,
-            use_worktree=False,
             use_memory=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -1610,8 +1588,6 @@ class SorcarRunApiTest(unittest.TestCase):
             work_dir=str(Path(self.tmpdir) / "initial_work"),
             scope_work_dir=workspace,
             sea_path=str(agent_script),
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -1668,8 +1644,6 @@ class SorcarRunApiTest(unittest.TestCase):
             work_dir=str(Path(self.tmpdir) / "scope_exec_work"),
             scope_work_dir=client_scope,
             sea_path=str(agent_script),
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )

@@ -114,6 +114,14 @@ function setTabRunning(tab, running) {
     tab.isRunning = running;
     if (!running) tab.isStopping = false;
 }
+// Collaborator added when the chat header's machine name became a
+// drop-down that setRunningState disables while the chat runs; spied
+// like the others.
+function renderChatMachine() { calls.push('renderChatMachine'); }
+// Collaborator added when the chat header gained an editable work-dir
+// field that setRunningState locks while the chat runs; spied like
+// the others.
+function renderChatWorkDir() { calls.push('renderChatWorkDir'); }
 
 """
         + set_running_state_src

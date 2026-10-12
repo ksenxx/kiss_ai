@@ -260,6 +260,161 @@ def test_create_list_pause_resume_remove(tmp_path: Path) -> None:
     assert load_jobs() == []
 
 
+def test_default_jobs_are_seeded_once_per_home() -> None:
+    """A fresh home gets the 6-hourly /recommendations and the 8am /good_morning jobs, once.
+
+    The seed is recorded in the cron directory, so a job the user later
+    removes, pauses or reschedules is never re-created or reset; a job
+    the user has under a default's name (even paused) stands untouched;
+    a corrupt or missing record re-seeds without duplicating; a store
+    that cannot be written is left alone without an exception.
+    """
+    names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
+    assert cron_agent.seed_default_jobs() == names
+    recommend, morning = load_jobs()
+    assert recommend["name"] == "Recommendations: five suggested tasks from the last 24 hours"
+    assert recommend["prompt"] == "/recommendations now" and recommend["command"] == ""
+    assert recommend["schedule"] == "0 */6 * * *"
+    assert recommend["deliver"] == "none" and recommend["enabled"] is True
+    assert recommend["max_budget"] == 1.0 and recommend["timeout"] == 600.0
+    assert recommend["in_chat"] is False
+    assert morning["prompt"] == "/good_morning now" and morning["schedule"] == "0 8 * * *"
+    assert morning["in_chat"] is True and morning["deliver"] == "none"
+    assert morning["max_budget"] == 0.5 and morning["timeout"] == 300.0
+    assert cron_agent._job_view(morning)["in_chat"] is True
+    assert "in_chat" not in cron_agent._job_view(recommend)
+    assert json.loads(cron_agent._seeded_defaults_path().read_text()) == sorted(names)
+    # Idempotent; the user's edits and removal stand.
+    assert cron_agent.seed_default_jobs() == []
+    assert len(load_jobs()) == 2
+    assert cron_job("pause", job_id=recommend["id"])
+    assert cron_agent.seed_default_jobs() == []
+    assert load_jobs()[0]["enabled"] is False
+    cron_job("remove", job_id=recommend["id"])
+    cron_job("remove", job_id=morning["id"])
+    assert cron_agent.seed_default_jobs() == [] and load_jobs() == []
+    # A corrupt or missing record seeds again, but a job the user has
+    # under a default's name is kept as it is, paused included.
+    mine = _create(cron_job(
+        "create", name=names[0], prompt="my own prompt", schedule="every 2h",
+    ))
+    cron_job("pause", job_id=mine["id"])
+    cron_agent._seeded_defaults_path().write_text("{not json")
+    assert cron_agent.seed_default_jobs() == names
+    kept, morning2 = load_jobs()
+    assert kept["id"] == mine["id"] and kept["prompt"] == "my own prompt"
+    assert kept["enabled"] is False
+    assert morning2["prompt"] == "/good_morning now"
+    cron_agent._seeded_defaults_path().unlink()
+    assert cron_agent.seed_default_jobs() == names and len(load_jobs()) == 2
+    # A store that exists but cannot be read or parsed is the user's
+    # schedules (load_jobs() reads it as empty): it is left as it is.
+    cron_agent._seeded_defaults_path().unlink()
+    store = cron_agent._jobs_path()
+    user_store = store.read_text()
+    store.write_text("{not a list")
+    assert cron_agent.seed_default_jobs() == []
+    assert store.read_text() == "{not a list"
+    store.write_text(user_store)
+    if sys.platform != "win32":  # chmod cannot make a file unreadable on Windows
+        store.chmod(0o000)
+        try:
+            assert cron_agent.seed_default_jobs() == []
+        finally:
+            store.chmod(0o600)
+        assert store.read_text() == user_store
+        assert not cron_agent._seeded_defaults_path().exists()
+    # A malformed job in the store (``_job_view`` cannot render it) is
+    # a warning, not a daemon-startup exception.
+    for job in load_jobs():
+        cron_job("remove", job_id=job["id"])
+    broken = _create(cron_job(
+        "create", name="odd", prompt="/recommendations now", schedule="0 */6 * * *",
+        deliver="none",
+    ))
+    jobs = load_jobs()
+    jobs[0]["next_run_at"] = "invalid"
+    cron_agent.save_jobs(jobs)
+    assert cron_agent.seed_default_jobs() == []
+    assert [j["id"] for j in load_jobs()] == [broken["id"]]
+    cron_job("remove", job_id=broken["id"])
+    # An unwritable store: nothing seeded, nothing raised.
+    cron_agent._seeded_defaults_path().unlink(missing_ok=True)
+    if sys.platform != "win32":  # chmod cannot make a directory unwritable on Windows
+        cron_agent._cron_dir().chmod(0o500)
+        try:
+            assert cron_agent.seed_default_jobs() == []
+            assert load_jobs() == []
+        finally:
+            cron_agent._cron_dir().chmod(0o700)
+
+
+def test_in_chat_prompt_job_is_submitted_as_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``in_chat`` job's prompt reaches the daemon verbatim as a chat message.
+
+    No preamble, no pinned SEA (the daemon's own slash dispatch runs
+    ``/good_morning now``), the job's model, budget, work directory and
+    a stop at the timeout; the chat's answer is the job's summary, a
+    [SILENT] one is silent, a failed run or an unreachable daemon is an
+    error, and an unconfirmed stop is the TimeoutError the scheduler
+    keeps the scratch directory for.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, object]] = []
+    outcome: dict[str, object] = {}
+
+    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        if isinstance(outcome.get("raise"), BaseException):
+            raise outcome["raise"]  # type: ignore[misc]
+        return daemon_client.TaskResult(
+            text=str(outcome.get("text", "")), success=bool(outcome.get("success", True)),
+            cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    job = {
+        "id": "abcd1234", "name": "morning", "prompt": "/good_morning now",
+        "model_name": "some-model", "max_budget": 0.5, "in_chat": True,
+    }
+    outcome.update(text="<p>Good morning!</p>", success=True)
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
+        "ok", "<p>Good morning!</p>",
+    )
+    sent = captured[0]
+    assert sent["prompt"] == "/good_morning now"
+    assert "sea_path" not in sent and "parent_task_id" not in sent
+    assert sent["model"] == "some-model" and sent["max_budget"] == 0.5
+    assert sent["work_dir"] == str(work_dir)
+    assert sent["timeout"] == 300.0 and sent["stop_on_timeout"] is True
+    assert not list(work_dir.iterdir())
+
+    outcome.update(text="[SILENT]", success=True)
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == ("silent", None)
+    outcome.update(text="", success=False)
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
+        "error", "Task failed",
+    )
+    outcome["raise"] = ConnectionError("daemon down")
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
+        "error", "Error: daemon down",
+    )
+    outcome["raise"] = daemon_client.StopUnconfirmedTimeoutError("no confirmation")
+    with pytest.raises(TimeoutError, match="MAY STILL BE RUNNING"):
+        cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0)
+    assert captured[-1]["max_budget"] == 0.5
+    job["max_budget"] = 0
+    outcome.pop("raise")
+    outcome.update(text="hi", success=True)
+    cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0)
+    assert captured[-1]["max_budget"] is None
+
+
 def test_resume_completed_one_shot_is_rejected() -> None:
     job = _create(cron_job("create", name="once", command="true", schedule="1h"))
     _set_job_fields(job["id"], next_run_at=1.0)
@@ -623,8 +778,6 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     assert sent["model"] == "some-model"
     assert sent["max_budget"] == 1.5
     assert sent["work_dir"] == str(work_dir)
-    assert sent["use_worktree"] is False
-    assert sent["auto_commit"] is False
     assert sent["record_timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
     # Top-level task: no parent, so no reviewer sub-tree marking.
     assert sent["parent_task_id"] == ""
@@ -635,6 +788,56 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     assert apply_sea(cmd) == {"classifyTasks"}
     assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
     assert cmd["classifyTasks"] is False
+
+
+def test_slash_command_prompt_job_runs_that_sea(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt that is a slash command (``/recommendations now``) runs that SEA directly.
+
+    The SEA named is the command's own file (not ``cron_prompt_sea.py``),
+    the task is the preamble plus the trailing text, and the classifier
+    is off as it is for the generic prompt SEA; a bare ``/recommendations``
+    (no text) runs that SEA too, on the preamble alone, since the SEA's
+    ``prompt()`` ignores the task text.
+    """
+    from kiss.agents.seas.recommendations import recommendations_sea
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, object]] = []
+
+    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(
+            text="<ul><li>five</li></ul>", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    job = {"id": "abcd1234", "name": "Recommendations", "prompt": "/recommendations now"}
+    status, text = cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
+    assert (status, text) == ("ok", "<ul><li>five</li></ul>")
+    sent = captured[0]
+    assert sent["sea_path"] == str(Path(recommendations_sea.__file__).resolve())
+    assert sent["prompt"] == cron_agent.PROMPT_PREAMBLE + "now"
+    assert sent["auto_classify"] is False
+    assert sent["work_dir"] == str(work_dir)
+    assert sent["parent_task_id"] == ""
+
+    job["prompt"] = "/recommendations"
+    cron_agent._run_prompt_job(job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS)
+    assert captured[1]["sea_path"] == str(Path(recommendations_sea.__file__).resolve())
+    assert captured[1]["prompt"] == cron_agent.PROMPT_PREAMBLE
+    assert captured[1]["auto_classify"] is False
+    # A prompt that names no command still runs the generic prompt SEA.
+    job["prompt"] = "list my open pull requests"
+    cron_agent._run_prompt_job(job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS)
+    assert captured[2]["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
+    assert captured[2]["prompt"] == cron_agent.PROMPT_PREAMBLE + "list my open pull requests"
+    assert captured[2]["auto_classify"] is None
 
 
 def test_prompt_job_defaults_and_silent_result(
@@ -787,8 +990,6 @@ def test_agent_script_getters(tmp_path: Path) -> None:
         "work_dir": work_dir, "locked": sorted({"work_dir", *WORKER_DEFAULTS}),
     }
     assert "kind" not in resolved and "channel" not in resolved
-    assert resolved["use_worktree"] is False
-    assert resolved["auto_commit"] is False
     assert resolved["auto_classify"] is False
     assert sea.system_prompt("BASE") == "BASE\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
@@ -804,12 +1005,11 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     }
     overridden = apply_sea(cmd)
     # The hooks are always staged, so only settings fields are reported.
-    assert {"appendToSystemPrompt", "workDir", "useWorktree", "autoCommit"} <= overridden
+    assert {"appendToSystemPrompt", "workDir", "classifyTasks"} <= overridden
     assert not {"systemPromptHook", "toolsHook", "prompt"} & overridden
     assert cmd["prompt"] == "schedule it"
     assert cmd["workDir"] == work_dir
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
+    assert cmd["classifyTasks"] is False
     assert cmd["appendToSystemPrompt"] == (
         "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="cron_agent")
     )
@@ -922,15 +1122,15 @@ def test_repeating_job_without_until_delivered_keeps_running() -> None:
     assert stored["enabled"] is True and stored["next_run_at"] is not None
 
 
-def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
+def test_prompt_sea_carries_job_work_dir_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A job with work_dir/use_worktree/auto_commit/timeout configures its run.
+    """A job with work_dir/timeout configures its run.
 
     This is the shape of a "run the tests in my repo nightly" job: the
     ``work_dir`` option names the project instead of the scratch
-    directory, the git toggles are on, and ``run_agent`` waits for the
-    job's own timeout instead of :data:`PROMPT_TIMEOUT_SECONDS`.
+    directory, and ``run_agent`` waits for the job's own timeout instead
+    of :data:`PROMPT_TIMEOUT_SECONDS`.
     """
     from kiss.agents.sorcar import daemon_client
 
@@ -947,12 +1147,9 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     project.mkdir()
     job = _create(cron_job(
         "create", name="nightly", prompt="run the tests", schedule="every 1d",
-        model_name="some-model", work_dir=str(project), use_worktree=True,
-        auto_commit=True, timeout="21600",
+        model_name="some-model", work_dir=str(project), timeout="21600",
     ))
-    assert (job["work_dir"], job["use_worktree"], job["auto_commit"]) == (
-        str(project.resolve()), True, True,
-    )
+    assert job["work_dir"] == str(project.resolve())
     assert job["timeout"] == 21600.0
     # The full run path: _execute_job derives the run directory and
     # timeout from the stored job and hands them to the dispatch.
@@ -963,14 +1160,12 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     assert sent["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
     assert sent["record_timeout"] == 21600.0
     assert sent["work_dir"] == str(project.resolve())
-    assert sent["use_worktree"] is True
-    assert sent["auto_commit"] is True
     assert sent["auto_classify"] is None  # pinned off by the SEA on the daemon
     assert sent["model"] == "some-model"
 
 
-def test_create_validates_work_dir_timeout_and_git_flags(tmp_path: Path) -> None:
-    """Bad work_dir/timeout values and misplaced git flags are refused."""
+def test_create_validates_work_dir_and_timeout(tmp_path: Path) -> None:
+    """Bad work_dir/timeout values are refused."""
     def create(**fields: object) -> dict:
         return dict(yaml.safe_load(cron_job(
             "create", name="x", schedule="every 5m", **fields,  # type: ignore[arg-type]
@@ -980,20 +1175,11 @@ def test_create_validates_work_dir_timeout_and_git_flags(tmp_path: Path) -> None
     assert "not a number" in create(prompt="p", timeout="soon")["error"]
     for bad in ("-5", "nan", "inf"):
         assert "must be a positive number" in create(prompt="p", timeout=bad)["error"]
-    # Worktree/auto-commit need a prompt job with a work_dir.
-    assert "need a prompt job with work_dir" in create(
-        prompt="p", use_worktree=True,
-    )["error"]
-    assert "need a prompt job with work_dir" in create(
-        command="echo 1", work_dir=str(tmp_path), auto_commit=True,
-    )["error"]
     # Without the new fields a job stores the defaults and lists none of them.
     job = create(prompt="p")["created"]
-    assert not any(key in job for key in ("work_dir", "use_worktree", "auto_commit",
-                                           "timeout"))
+    assert not any(key in job for key in ("work_dir", "timeout"))
     stored = load_jobs()[0]
-    assert (stored["work_dir"], stored["use_worktree"], stored["auto_commit"],
-            stored["timeout"]) == ("", False, False, 0.0)
+    assert (stored["work_dir"], stored["timeout"]) == ("", 0.0)
     assert load_jobs() == [stored]
 
 
@@ -1095,18 +1281,16 @@ def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
 def test_cli_create_with_work_dir_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
 ) -> None:
-    """kiss-cron --create passes --work-dir/--worktree/--auto-commit/--timeout through."""
+    """kiss-cron --create passes --work-dir/--timeout through."""
     project = tmp_path / "project"
     project.mkdir()
     out = _run_cli(
         monkeypatch, capsys, "--create", "nightly", "--schedule", "0 12 * * *",
-        "--prompt", "run the tests", "--work-dir", str(project), "--worktree",
-        "--auto-commit", "--timeout", "7200", "-m", "some-model",
+        "--prompt", "run the tests", "--work-dir", str(project),
+        "--timeout", "7200", "-m", "some-model",
     )
     created = yaml.safe_load(out)["created"]
     assert created["work_dir"] == str(project.resolve())
-    assert created["use_worktree"] is True
-    assert created["auto_commit"] is True
     assert created["timeout"] == 7200.0
     assert created["model_name"] == "some-model"
     listed = yaml.safe_load(_run_cli(monkeypatch, capsys, "--list"))["jobs"][0]
@@ -1174,3 +1358,120 @@ def test_ensure_of_a_finished_one_shot_reports_the_resume_error() -> None:
     assert reply == {
         "error": f"one-shot job {created['id']!r} already ran; create a new job instead",
     }
+
+
+def _wait_for_run(job_id: str, timeout: float = 20.0) -> dict[str, Any]:
+    """Wait until the job's run thread finished and return the stored job."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if job_id not in cron_agent.running_job_ids():
+            return next(job for job in load_jobs() if job["id"] == job_id)
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} still running after {timeout}s")
+
+
+def test_apply_job_action_pause_resume_update_remove(tmp_path: Path) -> None:
+    """The Schedule subpanel's buttons edit the stored job in place."""
+    job = _create(cron_job(
+        "create", name="hello", command="echo hi", schedule="every 5m",
+    ))
+    job_id = job["id"]
+    assert cron_agent.apply_job_action("pause", job_id) == ""
+    assert load_jobs()[0]["enabled"] is False
+    assert cron_agent.apply_job_action("resume", job_id) == ""
+    assert load_jobs()[0]["enabled"] is True
+
+    # An update keeps the job's kind (a command job stays one) and
+    # recomputes the next run only when the schedule changed.
+    before = load_jobs()[0]["next_run_at"]
+    assert cron_agent.apply_job_action(
+        "update", job_id, name=" greeter ", schedule="every 5m", what="echo bye",
+    ) == ""
+    updated = load_jobs()[0]
+    assert updated["name"] == "greeter"
+    assert updated["command"] == "echo bye" and not updated.get("prompt")
+    assert updated["next_run_at"] == before
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="greeter", schedule="2h", what="echo bye",
+    ) == ""
+    updated = load_jobs()[0]
+    assert updated["schedule"] == "2h" and updated["one_shot"] is True
+    assert updated["next_run_at"] > before
+
+    assert cron_agent.apply_job_action("remove", job_id) == ""
+    assert load_jobs() == []
+
+
+def test_apply_job_action_errors() -> None:
+    job = _create(cron_job("create", name="p", prompt="summarize", schedule="every 1h"))
+    job_id = job["id"]
+    assert cron_agent.apply_job_action("pause", "nope") == "no job with id 'nope'"
+    assert cron_agent.apply_job_action("explode", job_id) == "unknown action 'explode'"
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="", schedule="every 1h", what="x",
+    ) == "the name, the schedule and the task must not be empty"
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="p", schedule="whenever", what="x",
+    ).startswith("Unsupported schedule 'whenever':")
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="p", schedule="2000-01-01T00:00:00", what="x",
+    ) == "schedule '2000-01-01T00:00:00' never fires (in the past?)"
+    stored = load_jobs()[0]
+    assert stored["schedule"] == "every 1h" and stored["prompt"] == "summarize"
+    # A finished one-shot cannot be resumed.
+    _set_job_fields(job_id, enabled=False, one_shot=True, next_run_at=None)
+    assert "already ran" in cron_agent.apply_job_action("resume", job_id)
+    # A prompt job's update replaces its prompt.
+    _set_job_fields(job_id, enabled=True, one_shot=False, next_run_at=1.0)
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="p", schedule="every 1h", what="digest",
+    ) == ""
+    assert load_jobs()[0]["prompt"] == "digest"
+
+
+def test_apply_job_action_create_schedules_a_job() -> None:
+    """The Schedule header's + form: a prompt or command job with the tool's defaults."""
+    create = cron_agent.apply_job_action
+    assert create("create", "", "Digest", "every 1d", "summarize email") == ""
+    (job,) = load_jobs()
+    assert (job["name"], job["schedule"], job["prompt"], job["command"]) == (
+        "Digest", "every 1d", "summarize email", "",
+    )
+    assert job["deliver"] == "local" and job["enabled"] is True
+    assert job["next_run_at"] > time.time()
+    assert create(
+        "create", "ignored", " Backup ", " 0 3 * * * ", "rsync -a src dst", kind="command",
+    ) == ""
+    backup = load_jobs()[1]
+    assert (backup["name"], backup["schedule"], backup["prompt"], backup["command"]) == (
+        "Backup", "0 3 * * *", "", "rsync -a src dst",
+    )
+    # Refusals: a blank field, an unknown kind, a bad schedule and a
+    # duplicate leave the two jobs alone.
+    blank = "the name, the schedule and the task must not be empty"
+    assert create("create", "", "", "every 1d", "x") == blank
+    assert create("create", "", "N", "  ", "x") == blank
+    assert create("create", "", "N", "every 1d", " ") == blank
+    assert create("create", "", "N", "every 1d", "x", kind="both") == "unknown job kind 'both'"
+    assert create("create", "", "N", "whenever", "x").startswith("Unsupported schedule 'whenever':")
+    assert create("create", "", "Digest", "every 1d", "summarize email").startswith(
+        "duplicate: job "
+    )
+    assert len(load_jobs()) == 2
+
+
+def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
+    """``run_now`` returns at once; the job runs in its own thread; a second start is refused."""
+    job = _create(cron_job(
+        "create", name="slow", command="sleep 1; echo ran now", schedule="every 1d",
+    ))
+    job_id = job["id"]
+    cron_job("pause", job_id=job_id)
+    assert cron_agent.apply_job_action("run_now", job_id) == ""
+    assert job_id in cron_agent.running_job_ids()
+    assert cron_agent.apply_job_action("run_now", job_id) == f"job {job_id!r} is already running"
+    stored = _wait_for_run(job_id)
+    assert stored["last_status"] == "ok"
+    assert stored["last_summary"] == "ran now"
+    assert stored["enabled"] is False, "a run now does not resume a paused job"
+    assert cron_agent.apply_job_action("run_now", "nope") == "no job with id 'nope'"

@@ -28,28 +28,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _make_repo(path: Path) -> Path:
@@ -91,10 +74,10 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
+        self._saved = redirect_persistence(self._tmpdir)
 
     def teardown_method(self) -> None:
-        _restore_db(self._saved)
+        restore_persistence(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
 
@@ -117,7 +100,7 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         server = VSCodeServer()
         server.work_dir = str(repo)
 
-        wt_agent = WorktreeSorcarAgent("wt_agent")
+        wt_agent = ChatSorcarAgent("wt_agent")
         wt_agent._chat_id = "wt_tab"
         wt_work = wt_agent._try_setup_worktree(repo, str(repo))
         assert wt_work is not None
@@ -133,7 +116,6 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
             "task-wt-audit8", agent=wt_agent, tab_id="wt_tab",
             server_owned=True,
         )
-        state.use_worktree = True
         agent_state.register(state)
 
         try:

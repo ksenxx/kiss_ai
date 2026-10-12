@@ -32,7 +32,12 @@ const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-function makeWebview(remote) {
+/**
+ * Build a chat webview under jsdom.  When *timeouts* is given, every
+ * `setTimeout` the page arms is also recorded there as `{fn, ms}` so a
+ * test can fire a long timer on demand instead of waiting for it.
+ */
+function makeWebview(remote, timeouts) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -73,6 +78,14 @@ function makeWebview(remote) {
     };
   };
 
+  if (timeouts) {
+    const realSetTimeout = win.setTimeout.bind(win);
+    win.setTimeout = function (fn, ms, ...args) {
+      timeouts.push({fn, ms});
+      return realSetTimeout(fn, ms, ...args);
+    };
+  }
+
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
@@ -93,9 +106,7 @@ function makeSession(overrides) {
       timestamp: 1700000000,
       work_dir: '/home/user/proj',
       model: 'test-model',
-      is_worktree: true,
       is_parallel: false,
-      auto_commit_mode: true,
       is_favorite: false,
     },
     overrides || {},
@@ -291,29 +302,37 @@ function testFutureClockSkew() {
 // ---------------------------------------------------------------------------
 
 function testPeriodicRefresh() {
-  const {win} = makeWebview(false);
+  const timeouts = [];
+  const {win} = makeWebview(false, timeouts);
   const now = Date.now();
   loadHistory(win, [
     makeSession({startTs: now - 45 * 1000}), // "just now" at render time
   ]);
   const ago = historyRows(win)[0].querySelector('.sidebar-item-launched');
   assert.strictEqual(ago.textContent, 'just now');
+  const sweeps = timeouts.filter(t => t.ms === 30000);
+  assert.strictEqual(
+    sweeps.length,
+    1,
+    'rendering a label arms exactly one 30 s sweep',
+  );
   // Age the label past the minute boundary by rewinding its stored
-  // launch instant, then let the sweep run (jsdom timers are real).
-  // At check time (~31 s from now) the age is ~121 s -> "2 minutes".
-  ago.dataset.launchTs = String(now - 90 * 1000);
-  return new Promise(resolve => {
-    setTimeout(() => {
-      assert.strictEqual(
-        ago.textContent,
-        '2 minutes ago',
-        'the periodic sweep must refresh on-screen labels in place',
-      );
-      win.close();
-      console.log('  ok - the 30s sweep keeps labels current');
-      resolve();
-    }, 31 * 1000);
-  });
+  // launch instant, then fire the armed sweep on demand instead of
+  // waiting 30 s of wall-clock time for it.
+  ago.dataset.launchTs = String(now - 120 * 1000);
+  sweeps[0].fn();
+  assert.strictEqual(
+    ago.textContent,
+    '2 minutes ago',
+    'the periodic sweep must refresh on-screen labels in place',
+  );
+  assert.strictEqual(
+    timeouts.filter(t => t.ms === 30000).length,
+    2,
+    'the sweep re-arms itself while a label is still on screen',
+  );
+  win.close();
+  console.log('  ok - the 30s sweep keeps labels current');
 }
 
 // ---------------------------------------------------------------------------
@@ -392,19 +411,12 @@ function testNoTimerWithoutLabels() {
   console.log('  ok - no history rendered -> no timer keeps node alive');
 }
 
-async function main() {
-  [false, true].forEach(remote => {
-    testUnitLadder(remote);
-    testActionsStillWork(remote);
-  });
-  testTimestampSources();
-  testFutureClockSkew();
-  testNoTimerWithoutLabels();
-  await testPeriodicRefresh();
-  console.log('All historyTaskLaunchedAgo tests passed');
-}
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
+[false, true].forEach(remote => {
+  testUnitLadder(remote);
+  testActionsStillWork(remote);
 });
+testTimestampSources();
+testFutureClockSkew();
+testNoTimerWithoutLabels();
+testPeriodicRefresh();
+console.log('All historyTaskLaunchedAgo tests passed');

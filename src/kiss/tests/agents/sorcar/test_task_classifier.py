@@ -6,14 +6,10 @@
 
 ``kiss.agents.sorcar.task_classifier`` runs one NON-AGENTIC KISSAgent
 generation on the run's own model BEFORE a Sorcar agent starts a task.
-The structured JSON verdict ``{"is_simple": ..., "is_development": ...}``
-selects the system prompt (``SYSTEM_LITE.md`` for simple tasks,
-``SYSTEM.md`` otherwise) and decides worktree isolation for that run
-(``use_worktree and is_development`` becomes the effective
-``use_worktree`` — the verdict can only demote a requested worktree
-run, never promote one the caller pinned off) without touching the
-persisted ``is_worktree`` setting.  Tasks that only request git
-operations are never development.
+The structured JSON verdict ``{"is_simple": ...}`` selects the system
+prompt (``SYSTEM_LITE.md`` for simple tasks, ``SYSTEM.md`` otherwise).
+Worktree isolation is no longer a classifier decision: the agent calls
+``create_worktree`` itself before its first tracked-file edit.
 
 The classification tests call real LLMs (a cheap model) — no mocks.
 The verdict-cache tests use the real local OpenAI-compatible stand-in
@@ -25,11 +21,8 @@ rather than mocked: the ``except Exception`` in
 lookup it guards (``model_info.model_runs_task_to_completion``) returns
 ``False`` for every unknown name and raises for none of the inputs a
 caller can produce.
-The wiring tests drive real ``SorcarAgent`` / ``WorktreeSorcarAgent``
-runs inside an isolated KISS_HOME with a scratch git repo; where a full
-agent run is unnecessary, the run is stopped early by a real server
-printer whose task-allocation hook raises (the same technique as
-``test_audit0903_worktree_run_wrapping``).
+The wiring tests drive real ``SorcarAgent`` runs inside an isolated
+KISS_HOME.
 """
 
 from __future__ import annotations
@@ -63,12 +56,10 @@ from kiss.agents.sorcar.task_classifier import (
     clear_classification_cache,
     remember_classification,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
-    CapturePrinter,
     IsolatedKissHome,
     StandInModelServer,
 )
@@ -94,47 +85,7 @@ _DEV_TASK = (
     "and update its unit test. This requires editing source files."
 )
 
-_GIT_TASK = (
-    "Run git operations only: check `git status`, squash-merge the "
-    "branch kiss/wt-123 into main with `git merge --squash`, resolve "
-    "any merge conflicts, commit the result, and delete the branch. "
-    "Do not write any new code."
-)
-
-# Tasks that write a file in the repo without any "software development"
-# flavour, and a git request bundled with a file change: both must be
-# development because the files they write could become git-tracked.
-_FILE_WRITING_TASKS = (
-    "Research the three most popular Python web frameworks on the web and "
-    "write a comparison report to ./reports/frameworks.html",
-    "Run the benchmark script and save its output to results.csv",
-    "Delete the old log files under ./logs",
-)
-
-_GIT_PLUS_CHANGE_TASK = (
-    "Update the README with the new install instructions, then commit and push"
-)
-
 _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
-
-
-class _RaisingPrinter(CapturePrinter):
-    """A real server printer whose task-allocation hook raises.
-
-    Stops an agent run right after classification and the worktree
-    decision, so worktree-gating tests spend exactly one LLM call (the
-    classifier's) instead of a whole agent run.
-    """
-
-    def __init__(self, exc: BaseException) -> None:
-        super().__init__()
-        self._exc = exc
-
-    def agent_task_allocated(
-        self, agent: Any, task_id: Any, chat_id: str = ""
-    ) -> None:
-        super().agent_task_allocated(agent, task_id, chat_id)
-        raise self._exc
 
 
 @pytest.fixture
@@ -174,11 +125,10 @@ def env() -> Iterator[IsolatedKissHome]:
 @live_api
 @requires_anthropic
 def test_classify_simple_task(env: IsolatedKissHome) -> None:
-    """A pure-arithmetic task is simple and not development."""
+    """A pure-arithmetic task is simple."""
     outcome = classify_task(task=_SIMPLE_TASK, model_name=MODEL)
     assert outcome.classification is not None
     assert outcome.classification.is_simple is True
-    assert outcome.classification.is_development is False
     # The attempt's real usage is reported for budget folding, and the
     # non-agentic classification is exactly one generation.
     assert outcome.budget_used > 0.0
@@ -189,48 +139,10 @@ def test_classify_simple_task(env: IsolatedKissHome) -> None:
 @live_api
 @requires_anthropic
 def test_classify_development_task(env: IsolatedKissHome) -> None:
-    """A file-editing coding task is development and not simple."""
+    """A file-editing coding task is not simple."""
     outcome = classify_task(task=_DEV_TASK, model_name=MODEL)
     assert outcome.classification is not None
     assert outcome.classification.is_simple is False
-    assert outcome.classification.is_development is True
-
-
-@live_api
-@requires_anthropic
-def test_classify_git_task_is_not_development(
-    env: IsolatedKissHome,
-) -> None:
-    """A task that only requests git operations is never development."""
-    outcome = classify_task(task=_GIT_TASK, model_name=MODEL)
-    assert outcome.classification is not None
-    assert outcome.classification.is_development is False
-
-
-@live_api
-@requires_anthropic
-@pytest.mark.parametrize("task", _FILE_WRITING_TASKS)
-def test_any_file_write_in_the_repo_is_development(
-    env: IsolatedKissHome, task: str
-) -> None:
-    """A task that could create or modify any file in the repository is
-    development even when it is not software development: a report, a
-    saved result, a deletion."""
-    outcome = classify_task(task=task, model_name=MODEL)
-    assert outcome.classification is not None
-    assert outcome.classification.is_development is True
-
-
-@live_api
-@requires_anthropic
-def test_git_bundled_with_a_file_change_is_development(
-    env: IsolatedKissHome,
-) -> None:
-    """Only a purely git task is exempt: git operations bundled with a
-    file change are development."""
-    outcome = classify_task(task=_GIT_PLUS_CHANGE_TASK, model_name=MODEL)
-    assert outcome.classification is not None
-    assert outcome.classification.is_development is True
 
 
 @live_api
@@ -242,7 +154,7 @@ def test_classify_truncates_huge_task(env: IsolatedKissHome) -> None:
     assert len(huge_task) > 100_000
     outcome = classify_task(task=huge_task, model_name=MODEL)
     assert outcome.classification is not None
-    assert outcome.classification.is_development is True
+    assert outcome.classification.is_simple is False
     # ~20k chars of task survive; the input can't be the full 150k chars.
     assert outcome.tokens_used < 15_000
 
@@ -261,7 +173,7 @@ def test_classify_adaptive_thinking_model_takes_one_attempt(
     """
     outcome = classify_task(task=_SIMPLE_TASK, model_name="claude-fable-5")
     assert outcome.classification is not None
-    assert outcome.classification.is_development is False
+    assert outcome.classification.is_simple is True
     assert outcome.steps == 1
 
 
@@ -279,21 +191,19 @@ def test_classify_task_bad_model_fails_soft(env: IsolatedKissHome) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _verdict_of(entry: dict[str, Any]) -> tuple[bool, bool]:
-    """The ``(is_simple, is_development)`` pair of one stored cache entry."""
-    return (entry["is_simple"], entry["is_development"])
+def _verdict_of(entry: dict[str, Any]) -> bool:
+    """The ``is_simple`` verdict of one stored cache entry."""
+    verdict = entry["is_simple"]
+    assert isinstance(verdict, bool)
+    return verdict
 
 
-def _entry(is_simple: bool, is_development: bool, age_s: float = 0.0) -> dict[str, Any]:
+def _entry(is_simple: bool, age_s: float = 0.0) -> dict[str, Any]:
     """A cache file entry written *age_s* seconds ago."""
-    return {
-        "is_simple": is_simple,
-        "is_development": is_development,
-        "ts": time.time() - age_s,
-    }
+    return {"is_simple": is_simple, "ts": time.time() - age_s}
 
 
-def _verdict_body(is_simple: bool, is_development: bool) -> dict[str, Any]:
+def _verdict_body(is_simple: bool) -> dict[str, Any]:
     """A chat-completions body whose assistant text is the verdict JSON."""
     return {
         "id": "chatcmpl-kiss-classifier",
@@ -305,9 +215,7 @@ def _verdict_body(is_simple: bool, is_development: bool) -> dict[str, Any]:
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": json.dumps(
-                        {"is_simple": is_simple, "is_development": is_development},
-                    ),
+                    "content": json.dumps({"is_simple": is_simple}),
                 },
                 "finish_reason": "stop",
             }
@@ -323,16 +231,16 @@ def _verdict_body(is_simple: bool, is_development: bool) -> dict[str, Any]:
 class _CountingClassifierEndpoint:
     """A stand-in model endpoint that counts the classifier's requests."""
 
-    def __init__(self, is_simple: bool = True, is_development: bool = False) -> None:
+    def __init__(self, is_simple: bool = True) -> None:
         self.requests: list[dict[str, Any]] = []
         self._lock = threading.Lock()
-        self._verdict = (is_simple, is_development)
+        self._verdict = is_simple
         self.server = StandInModelServer(self._respond)
 
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.requests.append(request)
-        return _verdict_body(*self._verdict)
+        return _verdict_body(self._verdict)
 
     @property
     def model_config(self) -> dict[str, Any]:
@@ -361,9 +269,7 @@ def test_repeated_task_is_served_from_cache(
         task="say hello", model_name=STANDIN_MODEL,
         model_config=endpoint.model_config,
     )
-    assert first.classification == TaskClassification(
-        is_simple=True, is_development=False,
-    )
+    assert first.classification == TaskClassification(is_simple=True)
     assert first.steps == 1
     assert len(endpoint.requests) == 1
 
@@ -380,7 +286,7 @@ def test_repeated_task_is_served_from_cache(
     cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
     assert cache_file.is_file()
     stored = json.loads(cache_file.read_text(encoding="utf-8"))
-    assert [_verdict_of(v) for v in stored.values()] == [(True, False)]
+    assert [_verdict_of(v) for v in stored.values()] == [True]
     (entry,) = stored.values()
     assert abs(entry["ts"] - time.time()) < 60
 
@@ -396,24 +302,20 @@ def test_cache_misses_on_different_task_model_or_endpoint(
     classify_task(task="alpha ", model_name=STANDIN_MODEL, model_config=config)
     assert len(endpoint.requests) == 2
     # Same task, different endpoint (a second stand-in on another port).
-    other = _CountingClassifierEndpoint(is_simple=False, is_development=True)
+    other = _CountingClassifierEndpoint(is_simple=False)
     try:
         outcome = classify_task(
             task="alpha", model_name=STANDIN_MODEL,
             model_config=other.model_config,
         )
         assert len(other.requests) == 1
-        assert outcome.classification == TaskClassification(
-            is_simple=False, is_development=True,
-        )
+        assert outcome.classification == TaskClassification(is_simple=False)
     finally:
         other.stop()
     # The original triple still hits its own memo, not the other's.
     hit = classify_task(task="alpha", model_name=STANDIN_MODEL, model_config=config)
     assert hit.steps == 0
-    assert hit.classification == TaskClassification(
-        is_simple=True, is_development=False,
-    )
+    assert hit.classification == TaskClassification(is_simple=True)
     assert len(endpoint.requests) == 2
     # Different model name misses the first memo too.
     assert cached_classification("alpha", "gpt-4.1-mini", config) is None
@@ -452,7 +354,7 @@ def test_unparseable_verdict_is_not_cached_and_falls_back(
     """A model that answers prose gets the plain retry, yields no verdict,
     and leaves no memo (only genuine verdicts are memoised)."""
     def prose(_request: dict[str, Any]) -> dict[str, Any]:
-        body = _verdict_body(True, False)
+        body = _verdict_body(True)
         body["choices"][0]["message"]["content"] = "I would rather not say."
         return body
 
@@ -494,13 +396,13 @@ def test_malformed_cache_file_is_ignored_and_rewritten(
     clear_classification_cache()
     cache_file.write_text(
         json.dumps({
-            "junk-key": {**_entry(True, False), "is_simple": "yes"},
+            "junk-key": {**_entry(True), "is_simple": "yes"},
             "other-junk": "not a dict",
-            "int-not-bool": {**_entry(True, False), "is_development": 1},
-            "missing-key": {"is_simple": True, "ts": time.time()},
-            "no-timestamp": {"is_simple": True, "is_development": True},
-            "bad-timestamp": {"is_simple": True, "is_development": True, "ts": "now"},
-            "kept": _entry(False, True),
+            "int-not-bool": {**_entry(True), "is_simple": 1},
+            "missing-key": {"ts": time.time()},
+            "no-timestamp": {"is_simple": True},
+            "bad-timestamp": {"is_simple": True, "ts": "now"},
+            "kept": _entry(False),
         }),
         encoding="utf-8",
     )
@@ -520,7 +422,7 @@ def test_cache_is_bounded_oldest_first(
     """The file never grows past the cap; the oldest memo goes first."""
     cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
     full = {
-        f"key-{i:05d}": _entry(True, False)
+        f"key-{i:05d}": _entry(True)
         for i in range(CLASSIFIER_CACHE_MAX_ENTRIES)
     }
     cache_file.write_text(json.dumps(full), encoding="utf-8")
@@ -540,21 +442,19 @@ def test_cache_is_bounded_oldest_first(
 def test_remembering_refreshes_an_existing_memo(env: IsolatedKissHome) -> None:
     """Re-remembering a key moves it to the newest slot and updates it."""
     remember_classification(
-        "t", "m", None, TaskClassification(is_simple=True, is_development=False),
+        "t", "m", None, TaskClassification(is_simple=True),
     )
     remember_classification(
-        "u", "m", None, TaskClassification(is_simple=True, is_development=True),
+        "u", "m", None, TaskClassification(is_simple=True),
     )
     remember_classification(
-        "t", "m", None, TaskClassification(is_simple=False, is_development=True),
+        "t", "m", None, TaskClassification(is_simple=False),
     )
     stored = json.loads(
         (env.kiss_home / CLASSIFIER_CACHE_FILENAME).read_text(encoding="utf-8"),
     )
     assert list(stored) == [_cache_key("u", "m", None), _cache_key("t", "m", None)]
-    assert cached_classification("t", "m") == TaskClassification(
-        is_simple=False, is_development=True,
-    )
+    assert cached_classification("t", "m") == TaskClassification(is_simple=False)
 
 
 def test_cache_key_changes_with_prompt_prefix() -> None:
@@ -581,7 +481,7 @@ def test_cache_key_changes_with_prompt_prefix() -> None:
     # The file never holds the config values themselves, only digests.
     remember_classification(
         "the task text itself", "m", {"api_key": "sk-secret-value"},
-        TaskClassification(is_simple=True, is_development=False),
+        TaskClassification(is_simple=True),
     )
     text = tc_module._cache_path().read_text(encoding="utf-8")
     assert "sk-secret-value" not in text
@@ -595,15 +495,13 @@ def test_cache_key_covers_api_key_and_header_routing(
     second request must reach the model and may get its own verdict."""
     config_a = endpoint.model_config
     first = classify_task(task="route", model_name=STANDIN_MODEL, model_config=config_a)
-    assert first.classification == TaskClassification(is_simple=True, is_development=False)
-    other = _CountingClassifierEndpoint(is_simple=False, is_development=True)
+    assert first.classification == TaskClassification(is_simple=True)
+    other = _CountingClassifierEndpoint(is_simple=False)
     try:
         config_b = {**other.model_config, "api_key": "kiss-other-account"}
         second = classify_task(task="route", model_name=STANDIN_MODEL, model_config=config_b)
         assert len(other.requests) == 1
-        assert second.classification == TaskClassification(
-            is_simple=False, is_development=True,
-        )
+        assert second.classification == TaskClassification(is_simple=False)
         config_c = {**config_a, "extra_headers": {"X-Route": "b"}}
         third = classify_task(task="route", model_name=STANDIN_MODEL, model_config=config_c)
         assert third.steps == 1
@@ -623,17 +521,17 @@ def test_expired_memo_is_re_asked(
     cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
     cache_file.write_text(
         json.dumps({
-            key: _entry(False, True, age_s=CLASSIFIER_CACHE_TTL_SECONDS + 60),
-            "fresh-other": _entry(True, True, age_s=CLASSIFIER_CACHE_TTL_SECONDS - 60),
+            key: _entry(False, age_s=CLASSIFIER_CACHE_TTL_SECONDS + 60),
+            "fresh-other": _entry(True, age_s=CLASSIFIER_CACHE_TTL_SECONDS - 60),
         }),
         encoding="utf-8",
     )
     assert cached_classification("old news", STANDIN_MODEL, config) is None
     outcome = classify_task(task="old news", model_name=STANDIN_MODEL, model_config=config)
     assert outcome.steps == 1
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+    assert outcome.classification == TaskClassification(is_simple=True)
     stored = json.loads(cache_file.read_text(encoding="utf-8"))
-    assert _verdict_of(stored[key]) == (True, False), "the stale memo was replaced"
+    assert _verdict_of(stored[key]) is True, "the stale memo was replaced"
     assert "fresh-other" in stored, "an unexpired memo survives the rewrite"
     # A memo that expires while the mirror is loaded is not served either.
     from kiss.agents.sorcar import task_classifier as tc_module
@@ -659,28 +557,28 @@ def test_memos_from_another_process_are_merged_on_write(
     theirs_key = _cache_key("theirs", STANDIN_MODEL, config)
     cache_file.write_text(
         json.dumps({
-            theirs_key: _entry(False, True),
-            mine_key: {**_entry(False, True), "ts": time.time() + 5},
+            theirs_key: _entry(False),
+            mine_key: {**_entry(False), "ts": time.time() + 5},
         }),
         encoding="utf-8",
     )
     remember_classification(
         "third", STANDIN_MODEL, config,
-        TaskClassification(is_simple=True, is_development=True),
+        TaskClassification(is_simple=True),
     )
     stored = json.loads(cache_file.read_text(encoding="utf-8"))
-    assert _verdict_of(stored[theirs_key]) == (False, True)
-    assert _verdict_of(stored[mine_key]) == (False, True), "newer on-disk memo wins"
-    assert _verdict_of(stored[_cache_key("third", STANDIN_MODEL, config)]) == (True, True)
+    assert _verdict_of(stored[theirs_key]) is False
+    assert _verdict_of(stored[mine_key]) is False, "newer on-disk memo wins"
+    assert _verdict_of(stored[_cache_key("third", STANDIN_MODEL, config)]) is True
     assert cached_classification("theirs", STANDIN_MODEL, config) == TaskClassification(
-        is_simple=False, is_development=True,
+        is_simple=False,
     )
 
 
 def test_clear_cache_removes_file_and_memory(env: IsolatedKissHome) -> None:
     """``clear_classification_cache`` forgets everything, twice is fine."""
     remember_classification(
-        "t", "m", None, TaskClassification(is_simple=True, is_development=False),
+        "t", "m", None, TaskClassification(is_simple=True),
     )
     cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
     assert cache_file.is_file()
@@ -709,11 +607,9 @@ def test_unwritable_cache_dir_keeps_verdict(env: IsolatedKissHome) -> None:
         assert tc_module._cache_path().parent == blocked_home
         remember_classification(
             "t", "m", None,
-            TaskClassification(is_simple=True, is_development=False),
+            TaskClassification(is_simple=True),
         )
-        assert cached_classification("t", "m") == TaskClassification(
-            is_simple=True, is_development=False,
-        )
+        assert cached_classification("t", "m") == TaskClassification(is_simple=True)
         assert not tc_module._cache_path().exists()
     finally:
         os.environ["KISS_HOME"] = saved
@@ -727,71 +623,64 @@ def test_unwritable_cache_dir_keeps_verdict(env: IsolatedKissHome) -> None:
 
 def test_parse_verdict_accepts_bare_json() -> None:
     """The demanded schema — one bare JSON object — parses directly."""
-    assert _parse_verdict(
-        '{"is_simple": true, "is_development": false}'
-    ) == TaskClassification(is_simple=True, is_development=False)
+    assert _parse_verdict('{"is_simple": true}') == TaskClassification(is_simple=True)
     # String-typed booleans from lax models are interpreted by content.
+    assert _parse_verdict('{"is_simple": "yes"}') == TaskClassification(is_simple=True)
+    # Extra keys a lax model adds are ignored.
     assert _parse_verdict(
-        '{"is_simple": "yes", "is_development": "no"}'
-    ) == TaskClassification(is_simple=True, is_development=False)
+        '{"is_simple": false, "is_development": true}'
+    ) == TaskClassification(is_simple=False)
 
 
 def test_parse_verdict_extracts_json_from_fences_and_prose() -> None:
     """Code fences and surrounding prose do not defeat extraction."""
     fenced = (
         "```json\n"
-        '{"is_simple": false, "is_development": true}\n'
+        '{"is_simple": false}\n'
         "```"
     )
-    assert _parse_verdict(fenced) == TaskClassification(
-        is_simple=False, is_development=True,
-    )
+    assert _parse_verdict(fenced) == TaskClassification(is_simple=False)
     prose = (
         "Here is my classification of the task:\n"
-        '{"is_simple": true, "is_development": false}\n'
+        '{"is_simple": true}\n'
         "Let me know if you need anything else."
     )
-    assert _parse_verdict(prose) == TaskClassification(
-        is_simple=True, is_development=False,
-    )
+    assert _parse_verdict(prose) == TaskClassification(is_simple=True)
     # A leading brace that is not JSON does not stop the scan.
     noisy = (
         "{broken json} then the real verdict "
-        '{"is_simple": false, "is_development": false}'
+        '{"is_simple": false}'
     )
-    assert _parse_verdict(noisy) == TaskClassification(
-        is_simple=False, is_development=False,
-    )
+    assert _parse_verdict(noisy) == TaskClassification(is_simple=False)
     # An earlier valid JSON object without the verdict keys is skipped.
     decoy = (
         '{"note": "thinking"} '
-        '{"is_simple": true, "is_development": true}'
+        '{"is_simple": true}'
     )
-    assert _parse_verdict(decoy) == TaskClassification(
-        is_simple=True, is_development=True,
-    )
+    assert _parse_verdict(decoy) == TaskClassification(is_simple=True)
 
 
 def test_parse_verdict_rejects_junk() -> None:
     """Prose, non-object JSON, and partial objects all yield None."""
     assert _parse_verdict("I think this task is simple.") is None
     assert _parse_verdict("[1, 2]") is None
-    assert _parse_verdict('{"is_simple": true}') is None
+    assert _parse_verdict('{"is_development": true}') is None
     assert _parse_verdict("") is None
     assert _parse_verdict(None) is None  # type: ignore[arg-type]
 
 
 def test_parse_verdict_rejects_non_boolean_values() -> None:
-    """Truthy junk must not silently flip worktree isolation."""
-    assert _parse_verdict('{"is_simple": [], "is_development": {"x": 1}}') is None
-    assert _parse_verdict('{"is_simple": 2, "is_development": null}') is None
-    assert _parse_verdict('{"is_simple": 1.0, "is_development": true}') is None
-    assert _parse_verdict('{"is_simple": "maybe", "is_development": true}') is None
+    """Truthy junk must not silently select the lite prompt."""
+    assert _parse_verdict('{"is_simple": []}') is None
+    assert _parse_verdict('{"is_simple": {"x": 1}}') is None
+    assert _parse_verdict('{"is_simple": 2}') is None
+    assert _parse_verdict('{"is_simple": null}') is None
+    assert _parse_verdict('{"is_simple": 1.0}') is None
+    assert _parse_verdict('{"is_simple": "maybe"}') is None
     # A later well-formed verdict still wins over an earlier junk one.
     assert _parse_verdict(
-        '{"is_simple": null, "is_development": 3} '
-        '{"is_simple": false, "is_development": true}'
-    ) == TaskClassification(is_simple=False, is_development=True)
+        '{"is_simple": null} {"is_simple": false}'
+    ) == TaskClassification(is_simple=False)
 
 
 def test_classifier_model_config_enforces_output_cap() -> None:
@@ -957,11 +846,9 @@ def test_classify_once_returns_cached_verdict(
     """A verdict already computed for this run is returned as-is."""
     agent = SorcarAgent("clf-cached")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(
-        is_simple=False, is_development=True,
-    )
+    agent._task_classification = TaskClassification(is_simple=False)
     verdict = agent._classify_task_once(MODEL, _SIMPLE_TASK, None)
-    assert verdict == TaskClassification(is_simple=False, is_development=True)
+    assert verdict == TaskClassification(is_simple=False)
 
 
 def test_fold_classifier_usage_banks_and_resets(
@@ -971,7 +858,7 @@ def test_fold_classifier_usage_banks_and_resets(
     agent = SorcarAgent("clf-fold")
     agent._classifier_spend = _ClassifierSpend("classifier:t", 0.25, 123, 2)
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(True, False)
+    agent._task_classification = TaskClassification(True)
     agent._fold_classifier_usage()
     assert agent.budget_used == pytest.approx(0.25)
     assert agent.total_tokens_used == 123
@@ -1005,7 +892,7 @@ def _run_with_preloaded_classifier_spend(
     """
     agent = SorcarAgent("clf-fold-event")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(True, False)
+    agent._task_classification = TaskClassification(True)
     agent._classifier_spend = _ClassifierSpend("classifier:e", 0.25, 123, 2)
     raised: BaseException | None = None
     try:
@@ -1114,9 +1001,7 @@ def test_non_simple_verdict_keeps_full_prompt(
     """An is_simple=False verdict keeps the full SYSTEM.md prompt."""
     agent = SorcarAgent("clf-full-prompt")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(
-        is_simple=False, is_development=True,
-    )
+    agent._task_classification = TaskClassification(is_simple=False)
     result = _run_minimal_sorcar(
         agent, "Call the finish tool with the word DONE.",
     )
@@ -1147,9 +1032,7 @@ def test_base_system_prompt_override_beats_verdict(
     """A caller-supplied base prompt wins over the lite selection."""
     agent = SorcarAgent("clf-custom-prompt")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(
-        is_simple=True, is_development=False,
-    )
+    agent._task_classification = TaskClassification(is_simple=True)
     custom = "You are a terse assistant. Use the finish tool to answer."
     result = _run_minimal_sorcar(
         agent,
@@ -1158,113 +1041,6 @@ def test_base_system_prompt_override_beats_verdict(
     )
     assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(custom)
-
-
-# ---------------------------------------------------------------------------
-# Worktree gating — WorktreeSorcarAgent runs stopped after the decision
-# ---------------------------------------------------------------------------
-
-
-@live_api
-@requires_anthropic
-def test_non_development_task_skips_worktree(
-    env: IsolatedKissHome,
-) -> None:
-    """is_development=False turns worktree isolation off for the run."""
-    agent = WorktreeSorcarAgent("clf-wt-skip")
-    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
-    result = agent.run(
-        prompt_template=_SIMPLE_TASK,
-        model_name=MODEL,
-        work_dir=str(env.repo),
-        printer=printer,
-    )
-    payload = yaml.safe_load(result)
-    assert payload["success"] is False
-    assert "stop-after-decision" in payload["summary"]
-    assert agent._wt is None
-    assert printer.events_of_type("worktree_created") == []
-
-
-@live_api
-@requires_anthropic
-def test_development_task_keeps_requested_worktree(
-    env: IsolatedKissHome,
-) -> None:
-    """is_development=True keeps worktree isolation on for a run whose
-    caller asked for worktrees (the default)."""
-    agent = WorktreeSorcarAgent("clf-wt-keep")
-    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
-    result = agent.run(
-        prompt_template=_DEV_TASK,
-        model_name=MODEL,
-        work_dir=str(env.repo),
-        printer=printer,
-    )
-    payload = yaml.safe_load(result)
-    assert payload["success"] is False
-    assert len(printer.events_of_type("worktree_created")) == 1
-    assert agent._wt is not None
-    # The persisted setting was never touched by the runtime decision.
-    from kiss.core.vscode_config import load_config
-
-    assert load_config()["is_worktree"] is True
-    agent.discard()
-    assert agent._wt is None
-
-
-@live_api
-@requires_anthropic
-def test_development_verdict_cannot_override_worktree_pin(
-    env: IsolatedKissHome,
-) -> None:
-    """An explicit use_worktree=False beats an is_development verdict.
-
-    The channel-dispatch guarantee: ``run_agent`` pins
-    ``use_worktree=False`` for a channel sub-task running in a scratch
-    directory while leaving classification enabled, so the verdict may
-    pick the system prompt but must never create a worktree there.
-    """
-    agent = WorktreeSorcarAgent("clf-wt-pinned")
-    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
-    result = agent.run(
-        prompt_template=_DEV_TASK,
-        model_name=MODEL,
-        use_worktree=False,
-        work_dir=str(env.repo),
-        printer=printer,
-    )
-    payload = yaml.safe_load(result)
-    assert payload["success"] is False
-    # The classifier really ran and returned a development verdict
-    # (the run memoises it) …
-    verdict = cached_classification(_DEV_TASK, MODEL)
-    assert verdict is not None
-    assert verdict.is_development is True
-    # … but the pin is authoritative: no worktree was created.
-    assert agent._wt is None
-    assert printer.events_of_type("worktree_created") == []
-
-
-@live_api
-@requires_anthropic
-def test_disabled_classifier_keeps_callers_worktree_choice(
-    env: IsolatedKissHome,
-) -> None:
-    """With the classifier off, use_worktree=False is respected."""
-    env.write_config(classify_tasks=False)
-    agent = WorktreeSorcarAgent("clf-wt-off")
-    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
-    result = agent.run(
-        prompt_template=_DEV_TASK,
-        model_name=MODEL,
-        use_worktree=False,
-        work_dir=str(env.repo),
-        printer=printer,
-    )
-    assert yaml.safe_load(result)["success"] is False
-    assert agent._wt is None
-    assert printer.events_of_type("worktree_created") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1289,7 +1065,7 @@ def test_reset_drops_stale_unfolded_usage(env: IsolatedKissHome) -> None:
     misattributed to the next unrelated run."""
     agent = SorcarAgent("clf-stale-usage")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(True, False)
+    agent._task_classification = TaskClassification(True)
     agent._classifier_spend = _ClassifierSpend("classifier:stale", 0.5, 42, 1)
     agent._reset_task_classification()
     assert agent._classification_attempted is False
@@ -1302,39 +1078,34 @@ def test_reset_keeps_preseeded_verdict(env: IsolatedKissHome) -> None:
     per-run reset so every subtask of a submission reuses it."""
     agent = SorcarAgent("clf-preseed-keep")
     agent._classification_attempted = True
-    agent._task_classification = TaskClassification(False, True)
+    agent._task_classification = TaskClassification(False)
     agent._classification_preseeded = True
     agent._reset_task_classification()
-    assert agent._task_classification == TaskClassification(False, True)
+    assert agent._task_classification == TaskClassification(False)
     assert agent._classification_attempted is True
 
 
 @live_api
 @requires_anthropic
-def test_classify_task_for_run_preseeds_worktree_decision(
+def test_classify_task_for_run_preseeds_prompt_selection(
     env: IsolatedKissHome,
 ) -> None:
-    """The server-style pre-classification drives the run's worktree
-    mode; the run reuses the seeded verdict instead of re-classifying
-    the (contradictory) prompt it is given."""
-    agent = WorktreeSorcarAgent("clf-preseed-run")
+    """The server-style pre-classification drives the run's prompt
+    selection; the run reuses the seeded verdict instead of
+    re-classifying the (contradictory) prompt it is given."""
+    agent = SorcarAgent("clf-preseed-run")
     verdict = agent.classify_task_for_run(model_name=MODEL, task=_DEV_TASK)
     assert verdict is not None
-    assert verdict.is_development is True
-    printer = _RaisingPrinter(RuntimeError("stop-after-decision"))
-    # The run's own prompt is a NON-development task: if the run
-    # re-classified it, no worktree would be created.  The seeded
-    # development verdict must win.
-    result = agent.run(
-        prompt_template=_SIMPLE_TASK,
-        model_name=MODEL,
-        work_dir=str(env.repo),
-        printer=printer,
+    assert verdict.is_simple is False
+    # The run's own prompt is a SIMPLE task: if the run re-classified
+    # it, the lite prompt would be selected.  The seeded non-simple
+    # verdict must win and keep the full prompt.
+    result = _run_minimal_sorcar(
+        agent, _SIMPLE_TASK + " Call the finish tool with the answer.",
     )
-    assert yaml.safe_load(result)["success"] is False
-    assert len(printer.events_of_type("worktree_created")) == 1
-    assert agent._wt is not None
-    agent.discard()
+    assert yaml.safe_load(result)["success"] is True, result
+    assert agent.system_prompt.startswith(SYSTEM_PROMPT)
+    assert not agent.system_prompt.startswith(SYSTEM_PROMPT_LITE)
     # The next server-style classification replaces the seed.
     env.write_config(classify_tasks=False)
     assert agent.classify_task_for_run(model_name=MODEL, task=_DEV_TASK) is None
@@ -1360,7 +1131,7 @@ def test_classify_task_for_run_enabled_override_beats_config(
         model_name=MODEL, task=_DEV_TASK, enabled=True,
     )
     assert verdict is not None
-    assert verdict.is_development is True
+    assert verdict.is_simple is False
     spend = agent._classifier_spend
     assert spend is not None and spend.budget > 0.0
 
@@ -1376,4 +1147,4 @@ def test_classifier_sees_substituted_template_arguments(
         MODEL, "{task}", None, arguments={"task": _DEV_TASK},
     )
     assert verdict is not None
-    assert verdict.is_development is True
+    assert verdict.is_simple is False

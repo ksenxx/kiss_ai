@@ -489,7 +489,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     settings = run.settings
     assert settings["tool_profile"] == "none"
     assert isinstance(sea, WorkerSea)
-    assert settings["use_worktree"] is False and settings["use_memory"] is False
+    assert settings["use_memory"] is False
     assert run.prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
     assert run.system_prompt_hook is not None and run.tools_hook is not None
     # ``/ask`` overrides neither LLM-call nor tool-call hook: both are identities.

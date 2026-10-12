@@ -186,12 +186,6 @@ class FakeSidebarView {
   appendToInput() {
     return Promise.resolve();
   }
-  getRegistryTabEntries() {
-    return [];
-  }
-  onRegistryTabsState() {
-    return makeDisposable();
-  }
   onCommitMessage() {
     return makeDisposable();
   }
@@ -206,43 +200,41 @@ class FakeSidebarView {
   openSettingsUI() {
     return Promise.resolve();
   }
-  closeChatTab() {}
+  openChatFromHistory() {
+    return Promise.resolve();
+  }
   dispose() {}
 }
 
+// The single chat editor panel (SorcarPanelManager's public API); the
+// mode flips under test only need it to exist and answer modeEnabled.
 class FakePanelManager {
   static modeEnabled() {
     return state.editorTabsMode;
   }
   constructor() {
-    this.panelCount = 0;
+    this._controller = undefined;
   }
   registerSerializer() {
     return makeDisposable();
   }
-  watchEditorTabs() {
-    return makeDisposable();
+  controller() {
+    return this._controller;
   }
-  ensureChatOpen() {
-    return undefined;
+  open() {
+    if (!this._controller) this._controller = new FakeSidebarView();
+    return this._controller;
   }
-  enterMode() {}
-  closeAll() {}
-  setMetaSink() {}
-  setActiveTaskSink() {}
-  adoptRegistryTabs() {}
-  activeController() {
-    return undefined;
-  }
-  revealActiveOrCreate() {
-    return new FakeSidebarView();
-  }
-  openNewChat() {
-    return new FakeSidebarView();
-  }
-  openChat() {}
+  ensureOpen() {}
   openSettings() {
     return Promise.resolve();
+  }
+  openChat() {}
+  setMetaSink() {}
+  refreshActiveTaskUpdate() {}
+  setActiveTaskSink() {}
+  close() {
+    this._controller = undefined;
   }
   dispose() {}
 }

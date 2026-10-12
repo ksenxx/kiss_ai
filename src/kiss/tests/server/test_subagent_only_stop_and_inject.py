@@ -25,11 +25,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _clear_registry() -> None:
-    with agent_state.STATE_LOCK:
-        agent_state.agent_states.clear()
+from kiss.tests.server.conftest import clear_agent_states
 
 
 class TestViewerTabResolvesToSubagent:
@@ -38,10 +34,10 @@ class TestViewerTabResolvesToSubagent:
     Stop and prompt injection."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def _make_server(self) -> tuple[VSCodeServer, list[dict[str, Any]]]:
         server = VSCodeServer()

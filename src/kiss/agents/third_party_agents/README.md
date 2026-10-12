@@ -69,7 +69,7 @@ Name the service in your prompt and Sorcar routes it. Internally the session cal
 `run_agent` tool with the channel name and your request (`run_agent(agent="slack",
 task=...)`); your request goes through verbatim as the sub-session's task. The channel's
 SEA class derives from `ChannelSea`, so the sub-session runs in
-the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
+the shared `~/.kiss/channel_work` directory with no worktree tools, classifier,
 web tools or memory, inherits nothing from the calling task (model and budget
 are the daemon defaults unless the caller passes them), and carries that channel's
 authenticated tools; the daemon appends the channel preamble to its system prompt,
@@ -140,7 +140,8 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   `channel_system_prompt`, `system_prompt(self, system_prompt)` returning
   `system_prompt + "\n\n" +` that text. The base class is the whole channel
   configuration, so the module defines no `settings()`: `ChannelSea` lays the worker
-  defaults (worktree, auto-commit, classifier, web tools and memory off) under a run in
+  defaults (classifier, web tools and memory off; the `create_worktree` and
+  `commit_and_merge` tools dropped) under a run in
   `$KISS_HOME/channel_work` that inherits nothing from the calling task and locks
   `work_dir` and the worker keys; the loader
   recognizes a channel by `isinstance(sea, ChannelSea)` and the command registry by
@@ -306,7 +307,13 @@ files and Teams refuses to sign in): as a refresh-token credential the daemon
 renews itself when the grant includes a refresh token (Teams rejects a grant without
 one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
 plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
-header). The daemon starts on demand: agents that find none
+header). The daemon starts on demand, and only for a request: a channel agent wires
+its vault-backed client on the first request it serves (under a per-agent lock, so
+concurrent first requests share one client), not when it is built for its tool list,
+and the enrollment probes (`vault_has_credentials`, which an agent calls to decide
+whether to expose its backend tools, and `enrolled_services`, behind `auth_status`
+and the Apps panel) read the vault directory on disk, so `sea lint`,
+a tool-list build or a status probe never launches a daemon; agents that find none
 serialize the start behind `~/.kiss/muse_auth/spawn.lock`, so concurrent agents
 never race to launch two, and a running daemon exits on its own as soon as its
 `~/.kiss/muse_auth` state directory is deleted (a temporary home torn down), so it
@@ -659,8 +666,9 @@ found more than ten minutes overdue (`cron_agent.MISSED_RUN_GRACE_SECONDS`) is
 rescheduled from now without running, so a daemon back after a day does not fire every
 daily job at once; a one-shot job is exempt and runs late rather than never. A
 job that must work inside a specific project ("run the tests in ~/proj every night and
-fix them") names that directory instead; a prompt job in a Git repository can
-additionally ask for a worktree and auto-commit like a chat task. A run is stopped
+fix them") names that directory instead; a prompt job in a Git repository isolates
+its changes in a worktree and merges them back with its own `create_worktree` /
+`commit_and_merge` tools, like a chat task. A run is stopped
 once it exceeds the job's timeout (default one hour for a prompt job, ten minutes for a
 command). A poll that should stop once it has fired ("tell me *when* X happens") is
 stored with `until_delivered` (`--until-delivered` on the CLI): the job disables itself

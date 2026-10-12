@@ -1901,6 +1901,10 @@ async function main() {
       // At the deadline the timer refetches; the daemon's (contrary)
       // value now rules because the overlay has expired.
       win.Date.now = () => realNow() + 11000;
+      // The tasks_updated above was this tick's refresh; a second one
+      // in the same tick folds into the end-of-tick refetch, so let the
+      // tick end before the timer fires.
+      await new Promise(resolve => origSetTimeout(resolve, 0));
       const asked = ofType(posted, 'getHistory').length;
       longTimers.forEach(fn => fn());
       assert.ok(
@@ -1976,6 +1980,9 @@ async function main() {
       // At A's deadline the timer refetches; A's overlay has expired
       // (daemon value rules) while B's still holds.
       win.Date.now = () => T + 10200;
+      // Same tick as timers[0]'s refresh: let it end so this one is not
+      // folded into its end-of-tick refetch.
+      await new Promise(resolve => origSetTimeout(resolve, 0));
       const asked = ofType(posted, 'getHistory').length;
       timers[2].fn();
       assert.ok(
@@ -2835,16 +2842,13 @@ async function main() {
       'the working directory is unchanged',
     );
     assert.ok(rootRows(win)[0].classList.contains('is-workdir'));
-    // The panel is closed, so the refusal is a notification, not a
-    // line in the panel's error box.
+    // The refusal is an error notification.
     const toast = win.document.querySelector('.kiss-notification');
     assert.ok(toast, 'an error notification is shown');
     assert.ok(
       toast.textContent.indexOf('Not a directory: ' + OTHER) >= 0,
       "the notification carries the daemon's reason",
     );
-    const panelError = byId(win, 'workdir-error');
-    assert.ok(panelError.hidden, "the closed panel's error line stays hidden");
     win.close();
   });
 
@@ -2868,7 +2872,7 @@ async function main() {
     win.close();
   });
 
-  await test("The Working directory panel's own Open never focuses the Explorer, even after an abandoned check-mark switch", async () => {
+  await test("The chat header drop-down's own pick never focuses the Explorer, even after an abandoned check-mark switch", async () => {
     const {win, posted} = makeWebview();
     openExplorer(win, posted, []);
     addOtherFolder(win, posted, []);
@@ -2877,14 +2881,16 @@ async function main() {
     const tickCheck = ofType(posted, 'listDir')
       .filter(m => String(m.token).startsWith('workdir:'))
       .pop();
-    // Before the daemon answers, the user opens "..." > Working
-    // directory and opens a third folder from there.
-    click(win, byId(win, 'more-btn'));
-    click(win, byId(win, 'workdir-btn'));
-    const box = byId(win, 'workdir-input');
-    box.value = '/data/third';
-    box.dispatchEvent(new win.Event('input', {bubbles: true}));
-    click(win, byId(win, 'workdir-open-btn'));
+    // Before the daemon answers, the user picks a third folder in the
+    // chat header's working directory drop-down.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: [{path: '/data/third', ts: 1}]},
+    });
+    const select = byId(win, 'chat-workdir');
+    select.value = '/data/third';
+    assert.strictEqual(select.value, '/data/third');
+    select.dispatchEvent(new win.Event('change', {bubbles: true}));
     // The check mark's own reply is stale now and changes nothing.
     send(win, {
       type: 'dirListing',
@@ -2899,7 +2905,7 @@ async function main() {
     const active = win.document.activeElement;
     assert.ok(
       !(active && active.classList.contains('explorer-row')),
-      "the panel's switch leaves the Explorer alone, focus on " +
+      "the drop-down's switch leaves the Explorer alone, focus on " +
         (active ? active.id || active.className : 'none'),
     );
     win.close();
@@ -3173,13 +3179,11 @@ async function main() {
       config: {work_dir: WD, recent_work_dirs: RECENTS},
     });
     assert.ok(picker.querySelector('.folder-picker-recent').hidden);
-    // The panel's own list still carries every folder, titled "Open".
+    // The chat header's drop-down still lists every folder.
     click(win, picker.querySelector('.folder-picker-cancel'));
-    click(win, byId(win, 'more-btn'));
-    click(win, byId(win, 'workdir-btn'));
-    const panelRows = all(win, '#workdir-list .workdir-item');
-    assert.strictEqual(panelRows.length, 4);
-    assert.strictEqual(panelRows[0].title, 'Open ' + WD);
+    const listed = Array.from(byId(win, 'chat-workdir').options, o => o.value);
+    assert.deepStrictEqual(listed.slice(0, 4), [WD, '/data/newer', OTHER, '/data/old']);
+    assert.strictEqual(listed.length, 5, 'plus "Choose ..."');
     win.close();
   });
 

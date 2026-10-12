@@ -36,7 +36,7 @@ Reproduces and pins two bugs in the multi-viewer routing layer:
 
 The test drives the real ``VSCodeServer`` end-to-end through
 ``_handle_command``, the real ``_replay_session`` /
-``_reattach_running_chat`` paths, and the real ``_TaskRunnerMixin``
+``_attach_viewer_to_running_chat`` paths, and the real ``_TaskRunnerMixin``
 worker thread.  Only the innermost LLM-driven ``run`` (the
 grandparent of :class:`SorcarAgent`) is stubbed: it broadcasts a
 sentinel ``text_delta`` so the test can observe live fan-out, then
@@ -52,52 +52,26 @@ subscribed tab with the viewer's tab id stamped.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
-import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import (
+    init_repo,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 _LIVE_TEXT = "live-delta-marker"
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
@@ -161,10 +135,6 @@ def _patch_grandparent_run_blocking(
     return original
 
 
-def _unpatch_grandparent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 def _wait_until(predicate: Any, timeout: float = 10.0) -> bool:
     """Poll *predicate* every 10 ms up to *timeout* seconds."""
     deadline = time.monotonic() + timeout
@@ -186,8 +156,8 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             self.skipTest("no model API key configured")
         self.model = models[0]
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server, self.events, self.lock = _make_server()
         self.release = threading.Event()
         self.started = threading.Event()
@@ -202,8 +172,8 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=30)
         agent_state.agent_states.clear()
-        _unpatch_grandparent_run(self.original_run)
-        _restore_db(self.saved)
+        restore_sorcar_parent_run(self.original_run)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _start_blocking_task(self, tab_id: str, prompt: str) -> None:

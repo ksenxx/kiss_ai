@@ -42,6 +42,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, skipUnless
 
 import kiss.server.web_server as ws_mod
 from kiss.server.web_server import RemoteAccessServer, _describe_port_listeners
+from kiss.tests.server.conftest import find_free_port
 
 _HOLDER_SCRIPT = """
 import socket, sys, time
@@ -52,13 +53,6 @@ s.listen(1)
 print("ready", flush=True)
 time.sleep(60)
 """
-
-
-def _free_port() -> int:
-    """Pick a TCP port that is currently free on the loopback address."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _hold_loopback(port: int) -> subprocess.Popen[str]:
@@ -101,7 +95,7 @@ class _LoopbackAliasTestBase(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
-        self.port = _free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="0.0.0.0",
             port=self.port,
@@ -208,7 +202,7 @@ class TestSpecificHostNeedsNoAlias(IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             server = RemoteAccessServer(
                 host="127.0.0.1",
-                port=_free_port(),
+                port=find_free_port(),
                 work_dir=tmpdir,
                 local_endpoint_file=f"{tmpdir}/sorcar-local.json",
             )
@@ -229,7 +223,7 @@ class TestDescribePortListeners(TestCase):
     @skipUnless(shutil.which("lsof"), "lsof is not installed (documented empty result)")
     def test_names_foreign_holder_and_skips_own_process(self) -> None:
         """A child holding the port is reported as ``name[pid]``; a free port gives ``""``."""
-        port = _free_port()
+        port = find_free_port()
         holder = _hold_loopback(port)
         try:
             described = _describe_port_listeners(port)
@@ -242,4 +236,4 @@ class TestDescribePortListeners(TestCase):
             own.bind(("127.0.0.1", 0))
             own.listen(1)
             self.assertEqual(_describe_port_listeners(own.getsockname()[1]), "")
-        self.assertEqual(_describe_port_listeners(_free_port()), "")
+        self.assertEqual(_describe_port_listeners(find_free_port()), "")

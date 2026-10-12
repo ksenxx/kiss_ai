@@ -141,8 +141,7 @@ def test_row_to_extra_json_emits_all_typed_columns(
     payload = json.loads(str(entries[0]["extra"]))
     for k in (
         "model", "work_dir", "version",
-        "auto_commit_mode", "tokens", "cost", "steps",
-        "is_parallel", "is_worktree",
+        "tokens", "cost", "steps", "is_parallel",
         "startTs", "endTs", "is_favorite",
     ):
         assert k in payload, f"missing key {k!r}"

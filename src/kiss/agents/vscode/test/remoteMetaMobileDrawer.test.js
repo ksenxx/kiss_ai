@@ -280,7 +280,9 @@ async function main() {
       const text = id => win.document.getElementById(id).textContent;
       assert.strictEqual(text('meta-tokens'), '2.00K');
       assert.strictEqual(text('meta-cost'), '$0.25');
-      assert.strictEqual(text('meta-machine'), 'phone-host');
+      // The machine name stays in the status bar: no Machine row.
+      assert.strictEqual(text('status-machine'), 'phone-host');
+      assert.strictEqual(win.document.getElementById('meta-machine'), null);
       assert.strictEqual(text('meta-workdir'), '/cfg/dir');
       assert.strictEqual(text('meta-max-budget'), '$42.00');
     },

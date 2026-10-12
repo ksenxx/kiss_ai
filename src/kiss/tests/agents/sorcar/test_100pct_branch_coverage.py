@@ -10,7 +10,7 @@ Targets remaining uncovered branches in:
   sorcar_agent.py: lines 251-252
   chat_sorcar_agent.py: lines 130->134, 132-133
   useful_tools.py: lines 184, 204
-  worktree_sorcar_agent.py: lines 187, 209-211, 313-314, 351
+  sorcar_agent.py: lines 187, 209-211, 313-314, 351
   json_printer.py: lines 205-215, 248, 254, 259-260, 281-285, 294, 302-310,
                  319-323, 329-330, 332, 333->335, 336, 340, 342, 344->346,
                  349, 352, 355, 358, 363-365, 367-368, 376
@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
+from kiss.agents.sorcar.sorcar_agent import _generate_commit_message
 
 _SavedState = tuple[Path, "sqlite3.Connection | None", Path]
 

@@ -14,9 +14,8 @@ asked to fix:
   carry a ``tabId`` so the result only reaches the requesting tab.
 - C1: ``_cmd_get_adjacent_task`` must not fall back to the globally
   latest chat when the tab has no chat association.
-- C2, C3: ``_replay_session`` with an empty ``tab_id`` must not
-  synthesize a phantom registry entry keyed by ``chat_id`` or flip
-  ``use_worktree`` on a state that is not the caller's.
+- C2: ``_replay_session`` with an empty ``tab_id`` must not
+  synthesize a phantom registry entry keyed by ``chat_id``.
 - C4: ``_stop_task(None)`` must not stop every tab's task.
 
 All tests use real ``VSCodeServer`` instances (no mocks).
@@ -30,26 +29,14 @@ import unittest
 
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
+from kiss.tests.server.conftest import make_capturing_server
 
 
 class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
     """A7: per-task token/budget/step offsets in the printer."""
 
     def test_offsets_are_per_task_via_thread_local(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         printer = server.printer
         printer._thread_local.task_id = "A"
         printer.tokens_offset = 100
@@ -67,7 +54,7 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         assert printer.steps_offset == 5
 
     def test_offsets_concurrent_threads_do_not_clobber(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         printer = server.printer
         barrier = threading.Barrier(2)
         results: dict[str, tuple[int, float, int]] = {}
@@ -94,7 +81,7 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         assert results["B"] == (200, 2.5, 7)
 
     def test_cleanup_task_drops_offsets(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         printer = server.printer
         printer._thread_local.task_id = "A"
         printer.tokens_offset = 42
@@ -109,7 +96,7 @@ class TestB4AdjacentTaskAlwaysTagged(unittest.TestCase):
     def test_empty_tab_id_still_tags_event_so_cross_tab_broadcast_is_impossible(
         self,
     ) -> None:
-        server, events = _make_server()
+        server, events = make_capturing_server()
         server._get_adjacent_task(
             chat_id="none",
             task_id=None,
@@ -163,7 +150,7 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
     """
 
     def test_empty_chat_id_is_passed_through_without_global_fallback(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         captured: list[tuple[str, str | None, str, str]] = []
 
         def stub(
@@ -182,13 +169,12 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
         assert captured == [("", None, "prev", "T")]
 
 
-class TestC2C3ReplayRequiresTabId(unittest.TestCase):
-    """C2/C3: _replay_session with empty tab_id must not synthesize phantom state.
+class TestC2ReplayRequiresTabId(unittest.TestCase):
+    """C2: _replay_session with empty tab_id must not synthesize phantom state.
 
     Patches the persistence loader so a replay would normally succeed;
     the test proves that the empty-tab_id guard prevents creation of a
-    phantom registry entry keyed by ``chat_id`` and prevents modifying
-    ``use_worktree`` on any other tab's state.
+    phantom registry entry keyed by ``chat_id``.
     """
 
     def setUp(self) -> None:
@@ -200,7 +186,7 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
             return {
                 "events": [{"type": "text_delta", "text": "x"}],
                 "task": "t",
-                "extra": '{"is_worktree": true}',
+                "extra": "{}",
             }
 
         smod._load_latest_chat_events_by_chat_id = fake_loader  # type: ignore[assignment]
@@ -210,24 +196,10 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
         agent_state.agent_states.clear()
 
     def test_empty_tab_id_does_not_create_state_keyed_by_chat_id(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         server._replay_session("some-chat-id", tab_id="")
         assert "some-chat-id" not in agent_state.agent_states
         assert "some-chat-id" not in server._tab_chat_views
-
-    def test_empty_tab_id_does_not_flip_use_worktree_on_any_tab(self) -> None:
-        server, _ = _make_server()
-        state = agent_state.AgentState(
-            "task-real", tab_id="real-tab", server_owned=True,
-        )
-        # Force the flag away from whatever the replayed session would
-        # set so a leaky replay (C3) is still detected now that the
-        # AgentState default is True.
-        state.use_worktree = False
-        agent_state.register(state)
-        server._replay_session("some-chat-id", tab_id="")
-        for st in agent_state.agent_states.values():
-            assert st.use_worktree is False
 
 
 class TestC4StopRequiresTabId(unittest.TestCase):
@@ -237,7 +209,7 @@ class TestC4StopRequiresTabId(unittest.TestCase):
         agent_state.agent_states.clear()
 
     def test_stop_without_tab_id_is_no_op(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         ev1 = threading.Event()
         ev2 = threading.Event()
         t1 = threading.Thread(target=lambda: time.sleep(1), daemon=True)

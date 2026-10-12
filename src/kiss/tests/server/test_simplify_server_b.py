@@ -27,8 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
-import ssl
 import tempfile
 import textwrap
 import time
@@ -44,6 +42,7 @@ from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _BLOCKING_SCRIPT = textwrap.dedent(
     """
@@ -183,27 +182,12 @@ class TestReplayPublishesTabBeforeEvents(TestCase):
         self.assertLess(publish_idx, emitted.index(statuses[0]))
 
 
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 @posix_only("terminal tabs need a pty")
 class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
     """``terminalOpen`` from a remote connection opens a real shell."""
 
     async def asyncSetUp(self) -> None:
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -226,7 +210,7 @@ class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
     async def _remote_connection(self) -> Any:
         ws = await connect(
             f"wss://127.0.0.1:{self._port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": _PASSWORD}))
         await self._recv_type(ws, "auth_ok")

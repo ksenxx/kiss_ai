@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt integration tests for task_runner.py / server.py / merge_flow.py.
+"""Bug-hunt integration test for task_runner.py / server.py.
 
 BUG-1 (server.py ``_replay_session``): when a tab opens a chat whose
 task is STILL RUNNING, the resumed-running ``status`` broadcast reads
@@ -16,23 +16,11 @@ and the frontend (which requires ``ev.startTs > 0``) anchored the
 for a task that had been running for minutes.  This contradicts the
 method's own docstring, which claims the broadcast echoes the agent's
 true start time.
-
-BUG-2 (merge_flow.py ``_handle_autocommit_action``): the persisted
-``autocommit_done`` event is appended under ``tab.last_task_id`` — but
-when auto-commit mode is ON the handler runs from the task thread's
-post-task cleanup (``_run_task_inner``'s finally) BEFORE ``_run_task``'s
-outer finally refreshes ``last_task_id``.  For the second (and every
-later) task on the same tab, ``last_task_id`` still holds the PREVIOUS
-task's id, so the commit confirmation is persisted into the prior
-task's event stream and never shows up when the current task is
-replayed.
 """
 
 from __future__ import annotations
 
-import json
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -40,27 +28,9 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-import kiss.agents.sorcar.persistence as _persistence
-import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
 
 
 class _BugHuntBase(unittest.TestCase):
@@ -76,25 +46,11 @@ class _BugHuntBase(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
-
-        def fake_commit_msg(
-            diff_text: str,
-            user_prompt: str | None = None,
-            task_result: str | None = None,
-        ) -> str:
-            return "test: bughunt autocommit"
-
-        _merge_flow_module.generate_commit_message_from_diff = (  # type: ignore[assignment]
-            fake_commit_msg
-        )
-
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
-        _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -120,8 +76,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
             "prompt": "bughunt long-running task",
             "tabId": src_tab,
             "workDir": work_dir,
-            "useWorktree": False,
-            "autoCommit": False,
             "model": "",
         })
         try:
@@ -172,79 +126,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
             tab = agent_state.find_by_tab(src_tab)
             if tab is not None and tab.task_thread is not None:
                 tab.task_thread.join(timeout=30)
-
-
-class TestAutocommitDonePersistedToCurrentTask(_BugHuntBase):
-    """BUG-2: in-task auto-commit must persist under the CURRENT task id."""
-
-    def _events_for_task(self, task_id: str) -> list[dict[str, Any]]:
-        _persistence._flush_chat_events()
-        db = _persistence._get_db()
-        rows = db.execute(
-            "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
-            (task_id,),
-        ).fetchall()
-        return [json.loads(r["event_json"]) for r in rows]
-
-    def test_second_task_autocommit_done_not_persisted_under_first_task(
-        self,
-    ) -> None:
-        repo = str(Path(self.tmpdir) / "repo")
-        Path(repo).mkdir()
-        _init_repo(repo)
-        self.server.work_dir = repo
-        run_count = [0]
-
-        def stub_run(self_agent: object, **kwargs: object) -> str:
-            run_count[0] += 1
-            Path(repo, "out.txt").write_text(f"change {run_count[0]}\n")
-            return "success: true\nsummary: made a change\n"
-
-        self._parent_class.run = stub_run
-
-        tab_id = "bughunt-ac-tab"
-        cmd = {
-            "type": "run",
-            "prompt": "bughunt autocommit task",
-            "tabId": tab_id,
-            "workDir": repo,
-            "useWorktree": False,
-            "autoCommit": True,
-            "model": "",
-        }
-        self.server._run_task(dict(cmd))
-        tab = agent_state.find_by_tab(tab_id)
-        assert tab is not None, "no agent state registered for the tab"
-        task1_id = tab.task_id
-        assert task1_id is not None, "first task id missing"
-
-        self.server._run_task(dict(cmd))
-        tab = agent_state.find_by_tab(tab_id)
-        assert tab is not None, "no agent state registered for the tab"
-        task2_id = tab.task_id
-        assert task2_id is not None and task2_id != task1_id, (
-            f"second run did not allocate a new task row "
-            f"(task1={task1_id}, task2={task2_id})"
-        )
-
-        task1_done = [
-            e for e in self._events_for_task(task1_id)
-            if e.get("type") == "autocommit_done"
-        ]
-        task2_done = [
-            e for e in self._events_for_task(task2_id)
-            if e.get("type") == "autocommit_done"
-        ]
-        assert len(task1_done) == 1, (
-            f"BUG: task 1 has {len(task1_done)} persisted autocommit_done "
-            "events — the second task's commit confirmation was appended "
-            "to the FIRST task's event stream"
-        )
-        assert len(task2_done) == 1, (
-            f"BUG: task 2 has {len(task2_done)} persisted autocommit_done "
-            "events — its commit confirmation is missing from its own "
-            "event stream (it was persisted under the previous task)"
-        )
 
 
 if __name__ == "__main__":

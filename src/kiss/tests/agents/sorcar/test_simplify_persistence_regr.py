@@ -133,7 +133,7 @@ class TestLegacySchemaMigration(_TempDbTestBase):
         assert parent["cost"] == 1.5
         assert parent["tokens"] == 12
         assert parent["is_parallel"] == 0
-        assert parent["is_worktree"] == 0
+        assert "is_worktree" not in parent.keys()
         assert child["parent_task_id"] == parent["id"]
         evs = conn.execute("SELECT task_id FROM events").fetchall()
         assert len(evs) == 1

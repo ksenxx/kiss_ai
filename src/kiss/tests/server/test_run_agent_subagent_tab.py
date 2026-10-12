@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -44,6 +43,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import make_test_tls, open_local_connection
+from kiss.tests.server.conftest import init_repo
 
 PARENT_TAB_ID = "webtab-parent-1"
 
@@ -51,22 +51,6 @@ PARENT_TAB_ID = "webtab-parent-1"
 def _viewer_sub_tab_id(child_task_id: str) -> str:
     """The tab id every webview gives the child (``subagentTabIdFor``)."""
     return f"{PARENT_TAB_ID}__sub_{child_task_id}"
-
-
-def _init_repo(repo: str) -> None:
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True,
-            check=False,
-        )
-
-    git("init", "-q")
-    git("config", "user.email", "test@example.com")
-    git("config", "user.name", "Test User")
-    git("config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    git("add", "seed.txt")
-    git("commit", "-q", "-m", "seed")
 
 
 class DaemonLocalHarness(unittest.TestCase):
@@ -84,7 +68,7 @@ class DaemonLocalHarness(unittest.TestCase):
         self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -290,8 +274,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         parent = daemon_client.run(
             "parent seed task",
             work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -304,8 +286,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             child_out["result"] = daemon_client.run(
                 child_marker,
                 work_dir=self.repo,
-                use_worktree=False,
-                auto_commit=False,
                 parent_task_id=parent.task_id,
                 parent_tab_id=PARENT_TAB_ID,
                 endpoint_file=self.endpoint_file,
@@ -497,8 +477,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         parent = daemon_client.run(
             "parent seed task",
             work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -508,8 +486,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             f"<task>{child_marker} one</task>"
             f"<task>{child_marker} two</task>",
             work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=False,
             parent_task_id=parent.task_id,
             parent_tab_id=PARENT_TAB_ID,
             endpoint_file=self.endpoint_file,
@@ -563,8 +539,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         result = daemon_client.run(
             child_marker,
             work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -640,8 +614,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         parent = daemon_client.run(
             "parent seed task",
             work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -655,8 +627,6 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             child = daemon_client.run(
                 marker,
                 work_dir=self.repo,
-                use_worktree=False,
-                auto_commit=False,
                 use_web_tools=False,
                 parent_task_id=parent.task_id,
                 parent_tab_id=PARENT_TAB_ID,

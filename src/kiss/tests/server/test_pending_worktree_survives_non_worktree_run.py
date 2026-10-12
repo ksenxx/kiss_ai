@@ -2,168 +2,118 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""A pending worktree must survive the tab's next non-worktree run.
+"""A pending worktree must survive the tab's next run.
 
-R09-1.  With **Auto commit** off and **Use worktree** on, a finished
-task leaves its ``kiss/wt-*`` branch pending and the webview shows the
-Merge / Discard bar.  If the user does not click either button, unticks
-**Use worktree** and submits the next task on the same tab, the server
-used to lose the worktree entirely:
-
-* ``_run_task_inner`` set ``state.use_worktree = False`` for the new
-  run, so the release guard — gated on that same flag — never ran; and
-* ``_run_task``'s ``finally`` dropped ``state.agent`` using the same
-  flag, discarding the only in-memory handle to the worktree
-  directory, the branch and its ``branch.<name>.*`` config.
-
-Nothing was left to retry the cleanup, and because neither
-``_release_worktree`` nor ``_preserve_pending_worktree_for_review``
-ran, no preserve marker was written either — so the next worktree task
-in the repo let ``GitWorktreeOps.reclaim_orphaned_worktrees``
-auto-commit and squash-merge into the user's branch the very work the
-user had declined to merge.
+R09-1.  A task whose agent called ``create_worktree`` but never
+``commit_and_merge`` leaves its ``kiss/wt-*`` branch pending and the
+webview shows the Merge / Discard bar.  If the user clicks neither
+button and submits the next task on the same tab, the server must not
+lose the worktree: before the new run starts the pending worktree is
+parked on its branch (``_retire_previous_worktree``: the work is
+committed, the directory is removed, a preserve marker is written) and
+the branch is never squash-merged into the user's branch behind their
+back — not by the retire, and not by the orphan-reclaim sweep a later
+``create_worktree`` in the repo runs.
 
 Everything here is real: a real git repository, a real linked worktree
-created by ``WorktreeSorcarAgent``, real ``run`` commands dispatched
-through ``VSCodeServer._handle_command`` on real worker threads, and
-the real reclaim sweep.  Only the LLM call is replaced by a
-deterministic stub that writes a file, exactly as the sibling
-auto-commit suites do.
+created by the agent's own ``create_worktree`` tool, real ``run``
+commands dispatched through ``VSCodeServer._run_task`` on real worker
+threads, and the real reclaim sweep.  The model is a local stand-in
+endpoint scripting each task's tool calls.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import kiss_wt_branches, run_git
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    CapturePrinter,
+    IsolatedKissHome,
+    OfflineFastModel,
+    StandInModelServer,
+    finish_response,
+    request_text,
+    tool_call_response,
+)
 
 
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
-
-
-def _kiss_wt_branches(repo: str) -> list[str]:
-    """Names of the ``kiss/wt-*`` branches present in *repo*."""
-    out = _run_git(repo, "branch", "--list", "kiss/wt-*").stdout
-    return [
-        line.strip().lstrip("*+ ").strip()
-        for line in out.splitlines()
-        if line.strip()
-    ]
-
-
-class TestPendingWorktreeSurvivesNonWorktreeRun(unittest.TestCase):
+class TestPendingWorktreeSurvivesNextRun(unittest.TestCase):
     """The next run must never silently orphan a pending worktree."""
 
     def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-orphan-")
-        self.repo = str(Path(self.tmpdir) / "repo")
-        Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
-
-        self._saved_db = (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        )
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
-
-        self.printer = MemoryPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.home = IsolatedKissHome(prefix="kiss-wt-orphan-")
+        self.repo = str(self.home.repo)
+        self.home.write_config(max_budget=5.0, use_web_browser=False)
+        self.offline = OfflineFastModel()
+        self.offline.__enter__()
+        self.standin = StandInModelServer(self._respond)
+        self.printer = CapturePrinter()
+        self.server = VSCodeServer(printer=self.printer)
         self.server.work_dir = self.repo
-
-        self._parent_class = cast(Any, SorcarAgent.__mro__[1])
-        self._original_run = self._parent_class.run
+        # Per task prompt: how many model calls have been answered.
+        self.calls: dict[str, int] = {}
 
     def tearDown(self) -> None:
-        self._parent_class.run = self._original_run
         for state in agent_state.snapshot():
             if state.agent is not None and state.agent._wt_pending:
                 try:
                     state.agent.discard()
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
-        agent_state.agent_states.clear()
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
-        (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        ) = self._saved_db
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.standin.stop()
+        self.offline.__exit__(None, None, None)
+        self.home.cleanup()
 
     # -- helpers ---------------------------------------------------
 
-    def _stub_llm(self, filename: str | None) -> None:
-        """Make the agent write *filename* into its work dir and succeed.
+    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Script one task: ``create_worktree``, write the file, finish.
 
-        ``None`` writes nothing, which is how the non-worktree runs
-        below keep the main working tree clean.
+        A prompt ``write <name>`` makes the agent create a worktree
+        and write ``<name>`` into it; the worktree is never merged, so
+        the first ``finish`` is refused by the worktree gate and the
+        second one ends the task.  A prompt ``nothing`` finishes at
+        once, leaving the tree untouched.
         """
+        text = request_text(request)
+        # The chat history carries earlier prompts: the latest decides.
+        marker = text.rsplit("TASK:", 1)[1].split("\n", 1)[0].strip()
+        n = self.calls.get(marker, 0)
+        self.calls[marker] = n + 1
+        if marker == "nothing":
+            return finish_response("nothing to do")
+        filename = marker.removeprefix("write ")
+        if n == 0:
+            return tool_call_response("create_worktree", {})
+        if n == 1:
+            return tool_call_response("Bash", {
+                "command": f"printf 'agent output\\n' > {filename}",
+                "description": f"write {filename}",
+            })
+        return finish_response(f"wrote {filename}")
 
-        def stub_run(_agent: object, **kwargs: object) -> str:
-            work_dir = kwargs.get("work_dir")
-            if filename and isinstance(work_dir, str) and work_dir:
-                Path(work_dir, filename).write_text("agent output\n")
-            return "success: true\nsummary: stub\n"
-
-        self._parent_class.run = stub_run
-
-    def _run(
-        self,
-        tab_id: str,
-        *,
-        use_worktree: bool,
-        filename: str | None,
-    ) -> None:
-        """Dispatch a real ``run`` command and wait for it to finish.
-
-        The non-worktree runs pass ``filename=None`` so the main
-        working tree stays clean: the post-task commit of a dirty main
-        tree generates its message with a live LLM call, and these
-        tests must not make one.  Leaving the main tree clean is also
-        what the orphan-reclaim sweep requires before it will consider
-        a worktree at all, so the regression tail below tests the
-        sweep rather than its dirty-tree guard.
-        """
-        self._stub_llm(filename)
+    def _run(self, tab_id: str, prompt: str) -> None:
+        """Dispatch a real ``run`` command and wait for it to finish."""
         before = len(self._status_ends(tab_id))
-        self.server._handle_command({
+        self.server._run_task({
             "type": "run",
-            "prompt": f"write {filename}",
+            "prompt": f"TASK: {prompt}",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": use_worktree,
-            "autoCommit": False,
-            "model": "",
+            "model": STANDIN_MODEL,
+            "modelConfig": self.standin.model_config,
+            "isParallel": False,
+            "useWebTools": False,
+            "classifyTasks": False,
+            "maxBudget": 5.0,
         })
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -176,10 +126,8 @@ class TestPendingWorktreeSurvivesNonWorktreeRun(unittest.TestCase):
         """Recorded ``status running=False`` events for *tab_id*."""
         return [
             ev
-            for ev in list(self.printer.emitted)
-            if ev.get("type") == "status"
-            and ev.get("running") is False
-            and ev.get("tabId") == tab_id
+            for ev in self.printer.events_of_type("status")
+            if ev.get("running") is False and ev.get("tabId") == tab_id
         ]
 
     def _pending_branch(self, tab_id: str) -> str:
@@ -201,84 +149,105 @@ class TestPendingWorktreeSurvivesNonWorktreeRun(unittest.TestCase):
         assert wt_dir is not None
         return wt_dir
 
+    def _branch_files(self, branch: str) -> list[str]:
+        """Paths committed at the tip of *branch*."""
+        return run_git(
+            self.repo, "show", "--name-only", "--pretty=format:", branch,
+        ).stdout.split()
+
     # -- tests -----------------------------------------------------
 
-    def test_non_worktree_run_does_not_orphan_the_pending_worktree(
-        self,
-    ) -> None:
-        """The declined worktree keeps an owner, or is disposed of.
+    def test_first_run_leaves_the_worktree_pending(self) -> None:
+        """The task's work stays in its unmerged worktree, never on main."""
+        tab_id = "tab-pending"
+        self._run(tab_id, "write declined.txt")
 
-        "Disposed of" is the release-without-merging contract: the
-        work is committed onto the ``kiss/wt-*`` branch, the worktree
-        directory is removed and pruned, and the user is told where
-        the work went.  What must never happen is the third state —
-        directory and branch still there with nobody left holding
-        them.
-        """
-        tab_id = "tab-orphan"
-        self._run(tab_id, use_worktree=True, filename="declined.txt")
         branch = self._pending_branch(tab_id)
         wt_dir = self._pending_worktree_dir(tab_id)
-        assert branch in _kiss_wt_branches(self.repo)
+        assert branch in kiss_wt_branches(self.repo)
+        assert Path(wt_dir, "declined.txt").read_text() == "agent output\n"
+        assert not Path(self.repo, "declined.txt").exists()
+        assert run_git(self.repo, "status", "--porcelain").stdout == ""
+        created = self.printer.events_of_type("worktree_created")
+        assert [e.get("branch") for e in created] == [branch]
+        bars = self.printer.events_of_type("worktree_done")
+        assert [b.get("branch") for b in bars] == [branch], (
+            "the Merge / Discard bar was not presented for the pending worktree"
+        )
+        assert bars[0].get("changedFiles") == ["declined.txt"]
 
-        self._run(tab_id, use_worktree=False, filename=None)
+    def test_next_run_parks_the_pending_worktree_on_its_branch(self) -> None:
+        """The declined worktree is committed to its branch, not merged.
+
+        "Parked" is the preserve-for-review contract: the work is
+        committed onto the ``kiss/wt-*`` branch, the worktree directory
+        is removed and pruned, the branch carries a preserve marker so
+        no reclaim sweep publishes it, and the user is told where the
+        work went.  What must never happen is the third state —
+        directory and branch still there with nobody holding them —
+        or the work landing on the user's branch.
+        """
+        tab_id = "tab-orphan"
+        self._run(tab_id, "write declined.txt")
+        branch = self._pending_branch(tab_id)
+        wt_dir = self._pending_worktree_dir(tab_id)
+        head_before = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+        self._run(tab_id, "nothing")
 
         state = agent_state.find_by_tab(tab_id)
         assert state is not None
-        if state.agent is not None and state.agent._wt_pending:
-            return  # still owned: a later run can still dispose of it
-
-        if wt_dir.exists():
-            # These runs carry ``autoCommit: False``, so the release
-            # is not allowed to commit: it preserves the worktree for
-            # manual review and records a durable marker so a later
-            # reclaim sweep never publishes it.  That is an owner —
-            # the marker — not the orphan this test forbids.
-            assert GitWorktreeOps.load_preserve_marker(
-                Path(self.repo), branch,
-            ), (
-                f"worktree directory {wt_dir} was left on disk without "
-                "a preserve marker; a reclaim sweep could publish it"
-            )
-            assert Path(wt_dir, "declined.txt").exists(), (
-                "the preserved worktree no longer carries the declined work"
-            )
-            return
-        registered = [b for _d, b in GitWorktreeOps.registered_worktrees(
-            Path(self.repo),
-        )]
-        assert branch not in registered, (
-            f"branch {branch!r} is still a registered worktree with no "
-            "owner"
+        assert state.agent is None or not state.agent._wt_pending, (
+            "the retire left the previous worktree pending on the agent"
         )
-        if branch not in _kiss_wt_branches(self.repo):
-            return  # nothing was lost: the worktree held no work
-
-        committed = _run_git(
-            self.repo, "show", "--name-only", "--pretty=format:", branch,
-        ).stdout.split()
-        assert "declined.txt" in committed, (
+        assert not wt_dir.exists(), (
+            f"worktree directory {wt_dir} was left on disk after the retire"
+        )
+        registered = [
+            b for _d, b in GitWorktreeOps.registered_worktrees(Path(self.repo))
+        ]
+        assert branch not in registered, (
+            f"branch {branch!r} is still a registered worktree with no owner"
+        )
+        assert branch in kiss_wt_branches(self.repo), (
+            f"branch {branch!r} was deleted; the declined work is lost"
+        )
+        assert "declined.txt" in self._branch_files(branch), (
             f"branch {branch!r} survived but no longer carries the "
-            f"declined work: {committed}"
+            f"declined work: {self._branch_files(branch)}"
+        )
+        assert GitWorktreeOps.load_preserve_marker(Path(self.repo), branch), (
+            f"branch {branch!r} has no preserve marker; a reclaim sweep "
+            "could publish it"
+        )
+        assert run_git(self.repo, "rev-parse", "HEAD").stdout.strip() == (
+            head_before
+        ), "the retire merged the declined work into the user's branch"
+        assert not Path(self.repo, "declined.txt").exists()
+        warnings = [
+            e.get("message", "") for e in self.printer.events_of_type("warning")
+        ]
+        assert any(branch in w and "not merged" in w for w in warnings), (
+            f"the user was not told where the work went: {warnings}"
         )
 
     def test_declined_work_is_not_published_by_the_next_worktree_task(
         self,
     ) -> None:
-        """The orphan must not reach the user's branch via reclaim."""
+        """The parked branch must not reach the user's branch via reclaim."""
         tab_id = "tab-publish"
-        self._run(tab_id, use_worktree=True, filename="declined.txt")
+        self._run(tab_id, "write declined.txt")
         branch = self._pending_branch(tab_id)
 
-        self._run(tab_id, use_worktree=False, filename=None)
-        assert _run_git(self.repo, "status", "--porcelain").stdout == "", (
+        self._run(tab_id, "nothing")
+        assert run_git(self.repo, "status", "--porcelain").stdout == "", (
             "the main tree must be clean, otherwise the reclaim sweep "
             "declines for that reason and the regression is masked"
         )
 
-        self._run("tab-other", use_worktree=True, filename="third.txt")
+        self._run("tab-other", "write third.txt")
 
-        tracked = _run_git(self.repo, "ls-files").stdout.split()
+        tracked = run_git(self.repo, "ls-files").stdout.split()
         assert "declined.txt" not in tracked, (
             f"work the user declined to merge (branch {branch!r}) was "
             "auto-published onto their branch by the orphan reclaim sweep"
@@ -286,93 +255,52 @@ class TestPendingWorktreeSurvivesNonWorktreeRun(unittest.TestCase):
         assert not Path(self.repo, "declined.txt").exists(), (
             "the declined worktree's file reached the main working tree"
         )
+        assert branch in kiss_wt_branches(self.repo), (
+            f"the reclaim sweep deleted the parked branch {branch!r}"
+        )
 
     def test_next_worktree_run_still_owns_a_worktree(self) -> None:
-        """The worktree→worktree flow is untouched by the fix.
+        """A second ``create_worktree`` on the tab gets a fresh branch.
 
-        With the main tree idle the carried-over worktree is not
-        released here: the next run's own ``_try_setup_worktree``
-        retires it as it always did, and the tab ends up owning the
-        new run's worktree.  How that retirement disposes of the work
-        is the agent's own auto-commit policy — with ``autoCommit:
-        False`` on the wire it preserves the directory for manual
-        review — so what is asserted here is only that the tab keeps
-        exactly one live worktree and the retired one is never left
-        unowned.
+        The carried-over worktree is retired before the second run
+        starts (parked on its own branch, directory removed) and the
+        tab ends up owning exactly the new run's worktree; the retired
+        one is never left registered without an owner.
         """
         tab_id = "tab-chain"
-        self._run(tab_id, use_worktree=True, filename="first.txt")
+        self._run(tab_id, "write first.txt")
         first_branch = self._pending_branch(tab_id)
         first_dir = self._pending_worktree_dir(tab_id)
 
-        self._run(tab_id, use_worktree=True, filename="second.txt")
+        self._run(tab_id, "write second.txt")
         second_branch = self._pending_branch(tab_id)
+        second_dir = self._pending_worktree_dir(tab_id)
 
         assert second_branch != first_branch, (
             "the second worktree run reused the first run's branch"
         )
+        assert not first_dir.exists()
         registered = [
-            branch
-            for _dir, branch in GitWorktreeOps.registered_worktrees(
-                Path(self.repo),
-            )
+            b for _d, b in GitWorktreeOps.registered_worktrees(Path(self.repo))
         ]
-        if first_dir.exists():
-            # ``autoCommit: False`` forbids the retirement from
-            # committing, so it preserves the directory for manual
-            # review instead of removing it, and marks the branch so
-            # no later sweep publishes the work.  A preserved worktree
-            # stays registered with git precisely because it is still
-            # on disk.
-            assert GitWorktreeOps.load_preserve_marker(
-                Path(self.repo), first_branch,
-            ), (
-                f"the retired worktree directory {first_dir} was left "
-                "behind without a preserve marker"
-            )
-        else:
-            assert first_branch not in registered, (
-                f"the retired branch {first_branch!r} is still a "
-                "registered worktree"
-            )
+        assert first_branch not in registered, (
+            f"the retired branch {first_branch!r} is still a registered worktree"
+        )
         assert second_branch in registered, (
             "the tab must own the new run's worktree"
+        )
+        assert "first.txt" in self._branch_files(first_branch)
+        assert GitWorktreeOps.load_preserve_marker(
+            Path(self.repo), first_branch,
+        )
+        assert Path(second_dir, "second.txt").exists()
+        assert not Path(second_dir, "first.txt").exists(), (
+            "the new worktree inherited the retired run's work"
         )
 
     def test_changed_files_probe_ignores_unknown_tabs(self) -> None:
         """A tab with no state has no worktree changes to report."""
         assert self.server._get_worktree_changed_files("no-such-tab") == []
-
-    def test_pending_worktree_kept_when_the_run_is_refused(self) -> None:
-        """A run refused before it starts must not drop the owner.
-
-        A non-worktree run is rejected outright while another tab is
-        merging a worktree.  That early return happens after the new
-        run's ``useWorktree=False`` has been adopted, so the ownership
-        test in ``_run_task``'s ``finally`` must not key off it.
-        """
-        tab_id = "tab-refused"
-        self._run(tab_id, use_worktree=True, filename="declined.txt")
-        branch = self._pending_branch(tab_id)
-
-        merging = agent_state.AgentState(
-            "merging-task", tab_id="tab-merging", server_owned=True,
-        )
-        merging.use_worktree = True
-        merging.is_merging = True
-        agent_state.register(merging)
-        try:
-            self._run(tab_id, use_worktree=False, filename=None)
-        finally:
-            agent_state.unregister(merging.task_id, merging)
-
-        state = agent_state.find_by_tab(tab_id)
-        assert state is not None
-        assert state.agent is not None and state.agent._wt_pending, (
-            f"the refused run dropped the owner of branch {branch!r}, "
-            "leaking the worktree directory and branch forever"
-        )
-        assert branch in _kiss_wt_branches(self.repo)
 
 
 if __name__ == "__main__":

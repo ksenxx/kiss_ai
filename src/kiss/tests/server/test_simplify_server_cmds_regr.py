@@ -70,9 +70,7 @@ def test_extra_for_replay_without_stripped_keys_unchanged() -> None:
 def test_extra_for_replay_strips_global_setting_keys() -> None:
     payload = {
         "model": "m1",
-        "is_worktree": True,
         "is_parallel": False,
-        "auto_commit_mode": True,
         "startTs": 1,
         "endTs": 2,
         "tokens": 3,

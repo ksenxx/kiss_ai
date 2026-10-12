@@ -126,11 +126,12 @@ _GEOMETRY_JS = """
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
   // The per-task sections only: the workspace (Explorer, Source
-  // Control) and global (Schedule, Apps, Spend) sections (hidden by
-  // _open_page unless asked for) are measured separately.
+  // Control) and global (Schedule, Apps, Spend, Recommendations)
+  // sections (hidden by _open_page unless asked for) are measured
+  // separately.
   const isGlobal = el =>
-    el && ['meta-explorer', 'meta-scm', 'meta-schedule', 'meta-apps',
-           'meta-spend'].includes(el.id);
+    el && ['meta-explorer', 'meta-scm', 'meta-schedule', 'meta-machines',
+           'meta-apps', 'meta-spend', 'meta-recommendations'].includes(el.id);
   const resizers = Array.from(
     document.querySelectorAll('#meta-panel > .meta-section-resizer'))
     .filter(r => !isGlobal(r.previousElementSibling));
@@ -224,29 +225,22 @@ def browser() -> Iterator[Browser]:
 
 
 # Takes the workspace (Explorer, Source Control) and global (Schedule,
-# Apps, Spend) sections out of the stack (the `hidden` attribute; a Task
-# Info toggle round trip re-applies the layout), leaving the per-task
-# sections these geometry tests measure.
+# Machines, Apps, Spend, Recommendations) sections out of the stack (the `hidden`
+# attribute; the panel watches it and re-applies the layout), leaving
+# the per-task sections these geometry tests measure.
 _HIDE_WORKSPACE_SECTIONS_JS = """
 () => {
   document.getElementById('meta-explorer').hidden = true;
   document.getElementById('meta-scm').hidden = true;
-  const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
-  toggle.click();
-  toggle.click();
 }
 """
 
 _HIDE_GLOBAL_SECTIONS_JS = """
 () => {
-  document.getElementById('meta-explorer').hidden = true;
-  document.getElementById('meta-scm').hidden = true;
-  document.getElementById('meta-schedule').hidden = true;
-  document.getElementById('meta-apps').hidden = true;
-  document.getElementById('meta-spend').hidden = true;
-  const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
-  toggle.click();
-  toggle.click();
+  for (const id of ['meta-explorer', 'meta-scm', 'meta-schedule',
+                    'meta-machines', 'meta-apps', 'meta-spend',
+                    'meta-recommendations'])
+    document.getElementById(id).hidden = true;
 }
 """
 
@@ -484,13 +478,20 @@ def test_collapsing_hides_the_body_and_the_other_section_fills(
         # Two headers stacked at the top, nothing else.
         assert geo["headers"][0]["top"] < geo["headers"][1]["top"] < geo["panelTop"] + 120
 
+        # A click on a collapsed header opens that section alone: the
+        # other folds (one section at a time), so the opened body fills
+        # the panel and the separator is a divider again.
         _toggle(page, "meta-section-info")
+        geo = _geometry(page)
+        assert [h["expanded"] for h in geo["headers"]] == ["true", "false"]
+        assert geo["storedCollapsed"] == {"info": None, "update": "1"}
+        assert geo["listShown"] and not geo["contentShown"]
         _toggle(page, "meta-info")
         geo = _geometry(page)
-        assert [h["expanded"] for h in geo["headers"]] == ["true", "true"]
-        assert geo["storedCollapsed"] == {"info": None, "update": None}
-        assert geo["listShown"] and geo["contentShown"]
-        assert geo["resizers"][0]["handle"] is True
+        assert [h["expanded"] for h in geo["headers"]] == ["false", "true"]
+        assert geo["storedCollapsed"] == {"info": "1", "update": None}
+        assert geo["contentShown"] and not geo["listShown"]
+        assert geo["resizers"][0]["handle"] is False
         assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2)
     finally:
         page.close()
@@ -507,7 +508,7 @@ def test_short_window_keeps_both_headers_and_scrolls_the_bodies(
             () => {
               const long = 'ksen-vm-32.c.r2eg-441800.internal (x86_64)';
               for (const id of ['meta-tokens', 'meta-cost', 'meta-steps',
-                                'meta-time', 'meta-machine']) {
+                                'meta-time', 'meta-workdir']) {
                 document.getElementById(id).textContent = long + ' ' + long;
               }
             }
@@ -560,8 +561,31 @@ def test_mobile_drawer_has_the_same_sections_clear_of_the_close_button(
         assert geo["listShown"] is False
         assert geo["headers"][0]["expanded"] == "false"
         assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2)
+        # With Task Info collapsed the Task update header moves up to
+        # right under the first header row.  The close button ends above
+        # it, so the refresh button's whole face takes the tap.
+        hit = page.evaluate(_REFRESH_UNDER_CLOSE_JS)
+        assert hit["closeBottom"] <= hit["refreshTop"], hit
+        assert hit["hitsRefresh"] is True, hit
     finally:
         page.close()
+
+
+# The Task update refresh button against the drawer's close button:
+# whether a tap on the refresh button's top edge lands on it.
+_REFRESH_UNDER_CLOSE_JS = """
+() => {
+  const refresh = document.getElementById('meta-info-refresh');
+  const r = refresh.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 1);
+  return {
+    closeBottom: document.getElementById('meta-close').getBoundingClientRect().bottom,
+    refreshTop: r.top,
+    hitsRefresh: refresh.contains(hit),
+    hitId: hit && (hit.id || hit.tagName),
+  };
+}
+"""
 
 
 _EXTRA_GEOMETRY_JS = """
@@ -645,13 +669,11 @@ def test_a_third_section_stacks_resizes_and_hides(
         for hdr in _geometry(page)["headers"]:
             assert 0 <= hdr["top"] < hdr["bottom"] <= 700, hdr
 
-        # The owner hides its section with `hidden` and re-applies the
-        # layout (a toggle round trip does that here): the section is
+        # The owner hides its section with `hidden` (the panel watches
+        # the attribute and re-applies the layout): the section is
         # gone, Task update is last again and fills, its separator hides.
         _section_resizer(page).dblclick()
         page.evaluate("() => { document.getElementById('meta-section-extra').hidden = true; }")
-        _toggle(page, "meta-section-info")
-        _toggle(page, "meta-section-info")
         geo = _geometry(page)
         extra = page.evaluate(_EXTRA_GEOMETRY_JS)
         assert extra["sectionShown"] is False, extra
@@ -727,6 +749,18 @@ _APPS = [
     {"name": "matrix", "label": "Matrix", "authenticated": None, "error": "TimeoutError: slow"},
 ]
 
+
+# The local machine and one reachable remote, as the daemon reports them.
+_MACHINES = [
+    {
+        "name": "laptop", "address": "https://10.0.0.5:8787", "ip": "10.0.0.5", "port": 8787,
+        "local": True, "status": "reachable", "error": "",
+    },
+    {
+        "name": "gpu-box", "address": "ssh me@gpu", "ip": "10.0.0.9", "port": 41234,
+        "local": False, "status": "reachable", "error": "",
+    },
+]
 
 def _day_key(days_ago: int) -> str:
     """The local calendar day *days_ago* days back, as the reply keys it."""
@@ -890,12 +924,16 @@ def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
         widths: dict[str, set[float]] = {}
         for days_ago in (0, 1, 2, 3, 6, 5, 4, 200, 0):
             cell = page.locator(f'.spend-cell[data-spend-date="{_day_key(days_ago)}"]')
-            # The oldest cell is scrolled out of the viewport: bring it in.
+            # The oldest cell is scrolled out of the viewport: bring it
+            # in.  With six sections sharing the panel the Spend body
+            # scrolls vertically too, which moves the graph: measure it
+            # again where the scroll left it.
             cell.scroll_into_view_if_needed()
             cell.hover()
             box = tip.bounding_box()
             cell_box = cell.bounding_box()
-            assert box is not None and cell_box is not None
+            graph_box = page.locator("#meta-spend-graph").bounding_box()
+            assert box is not None and cell_box is not None and graph_box is not None
             widths.setdefault(tip.inner_text(), set()).add(round(box["width"], 1))
             assert box["x"] >= graph_box["x"] - 1, (days_ago, box, graph_box)
             assert box["x"] + box["width"] <= graph_box["x"] + graph_box["width"] + 1, (
@@ -971,11 +1009,19 @@ _GLOBAL_GEOMETRY_JS = """
     panelInnerBottom: panel.getBoundingClientRect().bottom - pad,
     scheduleTop: rect('meta-schedule-list').top,
     scheduleHeight: rect('meta-schedule-list').height,
+    machinesTop: rect('meta-machines-list').top,
+    machinesHeight: rect('meta-machines-list').height,
+    machines: Array.from(document.querySelectorAll(
+      '#meta-machines-list .sidebar-panel-name')).map(e => e.textContent),
     appsTop: rect('meta-apps-list').top,
     appsBottom: rect('meta-apps-list').bottom,
     appsHeight: rect('meta-apps-list').height,
     spendBottom: rect('meta-spend-body').bottom,
     spendHeight: rect('meta-spend-body').height,
+    recommendationsBottom: rect('meta-recommendations-list').bottom,
+    recommendationsHeight: rect('meta-recommendations-list').height,
+    recommendations: Array.from(document.querySelectorAll(
+      '#meta-recommendations-list .sidebar-panel-name')).map(e => e.textContent),
     listHeight: rect('meta-list').height,
     appsScrolls: apps.scrollHeight > apps.clientHeight + 1,
     headers: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
@@ -997,7 +1043,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         page.wait_for_selector("body.remote-desktop", state="attached")
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert "getCronJobs" in posted and "getAppsStatus" in posted
-        assert "getSpendReport" in posted
+        assert "getSpendReport" in posted and "getMachines" in posted
         _deliver(page, {
             "type": "cronJobs",
             "jobs": [{
@@ -1008,17 +1054,32 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
             }],
         })
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
+        _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
         _deliver(page, _spend_report())
+        _deliver(page, {
+            "type": "recommendations", "generatedAt": 1,
+            "tasks": ["Fix the parser", "Run the tests"],
+        })
         geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
-        # No running task: Task Info, Schedule, Apps and Spend are on screen.
-        assert geo["headers"] == ["Task Info", "Schedule", "Apps", "Spend"], geo
-        # The four bodies are equally tall; Spend reaches the bottom
-        # and Apps scrolls.
-        assert geo["scheduleTop"] < geo["appsTop"], geo
+        # No running task: Task Info, Schedule, Machines, Apps, Spend
+        # and Recommendations are on screen.
+        assert geo["headers"] == [
+            "Task Info", "Schedule", "Machines", "Apps", "Spend", "Recommendations",
+        ], geo
+        # The six bodies are equally tall; Recommendations reaches the
+        # bottom and Apps scrolls.
+        assert geo["scheduleTop"] < geo["machinesTop"] < geo["appsTop"], geo
         assert geo["scheduleHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["machinesHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["listHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["spendHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
-        assert geo["spendBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        assert geo["recommendationsHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["recommendations"] == ["Fix the parser", "Run the tests"], geo
+        assert geo["machines"] == ["laptop", "gpu-box"], geo
+        assert geo["spendBottom"] < geo["recommendationsBottom"], geo
+        assert geo["recommendationsBottom"] == pytest.approx(
+            geo["panelInnerBottom"], abs=2,
+        ), geo
         assert geo["appsScrolls"], geo
         assert geo["appsStatus"] == "1 of 40 connected"
         assert geo["firstApp"] == "App 07", "connected apps are listed first"
@@ -1026,12 +1087,13 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
 
         # The static server never completes the websocket handshake, so
         # the page believes the daemon is down (sends are held back).
-        # Connecting re-requests the three subpanels.
+        # Connecting re-requests the five subpanels.
         page.evaluate("() => { window.__posted.length = 0; }")
         _deliver(page, {"type": "daemonStatus", "connected": True})
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert "getCronJobs" in posted and "getAppsStatus" in posted
-        assert "getSpendReport" in posted
+        assert "getSpendReport" in posted and "getMachines" in posted
+        assert "getRecommendations" in posted
 
         # Clicking an app that is not connected submits a connect task
         # in a NEW chat, which takes the screen; the idle chat left
@@ -1088,9 +1150,10 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
                       updateScrolls: c.scrollHeight > c.clientHeight + 1};
             }"""
         )
-        # Five equal shares of a 700px panel after the headers, status
-        # lines and separators: about 79px at the 13px Cursor scale.
-        assert geo["apps"] >= 70, geo
+        # Seven equal shares of a 700px panel after the headers, status
+        # lines and separators leave the Apps list at least 35px at the
+        # 13px Cursor scale.
+        assert geo["apps"] >= 35, geo
         assert geo["update"] == pytest.approx(geo["apps"], abs=1), geo
         assert geo["updateScrolls"], geo
     finally:
@@ -1115,8 +1178,8 @@ _SURFACES = {
 }
 
 _BODY_HEIGHTS_JS = """
-() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-apps-list',
-       'meta-spend-body']
+() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-machines-list',
+       'meta-apps-list', 'meta-spend-body', 'meta-recommendations-list']
   .map(id => document.getElementById(id).getBoundingClientRect().height)
 """
 
@@ -1125,11 +1188,11 @@ _BODY_HEIGHTS_JS = """
 def test_every_surface_gives_the_expanded_sections_equal_heights(
     browser: Browser, remote_url: str, surface: str
 ) -> None:
-    """All five sections expanded: their bodies are equally tall by
+    """All seven sections expanded: their bodies are equally tall by
     default on every surface, whatever their content.  Dragging the
-    Schedule / Apps boundary moves only that boundary: the bodies above
-    it keep their heights, the two below absorb the loss between them
-    (Spend, last, keeps at least its minimum share)."""
+    Schedule / Machines boundary moves only that boundary: the bodies
+    above it keep their heights, the four below absorb the loss between
+    them (Spend, last, keeps at least its minimum share)."""
     width, setup = _SURFACES[surface]
     page = _open_page(browser, remote_url, width, height=900, global_sections=True)
     try:
@@ -1140,18 +1203,19 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
             " return r.width > 0 && Math.abs(r.right - innerWidth) < 1; }"
         )
         _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
         _deliver(page, _spend_report())
         # The VS Code surfaces get their Task update relayed from the
         # editor chat, so show the section directly (as setMetaInfoHTML
-        # does) and re-apply the layout with a toggle round trip.
+        # does) and re-apply the layout the way a `hidden` change does.
         page.evaluate(
             """html => {
               document.getElementById('meta-info-content').innerHTML = html;
-              document.getElementById('meta-info').classList.add('visible');
-              const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
-              toggle.click();
-              toggle.click();
+              const update = document.getElementById('meta-info');
+              update.classList.add('visible');
+              update.hidden = true;
+              update.hidden = false;
             }""",
             _LONG_REPORT,
         )
@@ -1172,10 +1236,12 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         assert dragged[0] == pytest.approx(heights[0], abs=1), (heights, dragged)
         assert dragged[1] == pytest.approx(heights[1], abs=1), (heights, dragged)
         assert dragged[2] == pytest.approx(heights[2] + 30, abs=2), (heights, dragged)
-        assert dragged[3] < heights[3] and dragged[4] < heights[4], (heights, dragged)
-        assert dragged[3] + dragged[4] == pytest.approx(
-            heights[3] + heights[4] - 30, abs=2
-        ), (heights, dragged)
+        assert all(d < h for d, h in zip(dragged[3:], heights[3:], strict=True)), (
+            heights, dragged,
+        )
+        assert sum(dragged[3:]) == pytest.approx(sum(heights[3:]) - 30, abs=2), (
+            heights, dragged,
+        )
     finally:
         page.close()
 
@@ -1193,8 +1259,10 @@ _MINIMUM_GEOMETRY_JS = """
     minimum: Math.min(4.5 * rem, share / 2),
     listHeight: rect('meta-list').height,
     scheduleHeight: rect('meta-schedule-list').height,
+    machinesHeight: rect('meta-machines-list').height,
     appsHeight: rect('meta-apps-list').height,
     spendHeight: rect('meta-spend-body').height,
+    recommendationsHeight: rect('meta-recommendations-list').height,
     scheduleScrolls: list.scrollHeight > list.clientHeight + 1,
     firstRowInside: row !== null
       && row.getBoundingClientRect().top >= list.getBoundingClientRect().top - 0.5
@@ -1242,23 +1310,30 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         browser,
         remote_url,
         1200,
-        height=800,
+        height=1200,
         global_sections=True,
         storage={"kiss-meta-section-h:meta-section-info": "2000"},
     )
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
         _deliver(page, _cron_jobs(12))
+        _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
         _deliver(page, _spend_report())
         geo = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        # Seven equal shares of a 1200px panel: well over 100px, so the
+        # minimum is the 4.5rem cap, taller than a Schedule row.
         assert geo["share"] > 100, geo
         assert geo["minimum"] > 40, geo
-        # Schedule, Apps and Spend each keep the minimum; Task Info has
-        # the rest, far less than the 2000px it asked for.
-        for key in ("scheduleHeight", "appsHeight", "spendHeight"):
+        # Schedule, Machines, Apps, Spend and Recommendations each keep
+        # the minimum; Task Info has the rest, far less than the 2000px
+        # it asked for.
+        for key in (
+            "scheduleHeight", "machinesHeight", "appsHeight", "spendHeight",
+            "recommendationsHeight",
+        ):
             assert geo[key] == pytest.approx(geo["minimum"], abs=1), (key, geo)
-        assert geo["listHeight"] < 4 * geo["share"] - 3 * geo["minimum"] + 2, geo
+        assert geo["listHeight"] < 6 * geo["share"] - 5 * geo["minimum"] + 2, geo
         assert geo["firstRowInside"] is True and geo["scheduleScrolls"] is True, geo
         assert geo["panelOverflows"] is False, geo
 
@@ -1278,7 +1353,9 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         # A much shorter window: the share and the minimums shrink with
         # it (ResizeObserver), every header stays on screen, the bodies
         # still show something, and the panel still does not overflow.
-        page.set_viewport_size({"width": 1200, "height": 300})
+        # 420px: seven header rows and a long status line leave the
+        # bodies a few pixels each, never none.
+        page.set_viewport_size({"width": 1200, "height": 420})
         page.wait_for_function(
             "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
             ".getPropertyValue('--meta-body-share')) < 60"
@@ -1287,10 +1364,10 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         assert 0 < short["minimum"] < geo["minimum"], short
         assert short["scheduleHeight"] == pytest.approx(short["minimum"], abs=1), short
         assert short["panelOverflows"] is False, short
-        assert all(bottom <= 300 for bottom in short["headerBottoms"]), short
+        assert all(bottom <= 420 for bottom in short["headerBottoms"]), short
 
         # A Task update whose status line then grows (a long error) adds
-        # a fifth section and a taller header row on this short panel:
+        # a seventh section and a taller header row on this short panel:
         # the share is measured after the status is set, so the
         # minimums shrink to fit and the panel still does not overflow.
         _show_task_update(page, _LONG_REPORT)
@@ -1314,19 +1391,20 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
             },
         )
         crowded = page.evaluate(_MINIMUM_GEOMETRY_JS)
-        assert len(crowded["headerBottoms"]) == 5, crowded
+        assert len(crowded["headerBottoms"]) == 7, crowded
         assert 0 < crowded["minimum"] < short["minimum"], (short, crowded)
         assert crowded["panelOverflows"] is False, crowded
-        assert all(bottom <= 300 for bottom in crowded["headerBottoms"]), crowded
+        assert all(bottom <= 420 for bottom in crowded["headerBottoms"]), crowded
 
         # Double-clicking the separator forgets the dragged height:
-        # the four bodies share the panel equally again.  (The share
-        # with five sections in 800px is about 99px: the tall window
-        # is back once it is well above the short window's 60px.)
-        page.set_viewport_size({"width": 1200, "height": 800})
+        # the bodies share the panel equally again.  (The share with
+        # seven sections and the long status line in 1000px is about
+        # 96px: the tall window is back once it is well above the short
+        # window's 60px.)
+        page.set_viewport_size({"width": 1200, "height": 1000})
         page.wait_for_function(
             "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
-            ".getPropertyValue('--meta-body-share')) > 80"
+            ".getPropertyValue('--meta-body-share')) > 70"
         )
         _section_resizer(page).dblclick()
         reset = page.evaluate(_MINIMUM_GEOMETRY_JS)

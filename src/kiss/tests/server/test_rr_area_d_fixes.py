@@ -17,94 +17,32 @@ or fakes):
   re-probes ``has_tab`` unlocked, so a concurrent ``closeTab`` can
   never turn a benign re-announce into a spurious "Tab limit reached"
   rejection.
-- D-RC3: ``_present_pending_worktree`` performs the worktree-occupancy
-  check and the ``is_merging`` claim in ONE ``_state_lock`` critical
-  section, so the task-admission gate (which registers occupancy under
-  the same lock) can never slip a task into the worktree between the
-  check and the claim — the window in which the empty-branch
-  auto-discard used to delete the worktree under the just-started
-  task.
+- D-RC3 (obsolete): the worktree-occupancy check and task-admission
+  gate were removed together with the main-tree claims; a worktree
+  now exists only through the ``create_worktree`` tool.
 - D-R1: ``_cmd_set_work_dir`` and ``_cmd_save_config`` share one
   work-dir update implementation (``_apply_new_work_dir``).
-
-D-RC3 determinism note: the pre-fix bug lived in the gap BETWEEN two
-adjacent ``with self._state_lock`` blocks.  ``merge_flow.py`` has no
-``KISS_RACE_DELAY`` hook (the repo's ``_race_delay`` pattern lives in
-``git_worktree.py`` / ``persistence.py`` only), and there is no way to
-pause a thread inside that former gap without instrumenting production
-code with a test-only hook or substituting a fake for
-``_any_non_wt_running`` — both of which are test doubles this suite
-must not use.  The tests below instead verify the invariant the merged
-critical section guarantees under real concurrency (the worktree is
-never deleted under an admitted occupant, for any interleaving) plus
-each side of the interlock deterministically.
 """
 
 from __future__ import annotations
 
-import subprocess
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _task_accepts_input
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.server import VSCodeServer
 from kiss.server.tab_registry import _MAX_TABS, OpenTabOutcome, TabRegistry
-from kiss.server.task_runner import _wt_merge_on_repo
 
 from ._memory_printer import MemoryPrinter
 
 
 def _noop() -> None:
     """Body for worker threads that must exist but do nothing."""
-
-
-def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in *repo*, capturing output."""
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=False,
-    )
-
-
-def _make_repo(path: Path) -> Path:
-    """Create a real git repository with one commit at *path*."""
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        capture_output=True, check=True,
-    )
-    _run_git(path, "config", "user.email", "t@t.com")
-    _run_git(path, "config", "user.name", "T")
-    (path / "README.md").write_text("# Test\n")
-    _run_git(path, "add", ".")
-    _run_git(path, "commit", "-m", "initial")
-    return path
-
-
-def _setup_wt_tab(
-    repo: Path, tab_id: str,
-) -> tuple[AgentState, WorktreeSorcarAgent, Path]:
-    """Create a real worktree agent and register its tab's agent state."""
-    wt_agent = WorktreeSorcarAgent("wt")
-    wt_agent._chat_id = tab_id
-    wt_work = wt_agent._try_setup_worktree(repo, str(repo))
-    assert wt_work is not None
-    state = AgentState(
-        f"{tab_id}-key",
-        agent=wt_agent,
-        tab_id=tab_id,
-        server_owned=True,
-    )
-    state.use_worktree = True
-    agent_state.register(state)
-    return state, wt_agent, Path(wt_work)
 
 
 class TestDRC1TaskAcceptsInputStartupWindow:
@@ -242,151 +180,6 @@ class TestDRC2OpenTabTriState:
             assert server.tab_registry.open_tab("racy-tab")
 
 
-class TestDRC3AtomicOccupancyCheckAndClaim:
-    """Occupancy check + ``is_merging`` claim form one critical section."""
-
-    def test_occupied_worktree_is_not_discarded(self, tmp_path: Path) -> None:
-        """An empty pending worktree with a non-wt task running INSIDE
-        it must be left alone by the session-resume presentation."""
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
-        server.work_dir = str(repo)
-        state, wt_agent, wt_dir = _setup_wt_tab(repo, "rr-d-rc3-occ")
-        occupant = AgentState(
-            "rr-d-rc3-occ-task", tab_id="rr-d-rc3-occ-task-tab",
-            server_owned=True,
-        )
-        occupant.is_running_non_wt = True
-        occupant.non_wt_repo_root = wt_dir.resolve()
-        agent_state.register(occupant)
-        try:
-            server._present_pending_worktree("rr-d-rc3-occ")
-            assert wt_dir.exists(), (
-                "the auto-discard deleted a worktree a running task "
-                "occupies"
-            )
-            assert state.is_merging is False, (
-                "the presentation kept its is_merging claim after "
-                "declining to discard"
-            )
-            branches = _run_git(repo, "branch", "--list", "kiss/wt-*")
-            assert branches.stdout.strip(), (
-                "the pending worktree branch was deleted despite the "
-                "occupying task"
-            )
-        finally:
-            agent_state.unregister(occupant.task_id, occupant)
-            agent_state.unregister(state.task_id, state)
-            wt_agent.discard(rescue_ignored=False)
-
-    def test_unoccupied_empty_worktree_is_discarded(
-        self, tmp_path: Path,
-    ) -> None:
-        """Control: with no occupant the empty branch is auto-discarded
-        and the claim is released afterwards."""
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
-        server.work_dir = str(repo)
-        state, _wt_agent, wt_dir = _setup_wt_tab(repo, "rr-d-rc3-free")
-        try:
-            server._present_pending_worktree("rr-d-rc3-free")
-            assert not wt_dir.exists(), (
-                "an empty, unoccupied pending worktree must be "
-                "auto-discarded on presentation"
-            )
-            assert state.is_merging is False, (
-                "the presentation must release is_merging when done"
-            )
-        finally:
-            agent_state.unregister(state.task_id, state)
-
-    def test_admission_gate_refuses_worktree_while_claimed(
-        self, tmp_path: Path,
-    ) -> None:
-        """The interlock the merged critical section relies on: once
-        ``is_merging`` is claimed, the real task-admission predicate
-        refuses a task whose work_dir resolves to the worktree."""
-        repo = _make_repo(tmp_path / "repo")
-        state, wt_agent, wt_dir = _setup_wt_tab(repo, "rr-d-rc3-gate")
-        try:
-            wt_repo = GitWorktreeOps.discover_repo(wt_dir)
-            assert wt_repo is not None
-            with agent_state.STATE_LOCK:
-                assert _wt_merge_on_repo(state, wt_repo) is False, (
-                    "precondition: no claim, the gate admits the task"
-                )
-                state.is_merging = True
-                assert _wt_merge_on_repo(state, wt_repo) is True, (
-                    "with is_merging claimed, a task starting inside "
-                    "the pending worktree must be refused"
-                )
-                state.is_merging = False
-        finally:
-            agent_state.unregister(state.task_id, state)
-            wt_agent.discard(rescue_ignored=False)
-
-    def test_concurrent_admission_never_occupies_deleted_worktree(
-        self, tmp_path: Path,
-    ) -> None:
-        """Invariant under real concurrency: whatever the interleaving
-        of the presentation and the admission gate, a task admitted
-        INTO the worktree implies the worktree was not (and will not
-        be) deleted by the presentation's auto-discard."""
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
-        server.work_dir = str(repo)
-        state, wt_agent, wt_dir = _setup_wt_tab(repo, "rr-d-rc3-race")
-        occupant = AgentState(
-            "rr-d-rc3-race-task", tab_id="rr-d-rc3-race-task-tab",
-            server_owned=True,
-        )
-        admitted_inside_wt = False
-        barrier = threading.Barrier(2)
-
-        def _admission_gate() -> None:
-            """Mirror ``_run_task_inner``'s non-worktree admission:
-            discover the repo, check ``_wt_merge_on_repo`` and register
-            occupancy — all under ``_state_lock``."""
-            nonlocal admitted_inside_wt
-            barrier.wait()
-            task_repo = GitWorktreeOps.discover_repo(wt_dir)
-            with server._state_lock:
-                if task_repo is None:
-                    return  # worktree already gone: nothing to occupy
-                if any(
-                    _wt_merge_on_repo(t, task_repo)
-                    for t in agent_state.agent_states.values()
-                ):
-                    return  # refused: a merge/discard owns the repo
-                occupant.is_running_non_wt = True
-                occupant.non_wt_repo_root = task_repo.resolve()
-                agent_state.register(occupant)
-                if task_repo.resolve() == wt_dir.resolve():
-                    admitted_inside_wt = True
-
-        gate_thread = threading.Thread(target=_admission_gate)
-        gate_thread.start()
-        try:
-            barrier.wait()
-            server._present_pending_worktree("rr-d-rc3-race")
-            gate_thread.join()
-            if admitted_inside_wt:
-                assert wt_dir.exists(), (
-                    "the presentation's auto-discard deleted the "
-                    "worktree under a task the admission gate had "
-                    "admitted into it"
-                )
-        finally:
-            gate_thread.join()
-            agent_state.unregister(occupant.task_id, occupant)
-            agent_state.unregister(state.task_id, state)
-            if wt_agent._wt_pending:
-                # Clear the synthetic occupancy first or the discard
-                # is deferred as "occupied".
-                occupant.is_running_non_wt = False
-                wt_agent.discard(rescue_ignored=False)
-
-
 def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
     """Poll *predicate* until it holds or *timeout* seconds elapse."""
     deadline = time.monotonic() + timeout
@@ -423,6 +216,7 @@ def _index_of(registry: FileIndexRegistry, work_dir: str) -> FileIndex | None:
     root, _ = registry.root_for(work_dir)
     with registry._lock:
         return registry._indexes.get(root)
+
 
 
 class TestDR1SharedWorkDirUpdate:

@@ -19,52 +19,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import ssl
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-import yaml
-
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _write_trajectory(jobs_root: Path, job: str, name: str) -> None:
-    """Create a minimal trajectory YAML under ``<jobs_root>/<job>/trajectories``."""
-    traj_dir = jobs_root / job / "trajectories"
-    traj_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "name": name,
-        "id": 1,
-        "run_start_timestamp": 100,
-        "run_end_timestamp": 200,
-        "model": "test-model",
-        "command": "do something",
-        "step_count": 3,
-        "max_steps": 10,
-        "messages": [{"role": "user", "content": "hi"}],
-    }
-    (traj_dir / "trajectory_0.yaml").write_text(yaml.safe_dump(data))
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl, write_trajectory
 
 
 class _ThreadRecordingPath(Path):
@@ -81,7 +46,7 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
     """Assert trajectory disk work runs off the server event-loop thread."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -89,7 +54,7 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
 
         self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_thr_")) / "jobs"
         self._jobs_root.mkdir(parents=True)
-        _write_trajectory(self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A")
+        write_trajectory(self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A")
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
 
@@ -141,7 +106,7 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
         import urllib.request
 
         url = f"https://127.0.0.1:{self.port}{path}"
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
 
         def _fetch() -> tuple[int, str]:
             try:

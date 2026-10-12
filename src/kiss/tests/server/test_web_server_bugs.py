@@ -33,21 +33,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    """Redirect the persistence DB to a temp dir; return saved state."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _RecordingEndpoint:
@@ -73,7 +59,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
@@ -101,7 +87,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 

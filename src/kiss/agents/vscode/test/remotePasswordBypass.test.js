@@ -160,6 +160,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// The shim's reconnect backoff is 0.5-1 s for the first attempt and
+// doubles (with jitter) on every further one within a page, so wait
+// for the socket the backoff opens rather than a fixed delay.
+async function waitForSocket(sockets, count, maxMs = 20000) {
+  const deadline = Date.now() + maxMs;
+  while (sockets.length < count) {
+    if (Date.now() > deadline) throw new Error(`socket ${count} never opened`);
+    await sleep(20);
+  }
+}
+
 // Frames dispatched into the page arrive as jsdom objects whose
 // prototype differs from a literal's; compare them as plain data.
 function plain(x) {
@@ -547,7 +558,7 @@ async function run() {
     s0.fireClose();
     assert.strictEqual(sockets.length, 1, 'no eager reconnect');
 
-    await sleep(400);
+    await waitForSocket(sockets, 2);
     assert.strictEqual(sockets.length, 2, 'backoff timer reconnects');
     const s1 = sockets[1];
 
@@ -612,7 +623,7 @@ async function run() {
       assert.deepStrictEqual(
         plain(statusFrames), [{type: 'daemonStatus', connected: false, reconnecting: true}],
       );
-      await sleep(400);
+      await waitForSocket(sockets, 4);
       const s3 = sockets[3];
       s3.fireOpen();
       s3.fireMessage({type: 'auth_ok'});
@@ -677,7 +688,7 @@ async function run() {
         'the app keeps its banner mode after a wake-up replacement',
       );
       window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'queued'});
-      await sleep(400);
+      await waitForSocket(sockets, 3);
       const s2 = sockets[2];
       s2.fireOpen();
       s2.fireMessage({type: 'auth_ok'});
@@ -990,7 +1001,7 @@ async function run() {
     sockets[0].fireMessage({type: 'auth_ok'});
     sockets[0].fireClose();
     api.postMessage({type: 'saveConfig', config: {edited: 'first outage'}});
-    await sleep(400);
+    await waitForSocket(sockets, 2);
     const s1 = sockets[1];
     s1.fireOpen();
     // Dies before it authenticates; the user keeps working meanwhile.
@@ -1128,7 +1139,7 @@ async function run() {
       assert.ok(isVisible(w2.document.getElementById('app')), 'the kept page is revealed');
       assert.strictEqual(w2.sessionStorage.getItem('sorcar-offline-reloaded'), '1');
       sockets2[0].fireClose();
-      await sleep(400);
+      await waitForSocket(sockets2, 2);
       sockets2[1].fireOpen();
       sockets2[1].fireMessage({type: 'auth_ok'});
       assert.strictEqual(reloads.length, 2, 'a kept cached page reconnects without reloading');
@@ -1219,28 +1230,75 @@ async function run() {
     } catch (err) {
       fail('stale-socket detection broken', err);
     }
+    try {
+      // The backoff is forgiven only by a session that stays up 30 s:
+      // a socket that dies right after auth_ok (a daemon that accepts
+      // the connection and then drops it during the replay) escalates
+      // the next delay instead of retrying every half second.
+      const first = timers[timers.length - 1];
+      assert.ok(first.ms >= 500 && first.ms < 1000, `first retry: ${first.ms}`);
+      const s1 = sockets[1];
+      s1.fireOpen();
+      s1.fireMessage({type: 'auth_ok'});
+      s1.fireClose();
+      const second = timers[timers.length - 1];
+      assert.ok(second.ms >= 1000 && second.ms < 2000, `escalated: ${second.ms}`);
+      second.fn();
+      const s2 = sockets[2];
+      s2.fireOpen();
+      s2.fireMessage({type: 'auth_ok'});
+      const stable = timers.filter((t) => t.ms === 30000);
+      assert.strictEqual(stable.length, 3, 'every auth_ok arms the stable timer');
+      stable[stable.length - 1].fn();
+      s2.fireClose();
+      const third = timers[timers.length - 1];
+      assert.ok(third.ms >= 500 && third.ms < 1000, `forgiven: ${third.ms}`);
+      ok('the backoff escalates across short-lived sessions and resets after a stable one');
+    } catch (err) {
+      fail('backoff escalation broken', err);
+    }
     window.close();
   }
 
   {
     // A page script or stylesheet that fails to load while the document
     // is parsing (a server restart mid-load, a network change aborting
-    // the fetch) reloads the page once per 30 s; any other error event
-    // is ignored.  jsdom keeps readyState 'loading' until a later
-    // macrotask, so the synchronous part below runs while the document
-    // still counts as parsing.
+    // the fetch) reloads the page, up to three times per 30 s; any
+    // other error event is ignored.  jsdom keeps readyState 'loading'
+    // until a later macrotask, so the synchronous part below runs
+    // while the document still counts as parsing.  Each reload starts
+    // a fresh document with a fresh guard instance, which re-evaluating
+    // the guard script stands in for (the sessionStorage of the tab,
+    // where the reload stamps live, survives a reload).
     const reloads = [];
     const dom = buildDom({reloads});
     const {window} = dom;
     const doc = window.document;
     installFakeWebSocket(window, []);
-    window.eval(readAssetGuardJs() + '\n//# sourceURL=asset-guard.js');
+    const STAMPS = 'sorcar-asset-reloads';
+    // A document has one guard: the previous instance's capture-phase
+    // error listener goes before the next instance is installed.
+    let guardListener = null;
+    const realAddEventListener = window.addEventListener.bind(window);
+    function newDocumentGuard() {
+      if (guardListener) window.removeEventListener('error', guardListener, true);
+      window.addEventListener = function (type, fn, opts) {
+        guardListener = fn;
+        return realAddEventListener(type, fn, opts);
+      };
+      window.eval(readAssetGuardJs() + '\n//# sourceURL=asset-guard.js');
+      window.addEventListener = realAddEventListener;
+    }
+    newDocumentGuard();
     evalShim(window, shimJs);
     function failLoad(tag, attrs) {
       const el = doc.createElement(tag);
       for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
       doc.head.appendChild(el);
       el.dispatchEvent(new window.Event('error'));
+    }
+    function stamps() {
+      return JSON.parse(window.sessionStorage.getItem(STAMPS)) || [];
     }
     try {
       assert.strictEqual(doc.readyState, 'loading');
@@ -1255,33 +1313,52 @@ async function run() {
         'non-asset, inline and cross-origin failures never reload');
       failLoad('script', {src: '/media/main.js'});
       assert.strictEqual(reloads.length, 1, 'a failed page script reloads');
-      assert.ok(Number(window.sessionStorage.getItem(
-        'sorcar-script-reloaded-at')) > 0, 'the reload is time-stamped');
-      failLoad('script', {src: '/media/main.js'});
+      assert.strictEqual(stamps().length, 1, 'the reload is time-stamped');
+      failLoad('link', {rel: 'stylesheet', href: '/media/remote-codex.css'});
       assert.strictEqual(reloads.length, 1,
-        'a second failure within 30 s does not reload again');
-      window.sessionStorage.setItem('sorcar-script-reloaded-at',
-        String(Date.now() - 31000));
+        'a second asset of the same document failing does not reload again');
+      assert.strictEqual(stamps().length, 1, '... nor takes a second stamp');
+      // The reloaded document's remote-codex.css fails too (the network
+      // change outlasted the first reload).
+      newDocumentGuard();
       failLoad('link', {rel: 'stylesheet', href: '/media/remote-codex.css'});
       assert.strictEqual(reloads.length, 2,
-        'a failed page stylesheet reloads once the guard expired (30 s)');
+        'a failed page stylesheet of the reloaded document reloads again');
+      newDocumentGuard();
+      failLoad('script', {src: '/media/api.js'});
+      assert.strictEqual(reloads.length, 3, 'a third reload within 30 s');
+      assert.strictEqual(stamps().length, 3);
+      newDocumentGuard();
+      failLoad('script', {src: '/media/main.js'});
+      assert.strictEqual(reloads.length, 3,
+        'a fourth failure within 30 s does not reload: the failure stays visible');
+      window.sessionStorage.setItem(STAMPS,
+        JSON.stringify([Date.now() - 31000, Date.now() - 31000, Date.now() - 31000]));
+      newDocumentGuard();
+      failLoad('link', {rel: 'stylesheet', href: '/media/remote-codex.css'});
+      assert.strictEqual(reloads.length, 4,
+        'the reload budget is back once the 30 s window has passed');
+      assert.strictEqual(stamps().length, 1,
+        'the stamps older than 30 s are dropped');
       const realGetItem = window.Storage.prototype.getItem;
       window.Storage.prototype.getItem = function () {
         throw new Error('SecurityError');
       };
+      newDocumentGuard();
       failLoad('script', {src: '/media/main.js'});
       window.Storage.prototype.getItem = realGetItem;
-      assert.strictEqual(reloads.length, 2,
+      assert.strictEqual(reloads.length, 4,
         'without storage there is no loop guard, so no reload');
       await tick();
       assert.notStrictEqual(doc.readyState, 'loading');
-      window.sessionStorage.removeItem('sorcar-script-reloaded-at');
+      window.sessionStorage.removeItem(STAMPS);
+      newDocumentGuard();
       failLoad('script', {src: '/media/main.js'});
       failLoad('link', {rel: 'stylesheet', href: '/media/highlight-vscode-dark.css'});
-      assert.strictEqual(reloads.length, 2,
+      assert.strictEqual(reloads.length, 4,
         'assets failing after parsing (on-demand script, swapped theme ' +
         'sheet) never reload');
-      ok('a page asset failing to load mid-parse reloads once per 30 s');
+      ok('a page asset failing to load mid-parse reloads up to three times per 30 s');
     } catch (err) {
       fail('asset load-error recovery broken', err);
     }
@@ -1298,6 +1375,23 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets);
     wireOverlayContract(window);
+    // Real timers drive the 1 s overlay tick; the wrappers only record
+    // which setTimeout ids the shim arms and clears, so the backoff
+    // cancellation below is checked by id instead of by sleeping
+    // shorter than the (1 s or longer) backoff it would have to catch.
+    const armed = [];
+    const cleared = [];
+    const realSetTimeout = window.setTimeout;
+    const realClearTimeout = window.clearTimeout;
+    window.setTimeout = function (fn, ms) {
+      const id = realSetTimeout(fn, ms);
+      armed.push(id);
+      return id;
+    };
+    window.clearTimeout = function (id) {
+      cleared.push(id);
+      return realClearTimeout(id);
+    };
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
@@ -1319,13 +1413,16 @@ async function run() {
       assert.strictEqual(retry.textContent, 'Retry now');
       // Close the in-flight attempt so a backoff timer is pending when
       // the user clicks: Retry now must drop that timer and connect.
+      const armedBefore = armed.length;
       sockets[sockets.length - 1].fireClose();
+      assert.strictEqual(armed.length, armedBefore + 1,
+        'closing the in-flight attempt arms exactly one backoff timer');
+      const backoffId = armed[armed.length - 1];
       const before = sockets.length;
       retry.click();
       assert.strictEqual(sockets.length, before + 1,
         'Retry now opens a new socket at once instead of waiting for the backoff');
-      await sleep(600);
-      assert.strictEqual(sockets.length, before + 1,
+      assert.ok(cleared.includes(backoffId),
         'the pending backoff timer was cancelled, so no second attempt follows');
       const sock = sockets[sockets.length - 1];
       sock.fireOpen();
@@ -1395,7 +1492,7 @@ async function run() {
       // the reconnect gets auth_required again: the cancelled dialog
       // must stay closed and the overlay must keep its explanation.
       sock.fireClose();
-      await sleep(300);
+      await waitForSocket(sockets, sockets.length + 1);
       const msgEl = doc.getElementById('kiss-server-loading-msg');
       assert.strictEqual(msgEl.textContent,
         'A password is needed to use this server.',
@@ -1436,7 +1533,7 @@ async function run() {
       assert.ok(!isVisible(doc.getElementById('auth-modal')),
         'auth_ok closes a pending dialog');
       sock3.fireClose();
-      await sleep(300);
+      await waitForSocket(sockets, sockets.length + 1);
       const sock4 = sockets[sockets.length - 1];
       sock4.fireOpen();
       sock4.fireMessage({type: 'auth_required'});

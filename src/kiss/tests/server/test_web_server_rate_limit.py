@@ -60,16 +60,7 @@ from kiss.server.web_server import (
     _tunnel_backoff_delay,
 )
 from kiss.tests.conftest import posix_only
-
-
-def _find_free_port() -> int:
-    """Return a free TCP port on localhost."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
+from kiss.tests.server.conftest import find_free_port
 
 
 class _ConfigSnapshot:
@@ -298,7 +289,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -393,7 +384,7 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,

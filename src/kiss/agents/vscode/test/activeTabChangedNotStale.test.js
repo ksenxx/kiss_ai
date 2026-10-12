@@ -116,6 +116,12 @@ function clickNewTabButton(win) {
   click(win, win.document.querySelector('#new-chat-btn'), 'new-tab button');
 }
 
+// `+` on a chat that is still new only focuses the composer; the daemon's
+// task-text echo makes the chat on screen "used" so `+` opens a tab.
+function markUsed(win) {
+  send(win, {type: 'setTaskText', text: 'first task'});
+}
+
 // Close a tab the way the user can: the close button of its strip entry
 // when its group is on screen.  A background chat has no entry since the
 // main row went; it is closed the way another surface's close reaches
@@ -209,6 +215,7 @@ function testNewTabButtonReportsTheNewTab() {
   const win = makeWebview();
   const first = win._testApi.getActiveTabId();
 
+  markUsed(win);
   clickNewTabButton(win);
 
   const second = win._testApi.getActiveTabId();
@@ -466,6 +473,7 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
 
   // `+` retires the idle chat it leaves behind, so the session goes on
   // with the chat it opened and one more opened without leaving.
+  markUsed(win);
   clickNewTabButton(win);
   alive();
   const first = win._testApi.getActiveTabId();

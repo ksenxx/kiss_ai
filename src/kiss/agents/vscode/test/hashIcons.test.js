@@ -464,10 +464,16 @@ async function testInterruptedPackagingRestoresManifest() {
     'manifest was rewritten for vsce',
   );
   child.kill('SIGTERM');
+  // The escalation timer is cleared once the child has exited: left
+  // pending, it kept node alive 10 s after the last assertion.
+  let escalation;
   const code = await Promise.race([
     exited,
-    sleep(10_000).then(() => 'timeout'),
+    new Promise(resolve => {
+      escalation = setTimeout(resolve, 10_000, 'timeout');
+    }),
   ]);
+  clearTimeout(escalation);
   if (code === 'timeout') child.kill('SIGKILL');
   assert.strictEqual(code, 1, 'the signal handler exits with status 1');
   assert.strictEqual(readManifest(root), original);

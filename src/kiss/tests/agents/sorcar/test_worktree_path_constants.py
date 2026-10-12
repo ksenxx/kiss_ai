@@ -193,14 +193,14 @@ def test_screenshot_still_remaps_into_a_live_worktree(repo_with_worktree):
 def test_created_worktree_uses_the_canonical_layout(tmp_path):
     """The producer's layout is the one the guards recognise.
 
-    ``WorktreeSorcarAgent`` creates the worktree; ``UsefulTools`` and
+    ``ChatSorcarAgent`` creates the worktree; ``UsefulTools`` and
     the reclaim sweep recognise it.  Both sides must read the layout
     from the same constants, so this builds every expectation from the
     imported ones and then proves the real producer's output is
     accepted by the real consumer.
     """
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.git_worktree import _WORKTREE_BRANCH_PREFIX
-    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
     repo = tmp_path / "producer-repo"
     repo.mkdir()
@@ -211,7 +211,7 @@ def test_created_worktree_uses_the_canonical_layout(tmp_path):
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-m", "initial")
 
-    agent = WorktreeSorcarAgent("layout-producer")
+    agent = ChatSorcarAgent("layout-producer")
     wt_dir = agent._try_setup_worktree(repo, str(repo))
     assert wt_dir is not None
     wt = agent._wt

@@ -7,9 +7,8 @@
 The History sidebar panel renders a filter bar between the search
 box and the history list with:
 
-* five status filter chips (labels wrapping hidden checkboxes) —
-  ``Running`` / ``Errored`` / ``Succeeded`` / ``Workspace`` /
-  ``Favorites``
+* four status filter chips (labels wrapping hidden checkboxes) —
+  ``Running`` / ``Errored`` / ``Succeeded`` / ``Favorites``
 * a date-range pill with two date inputs — ``From`` / ``To``
 
 This test asserts the HTML, CSS, and JS surfaces all line up: the
@@ -54,13 +53,11 @@ class TestHistoryFilterPanel(unittest.TestCase):
         ):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
-        self.assertIn('id="hf-workspace"', bar)
-        self.assertIn(
-            "checked", bar.split('id="hf-workspace"', 1)[1][:40]
-        )
+        # The CHATS list is not scoped to a workspace: no Workspace chip.
+        self.assertNotIn('id="hf-workspace"', bar)
         self.assertIn('id="hf-favorite"', bar)
         self.assertLess(
-            bar.index('id="hf-workspace"'),
+            bar.index('id="hf-completed"'),
             bar.index('id="hf-favorite"'),
         )
         for did in ("hf-from", "hf-to"):
@@ -70,10 +67,10 @@ class TestHistoryFilterPanel(unittest.TestCase):
             "Running",
             "Errored",
             "Succeeded",
-            "Workspace",
             "Favorites",
         ):
             self.assertIn(label, bar)
+        self.assertNotIn("Workspace", bar)
 
     def test_css_styles_filter_bar(self) -> None:
         """Stylesheet has rules for the new filter bar selectors."""
@@ -101,12 +98,12 @@ class TestHistoryFilterPanel(unittest.TestCase):
             "hf-running",
             "hf-errors",
             "hf-completed",
-            "hf-workspace",
             "hf-favorite",
             "hf-from",
             "hf-to",
         ):
             self.assertIn(cid, js)
+        self.assertNotIn("hf-workspace", js)
 
 
 if __name__ == "__main__":

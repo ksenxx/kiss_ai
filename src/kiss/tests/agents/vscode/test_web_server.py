@@ -25,7 +25,7 @@ from unittest import IsolatedAsyncioTestCase
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer, _build_html
-from kiss.tests.server.test_web_server import _find_free_port, _no_verify_ssl
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -232,7 +232,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
     """Test HTTPS serving of HTML and static assets."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -258,7 +258,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         import urllib.request
 
         url = f"https://127.0.0.1:{self.port}{path}"
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
 
         def _fetch() -> tuple[int, str]:
             try:

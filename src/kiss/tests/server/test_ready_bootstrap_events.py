@@ -16,31 +16,14 @@ driven directly.
 
 from __future__ import annotations
 
-import contextlib
-import os
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from kiss.server import web_server
 from kiss.server.tips import tips_data
+from kiss.tests.server.conftest import environ
 from kiss.tests.server.test_web_server_bugs import _RecordingEndpoint, _ServerTestBase
-
-
-@contextlib.contextmanager
-def _environ(**values: str) -> Iterator[None]:
-    """Set environment variables for the block, then restore them."""
-    saved = {k: os.environ.get(k) for k in values}
-    os.environ.update(values)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 class TestReadyBootstrapEvents(_ServerTestBase):
@@ -61,7 +44,7 @@ class TestReadyBootstrapEvents(_ServerTestBase):
             home = Path(tmp) / "home"
             home.mkdir()
             (home / "MY_INJECTION.md").write_text("## Trick\n\nmine\n")
-            with _environ(
+            with environ(
                 KISS_TIPS_PATH=str(tips_file),
                 KISS_INJECTIONS_PATH=str(injections),
                 KISS_HOME=str(home),
@@ -94,7 +77,7 @@ class TestReadyBootstrapEvents(_ServerTestBase):
             home = Path(tmp) / "home"
             home.mkdir()
             (home / "TIPS_DISABLED").write_text("2026-10-01T00:00:00\n")
-            with _environ(KISS_TIPS_PATH=str(tips_file), KISS_HOME=str(home)):
+            with environ(KISS_TIPS_PATH=str(tips_file), KISS_HOME=str(home)):
                 await self.server._handle_ready(
                     {"type": "ready", "tabId": "t1", "connId": "c2", "restoredTabs": []},
                     _RecordingEndpoint(),

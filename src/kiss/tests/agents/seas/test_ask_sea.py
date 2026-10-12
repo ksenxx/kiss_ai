@@ -72,8 +72,6 @@ _EXPECTED_SUFFIX_START = (
     "at any point. You must answer quickly because the user is waiting.**"
 )
 _EXPECTED_SETTINGS = {
-    "use_worktree": False,
-    "auto_commit": False,
     "auto_classify": False,
     "use_web_tools": False,
     "use_memory": False,
@@ -306,16 +304,19 @@ def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None
     assert sea_commands.sea_settings(sea_path) == {}
 
 
-def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> None:
-    """``/ask`` with no trailing text MUST NOT resolve; ``/ask help`` is the description.
+def test_slash_resolver_resolves_bare_ask_and_answers_help_from_description() -> None:
+    """``/ask`` with no trailing text resolves to the SEA; ``/ask help`` is the description.
 
-    Same contract as every other slash command: an empty task text
-    runs nothing, and ``help`` (in any case) is answered from
+    Same contract as every other slash command: a bare command runs the
+    SEA when its ``prompt()`` gives the empty task text (``AskSea``
+    appends the answering playbook, so a bare ``/ask`` asks about the
+    task with no question), and ``help`` (in any case) is answered from
     ``description()`` without a run.
     """
     sea_commands.refresh_registry()
-    assert sea_commands.slash_command_task("/ask") is None
-    assert sea_commands.slash_command_task("/ask ") is None
+    sea_path = Path(ask_sea.__file__).resolve()
+    assert sea_commands.slash_command_task("/ask") == ("", sea_path)
+    assert sea_commands.slash_command_task("/ask ") == ("", sea_path)
     assert sea_commands.slash_command_task("/ask help") is None
     assert sea_commands.slash_command_task("/ask HELP") is None
     assert sea_commands.help_text_if_command("/ask help") == AskSea().description()
@@ -331,8 +332,8 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
 
     This exercises the real ``apply_sea`` path —
     :meth:`TaskRunner._run_task_inner` calls it just before the run —
-    so the ``WorkerSea`` defaults land on ``useWorktree`` / ``autoCommit`` /
-    ``classifyTasks`` / ``useWebTools`` / ``useMemory``,
+    so the ``WorkerSea`` defaults land on ``classifyTasks`` /
+    ``useWebTools`` / ``useMemory``,
     the ``none`` profile on ``toolProfile`` (the daemon derives "no
     built-in tools" from it: nothing stages ``appendBasicTools`` any
     more), ``system_prompt`` on the daemon-side ``systemPromptHook``
@@ -346,13 +347,10 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     cmd: dict[str, Any] = {"seaPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_sea(cmd)
     assert overridden == {
-        "prompt", "toolProfile",
-        "useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory",
+        "prompt", "toolProfile", "classifyTasks", "useWebTools", "useMemory",
     }
     assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
     assert cmd["toolProfile"] == "none"
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False

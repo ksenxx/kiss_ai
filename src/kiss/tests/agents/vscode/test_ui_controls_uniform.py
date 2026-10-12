@@ -59,7 +59,7 @@ _PROBE_JS = """
               cs(filters).letterSpacing, cs(filters).color],
     subpanel: [cs(subpanel).textTransform, cs(subpanel).fontSize,
                cs(subpanel).letterSpacing, cs(subpanel).color],
-    checkboxAccent: cs(document.getElementById('cfg-auto-commit')).accentColor,
+    checkboxAccent: cs(document.getElementById('cfg-use-web-tools')).accentColor,
     linkColor: cs(document.querySelector('a') || body).color,
     scheme: cs(body).colorScheme,
   };

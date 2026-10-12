@@ -1,0 +1,233 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end tests of the bundled ``/machine`` agent
+(:mod:`kiss.agents.seas.machine.machine_sea`).
+
+The registry tools run against a real remote daemon in its own process
+(:mod:`kiss.tests.remote_daemon`); the agent-level test drives a real
+:class:`ChatSorcarAgent` ReAct loop against the scripted local
+chat-completions server with the SEA's configuration, so the tool's
+text really flows into the finish summary.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+import yaml
+
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
+from kiss.agents.seas.machine import machine_sea as sea
+from kiss.agents.seas.machine.machine_sea import MachineSea
+from kiss.agents.sorcar import machines as mach
+from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.sorcar.local_model_server import (
+    MODEL,
+    finish_body,
+    serve,
+    tool_call_body,
+)
+from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
+from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
+
+_SEA_PATH = Path(sea.__file__).resolve()
+
+
+@pytest.fixture(autouse=True)
+def _empty_registry() -> Iterator[None]:
+    mach.save_machines([])
+    yield
+    mach.save_machines([])
+
+
+@pytest.fixture(scope="module")
+def remote(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RemoteDaemon]:
+    daemon = start_remote_daemon(
+        tmp_path_factory.mktemp("sea-remote"), password="pw",
+        seed=[{"chat_id": "chat-1", "task": "remote work"}],
+    )
+    yield daemon
+    daemon.stop()
+
+
+@pytest.fixture(scope="module")
+def sshd(remote: RemoteDaemon, tmp_path_factory: pytest.TempPathFactory) -> Iterator[SshServer]:
+    """An sshd whose logins see the remote daemon's home as ``KISS_HOME``."""
+    if not SSHD:
+        pytest.skip("no sshd on this host")
+    server = start_sshd(tmp_path_factory.mktemp("sshd"), remote.home)
+    env = pytest.MonkeyPatch()
+    env.setenv(mach.SSH_CONFIG_ENV, str(server.config))
+    yield server
+    env.undo()
+    server.stop()
+
+
+def test_sea_methods_follow_the_contract() -> None:
+    """A worker with no built-in tools, the three registry tools, a $1 budget."""
+    agent = MachineSea()
+    assert isinstance(agent, WorkerSea)
+    assert agent.system_prompt("ASSEMBLED") == sea.SYSTEM_PROMPT
+    assert agent.tools([]) == [sea.machine_add, sea.machine_remove, sea.machine_list]
+    assert agent.tools([print]) == [print, sea.machine_add, sea.machine_remove, sea.machine_list]
+    assert agent.settings({}) == {
+        "tool_profile": "none", "locked": ["tool_profile"], "max_budget": 1.0,
+    }
+    assert sea_commands.base_settings([agent]) == resolve_settings(
+        {**WORKER_DEFAULTS, **agent.settings({})}
+    ) == {
+        "tool_profile": "none",
+        "locked": ["tool_profile"],
+        "max_budget": 1.0,
+        "use_web_tools": False,
+        "use_memory": False,
+        "auto_classify": False,
+    }
+    assert "/machine add user@host" in agent.description()
+    assert "/machine add <name> <https://host:port> <password>" in agent.description()
+    assert_no_removed_getters(sea)
+
+
+def test_slash_machine_resolves_to_the_bundled_sea() -> None:
+    """``/machine list`` resolves to the request text and this SEA."""
+    assert sea_commands.get_command("machine") == _SEA_PATH
+    hit = sea_commands.slash_command_task("/machine add box https://10.0.0.5:8787 s3cret")
+    assert hit is not None
+    task_text, path = hit
+    assert path == _SEA_PATH
+    assert task_text == "add box https://10.0.0.5:8787 s3cret"
+    hit = sea_commands.slash_command_task("/machine add ksen@10.0.0.5")
+    assert hit is not None and hit == ("add ksen@10.0.0.5", _SEA_PATH)
+    assert sea_commands.help_text_if_command("/machine help") == MachineSea().description()
+
+
+def test_tools_add_list_and_remove_against_a_real_daemon(remote: RemoteDaemon) -> None:
+    """The tools report what they did; a failed add stores nothing."""
+    assert sea.machine_list() == "No remote machine is registered."
+    assert sea.machine_add("box", remote.url, "nope") == (
+        f"Not registered: box ({remote.url}) rejected the password"
+    )
+    assert mach.load_machines() == []
+    assert sea.machine_add("box", f"127.0.0.1:{remote.port}", "pw") == (
+        f"Registered machine 'box' at {remote.url}."
+    )
+    assert sea.machine_list() == f"box  {remote.url}  reachable"
+    assert sea.machine_remove("other") == "No machine named 'other' is registered."
+    assert sea.machine_remove("box") == "Removed machine 'box'."
+    assert mach.load_machines() == []
+
+
+@pytest.mark.skipif(not SSHD, reason="no sshd on this host")
+def test_tools_add_an_ssh_machine_without_a_password(
+    remote: RemoteDaemon, sshd: SshServer,
+) -> None:
+    """``add user@host`` tunnels the daemon port over SSH; the host names the machine."""
+    assert sea.machine_add("", sshd.login) == (
+        f"Registered machine '127.0.0.1' at ssh {sshd.login}."
+    )
+    assert mach.load_machines() == [mach.Machine("127.0.0.1", ssh=sshd.login)]
+    assert sea.machine_list() == f"127.0.0.1  ssh {sshd.login}  reachable"
+    rows = mach.fetch_history(mach.load_machines()[0], "", "", 10).rows
+    assert [r["title"] for r in rows] == ["remote work"]
+    mach.close_links()
+    assert sea.machine_add("", f"nobody-x@127.0.0.1:{sshd.port}").startswith(
+        f"Not registered: 127.0.0.1: ssh nobody-x@127.0.0.1:{sshd.port} failed: "
+    )
+    assert sea.machine_remove("127.0.0.1") == "Removed machine '127.0.0.1'."
+    assert mach.load_machines() == []
+
+
+def test_agent_lists_the_machines_and_finishes_with_the_text(
+    remote: RemoteDaemon, tmp_path: Path,
+) -> None:
+    """With the SEA's configuration the model gets only finish and the registry tools."""
+    mach.add_machine("box", remote.url, "pw")
+    expected = f"<p>box  {remote.url}  reachable</p>"
+    script = [
+        tool_call_body("machine_list", {}, prompt_tokens=300),
+        finish_body(expected, prompt_tokens=400),
+    ]
+    run = sea_commands.evaluate_sea([MachineSea()], "list")
+    settings = run.settings
+    assert run.tools_hook is not None and run.system_prompt_hook is not None
+    with serve(script) as (url, requests):
+        agent = ChatSorcarAgent("machine-sea-test")
+        result = agent.run(
+            prompt_template=run.prompt,
+            model_name=MODEL,
+            work_dir=str(tmp_path),
+            max_steps=4,
+            max_budget=settings["max_budget"],
+            model_config={"base_url": url, "api_key": "local"},
+            tools_hook=run.tools_hook,
+            tool_profile=settings["tool_profile"],
+            system_prompt_hook=run.system_prompt_hook,
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            verbose=False,
+        )
+    parsed = yaml.safe_load(result)
+    assert parsed["success"] is True
+    assert parsed["summary"] == expected
+
+    agentic = [r for r in requests if r.get("tools")]
+    assert len(agentic) == 2, [list(r) for r in requests]
+    for request in agentic:
+        names = {t["function"]["name"] for t in request["tools"]}
+        assert names == {"finish", "machine_add", "machine_remove", "machine_list"}, names
+        system = next(m for m in request["messages"] if m["role"] == "system")
+        assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
+    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
+    assert len(tool_results) == 1
+    # The tool result is followed by the step/usage footer the agent appends.
+    assert str(tool_results[0]["content"]).startswith(f"box  {remote.url}  reachable\n")
+
+
+@pytest.mark.skipif(not SSHD, reason="no sshd on this host")
+def test_agent_adds_an_ssh_machine_from_the_short_request(
+    remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
+) -> None:
+    """``add user@host`` reaches ``machine_add`` with an empty name and no password."""
+    expected = f"<p>Registered machine '127.0.0.1' at ssh {sshd.login}.</p>"
+    script = [
+        tool_call_body(
+            "machine_add", {"name": "", "address": sshd.login, "password": ""},
+            prompt_tokens=300,
+        ),
+        finish_body(expected, prompt_tokens=400),
+    ]
+    run = sea_commands.evaluate_sea([MachineSea()], f"add {sshd.login}")
+    settings = run.settings
+    assert run.tools_hook is not None and run.system_prompt_hook is not None
+    with serve(script) as (url, requests):
+        agent = ChatSorcarAgent("machine-sea-test")
+        result = agent.run(
+            prompt_template=run.prompt,
+            model_name=MODEL,
+            work_dir=str(tmp_path),
+            max_steps=4,
+            max_budget=settings["max_budget"],
+            model_config={"base_url": url, "api_key": "local"},
+            tools_hook=run.tools_hook,
+            tool_profile=settings["tool_profile"],
+            system_prompt_hook=run.system_prompt_hook,
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            verbose=False,
+        )
+    parsed = yaml.safe_load(result)
+    assert parsed["success"] is True and parsed["summary"] == expected
+    assert mach.load_machines() == [mach.Machine("127.0.0.1", ssh=sshd.login)]
+    agentic = [r for r in requests if r.get("tools")]
+    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
+    assert str(tool_results[0]["content"]).startswith(
+        f"Registered machine '127.0.0.1' at ssh {sshd.login}.\n"
+    )
+    mach.close_links()

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression test: a ChatSorcarAgent / WorktreeSorcarAgent run from
+"""Regression test: a ChatSorcarAgent / ChatSorcarAgent run from
 OUTSIDE a chat webview still records a replayable event stream.
 
 When the agent runs inside a chat webview, the VS Code server's
@@ -46,7 +46,6 @@ from kiss.agents.sorcar.persistence import (
     _load_latest_chat_events_by_chat_id,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 _CANNED_RESULT: str = yaml.dump(
     {"success": True, "summary": "all done"}, sort_keys=False,
@@ -143,6 +142,42 @@ class TestReplayEventsOutsideWebview:
         assert result_ev.get("summary") == "all done"
         assert str(result_ev.get("cost", "")).startswith("$")
 
+    def test_secret_in_synthesized_prompt_tags_the_task(self) -> None:
+        """The tags are re-derived after the fallback events join the trajectory.
+
+        The second run's agent prompt carries the chat history, so the
+        token from the first result reaches the second task only through
+        the synthesized ``prompt`` event, which is written after the
+        run's ``endTs`` first derived the tags.
+        """
+        agent = _OfflineChatAgent("offline")
+        agent.canned_result = yaml.dump(
+            {"success": True, "summary": "the token is ghp_abcdefghijklmnopqrstuvwxyz0123456789"},
+            sort_keys=False,
+        )
+        agent.run(prompt_template="show the token", model_name="canned", work_dir=self.tmpdir)
+        first_id = agent._last_task_id
+        agent.canned_result = _CANNED_RESULT
+        agent.run(prompt_template="now list the files", model_name="canned", work_dir=self.tmpdir)
+        second_id = agent._last_task_id
+        assert first_id and second_id and first_id != second_id
+        _flush_chat_events()
+        db = th._get_db()
+        tags = {
+            r["id"]: r["tags"]
+            for r in db.execute(
+                "SELECT id, tags FROM task_history WHERE id IN (?, ?)", (first_id, second_id)
+            )
+        }
+        assert tags[first_id] == "work,secret"  # the result column alone tags it
+        assert "secret" in tags[second_id].split(","), tags
+        loaded = _load_chat_events_by_task_id(second_id)
+        assert loaded is not None
+        events = loaded.get("events")
+        assert isinstance(events, list)
+        prompt_ev = next(e for e in events if e.get("type") == "prompt")
+        assert "ghp_" in str(prompt_ev.get("text", ""))
+
     def test_chat_id_lookup_loads_outside_webview_run(self) -> None:
         agent = _OfflineChatAgent("offline")
         agent.run(
@@ -158,19 +193,19 @@ class TestReplayEventsOutsideWebview:
         assert any(e.get("type") == "result" for e in events), events
 
     def test_persist_replay_events_is_idempotent(self) -> None:
-        agent = WorktreeSorcarAgent("wt")
+        agent = ChatSorcarAgent("wt")
         agent.total_tokens_used = 5
         agent.budget_used = 0.25
         task_id, _ = _add_task("a worktree task")
 
-        agent._persist_replay_events_if_missing(
+        assert agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
             result_raw=_CANNED_RESULT,
             result_summary="all done",
             usage=agent.usage_snapshot(),
         )
-        agent._persist_replay_events_if_missing(
+        assert not agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
             result_raw=_CANNED_RESULT,
@@ -221,7 +256,7 @@ class TestReplayEventsOutsideWebview:
         assert not any(e.get("type") == "followup_suggestion" for e in events)
 
     def test_suggestion_persistence_is_idempotent(self) -> None:
-        agent = WorktreeSorcarAgent("wt")
+        agent = ChatSorcarAgent("wt")
         task_id, _ = _add_task("a worktree task")
         for _ in range(2):
             agent._persist_replay_events_if_missing(

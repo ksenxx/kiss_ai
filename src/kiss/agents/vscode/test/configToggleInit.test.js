@@ -3,10 +3,9 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the "Auto commit" / "Use worktree" /
-// "Use web tools", "Classify tasks before running" and "Classify with
-// Jev" settings toggles: they must be INITIALIZED from the server's
-// ``configData`` (keys ``auto_commit_mode`` / ``is_worktree`` /
+// End-to-end (JSDOM) tests for the "Use web tools", "Classify tasks
+// before running" and "Classify with Jev" settings toggles: they must
+// be INITIALIZED from the server's ``configData`` (keys
 // ``use_web_browser`` / ``classify_tasks`` / ``classify_with_decisions``)
 // instead of the hardcoded ``checked`` state shipped in chat.html, and
 // their state must be PERSISTED back through ``saveConfig`` when the
@@ -81,8 +80,6 @@ function testTogglesInitializedFalseFromConfigData() {
   send(win, {
     type: 'configData',
     config: {
-      auto_commit_mode: false,
-      is_worktree: false,
       use_web_browser: false,
       classify_tasks: false,
       classify_with_decisions: false,
@@ -90,23 +87,9 @@ function testTogglesInitializedFalseFromConfigData() {
     apiKeys: {},
   });
 
-  const ac = win.document.getElementById('cfg-auto-commit');
-  const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
   const ct = win.document.getElementById('cfg-classify-tasks');
   const cd = win.document.getElementById('cfg-classify-with-decisions');
-  assert.strictEqual(
-    ac.checked,
-    false,
-    'configData {auto_commit_mode:false} must uncheck #cfg-auto-commit ' +
-      '(was left at the hardcoded checked state from chat.html)',
-  );
-  assert.strictEqual(
-    wt.checked,
-    false,
-    'configData {is_worktree:false} must uncheck #cfg-use-worktree ' +
-      '(was left at the hardcoded checked state from chat.html)',
-  );
   assert.strictEqual(
     web.checked,
     false,
@@ -131,30 +114,24 @@ function testTogglesInitializedFalseFromConfigData() {
   typeAndSend(win, 'do something');
   const run = lastMsg(posted, 'submit');
   assert.ok(run, 'clicking send must post a submit command');
-  assert.strictEqual(
-    run.autoCommit,
-    false,
-    'submit must carry autoCommit:false after configData turned the toggle off',
-  );
-  assert.strictEqual(
-    run.useWorktree,
-    false,
-    'submit must carry useWorktree:false after configData turned the toggle off',
-  );
+  // The worktree and commit decisions belong to the agent's own
+  // create_worktree / commit_and_merge tools: no per-run flags.
+  assert.ok(!('useWorktree' in run), 'submit must not carry useWorktree');
+  assert.ok(!('autoCommit' in run), 'submit must not carry autoCommit');
   assert.strictEqual(
     run.useWebTools,
     false,
     'submit must carry useWebTools:false after configData turned the toggle off',
   );
   win.close();
-  console.log('  ok - configData false values initialize toggles and submit flags');
+  console.log(
+    '  ok - configData false values initialize toggles and submit flags',
+  );
 }
 
 function testTogglesInitializedTrueFromConfigData() {
   const {win} = makeWebview();
   // Start from the opposite state so a no-op would be caught.
-  win.document.getElementById('cfg-auto-commit').checked = false;
-  win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-classify-tasks').checked = false;
   win.document.getElementById('cfg-classify-with-decisions').checked = false;
@@ -162,8 +139,6 @@ function testTogglesInitializedTrueFromConfigData() {
   send(win, {
     type: 'configData',
     config: {
-      auto_commit_mode: true,
-      is_worktree: true,
       use_web_browser: true,
       classify_tasks: true,
       classify_with_decisions: true,
@@ -171,16 +146,6 @@ function testTogglesInitializedTrueFromConfigData() {
     apiKeys: {},
   });
 
-  assert.strictEqual(
-    win.document.getElementById('cfg-auto-commit').checked,
-    true,
-    'configData {auto_commit_mode:true} must check #cfg-auto-commit',
-  );
-  assert.strictEqual(
-    win.document.getElementById('cfg-use-worktree').checked,
-    true,
-    'configData {is_worktree:true} must check #cfg-use-worktree',
-  );
   assert.strictEqual(
     win.document.getElementById('cfg-use-web-tools').checked,
     true,
@@ -203,8 +168,6 @@ function testTogglesInitializedTrueFromConfigData() {
 
 function testMissingKeysDefaultToChecked() {
   const {win} = makeWebview();
-  win.document.getElementById('cfg-auto-commit').checked = false;
-  win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-classify-tasks').checked = false;
   win.document.getElementById('cfg-classify-with-decisions').checked = false;
@@ -213,16 +176,6 @@ function testMissingKeysDefaultToChecked() {
   // matching vscode_config.DEFAULTS.
   send(win, {type: 'configData', config: {}, apiKeys: {}});
 
-  assert.strictEqual(
-    win.document.getElementById('cfg-auto-commit').checked,
-    true,
-    'missing auto_commit_mode must default #cfg-auto-commit to checked',
-  );
-  assert.strictEqual(
-    win.document.getElementById('cfg-use-worktree').checked,
-    true,
-    'missing is_worktree must default #cfg-use-worktree to checked',
-  );
   assert.strictEqual(
     win.document.getElementById('cfg-use-web-tools').checked,
     true,
@@ -283,8 +236,6 @@ function testToggleStatePersistedOnSettingsClose() {
   send(win, {
     type: 'configData',
     config: {
-      auto_commit_mode: true,
-      is_worktree: true,
       use_web_browser: true,
       classify_tasks: true,
       classify_with_decisions: true,
@@ -293,15 +244,9 @@ function testToggleStatePersistedOnSettingsClose() {
   });
 
   // The user turns the toggles off, then closes the settings panel.
-  const ac = win.document.getElementById('cfg-auto-commit');
-  const wt = win.document.getElementById('cfg-use-worktree');
   const web = win.document.getElementById('cfg-use-web-tools');
   const ct = win.document.getElementById('cfg-classify-tasks');
   const cd = win.document.getElementById('cfg-classify-with-decisions');
-  ac.checked = false;
-  ac.dispatchEvent(new win.Event('change', {bubbles: true}));
-  wt.checked = false;
-  wt.dispatchEvent(new win.Event('change', {bubbles: true}));
   web.checked = false;
   web.dispatchEvent(new win.Event('change', {bubbles: true}));
   ct.checked = false;
@@ -315,15 +260,9 @@ function testToggleStatePersistedOnSettingsClose() {
 
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');
-  assert.strictEqual(
-    save.config.auto_commit_mode,
-    false,
-    'saveConfig must persist auto_commit_mode from #cfg-auto-commit',
-  );
-  assert.strictEqual(
-    save.config.is_worktree,
-    false,
-    'saveConfig must persist is_worktree from #cfg-use-worktree',
+  assert.ok(
+    !('auto_commit_mode' in save.config) && !('is_worktree' in save.config),
+    'saveConfig must not carry the retired auto_commit_mode / is_worktree',
   );
   assert.strictEqual(
     save.config.use_web_browser,
@@ -344,24 +283,18 @@ function testToggleStatePersistedOnSettingsClose() {
 
   // Round-trip: the server echoes the saved config back; a fresh
   // populate must land on the persisted (unchecked) state.
-  ac.checked = true;
-  wt.checked = true;
   web.checked = true;
   ct.checked = true;
   cd.checked = true;
   send(win, {
     type: 'configData',
     config: {
-      auto_commit_mode: false,
-      is_worktree: false,
       use_web_browser: false,
       classify_tasks: false,
       classify_with_decisions: false,
     },
     apiKeys: {},
   });
-  assert.strictEqual(ac.checked, false, 'echoed configData must re-apply');
-  assert.strictEqual(wt.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(web.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(ct.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(cd.checked, false, 'echoed configData must re-apply');
@@ -390,7 +323,7 @@ function testDecisionsToggleEditSurvivesPollAndFlushesAlone() {
   assert.strictEqual(
     cd.checked,
     false,
-    'a configData poll must not overwrite the user\'s unticked ' +
+    "a configData poll must not overwrite the user's unticked " +
       '#cfg-classify-with-decisions',
   );
   // An untouched sibling still follows the poll.
@@ -408,7 +341,7 @@ function testDecisionsToggleEditSurvivesPollAndFlushesAlone() {
   assert.strictEqual(
     save.config.classify_with_decisions,
     false,
-    'saveConfig must carry the user\'s classify_with_decisions:false',
+    "saveConfig must carry the user's classify_with_decisions:false",
   );
   assert.strictEqual(
     save.config.classify_tasks,
@@ -416,7 +349,9 @@ function testDecisionsToggleEditSurvivesPollAndFlushesAlone() {
     'the populated form saves classify_tasks alongside',
   );
   win.close();
-  console.log('  ok - an edited Classify-with-Jev box survives the poll and saves');
+  console.log(
+    '  ok - an edited Classify-with-Jev box survives the poll and saves',
+  );
 }
 
 function testDecisionsToggleFlushedAloneWithoutConfigData() {
@@ -443,7 +378,9 @@ function testDecisionsToggleFlushedAloneWithoutConfigData() {
   );
   assert.strictEqual(save.config.classify_with_decisions, false);
   win.close();
-  console.log('  ok - Classify-with-Jev edit alone is flushed before configData');
+  console.log(
+    '  ok - Classify-with-Jev edit alone is flushed before configData',
+  );
 }
 
 function main() {

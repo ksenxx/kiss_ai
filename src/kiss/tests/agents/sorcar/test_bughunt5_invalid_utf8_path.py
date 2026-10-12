@@ -14,7 +14,7 @@ whose output mentions such a path raised ``UnicodeDecodeError``:
 ``has_uncommitted_changes``, ``copy_dirty_state``, ``stash_if_dirty``
 ... all crashed, and the error (a ``ValueError``, not the ``OSError``
 that ``_try_setup_worktree`` guards against) propagated out of
-``WorktreeSorcarAgent.run()`` and killed the whole task.
+``ChatSorcarAgent.run()`` and killed the whole task.
 
 This was also internally inconsistent: ``_unquote_git_path`` already
 decodes quoted paths with ``errors="surrogateescape"``.
@@ -30,8 +30,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.conftest import posix_only
 
 _INVALID_NAME = b"caf\xe9.txt"
@@ -113,21 +113,23 @@ class TestInvalidUtf8Path:
             assert (wt / "README.md").read_text() == "# Test\nuser edit\n"
 
     def test_worktree_setup_survives_invalid_utf8(self) -> None:
-        """End-to-end: _try_setup_worktree must not die with
-        UnicodeDecodeError when the user's repo has a non-UTF-8 staged
-        path alongside normal dirty edits."""
+        """End-to-end: the ``create_worktree`` tool (``_try_setup_worktree``)
+        must not die with UnicodeDecodeError when the user's repo has a
+        non-UTF-8 staged path alongside normal dirty edits."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
             _stage_invalid_utf8_path(repo)
             (repo / "README.md").write_text("# Test\nuser edit\n")
 
-            agent = WorktreeSorcarAgent("bh5-invalid-utf8")
+            agent = ChatSorcarAgent("bh5-invalid-utf8")
+            agent.work_dir = str(repo)
             try:
-                wt_work_dir = agent._try_setup_worktree(repo, None)
+                agent.create_worktree()
             except UnicodeDecodeError as exc:
                 raise AssertionError(
-                    f"_try_setup_worktree crashed on non-UTF-8 path: {exc}"
+                    f"create_worktree crashed on non-UTF-8 path: {exc}"
                 ) from exc
+            wt_work_dir = agent._wt_work_dir
             if wt_work_dir is not None:
                 assert agent._wt is not None
                 assert (

@@ -121,7 +121,8 @@ test('duplicate stamped copies of one talk() call play only once', () => {
 
 test('copies stamped for two DIFFERENT owned tabs play only once', () => {
   const {win, posted, played, spoken, tabId} = makeWebview();
-  win.document.querySelector('#new-chat-btn').click();
+  // "+" keeps a chat that is still new; createNewTab() always opens one.
+  win._testApi.createNewTab();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId && newChat.tabId !== tabId);
   assert.strictEqual(spoken.length, 0, 'no unlock primer any more');

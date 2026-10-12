@@ -39,7 +39,7 @@ from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
-from kiss.agents.sorcar.task_metadata import classify_task_tags
+from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 
@@ -1116,9 +1116,9 @@ def _close_thread_db() -> None:
 _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id, "
     "model, work_dir, version, tokens, cost, steps, "
-    "is_parallel, is_worktree, auto_commit_mode, "
+    "is_parallel, "
     "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
-    "is_side_channel, tags, sea "
+    "is_side_channel, tags, sea, success "
     "FROM task_history "
 )
 
@@ -1207,12 +1207,10 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["model"] = _safe_str(row["model"])
         payload["work_dir"] = _safe_str(row["work_dir"])
         payload["version"] = _safe_str(row["version"])
-        payload["auto_commit_mode"] = bool(row["auto_commit_mode"])
         payload["tokens"] = _safe_int(row["tokens"], 0)
         payload["cost"] = _safe_float(row["cost"], 0.0)
         payload["steps"] = _safe_int(row["steps"], 0)
         payload["is_parallel"] = bool(row["is_parallel"])
-        payload["is_worktree"] = bool(row["is_worktree"])
         # Fall back to the row's insertion timestamp — the same
         # fallback the history sidebar applies (_safe_start_ms in
         # server.py) — so replay synthesis (task_settings events) and
@@ -1255,12 +1253,22 @@ def _history_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
     return out
 
 
-def _is_failed_result(result: str) -> bool:
-    """Return True when the ``task_history.result`` text represents a
-    failed task that should be flagged with a red dot in the history
-    sidebar (``.sidebar-item-failed``).
+def _is_failed_result(result: str, success: object = None) -> bool:
+    """Return True when a ``task_history`` row represents a failed task
+    that should be flagged with a red cross in the history sidebar
+    (``.sidebar-item-failed``).
 
-    Recognized failure markers:
+    A row fails either by the agent's own verdict or by how it ended:
+
+    * ``success == 0`` — the row's ``success`` column, written by
+      :func:`_save_task_result` from the ``success`` key of the
+      agent's ``finish()`` result.  A ``finish(success=False)`` run
+      keeps its HTML summary as the result text, so the text alone
+      reads like a success; the chat tab strip already shows such a
+      run as failed (``success === false`` on its terminal event) and
+      the history must agree.
+
+    Recognized failure markers in *result*:
 
     * ``Task failed*`` — the standard in-process failure prefix
       written by ``_save_task_result`` for ``task_error`` events.
@@ -1281,9 +1289,14 @@ def _is_failed_result(result: str) -> bool:
       run) and ``Task interrupted by server restart/shutdown`` (a
       graceful daemon/server shutdown cancellation).  Both are
       incomplete task outcomes rather than successes.
+
+    Args:
+        result: The row's ``result`` text.
+        success: The row's ``success`` column (``0``, ``1`` or ``None``).
     """
     return (
-        result.startswith("Task failed")
+        success == 0
+        or result.startswith("Task failed")
         or result == "Agent Failed Abruptly"
         or result == "Task terminated unexpectedly (process killed)"
         or result == "Task stopped by user"
@@ -1423,14 +1436,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             tokens INTEGER DEFAULT 0,
             cost REAL DEFAULT 0.0,
             steps INTEGER DEFAULT 0,
-            -- The framework (vscode_config.DEFAULTS, AgentState,
-            -- sorcar.run()) defaults all three toggles to ON, so a row
-            -- whose producer did not state a value must read as ON
-            -- too; DEFAULT 0 would label it "no worktree / no
-            -- parallel / no auto-commit" in the history sidebar.
+            -- The framework (AgentState, sorcar.run()) defaults the
+            -- toggle to ON, so a row whose producer did not state a
+            -- value must read as ON too; DEFAULT 0 would label it
+            -- "no parallel" in the history sidebar.
             is_parallel INTEGER DEFAULT 1,
-            is_worktree INTEGER DEFAULT 1,
-            auto_commit_mode INTEGER DEFAULT 1,
             start_ts INTEGER DEFAULT 0,
             end_ts INTEGER DEFAULT 0,
             is_favorite INTEGER DEFAULT 0,
@@ -1450,7 +1460,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             tags TEXT DEFAULT '',
             -- File stem of the SEA that ran the task
             -- ("write_paper_sea", "cron_agent"); '' for a plain run.
-            sea TEXT DEFAULT ''
+            sea TEXT DEFAULT '',
+            -- The agent's own finish() verdict: 0 for
+            -- finish(success=False), 1 for success, NULL when the run
+            -- returned no verdict (a crash, a stop, a legacy row).
+            success INTEGER
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did and the launch instant (epoch ms) of its latest task.
@@ -1537,6 +1551,7 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         ("is_side_channel", "INTEGER DEFAULT 0"),
         ("tags", "TEXT DEFAULT ''"),
         ("sea", "TEXT DEFAULT ''"),
+        ("success", "INTEGER"),
     )
     for name, column_ddl in added_columns:
         if name in cols:
@@ -1623,8 +1638,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             "cost REAL DEFAULT 0.0, "
             "steps INTEGER DEFAULT 0, "
             "is_parallel INTEGER DEFAULT 1, "
-            "is_worktree INTEGER DEFAULT 1, "
-            "auto_commit_mode INTEGER DEFAULT 1, "
             "start_ts INTEGER DEFAULT 0, "
             "end_ts INTEGER DEFAULT 0, "
             "is_favorite INTEGER DEFAULT 0, "
@@ -1649,8 +1662,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         dropped_unknown_keys = 0
         known_extra_keys = {
             "model", "work_dir", "version", "tokens", "cost", "steps",
-            "is_parallel", "is_worktree", "auto_commit_mode",
-            "startTs", "endTs", "is_favorite", "subagent",
+            "is_parallel", "startTs", "endTs", "is_favorite", "subagent",
         }
         for r in rows:
             old_id = int(r[0])
@@ -1678,10 +1690,10 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             conn.execute(
                 "INSERT INTO task_history__new (id, timestamp, task, "
                 "has_events, result, chat_id, model, work_dir, version, "
-                "tokens, cost, steps, is_parallel, is_worktree, "
-                "auto_commit_mode, start_ts, end_ts, is_favorite, "
+                "tokens, cost, steps, is_parallel, "
+                "start_ts, end_ts, is_favorite, "
                 "parent_task_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     id_map[old_id], r[1], r[2],
                     r[3] or 0, r[4] or "", r[5] or "",
@@ -1690,8 +1702,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                     _safe_float(extra.get("cost")),
                     _safe_int(extra.get("steps")),
                     _bx(extra.get("is_parallel"), missing=1),
-                    _bx(extra.get("is_worktree"), missing=1),
-                    _bx(extra.get("auto_commit_mode"), missing=1),
                     _safe_int(extra.get("startTs")),
                     _safe_int(extra.get("endTs")),
                     _bx(extra.get("is_favorite")), parent_task_id,
@@ -1934,6 +1944,14 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
     it appears; it must find the marker already there, or it would
     insert the committed rows a second time.  A copy left behind by a
     failed rename is a stale row, which is harmless.
+
+    A refused write (the busy timeout expired behind another process's
+    transaction, a ``disk I/O error``) is logged and ends the adoption
+    for now; the snapshot stays under its legacy name until the next
+    new connection retries.  It must not propagate: *conn* is already
+    registered in :data:`_open_conns` and is only cached on the thread
+    once this returns, so an exception here leaked one connection per
+    :func:`_get_db` call and handed the caller none.
     """
     legacy_prefix = _failed_events_path(_LEGACY_DB_NAME) + _JOURNAL_CONSUMED_SUFFIX
     directory = os.path.dirname(current_path) or "."
@@ -1944,17 +1962,24 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
         return
     for name in names:
         new_name = new_base + name[len(_failed_events_path(_LEGACY_DB_NAME)):]
-        conn.execute(
-            "INSERT OR IGNORE INTO replayed_journals (snapshot, timestamp) "
-            "SELECT ?, timestamp FROM replayed_journals WHERE snapshot = ?",
-            (new_name, name),
-        )
         try:
-            os.replace(os.path.join(directory, name), os.path.join(directory, new_name))
-        except OSError:  # pragma: no cover — another process adopted it first
-            continue
-        _race_delay()
-        conn.execute("DELETE FROM replayed_journals WHERE snapshot = ?", (name,))
+            conn.execute(
+                "INSERT OR IGNORE INTO replayed_journals (snapshot, timestamp) "
+                "SELECT ?, timestamp FROM replayed_journals WHERE snapshot = ?",
+                (new_name, name),
+            )
+            try:
+                os.replace(os.path.join(directory, name), os.path.join(directory, new_name))
+            except OSError:  # pragma: no cover — another process adopted it first
+                continue
+            _race_delay()
+            conn.execute("DELETE FROM replayed_journals WHERE snapshot = ?", (name,))
+        except sqlite3.Error:
+            logger.warning(
+                "legacy journal snapshot %s not adopted; retrying on the next connection",
+                name, exc_info=True,
+            )
+            return
 
 
 def _open_db_connection(current_path: str) -> _LockedConnection:
@@ -2114,9 +2139,9 @@ def _add_task(
         db.execute(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
-            "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
+            "start_ts, end_ts, is_favorite, "
             "parent_task_id, max_budget, owner, is_side_channel, sea) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -2127,8 +2152,6 @@ def _add_task(
                 _safe_float(payload.get("cost"), 0.0),
                 _safe_int(payload.get("steps"), 0),
                 1 if payload.get("is_parallel") else 0,
-                1 if payload.get("is_worktree") else 0,
-                1 if payload.get("auto_commit_mode") else 0,
                 _safe_int(payload.get("startTs"), 0),
                 _safe_int(payload.get("endTs"), 0),
                 1 if payload.get("is_favorite") else 0,
@@ -2218,7 +2241,7 @@ def _history_order_sql(running_task_ids: set[str] | None) -> tuple[str, tuple[st
 
 def _load_history(
     limit: int = 0, offset: int = 0, tag: str = "", *,
-    query: str = "", running_task_ids: set[str] | None = None,
+    query: str = "", work_dir: str = "", running_task_ids: set[str] | None = None,
 ) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
@@ -2229,6 +2252,8 @@ def _load_history(
         tag: When set, only entries carrying this tag are returned.
         query: When set, a case-insensitive substring the task text
             must contain.
+        work_dir: When set, only entries whose ``work_dir`` equals it
+            (the history panel's WORKDIR dropdown).
         running_task_ids: Tasks to put before completed history, including
             tasks older than the first chronological page.
 
@@ -2242,6 +2267,8 @@ def _load_history(
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query_sql = "AND task LIKE ? ESCAPE '\\' "
         query_params = (f"%{escaped}%",)
+    work_dir_sql = "AND work_dir = ? " if work_dir else ""
+    work_dir_params: tuple[str, ...] = (work_dir,) if work_dir else ()
     with _rw_lock.read_lock():
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
@@ -2252,10 +2279,15 @@ def _load_history(
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
             + query_sql
             + tag_sql
+            + work_dir_sql
             + f"ORDER BY {order_sql} LIMIT ? OFFSET ?"
         )
         rows = db.execute(
-            sql, (*query_params, *tag_params, *order_params, effective_limit, offset),
+            sql,
+            (
+                *query_params, *tag_params, *work_dir_params, *order_params,
+                effective_limit, offset,
+            ),
         ).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
@@ -2449,6 +2481,46 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
     return result
 
 
+def user_tasks_since(since: float) -> list[dict[str, object]]:
+    """List the tasks the user started on or after *since* (epoch seconds).
+
+    Only top-level tasks the user asked for: sub-agent rows
+    (``parent_task_id`` set) and side-channel rows (``/ask``) are left
+    out.  Rows carry the ``sea`` the task ran under so a caller can drop
+    automations (cron runs, the recommendations agent itself); there is
+    no row limit, so such a caller never loses a user task to a burst
+    of automation rows.  Thread-safe.
+
+    Args:
+        since: Epoch seconds; rows with ``timestamp >= since`` qualify.
+
+    Returns:
+        ``{"task", "workDir", "timestamp", "model", "sea", "success",
+        "result"}`` dicts, newest first; ``success`` is ``None`` for a
+        task that never finished (stopped, or still running).
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task, work_dir, timestamp, model, sea, success, result "
+            "FROM task_history WHERE timestamp >= ? AND parent_task_id = '' "
+            "AND is_side_channel = 0 ORDER BY timestamp DESC",
+            (float(since),),
+        ).fetchall()
+    return [
+        {
+            "task": str(row["task"] or ""),
+            "workDir": str(row["work_dir"] or ""),
+            "timestamp": _safe_float(row["timestamp"], 0.0),
+            "model": str(row["model"] or ""),
+            "sea": str(row["sea"] or ""),
+            "success": None if row["success"] is None else bool(row["success"]),
+            "result": str(row["result"] or ""),
+        }
+        for row in rows
+    ]
+
+
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     """Find recent unique tasks starting with *query* (case-sensitive).
 
@@ -2578,7 +2650,7 @@ def _evict_for_new_key(
 
 def _search_history(
     query: str, limit: int = 50, offset: int = 0, tag: str = "", *,
-    running_task_ids: set[str] | None = None,
+    work_dir: str = "", running_task_ids: set[str] | None = None,
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
@@ -2587,13 +2659,16 @@ def _search_history(
         limit: Maximum number of matching entries to return.
         offset: Number of entries to skip before returning results.
         tag: When set, only entries carrying this tag are returned.
+        work_dir: When set, only entries that ran in this exact
+            working directory are returned.
         running_task_ids: Matching tasks to put before completed history.
 
     Returns:
         List of matching entries, running first when requested, then newest first.
     """
     return _load_history(
-        limit=limit, offset=offset, tag=tag, query=query, running_task_ids=running_task_ids,
+        limit=limit, offset=offset, tag=tag, query=query, work_dir=work_dir,
+        running_task_ids=running_task_ids,
     )
 
 
@@ -2978,9 +3053,14 @@ def _recover_orphaned_tasks(
             if tid not in journalled:
                 continue
             cursor = db.execute(
-                "UPDATE task_history SET result = ? "
+                "UPDATE task_history SET result = ?, success = ? "
                 "WHERE rowid = ? AND result = ?",
-                [journalled[tid], rid, "Agent Failed Abruptly"],
+                [
+                    journalled[tid]["result"],
+                    journalled[tid]["success"],
+                    rid,
+                    "Agent Failed Abruptly",
+                ],
             )
             rowcount += cursor.rowcount or 0
             logger.warning(
@@ -3083,26 +3163,25 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
     return rowcount
 
 
-_UPDATABLE_COLUMNS = frozenset({"result"})
+_UPDATABLE_COLUMNS = frozenset({"result", "success"})
 
 
-def _update_task_column(
-    column: str,
-    value: str,
+def _update_task_columns(
+    values: dict[str, object],
     task_id: str | None,
     task: str | None,
 ) -> str | None:
-    """Write *value* into *column* of the resolved ``task_history`` row.
+    """Write *values* into the resolved ``task_history`` row in one UPDATE.
 
     Drains pending queued events first so the column update is ordered
     after every event the task has emitted so far, then performs the
     UPDATE under the process-wide write lock.
 
     Args:
-        column: Column name to update.  The name is interpolated into
-            the SQL, so it must be one of :data:`_UPDATABLE_COLUMNS`;
-            anything else raises ``ValueError``.
-        value: The new column value.
+        values: Column name to new value.  The names are interpolated
+            into the SQL, so each must be one of
+            :data:`_UPDATABLE_COLUMNS`; anything else raises
+            ``ValueError``.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
 
@@ -3111,11 +3190,12 @@ def _update_task_column(
         when no row could be resolved.
 
     Raises:
-        ValueError: When *column* is not an allowed column name.
+        ValueError: When a column is not an allowed column name.
     """
-    if column not in _UPDATABLE_COLUMNS:
+    refused = set(values) - _UPDATABLE_COLUMNS
+    if refused:
         raise ValueError(
-            f"_update_task_column refuses column {column!r}; "
+            f"_update_task_columns refuses columns {sorted(refused)}; "
             f"allowed: {sorted(_UPDATABLE_COLUMNS)}"
         )
     _flush_chat_events(task_id if is_task_history_id(task_id) else None)
@@ -3124,9 +3204,10 @@ def _update_task_column(
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return None
+        sets = ", ".join(f"{column} = ?" for column in values)
         db.execute(
-            f"UPDATE task_history SET {column} = ? WHERE id = ?",
-            (value, resolved),
+            f"UPDATE task_history SET {sets} WHERE id = ?",
+            (*values.values(), resolved),
         )
         row = db.execute(
             "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
@@ -3138,25 +3219,37 @@ def _save_task_result(
     result: str,
     task_id: str | None = None,
     task: str | None = None,
+    *,
+    success: bool | None = None,
 ) -> None:
-    """Save just the result summary for a task (no event table changes).
+    """Save the result summary (and the agent's verdict) for a task.
 
-    The result is additionally journalled to a plain-file sidecar
-    (see :func:`_journal_final_result`) so the startup orphan sweep
-    can restore it if the database write is later lost to an I/O
-    failure — the sweep would otherwise mislabel the finished task as
-    "process killed".
+    No event table changes.  The result is additionally journalled to
+    a plain-file sidecar (see :func:`_journal_final_result`) so the
+    startup orphan sweep can restore it if the database write is later
+    lost to an I/O failure — the sweep would otherwise mislabel the
+    finished task as "process killed".
 
     Args:
         result: The task result text to store in the history entry.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
+        success: The ``success`` key of the agent's ``finish()`` result
+            when the run returned one; ``False`` makes the history
+            sidebar show the task as failed (see
+            :func:`_is_failed_result`).  ``None`` (a crash, a stop, a
+            caller without a verdict) leaves the column untouched.
     """
-    affected_chat_id = _update_task_column("result", result, task_id, task)
+    values: dict[str, object] = {"result": result}
+    if success is not None:
+        values["success"] = int(success)
+    affected_chat_id = _update_task_columns(values, task_id, task)
     if affected_chat_id is None:
         return
     if is_task_history_id(task_id):
-        _journal_final_result(str(task_id), result)
+        _journal_final_result(
+            str(task_id), result, None if success is None else int(success),
+        )
     _invalidate_chat_context_cache(affected_chat_id)
 
 
@@ -3299,12 +3392,10 @@ _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "model": ("model", str, ""),
     "work_dir": ("work_dir", str, ""),
     "version": ("version", str, ""),
-    "auto_commit_mode": ("auto_commit_mode", lambda v: 1 if v else 0, 0),
     "tokens": ("tokens", int, 0),
     "cost": ("cost", float, 0.0),
     "steps": ("steps", int, 0),
     "is_parallel": ("is_parallel", lambda v: 1 if v else 0, 0),
-    "is_worktree": ("is_worktree", lambda v: 1 if v else 0, 0),
     "startTs": ("start_ts", int, 0),
     "endTs": ("end_ts", int, 0),
     "max_budget": ("max_budget", float, 0.0),
@@ -3390,15 +3481,17 @@ def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
 
     Called inside :func:`_save_task_extra`'s transaction once the row
     carries an ``endTs``: the result (``_save_task_result`` runs first)
-    decides the ``failed`` tag, and a listable (non-sub-agent) task
-    refreshes the ``chat_summaries`` row of its chat.
+    decides the ``failed`` tag, the persisted events decide whether the
+    trajectory holds a secret (``secret`` tag), and a listable
+    (non-sub-agent) task refreshes the ``chat_summaries`` row of its chat.
 
     Args:
         db: The connection holding the write transaction.
         task_id: The finished row's id.
     """
     row = db.execute(
-        "SELECT task, result, chat_id, parent_task_id FROM task_history WHERE id = ?",
+        "SELECT task, result, success, chat_id, parent_task_id "
+        "FROM task_history WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -3406,7 +3499,8 @@ def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
     tags = classify_task_tags(
         _safe_str(row["task"]),
         is_subagent=bool(row["parent_task_id"]),
-        failed=_is_failed_result(_safe_str(row["result"])),
+        failed=_is_failed_result(_safe_str(row["result"]), row["success"]),
+        has_secret=trajectory_has_secret(db, task_id, row["task"], row["result"]),
     )
     db.execute("UPDATE task_history SET tags = ? WHERE id = ?", (",".join(tags), task_id))
     if not row["parent_task_id"] and row["chat_id"]:
@@ -3583,7 +3677,9 @@ def _final_results_path(db_path: str) -> str:
 _FINAL_RESULTS_MAX_AGE_S = 30 * 24 * 3600.0
 
 
-def _journal_final_result(task_id: str, result: str) -> None:
+def _journal_final_result(
+    task_id: str, result: str, success: int | None = None,
+) -> None:
     """Best-effort append of a task's final result to a sidecar file.
 
     SQLite alone is not a sufficient store for the terminal ``result``
@@ -3610,11 +3706,13 @@ def _journal_final_result(task_id: str, result: str) -> None:
     Args:
         task_id: History row id whose result was just saved.
         result: The result text that was written to the database.
+        success: The row's ``success`` column value saved with it
+            (``0``, ``1`` or ``None``), restored alongside the text.
     """
     sidecar = _final_results_path(str(_DB_PATH))
-    line = json.dumps(
-        {"task_id": task_id, "result": result, "ts": time.time()}
-    )
+    line = json.dumps({
+        "task_id": task_id, "result": result, "success": success, "ts": time.time(),
+    })
     with _journal_lock:
         try:
             with _journal_file_lock(sidecar):
@@ -3638,18 +3736,20 @@ def _journal_final_result(task_id: str, result: str) -> None:
             )
 
 
-def _load_final_results(sidecar: str) -> dict[str, str]:
+def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
     """Load the journalled final results from *sidecar*, last write wins.
 
     Args:
         sidecar: Path returned by :func:`_final_results_path`.
 
     Returns:
-        Mapping of task id to its most recently journalled result.
+        Mapping of task id to its most recently journalled
+        ``{"result": text, "success": 0 | 1 | None}`` (a record from
+        before the verdict was journalled loads with ``None``).
         Missing or unreadable files and corrupt lines (a torn write
         from a killed process) yield/skip to an empty or partial map.
     """
-    results: dict[str, str] = {}
+    results: dict[str, dict[str, object]] = {}
     try:
         with open(sidecar, encoding="utf-8") as stream:
             for raw in stream:
@@ -3657,10 +3757,14 @@ def _load_final_results(sidecar: str) -> dict[str, str]:
                     entry = json.loads(raw)
                     task_id = entry["task_id"]
                     result = entry["result"]
-                except (ValueError, TypeError, KeyError):
+                    success = entry.get("success")
+                except (ValueError, TypeError, KeyError, AttributeError):
                     continue
                 if isinstance(task_id, str) and isinstance(result, str):
-                    results[task_id] = result
+                    results[task_id] = {
+                        "result": result,
+                        "success": success if success in (0, 1) else None,
+                    }
     except OSError:
         return results
     return results
@@ -3821,8 +3925,8 @@ def _replay_failed_events() -> None:
 
     Called from :func:`_flush_chat_events`, so the recovery happens on
     the very next write-ordering barrier after the database becomes
-    writable again — before ``_task_has_events`` decides that a task
-    produced no transcript and a stub stream must be synthesized in
+    writable again — before ``_task_has_transcript_events`` decides that
+    a task produced no transcript and a stub stream must be synthesized in
     its place.
 
     A snapshot is only removed once every row it holds has landed in
@@ -4452,43 +4556,21 @@ def _append_chat_event(
     _flush_chat_events()
 
 
-def _task_has_events(task_id: str) -> bool:
-    """Return whether any chat events are persisted for *task_id*.
-
-    Flushes the asynchronous event queue first so events enqueued by a
-    recording printer (which land on the events table via the background
-    writer) are visible before the check.  Used by
-    :meth:`ChatSorcarAgent.run` to decide whether it must synthesize a
-    minimal replayable event stream (prompt + result) for runs that
-    happened outside a chat webview — i.e. without a recording printer
-    that would have persisted the live event stream.
-
-    Args:
-        task_id: Stable ``task_history`` row id.
-
-    Returns:
-        ``True`` if at least one row exists in ``events`` for *task_id*.
-    """
-    _flush_chat_events(task_id)
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT 1 FROM events WHERE task_id = ? LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        return row is not None
-
-
 def _task_has_transcript_events(task_id: str) -> bool:
     """Return whether any TRANSCRIPT events are persisted for *task_id*.
 
-    Like :func:`_task_has_events` but ignoring the run's single
+    Flushes the asynchronous event queue first so events enqueued by a
+    recording printer (which land on the events table via the background
+    writer) are visible before the check.  The run's single
     ``task_settings`` metadata event, which is broadcast (and
-    persisted) BEFORE the agent produces any output.  Used by
-    :meth:`ChatSorcarAgent._persist_replay_events_if_missing`: a run
-    that failed right after allocation must still get its synthesized
-    ``prompt``/``result`` events even though the metadata event
-    already exists.
+    persisted) BEFORE the agent produces any output, is ignored.  Used
+    by :meth:`ChatSorcarAgent._persist_replay_events_if_missing` to
+    decide whether it must synthesize a minimal replayable event stream
+    (prompt + result) for a run that happened outside a chat webview —
+    without a recording printer that would have persisted the live
+    event stream; a run that failed right after allocation must still
+    get its synthesized events even though the metadata event already
+    exists.
 
     Args:
         task_id: Stable ``task_history`` row id.
@@ -4519,79 +4601,6 @@ def _task_has_transcript_events(task_id: str) -> bool:
     return len(rows) >= 3
 
 
-def _descendant_task_ids(root_task_id: str) -> list[str]:
-    """Return the ids of all tasks below *root_task_id*.
-
-    Walks the ``parent_task_id`` tree breadth-first (cycle-guarded).
-    The root itself is NOT included.
-
-    Args:
-        root_task_id: Stable ``task_history`` row id of the parent task.
-
-    Returns:
-        List of descendant task-id strings (children first, then
-        grandchildren, ...).  Empty when the task spawned no sub-tasks.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        ids: list[str] = []
-        seen: set[str] = {str(root_task_id)}
-        frontier = [str(root_task_id)]
-        while frontier:
-            marks = ",".join("?" * len(frontier))
-            rows = db.execute(
-                "SELECT id FROM task_history "
-                f"WHERE parent_task_id IN ({marks})",
-                frontier,
-            ).fetchall()
-            frontier = [
-                str(r["id"]) for r in rows if str(r["id"]) not in seen
-            ]
-            seen.update(frontier)
-            ids.extend(frontier)
-        return ids
-
-
-def _changed_paths_of_tasks(task_ids: list[str]) -> set[str]:
-    """Return file paths the given tasks changed, from persisted events.
-
-    Collects the ``path`` of every persisted ``Write`` / ``Edit``
-    ``tool_call`` event of *task_ids*.  The asynchronous event queue is
-    flushed first so the very last writes of a just-finished task are
-    visible.
-
-    Used with :func:`_descendant_task_ids` by the end-of-task
-    auto-commit to also commit files that sub-agents changed outside
-    the tab's work_dir repository.
-
-    Args:
-        task_ids: Stable ``task_history`` row ids.
-
-    Returns:
-        Set of path strings (as recorded in the events, i.e. absolute
-        for the standard file tools).  Empty when none of the tasks
-        changed a file.
-    """
-    if not task_ids:
-        return set()
-    _flush_chat_events()
-    with _rw_lock.read_lock():
-        db = _get_db()
-        paths: set[str] = set()
-        for start in range(0, len(task_ids), 100):
-            batch = task_ids[start:start + 100]
-            marks = ",".join("?" * len(batch))
-            rows = db.execute(
-                "SELECT DISTINCT json_extract(event_json, '$.path') AS p "
-                f"FROM events WHERE task_id IN ({marks}) "
-                "AND json_extract(event_json, '$.type') = 'tool_call' "
-                "AND json_extract(event_json, '$.name') IN ('Write', 'Edit')",
-                batch,
-            ).fetchall()
-            paths.update(str(r["p"]) for r in rows if r["p"])
-        return paths
-
-
 def _fetch_events_for_task_id(
     db: sqlite3.Connection, task_id: str,
 ) -> list[dict[str, object]]:
@@ -4607,16 +4616,48 @@ def _fetch_events_for_task_id(
         db: Active database connection.
         task_id: Primary key of the ``task_history`` row.
 
+    Rows longer than :data:`MAX_EVENT_ROW_CHARS` (tool output recorded
+    before the per-call cap, up to 100 MB each) are never transferred
+    to Python: SQLite returns only their ``type`` and the first
+    :data:`MAX_EVENT_TEXT_CHARS` characters of their ``text``, and the
+    row is replaced by a clipped event (or a ``system_output`` note
+    naming the event type and size when it carried no ``text``).
+
     Returns:
         List of event dicts with ``_timestamp`` injected.
     """
     event_rows = db.execute(
-        "SELECT event_json, timestamp FROM events "
-        "WHERE task_id = ? ORDER BY seq",
-        (task_id,),
+        "SELECT timestamp, length(event_json) AS size, "
+        "CASE WHEN length(event_json) <= ? THEN event_json END AS event_json, "
+        "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
+        "THEN json_extract(event_json, '$.type') END AS big_type, "
+        "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
+        "THEN substr(json_extract(event_json, '$.text'), 1, ?) END AS big_text, "
+        "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
+        "AND length(json_remove(event_json, '$.text')) <= ? "
+        "THEN json_remove(event_json, '$.text') END AS big_rest "
+        "FROM events WHERE task_id = ? ORDER BY seq",
+        (
+            MAX_EVENT_ROW_CHARS,
+            MAX_EVENT_ROW_CHARS,
+            MAX_EVENT_ROW_CHARS,
+            MAX_EVENT_TEXT_CHARS,
+            MAX_EVENT_ROW_CHARS,
+            MAX_EVENT_REST_CHARS,
+            task_id,
+        ),
     ).fetchall()
     events: list[dict[str, object]] = []
     for r in event_rows:
+        if r["event_json"] is None:
+            ev = _clipped_event_row(
+                r["big_type"], r["big_text"], r["big_rest"], r["size"],
+            )
+            if ev is None:
+                continue
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
+            continue
         try:
             ev = json.loads(r["event_json"])
             ev["_timestamp"] = r["timestamp"]
@@ -4626,12 +4667,59 @@ def _fetch_events_for_task_id(
     return events
 
 
+#: An event row longer than this is clipped by SQLite instead of being
+#: loaded (see :func:`_fetch_events_for_task_id`).  Generous enough
+#: for a ``tool_result`` carrying a few embedded screenshots.
+MAX_EVENT_ROW_CHARS = 4 * 1024 * 1024
+#: How much of an oversized row's ``text`` survives.
+MAX_EVENT_TEXT_CHARS = 200_000
+#: An oversized row whose fields other than ``text`` fit in this many
+#: characters keeps them all (its bulk was the text); otherwise only
+#: the type is known and the row becomes a note.
+MAX_EVENT_REST_CHARS = 64 * 1024
+
+
+def _clipped_event_row(
+    big_type: object, big_text: object, big_rest: object, size: int,
+) -> dict[str, object] | None:
+    """Build the stand-in for an event row too large to load.
+
+    Args:
+        big_type: The row's ``type`` (``None`` for malformed JSON).
+        big_text: The first :data:`MAX_EVENT_TEXT_CHARS` characters of
+            its ``text`` (``None`` when the event has no text).
+        big_rest: The event without its ``text``, when that fits in
+            :data:`MAX_EVENT_REST_CHARS` (``None`` otherwise).
+        size: The row's length in characters.
+
+    Returns:
+        A clipped copy of a text-bearing event (its other fields kept
+        when *big_rest* is available), a ``system_output`` note for
+        any other, or ``None`` for a malformed row.
+    """
+    if not isinstance(big_type, str):
+        return None
+    if isinstance(big_text, str):
+        rest: dict[str, object] = (
+            json.loads(big_rest) if isinstance(big_rest, str) else {"type": big_type}
+        )
+        rest["text"] = big_text + (
+            f"\n... [truncated: this {big_type} event was {size // 1_000_000} MB] ...\n"
+        )
+        return rest
+    return {
+        "type": "system_output",
+        "text": f"[a {big_type} event of {size // 1_000_000} MB was not replayed]",
+    }
+
+
 def _events_session_dict(
     db: sqlite3.Connection,
     task_id: str,
     task: str,
     chat_id: str,
     extra: object,
+    with_events: bool = True,
 ) -> dict[str, object]:
     """Build the replay-session dict shared by both chat-events loaders.
 
@@ -4645,6 +4733,8 @@ def _events_session_dict(
         task: The row's task text.
         chat_id: The session's chat id (possibly ``""``).
         extra: The raw ``extra`` column value.
+        with_events: ``False`` leaves ``events`` empty: the caller
+            wants the row's metadata only (a deferred replay).
 
     Returns:
         Dict with ``task``, ``task_id``, ``events``, ``chat_id``, and
@@ -4653,7 +4743,7 @@ def _events_session_dict(
     return {
         "task": task,
         "task_id": task_id,
-        "events": _fetch_events_for_task_id(db, task_id),
+        "events": _fetch_events_for_task_id(db, task_id) if with_events else [],
         "chat_id": chat_id,
         "extra": extra or "",
     }
@@ -4662,6 +4752,7 @@ def _events_session_dict(
 def _load_events_session_row(
     where_sql: str,
     params: tuple[object, ...],
+    with_events: bool = True,
 ) -> dict[str, object] | None:
     """Load one ``task_history`` row and its events as a session dict.
 
@@ -4674,6 +4765,8 @@ def _load_events_session_row(
         where_sql: SQL appended to ``_HISTORY_SELECT`` (the
             WHERE/ORDER BY/LIMIT clauses).
         params: Bind parameters for *where_sql*.
+        with_events: ``False`` skips the events table (``events`` is
+            then ``[]``).
 
     Returns:
         A dict with ``task`` (str), ``task_id`` (str), ``events``
@@ -4687,12 +4780,13 @@ def _load_events_session_row(
             return None
         return _events_session_dict(
             db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
-            _row_to_extra_json(row),
+            _row_to_extra_json(row), with_events,
         )
 
 
 def _load_latest_chat_events_by_chat_id(
     chat_id: str,
+    with_events: bool = True,
 ) -> dict[str, object] | None:
     """Load the latest task and its events for a chat session.
 
@@ -4710,6 +4804,8 @@ def _load_latest_chat_events_by_chat_id(
 
     Args:
         chat_id: The string chat session identifier.
+        with_events: ``False`` skips the events table (``events`` is
+            then ``[]``).
 
     Returns:
         A dict with ``task`` (str), ``task_id`` (str), ``events``
@@ -4723,6 +4819,7 @@ def _load_latest_chat_events_by_chat_id(
         f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         (chat_id,),
+        with_events,
     )
 
 
@@ -4812,6 +4909,7 @@ def _load_all_chat_events_by_chat_id(
 
 def _load_subagent_rows_by_parent_task_id(
     parent_task_id: str,
+    with_events: bool = True,
 ) -> list[dict[str, object]]:
     """Return persisted sub-agent rows whose parent is *parent_task_id*.
 
@@ -4830,6 +4928,9 @@ def _load_subagent_rows_by_parent_task_id(
     Args:
         parent_task_id: Primary key (32-hex UUID TEXT id) of the
             parent ``task_history`` row.
+        with_events: ``False`` skips the events table (every row's
+            ``events`` is then ``[]``): the sub-agent tabs are being
+            announced, their transcripts deferred.
 
     Returns:
         List of dicts ordered by ``rowid`` ASC (the order in which
@@ -4852,7 +4953,7 @@ def _load_subagent_rows_by_parent_task_id(
         for r in rows:
             out.append(_events_session_dict(
                 db, str(r["id"]), r["task"], str(r["chat_id"] or ""),
-                _row_to_extra_json(r),
+                _row_to_extra_json(r), with_events,
             ))
     return out
 

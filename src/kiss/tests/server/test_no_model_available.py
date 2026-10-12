@@ -19,7 +19,7 @@ import unittest
 from typing import Any
 from unittest import TestCase
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 
 
@@ -30,7 +30,7 @@ def _make_server() -> Any:
     return VSCodeServer()
 
 
-def _register_tab_state(task_id: str, tab_id: str, agent: WorktreeSorcarAgent) -> Any:
+def _register_tab_state(task_id: str, tab_id: str, agent: ChatSorcarAgent) -> Any:
     """Register a server-owned AgentState for *tab_id* carrying *agent*."""
     st = agent_state.AgentState(
         task_id,
@@ -99,7 +99,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "no-model-test-1"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
 
             run_called = False
 
@@ -167,7 +167,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "model-ok-test-1"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
 
             run_called = False
 

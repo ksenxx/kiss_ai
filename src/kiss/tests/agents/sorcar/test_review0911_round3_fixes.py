@@ -1,7 +1,7 @@
 """Round-3 regressions for the gpt-5.6-sol review findings in
 ``tmp/review3-sorcar.md``.
 
-Three defects, each reproduced against the real production objects
+Two defects, each reproduced against the real production objects
 (no mocks, patches, or fakes):
 
 1. ``persistence._RWLock`` — a stranded acquisition whose exception
@@ -20,12 +20,6 @@ Three defects, each reproduced against the real production objects
    fusing marker and flock lifetime into one token that owns the open
    handle: the marker is live exactly while the kernel lock is held.
 
-3. ``WorktreeSorcarAgent._try_setup_worktree`` — a same-repository
-   task handoff released the retirement flock before acquiring the
-   baseline-capture flock and trusted the branch cached across that
-   gap.  Fixed by holding the (re-entrant) flock across retirement AND
-   baseline capture as one transaction.
-
 The injected-stop boundaries exercised here (the first line of a
 ``finally`` block, skipping its body) are driven with a real exception
 raised by ``sys.settrace`` at that exact line — the same boundary class
@@ -43,7 +37,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -53,12 +46,41 @@ from kiss.agents.sorcar.git_worktree import (
     _held_reclaim_locks,
     _reclaim_process_lock,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.tests.agents.sorcar.test_review0911_round2_fixes import (
-    _FLOCK_HOLDER_SCRIPT,
-    _make_repo,
-    _reclaim_lock_path,
-)
+
+
+def _make_repo(path: Path) -> Path:
+    """Create a git repo on branch ``main`` with one committed file."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
+    for key, val in (("user.email", "t@t.com"), ("user.name", "T")):
+        subprocess.run(
+            ["git", "-C", str(path), "config", key, val],
+            capture_output=True, check=True,
+        )
+    (path / "f.txt").write_text("f0\n")
+    subprocess.run(
+        ["git", "-C", str(path), "add", "."], capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "initial"],
+        capture_output=True, check=True,
+    )
+    return path
+
+
+def _reclaim_lock_path(repo: Path) -> Path:
+    """Return the repo's ``kiss-reclaim.lock`` path."""
+    common = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    common_dir = Path(common)
+    if not common_dir.is_absolute():
+        common_dir = (repo / common_dir).resolve()
+    return common_dir / "kiss-reclaim.lock"
 
 
 def _finally_line(func: Any, needle: str) -> int:
@@ -299,111 +321,3 @@ class TestReclaimMarkerFlockConsistency:
             t.start()
             assert done.wait(timeout=30), "re-entrant take self-deadlocked"
             t.join(timeout=10)
-
-
-class _HandoffProbeAgent(WorktreeSorcarAgent):
-    """Agent whose retirement records whether the outer flock is held.
-
-    ``_retire_previous_worktree`` is the real method — ``super()`` runs
-    unmodified production code; the override only OBSERVES, at the
-    moment retirement begins, whether this thread already holds the
-    repo's cross-process ``kiss-reclaim.lock`` (the round-3 invariant:
-    same-repo handoffs must run retirement and baseline capture under
-    one continuous hold).
-    """
-
-    def __init__(self, name: str, lock_path: Path) -> None:
-        super().__init__(name)
-        self._probe_lock_path = str(lock_path)
-        self.flock_held_at_retirement: list[bool] = []
-
-    def _retire_previous_worktree(self) -> str | None:
-        ref = _held_reclaim_locks().get(self._probe_lock_path)
-        self.flock_held_at_retirement.append(
-            ref is not None and ref() is not None
-        )
-        return super()._retire_previous_worktree()
-
-
-class TestSameRepoHandoffFlockSpan:
-    """Finding 3: retirement + baseline capture is one flock hold."""
-
-    def test_handoff_retirement_runs_under_the_outer_flock(self) -> None:
-        """A second same-repo ``_try_setup_worktree`` (task handoff:
-        ``self._wt`` still set) must begin retirement with the
-        cross-process flock already held, so no peer process can slip
-        between the branch decision and the dirty-state copy."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            lock_path = _reclaim_lock_path(repo)
-            agent = _HandoffProbeAgent("review0911r3-handoff", lock_path)
-            first = agent._try_setup_worktree(repo, None)
-            assert first is not None, "initial worktree setup failed"
-            assert agent._wt is not None
-            # Give the retiring merge something real to squash.
-            (first / "work.txt").write_text("task output\n")
-
-            second = agent._try_setup_worktree(repo, None)
-            assert second is not None, "handoff worktree setup failed"
-            # First call: no previous worktree, retirement is a no-op
-            # dispatch.  Second call: the same-repo handoff — this is
-            # the one the review proved ran outside the flock.
-            assert agent.flock_held_at_retirement[-1], (
-                "same-repo handoff started retirement without holding "
-                "kiss-reclaim.lock — a peer process waiting on the "
-                "flock could change the checked-out branch between the "
-                "branch decision and the dirty-state copy"
-            )
-            # The whole transaction released the flock afterwards.
-            ref = _held_reclaim_locks().get(str(lock_path))
-            assert ref is None or ref() is None
-
-    def test_handoff_blocks_while_peer_holds_flock(self) -> None:
-        """End-to-end kernel check: with ``self._wt`` set, a same-repo
-        handoff must BLOCK while a second OS process holds the flock —
-        pre-fix, retirement completed and only the later baseline
-        capture blocked, leaving the branch-decision gap."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            agent = WorktreeSorcarAgent("review0911r3-handoff-block")
-            first = agent._try_setup_worktree(repo, None)
-            assert first is not None
-            (first / "work.txt").write_text("task output\n")
-
-            held = Path(tmp) / "held"
-            release = Path(tmp) / "release"
-            holder = subprocess.Popen(
-                [
-                    sys.executable, "-c", _FLOCK_HOLDER_SCRIPT,
-                    str(_reclaim_lock_path(repo)), str(held), str(release),
-                ],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
-            try:
-                deadline = time.monotonic() + 30
-                while not held.exists():
-                    assert time.monotonic() < deadline, "holder never locked"
-                    time.sleep(0.02)
-
-                done = threading.Event()
-                result: list[Path | None] = []
-
-                def handoff() -> None:
-                    result.append(agent._try_setup_worktree(repo, None))
-                    done.set()
-
-                runner = threading.Thread(target=handoff, daemon=True)
-                runner.start()
-                assert not done.wait(timeout=2.0), (
-                    "same-repo handoff proceeded (retired and/or "
-                    "captured the baseline) while another process held "
-                    "kiss-reclaim.lock"
-                )
-                release.write_text("go")
-                assert done.wait(timeout=120), "handoff never finished"
-                runner.join(timeout=10)
-            finally:
-                release.write_text("go")
-                out, err = holder.communicate(timeout=120)
-                assert holder.returncode == 0, f"holder failed: {out}\n{err}"
-            assert result and result[0] is not None

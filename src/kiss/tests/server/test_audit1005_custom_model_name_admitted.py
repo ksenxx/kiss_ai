@@ -15,7 +15,7 @@ falls back to the current ``MY_MODELS.json`` for names outside the
 loaded catalog.
 
 The run here goes through the real ``_cmd_run`` -> task runner ->
-``WorktreeSorcarAgent`` chain against a local stand-in endpoint (no
+``ChatSorcarAgent`` chain against a local stand-in endpoint (no
 mocks); the classifier is disabled so the one request is the agent's.
 """
 
@@ -35,6 +35,7 @@ from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     IsolatedKissHome,
     StandInModelServer,
@@ -83,24 +84,17 @@ def home() -> Iterator[IsolatedKissHome]:
     isolated.write_config()
     saved_my_models = model_info.USER_MY_MODELS_PATH
     model_info.USER_MY_MODELS_PATH = isolated.kiss_home / "MY_MODELS.json"
-    _clear_tab_states()
+    clear_tab_states(_TAB)
     try:
         yield isolated
     finally:
-        _clear_tab_states()
+        clear_tab_states(_TAB)
         model_info.USER_MY_MODELS_PATH = saved_my_models
         if saved_disable is None:
             os.environ.pop(_DISABLE_ENV, None)
         else:
             os.environ[_DISABLE_ENV] = saved_disable
         isolated.cleanup()
-
-
-def _clear_tab_states() -> None:
-    with agent_state.STATE_LOCK:
-        for st in agent_state.snapshot():
-            if st.tab_id == _TAB:
-                agent_state.unregister(st.task_id, st)
 
 
 def _wait_idle() -> None:

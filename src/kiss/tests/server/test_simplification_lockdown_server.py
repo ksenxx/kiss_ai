@@ -16,8 +16,8 @@ Pins the externally-observable behavior of ``kiss.server.server`` and
   (deferred tab disposal).
 - persisted sub-agent rows are reported done when no live agent is
   registered (``_open_persisted_subagent_tabs``).
-- ``_emit_pending_worktree`` is a silent no-op when ``use_worktree``
-  is off.
+- ``_emit_pending_worktree`` is a silent no-op when the tab's agent
+  holds no worktree.
 - unknown worktree actions are refused with the exact
   ``Unknown action: <name>`` message (direct call + command dispatch).
 """
@@ -30,37 +30,15 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str):
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore(saved) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
+from kiss.tests.server.conftest import (
+    make_capturing_server,
+    redirect_persistence,
+    restore_persistence,
+)
 
 
 class _DbTestBase:
@@ -69,21 +47,21 @@ class _DbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 def _register_state(
     task_id: str,
     *,
-    agent: WorktreeSorcarAgent | None = None,
+    agent: ChatSorcarAgent | None = None,
     tab_id: str = "",
     is_task_active: bool = False,
 ) -> agent_state.AgentState:
@@ -129,7 +107,7 @@ class TestGetHistoryExtraCoercion(_DbTestBase):
             },
             task_id=task_id,
         )
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         s = _session_by_title(_history_sessions(server, events), "valid numbers")
 
@@ -147,7 +125,7 @@ class TestGetHistoryExtraCoercion(_DbTestBase):
             {"tokens": "123", "cost": "2.5", "steps": "9", "endTs": "1700000000001"},
             task_id=task_id,
         )
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         s = _session_by_title(_history_sessions(server, events), "numeric strings")
 
@@ -170,7 +148,7 @@ class TestGetHistoryExtraCoercion(_DbTestBase):
             },
             task_id=task_id,
         )
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         s = _session_by_title(_history_sessions(server, events), "garbage extras")
 
@@ -189,7 +167,7 @@ class TestGetHistoryExtraCoercion(_DbTestBase):
         th._save_task_extra(
             {"tokens": "abc", "cost": "xyz", "steps": None}, task_id=bad_id,
         )
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         sessions = _history_sessions(server, events)
         good = _session_by_title(sessions, "good row")
@@ -204,7 +182,7 @@ class TestUnknownWorktreeAction(_DbTestBase):
 
     def _arm_pending_worktree(self, tab_id: str, task_id: str) -> None:
         """Register a state whose agent holds a pending worktree."""
-        agent = WorktreeSorcarAgent("lockdown worktree agent")
+        agent = ChatSorcarAgent("lockdown worktree agent")
         agent._wt = GitWorktree(
             repo_root=Path(self.tmpdir),
             branch="kiss-wt-test",
@@ -212,11 +190,10 @@ class TestUnknownWorktreeAction(_DbTestBase):
             wt_dir=Path(self.tmpdir) / "wt",
             baseline_commit=None,
         )
-        st = _register_state(task_id, agent=agent, tab_id=tab_id)
-        st.use_worktree = True
+        _register_state(task_id, agent=agent, tab_id=tab_id)
 
     def test_direct_call_returns_unknown_action_message(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         self._arm_pending_worktree("tab-unknown-action", "task-ua")
 
         result = server._handle_worktree_action(
@@ -229,7 +206,7 @@ class TestUnknownWorktreeAction(_DbTestBase):
         }
 
     def test_command_dispatch_broadcasts_worktree_result(self) -> None:
-        server, events = _make_server()
+        server, events = make_capturing_server()
         self._arm_pending_worktree("tab-dispatch", "task-disp")
 
         server._handle_command({
@@ -247,18 +224,19 @@ class TestUnknownWorktreeAction(_DbTestBase):
             "message": "Unknown action: frobnicate",
         }
 
-    def test_guard_ordering_worktree_mode_checked_first(self) -> None:
-        """Without ``use_worktree`` even an unknown action gets the
-        mode-disabled message, pinning the guard ordering."""
-        server, _ = _make_server()
-        st = _register_state("task-no-wt", tab_id="tab-no-wt")
-        st.use_worktree = False
+    def test_guard_ordering_pending_worktree_checked_first(self) -> None:
+        """Without a pending worktree even an unknown action gets the
+        nothing-pending message, pinning the guard ordering."""
+        server, _ = make_capturing_server()
+        _register_state(
+            "task-no-wt", agent=ChatSorcarAgent("no worktree"), tab_id="tab-no-wt",
+        )
 
         result = server._handle_worktree_action("frobnicate", "tab-no-wt")
 
         assert result == {
             "success": False,
-            "message": "Worktree mode is not enabled",
+            "message": "No pending worktree changes to act on",
         }
 
 
@@ -266,7 +244,7 @@ class TestRegistryLiveMetrics(_DbTestBase):
     """Live task ids and metrics come from the agent-state registry."""
 
     def test_get_running_task_ids_tracks_alive_threads(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("7", tab_id="tab-live")
 
         release = threading.Event()
@@ -280,7 +258,7 @@ class TestRegistryLiveMetrics(_DbTestBase):
             worker.join(timeout=5)
 
     def test_get_running_task_ids_ignores_dead_threads(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("7", tab_id="tab-dead")
 
         worker = threading.Thread(target=lambda: None, daemon=True)
@@ -291,16 +269,14 @@ class TestRegistryLiveMetrics(_DbTestBase):
         assert server._get_running_task_ids() == set()
 
     def test_overlay_live_metrics_reads_registered_agent(self) -> None:
-        server, _ = _make_server()
-        agent = WorktreeSorcarAgent("lockdown metrics agent")
+        server, _ = make_capturing_server()
+        agent = ChatSorcarAgent("lockdown metrics agent")
         agent.total_tokens_used = 555
         agent.budget_used = 1.25
         agent.total_steps = 9
         agent.model_name = "test-model"
         st = _register_state("7", agent=agent, tab_id="tab-overlay")
-        st.use_worktree = True
         st.use_parallel = False
-        st.auto_commit_mode = False
 
         matched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
         server._overlay_live_metrics(matched, "7")
@@ -309,15 +285,13 @@ class TestRegistryLiveMetrics(_DbTestBase):
             "cost": 1.25,
             "steps": 9,
             "model": "test-model",
-            "is_worktree": True,
             "is_parallel": False,
-            "auto_commit_mode": False,
             "awaiting_answer": False,
         }
 
     def test_overlay_live_metrics_ignores_unregistered_task(self) -> None:
-        server, _ = _make_server()
-        agent = WorktreeSorcarAgent("lockdown unmatched agent")
+        server, _ = make_capturing_server()
+        agent = ChatSorcarAgent("lockdown unmatched agent")
         agent.total_tokens_used = 100
         _register_state("7", agent=agent, tab_id="tab-unmatched")
 
@@ -331,7 +305,7 @@ class TestDeferredTabDisposal(_DbTestBase):
     """The busy predicate defers disposal; idle close disposes."""
 
     def test_close_during_active_task_keeps_state(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("t-busy", tab_id="tab-busy", is_task_active=True)
 
         server._handle_command({"type": "closeTab", "tabId": "tab-busy"})
@@ -340,7 +314,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         assert agent_state.get("t-busy") is st
 
     def test_close_during_merge_keeps_state(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("t-merging", tab_id="tab-merging")
         st.is_merging = True
 
@@ -350,7 +324,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         assert agent_state.get("t-merging") is st
 
     def test_close_with_live_thread_keeps_state(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("t-thread", tab_id="tab-thread")
         release = threading.Event()
         worker = threading.Thread(target=release.wait, daemon=True)
@@ -366,7 +340,7 @@ class TestDeferredTabDisposal(_DbTestBase):
             worker.join(timeout=5)
 
     def test_close_idle_tab_disposes_immediately(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         _register_state("t-idle", tab_id="tab-idle")
 
         server._handle_command({"type": "closeTab", "tabId": "tab-idle"})
@@ -374,7 +348,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         assert agent_state.get("t-idle") is None
 
     def test_dispose_if_closed_after_task_end(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state(
             "t-deferred", tab_id="tab-deferred", is_task_active=True,
         )
@@ -387,7 +361,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         assert agent_state.get("t-deferred") is None
 
     def test_dispose_if_closed_noop_when_frontend_open(self) -> None:
-        server, _ = _make_server()
+        server, _ = make_capturing_server()
         st = _register_state("t-open", tab_id="tab-open")
 
         server._dispose_if_closed("tab-open")
@@ -396,12 +370,13 @@ class TestDeferredTabDisposal(_DbTestBase):
 
 
 class TestEmitPendingWorktreeNoop(_DbTestBase):
-    """``_emit_pending_worktree`` is silent without ``use_worktree``."""
+    """``_emit_pending_worktree`` is silent without a pending worktree."""
 
-    def test_emit_pending_worktree_noop_without_use_worktree(self) -> None:
-        server, events = _make_server()
-        st = _register_state("t-no-wt", tab_id="tab-no-worktree")
-        st.use_worktree = False
+    def test_emit_pending_worktree_noop_without_worktree(self) -> None:
+        server, events = make_capturing_server()
+        _register_state(
+            "t-no-wt", agent=ChatSorcarAgent("no worktree"), tab_id="tab-no-worktree",
+        )
         before = len(events)
 
         server._emit_pending_worktree("tab-no-worktree")
@@ -420,7 +395,7 @@ class TestPersistedSubagentIsDone(_DbTestBase):
             extra={"subagent": {"parent_task_id": parent_id}},
         )
         assert agent_state.get(sub_id) is None
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._open_persisted_subagent_tabs(
             parent_task_id=parent_id, parent_tab_id="tab-parent",
@@ -439,7 +414,7 @@ class TestPersistedSubagentIsDone(_DbTestBase):
 
     def test_no_subagent_rows_no_broadcast(self) -> None:
         parent_id, _ = th._add_task("childless parent")
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._open_persisted_subagent_tabs(
             parent_task_id=parent_id, parent_tab_id="tab-solo",

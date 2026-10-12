@@ -8,13 +8,11 @@
 entry and only re-publish it after ``_add_task``.  Between those two
 statements sit a SQLite read (``build_chat_prompt``'s chat/task-chain
 context load) and a SQLite write — a window of tens of milliseconds,
-far longer under DB contention.  Three server threads read the
-attribute during that window (``commands._owner_task_id``,
-``merge_flow._state_task_key`` and the printer's broadcast fan-out),
-and all three resolve ``None``: the user's queued message, generated
-commit message or merge action is then stamped with no task id and
-mis-routed or dropped.  ``_task_id_lock`` did not help, because only
-the writer ever took it.
+far longer under DB contention.  Server threads read the attribute
+during that window (``commands._owner_task_id`` and the printer's
+broadcast fan-out), and all resolve ``None``: the user's queued
+message is then stamped with no task id and mis-routed or dropped.
+``_task_id_lock`` did not help, because only the writer ever took it.
 
 The tests below use real threads and the real server-side readers.
 The window is opened deterministically by a subclass that parks
@@ -33,7 +31,6 @@ import pytest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.commands import _owner_task_id
-from kiss.server.merge_flow import _state_task_key
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -126,10 +123,6 @@ def test_followup_run_never_exposes_a_none_task_id(
             assert _owner_task_id(state) == first_task_id, (
                 "a user message queued during run #2's startup would be "
                 "stamped with no task id"
-            )
-            assert _state_task_key(state) == first_task_id, (
-                "a merge/commit-message action during run #2's startup "
-                "would resolve no task id"
             )
         finally:
             agent.release.set()

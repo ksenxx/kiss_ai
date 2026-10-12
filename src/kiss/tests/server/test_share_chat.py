@@ -48,41 +48,9 @@ from kiss.server.web_server import (
     RemoteAccessServer,
 )
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 _PASSWORD = "share-chat-test-password"
-
-
-def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
-    """Point the history database at a temp dir; return prior state.
-
-    ``_get_db()`` invalidates cached per-thread connections whenever
-    ``_DB_PATH`` changes, so reassigning the module globals is the
-    supported test redirect (the same fixture every persistence test
-    in this suite's directory uses).
-    """
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple[Any, Any, Any]) -> None:
-    """Undo :func:`_redirect_db`.
-
-    Also drops the process-owner marker the redirected ``_KISS_DIR``
-    accumulated (``task-owners/<token>.lock``, held open for the
-    liveness probe): Windows refuses to delete an open file, so leaving
-    it would make the caller's ``TemporaryDirectory`` cleanup fail with
-    ``WinError 32``.  The next owner-token request re-mints it under
-    the restored directory.
-    """
-    th._release_owner_marker()
-    if th._db_conn is not None:
-        th._db_conn.close()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
 class _LocalServerTestCase(unittest.TestCase):
@@ -320,10 +288,10 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.saved_db = _redirect_db(self.tmp.name)
+        self.saved_db = redirect_persistence(self.tmp.name)
 
     def tearDown(self) -> None:
-        _restore_db(self.saved_db)
+        restore_persistence(self.saved_db)
         super().tearDown()
 
     def _tasks(self, **fields: Any) -> dict[str, Any]:
@@ -331,16 +299,32 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         cmd.update(fields)
         return self._roundtrip([cmd], "share_tasks")
 
-    def _seed(self, chat_id: str, task: str, content: str) -> str:
-        """Persist one task with a single tool_call event; return id."""
+    def _seed(
+        self, chat_id: str, task: str, content: str, events: int = 1,
+    ) -> str:
+        """Persist one task with *events* tool_call events; return id."""
         task_id, _ = th._add_task(task, chat_id=chat_id)
-        th._append_chat_event(
-            {"type": "tool_call", "name": "Bash", "command": content},
-            task_id=task_id,
-        )
+        for _ in range(events):
+            th._append_chat_event(
+                {"type": "tool_call", "name": "Bash", "command": content},
+                task_id=task_id,
+            )
         # timestamp is the ordering key; keep the rows distinct.
         time.sleep(0.01)
         return task_id
+
+    def _seed_half_budget(self, chat_id: str, task: str) -> str:
+        """Persist a task whose events total just over half the reply budget.
+
+        Spread over rows each well under the persistence loader's
+        ``MAX_EVENT_ROW_CHARS`` (4 MiB): a single oversized row would be
+        clipped to a short note at load time and never overflow anything.
+        """
+        chunk = 1024 * 1024
+        return self._seed(
+            chat_id, task, "x" * chunk,
+            events=_SHARE_TASKS_MAX_REPLY_BYTES // 2 // chunk + 1,
+        )
 
     def test_every_task_of_the_chat_is_returned_oldest_first(self) -> None:
         first = self._seed("chat-a", "first task", "ls -la")
@@ -501,11 +485,10 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         # The oldest task's sub-agent is what makes the pair overflow:
         # the old task must be dropped WITH its sub-agent, and the
         # newest kept — the same rule the plain task loader applies.
-        big = "x" * (_SHARE_TASKS_MAX_REPLY_BYTES // 2 + 1024)
         old = self._seed("chat-sb", "old task", "ls")
-        old_sub = self._seed("chat-sb", "old sub", big)
+        old_sub = self._seed_half_budget("chat-sb", "old sub")
         th._save_task_extra({"parent_task_id": old}, task_id=old_sub)
-        newest = self._seed("chat-sb", "new task", big)
+        newest = self._seed_half_budget("chat-sb", "new task")
         event = self._tasks(chatId="chat-sb")
         self.assertTrue(event["truncated"])
         self.assertEqual(
@@ -565,9 +548,8 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         # newest transcripts are the ones the webview cannot redraw
         # from its own DOM — and the reply must both fit the transport
         # frame and say it was truncated.
-        big = "x" * (_SHARE_TASKS_MAX_REPLY_BYTES // 2 + 1024)
-        self._seed("chat-t", "old task", big)
-        newest = self._seed("chat-t", "new task", big)
+        self._seed_half_budget("chat-t", "old task")
+        newest = self._seed_half_budget("chat-t", "new task")
         event = self._tasks(chatId="chat-t")
         self.assertTrue(event["truncated"])
         self.assertEqual(
@@ -594,7 +576,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": _PASSWORD})
         self._work_dir = tempfile.mkdtemp()
-        self._saved_db = _redirect_db(self._work_dir)
+        self._saved_db = redirect_persistence(self._work_dir)
         self._server = RemoteAccessServer(
             host="127.0.0.1",
             port=self._port,
@@ -604,7 +586,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
         await self._server.start_async()
 
     async def asyncTearDown(self) -> None:
-        _restore_db(self._saved_db)
+        restore_persistence(self._saved_db)
         await self._server.stop_async()
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)

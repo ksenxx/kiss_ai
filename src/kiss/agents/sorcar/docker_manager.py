@@ -27,6 +27,7 @@ from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
+from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
 
@@ -100,6 +101,22 @@ def _join_demuxed(stdout_parts: list[bytes], stderr_parts: list[bytes]) -> str:
     texts = [b"".join(parts).decode("utf-8", errors="replace")
              for parts in (stdout_parts, stderr_parts)]
     return "\n".join(text for text in texts if text)
+
+
+def _stop_requested(cancel: threading.Event | None) -> bool:
+    """Return whether *cancel* fired or the calling thread's tool call was interrupted.
+
+    Both docker ``Bash`` paths poll this in 0.2 s slices (like the host
+    Bash tool) so a task Stop and a tool-panel Stop end a command
+    promptly instead of after its whole timeout.
+
+    Args:
+        cancel: The task's stop event, or ``None`` when there is none.
+    """
+    interrupt = tool_interrupt.current_tool_interrupt_event()
+    return (cancel is not None and cancel.is_set()) or (
+        interrupt is not None and interrupt.is_set()
+    )
 
 
 def _drain_exec_stream(
@@ -416,7 +433,10 @@ class DockerManager:
             return self._bash_streaming(
                 container, command, timeout_seconds, max_output_chars,
             )
-        exit_code, output = self._exec(container, command, timeout_seconds)
+        exit_code, output = self._exec(container, command, timeout_seconds, self.stop_event)
+        # A tool-panel Stop ended the wait cooperatively (the exec is
+        # already killed): surface it as the interrupted result.
+        tool_interrupt.raise_if_interrupted()
         if exit_code is None:
             return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
         return _truncate_output(
@@ -429,6 +449,7 @@ class DockerManager:
         max_workers: int = 0,
         timeout_seconds: float = 1800,
         max_output_chars: int = 5000,
+        description: str = "",
     ) -> str:
         """Run several independent shell commands concurrently in the container, with no LLM.
 
@@ -449,6 +470,8 @@ class DockerManager:
             timeout_seconds: Timeout in seconds applied to EACH command.
             max_output_chars: Maximum characters of each command's output
                 kept in the report (head and tail are kept when truncating).
+            description: A brief description of the commands, shown as
+                the title of this call in the chat.
 
         Returns:
             A report starting with a tally line
@@ -460,6 +483,7 @@ class DockerManager:
         Raises:
             KISSError: If no container is open.
         """
+        del description
         container = self.container
         if container is None:
             raise KISSError("No container is open. Please call open() first.")
@@ -524,12 +548,14 @@ class DockerManager:
             timeout_seconds: Maximum time to wait before treating the
                 command as hung; the container-side process is killed.
             cancel: Optional event that ends the wait early; the
-                container-side process is killed the same way.
+                container-side process is killed the same way.  An
+                interrupt of the calling thread's tool call (see
+                :func:`_stop_requested`) ends it the same way.
 
         Returns:
             ``(exit_code, output)`` — the exit code is ``None`` on
-            timeout and ``-1`` when *cancel* fired; the output is stdout
-            followed by stderr, untruncated.
+            timeout and ``-1`` when *cancel* or the interrupt fired; the
+            output is stdout followed by stderr, untruncated.
         """
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
@@ -592,15 +618,7 @@ class DockerManager:
             except BaseException as exc:
                 error_holder["error"] = exc
 
-        thread = threading.Thread(target=run_exec, daemon=True)
-        thread.start()
-        deadline = time.monotonic() + timeout_seconds
-        while thread.is_alive() and (cancel is None or not cancel.is_set()):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            thread.join(min(remaining, 0.2))
-        if thread.is_alive():
+        def cancel_exec() -> None:
             with state_lock:
                 state["cancelled"] = True
                 committed = state["start_committed"]
@@ -608,7 +626,24 @@ class DockerManager:
                 # ``exec_id`` is guaranteed set: the worker stores it
                 # before committing, and the shared lock publishes it.
                 self._reap_timed_out_exec(result_holder["exec_id"], token)
-            if cancel is not None and cancel.is_set():
+
+        thread = threading.Thread(target=run_exec, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            while thread.is_alive() and not _stop_requested(cancel):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(min(remaining, 0.2))
+        except BaseException:
+            # An injected Stop (task stop watchdog, tool-panel interrupt)
+            # landed between joins: the exec must not outlive the call.
+            cancel_exec()
+            raise
+        if thread.is_alive():
+            cancel_exec()
+            if _stop_requested(cancel):
                 return -1, "Killed: the task was stopped."
             return None, _join_demuxed(stdout_parts, stderr_parts)
         if error_holder:  # pragma: no branch
@@ -674,7 +709,13 @@ class DockerManager:
             max_output_chars: Maximum characters in output before truncation.
 
         Returns:
-            The command's output, or the timeout error.
+            The command's output, the timeout error, or the
+            ``Killed: the task was stopped.`` result when the task's
+            stop event fired (the exec is killed in every early exit).
+
+        Raises:
+            ToolCallInterrupted: When the tool panel's Stop interrupted
+                this call; the exec is killed first.
         """
         assert self.stream_callback is not None
         token = uuid.uuid4().hex
@@ -689,23 +730,37 @@ class DockerManager:
         stderr_parts: list[str] = []
         deadline = time.monotonic() + timeout_seconds
         eof = False
-        while True:
-            try:
-                item = out_queue.get(timeout=max(deadline - time.monotonic(), 0))
-            except queue.Empty:
-                break
-            if item is None:
-                eof = True
-                break
-            is_stderr, text = item
-            (stderr_parts if is_stderr else stdout_parts).append(text)
-            self.stream_callback(text)
+        # Short slices keep this loop in Python, where an injected Stop
+        # lands; one ``get`` over the whole deadline would block in C
+        # for the command's full timeout.
+        try:
+            while not _stop_requested(self.stop_event):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = out_queue.get(timeout=min(remaining, 0.2))
+                except queue.Empty:
+                    continue
+                if item is None:
+                    eof = True
+                    break
+                is_stderr, text = item
+                (stderr_parts if is_stderr else stdout_parts).append(text)
+                self.stream_callback(text)
+        except BaseException:
+            self._kill_exec(token)
+            raise
 
         output = "\n".join(
             part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
         )
         if not eof:
             self._kill_exec(token)
+            tool_interrupt.raise_if_interrupted()
+            if self.stop_event is not None and self.stop_event.is_set():
+                output = "\n".join(filter(None, (output, "Killed: the task was stopped.")))
+                return _truncate_output(_with_exit_code(output, -1), max_output_chars)
             return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
 
         exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)

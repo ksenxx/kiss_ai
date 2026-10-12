@@ -1425,13 +1425,24 @@ def test_bluebubbles_muse_authenticate_rollbacks(
 def test_bluebubbles_agent_init_and_clear_tool(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
-    """The agent wires Muse at construction; the clear tool empties the vault."""
+    """The agent wires Muse on its first request; the clear tool empties the vault."""
     from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesAgent
 
     bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
     agent = BlueBubblesAgent()
+    assert agent._is_authenticated() and agent._backend._muse is False
+    before = len(api_server.requests)
+    agent._backend.poll_messages("chat1", "")
     assert agent._backend._muse is True
     assert vault_has_credentials("bluebubbles")
+    assert len(api_server.requests) == before + 1
+    assert api_server.query().get("password") == [_REAL_BB_PASSWORD]
+    # A retry reuses the wiring: one more boundary request, same surrogate.
+    surrogate = agent._backend._surrogate
+    agent._backend.poll_messages("chat1", "")
+    assert len(api_server.requests) == before + 2
+    assert agent._backend._surrogate == surrogate
+    assert "muse-sgt." not in json.dumps(api_server.requests[before:])
     tools = auth_tools(agent)
     assert "cleared" in tools["clear_bluebubbles_auth"]()
     assert not vault_has_credentials("bluebubbles")
@@ -1524,7 +1535,7 @@ def test_query_kind_allowlisted_cross_origin_redirect_drops_credential(
     assert api_server.query(index=0).get("password") == [_REAL_BB_PASSWORD]
 
 
-def test_query_kind_error_text_hides_encoded_credential(muse_env: Path) -> None:
+def test_query_kind_error_text_hides_encoded_credential(muse_env: Path, refusing_port: int) -> None:
     """Transport errors never reflect the credential, raw or percent-encoded.
 
     The sent URL carries the percent-encoded credential and the HTTP
@@ -1535,27 +1546,25 @@ def test_query_kind_error_text_hides_encoded_credential(muse_env: Path) -> None:
     from urllib.parse import quote, quote_plus
 
     secret = "slash/plus+question?percent%"
+    url = f"http://127.0.0.1:{refusing_port}/api/v1/server/info"
     store_credentials(
         "bluebubbles",
         {"kind": "query", "param": "password", "token": secret},
         [],
-        hosts=("127.0.0.1:9",),
+        hosts=(f"127.0.0.1:{refusing_port}",),
     )
     handle = mint_surrogate("bluebubbles")
     assert handle is not None
     session = MuseBoundarySession("bluebubbles")
     with pytest.raises(MuseAuthError) as err:
-        # Port 9 (discard) refuses connections: a real transport error.
-        session.get(
-            "http://127.0.0.1:9/api/v1/server/info",
-            headers={"Authorization": f"Bearer {handle.token}"},
-        )
+        # The refused connect is a real transport error.
+        session.get(url, headers={"Authorization": f"Bearer {handle.token}"})
     text = str(err.value)
     assert secret not in text
     assert quote_plus(secret) not in text
     assert quote(secret, safe="") not in text
     # Only the exception class and the credential-free URL survive.
-    assert "ConnectionError contacting http://127.0.0.1:9/api/v1/server/info" in text
+    assert f"ConnectionError contacting {url}" in text
 
 
 def test_synology_tokenless_rotation_never_revives_vault_token(

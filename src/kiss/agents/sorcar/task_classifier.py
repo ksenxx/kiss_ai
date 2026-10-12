@@ -4,33 +4,17 @@
 # add your name here
 """Pre-run task classification for Sorcar agents.
 
-Before a Sorcar agent starts a task, :func:`classify_task` answers two
-questions about the task — with one typed question to a decisions model
+Before a Sorcar agent starts a task, :func:`classify_task` answers one
+question about the task — with one typed question to a decisions model
 when it can, else with one lightweight NON-AGENTIC
 :class:`~kiss.core.kiss_agent.KISSAgent` call on the run's own model:
 
 - ``is_simple``: the task involves neither software development nor
   Internet search.  A simple task runs with the lite system prompt
-  (``SYSTEM_LITE.md``) instead of the full ``SYSTEM.md``.
-- ``is_development``: the task could create or modify ANY file in the
-  current git repository (the working directory) — software
-  development, documentation, or producing an artifact such as a
-  report, presentation, notebook or data file.  This is a hard rule
-  with one exception: any task that could write a file in the repo
-  is development, whatever else it involves, UNLESS it is a git-only
-  task (commit, merge, rebase, resolving merge conflicts, ...) that
-  changes nothing beyond what those git operations make.  A task
-  mixing git operations with other work ("fix the bug and commit",
-  "build and commit the package") is development.  Every such
-  task must run in a worktree, since every file it writes may end up
-  git-tracked.  Tasks that create or edit no file are NOT development.
-  The verdict decides the run's effective
-  ``is_worktree`` value (worktree isolation on/off) without ever
-  touching the persisted ``is_worktree`` setting — but it can only
-  DEMOTE a run that asked for a worktree to direct execution, never
-  promote a run whose caller pinned ``use_worktree=False`` (a channel
-  dispatch classifies for its system prompt while running in a
-  scratch directory that must never get a worktree).
+  (``SYSTEM_LITE.md``) instead of the full ``SYSTEM.md``.  Whether the
+  task needs a git worktree is not classified: the agent creates one
+  itself with its ``create_worktree`` tool before its first change to
+  a tracked file.
 
 Two classifiers implement the verdict; :func:`classify_task` picks one
 per call:
@@ -62,7 +46,7 @@ per call:
 
 The LLM classification is a single non-agentic ``generate()`` call — no
 tool loop, no tools — that returns the STRUCTURED verdict
-``{"is_simple": <bool>, "is_development": <bool>}``.  The structure is
+``{"is_simple": <bool>}``.  The structure is
 enforced twice over: the provider's own structured-output mechanism
 pins :data:`_VERDICT_JSON_SCHEMA` on the request (``response_json_schema``
 on Gemini, ``response_format`` on the OpenAI-compatible vendors), and
@@ -197,19 +181,17 @@ _DECISIONS_QUESTIONS_JSON = json.dumps(_DECISIONS_QUESTIONS, sort_keys=True)
 # A chosen kind whose probability is below this floor is treated as
 # ``ambiguous`` — the conservative verdict — rather than trusted.  On
 # the benchmark's held-out half this halves the harmful errors (a
-# non-simple task on the lite prompt, a development task without a
-# worktree) at unchanged accuracy.
+# non-simple task on the lite prompt) at unchanged accuracy.
 CLASSIFIER_DECISIONS_MIN_PROBABILITY = 0.6
 
-# Kind -> (is_simple, is_development).  ``ambiguous`` gets the same
-# conservative verdict the LLM prompt demands for follow-ups it cannot
-# see the context of.
-_KIND_VERDICTS: dict[str, tuple[bool, bool]] = {
-    "development": (False, True),
-    "ambiguous": (False, True),
-    "git_only": (True, False),
-    "simple": (True, False),
-    "internet": (False, False),
+# Kind -> is_simple.  ``ambiguous`` gets the same conservative verdict
+# the LLM prompt demands for follow-ups it cannot see the context of.
+_KIND_VERDICTS: dict[str, bool] = {
+    "development": False,
+    "ambiguous": False,
+    "git_only": True,
+    "simple": True,
+    "internet": False,
 }
 
 # The decisions classifier's memo criteria: everything that turns a task
@@ -287,22 +269,8 @@ _VERDICT_JSON_SCHEMA: dict[str, Any] = {
                 "nor searching the internet."
             ),
         },
-        "is_development": {
-            "type": "boolean",
-            "description": (
-                "True if the task could create or modify ANY file in the "
-                "current git repository, whatever else it involves: "
-                "software development, documentation, configuration, "
-                "scripts, or producing a report, document, presentation, "
-                "notebook, database or data file. The only exception is a "
-                "git-only task (git operations and nothing else), which is "
-                "false. Also false for tasks that create or edit no file "
-                "(questions, explanations, read-only commands, answers "
-                "given in the reply)."
-            ),
-        },
     },
-    "required": ["is_simple", "is_development"],
+    "required": ["is_simple"],
     "additionalProperties": False,
 }
 
@@ -310,35 +278,19 @@ _CLASSIFIER_PROMPT_PREFIX = (
     "You are a task classifier. Read the task below and respond with "
     "ONLY one JSON object — no prose, no code fences, no explanation — "
     "exactly matching this schema:\n"
-    '{"is_simple": <true|false>, "is_development": <true|false>}\n\n'
+    '{"is_simple": <true|false>}\n\n'
     "- is_simple: true if the task involves NEITHER software "
-    "development NOR searching the internet. false otherwise.\n"
-    "- is_development: HARD RULE: if the task could create or modify ANY "
-    "file in the current git repository (the working directory), it MUST "
-    "get is_development=true, whatever else it involves. This covers "
-    "software development (implementing or changing features, fixing "
-    "bugs, refactoring, writing tests), updating documentation, "
-    "configuration or scripts, producing a file such as a report, "
-    "document, presentation, notebook, database, data or image file, "
-    "saving results or output into a file, and git operations combined "
-    "with any such change (e.g. 'fix the bug and commit', 'build and "
-    "commit the package'). The ONLY exception is a git-only task: one "
-    "that requests git operations (e.g. status, diff, log, add, commit, "
-    "push, pull, fetch, checkout, branch, merge, squash, rebase, "
-    "resolving merge conflicts in the files git marked, tagging, "
-    "worktree management) and nothing else, so no file changes beyond "
-    "what those git operations themselves make; it MUST get "
-    "is_development=false. A task that is not purely git — it also "
-    "builds, fixes, writes or edits something — is development. "
-    "Otherwise false only for tasks that create or edit no file: "
-    "questions, explanations, running or starting commands, servers or "
-    "tests that leave the repository's files unchanged (their output "
-    "only reported back), reading messages, or answers given in the "
-    "reply.\n\n"
+    "development (implementing or changing features, fixing bugs, "
+    "refactoring, writing tests, updating documentation, configuration "
+    "or scripts, producing a report, document, presentation, notebook "
+    "or data file) NOR searching the internet. true for a question, "
+    "explanation, shell command or chore that creates or edits no file, "
+    "and for git-only operations (status, diff, log, commit, merge, "
+    "rebase, resolving merge conflicts). false otherwise.\n\n"
     "If the task is ambiguous, or is a follow-up that continues earlier "
     "work you cannot see (e.g. 'continue', 'fix it', 'do the same for "
     "the rest'), be conservative: respond with "
-    '{"is_simple": false, "is_development": true}.\n\n'
+    '{"is_simple": false}.\n\n'
     "Do NOT attempt to perform the task. Answer immediately with the "
     "single JSON object.\n\n"
     "# Task\n"
@@ -352,17 +304,9 @@ class TaskClassification:
     Attributes:
         is_simple: The task involves neither software development nor
             Internet search.
-        is_development: The task could create or modify any file in
-            the current git repository — code, documentation, or
-            artifacts such as reports, presentations, notebooks or
-            data files — and so must run in a worktree.  The one
-            exception is a git-only task, which changes nothing
-            beyond what its git operations make and is not
-            development.
     """
 
     is_simple: bool
-    is_development: bool
 
 
 @dataclass(frozen=True)
@@ -422,15 +366,13 @@ def _verdict_bool(value: Any) -> bool | None:
     """Interpret one verdict value as a strict boolean.
 
     Args:
-        value: A candidate ``is_simple`` / ``is_development`` value from
-            the model's JSON.
+        value: A candidate ``is_simple`` value from the model's JSON.
 
     Returns:
         The boolean it denotes — a real JSON boolean, or one of the lax
         string spellings ``"true"/"false"``, ``"yes"/"no"``, ``"1"/"0"``
         — or ``None`` for every other type or spelling (numbers, null,
-        arrays, objects), which must NOT silently become a verdict that
-        flips worktree isolation.
+        arrays, objects), which must NOT silently become a verdict.
     """
     if isinstance(value, bool):
         return value
@@ -458,8 +400,8 @@ def _parse_verdict(result: str) -> TaskClassification | None:
 
     Returns:
         The parsed :class:`TaskClassification`, or ``None`` when no
-        JSON object holding boolean ``is_simple`` and ``is_development``
-        values can be found in *result*.
+        JSON object holding a boolean ``is_simple`` value can be found
+        in *result*.
     """
     if not isinstance(result, str):
         return None
@@ -473,11 +415,8 @@ def _parse_verdict(result: str) -> TaskClassification | None:
             continue
         if isinstance(verdict, dict):
             is_simple = _verdict_bool(verdict.get("is_simple"))
-            is_development = _verdict_bool(verdict.get("is_development"))
-            if is_simple is not None and is_development is not None:
-                return TaskClassification(
-                    is_simple=is_simple, is_development=is_development,
-                )
+            if is_simple is not None:
+                return TaskClassification(is_simple=is_simple)
         idx = result.find("{", idx + 1)
     return None
 
@@ -623,8 +562,8 @@ def _read_cache_file(path: Path) -> dict[str, dict[str, Any]]:
         path: The cache file.
 
     Returns:
-        Valid, unexpired entries (``is_simple``/``is_development``
-        booleans plus the ``ts`` write time) in file order.  A missing,
+        Valid, unexpired entries (the ``is_simple`` boolean plus the
+        ``ts`` write time) in file order.  A missing,
         unreadable or malformed file yields an empty mapping.
     """
     try:
@@ -639,15 +578,12 @@ def _read_cache_file(path: Path) -> dict[str, dict[str, Any]]:
         if not (isinstance(key, str) and isinstance(value, dict)):
             continue
         is_simple = value.get("is_simple")
-        is_development = value.get("is_development")
         ts = value.get("ts")
-        if not (isinstance(is_simple, bool) and isinstance(is_development, bool)):
+        if not isinstance(is_simple, bool):
             continue
         if not isinstance(ts, (int, float)) or ts < oldest_valid:
             continue
-        entries[key] = {
-            "is_simple": is_simple, "is_development": is_development, "ts": ts,
-        }
+        entries[key] = {"is_simple": is_simple, "ts": ts}
     return entries
 
 
@@ -689,9 +625,7 @@ def cached_classification(
         entry = _load_cache_locked().get(key)
     if entry is None or entry["ts"] < time.time() - CLASSIFIER_CACHE_TTL_SECONDS:
         return None
-    return TaskClassification(
-        is_simple=entry["is_simple"], is_development=entry["is_development"],
-    )
+    return TaskClassification(is_simple=entry["is_simple"])
 
 
 def remember_classification(
@@ -728,7 +662,6 @@ def remember_classification(
         cache.pop(key, None)
         cache[key] = {
             "is_simple": classification.is_simple,
-            "is_development": classification.is_development,
             "ts": time.time(),
         }
         while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
@@ -823,7 +756,7 @@ def _verdict_from_decision(answers: Any) -> TaskClassification | None:
     probability = probabilities.get(kind) if isinstance(probabilities, dict) else None
     if isinstance(probability, (int, float)) and probability < CLASSIFIER_DECISIONS_MIN_PROBABILITY:
         verdict = _KIND_VERDICTS["ambiguous"]
-    return TaskClassification(is_simple=verdict[0], is_development=verdict[1])
+    return TaskClassification(is_simple=verdict)
 
 
 def _decisions_model_config() -> dict[str, Any]:
@@ -916,9 +849,8 @@ def _truncate_task(task: str) -> str:
 def _cached_run(cached: TaskClassification) -> ClassifierRun:
     """Return the zero-usage :class:`ClassifierRun` for a memoised verdict."""
     logger.info(
-        "Task classification served from cache: is_simple=%s is_development=%s",
+        "Task classification served from cache: is_simple=%s",
         cached.is_simple,
-        cached.is_development,
     )
     return ClassifierRun(classification=cached, budget_used=0.0, tokens_used=0, steps=0)
 

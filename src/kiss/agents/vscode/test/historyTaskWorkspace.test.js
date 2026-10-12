@@ -139,17 +139,12 @@ function rowsByTitle(win) {
   return map;
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function workspaceSpan(row) {
@@ -162,7 +157,7 @@ function metricsSpan(row) {
 
 function testWorkspaceRendersAfterMetrics() {
   const {win} = makeWebview();
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 

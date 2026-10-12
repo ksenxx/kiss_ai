@@ -26,7 +26,7 @@ Covers:
 No mocks/patches/fakes: real :class:`JsonPrinter` subclasses (the same
 technique the existing vscode regression tests use) capture or steer
 broadcasts, real :class:`VSCodeServer` / :class:`AgentState` /
-:class:`WorktreeSorcarAgent` objects are exercised, and the wake-word
+:class:`ChatSorcarAgent` objects are exercised, and the wake-word
 test streams real synthesized speech through the real Vosk recognizer.
 """
 
@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
@@ -114,7 +114,7 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
         owner_state = AgentState("200", tab_id=owner, server_owned=True)
         owner_state.user_answer_queue = queue.Queue(maxsize=1)
         owner_state.is_task_active = True
-        owner_state.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        owner_state.agent = ChatSorcarAgent("Sorcar VS Code")
         owner_state.agent._last_task_id = "200"
         agent_state.register(owner_state)
         printer.subscribe_tab(200, owner)

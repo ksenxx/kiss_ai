@@ -67,17 +67,17 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+/** Let main.js's end-of-tick history refetch coalescing settle. */
+function tick() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
 }
 
-function uncheckWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function makeRow(overrides) {
@@ -144,7 +144,7 @@ function assertAskingMark(win, row, where) {
 function testAskingRowShowsQuestionMark() {
   const {win} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   send(win, {
     type: 'history',
     offset: 0,
@@ -167,10 +167,10 @@ function testAskingRowShowsQuestionMark() {
   console.log('  ok - a task waiting for an answer shows "?" instead of the spinner');
 }
 
-function testMarkFlipsWithTasksUpdated() {
+async function testMarkFlipsWithTasksUpdated() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   send(win, {
     type: 'history',
     offset: 0,
@@ -194,7 +194,10 @@ function testMarkFlipsWithTasksUpdated() {
   });
   assertAskingMark(win, rowByTitle(win, 'live task'), 'while the question is open');
 
-  // Answered: the next nudge brings the spinner back.
+  // Answered: the next nudge brings the spinner back.  (A refresh in the
+  // same tick as the previous one folds into its end-of-tick refetch,
+  // so let that tick end first.)
+  await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   req = posted.find(m => m && m.type === 'getHistory');
@@ -210,11 +213,13 @@ function testMarkFlipsWithTasksUpdated() {
   console.log('  ok - the "?" comes and goes with the daemon\'s tasks_updated nudges');
 }
 
-try {
+async function main() {
   testAskingRowShowsQuestionMark();
-  testMarkFlipsWithTasksUpdated();
+  await testMarkFlipsWithTasksUpdated();
   console.log('\n2 passed, 0 failed');
-} catch (e) {
+}
+
+main().catch(e => {
   console.error(e);
   process.exit(1);
-}
+});

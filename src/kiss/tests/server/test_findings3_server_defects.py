@@ -49,8 +49,6 @@ import asyncio
 import json
 import os
 import random
-import socket
-import ssl
 import tempfile
 import threading
 import unittest
@@ -71,6 +69,7 @@ from kiss.server.sorcar import run as sorcar_run
 from kiss.server.task_runner import coerce_budget_override
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import fake_daemon
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _PASSWORD = "findings3-auth-test-password"
 
@@ -264,7 +263,7 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """Start a real ``RemoteAccessServer`` with a known password."""
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -288,7 +287,7 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
     async def _first_reply_to_wrong_guess(self) -> str:
         """Send one wrong non-empty password; return the first reply type."""
         async with await connect(
-            f"wss://127.0.0.1:{self._port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong-pw"}))
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -335,7 +334,7 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
         max_fail = web_server._AUTH_FAIL_MAX
         # Admit a socket BEFORE the lock engages and keep it waiting.
         admitted = await connect(
-            f"wss://127.0.0.1:{self._port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
         )
         try:
             await asyncio.sleep(random.uniform(0.001, 0.05))
@@ -419,21 +418,6 @@ class TestConcurrentApiKeySave(unittest.TestCase):
                 f"{name} was lost — concurrent RC writes were not "
                 f"serialized",
             )
-
-
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 if __name__ == "__main__":

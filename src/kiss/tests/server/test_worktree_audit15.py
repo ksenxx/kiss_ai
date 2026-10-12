@@ -14,10 +14,7 @@ BUG-66: ``_emit_pending_worktree`` broadcasts ``worktree_done`` for
     shown merge/discard buttons for a worktree that has nothing to
     merge.
 
-    The auto-discard used to be suppressed while a non-worktree task
-    ran on the main tree, which leaked the worktree permanently.  It
-    now runs unconditionally — see
-    ``test_worktree_leak_when_main_tree_busy.py``.
+    The auto-discard runs unconditionally.
 
 BUG-67 (obsolete): covered ``_start_merge_session``, which was removed
     together with the interactive diff/merge review workflow.
@@ -36,11 +33,11 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
@@ -50,16 +47,12 @@ def _register_state(
     task_id: str,
     tab_id: str,
     *,
-    agent: WorktreeSorcarAgent | None = None,
-    use_worktree: bool = False,
-    auto_commit_mode: bool = True,
+    agent: ChatSorcarAgent | None = None,
 ) -> agent_state.AgentState:
     """Register a server-owned AgentState for *tab_id*."""
     state = agent_state.AgentState(
         task_id, agent=agent, tab_id=tab_id, server_owned=True,
     )
-    state.use_worktree = use_worktree
-    state.auto_commit_mode = auto_commit_mode
     agent_state.register(state)
     return state
 
@@ -135,9 +128,9 @@ class TestBug66EmitPendingNoAutoDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab_id = "tab-bug66"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_state(
-            "task-bug66", tab_id, agent=agent, use_worktree=True,
+            "task-bug66", tab_id, agent=agent,
         )
         branch = "kiss/wt-bug66-1"
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-1"
@@ -174,21 +167,16 @@ class TestBug66EmitPendingNoAutoDiscard:
         auto-discarded.  ``worktree_done`` is broadcast so the user
         gets the Merge / Discard buttons — but never auto-discard.
 
-        Auto-commit is switched off because that is the mode in which
-        the user is asked what to do with the branch.  With auto-commit
-        on the branch is merged without a prompt instead — see
-        :meth:`test_emit_pending_worktree_merges_changed_when_autocommit`.
+        The user is asked what to do with the branch; it is never
+        merged behind their back.
         """
         repo = _make_repo(tmp_path / "repo")
 
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab_id = "tab-bug66-changed"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
-        _register_state(
-            "task-bug66-changed", tab_id, agent=agent,
-            use_worktree=True, auto_commit_mode=False,
-        )
+        agent = ChatSorcarAgent("Sorcar VS Code")
+        _register_state("task-bug66-changed", tab_id, agent=agent)
         branch = "kiss/wt-bug66-2"
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-2"
         assert GitWorktreeOps.create(repo, branch, wt_dir)
@@ -216,127 +204,6 @@ class TestBug66EmitPendingNoAutoDiscard:
 
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
-
-    def test_emit_pending_worktree_merges_changed_when_autocommit(
-        self, tmp_path: Path,
-    ) -> None:
-        """With auto-commit ON the branch is merged, never reviewed.
-
-        Auto-commit means "do not interrupt me".  A post-task merge
-        that could not complete leaves the branch pending, and the next
-        history click reaches this path; showing the hunk-by-hunk
-        diff/merge UI there contradicts the toggle the user set.  The
-        branch must instead be merged into the original branch and the
-        outcome reported through ``worktree_result``.
-        """
-        repo = _make_repo(tmp_path / "repo")
-
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-        tab_id = "tab-bug66-autocommit"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
-        state = _register_state(
-            "task-bug66-autocommit", tab_id, agent=agent,
-            use_worktree=True, auto_commit_mode=True,
-        )
-        branch = "kiss/wt-bug66-4"
-        wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-4"
-        assert GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-        )
-        (wt_dir / "new_file.txt").write_text("agent work\n")
-
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-        server._emit_pending_worktree(tab_id)
-
-        types = {e.get("type") for e in printer.events}
-        assert "merge_started" not in types, (
-            "auto-commit was on, yet the diff/merge UI was opened.  "
-            f"Events: {printer.events}"
-        )
-        assert "merge_data" not in types, (
-            "auto-commit was on, yet merge data was pushed to the "
-            f"frontend.  Events: {printer.events}"
-        )
-        assert not state.is_merging, "the tab was left in merge-review mode."
-        assert agent._wt is None, (
-            "the pending worktree survived the silent merge."
-        )
-        assert (repo / "new_file.txt").exists(), (
-            "the branch's work was not merged into the main tree."
-        )
-        results = [e for e in printer.events if e.get("type") == "worktree_result"]
-        assert results, f"no worktree_result reported.  Events: {printer.events}"
-
-    def test_emit_pending_discards_empty_even_when_non_wt_running(
-        self, tmp_path: Path,
-    ) -> None:
-        """Auto-discard of an EMPTY worktree must still happen while a
-        non-worktree task runs on the main tree.
-
-        The main-tree guard exists to protect a *merge*, which
-        stashes, checks out and merges the working tree the other
-        task is writing.  Discarding an empty worktree only removes
-        ``.kiss-worktrees/<slug>`` and deletes its unmerged branch, so
-        it touches neither the main tree's files nor its HEAD.
-        Skipping it leaked the branch, the directory and the
-        ``branch.kiss/*`` config section forever, because nothing ever
-        retried the cleanup.
-
-        No ``worktree_done`` event may be broadcast either: there are
-        no changes to merge, so the "Auto-commit and merge or
-        Discard?" prompt would be meaningless and confusing.
-        """
-        repo = _make_repo(tmp_path / "repo")
-
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-
-        other_state = _register_state("task-other", "other")
-        other_state.is_running_non_wt = True
-
-        tab_id = "tab-bug66-guard"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
-        _register_state(
-            "task-bug66-guard", tab_id, agent=agent, use_worktree=True,
-        )
-        branch = "kiss/wt-bug66-3"
-        wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-3"
-        assert GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-        )
-
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-        server._emit_pending_worktree(tab_id)
-
-        assert agent._wt is None, (
-            "A busy main tree must not block the discard of an empty "
-            "worktree — the branch and directory would leak forever."
-        )
-        assert not GitWorktreeOps.branch_exists(repo, branch), (
-            "branch survived the auto-discard."
-        )
-        assert not wt_dir.exists(), "worktree directory survived the auto-discard."
-        wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
-        assert not wt_done, (
-            "worktree_done must NOT be broadcast for an empty worktree — "
-            "the resulting merge/discard prompt is meaningless with no "
-            "changes."
-        )
-
-        other_state.is_running_non_wt = False
 
 
 class TestRed9RestorePendingMergeDeadCode:

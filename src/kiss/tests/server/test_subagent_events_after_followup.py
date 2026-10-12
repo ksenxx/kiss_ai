@@ -28,6 +28,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _subscribe_on_alloc(printer: JsonPrinter, tab_id: str) -> Any:
@@ -254,23 +255,6 @@ class _FanoutCapturePrinter(JsonPrinter):
 
 
 
-def _redirect(tmpdir: str) -> tuple:
-    from pathlib import Path
-
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
-
-
-
 class TestSubagentEventsAfterFollowup:
     """No sub-agent result events must appear in the parent tab's event
     stream — especially not after a followup_suggestion.
@@ -278,7 +262,7 @@ class TestSubagentEventsAfterFollowup:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.srv, self.url = _start_server()
 
     def teardown_method(self) -> None:
@@ -288,7 +272,7 @@ class TestSubagentEventsAfterFollowup:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_no_subagent_result_in_parent_fanout(self) -> None:

@@ -326,7 +326,7 @@ def test_handle_stays_grabbable_when_the_panel_content_scrolls(
             () => {
               const long = 'ksen-vm-32.c.r2eg-441800.internal (x86_64)';
               for (const id of ['meta-tokens', 'meta-cost', 'meta-steps',
-                                'meta-time', 'meta-machine']) {
+                                'meta-time', 'meta-workdir']) {
                 document.getElementById(id).textContent = long + ' ' + long;
               }
             }

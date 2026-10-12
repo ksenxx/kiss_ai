@@ -1136,12 +1136,10 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     declared = {"tool_profile": "shell"}
     assert skillopt.settings({}) == declared
     assert skillopt.settings({"model": "m"}) == {"model": "m", **declared}
-    # ``WorkerSea`` lays its defaults under the SEA's own keys: worktree,
-    # auto-commit, classifier, browser and memory off; ``system_prompt``
-    # is a method, not a settings key.
+    # ``WorkerSea`` lays its defaults under the SEA's own keys:
+    # classifier, browser and memory off; ``system_prompt`` is a
+    # method, not a settings key.
     effective = {
-        "use_worktree": False,
-        "auto_commit": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
@@ -1159,10 +1157,11 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     cmd: dict[str, Any] = {"seaPath": str(_SKILLOPT_SEA), "prompt": "x.py evals.json"}
     # The hooks are written on every run, so the set lists the settings only.
     assert apply_sea(cmd) == {
-        "toolProfile", "useWorktree", "autoCommit",
-        "classifyTasks", "useWebTools", "useMemory",
+        "toolProfile", "classifyTasks", "useWebTools", "useMemory",
     }
-    assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
+    assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
+    assert cmd["useMemory"] is False
+    assert "autoCommit" not in cmd and "useWorktree" not in cmd
     assert cmd["toolProfile"] == "shell" and cmd["prompt"] == "x.py evals.json"
     assert "appendBasicTools" not in cmd and "systemPrompt" not in cmd and "tools" not in cmd
     assert cmd["systemPromptHook"]("DEFAULT PROMPT") == skillopt_sea.SYSTEM_PROMPT

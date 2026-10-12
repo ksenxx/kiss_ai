@@ -74,8 +74,7 @@ def test_add_task_writes_extra_to_columns(fresh_kiss_db):
         extra={
             "model": "gpt-5", "work_dir": "/x", "version": "v1",
             "tokens": 100, "cost": 0.5, "steps": 3,
-            "is_parallel": True, "is_worktree": True,
-            "auto_commit_mode": "auto",
+            "is_parallel": True,
             "startTs": 1700000000000, "endTs": 1700000001000,
         },
     )
@@ -90,8 +89,6 @@ def test_add_task_writes_extra_to_columns(fresh_kiss_db):
     assert row["cost"] == 0.5
     assert row["steps"] == 3
     assert row["is_parallel"] == 1
-    assert row["is_worktree"] == 1
-    assert row["auto_commit_mode"] == 1
     assert row["start_ts"] == 1700000000000
     assert row["end_ts"] == 1700000001000
     assert row["is_favorite"] == 0
@@ -250,8 +247,7 @@ def test_migration_from_old_schema(tmp_path, monkeypatch):
     extra_parent = json.dumps({
         "model": "gpt", "work_dir": "/p", "version": "v1",
         "tokens": 10, "cost": 1.5, "steps": 2,
-        "is_parallel": True, "is_worktree": False,
-        "auto_commit_mode": "auto",
+        "is_parallel": True,
         "startTs": 100, "endTs": 200, "is_favorite": True,
     })
     extra_child = json.dumps({

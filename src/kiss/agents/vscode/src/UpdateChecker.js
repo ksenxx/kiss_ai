@@ -83,14 +83,9 @@ function scanInstalledExtensionVersions(extensionsRoot) {
 
 function resolveCurrentVersion(kissProjectPath, extensionsRoot) {
   let best = null;
-  let bestTuple = null;
   for (const v of scanInstalledExtensionVersions(extensionsRoot)) {
-    const t = versionTuple(v);
-    if (!t) continue;
-    if (!bestTuple || compareVersions(v, best) > 0) {
-      best = v;
-      bestTuple = t;
-    }
+    if (!versionTuple(v)) continue;
+    if (!best || compareVersions(v, best) > 0) best = v;
   }
   if (best) return best;
   if (kissProjectPath) {

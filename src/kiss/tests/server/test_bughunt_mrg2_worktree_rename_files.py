@@ -16,7 +16,7 @@ sets used by ``_check_merge_conflict``, which could therefore miss a
 conflict with dirty main-tree edits to the old path.
 
 No mocks, patches, fakes, or test doubles. Real git repository, real
-``WorktreeSorcarAgent`` worktree, real server mixin methods.
+``ChatSorcarAgent`` worktree, real server mixin methods.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -62,17 +62,16 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-rename"
-        self.agent = WorktreeSorcarAgent("wt-rename-test")
+        self.agent = ChatSorcarAgent("wt-rename-test")
         self.state = agent_state.AgentState(
             "task-wt-rename",
             agent=self.agent,
             tab_id=self.tab_id,
             server_owned=True,
         )
-        self.state.use_worktree = True
         agent_state.register(self.state)
-        wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
-        assert wt_work_dir is not None
+        self.agent.work_dir = self.repo
+        assert self.agent.create_worktree().startswith("Created worktree ")
         assert self.agent._wt is not None
         self.wt_dir = str(self.agent._wt.wt_dir)
 

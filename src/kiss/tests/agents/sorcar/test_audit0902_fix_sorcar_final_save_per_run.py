@@ -44,8 +44,8 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 _COLUMNS = (
-    "model", "work_dir", "is_parallel", "is_worktree", "tokens", "cost",
-    "steps", "max_budget", "auto_commit_mode",
+    "model", "work_dir", "is_parallel", "tokens", "cost",
+    "steps", "max_budget",
 )
 
 
@@ -137,12 +137,10 @@ def test_setup_failure_on_reused_agent_records_this_runs_settings_and_zero_usage
         "model": "claude-fable-5-1",
         "work_dir": str(first_dir.resolve()),
         "is_parallel": 1,
-        "is_worktree": 0,
         "tokens": 1234,
         "cost": pytest.approx(12.34),
         "steps": 7,
         "max_budget": pytest.approx(20.0),
-        "auto_commit_mode": 1,
     }
 
     with pytest.raises(RuntimeError, match="recording unavailable"):
@@ -160,12 +158,10 @@ def test_setup_failure_on_reused_agent_records_this_runs_settings_and_zero_usage
         "model": "gpt-5.6-sol",
         "work_dir": str(second_dir.resolve()),
         "is_parallel": 0,
-        "is_worktree": 0,
         "tokens": 0,
         "cost": 0.0,
         "steps": 0,
         "max_budget": pytest.approx(1.5),
-        "auto_commit_mode": 1,
     }
     # The first run's row is untouched.
     assert _row(first_id)["tokens"] == 1234

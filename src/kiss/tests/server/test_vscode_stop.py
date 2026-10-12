@@ -127,12 +127,6 @@ class TestVSCodeServerStop(unittest.TestCase):
             if task_thread is not None:
                 task_thread.join(timeout=60)
             agent_state.agent_states.clear()
-            # A spare-worktree refill may have been scheduled for this repo
-            # (a background ``git worktree add``); join and remove it so
-            # the test does not leave git running.
-            from kiss.agents.sorcar import worktree_pool
-
-            worktree_pool.discard_all()
 
 
 class TestForceStopMechanism(unittest.TestCase):

@@ -38,23 +38,10 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
 from typing import Any
-
-import pytest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-
-
-@pytest.fixture
-def clean_registry() -> Iterator[None]:
-    """Run with an empty agent-state registry and leave it empty."""
-    agent_state.agent_states.clear()
-    try:
-        yield
-    finally:
-        agent_state.agent_states.clear()
 
 
 def _make_remote_server() -> Any:

@@ -75,6 +75,24 @@ export interface CronJobRow {
 }
 
 /**
+ * One machine in the right sidebar's Machines subpanel (see
+ * kiss/server/sidebar_panels.py machines_report).
+ */
+export interface MachineRow {
+  name: string;
+  /** The address as registered (`https://host:port`, `ssh user@host`). */
+  address: string;
+  /** The host's IP address (the host name when it does not resolve). */
+  ip: string;
+  /** The daemon port, or an SSH machine's local tunnel port (0 while closed). */
+  port: number;
+  local: boolean;
+  status: 'reachable' | 'unreachable';
+  /** Why the machine is unreachable; '' otherwise. */
+  error: string;
+}
+
+/**
  * One third-party agent in the right sidebar's Apps subpanel (see
  * kiss/agents/third_party_agents/auth_status.py).
  */
@@ -118,17 +136,12 @@ export interface MetaPanelValues {
   steps: string;
   time: string;
   timeColor: string;
-  machine: string;
   workdir: string;
   maxBudget: string;
   /** The task's start time, localized. */
   date: string;
   /** The task's base model name. */
   model: string;
-  /** 'worktree' or 'no worktree'. */
-  worktree: string;
-  /** 'parallel' or 'sequential'. */
-  parallel: string;
   chatId: string;
   /** The task id, suffixed ' (subagent)' for a subagent's task. */
   taskId: string;
@@ -142,12 +155,13 @@ export type FromWebviewMessage =
       prompt: string;
       model: string;
       attachments: Attachment[];
-      useWorktree?: boolean;
       isParallel?: boolean;
-      autoCommit?: boolean;
       useWebTools?: boolean;
       tabId?: string;
       workDir?: string;
+      // The registered machine the tab's tasks run on (the chat
+      // header's drop-down); '' or absent for this machine.
+      machine?: string;
       // The file tab the webview's user viewed last; the host's own
       // visible editor takes precedence when there is one.
       activeFile?: string;
@@ -163,6 +177,8 @@ export type FromWebviewMessage =
       type: 'getHistory';
       query?: string;
       tag?: string;
+      machine?: string;
+      workDir?: string;
       offset?: number;
       generation?: number;
     }
@@ -272,8 +288,8 @@ export type FromWebviewMessage =
   | {
       type: 'ready';
       tabId?: string;
-      /** The only registry tab this client shows (editor-tab panel):
-       *  the daemon replays just that tab instead of every bound one. */
+      /** The only registry tab the daemon should replay (the history
+       *  and Task Info panels name their never-bound root: no replay). */
       singleTabId?: string;
       restoredTabs?: Array<{
         tabId: string;
@@ -289,6 +305,9 @@ export type FromWebviewMessage =
       id?: string;
       taskId?: string | number | null;
       tabId?: string;
+      // The transcript goes to the sending connection only (the fetch
+      // of a tab whose replay the daemon deferred on `ready`).
+      scoped?: boolean;
     }
   | {type: 'getWelcomeInfo'}
   // activeFile / activeFileContent: the file tab the webview's user
@@ -312,12 +331,6 @@ export type FromWebviewMessage =
       type: 'worktreeAction';
       action: 'merge' | 'discard' | 'nothing';
       tabId?: string;
-    }
-  | {
-      type: 'mainTreeAction';
-      action: 'discard' | 'nothing';
-      tabId?: string;
-      workDir?: string;
     }
   | {type: 'autocommitAction'; tabId?: string; workDir?: string}
   | {
@@ -407,11 +420,11 @@ export type FromWebviewMessage =
   | {type: 'voiceAck'}
   | {type: 'voiceDropped'; tabId?: string; text: string}
   // Editor-tabs mode (host-only, never forwarded to the daemon): the
-  // webview's root chat tab renamed itself or its task's status
-  // changed, so the hosting editor tab should follow. `state` mirrors
+  // chat on screen changed (switched, renamed, or its task's status
+  // changed), so the hosting editor tab should follow. `state` mirrors
   // the internal tab strip's status icon: '' (no task yet), 'running',
   // 'ok' or 'fail'.
-  | {type: 'panelTitle'; title: string; tabId?: string; state?: string}
+  | {type: 'panelTitle'; title: string; state?: string}
   // Editor-tabs mode: a task in this panel just finished — bring the
   // hosting editor tab forward (sidebar mode's finished-task switch).
   | {type: 'revealPanel'}
@@ -424,31 +437,23 @@ export type FromWebviewMessage =
   // mode maximizes the secondary side bar over the editor area,
   // editor-tabs mode brings the Task Info view up beside the chat.
   | {type: 'taskStarted'}
-  // Editor-tabs mode: open another chat as a new editor tab — a fresh
-  // conversation when chatId is absent, a history resume otherwise.
+  // Editor-tabs mode, from the history and Task Info panels: show a
+  // chat in the chat editor tab — a history click (chatId / taskId /
+  // title, chatId absent when there is nothing to resume), the Apps
+  // subpanel's "connect this app" launch (pendingText submitted as a
+  // new chat's first task, autoSubmit), or a Recommendations row
+  // (pendingText put in a new chat's composer, not submitted).
   | {
       type: 'openChatPanel';
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
-      // Fresh conversations only: the opening webview's composer draft,
-      // stamped onto the new panel as data-kiss-pending-text so the new
-      // chat's textarea starts out with the same text.
       pendingText?: string;
-      // Fresh conversations only: submit pendingText as the new chat's
-      // first task as soon as the panel is ready (the Apps subpanel's
-      // "connect this app" launch).
       autoSubmit?: boolean;
     }
-  // Editor-tabs mode: close this panel — because the daemon's registry
-  // no longer lists its chat tab (another client closed it; retire
-  // absent/false), or because the user closed the root chat inside the
-  // panel (retire true: the host must also retire the tab from the
-  // registry).
-  | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
   | {type: 'setEditorTabsMode'; enabled: boolean}
-  // The "Working directory" panel ("..." menu): make `path` the global
+  // The chat header's work-dir drop-down: make `path` the global
   // working directory every task (on every surface) runs in.  The host
   // checks the folder exists (it never opens it as the window's
   // workspace), forwards `setWorkDir` to the daemon and answers
@@ -474,14 +479,41 @@ export type FromWebviewMessage =
   // `cronJobs` / `appsStatus` reply. `refresh` re-probes the apps'
   // authentication state instead of serving the daemon's cached one.
   | {type: 'getCronJobs'}
+  // A Schedule row's edit / run / pause / delete button, or the
+  // header's `+` form (`create`: no jobId; `kind` is `prompt` or
+  // `command`): the daemon applies the action and answers with a
+  // fresh `cronJobs` reply.
+  | {
+      type: 'cronAction';
+      action: 'create' | 'remove' | 'pause' | 'resume' | 'run_now' | 'update';
+      jobId?: string;
+      name?: string;
+      schedule?: string;
+      what?: string;
+      kind?: 'prompt' | 'command';
+    }
+  // The right sidebar's Machines subpanel: the daemon answers with a
+  // direct `machines` reply (`refresh` pings every machine again); an
+  // add / delete button sends machineAction, answered the same way.
+  | {type: 'getMachines'; refresh?: boolean}
+  | {
+      type: 'machineAction';
+      action: 'add' | 'remove';
+      name: string;
+      address?: string;
+      password?: string;
+    }
   | {type: 'getAppsStatus'; refresh?: boolean}
   // The right sidebar's Spend subpanel: the daemon answers with a
   // direct `spendReport` reply.
   | {type: 'getSpendReport'}
-  // Editor-tabs mode (host-only): this panel's live task-info values —
-  // the mirror the secondary sidebar's Task Info view renders for the
-  // ACTIVE panel. taskUpdate is the running task's task-update report
-  // state (null when there is nothing to show).
+  // The right sidebar's Recommendations subpanel: the daemon answers
+  // with a direct `recommendations` reply.
+  | {type: 'getRecommendations'}
+  // Editor-tabs mode (host-only): the chat editor tab's live task-info
+  // values — the mirror the secondary sidebar's Task Info view renders.
+  // taskUpdate is the running task's task-update report state (null
+  // when there is nothing to show).
   | {
       type: 'metaUpdate';
       values: MetaPanelValues;
@@ -525,17 +557,6 @@ type ToWebviewMessageBody =
       error?: string;
       hostMicUnavailable?: boolean;
     }
-  | {type: 'defaultModel'; model: string}
-  | {type: 'kissConfig'; config: Record<string, unknown>}
-  | {type: 'kissConfigSaved'; ok: boolean; error?: string}
-  | {
-      type: 'voiceWakeEvent';
-      event: 'ready' | 'wake' | 'transcribing' | 'no_speech' | 'speech';
-      text?: string;
-      speaker?: number | null;
-      language?: string | null;
-    }
-  | {type: 'voiceWakeState'; listening: boolean; error?: string}
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
@@ -849,13 +870,15 @@ type ToWebviewMessageBody =
         model: string;
         work_dir: string;
         is_parallel: boolean;
-        is_worktree: boolean;
         start_ts?: number;
         max_budget?: number;
         chat_id: string;
         task_id: string;
         is_subagent: boolean;
         parent_task_id?: string;
+        // The machine the run is on (platform.node()); absent from a
+        // replay synthesised for an older row.
+        host?: string;
         // The run configuration (kiss.agents.sorcar.run_config): the
         // SEA the task ran as, its kind, the effective tool
         // profile, the caller's timeout, the setting keys inherited
@@ -915,6 +938,12 @@ type ToWebviewMessageBody =
       offset?: number;
       generation?: number;
       dateRange?: {min: number | null; max: number | null};
+      machines?: string[];
+      localMachine?: string;
+      // The WORKDIR filter's options: the chat header's working
+      // directories (the current one, then the ones adopted before,
+      // newest first).
+      workDirs?: string[];
     }
   | {
       type: 'files';
@@ -953,7 +982,7 @@ type ToWebviewMessageBody =
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
   | {type: 'setTaskText'; text: string}
-  | {type: 'appendToInput'; text: string}
+  | {type: 'appendToInput'; text: string; replace?: boolean}
   | {type: 'insertAndSubmit'; text: string}
   | {type: 'focusInput'}
   | {
@@ -970,6 +999,15 @@ type ToWebviewMessageBody =
       originalBranch: string;
       changedFiles: string[];
       hasConflict?: boolean;
+      /** One entry per repository the task isolated; the fields above describe the work dir's. */
+      worktrees?: Array<{
+        repoRoot: string;
+        branch: string;
+        worktreeDir: string;
+        originalBranch: string | null;
+        changedFiles: string[];
+        hasConflict: boolean;
+      }>;
     }
   | {type: 'worktree_progress'; message: string}
   | {
@@ -977,19 +1015,15 @@ type ToWebviewMessageBody =
       success: boolean;
       message: string;
       kept?: boolean;
+      /** The one worktree this result is about (commit_and_merge: one
+       *  per repository); absent for a merge/discard of everything pending. */
+      worktreeDir?: string;
       // A failure the user can retry (merge_flow.py: deferred discard
       // while a sub-agent still holds the worktree): the webview keeps
       // the Merge / Discard bar instead of stripping it.
       retryable?: boolean;
     }
-  | {
-      type: 'main_tree_done';
-      workDir?: string;
-      changedFiles: string[];
-    }
-  | {type: 'main_tree_result'; success: boolean; message: string}
   | {type: 'warning'; message: string; tabId?: string}
-  | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {
       type: 'autocommit_done';
       success: boolean;
@@ -1047,14 +1081,10 @@ type ToWebviewMessageBody =
   // chat tab's working tree — the editor-title git-commit button's
   // action (same flow as the settings drawer's Git Commit button).
   | {type: 'gitCommit'}
-  // Host (editor-tabs mode): bring one of the panel's own chat's tasks
-  // on screen — a history-panel click on a task of a chat whose editor
-  // tab is already open. The webview scrolls to the task's transcript
-  // region, or replays the task when it is not rendered.
-  | {type: 'showTask'; taskId: string}
-  // Host (sidebar mode): a primary-sidebar history panel click — open
-  // the chat in THIS sidebar chat view, mirroring the webview's own
-  // in-page history rows (switch tab / resume / read-only fallback).
+  // Host: a primary-sidebar history panel click — open the chat in
+  // THIS chat webview (the sidebar view or the chat editor tab),
+  // mirroring the webview's own in-page history rows (switch tab /
+  // resume / read-only fallback).
   | {
       type: 'openChatFromHistory';
       chatId: string;
@@ -1091,8 +1121,8 @@ type ToWebviewMessageBody =
   // panel, the remote Explorer's check mark, or a settings save); the
   // webview re-scopes its Explorer, history and panel to `workDir`.
   | {type: 'workDirChanged'; workDir: string}
-  // The "Working directory" panel's openWorkDir / pickWorkDir named
-  // something that is not a folder; shown inside the panel.
+  // The chat header drop-down's openWorkDir / pickWorkDir named
+  // something that is not a folder; shown as an error notification.
   | {type: 'workDirError'; text: string}
   // The folder asked for by openWorkDir / pickWorkDir exists: `path`
   // (symlinks and `..` resolved) is now the global working directory;
@@ -1126,6 +1156,16 @@ type ToWebviewMessageBody =
       startTs?: number;
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
+  | {
+      // The daemon's answer to `ready` for a registry tab other than
+      // the one on screen: the tab's transcript was not sent; the
+      // webview fetches it (a `scoped` resumeSession) when the user
+      // opens the tab.
+      type: 'replay_deferred';
+      tabId: string;
+      chatId: string;
+      taskId: string;
+    }
   | {
       // Transient picker label update: 'agent' is the model a running
       // agent switched itself to, 'restore' the end-of-task revert to
@@ -1190,7 +1230,18 @@ type ToWebviewMessageBody =
   | {type: 'showForRun'}
   // The daemon's direct reply to `getCronJobs`: the scheduled cron jobs
   // (kiss/server/sidebar_panels.py cron_jobs_report).
-  | {type: 'cronJobs'; jobs: CronJobRow[]}
+  // A reply to `cronAction` also names the `action` and carries the
+  // `error` text when the daemon refused it.
+  | {type: 'cronJobs'; jobs: CronJobRow[]; action?: string; error?: string}
+  // The daemon's direct reply to `getMachines` / `machineAction`: the
+  // local machine, then every registered one with its reachability.
+  | {
+      type: 'machines';
+      machines: MachineRow[];
+      checkedAt: number;
+      action?: string;
+      error?: string;
+    }
   // The daemon's direct reply to `getAppsStatus`: every third-party
   // agent's authentication state and the epoch ms it was probed (0
   // before the first successful probe).
@@ -1205,6 +1256,10 @@ type ToWebviewMessageBody =
       totalByModel: SpendSum[];
       daysByModel: Record<string, SpendSum[]>;
     }
+  // The daemon's direct reply to `getRecommendations`: the five tasks
+  // the last `/recommendations` run suggested and when it stored them
+  // (epoch ms, 0 before the first run).
+  | {type: 'recommendations'; generatedAt: number; tasks: string[]}
   // Host relay to the ACTIVE chat panel: the Task Info view's refresh
   // button was pressed — poll `getTaskUpdate` with `refresh: true`.
   | {type: 'refreshTaskUpdate'}
@@ -1239,7 +1294,6 @@ export interface AgentCommand {
     | 'autocommitAction'
     | 'getInputHistory'
     | 'worktreeAction'
-    | 'mainTreeAction'
     | 'getAdjacentTask'
     | 'setWorkDir'
     | 'getConfig'
@@ -1257,8 +1311,12 @@ export interface AgentCommand {
     | 'updateWhenIdle'
     | 'getTaskUpdate'
     | 'getCronJobs'
+    | 'cronAction'
+    | 'getMachines'
+    | 'machineAction'
     | 'getAppsStatus'
-    | 'getSpendReport';
+    | 'getSpendReport'
+    | 'getRecommendations';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -1283,10 +1341,27 @@ export interface AgentCommand {
   chatId?: number | string;
   taskId?: string | number | null;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'nothing';
-  useWorktree?: boolean;
+  action?:
+    | 'merge'
+    | 'discard'
+    | 'nothing'
+    | 'remove'
+    | 'pause'
+    | 'resume'
+    | 'run_now'
+    | 'update'
+    | 'create'
+    | 'add';
+  /** cronAction: the job; create and update also carry name, schedule, what. */
+  jobId?: string;
+  schedule?: string;
+  what?: string;
+  /** cronAction create: `prompt` or `command`. */
+  kind?: 'prompt' | 'command';
+  /** machineAction add: the machine's address and daemon password. */
+  address?: string;
+  password?: string;
   isParallel?: boolean;
-  autoCommit?: boolean;
   useWebTools?: boolean;
   classifyTasks?: boolean;
   task?: string;
@@ -1319,7 +1394,7 @@ export interface AgentCommand {
   token?: string;
   /** getTaskUpdate: ask the /ask agent now; getAppsStatus: re-probe. */
   refresh?: boolean;
-  /** ready: the only registry tab an editor-tab panel shows. */
+  /** ready: the only registry tab to replay (see FromWebviewMessage). */
   singleTabId?: string;
   restoredTabs?: Array<{
     tabId: string;

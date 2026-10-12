@@ -40,7 +40,7 @@ from typing import Any, cast
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 
@@ -81,7 +81,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
         ``(worker_thread, task_id)`` once the worker is inside the agent
         run and ``is_task_active`` has been set.
     """
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = AgentState(
         f"pre-{tab_id}",
         agent=agent,

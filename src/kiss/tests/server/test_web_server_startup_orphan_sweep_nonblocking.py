@@ -43,7 +43,6 @@ real local WSS endpoint.
 from __future__ import annotations
 
 import asyncio
-import socket
 import sqlite3
 import tempfile
 import time
@@ -53,19 +52,12 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port
 
 _SENTINEL = "Agent Failed Abruptly"
 _RECOVERED = "Task terminated unexpectedly (process killed)"
 
 _STARTUP_BUDGET_SECS = 12.0
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
 
 
 def _disown(task_id: str) -> None:
@@ -165,7 +157,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         started = time.monotonic()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             use_tunnel=False,
             url_file=self.url_file,
             local_endpoint_file=self.endpoint_file,
@@ -221,7 +213,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         started = time.monotonic()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             use_tunnel=False,
             url_file=self.url_file,
             local_endpoint_file=self.endpoint_file,

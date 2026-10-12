@@ -37,8 +37,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -59,7 +59,7 @@ class _CapturePrinter(JsonPrinter):
         super().broadcast(event)
 
 
-class _StopDuringRetireAgent(WorktreeSorcarAgent):
+class _StopDuringRetireAgent(ChatSorcarAgent):
     """Agent whose pending-worktree retire presses Stop and outlasts the watchdog's grace."""
 
     server: VSCodeServer
@@ -68,7 +68,7 @@ class _StopDuringRetireAgent(WorktreeSorcarAgent):
     run_entered = False
     claimed_during_retire = False
 
-    def _retire_previous_worktree(self) -> str | None:
+    def _retire_previous_worktree(self) -> None:
         """Press Stop, dwell 1.6 s (an injection would land here), drop the pending worktree."""
         state = agent_state.find_by_tab(self.tab_id)
         self.claimed_during_retire = bool(
@@ -80,7 +80,6 @@ class _StopDuringRetireAgent(WorktreeSorcarAgent):
         time.sleep(1.6)
         self._wt = None
         self.retire_completed = True
-        return None
 
     def run(self, *args: Any, **kwargs: Any) -> str:
         """Record that the loop was reached (it must not be after a Stop)."""

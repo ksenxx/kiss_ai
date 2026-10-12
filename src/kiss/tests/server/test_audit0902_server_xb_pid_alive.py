@@ -17,30 +17,12 @@ the pidfile; ``KISS_HOME`` is restored afterwards.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
-
-import pytest
 
 from kiss.core.processes import pid_alive
 from kiss.server import web_server as ws
-
-
-@pytest.fixture
-def kiss_home(tmp_path: Path) -> Iterator[Path]:
-    """Point ``KISS_HOME`` at a throwaway directory for the pidfile."""
-    saved = os.environ.get("KISS_HOME")
-    os.environ["KISS_HOME"] = str(tmp_path)
-    try:
-        yield tmp_path
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = saved
 
 
 def _write_pidfile(home: Path, pid: int) -> None:

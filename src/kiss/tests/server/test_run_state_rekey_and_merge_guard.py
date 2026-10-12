@@ -105,7 +105,6 @@ class TestFinallyCleanupSurvivesRekey(_Harness):
         assert state.stop_event is None
         assert state.user_answer_queue is None
         assert not state.is_task_active
-        assert not state.is_running_non_wt
 
         status_off = [
             e for e in self._events_of("status") if e.get("running") is False

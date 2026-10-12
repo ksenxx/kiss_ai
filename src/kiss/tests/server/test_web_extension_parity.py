@@ -9,10 +9,11 @@ token-authenticated WSS) share one frontend (``media/main.js``) and one backend 
 (:meth:`RemoteAccessServer._dispatch_client_command`).  These tests
 lock in the behaviours that previously diverged between the two:
 
-* ``submit`` must forward the webview's ``autoCommit`` toggle into the
-  backend ``run`` command (the daemon's ``_handle_submit`` is now the
-  one submit path of both surfaces — the extension host forwards its
-  webview's ``submit`` over UDS — and used to drop the toggle).
+* ``submit`` must forward the webview's per-run fields (``useWebTools``,
+  ``activeFile``, ``useMemory``, ``classifyTasks``) into the backend
+  ``run`` command (the daemon's ``_handle_submit`` is now the one submit
+  path of both surfaces — the extension host forwards its webview's
+  ``submit`` over UDS — and used to drop such toggles).
 * ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` exactly
   like the extension's ``runUpdate()`` / ``installerPath.js`` — falling
   back to the curl bootstrap when the script is missing — and must
@@ -34,7 +35,6 @@ import os
 import shutil
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -44,20 +44,7 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.core.config import kiss_home
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _join_task_threads() -> None:
@@ -93,7 +80,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -116,7 +103,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(self) -> tuple[LocalReader, LocalWriter]:
@@ -295,96 +282,6 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             except Exception:
                 pass
 
-    async def test_submit_forwards_auto_commit_to_run(self) -> None:
-        """A webapp ``submit`` with ``autoCommit: true`` reaches the task.
-
-        ``task_runner`` flips ``tab.auto_commit_mode`` from the
-        ``run`` command's ``autoCommit``; the daemon's submit → run
-        translation (shared by the extension and the webapp) must carry
-        the toggle through.  Uses a stub agent (the pattern
-        ``_run_task`` explicitly supports for tests) so no LLM call is
-        made, and a fake API key so a model is "available".
-        """
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-        from kiss.core import config as config_module
-        from kiss.core.models.model_info import get_available_models
-        from kiss.server import agent_state
-
-        keys = config_module.DEFAULT_CONFIG
-        saved_key = keys.ANTHROPIC_API_KEY
-        keys.ANTHROPIC_API_KEY = "test-anthropic-key"
-        try:
-            available = get_available_models()
-            self.assertTrue(available, "no model available with fake key")
-            model = next(m for m in available if m.startswith("claude-"))
-
-            tab_id = "tab-parity-autocommit"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
-            ran = threading.Event()
-
-            def fake_run(**kwargs: Any) -> None:
-                ran.set()
-
-            agent.run = fake_run  # type: ignore[assignment]
-            # Pre-register an idle state carrying the stub agent;
-            # _cmd_run carries the previous state's agent over to the
-            # new run's state (the pattern _run_task supports for
-            # tests).
-            seed = agent_state.AgentState(
-                "parity-autocommit-seed",
-                agent=agent,
-                tab_id=tab_id,
-                server_owned=True,
-            )
-            agent_state.register(seed)
-
-            work_dir = Path(self.tmpdir) / "work"
-            work_dir.mkdir(parents=True, exist_ok=True)
-
-            reader, writer = await self._connect()
-            try:
-                await self._send(writer, {
-                    "type": "submit",
-                    "tabId": tab_id,
-                    "prompt": "do a thing",
-                    "model": model,
-                    "workDir": str(work_dir),
-                    "attachments": [],
-                    "useWorktree": False,
-                    "isParallel": False,
-                    "autoCommit": True,
-                })
-                _, seen = await self._drain_until(reader, "setTaskText")
-                self._assert_no_unknown_command(seen)
-                self.assertTrue(
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, ran.wait, 10.0,
-                    ),
-                    "stub agent.run never started",
-                )
-                deadline = time.monotonic() + 5.0
-                while time.monotonic() < deadline:
-                    live = agent_state.find_by_tab(tab_id)
-                    if live is not None and live.auto_commit_mode:
-                        break
-                    await asyncio.sleep(0.05)
-                live = agent_state.find_by_tab(tab_id)
-                assert live is not None
-                self.assertTrue(
-                    live.auto_commit_mode,
-                    "autoCommit was dropped on the submit → run path",
-                )
-            finally:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-        finally:
-            keys.ANTHROPIC_API_KEY = saved_key
-            await asyncio.to_thread(_join_task_threads)
-            agent_state.agent_states.clear()
-
     async def test_submit_forwards_web_tools_to_run(self) -> None:
         """A webapp ``submit`` with ``useWebTools: false`` reaches the agent.
 
@@ -394,7 +291,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         ``task_runner`` passes ``web_tools=False`` to the agent instead
         of silently falling back to the persisted config default.
         """
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.core import config as config_module
         from kiss.core.models.model_info import get_available_models
         from kiss.server import agent_state
@@ -408,7 +305,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             model = next(m for m in available if m.startswith("claude-"))
 
             tab_id = "tab-parity-webtools"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_kwargs: dict[str, Any] = {}
 
@@ -437,9 +334,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "model": model,
                     "workDir": str(work_dir),
                     "attachments": [],
-                    "useWorktree": False,
                     "isParallel": False,
-                    "autoCommit": True,
                     "useWebTools": False,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
@@ -474,7 +369,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         its visible editor; the submit → run translation must forward
         it so ``task_runner`` passes it as ``current_editor_file``.
         """
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.core import config as config_module
         from kiss.core.models.model_info import get_available_models
         from kiss.server import agent_state
@@ -488,7 +383,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             model = next(m for m in available if m.startswith("claude-"))
 
             tab_id = "tab-parity-activefile"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_kwargs: dict[str, Any] = {}
 
@@ -520,9 +415,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "workDir": str(work_dir),
                     "activeFile": str(viewed),
                     "attachments": [],
-                    "useWorktree": False,
                     "isParallel": False,
-                    "autoCommit": True,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
                 self._assert_no_unknown_command(seen)
@@ -557,7 +450,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         ``use_memory=False`` to the agent instead of silently falling
         back to the persisted ``use_memory`` config default.
         """
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.core import config as config_module
         from kiss.core.models.model_info import get_available_models
         from kiss.server import agent_state
@@ -571,7 +464,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             model = next(m for m in available if m.startswith("claude-"))
 
             tab_id = "tab-parity-usememory"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_kwargs: dict[str, Any] = {}
 
@@ -600,9 +493,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "model": model,
                     "workDir": str(work_dir),
                     "attachments": [],
-                    "useWorktree": False,
                     "isParallel": False,
-                    "autoCommit": True,
                     "useMemory": False,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
@@ -640,8 +531,8 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         ``classify_task_for_run`` instead of silently falling back to
         the persisted ``classify_tasks`` config default.
         """
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
         from kiss.core import config as config_module
         from kiss.core.models.model_info import get_available_models
         from kiss.server import agent_state
@@ -656,7 +547,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             model = next(m for m in available if m.startswith("claude-"))
 
             tab_id = "tab-parity-classify"
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_enabled: list[Any] = []
 
@@ -691,9 +582,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "model": model,
                     "workDir": str(work_dir),
                     "attachments": [],
-                    "useWorktree": False,
                     "isParallel": False,
-                    "autoCommit": True,
                     "classifyTasks": False,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")

@@ -425,8 +425,7 @@ body.remote-chat .file-chip.error {
 }
 
 body.remote-chat #sidebar,
-body.remote-chat #tricks-panel,
-body.remote-chat #workdir-panel {
+body.remote-chat #tricks-panel {
   background: var(--surface);
   border-right: 1px solid var(--border-soft);
 }
@@ -695,17 +694,22 @@ body.remote-chat #meta-info-content {
    docked desktop panel's "hide" while it lies over an open content
    pane (both contexts set `display`; main.css hides it elsewhere).
    It sits over the first section's header row, which keeps its text
-   clear of it. */
+   clear of it.  Its box ends with that row (the panel's 16px padding
+   plus the row, --meta-hdr-row from main.css) and the glyph sits on
+   the row: the header after a collapsed first section lies below the
+   button, clear of its taps. */
 body.remote-chat #meta-close {
   position: absolute;
-  top: 12px;
+  top: var(--space-1);
   right: 12px;
+  height: calc(var(--space-4) - var(--space-1) + var(--meta-hdr-row));
   background: none;
   border: none;
   color: var(--dim);
   font-size: var(--fs-2xl);
+  line-height: 1;
   cursor: pointer;
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-1-5) var(--space-2) 0;
   border-radius: var(--radius-sm);
 }
 
@@ -785,6 +789,15 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     margin-right: var(--meta-w, var(--meta-panel-w));
     transition: margin-left var(--dur-slow) var(--ease);
 
+    /* The containing block of the promptlet and working-directory
+       sheets (the grid-placed rule further down).  The closed sheet is
+       translated below #app, which clips it: `clip`, not `hidden`,
+       because a hidden-overflow box is still a scroll container that
+       the focus moving into the opening sheet would scroll, leaving
+       the chat shifted up by the sheet's height. */
+    position: relative;
+    overflow: clip;
+
     /* #app is a grid.  With no file, browser or terminal tab open
        (no body.content-pane-open) it is the CHAT pane alone: the
        group strip, the machine name, the chat transcript and the
@@ -839,6 +852,22 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
   body.remote-chat.remote-desktop:not(.content-pane-open) #content-tab-area,
   body.remote-chat.remote-desktop:not(.content-pane-open) #pane-resizer {
     display: none;
+  }
+
+  /* The Inject promptlet and Working directory sheets, and the scrims
+     behind them, stay INSIDE the chat pane instead of spanning the
+     window: #app is their containing block and the grid places them
+     in the `chat` column across every row, so the sheet rises from
+     the composer's bottom edge and stops at the history panel, the
+     content pane's handle and the docked task-info panel, which the
+     scrim leaves undimmed and usable.  Their main.css insets (5% /
+     90% / bottom: 0) now measure that column (#app is positioned and
+     clips, see its rule above). */
+  body.remote-chat.remote-desktop #tricks-panel,
+  body.remote-chat.remote-desktop #tricks-overlay {
+    position: absolute;
+    grid-column: chat;
+    grid-row: 1 / -1;
   }
 
   /* Hiding and showing the task-info panel over the content pane
@@ -1017,15 +1046,13 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
 @media (width >= 900px) {
   body.remote-chat.remote-desktop #tab-bar { grid-area: strip; }
 
-  /* The machine name shares its row with the content pane's tab row:
-     the strip fills the row's height, so its bottom hairline runs on
-     from the tab row's across the handle, and the name sits at the
-     row's vertical centre (align-content on a block keeps the
-     ellipsis a flex or grid container would drop). */
-  body.remote-chat.remote-desktop #chat-machine {
+  /* The chat header ("machine: working directory") shares its row
+     with the content pane's tab row: the strip fills the row's
+     height, so its bottom hairline runs on from the tab row's across
+     the handle, and the names sit at the row's vertical centre. */
+  body.remote-chat.remote-desktop #chat-header {
     grid-area: machine;
     align-self: stretch;
-    align-content: center;
   }
 
   body.remote-chat.remote-desktop #tab-status-bar { grid-area: status; }

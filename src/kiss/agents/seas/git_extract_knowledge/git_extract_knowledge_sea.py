@@ -230,7 +230,9 @@ docstring that mentions B. When you cannot verify a claim, leave it out.
 describe it as current.
 - Never edit, commit or push anything in the repository; the memory is the only output.
 - Plain, specific prose. No filler sentences, no marketing language, no emoji.
-- Call the `summary` tool every ten steps when it is available.
+- Call the `summary` tool every ten steps when it is available: when the `Steps:` \
+footer of a tool result ends in 9, make the next call `summary`; the 10th, 20th, ... \
+call is refused otherwise and has to be repeated.
 - The final `finish` summary is HTML (`<h3>`, `<p>`, `<ul>`), never Markdown.
 """
 

@@ -117,23 +117,18 @@ function makeRow(overrides) {
   );
 }
 
-function enableWorkspaceFilter(win) {
-  const ws = win.document.getElementById('hf-workspace');
-  ws.checked = true;
-  ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
-
-function testRunningRowVisibleDespiteResolvedWorkDirVariant() {
+// The CHATS list is not scoped to the working directory: every row of
+// the history shows whatever folder its task ran in, running or not,
+// and whatever the client's own working directory is.
+function testRowsFromEveryWorkDirVisible() {
   const {win, posted} = makeWebview();
 
   send(win, {
     type: 'configData',
-    config: {work_dir: '/var/repo/alpha'},
+    config: {work_dir: '/repo/alpha'},
     apiKeys: {},
   });
-
   openSidebar(win);
-  enableWorkspaceFilter(win);
   assert.ok(lastGetHistory(posted), 'opening the sidebar must post getHistory');
 
   posted.length = 0;
@@ -154,6 +149,17 @@ function testRunningRowVisibleDespiteResolvedWorkDirVariant() {
         work_dir: '/private/var/repo/alpha',
         endTs: 0,
       }),
+      makeRow({
+        task_id: 102,
+        title: 'other workspace task',
+        work_dir: '/repo/beta',
+      }),
+      makeRow({
+        task_id: 103,
+        title: 'windows task',
+        work_dir: 'C:\\Users\\me\\proj',
+      }),
+      makeRow({task_id: 104, title: 'no work dir task', work_dir: ''}),
     ],
     offset: 0,
     generation: fetched.generation,
@@ -166,63 +172,28 @@ function testRunningRowVisibleDespiteResolvedWorkDirVariant() {
     'running',
     'row must be stamped data-category=running',
   );
-  assert.notStrictEqual(
-    row.style.display,
-    'none',
-    'REGRESSION: a just-started RUNNING task must be VISIBLE in the ' +
-      'History panel even when its early-persisted work_dir is a ' +
-      'resolved path variant of the client workspace — the Workspace ' +
-      'filter must never hide a running row',
+  assert.deepStrictEqual(
+    visibleRows(win),
+    ['just-started task', 'other workspace task', 'windows task', 'no work dir task'],
+    'every row must be visible whatever its work_dir: the CHATS list has ' +
+      'no workspace filter',
+  );
+  assert.strictEqual(
+    win.document.getElementById('hf-workspace'),
+    null,
+    'the Workspace chip is gone from the CHATS filter bar',
   );
 
-  win.close();
-  console.log('  ok - running row visible despite resolved work_dir variant');
-}
-
-function testRunningRowVisibleFromOtherWorkspace() {
-  const {win, posted} = makeWebview();
-
+  // A change of the working directory does not hide anything either.
   send(win, {
     type: 'configData',
-    config: {work_dir: '/repo/alpha'},
+    config: {work_dir: '/repo/gamma'},
     apiKeys: {},
   });
-  openSidebar(win);
-  enableWorkspaceFilter(win);
-  const fetched = lastGetHistory(posted);
-
-  send(win, {
-    type: 'history',
-    sessions: [
-      makeRow({
-        task_id: 102,
-        title: 'running elsewhere',
-        is_running: true,
-        work_dir: '/repo/beta',
-        endTs: 0,
-      }),
-      makeRow({
-        task_id: 103,
-        title: 'completed elsewhere',
-        is_running: false,
-        work_dir: '/repo/beta',
-      }),
-    ],
-    offset: 0,
-    generation: fetched.generation,
-  });
-
-  const visible = visibleRows(win).sort();
-  assert.deepStrictEqual(
-    visible,
-    ['running elsewhere'],
-    'a RUNNING row must always pass the Workspace filter while a ' +
-      'completed row from another workspace stays hidden; got ' +
-      JSON.stringify(visible),
-  );
+  assert.strictEqual(visibleRows(win).length, 4);
 
   win.close();
-  console.log('  ok - running row visible from other workspace, completed hidden');
+  console.log('  ok - rows from every work_dir are visible');
 }
 
 function testUncheckingRunningStillHidesRunningRow() {
@@ -234,7 +205,6 @@ function testUncheckingRunningStillHidesRunningRow() {
     apiKeys: {},
   });
   openSidebar(win);
-  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {
@@ -261,8 +231,7 @@ function testUncheckingRunningStillHidesRunningRow() {
   assert.deepStrictEqual(
     visibleRows(win),
     [],
-    'unchecking the Running filter must still hide running rows — ' +
-      'the workspace always-pass rule must not defeat the category filter',
+    'unchecking the Running filter must hide running rows',
   );
 
   win.close();
@@ -291,137 +260,15 @@ function testTasksUpdatedRefetchesHistoryWhileSidebarOpen() {
   console.log('  ok - tasks_updated re-fetches history while sidebar open');
 }
 
-function testTrailingSlashNormalizedMatchForCompletedRows() {
-  const {win, posted} = makeWebview();
-
-  send(win, {
-    type: 'configData',
-    config: {work_dir: '/repo/alpha'},
-    apiKeys: {},
-  });
-  openSidebar(win);
-  enableWorkspaceFilter(win);
-  const fetched = lastGetHistory(posted);
-
-  send(win, {
-    type: 'history',
-    sessions: [
-      makeRow({
-        task_id: 105,
-        title: 'completed with trailing slash',
-        is_running: false,
-        work_dir: '/repo/alpha/',
-      }),
-      makeRow({
-        task_id: 106,
-        title: 'completed different dir',
-        is_running: false,
-        work_dir: '/repo/beta',
-      }),
-    ],
-    offset: 0,
-    generation: fetched.generation,
-  });
-
-  const visible = visibleRows(win).sort();
-  assert.deepStrictEqual(
-    visible,
-    ['completed with trailing slash'],
-    'the Workspace comparison must normalize trailing slashes ' +
-      '(/repo/alpha/ matches /repo/alpha) while still hiding rows ' +
-      `from a genuinely different dir; got ${JSON.stringify(visible)}`,
-  );
-
-  win.close();
-  console.log('  ok - trailing-slash normalized match for completed rows');
-}
-
-function testClientTrailingSlashNormalizes() {
-  const {win, posted} = makeWebview();
-
-  send(win, {
-    type: 'configData',
-    config: {work_dir: '/repo/alpha/'},
-    apiKeys: {},
-  });
-  openSidebar(win);
-  enableWorkspaceFilter(win);
-  const fetched = lastGetHistory(posted);
-
-  send(win, {
-    type: 'history',
-    sessions: [
-      makeRow({
-        task_id: 107,
-        title: 'completed exact',
-        is_running: false,
-        work_dir: '/repo/alpha',
-      }),
-    ],
-    offset: 0,
-    generation: fetched.generation,
-  });
-
-  assert.deepStrictEqual(
-    visibleRows(win),
-    ['completed exact'],
-    'a trailing slash on the CLIENT work_dir must also normalize away',
-  );
-
-  win.close();
-  console.log('  ok - client-side trailing slash normalizes');
-}
-
-function testWindowsPathVariantsNormalize() {
-  const {win, posted} = makeWebview();
-
-  send(win, {
-    type: 'configData',
-    config: {work_dir: 'C:\\Repo\\Alpha\\'},
-    apiKeys: {},
-  });
-  openSidebar(win);
-  enableWorkspaceFilter(win);
-  const fetched = lastGetHistory(posted);
-
-  send(win, {
-    type: 'history',
-    sessions: [
-      makeRow({
-        task_id: 108,
-        title: 'completed Windows path variant',
-        is_running: false,
-        work_dir: 'c:/repo/alpha',
-      }),
-    ],
-    offset: 0,
-    generation: fetched.generation,
-  });
-
-  assert.deepStrictEqual(
-    visibleRows(win),
-    ['completed Windows path variant'],
-    'Windows backslash/forward-slash, drive-case, component-case, and ' +
-      'trailing-separator variants must compare as the same workspace',
-  );
-
-  win.close();
-  console.log('  ok - Windows path separator/case variants normalize');
-}
-
 function runTests() {
-  testRunningRowVisibleDespiteResolvedWorkDirVariant();
-  testRunningRowVisibleFromOtherWorkspace();
+  testRowsFromEveryWorkDirVisible();
   testUncheckingRunningStillHidesRunningRow();
   testTasksUpdatedRefetchesHistoryWhileSidebarOpen();
-  testTrailingSlashNormalizedMatchForCompletedRows();
-  testClientTrailingSlashNormalizes();
-  testWindowsPathVariantsNormalize();
 }
 
 try {
   runTests();
-  console.log('\n7 passed, 0 failed');
+  console.log('\n3 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

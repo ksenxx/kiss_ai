@@ -18,8 +18,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import ssl
 import tempfile
 import threading
 from collections.abc import Coroutine
@@ -32,6 +30,7 @@ from websockets.asyncio.client import connect
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _PY_SOURCE = 'def greet(name):\n    return "hello " + name\n'
 
@@ -44,22 +43,6 @@ _HTML_SOURCE = (
 
 
 _MD_SOURCE = "# KISS-MD-TITLE\n\nSome **bold** words.\n"
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 class _ServerHarness:
@@ -94,7 +77,7 @@ class _ServerHarness:
         certfile = tmp / "cert.pem"
         keyfile = tmp / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.base_url = f"https://127.0.0.1:{self.port}"
         self.ws_url = f"wss://127.0.0.1:{self.port}/ws"
         self.server = RemoteAccessServer(
@@ -146,7 +129,7 @@ def harness():
 async def _ws_request(harness: _ServerHarness, payload: dict) -> dict:
     """Authenticate over wss:// , send *payload*, return the
     ``fileContent`` reply."""
-    async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
+    async with connect(harness.ws_url, ssl=no_verify_ssl()) as ws:
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         while True:
             msg = json.loads(await asyncio.wait_for(ws.recv(), 30))

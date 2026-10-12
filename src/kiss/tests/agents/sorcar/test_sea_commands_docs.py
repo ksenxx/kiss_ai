@@ -160,6 +160,13 @@ def test_documented_edge_cases_hold(home: Path) -> None:
     for name in ("deploy", "_scratch", "release.notes", "my agent"):
         (folder / name).mkdir()
         (folder / name / f"{name}_sea.py").write_text("# stub\n", encoding="utf-8")
+    # A stock SEA (its ``prompt()`` passes the empty task through), so the
+    # bare ``/deploy`` has no default task to run; see the bullet.
+    (folder / "deploy" / "deploy_sea.py").write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass DeploySea(BaseSea):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
     (folder / "wrongname").mkdir()
     (folder / "wrongname" / "main_sea.py").write_text("# stub\n", encoding="utf-8")
     (folder / "loose_sea.py").write_text("# stub\n", encoding="utf-8")

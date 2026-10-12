@@ -43,8 +43,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from kiss.agents.sorcar.commit_message import clean_llm_output
 from kiss.server.user_assets import ensure_user_asset_from_default
 
@@ -102,14 +100,6 @@ class TestCleanLlmOutputPairedQuotesOnly:
         assert clean_llm_output("   \n  ") == ""
 
 
-
-
-@pytest.fixture
-def kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect ``KISS_HOME`` to a fresh ``tmp_path`` for each test."""
-    home = tmp_path / ".kiss"
-    monkeypatch.setenv("KISS_HOME", str(home))
-    return home
 
 
 class TestUserAssetSeedIsAtomic:

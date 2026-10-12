@@ -8,16 +8,16 @@ Issue reproduced here
 ---------------------
 When a task is submitted to the chat webview, the authoritative
 ``prompt`` / ``system_prompt`` events are emitted deep inside
-``KISSAgent.run`` — AFTER the git pre-snapshot, worktree creation,
-chat-context loading and model/tool setup — so the webview shows an
-empty tab for the first seconds after submit.
+``KISSAgent.run`` — AFTER the git pre-snapshot, chat-context loading
+and model/tool setup — so the webview shows an empty tab for the first
+seconds after submit.
 
 The fix (``_TaskRunnerMixin._broadcast_early_prompts``) broadcasts
 optimistic ``early``-flagged panels the moment the task thread starts,
 scoped to the launching tab and excluded from recording/persistence so
 replayed sessions still contain exactly one authoritative pair.
 
-The agent stack is real (``_run_task`` → ``WorktreeSorcarAgent.run`` →
+The agent stack is real (``_run_task`` → ``ChatSorcarAgent.run`` →
 ``ChatSorcarAgent.run``); only the innermost LLM-driven ``run`` (the
 grandparent of ``SorcarAgent``) is replaced — it sleeps to simulate the
 slow model/tool setup that precedes the authoritative prompt events,
@@ -30,12 +30,10 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import yaml
@@ -45,38 +43,15 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import (
+    init_repo,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 _SLOW_SETUP_S = 1.5
 _EARLY_DEADLINE_S = 1.0
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
@@ -116,7 +91,7 @@ def _patch_grandparent_run() -> Any:
     """Replace the LLM-driven grandparent ``run`` with a slow stub.
 
     ``_run_task_inner`` (which owns the early-prompt broadcast under
-    test), ``WorktreeSorcarAgent.run`` and ``ChatSorcarAgent.run`` stay
+    test), ``ChatSorcarAgent.run`` and ``ChatSorcarAgent.run`` stay
     REAL.  The stub reproduces the REAL inner-agent timeline: a slow
     setup phase (``_SLOW_SETUP_S``) followed by the authoritative
     ``system_prompt`` / ``prompt`` events, exactly the emission order
@@ -143,10 +118,6 @@ def _patch_grandparent_run() -> Any:
     return original
 
 
-def _unpatch_grandparent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 class TestPromptPanelsEarly(unittest.TestCase):
     """Prompt / system-prompt panels must be broadcast at submit time."""
 
@@ -156,27 +127,25 @@ class TestPromptPanelsEarly(unittest.TestCase):
             self.skipTest("no model API key configured")
         self.model = models[0]
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server, self.events, self.lock = _make_server()
         self.original_run = _patch_grandparent_run()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        _unpatch_grandparent_run(self.original_run)
-        _restore_db(self.saved)
+        restore_sorcar_parent_run(self.original_run)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _events_snapshot(self) -> list[dict[str, Any]]:
         with self.lock:
             return list(self.events)
 
-    def _submit(self, tab_id: str, prompt: str,
-                use_worktree: bool = False) -> None:
+    def _submit(self, tab_id: str, prompt: str) -> None:
         self.server._handle_command({
             "type": "run", "prompt": prompt, "model": self.model,
-            "workDir": self.tmpdir, "tabId": tab_id, "autoCommit": True,
-            "useWorktree": use_worktree,
+            "workDir": self.tmpdir, "tabId": tab_id,
         })
 
     def _join_task(self, tab_id: str) -> None:
@@ -247,26 +216,6 @@ class TestPromptPanelsEarly(unittest.TestCase):
             and not e.get("early") and e.get("tabId") == tab
         }
         assert auth_types == {"prompt", "system_prompt"}, f"got: {post}"
-
-    def test_prompt_panels_precede_worktree_creation(self) -> None:
-        """Ordering reproduction: in worktree mode the early panels must
-        be broadcast BEFORE the (slow) worktree setup completes
-        (pre-fix: the first prompt event trails ``worktree_created``)."""
-        tab = "tab-wt"
-        self._submit(tab, "worktree ordering prompt", use_worktree=True)
-        self._join_task(tab)
-        events = self._events_snapshot()
-        types = [
-            e.get("type") for e in events
-            if e.get("type") in ("prompt", "system_prompt",
-                                 "worktree_created")
-        ]
-        assert "worktree_created" in types, f"no worktree run: {events}"
-        wt_idx = types.index("worktree_created")
-        assert "prompt" in types[:wt_idx] and "system_prompt" in types[:wt_idx], (
-            "prompt panels were not broadcast before worktree creation: "
-            f"{types}"
-        )
 
     def test_early_prompt_events_are_not_persisted(self) -> None:
         """Replay correctness: the persisted event stream must contain

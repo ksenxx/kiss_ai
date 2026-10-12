@@ -6,28 +6,18 @@
 // End-to-end (JSDOM) tests for the LAST exit of the commit/merge
 // progress line.
 //
-// ``actionProgressRendered.test.js`` covers the two happy endings:
-// ``autocommit_done`` clears an ``autocommit_progress`` line and
-// ``worktree_result`` clears a ``worktree_progress`` line.  Neither of
-// those events is guaranteed to arrive.
+// ``actionProgressRendered.test.js`` covers the happy ending:
+// ``worktree_result`` clears a ``worktree_progress`` line.  That event
+// is not guaranteed to arrive.
 //
-// Both flows run on the daemon's post-task path inside a swallow-all
-// handler (``task_runner._run_task_inner``):
-//
-//     try:
-//         if self._main_dirty_files(work_dir):
-//             self._autocommit_changes(tab_id, work_dir=work_dir)
-//     except BaseException:
-//         logger.debug("Post-task autocommit error", exc_info=True)
-//
-// and the worktree branch a few lines below has the same shape.  The
-// progress events are broadcast from INSIDE those calls, so anything
-// raised after the first "Staging changes…" / "Generating commit
-// message…" -- a git binary that dies, a stopped task unwinding through
-// the merge, an LLM call that throws while writing the commit message
-// -- eats the terminal event and the transcript keeps a live progress
-// line that nothing will ever take away.  It is not a stale label: it
-// reads as if the merge were still running, forever.
+// The merge flow runs inside a swallow-all handler on the daemon, and
+// the progress events are broadcast from INSIDE the call it wraps, so
+// anything raised after the first "Staging changes…" / "Generating
+// commit message…" -- a git binary that dies, a stopped task unwinding
+// through the merge, an LLM call that throws while writing the commit
+// message -- eats the terminal event and the transcript keeps a live
+// progress line that nothing will ever take away.  It is not a stale
+// label: it reads as if the merge were still running, forever.
 //
 // What the daemon does still guarantee is the task-end event: control
 // falls out of that handler and broadcasts task_done / task_error /
@@ -115,37 +105,6 @@ const TASK_END_EVENTS = [
   ['task_stopped', 'a task the user stopped'],
   ['task_interrupted', 'a task that was interrupted'],
 ];
-
-function testEveryTaskEndClearsAutocommitProgress() {
-  TASK_END_EVENTS.forEach(([type, what]) => {
-    const {win} = makeWebview();
-    const out = win.document.getElementById('output');
-    const tabId = win._testApi.getActiveTabId();
-
-    send(win, {
-      type: 'autocommit_progress',
-      message: 'Staging changes\u2026',
-      tabId,
-    });
-    assert.deepStrictEqual(
-      progressLines(out),
-      ['Staging changes\u2026'],
-      'the progress line must be on screen before the task ends',
-    );
-
-    // The daemon's `except BaseException` swallowed the failure, so no
-    // autocommit_done is ever sent -- only the task-end event.
-    send(win, {type, tabId, startTs: 1, endTs: 2});
-    assert.deepStrictEqual(
-      progressLines(out),
-      [],
-      `${what} must not leave a live "Staging changes…" line behind ` +
-        `(${type} was the only terminal event the daemon sent)`,
-    );
-    win.close();
-  });
-  console.log('  ok - every task-end event clears an autocommit_progress line');
-}
 
 function testEveryTaskEndClearsWorktreeProgress() {
   TASK_END_EVENTS.forEach(([type, what]) => {
@@ -252,12 +211,12 @@ function testTaskEndKeepsTheRealResultLine() {
   const tabId = win._testApi.getActiveTabId();
 
   send(win, {
-    type: 'autocommit_progress',
+    type: 'worktree_progress',
     message: 'Committing\u2026',
     tabId,
   });
   send(win, {
-    type: 'autocommit_done',
+    type: 'worktree_result',
     success: true,
     message: 'chore: update README',
     tabId,
@@ -279,7 +238,6 @@ function testTaskEndKeepsTheRealResultLine() {
 }
 
 function main() {
-  testEveryTaskEndClearsAutocommitProgress();
   testEveryTaskEndClearsWorktreeProgress();
   testTaskEndClearsProgressOfAHiddenTab();
   testTaskEndOfAnotherTabLeavesTheLiveLineAlone();

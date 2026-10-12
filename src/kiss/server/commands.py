@@ -15,7 +15,6 @@ from __future__ import annotations
 import functools
 import logging
 import os
-import platform
 import queue
 import subprocess
 import sys
@@ -25,6 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
@@ -42,7 +42,6 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
@@ -402,6 +401,8 @@ class _CommandsMixin:
             generation: int = 0,
             conn_id: str = "",
             tag: str = "",
+            machine: str = "",
+            work_dir: str = "",
         ) -> None: ...
         def _get_files(
             self,
@@ -416,6 +417,13 @@ class _CommandsMixin:
             tab_id: str = "",
             task_id: str | None = None,
             conn_id: str = "",
+        ) -> None: ...
+        def _defer_replay(
+            self,
+            chat_id: str,
+            tab_id: str,
+            task_id: str | None,
+            conn_id: str,
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
@@ -440,37 +448,10 @@ class _CommandsMixin:
         def _generate_commit_message(
             self, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
-        def _autocommit_changes(
-            self, tab_id: str = "", *, work_dir: str = "",
-            manual: bool = False, claimed_repo: Path | None = None,
-            own_state: AgentState | None = None,
-        ) -> None: ...
-        def _any_non_wt_running(
-            self,
-            repo_root: Path | None = None,
-            *,
-            exclude: AgentState | None = None,
-        ) -> bool: ...
-        def _claim_main_tree(
-            self, repo_root: Path, reason: str,
-            holder: list[Any] | None = None,
-        ) -> bool: ...
-        def _release_main_tree_claim(self, claim: Any) -> None: ...
-        def _broadcast_autocommit_done(
-            self, tab_id: str, *, success: bool, committed: bool,
-            message: str, commit_message: str | None = None,
-            manual: bool = False, work_dir: str = "",
-        ) -> dict[str, Any]: ...
+        def _commit_main_tree(self, tab_id: str, work_dir: str = "") -> None: ...
         def _handle_worktree_action(
-            self, action: str, tab_id: str = "", *,
-            internal: bool = False, already_claimed: bool = False,
-            resolve_conflicts: bool = False,
-            deferred_branch: str | None = None,
+            self, action: str, tab_id: str = "",
         ) -> dict[str, Any]: ...
-        def _handle_main_tree_action(
-            self, action: str, work_dir: str,
-        ) -> dict[str, Any]: ...
-        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
     def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
@@ -492,7 +473,7 @@ class _CommandsMixin:
         directory for the ``@``-mention picker, persists it as
         ``config.json`` ``work_dir`` so a daemon restart keeps it, and
         broadcasts ``workDirChanged`` so every connected client
-        re-scopes its Explorer, history and "Working directory" panel.
+        re-scopes its Explorer, history and chat-header work-dir drop-down.
         Mirrors the value onto the printer either way.  Takes
         ``_work_dir_lock`` and then ``_state_lock`` itself, so it must
         not be called while holding ``_state_lock`` (the reverse order
@@ -536,8 +517,8 @@ class _CommandsMixin:
                     self._file_index.ensure(new_dir)
                 if hasattr(self.printer, "work_dir"):
                     setattr(self.printer, "work_dir", new_dir)
-            # Every surface's "Working directory" panel lists the
-            # directories opened so far (most recent first); this is the
+            # Every surface's chat-header work-dir drop-down lists the
+            # directories selected so far (most recent first); this is the
             # one place every adopted directory passes through.
             record_recent_work_dir(new_dir)
             with _CommandsMixin._save_config_lock:
@@ -1002,12 +983,16 @@ class _CommandsMixin:
         offset = _parse_int(cmd.get("offset", 0))
         generation = _parse_int(cmd.get("generation", 0))
         tag = cmd.get("tag", "")
+        machine = cmd.get("machine", "")
+        work_dir = cmd.get("workDir", "")
         self._get_history(
             query,
             0 if offset is None else offset,
             0 if generation is None else generation,
             cmd.get("connId", ""),
             tag if isinstance(tag, str) else "",
+            machine if isinstance(machine, str) else "",
+            work_dir if isinstance(work_dir, str) else "",
         )
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
@@ -1461,8 +1446,6 @@ class _CommandsMixin:
                     parent_tab_id=tab_id,
                     side_channel=True,
                     chat_id=chat_id,
-                    use_worktree=False,
-                    auto_commit=False,
                     endpoint_file=endpoint_file,
                     timeout=_ASK_TIMEOUT_SECONDS,
                     stop_on_timeout=True,
@@ -1693,20 +1676,33 @@ class _CommandsMixin:
 
         ``replayConnId`` is set only on the resumes a client's ``ready``
         fans out (``_handle_ready``): the transcript then goes to that
-        connection alone.  A user's history click carries no
-        ``replayConnId`` and its transcript is broadcast, since every
-        window mirroring the tab must show the newly bound chat.
+        connection alone.  ``scoped: true`` is the client's own way to
+        ask for the same thing (a deferred tab it just activated, see
+        ``replay_deferred``); the stamped ``connId`` is used then.  A
+        user's history click carries neither and its transcript is
+        broadcast, since every window mirroring the tab must show the
+        newly bound chat.  ``deferred: true`` (also from
+        ``_handle_ready``) sends no transcript at all: the connection
+        gets the tab's state and a ``replay_deferred`` offer instead
+        (:meth:`_defer_replay`).
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
         task_id = _opt_str(cmd.get("taskId"))
-        if chat_id or task_id is not None:
-            self._replay_session(
-                chat_id,
-                cmd.get("tabId", ""),
-                task_id=task_id,
-                conn_id=str(cmd.get("replayConnId") or ""),
-            )
+        if not chat_id and task_id is None:
+            return
+        conn_id = str(cmd.get("replayConnId") or "")
+        if not conn_id and cmd.get("scoped"):
+            conn_id = str(cmd.get("connId") or "")
+        if cmd.get("deferred") and conn_id:
+            self._defer_replay(chat_id, cmd.get("tabId", ""), task_id, conn_id)
+            return
+        self._replay_session(
+            chat_id,
+            cmd.get("tabId", ""),
+            task_id=task_id,
+            conn_id=conn_id,
+        )
 
     def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
         """Broadcast the canonical ``tabs_state`` snapshot on request.
@@ -1987,7 +1983,6 @@ class _CommandsMixin:
         in_flight: set[str],
         tab_id: str,
         job: Callable[[], None],
-        after: Callable[[], None] | None = None,
     ) -> None:
         """Run *job* on a daemon thread as *tab_id*'s in-flight entry of *in_flight*.
 
@@ -2003,14 +1998,11 @@ class _CommandsMixin:
                 ``_autocommit_tabs``).
             tab_id: Frontend tab that requested the job.
             job: The work to run on the thread.
-            after: Optional follow-up that runs on the same thread
-                once the entry is released, so it never touches an
-                entry a later request re-added.
         """
         try:
             threading.Thread(
                 target=self._finish_tab_job,
-                args=(in_flight, tab_id, job, after),
+                args=(in_flight, tab_id, job),
                 daemon=True,
             ).start()
         except BaseException:
@@ -2023,30 +2015,24 @@ class _CommandsMixin:
         in_flight: set[str],
         tab_id: str,
         job: Callable[[], None],
-        after: Callable[[], None] | None,
     ) -> None:
-        """Run *job*, release *tab_id*'s entry in *in_flight*, then run *after*.
+        """Run *job*, then release *tab_id*'s entry in *in_flight*.
 
         Body of the thread :meth:`_start_tab_job` spawns; the
-        ``finally`` makes a failed job re-arm the tab.  *after* runs
-        only when *job* succeeded.
+        ``finally`` makes a failed job re-arm the tab.
         """
         try:
             job()
         finally:
             with self._state_lock:
                 in_flight.discard(tab_id)
-        if after is not None:
-            after()
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Stage-all + commit the tab's working tree in the background.
 
         Serves the settings panel's "Git Commit" button.  Delegates to
-        :meth:`_autocommit_changes` with ``manual=True`` (the same
-        path the post-task autocommit uses), which stages everything,
-        generates an LLM commit message from the staged diff alone
-        (no ``User prompt:`` / ``Result:`` sections), commits, and
+        :meth:`_commit_main_tree`, which stages everything, generates
+        an LLM commit message from the staged diff alone, commits, and
         reports through toast ``notification`` events — the chat
         transcript stays clean except for a failure, whose reason is
         still rendered there via the non-silent ``autocommit_done``
@@ -2057,131 +2043,27 @@ class _CommandsMixin:
         daemon-wide ``self.work_dir``, which may point at a different —
         possibly non-git — folder.
 
-        At most one autocommit runs per tab: the commit-message
-        generation is a billed LLM call and ``git add -A``/``git
-        commit`` mutate the repository, so an impatient double click
-        must not race two commits.  Extra clicks are dropped while the
-        tab's autocommit is in flight.
-
-        While a non-worktree task is running in the tab's repository
-        the commit is refused: ``git add -A`` would snapshot whatever
-        half-written state the agent happens to be in, producing an
-        unintended intermediate commit that claims success while later
-        task writes stay dirty.  Worktree tasks write inside their own
-        linked worktree and never dirty the main tree, so they do not
-        block a manual commit.
+        At most one commit runs per tab: the commit-message generation
+        is a billed LLM call and ``git add -A``/``git commit`` mutate
+        the repository, so an impatient double click must not race two
+        commits.  Extra clicks are dropped while the tab's commit is in
+        flight.
         """
         tab_id = cmd.get("tabId", "")
         work_dir = cmd.get("workDir", "") or self.work_dir
-        # Resolve the repository the worker will ACTUALLY stage — the
-        # worker applies a stale-worktree fallback to a vanished
-        # ``.kiss-worktrees/kiss_wt-*`` path, so discovering from the
-        # raw path here claimed the wrong (or no) repository while the
-        # parent repository was mutated unprotected (gpt-5.6-sol
-        # review 2, missed wiring 1).  Should the path's target change
-        # again between this dispatch and the worker's own resolution,
-        # the worker re-runs the busy-check + claim on the repository
-        # it resolved (see ``_autocommit_changes``).
-        repo = _effective_commit_repo(work_dir)
-        # Release-armed before publication (``_claim_main_tree``
-        # appends to this list before it publishes) with the releasing
-        # handler installed first, so no injected-stop boundary can
-        # strand the claim (gpt-5.6-sol review 3, introduced bug 2).
-        dispatch_claims: list[Any] = []
         with self._state_lock:
-            if repo is not None and self._any_non_wt_running(repo):
-                self._broadcast_autocommit_done(
-                    tab_id, success=False, committed=False,
-                    message="A task is still running in this folder; "
-                            "wait for it to finish before committing.",
-                    manual=True, work_dir=work_dir,
-                )
-                return
             if tab_id in self._autocommit_tabs:
                 logger.debug(
-                    "Autocommit already in flight for tab %r; "
-                    "ignoring duplicate request", tab_id,
-                )
-                return
-            # Publish the per-repo main-tree claim in the SAME locked
-            # section as the busy check above: without it, a direct
-            # non-worktree task could start (its admission saw no
-            # worktree merge and no claim) between this check and the
-            # worker's ``git add -A``, which would then stage the
-            # task's half-written intermediate state (gpt-5.6-sol
-            # review, finding 3).  Non-worktree task admission refuses
-            # to start while the claim is held; the worker's
-            # ``finally`` releases it.
-            if repo is not None and not self._claim_main_tree(
-                repo, "manual commit", holder=dispatch_claims,
-            ):
-                self._broadcast_autocommit_done(
-                    tab_id, success=False, committed=False,
-                    message="Another operation is modifying this "
-                            "repository; wait for it to finish before "
-                            "committing.",
-                    manual=True, work_dir=work_dir,
+                    "Commit already in flight for tab %r; ignoring duplicate request",
+                    tab_id,
                 )
                 return
             self._autocommit_tabs.add(tab_id)
-        try:
-            self._start_tab_job(
-                self._autocommit_tabs,
-                tab_id,
-                functools.partial(
-                    self._run_autocommit_job,
-                    tab_id, work_dir, repo, dispatch_claims,
-                ),
-                # The main tree is committed (and its claim released):
-                # merge the worktrees whose merge waited for exactly
-                # this commit.  Runs after the tab is re-armed, so a
-                # second click during those merges is a new request
-                # (refused by the busy guard), not a duplicate.
-                after=functools.partial(self._merge_deferred_worktrees, repo),
-            )
-        except BaseException:
-            # The worker never ran, so its ``finally`` cannot release
-            # the main-tree claims published above — release them here
-            # or the repo stays wedged (``_start_tab_job`` already
-            # re-armed the tab).
-            with self._state_lock:
-                for claim in dispatch_claims:
-                    self._release_main_tree_claim(claim)
-            raise
-
-    def _run_autocommit_job(
-        self,
-        tab_id: str,
-        work_dir: str,
-        repo: Path | None,
-        dispatch_claims: list[Any] | None = None,
-    ) -> None:
-        """Commit the tab's working tree and release the repository.
-
-        The job :meth:`_cmd_autocommit_action` runs through
-        :meth:`_start_tab_job`; the ``finally`` here releases the
-        repository's main-tree claim so tasks can start again even
-        after a failed commit.  The tab's in-flight entry is released
-        by :meth:`_finish_tab_job` right after this returns.
-
-        Args:
-            tab_id: Frontend tab that requested the commit.
-            work_dir: The tab's working directory.
-            repo: The repository whose main-tree claim the dispatcher
-                published (``None`` when *work_dir* is not in a repo).
-            dispatch_claims: The claim objects the dispatcher
-                published; released here conditionally (identity
-                check), so a stale release can never pop a successor's
-                claim.
-        """
-        try:
-            self._autocommit_changes(
-                tab_id, work_dir=work_dir, manual=True, claimed_repo=repo,
-            )
-        finally:
-            with self._state_lock:
-                for claim in dispatch_claims or []:
-                    self._release_main_tree_claim(claim)
+        self._start_tab_job(
+            self._autocommit_tabs,
+            tab_id,
+            functools.partial(self._commit_main_tree, tab_id, work_dir),
+        )
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -2195,39 +2077,6 @@ class _CommandsMixin:
         self.printer.broadcast(
             {"type": "worktree_result", "tabId": wt_tab_id, **result},
         )
-
-    def _cmd_main_tree_action(self, cmd: dict[str, Any]) -> None:
-        """Execute a main-tree discard/do-nothing action.
-
-        Serves the Discard and Do-nothing buttons of the post-task
-        action bar shown after a non-worktree manual-commit run (the
-        bar's Auto-commit button sends the existing
-        ``autocommitAction`` command instead).  Delegates to
-        :meth:`_handle_main_tree_action` and always answers with a
-        broadcast ``main_tree_result`` event so every client dismisses
-        the bar — mirroring :meth:`_cmd_worktree_action`.
-        """
-        action = cmd.get("action", "")
-        tab_id = cmd.get("tabId", "")
-        # Resolved once, so the discard and the deferred-merge trigger
-        # below act on the same repository (``_handle_main_tree_action``
-        # falls back to ``self.work_dir`` for an empty ``workDir``, and
-        # the trigger must not resolve "" to the daemon's cwd instead).
-        work_dir = cmd.get("workDir", "") or self.work_dir
-        try:
-            result = self._handle_main_tree_action(action, work_dir)
-        except Exception as e:
-            logger.debug("Main-tree action error", exc_info=True)
-            result = {"success": False, "message": str(e)}
-        self.printer.broadcast(
-            {"type": "main_tree_result", "tabId": tab_id, **result},
-        )
-        if action == "discard" and result.get("success"):
-            # The task's uncommitted main-tree changes are gone, so the
-            # tree is back at its committed state: merge the worktrees
-            # whose merge waited for that.  ("Do nothing" leaves the
-            # tree dirty; a later Git Commit triggers them instead.)
-            self._merge_deferred_worktrees(_effective_commit_repo(work_dir))
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend.
@@ -2253,11 +2102,13 @@ class _CommandsMixin:
         api_keys = get_current_api_keys()
         event: dict[str, Any] = {
             "type": "configData", "config": cfg, "apiKeys": api_keys,
-            # The server machine's hostname, shown centered in the
+            # The server machine's short host name, shown centered in the
             # webview's status bar (both the VS Code webview and the
             # remote webapp) so the user always sees which machine the
-            # agent runs on.
-            "machine": platform.node(),
+            # agent runs on.  The same name labels the local row of the
+            # `machines` reply (the chat header's machine drop-down):
+            # `platform.node()` would add the domain on cloud hosts.
+            "machine": local_machine_name(),
         }
         self._broadcast_to_conn(event, cmd.get("connId", ""))
 
@@ -2287,6 +2138,7 @@ class _CommandsMixin:
         from kiss.core.vscode_config import (
             apply_config_to_env,
             load_config,
+            recent_work_dirs,
             sanitize_config,
             save_api_key,
             save_config,
@@ -2343,6 +2195,10 @@ class _CommandsMixin:
         # Same effective directory as ``getConfig``: a save that carries
         # no ``work_dir`` must not report the startup fallback as "".
         new_cfg["work_dir"] = self.work_dir
+        # Same recent directories as ``getConfig`` too: the stored list
+        # may still name directories that were deleted since, and the
+        # chat header's drop-down shows whatever this reply carries.
+        new_cfg["recent_work_dirs"] = recent_work_dirs()
         self._broadcast_to_conn(
             {"type": "configData", "config": new_cfg}, conn_id,
         )
@@ -2532,8 +2388,8 @@ class _CommandsMixin:
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Make ``workDir`` the global working directory of every task.
 
-        Sent when the user picks a folder in any surface's "..." >
-        "Working directory" panel or ticks a top-level folder in the
+        Sent when the user picks a folder in any surface's chat-header
+        work-dir drop-down or ticks a top-level folder in the
         remote webapp's Explorer.  The VS Code extension also sends it
         with ``ifUnset: true`` on connect, carrying its workspace
         folder: that seeds the value on a fresh install (the daemon is
@@ -2592,7 +2448,6 @@ class _CommandsMixin:
         "generateCommitMessage": _cmd_generate_commit_message,
         "autocommitAction": _cmd_autocommit_action,
         "worktreeAction": _cmd_worktree_action,
-        "mainTreeAction": _cmd_main_tree_action,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,

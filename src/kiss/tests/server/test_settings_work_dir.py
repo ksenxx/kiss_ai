@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The daemon side of the "Working directory" panel ("..." menu).
+"""The daemon side of the chat header's working directory drop-down.
 
 Tested against a real ``RemoteAccessServer`` over its local endpoint:
 
@@ -17,9 +17,9 @@ Tested against a real ``RemoteAccessServer`` over its local endpoint:
   directory field -- leaves the persisted value alone.
 
 The webview half (the Settings form never carries ``work_dir``; every
-surface picks through the "Working directory" panel) is covered by the real DOM tests in
+surface picks through the chat header's drop-down) is covered by the real DOM tests in
 ``agents/vscode/test/settingsWorkDirField.test.js`` and
-``agents/vscode/test/workDirPanel.test.js``.
+``agents/vscode/test/chatWorkDirSelect.test.js``.
 """
 
 from __future__ import annotations
@@ -37,20 +37,7 @@ import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
@@ -58,7 +45,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
@@ -96,7 +83,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -172,22 +159,26 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         )
 
     async def test_get_config_reports_the_server_machine_name(self) -> None:
-        """Every ``configData`` reply carries the server machine's
-        hostname — the webview shows it centered in the status bar so
-        the user always sees which machine the agent runs on."""
-        import platform
+        """Every ``configData`` reply carries the server machine's short
+        host name — the webview shows it centered in the status bar so
+        the user always sees which machine the agent runs on.  It is the
+        name the machine registry gives the local daemon (not
+        ``platform.node()``, which carries the domain on cloud hosts), so
+        the status bar and the chat header's machine drop-down agree."""
+        from kiss.agents.sorcar.machines import local_machine_name
 
         reader, writer = await self._connect()
         await self._send(writer, {"type": "getConfig"})
         msg = await self._drain_until(
             reader, lambda m: m.get("type") == "configData",
         )
-        self.assertEqual(msg.get("machine"), platform.node())
+        self.assertEqual(msg.get("machine"), local_machine_name())
+        self.assertNotIn(".", msg["machine"])
 
     async def test_set_work_dir_replaces_persisted_value_for_everyone(
         self,
     ) -> None:
-        """A ``setWorkDir`` (a "Working directory" panel pick) replaces
+        """A ``setWorkDir`` (a chat-header drop-down pick) replaces
         the persisted work_dir: ``getConfig`` reports the new directory
         both to the picking connection and to a connection opened
         afterwards that announced nothing, and ``config.json`` holds it."""
@@ -214,7 +205,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A ``saveConfig`` carrying ``config.work_dir`` (sent by the
-        standalone web client's "Working directory" panel) persists the
+        standalone web client) persists the
         value and moves the daemon-wide fallback work_dir."""
         reader, writer = await self._connect()
         await self._send(

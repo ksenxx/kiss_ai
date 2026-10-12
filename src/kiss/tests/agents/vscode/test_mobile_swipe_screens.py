@@ -466,8 +466,9 @@ def test_a_sideways_scroll_is_not_a_swipe(browser, harness):
         # ...so the screen stays...
         assert _settled_screen(page) == "file"
         # ...and with the editor at its end the same drag moves nothing:
-        # it is a swipe.
-        _drag(cdp, (before + 300, y), (before + 60, y), steps=12)
+        # it is a swipe.  Few steps: Monaco spends ~100ms on every
+        # synthetic touchmove, and a swipe must finish within 1.5s.
+        _drag(cdp, (before + 300, y), (before + 60, y), steps=4)
         _wait_screen(page, "info")
     finally:
         context.close()

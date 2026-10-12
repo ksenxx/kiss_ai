@@ -25,7 +25,7 @@ import unittest
 from collections.abc import Callable
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
@@ -87,7 +87,7 @@ def _start_task(
     shows up as the task FINISHING with the interrupt message, not as a
     stopped task.
     """
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = agent_state.AgentState(
         task_id,
         agent=agent,
@@ -261,7 +261,7 @@ class TestInterruptToolCommand(unittest.TestCase):
         server = _make_server()
         events, lock = _capture(server)
         release = threading.Event()
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = agent_state.AgentState(
             "it-task-5", agent=agent, tab_id="it-tab-5", server_owned=True,
             stop_event=threading.Event(),

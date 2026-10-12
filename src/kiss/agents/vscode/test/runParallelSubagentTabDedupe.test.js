@@ -8,8 +8,10 @@
 // The daemon addresses a sub-agent's tab by three different ids over
 // the life of a fan-out:
 //
-//   * the live fan-out id minted by ChatSorcarAgent._run_tasks_parallel
-//     ("task-<parentTaskId>__sub_<idx>"),
+//   * a synthetic live id of the form "task-<parentTaskId>__sub_<idx>"
+//     (the form the in-agent fan-out minted before run_parallel moved
+//     to agent_dispatch.make_run_parallel_tool; kept here as "an id
+//     that differs from the tab's current one"),
 //   * the deterministic replay id minted by
 //     VSCodeServer._open_persisted_subagent_tabs
 //     ("<parentTabId>__sub_<subTaskId>"), and
@@ -838,9 +840,9 @@ function testRetagReleasesTheOldTabId(makeClient, label) {
   // A daemon id that DIFFERS from the tab's current id.  Since the
   // deterministic-id fix (subagentTabIdFor) the client already sits on
   // "<parentId>__sub_<taskId>", so the rename is exercised with the
-  // other id form the daemon still uses: the agent-minted synthetic
-  // live-fan-out id ("task-<parentTaskId>__sub_<idx>", see
-  // ChatSorcarAgent._run_tasks_parallel).
+  // other id form: the synthetic "task-<parentTaskId>__sub_<idx>" the
+  // in-agent fan-out minted before run_parallel moved to
+  // agent_dispatch.make_run_parallel_tool (any differing id works).
   const replayId = 'task-parent-task__sub_0';
   assert.notStrictEqual(replayId, liveTabIds[0], 'sanity: ids must differ');
   send(win, {
@@ -911,9 +913,9 @@ function testRetagReReportsTheChatTabBehindAContentTab(makeClient, label) {
   // A daemon id that DIFFERS from the tab's current id.  Since the
   // deterministic-id fix (subagentTabIdFor) the client already sits on
   // "<parentId>__sub_<taskId>", so the rename is exercised with the
-  // other id form the daemon still uses: the agent-minted synthetic
-  // live-fan-out id ("task-<parentTaskId>__sub_<idx>", see
-  // ChatSorcarAgent._run_tasks_parallel).
+  // other id form: the synthetic "task-<parentTaskId>__sub_<idx>" the
+  // in-agent fan-out minted before run_parallel moved to
+  // agent_dispatch.make_run_parallel_tool (any differing id works).
   const replayId = 'task-parent-task__sub_0';
   assert.notStrictEqual(replayId, liveTabIds[0], 'sanity: ids must differ');
   send(win, {

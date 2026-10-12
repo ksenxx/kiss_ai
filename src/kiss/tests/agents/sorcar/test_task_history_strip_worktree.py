@@ -107,7 +107,6 @@ class TestChatSorcarAgentBuildExtraStripsWorktree(unittest.TestCase):
             model="claude-opus-4-7",
             work_dir=wt,
             is_parallel=False,
-            is_worktree=True,
         )
         assert payload["work_dir"] == "/Users/alice/proj", (
             f"_build_extra_payload kept worktree suffix: {payload['work_dir']!r}"
@@ -121,7 +120,6 @@ class TestChatSorcarAgentBuildExtraStripsWorktree(unittest.TestCase):
             model="claude-opus-4-7",
             work_dir="/Users/alice/proj",
             is_parallel=False,
-            is_worktree=False,
         )
         assert payload["work_dir"] == "/Users/alice/proj"
 
@@ -165,7 +163,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
             model="claude-opus-4-7",
             work_dir=wt,
             is_parallel=False,
-            is_worktree=True,
         )
         task_id, _chat_id = _add_task("repro task", "")
         _save_task_extra(payload, task_id=task_id)
@@ -176,7 +173,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
             f"{stored['work_dir']!r}"
         )
         assert stored["model"] == "claude-opus-4-7"
-        assert stored["is_worktree"] is True
+        assert "is_worktree" not in stored
 
     def test_plain_path_passthrough_end_to_end(self) -> None:
         """A non-worktree ``work_dir`` must persist unchanged."""
@@ -188,7 +185,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
             model="claude-opus-4-7",
             work_dir=plain,
             is_parallel=False,
-            is_worktree=False,
         )
         task_id, _chat_id = _add_task("plain task", "")
         _save_task_extra(payload, task_id=task_id)

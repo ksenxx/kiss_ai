@@ -7,15 +7,14 @@
 Each test verifies that the bug has been fixed:
 
 BUG-12: squash_merge_from_baseline now checks commit return code
-BUG-13: _release_worktree sets _merge_conflict_warning and returns None
-         on merge conflict
+BUG-13 / BUG-18 (obsolete): covered the auto-release merge on the next
+         task (``_release_worktree``), removed with the auto-merge; a
+         pending worktree is now committed and kept for review instead
 BUG-14: _new_chat surfaces _stash_pop_warning and _merge_conflict_warning
-BUG-15: concurrent _release_worktree uses per-repo locking
-BUG-16: _finalize_worktree preserves worktree when auto-commit fails
+BUG-15: concurrent worktree operations use per-repo locking
+BUG-16: _finalize_worktree preserves worktree when the commit fails
 BUG-17 (obsolete): covered _save_untracked_base, removed together with
          the interactive diff/merge review workflow
-BUG-18: _release_worktree returns None on merge conflict (not
-         original_branch)
 """
 
 from __future__ import annotations
@@ -23,20 +22,18 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     MergeResult,
-    _git,
     repo_lock,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -161,7 +158,7 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
         saved = _redirect_db(self.tmpdir)
         orig = _patch_super_run()
         try:
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._chat_id = "test-chat-12"
 
             wt_dir = repo / ".kiss-worktrees" / "test_wt"
@@ -208,72 +205,8 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
             _restore_db(saved)
 
 
-class TestBug13ReleaseWorktreeWarnsOnConflict:
-    """_release_worktree sets _merge_conflict_warning and returns None
-    when auto-merge has conflicts.
-    """
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.saved = _redirect_db(self.tmpdir)
-        self.orig = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.orig)
-        _restore_db(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_merge_conflict_sets_warning_and_returns_none(self) -> None:
-        """FIX: _release_worktree sets _merge_conflict_warning and
-        returns None when a merge conflict occurs, so the caller
-        knows the release didn't fully succeed and the user is warned.
-        """
-        repo = self.repo
-
-        GitWorktreeOps.ensure_excluded(repo)
-
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "test-chat-13"
-
-        wt_dir = repo / ".kiss-worktrees" / "test_wt13"
-        assert GitWorktreeOps.create(repo, "kiss/wt-test13", wt_dir)
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-test13", "main")
-
-        (wt_dir / "README.md").write_text("agent version\n")
-        GitWorktreeOps.commit_all(wt_dir, "agent edits README")
-
-        (repo / "README.md").write_text("conflicting version\n")
-        _git("add", ".", cwd=repo)
-        _git("commit", "-m", "main edits README", cwd=repo)
-
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-test13",
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=None,
-        )
-
-        released = agent._release_worktree()
-
-        assert released is None, (
-            "_release_worktree should return None on merge conflict"
-        )
-
-        assert agent._merge_conflict_warning is not None, (
-            "_merge_conflict_warning should be set on merge conflict"
-        )
-        assert "kiss/wt-test13" in agent._merge_conflict_warning
-        assert "conflict" in agent._merge_conflict_warning.lower()
-
-        assert agent._wt is None
-
-        assert GitWorktreeOps.branch_exists(repo, "kiss/wt-test13")
-
-
-class TestBug15ConcurrentReleaseUsesLocking:
-    """Concurrent _release_worktree calls are serialized by repo_lock."""
+class TestBug15RepoLockIsPerRepoAndReentrant:
+    """Concurrent worktree operations on one repo share a re-entrant lock."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -314,75 +247,6 @@ class TestBug15ConcurrentReleaseUsesLocking:
         finally:
             lock1.release()
 
-    def test_concurrent_releases_are_serialized(self) -> None:
-        """FIX: Two concurrent _release_worktree calls are serialized
-        by the repo lock, preventing interleaved git operations.
-        """
-        repo = self.repo
-
-        wt_dir_a = repo / ".kiss-worktrees" / "wt_a"
-        wt_dir_b = repo / ".kiss-worktrees" / "wt_b"
-        assert GitWorktreeOps.create(repo, "kiss/wt-a", wt_dir_a)
-        assert GitWorktreeOps.create(repo, "kiss/wt-b", wt_dir_b)
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-a", "main")
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-b", "main")
-
-        (wt_dir_a / "file_a.txt").write_text("from agent A")
-        GitWorktreeOps.commit_all(wt_dir_a, "agent A work")
-
-        (wt_dir_b / "file_b.txt").write_text("from agent B")
-        GitWorktreeOps.commit_all(wt_dir_b, "agent B work")
-
-        agent_a = WorktreeSorcarAgent("agent-a")
-        agent_a._chat_id = "chat-a"
-        agent_a._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-a",
-            original_branch="main",
-            wt_dir=wt_dir_a,
-            baseline_commit=None,
-        )
-
-        agent_b = WorktreeSorcarAgent("agent-b")
-        agent_b._chat_id = "chat-b"
-        agent_b._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-b",
-            original_branch="main",
-            wt_dir=wt_dir_b,
-            baseline_commit=None,
-        )
-
-        results: dict[str, str | None] = {}
-        errors: list[str] = []
-
-        def release_a() -> None:
-            try:
-                results["a"] = agent_a._release_worktree()
-            except Exception as e:
-                errors.append(f"A: {e}")
-
-        def release_b() -> None:
-            try:
-                results["b"] = agent_b._release_worktree()
-            except Exception as e:
-                errors.append(f"B: {e}")
-
-        t_a = threading.Thread(target=release_a)
-        t_b = threading.Thread(target=release_b)
-        t_a.start()
-        t_b.start()
-        t_a.join(timeout=30)
-        t_b.join(timeout=30)
-
-        assert not errors, f"Concurrent releases should not error: {errors}"
-        assert "a" in results and "b" in results
-
-        successes = [k for k, v in results.items() if v == "main"]
-        assert len(successes) >= 1, (
-            "At least one concurrent release should succeed"
-        )
-
 
 class TestBug16FinalizePreservesWorktreeOnCommitFailure:
     """_finalize_worktree returns False and keeps the worktree directory
@@ -407,7 +271,7 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
     def test_finalize_returns_true_on_success(self) -> None:
         """Regression: _finalize_worktree returns True on normal success."""
         repo = self.repo
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test-chat-16b"
 
         wt_dir = repo / ".kiss-worktrees" / "test_wt16b"
@@ -437,7 +301,7 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
     def test_merge_reports_autocommit_failure(self) -> None:
         """FIX: merge() reports auto-commit failure instead of proceeding."""
         repo = self.repo
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test-chat-16c"
 
         wt_dir = repo / ".kiss-worktrees" / "test_wt16c"
@@ -468,91 +332,4 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         )
         assert wt_dir.exists(), (
             "Worktree should be preserved when auto-commit fails"
-        )
-
-
-
-
-class TestBug18ReleaseReturnsNoneOnConflict:
-    """_release_worktree returns None (not original_branch) on merge conflict."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.saved = _redirect_db(self.tmpdir)
-        self.orig = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.orig)
-        _restore_db(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_returns_none_on_conflict(self) -> None:
-        """FIX: _release_worktree returns None when the merge fails,
-        correctly signaling to the caller that the release did not
-        fully succeed.
-        """
-        repo = self.repo
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "test-chat-18"
-
-        wt_dir = repo / ".kiss-worktrees" / "test_wt18"
-        assert GitWorktreeOps.create(repo, "kiss/wt-test18", wt_dir)
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-test18", "main")
-        (wt_dir / "README.md").write_text("agent version\n")
-        GitWorktreeOps.commit_all(wt_dir, "agent edits")
-
-        (repo / "README.md").write_text("main version\n")
-        _git("add", ".", cwd=repo)
-        _git("commit", "-m", "main edits", cwd=repo)
-
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-test18",
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=None,
-        )
-
-        result = agent._release_worktree()
-
-        assert result is None, (
-            "_release_worktree should return None on merge conflict"
-        )
-
-        assert agent._wt is None
-
-        assert agent._merge_conflict_warning is not None
-
-        assert GitWorktreeOps.branch_exists(repo, "kiss/wt-test18")
-
-    def test_returns_branch_on_success(self) -> None:
-        """Regression: _release_worktree returns original_branch on success."""
-        repo = self.repo
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "test-chat-18b"
-
-        wt_dir = repo / ".kiss-worktrees" / "test_wt18b"
-        assert GitWorktreeOps.create(repo, "kiss/wt-test18b", wt_dir)
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-test18b", "main")
-        (wt_dir / "newfile.txt").write_text("agent work\n")
-        GitWorktreeOps.commit_all(wt_dir, "agent work")
-
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-test18b",
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=None,
-        )
-
-        result = agent._release_worktree()
-
-        assert result == "main", (
-            "_release_worktree should return original_branch on success"
-        )
-        assert agent._wt is None
-        assert agent._merge_conflict_warning is None
-        assert not GitWorktreeOps.branch_exists(repo, "kiss/wt-test18b"), (
-            "Branch should be deleted after successful merge"
         )

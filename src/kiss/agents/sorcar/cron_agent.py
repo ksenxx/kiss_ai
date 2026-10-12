@@ -18,8 +18,8 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   ``sea_path`` contract), and a scheduling request is dispatched to
   it with the ``run_agent`` tool as ``run_agent(task, agent="cron")`` — the
   dispatched session gets the :func:`cron_job` tool from
-  :func:`tools` and runs in ``$KISS_HOME/cron/work`` without a
-  worktree (a ``ChannelSea`` with the ``work_dir`` of :func:`settings`).
+  :func:`tools` and runs in ``$KISS_HOME/cron/work`` (a ``ChannelSea``
+  with the ``work_dir`` of :func:`settings`).
 - The kiss-web daemon runs the scheduler automatically in a
   background thread (:func:`start_scheduler_thread`): every ~60
   seconds a tick finds due jobs, reschedules them *before* running
@@ -42,11 +42,12 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   :mod:`kiss.agents.sorcar.cron_prompt_sea` through the same
   ``run_agent`` tool a chat task uses for any ``.py`` SEA
   (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`): the
-  job's prompt is the task, and its model, budget, ``work_dir`` /
-  ``use_worktree`` / ``auto_commit`` are the tool's arguments — a job
-  that must work inside a specific project names that directory,
-  otherwise the run's scratch directory with worktree and auto-commit
-  off (:func:`_run_prompt_job`).
+  job's prompt is the task, and its model, budget and ``work_dir`` are
+  the tool's arguments — a job that must work inside a specific project
+  names that directory, otherwise the run's scratch directory
+  (:func:`_run_prompt_job`).  A prompt that is a slash command with
+  text (``/recommendations now``) runs that SEA directly instead, as
+  the chat does.
 - An always-on channel gateway (README §19) is a scheduled COMMAND
   job — the channel CLI's poll tick, e.g. ``kiss-telegram
   --channel=-100123 --pairing`` — never a prompt job: a tick that
@@ -652,6 +653,61 @@ def _job_timeout(job: dict[str, Any], default: float) -> float:
     return float(job.get("timeout") or 0.0) or default
 
 
+def _run_in_chat_job(
+    job: dict[str, Any], prompt: str, run_dir: Path, timeout: float,
+) -> tuple[str, str | None]:
+    """Run an ``in_chat`` prompt job as a message typed in a new chat.
+
+    The prompt goes to the daemon verbatim (no unattended preamble, no
+    SEA pinned: a ``/command text`` is dispatched by the daemon exactly
+    as when typed).  The run's own registry tab (every top-level
+    :func:`kiss.agents.sorcar.daemon_client.run` creates one, which the
+    ``tabs_state`` broadcast opens on every surface) is the new chat:
+    it shows the run and the user answers in it.  The job's
+    ``model_name``, ``max_budget`` and *run_dir* are the run's;
+    *timeout* stops it.
+
+    Args:
+        job: The job dict (uses ``model_name``, ``max_budget``).
+        prompt: The job's prompt.
+        run_dir: The task's working directory (see :func:`_job_work_dir`).
+        timeout: The run's bound in seconds.
+
+    Returns:
+        ``(status, summary)`` as :func:`_run_prompt_job`; the run's
+        summary stays in the chat and is also logged to the job's
+        output file by the caller.
+
+    Raises:
+        TimeoutError: When the run timed out but the daemon never
+            confirmed the stop (see :func:`_run_prompt_job`).
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    raw_budget = job.get("max_budget")
+    try:
+        result = daemon_client.run(
+            prompt,
+            work_dir=str(run_dir),
+            model=str(job.get("model_name") or ""),
+            max_budget=float(raw_budget) if raw_budget else None,
+            timeout=timeout,
+            stop_on_timeout=True,
+            endpoint_file=_daemon_endpoint_file,
+        )
+    except daemon_client.StopUnconfirmedTimeoutError as exc:
+        raise TimeoutError(
+            f"in-chat job timed out after {timeout:g}s; the stop was not confirmed, "
+            f"so the task MAY STILL BE RUNNING (and spending) on the daemon: {exc}"
+        ) from exc
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+        return "error", f"Error: {exc}"
+    summary = result.text or ("" if result.success else "Task failed")
+    if not summary or _is_silent(summary):
+        return "silent", None
+    return ("ok" if result.success else "error"), summary
+
+
 def _run_prompt_job(
     job: dict[str, Any], scratch_dir: Path, run_dir: Path, timeout: float,
 ) -> tuple[str, str | None]:
@@ -662,10 +718,12 @@ def _run_prompt_job(
     exactly as a chat task launches any SEA: the task text is
     the Hermes-style preamble followed by the job's prompt, and the
     job's ``model`` and ``max_budget`` (``""`` / ``None`` mean "daemon
-    default"), *run_dir* and the job's ``use_worktree`` /
-    ``auto_commit`` flags (off unless the job asked for them, since a
-    scratch directory is not a git repository) travel as the tool's
-    arguments and ``options``.
+    default") and *run_dir* travel as the tool's arguments and
+    ``options``.  A prompt that is a slash command with text
+    (``/recommendations now``, see
+    :func:`kiss.agents.sorcar.sea_commands.slash_command_task`) runs
+    that SEA instead, on the preamble plus the trailing text, without a
+    classifier (as the generic prompt SEA runs).
     Mirrors Hermes: every run gets a brand-new session (no history),
     with a preamble marking the run as unattended and forbidding
     further scheduling; a ``[SILENT]`` (or empty) summary suppresses
@@ -677,8 +735,7 @@ def _run_prompt_job(
 
     Args:
         job: The job dict (uses ``id``, ``name``, ``prompt``,
-            ``model_name``, ``max_budget``, ``use_worktree``,
-            ``auto_commit``).
+            ``model_name``, ``max_budget``).
         scratch_dir: The run's private scratch directory (created by
             :func:`_execute_job`), where the SEA lives.
         run_dir: The task's working directory: the job's ``work_dir``
@@ -712,21 +769,30 @@ def _run_prompt_job(
         notice_job_id,
         unconfirmed_stop_error,
     )
+    from kiss.agents.sorcar.sea_commands import slash_command_task
     from kiss.agents.sorcar.sea_settings import script_name
 
+    prompt = str(job.get("prompt", ""))
+    if job.get("in_chat"):
+        return _run_in_chat_job(job, prompt, run_dir, timeout)
+    # A prompt that is a slash command (``/recommendations now``) runs
+    # that SEA directly, as the chat does, with the preamble on its
+    # text; any other prompt runs the generic cron prompt SEA.
+    command = slash_command_task(prompt)
+    sea_path = PROMPT_SEA_PATH if command is None else command[1]
+    task = PROMPT_PREAMBLE + (prompt if command is None else command[0])
+    options: dict[str, Any] = {"work_dir": str(run_dir)}
+    if command is not None:
+        options["auto_classify"] = False
     run_agent = make_run_agent_tool(str(scratch_dir))
     raw_budget = job.get("max_budget")
     reply = run_agent(
-        agent=str(PROMPT_SEA_PATH),
-        task=PROMPT_PREAMBLE + str(job.get("prompt", "")),
+        agent=str(sea_path),
+        task=task,
         model=str(job.get("model_name") or ""),
         max_budget=str(float(raw_budget)) if raw_budget else "",
         timeout=str(timeout),
-        options=json.dumps({
-            "work_dir": str(run_dir),
-            "use_worktree": bool(job.get("use_worktree")),
-            "auto_commit": bool(job.get("auto_commit")),
-        }),
+        options=json.dumps(options),
     )
     # ``run_agent``'s timeout bounds the call only; an unattended run
     # has nobody to collect the detached sub-task, so it is stopped.
@@ -739,7 +805,7 @@ def _run_prompt_job(
             # ever collects an ownerless job from the registry.
             forget_agent_job(detached)
         bound = f"the scheduled task did not finish within {timeout:g}s"
-        unconfirmed = unconfirmed_stop_error(script_name(str(PROMPT_SEA_PATH)))
+        unconfirmed = unconfirmed_stop_error(script_name(str(sea_path)))
         if not detached.finished or detached.outcome == unconfirmed:
             raise TimeoutError(
                 f"prompt job timed out after {timeout:g}s; the stop was not "
@@ -1204,6 +1270,106 @@ def start_scheduler_thread(
     return stop_event
 
 
+DEFAULT_JOBS: list[dict[str, str]] = [
+    {
+        "name": "Recommendations: five suggested tasks from the last 24 hours",
+        "prompt": "/recommendations now",
+        "schedule": "0 */6 * * *",
+        "deliver": "none",
+        "max_budget": "1",
+        "timeout": "600",
+    },
+    {
+        "name": "Good morning: greeting, your recommendations, and what to do today",
+        "prompt": "/good_morning now",
+        "schedule": "0 8 * * *",
+        "deliver": "none",
+        "max_budget": "0.5",
+        "timeout": "300",
+        "in_chat": "true",
+    },
+]
+"""The jobs every installation gets, by :func:`seed_default_jobs`.
+
+The recommendations job runs the ``/recommendations`` SEA every six
+hours (Pacific time); its result is the sidebar's RECOMMENDATIONS
+subpanel, not a chat message, so it delivers nowhere.  The morning job
+runs ``/good_morning`` at 8:00 Pacific time in a new chat every surface
+opens (``in_chat``): a greeting, the recommendations the last 6-hourly
+run stored, and the question what to do today, which the user answers
+in that chat.
+"""
+
+
+def _seeded_defaults_path() -> Path:
+    """The file naming the default jobs this home has already been given."""
+    return _cron_dir() / "default-jobs-seeded.json"
+
+
+def seed_default_jobs() -> list[str]:
+    """Install the :data:`DEFAULT_JOBS` this home has never had.
+
+    Called by the kiss-web daemon on startup, so a fresh installation
+    (and an existing one on its first start after an update) gets the
+    default jobs without any user action.  Each default is seeded once
+    per home, recorded in :func:`_seeded_defaults_path`: a job the user
+    later removes, pauses or edits is theirs and is never re-created or
+    reset, and a job the user already has under a default's name (paused
+    or not) stands untouched.  Never raises: a store that cannot be
+    read, parsed, locked or written is left as it is and the defaults
+    wait for a later start.
+
+    Returns:
+        The names of the jobs seeded on this call (empty when every
+        default was seeded before, or the store is not writable).
+    """
+    try:
+        seeded = {str(n) for n in json.loads(_seeded_defaults_path().read_text("utf-8"))}
+    except (OSError, ValueError, TypeError):
+        seeded = set()
+    pending = [spec for spec in DEFAULT_JOBS if spec["name"] not in seeded]
+    if not pending:
+        return []
+    done: list[str] = []
+    try:
+        # A store that exists but cannot be read or parsed is the user's
+        # schedules, not an empty store: creating into it (load_jobs()
+        # reads it as []) would replace them with the defaults.
+        if _jobs_path().exists() and not isinstance(
+            json.loads(read_bytes_waiting_for_writer(_jobs_path()).decode("utf-8")), list
+        ):
+            raise ValueError("the cron job store is not a JSON list")
+        for spec in pending:
+            if any(j.get("name") == spec["name"] for j in load_jobs()):
+                done.append(spec["name"])  # the user's own job under that name stands
+                continue
+            result = _create_or_ensure(
+                "create",
+                name=spec["name"],
+                prompt=spec.get("prompt", ""),
+                command=spec.get("command", ""),
+                schedule=spec["schedule"],
+                deliver=spec.get("deliver", "none"),
+                model_name="",
+                max_budget=spec.get("max_budget", ""),
+                until_delivered=False,
+                work_dir="",
+                timeout=spec.get("timeout", ""),
+                in_chat=spec.get("in_chat", "") == "true",
+            )
+            if "error" in result:
+                logger.warning("default cron job %r not seeded: %s", spec["name"], result["error"])
+                continue
+            done.append(spec["name"])
+        _cron_dir().mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            _seeded_defaults_path(), json.dumps(sorted(seeded | set(done)), indent=2),
+        )
+    except Exception as exc:  # noqa: BLE001 - startup must not fail on the store
+        logger.warning("could not seed the default cron jobs: %s", exc)
+    return done
+
+
 def stop_scheduler_thread(stop_event: SchedulerStop) -> None:
     """Stop a scheduler started by :func:`start_scheduler_thread`.
 
@@ -1247,7 +1413,9 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         )
         if job.get(key) not in (None, "", [])
     }
-    for key in ("work_dir", "use_worktree", "auto_commit", "timeout", "model_name"):
+    if job.get("in_chat"):
+        view["in_chat"] = True
+    for key in ("work_dir", "timeout", "model_name"):
         if job.get(key):
             view[key] = job[key]
     for key in ("next_run_at", "last_run_at"):
@@ -1271,6 +1439,135 @@ def _enable(job: dict[str, Any]) -> str:
     job["enabled"] = True
     if job.get("next_run_at") is None:
         job["next_run_at"] = compute_next_run(str(job["schedule"]), time.time())
+    return ""
+
+
+def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
+    """Replace *job*'s name, schedule and task (prompt or command) in place.
+
+    A changed schedule recomputes the next run (a one-shot schedule
+    makes the job a one-shot); the job keeps its kind: a command job
+    gets *what* as its command, a prompt job as its prompt.
+
+    Args:
+        job: The stored job record, mutated; the caller saves the store.
+        name: The new name.
+        schedule: The new schedule (see :func:`compute_next_run`).
+        what: The new prompt or shell command.
+
+    Returns:
+        ``""`` on success, else the error text (an empty field, an
+        unsupported schedule or one that never fires).
+    """
+    name, schedule, what = name.strip(), schedule.strip(), what.strip()
+    if not (name and schedule and what):
+        return "the name, the schedule and the task must not be empty"
+    if schedule != str(job.get("schedule") or ""):
+        try:
+            next_run = compute_next_run(schedule, time.time())
+        except ValueError as e:
+            return str(e)
+        if next_run is None:
+            return f"schedule {schedule!r} never fires (in the past?)"
+        job["schedule"] = schedule
+        job["one_shot"] = is_one_shot(schedule)
+        job["next_run_at"] = next_run
+    job["name"] = name
+    job["command" if job.get("command") else "prompt"] = what
+    return ""
+
+
+def start_job(job: dict[str, Any]) -> str:
+    """Run *job* now in its own thread (as a tick does), without waiting.
+
+    The thread is registered in :data:`_running` so a tick skips the
+    job while it runs and a second start is refused.
+
+    Args:
+        job: The stored job record to execute.
+
+    Returns:
+        ``""`` when the thread started, else the error text (the job is
+        already running in this process).
+    """
+    with _running_lock:
+        running = _running.get(job["id"])
+        if running is not None and running.is_alive():
+            return f"job {job['id']!r} is already running"
+        thread = threading.Thread(
+            target=_execute_job, args=(job,),
+            name=f"kiss-cron-job-{job['id']}", daemon=True,
+        )
+        _running[job["id"]] = thread
+        thread.start()
+    return ""
+
+
+def apply_job_action(
+    action: str,
+    job_id: str,
+    name: str = "",
+    schedule: str = "",
+    what: str = "",
+    kind: str = "prompt",
+) -> str:
+    """Apply one of the Schedule subpanel's buttons to the stored jobs.
+
+    *action* is ``create`` (the header's ``+`` form: a new job named
+    *name* with *schedule* running *what* as a prompt or, when *kind*
+    is ``command``, as a shell command, with the ``cron_job`` tool's
+    defaults for everything else, see :func:`_create_or_ensure`), or
+    one applied to the stored job *job_id*: ``remove``, ``pause`` or
+    ``resume`` (as the ``cron_job`` tool's actions), ``run_now`` (start
+    the job in its own thread and return at once, see :func:`start_job`)
+    or ``update`` (replace the name, schedule and task, see
+    :func:`_update`).
+
+    Args:
+        action: The action name.
+        job_id: The id of the job (ignored by ``create``).
+        name: The new name (``create`` and ``update``).
+        schedule: The new schedule (``create`` and ``update``).
+        what: The new prompt or command (``create`` and ``update``).
+        kind: ``prompt`` or ``command`` (``create`` only).
+
+    Returns:
+        ``""`` on success, else the error text for the user.
+    """
+    if action == "create":
+        if kind not in ("prompt", "command"):
+            return f"unknown job kind {kind!r}"
+        if not (name.strip() and schedule.strip() and what.strip()):
+            return "the name, the schedule and the task must not be empty"
+        prompt, command = (what, "") if kind == "prompt" else ("", what)
+        result = _create_or_ensure(
+            "create", name.strip(), prompt, command, schedule.strip(),
+            "local", "", "", False, "", "",
+        )
+        return str(result.get("error") or "")
+    with _jobs_lock(blocking=True):
+        jobs = load_jobs()
+        match = [job for job in jobs if job["id"] == job_id]
+        if not match:
+            return f"no job with id {job_id!r}"
+        job = match[0]
+        if action == "run_now":
+            return start_job(job)
+        if action == "remove":
+            jobs = [other for other in jobs if other["id"] != job_id]
+        elif action == "pause":
+            job["enabled"] = False
+        elif action == "resume":
+            error = _enable(job)
+            if error:
+                return error
+        elif action == "update":
+            error = _update(job, name, schedule, what)
+            if error:
+                return error
+        else:
+            return f"unknown action {action!r}"
+        save_jobs(jobs)
     return ""
 
 
@@ -1309,6 +1606,132 @@ def _find_duplicate(
     return None
 
 
+def _create_or_ensure(
+    action: str,
+    name: str,
+    prompt: str,
+    command: str,
+    schedule: str,
+    deliver: str,
+    model_name: str,
+    max_budget: str,
+    until_delivered: bool,
+    work_dir: str,
+    timeout: str,
+    in_chat: bool = False,
+) -> dict[str, Any]:
+    """Register a job (the ``create`` and ``ensure`` actions of :func:`cron_job`).
+
+    The arguments are those of :func:`cron_job`, which documents them
+    and the two actions.  Shared with the Schedule subpanel's ``+``
+    form (:func:`apply_job_action` ``create``), which needs the result
+    as data rather than YAML.
+
+    Returns:
+        ``{"created": <job view>}`` (with a ``note`` when the delivery
+        was forced to ``none``), ``{"exists": ...}`` / ``{"resumed": ...}``
+        for ``ensure``, or ``{"error": <text>}`` (a duplicate also
+        carries the ``existing`` job).
+    """
+    if not name or not schedule:
+        return {"error": f"{action} requires name and schedule"}
+    if bool(prompt.strip()) == bool(command.strip()):
+        return {"error": f"{action} requires exactly one of prompt or command"}
+    if _describes_gateway(prompt):
+        return {
+            "error": "a messaging gateway is never a prompt job: an LLM "
+            "session on every tick costs money and posts status chatter "
+            "such as 'tick-OK' into the chat.  Call gateway_command(channel, "
+            "chat) and schedule its result as a command job with "
+            "deliver='none'."
+        }
+    note = ""
+    if _gateway_delivery(command, deliver) != deliver:
+        note = (
+            "a gateway tick never posts into a chat: delivery set to none "
+            "(ticks that served messages or failed are logged in "
+            f"{_output_dir()}/<job_id>.md)"
+        )
+        deliver = "none"
+    try:
+        next_run = compute_next_run(schedule, time.time())
+    except ValueError as e:
+        return {"error": str(e)}
+    if next_run is None:
+        return {"error": f"schedule {schedule!r} never fires (in the past?)"}
+    try:
+        budget = float(max_budget) if max_budget.strip() else 0.0
+    except ValueError:
+        return {"error": f"max_budget {max_budget!r} is not a number"}
+    try:
+        timeout_seconds = float(timeout) if timeout.strip() else 0.0
+    except ValueError:
+        return {"error": f"timeout {timeout!r} is not a number"}
+    if not (timeout_seconds >= 0 and math.isfinite(timeout_seconds)):
+        return {"error": f"timeout {timeout!r} must be a positive number"}
+    run_dir = ""
+    if work_dir.strip():
+        run_dir = str(Path(work_dir.strip()).expanduser().resolve())
+        if not Path(run_dir).is_dir():
+            return {"error": f"work_dir {work_dir!r} is not a directory"}
+    job = {
+        "id": uuid.uuid4().hex[:8],
+        "name": name,
+        "prompt": prompt.strip(),
+        "command": command.strip(),
+        "schedule": schedule.strip(),
+        "deliver": deliver.strip() or "local",
+        "model_name": model_name.strip(),
+        "max_budget": budget,
+        "work_dir": run_dir,
+        "timeout": timeout_seconds,
+        "enabled": True,
+        "one_shot": is_one_shot(schedule),
+        "until_delivered": bool(until_delivered),
+        "in_chat": bool(in_chat),
+        "created_at": time.time(),
+        "next_run_at": next_run,
+        "last_run_at": None,
+        "last_status": "",
+        "last_summary": "",
+        "last_delivery": [],
+    }
+    with _jobs_lock(blocking=True):
+        jobs = load_jobs()
+        duplicate = _find_duplicate(jobs, job)
+        if action == "ensure":
+            named = [j for j in jobs if j.get("name") == name]
+            existing = named[0] if named else duplicate
+            if existing is not None:
+                if existing.get("enabled"):
+                    return {"exists": _job_view(existing)}
+                error = _enable(existing)
+                if error:
+                    return {"error": error}
+                save_jobs(jobs)
+                return {"resumed": _job_view(existing)}
+        if duplicate is not None:
+            state = "paused" if not duplicate.get("enabled") else "scheduled"
+            hint = (
+                f"resume it with cron_job('resume', job_id={duplicate['id']!r})"
+                if state == "paused"
+                else "remove it first if you want to replace it"
+            )
+            return {
+                "error": f"duplicate: job {duplicate['id']!r} "
+                f"({duplicate.get('name')!r}) is already {state} with the "
+                f"same {'command' if job['command'] else 'prompt'}, schedule "
+                f"and delivery targets; {hint}",
+                "existing": _job_view(duplicate),
+            }
+        jobs.append(job)
+        save_jobs(jobs)
+    result: dict[str, Any] = {"created": _job_view(job)}
+    if note:
+        result["note"] = note
+    return result
+
+
 def cron_job(
     action: str,
     job_id: str = "",
@@ -1321,9 +1744,8 @@ def cron_job(
     max_budget: str = "",
     until_delivered: bool = False,
     work_dir: str = "",
-    use_worktree: bool = False,
-    auto_commit: bool = False,
     timeout: str = "",
+    in_chat: bool = False,
 ) -> str:
     """Manage scheduled automations (cron jobs) stored in a local JSON file.
 
@@ -1369,17 +1791,19 @@ def cron_job(
     (typically ``"every 2m"``) — never as a ``prompt`` job: ``create``
     refuses a prompt that describes a gateway tick, and a gateway
     command is always stored with ``deliver`` ``none`` so its ticks
-    never post status into the chat.
+    never post status into the chat.  A ``prompt`` that is a slash
+    command with text (``/recommendations now``) runs that SEA directly
+    on every tick, as the chat does.
 
     Jobs due at the same time run concurrently, each in its own scratch
     directory that is removed when the run ends; a job whose previous
     run is still in progress is not started again until it finishes.
     A job that must work inside a specific project ("run the tests in
     /home/me/proj every night and fix them") names that directory as
-    ``work_dir``; a prompt job in a git repository may additionally ask
-    for ``use_worktree`` / ``auto_commit`` so the run edits an isolated
-    worktree and merges its commits back, exactly like a chat task with
-    those toggles on.  Long runs need a larger ``timeout``: a run is
+    ``work_dir``; in a git repository the run isolates its edits in a
+    worktree and merges them back with its own ``create_worktree`` /
+    ``commit_and_merge`` tools, exactly like a chat task.  Long runs
+    need a larger ``timeout``: a run is
     stopped once it exceeds it (default 3600 s for a prompt job,
     600 s for a command).
 
@@ -1427,121 +1851,24 @@ def cron_job(
         work_dir: Existing directory the run works in — the command's
             working directory or the prompt session's work directory
             (create; empty uses a private scratch directory).
-        use_worktree: Run the prompt job in a git worktree of
-            ``work_dir`` (create; prompt jobs with ``work_dir`` only).
-        auto_commit: Auto-commit (and, with ``use_worktree``, merge)
-            the prompt job's changes (create; prompt jobs with
-            ``work_dir`` only).
         timeout: Per-run timeout in seconds, as a string like
             ``"21600"`` (create; empty uses the default).
+        in_chat: Run the prompt as a message typed in a new chat
+            instead of unattended (create; a greeting or a question the
+            user answers in that chat, e.g. the morning
+            ``/good_morning`` job): submitted verbatim (a ``/command
+            text`` runs that SEA), without the unattended preamble,
+            under its own chat tab every surface opens.
 
     Returns:
         A YAML string describing the result (created job, job list,
         confirmation, or an ``error`` key explaining what went wrong).
     """
     if action in ("create", "ensure"):
-        if not name or not schedule:
-            return _dump({"error": f"{action} requires name and schedule"})
-        if bool(prompt.strip()) == bool(command.strip()):
-            return _dump({"error": f"{action} requires exactly one of prompt or command"})
-        if _describes_gateway(prompt):
-            return _dump({
-                "error": "a messaging gateway is never a prompt job: an LLM "
-                "session on every tick costs money and posts status chatter "
-                "such as 'tick-OK' into the chat.  Call gateway_command(channel, "
-                "chat) and schedule its result as a command job with "
-                "deliver='none'."
-            })
-        note = ""
-        if _gateway_delivery(command, deliver) != deliver:
-            note = (
-                "a gateway tick never posts into a chat: delivery set to none "
-                "(ticks that served messages or failed are logged in "
-                f"{_output_dir()}/<job_id>.md)"
-            )
-            deliver = "none"
-        try:
-            next_run = compute_next_run(schedule, time.time())
-        except ValueError as e:
-            return _dump({"error": str(e)})
-        if next_run is None:
-            return _dump({"error": f"schedule {schedule!r} never fires (in the past?)"})
-        try:
-            budget = float(max_budget) if max_budget.strip() else 0.0
-        except ValueError:
-            return _dump({"error": f"max_budget {max_budget!r} is not a number"})
-        try:
-            timeout_seconds = float(timeout) if timeout.strip() else 0.0
-        except ValueError:
-            return _dump({"error": f"timeout {timeout!r} is not a number"})
-        if not (timeout_seconds >= 0 and math.isfinite(timeout_seconds)):
-            return _dump({"error": f"timeout {timeout!r} must be a positive number"})
-        run_dir = ""
-        if work_dir.strip():
-            run_dir = str(Path(work_dir.strip()).expanduser().resolve())
-            if not Path(run_dir).is_dir():
-                return _dump({"error": f"work_dir {work_dir!r} is not a directory"})
-        if (use_worktree or auto_commit) and not (run_dir and prompt.strip()):
-            return _dump({
-                "error": "use_worktree and auto_commit need a prompt job with work_dir"
-            })
-        job = {
-            "id": uuid.uuid4().hex[:8],
-            "name": name,
-            "prompt": prompt.strip(),
-            "command": command.strip(),
-            "schedule": schedule.strip(),
-            "deliver": deliver.strip() or "local",
-            "model_name": model_name.strip(),
-            "max_budget": budget,
-            "work_dir": run_dir,
-            "use_worktree": bool(use_worktree),
-            "auto_commit": bool(auto_commit),
-            "timeout": timeout_seconds,
-            "enabled": True,
-            "one_shot": is_one_shot(schedule),
-            "until_delivered": bool(until_delivered),
-            "created_at": time.time(),
-            "next_run_at": next_run,
-            "last_run_at": None,
-            "last_status": "",
-            "last_summary": "",
-            "last_delivery": [],
-        }
-        with _jobs_lock(blocking=True):
-            jobs = load_jobs()
-            duplicate = _find_duplicate(jobs, job)
-            if action == "ensure":
-                named = [j for j in jobs if j.get("name") == name]
-                existing = named[0] if named else duplicate
-                if existing is not None:
-                    if existing.get("enabled"):
-                        return _dump({"exists": _job_view(existing)})
-                    error = _enable(existing)
-                    if error:
-                        return _dump({"error": error})
-                    save_jobs(jobs)
-                    return _dump({"resumed": _job_view(existing)})
-            if duplicate is not None:
-                state = "paused" if not duplicate.get("enabled") else "scheduled"
-                hint = (
-                    f"resume it with cron_job('resume', job_id={duplicate['id']!r})"
-                    if state == "paused"
-                    else "remove it first if you want to replace it"
-                )
-                return _dump({
-                    "error": f"duplicate: job {duplicate['id']!r} "
-                    f"({duplicate.get('name')!r}) is already {state} with the "
-                    f"same {'command' if job['command'] else 'prompt'}, schedule "
-                    f"and delivery targets; {hint}",
-                    "existing": _job_view(duplicate),
-                })
-            jobs.append(job)
-            save_jobs(jobs)
-        result: dict[str, Any] = {"created": _job_view(job)}
-        if note:
-            result["note"] = note
-        return _dump(result)
+        return _dump(_create_or_ensure(
+            action, name, prompt, command, schedule, deliver, model_name,
+            max_budget, until_delivered, work_dir, timeout, in_chat,
+        ))
 
     if action == "list":
         return _dump({"jobs": [_job_view(job) for job in load_jobs()]})
@@ -1796,8 +2123,8 @@ CRON_DISPATCH_PREAMBLE = (
     "as a prompt job — it would burn tokens on every tick.  A job that "
     "must work inside a specific project (\"run the tests in "
     "/home/me/proj nightly and fix them\") gets that directory as "
-    "work_dir; for a git repository whose changes should land on its "
-    "branch pass use_worktree=True and auto_commit=True as well, and "
+    "work_dir (in a git repository the run commits and merges its own "
+    "changes with its create_worktree / commit_and_merge tools), and "
     "give long runs a larger timeout (seconds; default 3600 for a "
     "prompt job).  create "
     "refuses a job whose prompt/command, schedule and delivery match an "
@@ -1878,7 +2205,7 @@ def main() -> None:
             "Usage: kiss-cron (--daemon [--interval SECONDS] | --tick | --list |\n"
             "  --create NAME --schedule S (--prompt P | --command C)\n"
             "    [--deliver TARGETS] [-m MODEL] [-b BUDGET] [--until-delivered]\n"
-            "    [--work-dir DIR] [--worktree] [--auto-commit] [--timeout SECONDS] |\n"
+            "    [--work-dir DIR] [--timeout SECONDS] |\n"
             "  --remove ID | --pause ID | --resume ID | --run ID)"
         )
         sys.exit(1)
@@ -1906,14 +2233,6 @@ def main() -> None:
     parser.add_argument(
         "--work-dir", default="", metavar="DIR",
         help="Directory the run works in (default: a private scratch directory)",
-    )
-    parser.add_argument(
-        "--worktree", action="store_true",
-        help="Run the prompt job in a git worktree of --work-dir",
-    )
-    parser.add_argument(
-        "--auto-commit", action="store_true",
-        help="Auto-commit (and merge) the prompt job's changes",
     )
     parser.add_argument(
         "--timeout", default="", metavar="SECONDS", help="Per-run timeout",
@@ -1945,8 +2264,6 @@ def main() -> None:
                 max_budget=args.budget,
                 until_delivered=args.until_delivered,
                 work_dir=args.work_dir,
-                use_worktree=args.worktree,
-                auto_commit=args.auto_commit,
                 timeout=args.timeout,
             ),
             end="",

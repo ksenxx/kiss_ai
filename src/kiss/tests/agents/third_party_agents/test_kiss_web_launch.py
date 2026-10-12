@@ -1109,17 +1109,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             "the resumed run must see the prior task as chat context"
         )
 
-    def test_carrier_records_result_with_new_chat(self) -> None:
-        agent = KissWebChatAgent("Test Carrier 2")
-        agent.new_chat()
-        result = run_agent_via_kiss_web(
-            agent,
-            "wt task",
-            work_dir=self.repo,
-        )
-        assert SUMMARY in yaml.safe_load(result)["summary"]
-        assert agent.last_run_result == result
-
 
 class _RecordingBackend:
     """A channel backend that records what the runner posts."""
