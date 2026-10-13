@@ -39,7 +39,9 @@
          surface: "machine: working directory".  The machine drop-down
          lists this daemon's machine (configData.machine) and the
          reachable registered machines (the MACHINES subpanel); main.js
-         sends the pick as `machine` with every submit.  The working
+         sends the pick as `machine` with every submit, so it can be
+         changed while a task runs: that task stays put, the next one
+         goes to the pick.  The working
          directory drop-down lists every directory selected so far
          (configData.recent_work_dirs) and ends with "Choose ...",
          which opens a folder picker; a pick becomes the global working
@@ -47,7 +49,7 @@
          in a .chat-header-select span whose ::after draws the down
          chevron (main.css) that marks it as a drop-down. -->
     <div id="chat-header">
-      <span id="chat-machine-wrap" class="chat-header-select"><select id="chat-machine" title="The machine this chat's tasks run on" aria-label="Machine"></select></span>
+      <span id="chat-machine-wrap" class="chat-header-select"><select id="chat-machine" title="The machine this chat's next task runs on" aria-label="Machine"></select></span>
       <span id="chat-header-sep" aria-hidden="true" hidden>:</span>
       <span id="chat-workdir-wrap" class="chat-header-select"><select id="chat-workdir" title="The working directory the next task runs in" aria-label="Working directory"></select></span>
     </div>
@@ -314,7 +316,9 @@
            expanded, drags the boundary between them.  By default
            every expanded section gets an equal share of the height;
            the last expanded section fills whatever height the others
-           leave.  Every section starts expanded.  To add a panel, append one
+           leave.  Every section starts expanded, except on the first
+           load after an install or an update, which shows only
+           Recommendations (resetMetaSectionsForVersion).  To add a panel, append one
            more <section class="meta-section"> (a unique id, a header
            with a .meta-section-toggle, a .meta-section-body) followed
            by its .meta-section-resizer. -->

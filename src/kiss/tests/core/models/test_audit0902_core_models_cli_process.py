@@ -88,10 +88,15 @@ _SPAWN_GRANDCHILD = f"""
 
     # The grandchild inherits OUR stdin -- the adapter's prompt pipe -- and
     # outlives us, but not stdout/stderr, so the adapter sees EOF on both.
+    # It starts its own session so the supervisor's group kill does not
+    # reach it (on POSIX; Windows ignores start_new_session and the
+    # grandchild dies with the Job Object): only cancellation can free
+    # the prompt writer while it lives.
     grandchild = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep({_GRANDCHILD_LIFETIME})"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     with open({_GRANDCHILD_PID_FILE}, "w") as f:
         f.write(str(grandchild.pid))
@@ -103,6 +108,14 @@ def _grandchild_pid(tmp_path: Path) -> int:
     pid_file = tmp_path / "grandchild.pid"
     assert pid_file.exists(), "the stand-in never recorded its grandchild"
     return int(pid_file.read_text())
+
+
+def _wait_dead(pid: int, timeout: float = 5.0) -> bool:
+    """Return whether *pid* disappears within *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not pid_alive(pid)
 
 
 def _kill_grandchild(tmp_path: Path) -> None:
@@ -199,9 +212,15 @@ class TestWriterThreadDoesNotHoldTheTurnHostage:
             f"generate() took {elapsed:.1f}s: the supervisor waited on the "
             "stdin writer instead of returning the child's finished reply"
         )
-        # Explicit child event: the grandchild was recorded before the reply
-        # and is still alive, so only cancellation can have freed the writer.
-        assert pid_alive(_grandchild_pid(tmp_path))
+        grandchild = _grandchild_pid(tmp_path)
+        if os.name == "nt":
+            # No session to escape to: the grandchild is killed with the job.
+            assert _wait_dead(grandchild), f"grandchild {grandchild} survived the turn"
+        else:
+            # Explicit child event: the grandchild was recorded before the
+            # reply and is still alive, so only cancellation can have freed
+            # the writer.
+            assert pid_alive(grandchild)
         assert not _writer_threads(), (
             "generate() returned with the stdin writer still parked in write(2)"
         )

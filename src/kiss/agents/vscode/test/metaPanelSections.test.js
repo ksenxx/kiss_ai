@@ -77,6 +77,7 @@ function makeWebview(bodyAttrs, opts) {
     storage = {},
     url = 'https://localhost/',
     extraSection = false,
+    tips = undefined,
   } = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -140,6 +141,9 @@ function makeWebview(bodyAttrs, opts) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  // The remote page embeds the daemon's tips bootstrap (with the
+  // running version) before main.js runs; *tips* stands in for it.
+  if (tips !== undefined) win.__TIPS__ = tips;
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=metasections-main.js',
@@ -747,6 +751,109 @@ async function main() {
     click(win, toggleOf(info));
     assertExpanded(info, true);
     assertExpanded(update, false);
+  });
+
+  // ---- First load after an install or an update ----
+  const CK = 'kiss-meta-section-collapsed:';
+  const VK = 'kiss-meta-sections-version';
+  const RECS = 'meta-recommendations';
+
+  /** Only Recommendations is expanded; every other section is folded. */
+  function assertFreshLayout(win) {
+    for (const section of sections(win))
+      assertExpanded(section, section.id === RECS);
+  }
+
+  await test('remote webapp: the first load of a version expands only Recommendations, whatever was stored', () => {
+    // A profile that had Recommendations folded and Task Info open.
+    let win = makeWebview(REMOTE, {
+      storage: {[CK + RECS]: '1', [CK + 'meta-info']: '1'},
+      tips: {tips: [], show: false, version: '2026.10.1'},
+    }).win;
+    assertFreshLayout(win);
+    assert.strictEqual(win.localStorage.getItem(VK), '2026.10.1');
+    // The reset persists like clicks on the chevrons.
+    assert.strictEqual(win.localStorage.getItem(CK + RECS), null);
+    assert.strictEqual(win.localStorage.getItem(CK + 'meta-section-info'), '1');
+    assert.strictEqual(win.localStorage.getItem(CK + 'meta-spend'), '1');
+    // The user opens Task Info (which folds Recommendations) ...
+    click(win, toggleOf(el(win, 'meta-section-info')));
+    assertExpanded(el(win, 'meta-section-info'), true);
+    assertExpanded(el(win, RECS), false);
+    const kept = {};
+    for (let i = 0; i < win.localStorage.length; i++) {
+      const k = win.localStorage.key(i);
+      kept[k] = win.localStorage.getItem(k);
+    }
+    // ... and the next load of the SAME version keeps that choice.
+    win = makeWebview(REMOTE, {
+      storage: kept,
+      tips: {tips: [], show: false, version: '2026.10.1'},
+    }).win;
+    assertExpanded(el(win, 'meta-section-info'), true);
+    assertExpanded(el(win, RECS), false);
+    // An update: the fresh layout again, once.
+    win = makeWebview(REMOTE, {
+      storage: kept,
+      tips: {tips: [], show: false, version: '2026.10.2'},
+    }).win;
+    assertFreshLayout(win);
+    assert.strictEqual(win.localStorage.getItem(VK), '2026.10.2');
+  });
+
+  await test('no version (the VS Code placeholder bootstrap, or none at all): nothing is reset', () => {
+    let win = makeWebview(REMOTE, {
+      storage: {[CK + RECS]: '1'},
+      tips: {tips: [], show: false, version: ''},
+    }).win;
+    assertExpanded(el(win, RECS), false);
+    assertExpanded(el(win, 'meta-section-info'), true);
+    assert.strictEqual(win.localStorage.getItem(VK), null);
+    win = makeWebview(REMOTE, {storage: {[CK + RECS]: '1'}}).win;
+    assertExpanded(el(win, RECS), false);
+    assert.strictEqual(win.localStorage.getItem(VK), null);
+  });
+
+  await test('VS Code surfaces learn the version from tipsData: the Task Info view and the sidebar chat reset once', () => {
+    for (const attrs of [META_VIEW, SIDEBAR]) {
+      const win = makeWebview(attrs, {
+        storage: {[CK + RECS]: '1'},
+        tips: {tips: [], show: false, version: ''},
+      }).win;
+      assertExpanded(el(win, RECS), false);
+      send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.1'});
+      assertFreshLayout(win);
+      assert.strictEqual(win.localStorage.getItem(VK), '2026.10.1');
+      // The user's later choice survives the tipsData a reconnect
+      // re-sends.
+      click(win, toggleOf(el(win, 'meta-spend')));
+      assertExpanded(el(win, 'meta-spend'), true);
+      assertExpanded(el(win, RECS), false);
+      send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.1'});
+      assertExpanded(el(win, 'meta-spend'), true);
+      assertExpanded(el(win, RECS), false);
+      // A tipsData without a version string changes nothing.
+      send(win, {type: 'tipsData', tips: [], show: false});
+      assertExpanded(el(win, 'meta-spend'), true);
+    }
+  });
+
+  await test('opaque origin (no localStorage): a version makes every load a first one', () => {
+    const win = makeWebview(REMOTE, {
+      url: null,
+      tips: {tips: [], show: false, version: '2026.10.1'},
+    }).win;
+    assertFreshLayout(win);
+    click(win, toggleOf(el(win, 'meta-spend')));
+    assertExpanded(el(win, 'meta-spend'), true);
+    // The page itself remembers the version: the tipsData of the
+    // connect (and of every reconnect) leaves its choices alone.
+    send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.1'});
+    assertExpanded(el(win, 'meta-spend'), true);
+    assertExpanded(el(win, RECS), false);
+    // A new version (the daemon updated under an open page) resets.
+    send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.2'});
+    assertFreshLayout(win);
   });
 
   await test('the equal share is published as --meta-body-share and re-measured when the panel resizes', () => {

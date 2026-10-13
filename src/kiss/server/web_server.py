@@ -2613,6 +2613,15 @@ class WebPrinter(JsonPrinter):
         # apart from ``_remote_clients`` because talk arbitration sends
         # them muted copies when the daemon plays a clip itself.
         self._local_clients: set[ServerConnection] = set()
+        # Daemon-link peers: another daemon's ``MachineLink`` request
+        # socket (``"link": true`` in its ``auth`` frame).  Such a peer
+        # only ever wants the replies to its own requests, so it is
+        # kept out of both sets above: it gets connection-scoped
+        # replies and global events, never the tab-stamped task copies
+        # (streamed tokens, status, a whole ``task_events`` transcript
+        # replayed by someone's history click) that ``broadcast`` fans
+        # out to every other peer.
+        self._link_clients: set[ServerConnection] = set()
         # Local talk bookkeeping.  This printer owns two facts:
         # which local connection addressed which tab id (INTEREST: the
         # per-connection sets, keyed by connection id) and
@@ -2880,6 +2889,12 @@ class WebPrinter(JsonPrinter):
                     self._keep_tab_stamped_task_event(*kept)
                 if data:
                     self._send_to_ws_clients(data)
+                    # An explicit empty stamp is a global event sent
+                    # verbatim (``tabs_state``, ``tasks_updated``), so
+                    # daemon-link peers get it; a tab's event is a
+                    # task copy they never want.
+                    if not event["tabId"]:
+                        self._send_to_link_clients(data)
             return
 
         event = self._inject_task_id(event)
@@ -2887,7 +2902,9 @@ class WebPrinter(JsonPrinter):
         if not event.get("taskId"):
             if record_only:
                 return
-            self._send_to_ws_clients(json.dumps(event))
+            data = json.dumps(event)
+            self._send_to_ws_clients(data)
+            self._send_to_link_clients(data)
             return
 
         # A ``talk`` event is never replayed (not a display event), and
@@ -3255,7 +3272,10 @@ class WebPrinter(JsonPrinter):
         remote and local clients in lockstep by
         delegating to :meth:`_send_to_remote_clients` and
         :meth:`_send_to_local_clients` (per-endpoint FIFO order is
-        preserved by each endpoint's ``send_lock``).
+        preserved by each endpoint's ``send_lock``).  Daemon-link peers
+        are not clients in this sense: :meth:`broadcast` sends them
+        global events through :meth:`_send_to_link_clients` and
+        nothing else.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
@@ -3266,6 +3286,23 @@ class WebPrinter(JsonPrinter):
         """
         self._send_to_remote_clients(data)
         self._send_to_local_clients(data, tab_id)
+
+    def _send_to_link_clients(self, data: str) -> None:
+        """Send a global event to every daemon-link peer.
+
+        Called by :meth:`broadcast` for an event with no task id or
+        with an explicit empty ``tabId`` stamp only; a task-event copy
+        never reaches a link peer, which wants just the replies to its
+        own requests (and the global events some of those replies are,
+        such as ``tabs_state``).
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoints = list(self._link_clients)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
 
     def _reserve_replay_send(
         self, slot: ConcurrentFuture[str], conn_id: str,
@@ -3413,7 +3450,9 @@ class WebPrinter(JsonPrinter):
             if transport is not None:
                 transport.abort()
 
-    def add_client(self, ws: ServerConnection, local: bool = False) -> None:
+    def add_client(
+        self, ws: ServerConnection, local: bool = False, link: bool = False,
+    ) -> None:
         """Register a WebSocket client for event broadcasting.
 
         Args:
@@ -3422,9 +3461,19 @@ class WebPrinter(JsonPrinter):
                 Code extension window, ``daemon_client`` run), which
                 joins ``_local_clients``; ``False`` for a remote,
                 password-authenticated browser.
+            link: ``True`` for another daemon's ``MachineLink`` request
+                socket, whatever *local* says: it joins
+                ``_link_clients`` instead and receives only the replies
+                to its own requests and global events, never a
+                task-event copy (a transcript replayed by a history
+                click on this daemon used to close such a socket with
+                1009 and show this machine as unreachable).
         """
         with self._ws_lock:
-            (self._local_clients if local else self._remote_clients).add(ws)
+            if link:
+                self._link_clients.add(ws)
+            else:
+                (self._local_clients if local else self._remote_clients).add(ws)
             self._pending_sends.setdefault(ws, set())
 
     def remove_client(self, ws: ServerConnection) -> None:
@@ -3441,6 +3490,7 @@ class WebPrinter(JsonPrinter):
         with self._ws_lock:
             self._remote_clients.discard(ws)
             self._local_clients.discard(ws)
+            self._link_clients.discard(ws)
             pending = self._pending_sends.pop(ws, set())
             self._send_locks.pop(ws, None)
         for fut in pending:
@@ -4864,6 +4914,8 @@ _WS_SHIM_JS = r"""
   // ``auth`` frames, and the value the user is typing is never
   // cleared under them.
   var _authPrompt = null;
+  // Pending interactive submission, never populated from cached credentials.
+  var _authPassword = '';
   // Detaches the pending prompt's listeners without resolving it;
   // set while a prompt is pending, used by ``_hideAuthModal`` so a
   // dialog hidden from outside (``auth_ok`` won on a reconnect with
@@ -4932,7 +4984,10 @@ _WS_SHIM_JS = r"""
   }
 
   function _hideAuthModal() {
+    _authPassword = '';
     if (_authPromptCancel) _authPromptCancel();
+    var input = document.getElementById('auth-modal-input');
+    if (input) input.value = '';
     var modal = document.getElementById('auth-modal');
     if (modal) modal.style.display = 'none';
     _setAuthError('');
@@ -4983,6 +5038,7 @@ _WS_SHIM_JS = r"""
       _showPasswordNeeded();
       return;
     }
+    _authPassword = pwd;
     try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
     if (_ws && _ws.readyState === WebSocket.OPEN) {
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
@@ -5151,6 +5207,7 @@ _WS_SHIM_JS = r"""
     _ws.onopen = function() {
       var pwd = '';
       try { pwd = localStorage.getItem('sorcar-remote-pwd') || ''; } catch(e) {}
+      if (_authPassword !== pwd) _authPassword = '';
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
     };
 
@@ -5188,6 +5245,17 @@ _WS_SHIM_JS = r"""
         _promptDeclined = false;
         _stopOverlayTick();
         _setOverlayAction(null, null);
+        // WebSocket auth is invisible to the browser's login heuristics.
+        // Complete an interactive login explicitly; otherwise Terminal's
+        // later xterm fetch looks like its successful form submission and
+        // opens Save Password there. Never re-offer on silent reconnects.
+        if (_authPassword && window.PasswordCredential && navigator.credentials) {
+          try {
+            navigator.credentials.store(new PasswordCredential({
+              id: 'remote', password: _authPassword
+            })).catch(function() {});
+          } catch (e) { /* Password saving must not block authentication. */ }
+        }
         _hideAuthModal();
         // Everything the page posted while the connection was down
         // (a settings save, a model change, a closed tab, ...) goes
@@ -5227,6 +5295,7 @@ _WS_SHIM_JS = r"""
         return;
       }
       if (msg.type === 'auth_required') {
+        _authPassword = '';
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
@@ -5954,13 +6023,15 @@ class RemoteAccessServer:
 
     async def _authenticate_ws(
         self, websocket: ServerConnection,
-    ) -> sorcar_api.AuthKind | None:
+    ) -> sorcar_api.Auth | None:
         """Authenticate a WebSocket client with the ``auth`` handshake.
 
-        Returns ``"local"`` for a loopback peer that presented this
-        daemon's local token (see :attr:`local_token`), ``"remote"``
-        for a client that supplied the configured ``remote_password``,
-        and ``None`` (with the socket closed) on failure.
+        Returns an :class:`~kiss.server.sorcar.Auth` of kind
+        ``"local"`` for a loopback peer that presented this daemon's
+        local token (see :attr:`local_token`), ``"remote"`` for a
+        client that supplied the configured ``remote_password`` (its
+        ``link`` flag set when the peer declared itself a daemon
+        link), and ``None`` (with the socket closed) on failure.
 
         When the configured ``remote_password`` is empty, only
         loopback peers may connect at all (:meth:`_process_request`
@@ -6031,9 +6102,9 @@ class RemoteAccessServer:
         auth = await self._authenticate_ws(websocket)
         if auth is None:
             return
-        is_local = auth == "local"
+        is_local = auth.kind == "local"
 
-        self._printer.add_client(websocket, local=is_local)
+        self._printer.add_client(websocket, local=is_local, link=auth.link)
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex}
         self._printer.bind_conn(conn_state["conn_id"], websocket)
         try:

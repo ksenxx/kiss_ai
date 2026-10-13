@@ -225,14 +225,16 @@ export class SorcarPanelManager {
    * composer (not submitted: the user reads it first).
    *
    * @param event The chat to open: backend chat id ('' or absent for a
-   *     new chat), the task to scroll to, the task text; or pendingText,
-   *     the prompt a new chat's composer receives, submitted at once
-   *     with autoSubmit.
+   *     new chat), the task to scroll to, the task text, the remote
+   *     machine the chat lives on ('' or absent for this one); or
+   *     pendingText, the prompt a new chat's composer receives,
+   *     submitted at once with autoSubmit.
    */
   public openChat(event: {
     chatId?: string;
     taskId?: string | number | null;
     title?: string;
+    machine?: string;
     pendingText?: string;
     autoSubmit?: boolean;
   }): void {

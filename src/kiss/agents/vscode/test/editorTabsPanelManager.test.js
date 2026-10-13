@@ -322,6 +322,7 @@ async function runTest() {
       chatId: 'chat-B',
       taskId: 7,
       title: 'resumed chat',
+      machine: '',
     },
   ]);
   assert.strictEqual(createdPanels.length, 1, 'still the one panel');

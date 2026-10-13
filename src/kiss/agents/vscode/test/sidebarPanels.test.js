@@ -214,7 +214,9 @@ const MACHINES = [
     error: '',
   },
   {
+    // Registered by its address: the daemon labels it by its host name.
     name: 'office',
+    label: 'office-pc',
     address: 'ssh me@office',
     ip: 'office',
     port: 0,
@@ -884,7 +886,8 @@ async function main() {
     const name = r => r.querySelector('.sidebar-panel-name').textContent;
     const sub = r => r.querySelector('.sidebar-panel-sub').textContent;
     const dot = r => r.querySelector('.machine-status');
-    eq(rows.map(name), ['laptop', 'gpu-box', 'office']);
+    eq(rows.map(name), ['laptop', 'gpu-box', 'office-pc'], 'a row shows the label');
+    assert.strictEqual(rows[2].dataset.machine, 'office', 'the row keeps the name');
     assert.strictEqual(rows[0].querySelector('.sidebar-panel-badge').textContent, 'local');
     assert.strictEqual(rows[1].querySelector('.sidebar-panel-badge'), null);
     assert.ok(dot(rows[0]).classList.contains('reachable'));

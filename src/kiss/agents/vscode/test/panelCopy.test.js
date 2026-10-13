@@ -144,9 +144,7 @@ async function run() {
       const rc = document.createElement('div');
       rc.className = 'ev rc';
       rc.innerHTML =
-        '<div class="rc-h"><h3>Result</h3><div class="rs">' +
-        '<span>Tokens <b>123</b></span><span>Cost <b>$0.01</b></span>' +
-        '</div></div>' +
+        '<div class="rc-h"><h3>Result</h3></div>' +
         '<div class="rc-body md-body">' +
         '<h1>Hello</h1><p><strong>World</strong></p>' +
         '</div>';
@@ -159,7 +157,7 @@ async function run() {
       await flushMicrotasks();
 
       assert.strictEqual(getClipboard(), rawMd);
-      assert.notStrictEqual(getClipboard(), 'Result Tokens 123 Cost $0.01 Hello World');
+      assert.notStrictEqual(getClipboard(), 'Result Hello World');
     },
   );
 

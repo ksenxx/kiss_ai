@@ -57,6 +57,7 @@ from playwright.sync_api import Browser, Locator, Page, sync_playwright
 from kiss.server.web_server import MEDIA_DIR, _build_html
 from kiss.tests.conftest import (
     goto_retrying_network_change,
+    mark_version_seen,
     reload_retrying_network_change,
 )
 
@@ -252,6 +253,7 @@ def _open_page(
     height: int = 900,
     global_sections: bool = False,
     storage: dict[str, str] | None = None,
+    fresh_profile: bool = False,
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
@@ -260,9 +262,13 @@ def _open_page(
     ``global_sections``, the Schedule, Apps and Spend sections are hidden
     too, so only the per-task sections share the panel.  ``storage``
     entries land in localStorage before the page's scripts run, the way
-    a previous visit would have left them."""
+    a previous visit would have left them.  The profile has already seen
+    the running version unless ``fresh_profile``: the first load of a
+    version shows only Recommendations."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
+    if not fresh_profile:
+        mark_version_seen(page)
     if storage:
         page.add_init_script(
             f"for (const [k, v] of Object.entries({json.dumps(storage)})) "
@@ -353,6 +359,39 @@ def _drag_separator_by(page: Page, dy: float) -> None:
 
 def _toggle(page: Page, section_id: str) -> None:
     page.locator(f"#{section_id} .meta-section-toggle").click()
+
+
+_EXPANDED_BY_ID_JS = """
+() => Object.fromEntries(Array.from(
+  document.querySelectorAll('#meta-panel > .meta-section'),
+  s => [s.id, s.querySelector('.meta-section-toggle').getAttribute('aria-expanded')]))
+"""
+
+
+def test_a_fresh_profile_opens_only_recommendations(browser: Browser, remote_url: str) -> None:
+    """The first load after an install or an update: only Recommendations
+    is expanded, whatever the profile stored; the next load of the same
+    version keeps the user's folds."""
+    page = _open_page(
+        browser, remote_url, 1200, global_sections=True, fresh_profile=True,
+        storage={"kiss-meta-section-collapsed:meta-recommendations": "1"},
+    )
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        expanded = page.evaluate(_EXPANDED_BY_ID_JS)
+        assert expanded["meta-recommendations"] == "true", expanded
+        assert {k for k, v in expanded.items() if v == "true"} == {"meta-recommendations"}
+        assert page.evaluate("localStorage.getItem('kiss-meta-sections-version')")
+        # The user opens Task Info (Recommendations folds) ...
+        _toggle(page, "meta-section-info")
+        reload_retrying_network_change(page)
+        page.wait_for_selector("body.remote-chat", state="attached")
+        # ... and a reload of the same version keeps that.
+        expanded = page.evaluate(_EXPANDED_BY_ID_JS)
+        assert expanded["meta-section-info"] == "true", expanded
+        assert expanded["meta-recommendations"] == "false", expanded
+    finally:
+        page.close()
 
 
 def test_both_sections_expanded_share_the_panel_equally(

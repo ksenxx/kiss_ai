@@ -408,10 +408,11 @@ body {
    top of the chat pane in bold green on every chat surface, styled as
    plain text (main.js lists this daemon's machine, from
    configData.machine, and the reachable registered machines); the
-   strip takes no room until it has a name.  A remote pick turns
-   orange: the task is not going to run here.  Disabled while the
-   chat runs (a running chat cannot move).  The same hairline as the
-   tab rows parts it from the transcript. */
+   strip takes no room until it has a name.  A remote pick stays
+   green while the machine answers the daemon's pings and turns red
+   once it is reported down.  Stays enabled while the chat runs (the
+   pick is where the next task goes).  The same hairline as the tab
+   rows parts it from the transcript. */
 #chat-header {
   flex-shrink: 0;
   display: flex;
@@ -480,8 +481,11 @@ body {
   appearance: none;
 }
 
-/* A remote pick turns the name and its chevron orange. */
-#chat-machine-wrap:has(> .remote) { color: var(--orange); }
+/* A remote pick turns the name and its chevron green, like the
+   reachability dot of the Machines subpanel; red, like that dot of a
+   machine that is down, once the daemon has reported the pick down. */
+#chat-machine-wrap:has(> .remote) { color: var(--status-ok); }
+#chat-machine-wrap:has(> .remote.down) { color: var(--status-fail); }
 
 #chat-machine:disabled { cursor: default; }
 
@@ -1351,12 +1355,6 @@ body.ask-answering #input-container {
   flex-direction: column; align-items: flex-start; gap: var(--space-1-5);
 }
 .rc-h h3 { color: var(--fg); font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-0-5); }
-
-.rs {
-  font-size: var(--fs-md); color: var(--dim);
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; width: 100%;
-}
-.rs b { color: var(--fg); font-weight: 500; display: block; font-size: var(--fs-base); }
 
 .rc-body {
   padding: var(--space-2-5) var(--space-3); font-size: var(--fs-md);
@@ -2284,8 +2282,20 @@ body.meta-section-resizing {
 }
 
 /* A Recommendations row is a click target (it opens a new chat with
-   the task in the composer); the whole sentence shows, wrapped. */
-.recommendation-row { cursor: pointer; }
+   the task in the composer); the whole sentence shows, wrapped, inside
+   its own bordered box so the five suggestions read as separate cards. */
+.recommendation-row {
+  cursor: pointer;
+  padding: var(--space-1-5) var(--space-2);
+  border-width: 1px;
+  border-style: solid;
+  border-color: var(--border);
+}
+
+.recommendation-row:hover,
+.recommendation-row:focus-visible {
+  border-color: color-mix(in srgb, var(--fg) 35%, transparent);
+}
 
 .recommendation-row .sidebar-panel-name {
   white-space: normal;
@@ -4543,14 +4553,11 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-/* The remote machine a task belongs to (a link to that machine's web
-   UI, where the chat can be opened). */
+/* The remote machine a task belongs to: a label (the row opens the
+   chat here, in a tab bound to that machine). */
 .sidebar-item-machine {
-  text-decoration: none;
   font-weight: 600;
 }
-
-.sidebar-item-machine:hover { opacity: 1; text-decoration: underline; }
 
 .sidebar-item-launched + .sidebar-item-tags::before,
 .sidebar-item-launched + .sidebar-item-sea::before,
