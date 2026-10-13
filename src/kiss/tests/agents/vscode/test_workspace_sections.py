@@ -38,6 +38,7 @@ from kiss.server.web_server import _compare_versions, _read_version
 from kiss.tests.agents.vscode.test_content_tab_editing import _dismiss_toasts
 from kiss.tests.conftest import (
     goto_retrying_network_change,
+    mark_version_seen,
     reload_retrying_network_change,
 )
 from kiss.tests.server.test_explorer_scm_commands import (
@@ -102,11 +103,14 @@ def _open_page(browser, harness, width: int = 1400):
     """Open the remote page in desktop mode and record sent WS frames.
 
     Returns ``(context, page, sent_frames)``; *sent_frames* is a live
-    list of the JSON frames the page sent over its WebSocket.
+    list of the JSON frames the page sent over its WebSocket.  The
+    profile has already seen the running version, so every task-info
+    section starts expanded (not the fresh-install layout).
     """
     context = browser.new_context(
         ignore_https_errors=True, viewport={"width": width, "height": 900},
     )
+    mark_version_seen(context)
     page = context.new_page()
     sent_frames: list[dict] = []
 
@@ -834,6 +838,7 @@ def _open_page_mobile(browser, harness):
     context = browser.new_context(
         ignore_https_errors=True, viewport={"width": 390, "height": 844},
     )
+    mark_version_seen(context)
     page = context.new_page()
     sent_frames: list[dict] = []
 

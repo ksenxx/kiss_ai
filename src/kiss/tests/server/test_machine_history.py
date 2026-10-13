@@ -181,11 +181,28 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         )
         self.assertTrue(all("machine" not in s for s in reply["sessions"]))
 
+    async def test_the_reply_labels_an_address_named_machine_by_its_host_name(self) -> None:
+        """A machine registered by its address is labelled by the host name of its history reply."""
+        mach._hosts.clear()
+        await asyncio.to_thread(mach.add_machine, "", self.remote.url, "pw-remote")
+        host = socket.gethostname().split(".")[0]
+        reply = await self._history()
+        self.assertEqual(reply["machines"], ["box", "127.0.0.1"])
+        self.assertEqual(reply["machineLabels"], {"box": "box", "127.0.0.1": host})
+        # The label outlives the machine: the host name of its last reply.
+        self.remote.stop()
+        reply = await self._history()
+        self.assertEqual(reply["machineLabels"], {"box": "box", "127.0.0.1": host})
+
     async def test_a_dead_machine_hides_nothing_local(self) -> None:
         """Once the remote is down its rows vanish; the local ones stay."""
         self.remote.stop()
+        mach._hosts.clear()
         reply = await self._history()
         self.assertEqual(reply["machines"], ["box"])
+        self.assertEqual(
+            reply["machineLabels"], {"box": "box"}, "a chosen name is the label",
+        )
         self.assertEqual(
             sorted(s["title"] for s in reply["sessions"]),
             ["local only", "shared task (local copy)"],

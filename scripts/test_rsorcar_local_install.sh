@@ -14,13 +14,18 @@
 #     points the persistent launchers at its own directory),
 #   * and a failing local install fails the script without hiding the
 #     remote URL and password printed just before it.
-# The ~/.ssh/ copy of step 2 runs for real through the ssh stub: the fake
-# HOME has an ~/.ssh with a key, an authorized_keys and an agent socket, and
-# the stub hands the tar stream rsorcar sends to the real
-# scripts/install-ssh-identity.sh with HOME set to the fake remote home — so
-# the test sees the key arrive, the excluded files stay behind, and the
-# remote's authorized_keys survive.  No rsync anywhere: the remote may not
-# have it.
+# Step 2 runs for real through the ssh stub.  By default
+# (SORCAR_SKIP_SSH_COPY=1) the key stays home: the test sees nothing arrive
+# in the remote ~/.ssh, the switch handed to sync-repo.sh (which forwards the
+# agent), and the ssh-add stub's verdict reported — keys to forward, or a
+# warning when there is no agent (FAKE_SSH_ADD_RC=2) — and, when the GitHub
+# token is installed (test 1d), the deployed checkout pointed at https.  With
+# SORCAR_SKIP_SSH_COPY=0 (test 1b) the fake HOME's ~/.ssh — a key, an
+# authorized_keys and an agent socket — travels: the stub hands the tar
+# stream rsorcar sends to the real scripts/install-ssh-identity.sh with HOME
+# set to the fake remote home, so the test sees the key arrive, the excluded
+# files stay behind, and the remote's authorized_keys survive.  No rsync
+# anywhere: the remote may not have it.
 # Step 1a runs for real too: the stub runs the scripts/install-remote-prereqs.sh
 # it is fed on ``bash -s`` (against this machine, which has every tool), and
 # the test checks that it runs before the git sync — a fresh image has no git
@@ -75,8 +80,13 @@ EOF
 
     # The deploy helpers rsorcar insists on: the two it runs locally are
     # no-ops, the rest only need to exist (they travel to the "remote").
-    printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-repo.sh"
+    # The git sync (step 3) records the ssh-key switch it was handed.
+    printf '#!/bin/bash\nprintf "SORCAR_SKIP_SSH_COPY=%%s\\n" "${SORCAR_SKIP_SSH_COPY-unset}" >> "%s/sync-repo-env.txt"\nexit 0\n' "$fix" \
+        > "$dir/scripts/sync-repo.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-task-db.sh"
+    # The GitHub credentials (step 8, run only when a test asks for it)
+    # come from this stub as one fake account.
+    printf '#!/bin/bash\necho "account bob faketoken"\n' > "$dir/scripts/collect-github-auth.sh"
     # The memory sync (step 4c) records what it was asked to sync with.
     printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/sync-memory-args.txt"\nexit 0\n' "$fix" \
         > "$dir/scripts/sync-memory.sh"
@@ -96,7 +106,7 @@ EOF
     # the fake remote HOME.
     cp "$REPO_ROOT/src/kiss/scripts/legacy_task_db.py" "$dir/src/kiss/scripts/"
     local helper
-    for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
+    for helper in scripts/install-github-auth.sh \
                   scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
                   scripts/wait-for-public-url.sh \
                   src/kiss/scripts/sync_db.py src/kiss/agents/sorcar/chat_summary.py \
@@ -138,6 +148,7 @@ make_env() {
     # ssh stub: answers each probe rsorcar sends a healthy deploy's answer.
     cat > "$fix/bin/ssh" <<EOF
 #!/bin/bash
+printf '%s\n' "\$*" >> "$fix/ssh-args.txt"
 while [[ "\${1:-}" == -* ]]; do
     if [[ "\$1" == -o ]]; then shift 2; else shift; fi
 done
@@ -152,6 +163,7 @@ case "\$cmd" in
     *remote-url.json*) echo "$FAKE_URL" ;;
     *remote_password*) echo "$FAKE_PW" ;;
     *'git log -1'*) printf 'abc123 fake commit\n0\n' ;;
+    *'url.https://github.com/.insteadOf'*) bash -c "\$cmd" ;;   # step 8's rewrite, run for real (test 1d)
     *install-ssh-identity.sh*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # the real remote half, fed the tar stream
     'bash -s'|*' bash -s')                      # a helper fed on standard input (steps 1a, 1c and 4): run it
         script="\$(cat)"
@@ -173,6 +185,9 @@ printf '%s\n' "\$*" >> "$fix/scp-args.txt"
 exit 0
 SCP
     printf '#!/bin/bash\nprintf 200\n' > "$fix/bin/curl"
+    # ssh-add stub: an agent with keys (0), unless the test says otherwise
+    # (1: an agent without keys, 2: no agent), as the real one answers -l.
+    printf '#!/bin/bash\nexit "${FAKE_SSH_ADD_RC:-0}"\n' > "$fix/bin/ssh-add"
     chmod +x "$fix/bin/"*
 }
 
@@ -180,7 +195,7 @@ SCP
 run_rsorcar() {
     local fix="$1" rsorcar="$2"
     HOME="$fix/home" KISS_HOME='' PATH="$fix/bin:$PATH" \
-    SORCAR_NO_BROWSER=1 SORCAR_SKIP_GITHUB_AUTH=1 \
+    SORCAR_NO_BROWSER=1 SORCAR_SKIP_GITHUB_AUTH="${SORCAR_SKIP_GITHUB_AUTH:-1}" \
         bash "$rsorcar" user@fakehost 2>&1
 }
 
@@ -252,19 +267,30 @@ grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
     || fail "local install.sh not run with KISS_SKIP_LAUNCH=1"
 pass "rsorcar runs install.sh locally, non-interactively, no editor launch"
 
+# Step 2, by default: the private key stays home, the agent is forwarded.
 RSSH="$WORK/ok/rhome/.ssh"
-[[ "$(cat "$RSSH/id_test")" == "local private key" ]] || fail "the ssh key did not reach the remote ~/.ssh"
-[[ "$(cat "$RSSH/id_test.pub")" == "local public key" ]] || fail "the public key did not reach the remote ~/.ssh"
-[[ "$(cat "$RSSH/authorized_keys")" == "remote authorized_keys" ]] \
-    || fail "the remote's authorized_keys was overwritten: $(cat "$RSSH/authorized_keys")"
-[[ ! -e "$RSSH/.DS_Store" && ! -e "$RSSH/agent" ]] \
-    || fail "excluded files were copied: $(ls -A "$RSSH")"
-[[ -z "$(find "$WORK/ok/rhome/.kiss" -maxdepth 1 -name 'ssh-replaced-*')" ]] \
-    || fail "a backup directory was created although nothing was replaced"
-echo "$OUT" | grep -q "SSH identity copied to $WORK/ok/rhome/.ssh (2 files)" \
-    || fail "the ssh copy was not reported with its file count:
+echo "$OUT" | grep -q "Leaving ~/.ssh/ here (SORCAR_SKIP_SSH_COPY=1)" \
+    || fail "the default deploy did not say it leaves ~/.ssh/ here:
 $OUT"
-pass "the ssh identity travels as a tar stream: key arrives, authorized_keys and excluded files stay put"
+echo "$OUT" | grep -q "The ssh agent here has keys to forward (ssh-add -l)" \
+    || fail "the ssh agent was not checked (or not reported):
+$OUT"
+echo "$OUT" | grep -q "No ssh agent with a key here" && fail "a warning about the agent although ssh-add found keys:
+$OUT"
+echo "$OUT" | grep -q "Copying ~/.ssh/ to" && fail "the ssh copy ran although SORCAR_SKIP_SSH_COPY defaults to 1:
+$OUT"
+[[ ! -e "$RSSH/id_test" && ! -e "$RSSH/id_test.pub" ]] \
+    || fail "the ssh key reached the remote ~/.ssh by default: $(ls -A "$RSSH")"
+[[ "$(cat "$RSSH/authorized_keys")" == "remote authorized_keys" ]] \
+    || fail "the remote's authorized_keys was touched: $(cat "$RSSH/authorized_keys")"
+grep -q 'install-ssh-identity.sh' "$WORK/ok/scp-args.txt" \
+    && fail "the ssh identity installer was shipped although nothing is copied: $(cat "$WORK/ok/scp-args.txt")"
+grep -qx 'SORCAR_SKIP_SSH_COPY=1' "$WORK/ok/sync-repo-env.txt" \
+    || fail "sync-repo.sh was not told to forward the agent: $(cat "$WORK/ok/sync-repo-env.txt")"
+echo "$OUT" | grep -q "pushes as ksenxx over ssh through a forwarded agent only (ssh -A)" \
+    || fail "the summary does not say how the remote reaches GitHub without a key:
+$OUT"
+pass "by default the private ssh keys stay here: nothing lands in the remote ~/.ssh, the sync is told to forward the agent"
 
 echo "$OUT" | grep -q "Copying API keys (1 exported variables) to user@fakehost" \
     || fail "this machine's keys were not copied to a remote without any:
@@ -282,7 +308,7 @@ echo "$OUT" | grep -q "The tools the deploy needs are all installed" \
 $OUT"
 PREREQ_LINE=$(echo "$OUT" | grep -n "Checking that git, curl, tar, python3 and ssh are installed" | cut -d: -f1 | head -1)
 TASK_LINE=$(echo "$OUT" | grep -n "Checking whether a task is running" | cut -d: -f1 | head -1)
-SSH_LINE=$(echo "$OUT" | grep -n "Copying ~/.ssh/ to" | cut -d: -f1 | head -1)
+SSH_LINE=$(echo "$OUT" | grep -n "Leaving ~/.ssh/ here" | cut -d: -f1 | head -1)
 SYNC_LINE=$(echo "$OUT" | grep -n "through origin (branch" | cut -d: -f1 | head -1)
 [[ -n "$PREREQ_LINE" && -n "$TASK_LINE" && -n "$SSH_LINE" && -n "$SYNC_LINE" ]] \
     || fail "a step is missing from the output (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
@@ -334,6 +360,87 @@ echo "$OUT" | grep -q "Password:.*$FAKE_PW" || fail "deploy summary (password) m
 [[ -n "$DONE_LINE" && "$STEP_LINE" -lt "$DONE_LINE" ]] \
     || fail "local install did not run before rsorcar finished"
 pass "local install runs after the summary box and before Done."
+
+# --- Test 1b: SORCAR_SKIP_SSH_COPY=0 copies the ssh identity ------------------
+make_env "$WORK/sshcopy"
+populate_checkout "$WORK/sshcopy/checkout" 0 "$WORK/sshcopy"
+OUT=$(SORCAR_SKIP_SSH_COPY=0 run_rsorcar "$WORK/sshcopy" "$WORK/sshcopy/checkout/rsorcar") || fail "rsorcar failed with the ssh copy on:
+$OUT"
+echo "$OUT" | grep -q "Leaving ~/.ssh/ here" && fail "the key stayed home although SORCAR_SKIP_SSH_COPY=0:
+$OUT"
+RSSH="$WORK/sshcopy/rhome/.ssh"
+[[ "$(cat "$RSSH/id_test")" == "local private key" ]] || fail "the ssh key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/id_test.pub")" == "local public key" ]] || fail "the public key did not reach the remote ~/.ssh"
+[[ "$(cat "$RSSH/authorized_keys")" == "remote authorized_keys" ]] \
+    || fail "the remote's authorized_keys was overwritten: $(cat "$RSSH/authorized_keys")"
+[[ ! -e "$RSSH/.DS_Store" && ! -e "$RSSH/agent" ]] \
+    || fail "excluded files were copied: $(ls -A "$RSSH")"
+[[ -z "$(find "$WORK/sshcopy/rhome/.kiss" -maxdepth 1 -name 'ssh-replaced-*')" ]] \
+    || fail "a backup directory was created although nothing was replaced"
+echo "$OUT" | grep -q "SSH identity copied to $WORK/sshcopy/rhome/.ssh (2 files)" \
+    || fail "the ssh copy was not reported with its file count:
+$OUT"
+grep -qx 'SORCAR_SKIP_SSH_COPY=0' "$WORK/sshcopy/sync-repo-env.txt" \
+    || fail "sync-repo.sh was not told the key is on the remote: $(cat "$WORK/sshcopy/sync-repo-env.txt")"
+echo "$OUT" | grep -q "pushes as ksenxx over ssh (this machine's key)" \
+    || fail "the summary does not say the remote pushes with the copied key:
+$OUT"
+pass "SORCAR_SKIP_SSH_COPY=0: the ssh identity travels as a tar stream, authorized_keys and excluded files stay put"
+
+# --- Test 1c: no ssh agent here is a warning, and the deploy goes on --------------
+make_env "$WORK/noagent"
+populate_checkout "$WORK/noagent/checkout" 0 "$WORK/noagent"
+OUT=$(FAKE_SSH_ADD_RC=2 run_rsorcar "$WORK/noagent" "$WORK/noagent/checkout/rsorcar") || fail "rsorcar failed without an ssh agent:
+$OUT"
+echo "$OUT" | grep -q "WARN.*No ssh agent with a key here (ssh-add -l): user@fakehost can reach GitHub over ssh only with a key or token of its own" \
+    || fail "a machine without an ssh agent was not warned:
+$OUT"
+echo "$OUT" | grep -q "set SORCAR_SKIP_SSH_COPY=0 to copy ~/.ssh/" \
+    || fail "the warning does not name the switch that copies the key instead:
+$OUT"
+[[ ! -e "$WORK/noagent/rhome/.ssh/id_test" ]] || fail "the key was copied although only a warning was due"
+[[ -f "$WORK/noagent/install-marker.txt" ]] || fail "the deploy did not finish without an ssh agent"
+pass "no ssh agent with a key here is a warning that names the switch, not a failed deploy"
+
+# --- Test 1d: once the GitHub token is on the keyless remote, git goes over https
+# Step 8 runs for real up to the stubs: the collect stub hands one account to
+# the ssh stub, and the deployed checkout's git@github.com: URLs are pointed
+# at https://github.com/, which that token can authenticate.
+make_env "$WORK/ghtoken"
+populate_checkout "$WORK/ghtoken/checkout" 0 "$WORK/ghtoken"
+# The ssh stub runs the git config command for real (its ``cd`` names the
+# fake remote home), against a repository standing in for the deployment.
+git -C "$WORK/ghtoken/rhome" init -q checkout
+OUT=$(SORCAR_SKIP_GITHUB_AUTH=0 run_rsorcar "$WORK/ghtoken" "$WORK/ghtoken/checkout/rsorcar") || fail "rsorcar failed with the GitHub token copied:
+$OUT"
+REWRITES="$(git -C "$WORK/ghtoken/rhome/checkout" config --get-all url.https://github.com/.insteadOf | tr '\n' ' ')"
+[[ "$REWRITES" == "git@github.com: ssh://git@github.com/ " ]] \
+    || fail "the deployed checkout was not pointed at https after the token install (rewrites: '$REWRITES')"
+echo "$OUT" | grep -q "reaches GitHub over https with this token (no ssh key there)" \
+    || fail "the https rewrite was not reported:
+$OUT"
+echo "$OUT" | grep -q "pushes as ksenxx over https (gh token)" \
+    || fail "the summary does not say the remote pushes over https:
+$OUT"
+# A second deploy replaces the two values rather than adding two more.
+OUT=$(SORCAR_SKIP_GITHUB_AUTH=0 run_rsorcar "$WORK/ghtoken" "$WORK/ghtoken/checkout/rsorcar") || fail "the second deploy failed:
+$OUT"
+REWRITES="$(git -C "$WORK/ghtoken/rhome/checkout" config --get-all url.https://github.com/.insteadOf | tr '\n' ' ')"
+[[ "$REWRITES" == "git@github.com: ssh://git@github.com/ " ]] \
+    || fail "a second deploy piled up rewrites: '$REWRITES'"
+pass "a keyless remote that got the GitHub token has its checkout's ssh URLs (both spellings) pointed at https, once"
+
+# ... and a remote that got the key keeps git over ssh: no rewrite.
+make_env "$WORK/ghtokenkey"
+populate_checkout "$WORK/ghtokenkey/checkout" 0 "$WORK/ghtokenkey"
+OUT=$(SORCAR_SKIP_GITHUB_AUTH=0 SORCAR_SKIP_SSH_COPY=0 run_rsorcar "$WORK/ghtokenkey" "$WORK/ghtokenkey/checkout/rsorcar") || fail "rsorcar failed with the token and the key copied:
+$OUT"
+grep -q "insteadOf" "$WORK/ghtokenkey/ssh-args.txt" \
+    && fail "the checkout was pointed at https although the key was copied: $(grep insteadOf "$WORK/ghtokenkey/ssh-args.txt")"
+echo "$OUT" | grep -q "pushes as ksenxx over ssh (this machine's key)" \
+    || fail "the summary does not say the remote pushes over ssh with the key:
+$OUT"
+pass "a remote that got the key keeps git over ssh when the token arrives"
 
 # --- Test 2: from a linked worktree, the MAIN repo's install.sh runs ---------
 make_env "$WORK/wt"
@@ -398,7 +505,7 @@ $OUT"
 echo "$OUT" | grep -q "user@fakehost does not have room for the deploy" \
     || fail "no clear error message when the remote has no room:
 $OUT"
-echo "$OUT" | grep -q "Copying ~/.ssh/ to" && fail "the ssh copy ran although the remote has no room"
+echo "$OUT" | grep -qE "Copying ~/.ssh/ to|Leaving ~/.ssh/ here" && fail "step 2 ran although the remote has no room"
 echo "$OUT" | grep -q "through origin (branch" && fail "the git sync was attempted although the remote has no room"
 [[ ! -f "$WORK/full/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
 pass "a remote without room for the deploy stops it before anything of size travels"

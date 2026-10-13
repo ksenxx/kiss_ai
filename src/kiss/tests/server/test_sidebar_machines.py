@@ -41,9 +41,10 @@ from kiss.tests.remote_daemon import start_remote_daemon
 
 
 def _forget_machine_pings() -> None:
-    """Drop the cached machine pings so the next report pings anew."""
+    """Drop the cached machine pings (and host names) so the next report pings anew."""
     with sidebar_panels._machines_lock:
         sidebar_panels._machines_checked_at = 0.0
+        mach._hosts.clear()
 
 
 class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
@@ -142,6 +143,37 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             [row["status"] for row in refreshed["machines"]],
             ["reachable", "reachable", "unreachable", "unreachable"],
         )
+
+    async def test_an_address_named_machine_is_labelled_by_its_host_name(self) -> None:
+        """An address-registered machine reads as its daemon's host name; a chosen name stays."""
+        await asyncio.to_thread(mach.add_machine, "", self.remote.url, "pw-remote")
+        await asyncio.to_thread(mach.add_machine, "box", self.remote.url, "pw-remote")
+        mach.save_machines([
+            *mach.load_machines(),
+            mach.Machine(name="dead", url=f"https://127.0.0.1:{find_free_port()}"),
+        ])
+        host = socket.gethostname().split(".")[0]
+        reply = await self._machines()
+        self.assertEqual(
+            [(row["name"], row["label"]) for row in reply["machines"]],
+            [(host, host), ("127.0.0.1", host), ("box", "box"), ("dead", "dead")],
+        )
+        # The host name of the last answered ping serves while the
+        # machine is down.
+        self.remote.stop()
+        down = await self._machines(refresh=True)
+        rows = {row["name"]: row for row in down["machines"]}
+        self.assertEqual(rows["127.0.0.1"]["status"], "unreachable")
+        self.assertEqual(rows["127.0.0.1"]["label"], host)
+        self.assertEqual(rows["box"]["label"], "box")
+        # The label is as fresh as the daemon's knowledge, not as the
+        # cached ping: a host name learnt meanwhile (a history fetch)
+        # shows on the cached report.
+        mach.note_host(mach.Machine(name="127.0.0.1"), "renamed-host")
+        cached = await self._machines()
+        self.assertEqual(cached["checkedAt"], down["checkedAt"], "the same ping")
+        rows = {row["name"]: row for row in cached["machines"]}
+        self.assertEqual(rows["127.0.0.1"]["label"], "renamed-host")
 
     async def test_machine_action_adds_after_a_handshake_and_removes(self) -> None:
         """A wrong password is refused and registers nothing; add and remove send the list."""

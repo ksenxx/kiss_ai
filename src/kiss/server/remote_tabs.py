@@ -6,7 +6,12 @@
 
 The machine drop-down at the top of a chat webview chooses where the
 tab's tasks run; a ``submit`` carries the choice as ``machine`` (empty
-for this machine).  :class:`RemoteTabs` keeps one :class:`RemoteTab`
+for this machine).  A click on a remote machine's row of the CHATS
+panel binds a tab the same way: its ``resumeSession`` carries the
+row's ``machine`` (and the task as ``title``), the machine's daemon
+replays the chat into the tab, and the tab's next prompts run there.
+Every remote machine is thus managed from this daemon's own surfaces;
+the remote's web UI is never opened.  :class:`RemoteTabs` keeps one :class:`RemoteTab`
 per tab bound to a remote machine: an authenticated WebSocket to that
 machine's daemon (:meth:`MachineLink.open_connection`) over which the
 tab's commands are forwarded unchanged, same ``tabId``, so the remote
@@ -24,7 +29,10 @@ What else the stream carries:
   sub-agent tab and asks for the transcript with ``resumeSession
   {taskId, tabId}``, which is forwarded (the sub-agent tab joins the
   stream's tabs, so its frames and its ``subagentDone`` are relayed and
-  its ``stop``/``closeTab`` reach the remote).
+  its ``stop``/``closeTab`` reach the remote).  A sub-agent that
+  finished before the chat was opened here announced no ``new_tab``
+  to this daemon: the fan-out panel's resume names its
+  ``parentTabId``, whose stream the sub-agent tab joins.
 * **Replays.**  A client's ``ready`` (a reload, a surface opening)
   replays every bound tab to that connection: a ``resumeSession`` of
   the tab's remote chat is forwarded and the ``task_events`` it
@@ -34,9 +42,10 @@ What else the stream carries:
   which machine a tab is bound to (on bind, on unbind, and on
   ``ready``), so the chat header's drop-down agrees across surfaces.
 
-A tab stays bound while it exists: a later ``submit`` for another
-machine re-binds it, an empty ``machine`` brings it home, a
-``resumeSession`` of a local chat or ``closeTab`` unbinds it
+A tab stays bound while it exists: a later ``submit`` or
+``resumeSession`` for another machine re-binds it, an empty
+``machine`` brings it home, a ``resumeSession`` of a local chat or
+``closeTab`` unbinds it
 (``closeTab`` is forwarded too, so the remote drops its tab; its task
 keeps running there as a closed local tab's would).  Losing the socket
 ends the tab's running state with an ``error`` naming the machine.
@@ -129,8 +138,15 @@ class RemoteTab:
         spawn: The run's own ``new_tab`` frame while the run lasts (""
             before it, and after its terminal ``status``): a surface
             connecting meanwhile gets it from :meth:`RemoteTabs.replay_to`.
-        chat_id: The remote chat of the root tab, learnt from the first
-            relayed frame that carries one; "" until then.
+        chat_id: The remote chat of the root tab: the chat a
+            CHATS-panel click resumed in it, else the one learnt from
+            the first relayed frame that carries one; "" until then.
+        shown_task_id: The task a CHATS-panel click pinned the root
+            tab to (the resume's ``taskId``, as the registry keeps it
+            for a local chat), "" while the tab tracks the chat's
+            latest task: a surface connecting later is replayed at it.
+            Cleared by a submit, whose task becomes the latest; never
+            set by a relayed frame, whose replay may predate a submit.
         replay_sinks: Per tab, the connections waiting for a
             ``task_events`` replay, one per forwarded ``resumeSession``,
             answered in order (the socket keeps the remote's order).
@@ -161,6 +177,7 @@ class RemoteTab:
         self.pending_spawns: dict[str, str] = {}
         self.spawn = ""
         self.chat_id = ""
+        self.shown_task_id = ""
         self.replay_sinks: dict[str, list[str]] = {}
         self.replay_conn: dict[str, str] = {}
         self.retired = False
@@ -357,9 +374,11 @@ class RemoteTabs:
         A ``submit`` or ``run`` binds the tab to the machine it names
         (re-binding when the name changed, unbinding when it is empty);
         every other forwarded command follows the tab's binding.
-        ``resumeSession`` of a sub-agent task joins its tab to the
-        stream; ``resumeSession`` of anything else, ``newChat`` and
-        ``closeTab`` unbind the tab and are still handled here.
+        A ``resumeSession`` naming a machine binds the tab to it too
+        (the machine's chat is replayed into the tab); one of a
+        sub-agent task joins its tab to the stream; ``resumeSession``
+        of anything else, ``newChat`` and ``closeTab`` unbind the tab
+        and are still handled here.
 
         Returns:
             True when the command was consumed (forwarded, or refused
@@ -384,9 +403,12 @@ class RemoteTabs:
                 if name == "submit":
                     self._unbind(tab_id)
                 return False
-            tab = self._bind(tab_id, machine_name, cmd)
+            tab = self._bind(tab_id, machine_name, cmd, str(cmd.get("prompt", "") or ""))
             if tab is None:
                 return True
+            with tab.lock:
+                # The new task becomes the chat's latest: no pin to replay.
+                tab.shown_task_id = ""
         else:
             with self._lock:
                 tab = self._tabs.get(tab_id)
@@ -398,11 +420,15 @@ class RemoteTabs:
             self._backend._vscode_server._refuse_run(tab_id, str(exc))
         return True
 
-    def _bind(self, tab_id: str, machine_name: str, cmd: dict[str, Any]) -> RemoteTab | None:
+    def _bind(
+        self, tab_id: str, machine_name: str, cmd: dict[str, Any], title: str,
+    ) -> RemoteTab | None:
         """Bind *tab_id* to the registered machine *machine_name* (None when refused).
 
-        Connecting blocks (up to the link's timeout) outside the lock,
-        so the other tabs' commands keep flowing meanwhile; what
+        *title* is the tab's title in the registry (the prompt of a
+        submit, the task of a resumed chat).  Connecting blocks (up to
+        the link's timeout) outside the lock, so the other tabs'
+        commands keep flowing meanwhile; what
         happened to the tab in between decides what the new stream is
         worth: a ``closeTab`` (``_unbinds`` moved) stands it down, a
         bind to the same machine that won the race is kept instead of
@@ -457,7 +483,7 @@ class RemoteTabs:
         if not cmd.get("parentTaskId"):
             self._backend._vscode_server._registry_update_tab(
                 tab_id,
-                title=str(cmd.get("prompt", "") or ""),
+                title=title,
                 work_dir=str(cmd.get("workDir", "") or ""),
                 task_id="",
                 create=True,
@@ -512,15 +538,47 @@ class RemoteTabs:
                 self._tabs[sub_tab_id] = tab
 
     def _resume(self, tab_id: str, task_id: str, conn_id: str, cmd: dict[str, Any]) -> bool:
-        """Route a ``resumeSession``: a sub-agent task's joins its tab to the stream.
+        """Route a ``resumeSession``: a machine's chat binds the tab, a sub-agent task's joins it.
 
-        Any other resume into a bound tab shows a local chat there: the
-        tab is unbound and the resume handled here.
+        A resume naming a ``machine`` (a click on that machine's row of
+        the History panel) binds the tab to the machine as a submit
+        would and forwards the resume: the machine's daemon replays its
+        chat into this tab, which stays bound, so the user reads and
+        continues the chat here instead of in the machine's own web UI.
+        The forwarded ``title`` names the tab meanwhile (the replay
+        then sets it, as a local chat's would).  A resume of a
+        sub-agent task joins its tab to the task's stream: the stream
+        that announced the task (``new_tab``), else the stream of the
+        ``parentTabId`` the resume names (a finished sub-agent of a
+        replayed chat, whose ``new_tab`` this daemon never saw).  Any
+        other resume into a bound tab shows a local chat there: the tab
+        is unbound and the resume handled here.
         """
+        machine_name = str(cmd.get("machine", "") or "")
+        if machine_name:
+            tab = self._bind(tab_id, machine_name, cmd, str(cmd.get("title", "") or ""))
+            if tab is None:
+                return True
+            with tab.lock:
+                # The tab shows this chat, at this task, from here on
+                # (a later ``ready`` replays those); taken from the
+                # click, not from the replay it gets, which can cross a
+                # later submit on the socket.
+                tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
+                tab.shown_task_id = str(cmd.get("taskId") or "")
+                if cmd.get("scoped") and conn_id:
+                    tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
+            try:
+                tab.send(cmd)
+            except MachineError as exc:
+                self._backend._vscode_server._refuse_run(tab_id, str(exc))
+            return True
         with self._lock:
             tab = next(
                 (t for t in self._tabs.values() if task_id and task_id in t.task_ids), None,
             )
+            if tab is None and task_id:
+                tab = self._tabs.get(str(cmd.get("parentTabId", "") or ""))
             if tab is None:
                 bound = self._tabs.get(tab_id)
                 unbind = bound is not None and bound.tab_id == tab_id
@@ -529,6 +587,7 @@ class RemoteTabs:
                 self._tabs[tab_id] = tab
                 with tab.lock:
                     tab.tab_ids.add(tab_id)
+                    tab.task_ids.add(task_id)
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
         if unbind:
             self._unbind(tab_id)
@@ -567,12 +626,16 @@ class RemoteTabs:
             self.deliver_to(conn_id, _tab_machine_frame(tab_id, tab.machine.name))
             with tab.lock:
                 chat_id = tab.chat_id
+                task_id = tab.shown_task_id
                 if chat_id:
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
             if not chat_id:
                 continue
+            resume: dict[str, Any] = {"type": "resumeSession", "chatId": chat_id, "tabId": tab_id}
+            if task_id:
+                resume["taskId"] = task_id
             try:
-                tab.send({"type": "resumeSession", "chatId": chat_id, "tabId": tab_id})
+                tab.send(resume)
             except MachineError:
                 pass
 

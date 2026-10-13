@@ -21,8 +21,14 @@
 #      step needs one of the five (1b runs python3, 2 runs tar).  A host that
 #      already has every tool is left alone.
 #   1b. Check that no task is running there: this deploy restarts the remote
-#      web app, which would kill one mid-step (SORCAR_FORCE_RESTART=1 says go
-#      ahead anyway).
+#      web app, which would kill one mid-step.  A task that IS running is
+#      waited for -- up to SORCAR_LIVE_TASK_WAIT seconds (15 minutes), polling
+#      every few seconds -- because most of the tasks a deploy runs into are
+#      short: an hourly cron job, the sub-agents it dispatches, a quick
+#      question in the web app.  Only a task still running when the wait is
+#      over stops the deploy (SORCAR_FORCE_RESTART=1 says go ahead anyway).
+#      The same wait happens again on the remote right before the web app is
+#      restarted in step 6, for a task that started while the deploy ran.
 #   1c. Check that the remote has room under $HOME for the deploy: this
 #      machine's task database (step 4b ships it whole the first time) plus
 #      SORCAR_DISK_HEADROOM_GB (3) for the checkout, its Python environment
@@ -33,14 +39,28 @@
 #      moves the home directory onto it (scripts/move-home-to-disk.sh, a bind
 #      mount recorded in /etc/fstab, so $HOME keeps its path).  A deploy that
 #      ran out of room half-way used to fail in a different place each time.
-#   2. Copy ~/.ssh/ so the remote can fetch and push git as you, and hop to
-#      other hosts as you.  It comes before the sync because the deployment
-#      pulls its own history from GitHub over that key.  ``authorized_keys``
-#      is never overwritten — that file is what lets you SSH *into* the
-#      remote — and a file of the remote's own that this copy would replace
-#      (its own key, its own ssh config) is moved into
-#      ~/.kiss/ssh-replaced-<time>/ rather than destroyed: a private key
-#      cannot be reconstructed.
+#   2. Leave the private ssh keys here (the default, SORCAR_SKIP_SSH_COPY=1):
+#      a private key that has travelled to a cloud VM is readable by whoever
+#      gets root there, and the deploy does not need it to travel.  The
+#      sync of step 3 forwards this machine's ssh agent instead (``ssh -A``),
+#      so the remote fetches and pushes its history from GitHub as you for
+#      the duration of that one ssh session (an https origin is carried over
+#      ssh for that session too, so no token is needed before step 8) and
+#      holds no key afterwards; the
+#      agent is checked here (``ssh-add -l``) and a machine without one is
+#      warned, because the sync will then fail unless the remote has a key
+#      of its own.  After the deploy, the remote reaches GitHub over https
+#      with the token of step 8 (which points the deployed checkout's
+#      git@github.com: URLs at https://github.com/), and over ssh only
+#      through an agent you forward when you log in (``ssh -A``).
+#      SORCAR_SKIP_SSH_COPY=0 copies ~/.ssh/ instead, so the remote can fetch
+#      and push git as you on its own, and hop to other hosts as you.  It
+#      comes before the sync because the deployment pulls its own history
+#      from GitHub over that key.  ``authorized_keys`` is never overwritten —
+#      that file is what lets you SSH *into* the remote — and a file of the
+#      remote's own that this copy would replace (its own key, its own ssh
+#      config) is moved into ~/.kiss/ssh-replaced-<time>/ rather than
+#      destroyed: a private key cannot be reconstructed.
 #   3. Put this checkout and ~/<project>/ on the remote machine in total sync
 #      through ``origin``, by way of scripts/sync-repo.sh: every branch here
 #      is pushed to origin, the remote checkout is created (or updated) from
@@ -175,11 +195,22 @@
 #   SORCAR_GIT_NAME     git author name on the remote (default: the account)
 #   SORCAR_GIT_EMAIL    git author email (default: <account>@users.noreply.github.com)
 #   SORCAR_NO_BROWSER   set to 1 to skip opening the browser
+#   SORCAR_SKIP_SSH_COPY  1 (default) leaves ~/.ssh/ here and forwards the ssh
+#                       agent for the sync; set to 0 to copy ~/.ssh/ to the
+#                       remote (step 2)
 #   SORCAR_SKIP_GITHUB_AUTH  set to 1 to leave this machine's GitHub.com
 #                       credentials here (step 8 is skipped)
 #   SORCAR_DISK_HEADROOM_GB  room asked for on the remote beyond the task
 #                       database (default: 3)
 #   SORCAR_SKIP_DISK_CHECK  set to 1 to deploy without checking the room
+#   SORCAR_LIVE_TASK_WINDOW  how recent a task's newest event has to be, in
+#                       seconds, for the task to count as running on the
+#                       remote (default: 300; 0 turns the check off)
+#   SORCAR_LIVE_TASK_WAIT  how long to wait, in seconds, for the tasks running
+#                       on the remote to finish before giving up (default:
+#                       900; 0 gives up at once)
+#   SORCAR_FORCE_RESTART  set to 1 to deploy even while a task is running on
+#                       the remote (the restart of the web app kills it)
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -296,10 +327,29 @@ ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-remote-prereqs.sh" \
 # history, because a running task writes events continuously.  The thousands
 # of rows an old database holds with no end time and no recent event are not
 # running tasks; see src/kiss/scripts/running_tasks.py.
+#
+# A task that is running is waited for rather than refused outright.  The
+# tasks a deploy runs into are mostly short -- an hourly cron job and the
+# sub-agents it dispatches take a minute or two -- and a deploy that gives up
+# the moment it sees one fails at random, at whatever minute the cron fires;
+# the one that had already done the sync, the install and the environment
+# build failed on the very last step.  The wait is bounded
+# (SORCAR_LIVE_TASK_WAIT, 15 minutes by default; 0 gives up at once, which is
+# what this check did before), and a task still running at the end of it
+# stops the deploy as before.
 # ---------------------------------------------------------------------------
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 [[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \
     || die "SORCAR_LIVE_TASK_WINDOW must be a number of seconds, got '$LIVE_TASK_WINDOW'."
+LIVE_TASK_WAIT="${SORCAR_LIVE_TASK_WAIT:-900}"
+[[ "$LIVE_TASK_WAIT" =~ ^[0-9]+$ ]] \
+    || die "SORCAR_LIVE_TASK_WAIT must be a number of seconds, got '$LIVE_TASK_WAIT'."
+LIVE_TASK_WAIT=$((10#$LIVE_TASK_WAIT))   # "08" is eight, not octal
+# Seconds between two looks; SORCAR_LIVE_TASK_POLL is for the tests.
+LIVE_TASK_POLL="${SORCAR_LIVE_TASK_POLL:-15}"
+[[ "$LIVE_TASK_POLL" =~ ^0*[1-9][0-9]*$ ]] \
+    || die "SORCAR_LIVE_TASK_POLL must be a number of seconds, got '$LIVE_TASK_POLL'."
+LIVE_TASK_POLL=$((10#$LIVE_TASK_POLL))
 # The database was ~/.kiss/sorcar.db before version 2026.10.2: a remote still
 # running that version holds it under the old name, so that is the file asked
 # -- and renamed once the check has passed, so that the sync below (step 4b)
@@ -317,26 +367,63 @@ REMOTE_DB="$(ssh "$TARGET" 'python3 - "$HOME/.kiss"' < "$LEGACY_TASK_DB")" \
     || die "Could not look for the task database on $TARGET (answer: '$REMOTE_DB')."
 if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
     step "Checking whether a task is running on $TARGET ..."
-    RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/$REMOTE_DB\" \
-        $(shquote "$LIVE_TASK_WINDOW")" \
-        < "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" 2>/dev/null || echo unknown)"
-    RUNNING_COUNT="$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')"
-    case "$RUNNING_COUNT" in
-        0) info "No task is running on $TARGET." ;;
-        ""|*[!0-9]*)
-            # Not an answer.  Reading "I could not look" as "nothing is
-            # running" is how a deploy kills the task it was told to look for.
-            die "Could not tell whether a task is running on $TARGET (answer:" \
-                "'${RUNNING_COUNT:-none}'). Fix the connection, or the database" \
-                "there, or set SORCAR_FORCE_RESTART=1 to deploy anyway."
-            ;;
-        *)
-            printf '%s\n' "$RUNNING" | tail -n +2 | sed 's/^/         task /'
+    WAIT_STARTED=$SECONDS   # the wait is measured, probes included
+    WAITED=0
+    NEXT_REPORT=60
+    while :; do
+        RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/$REMOTE_DB\" \
+            $(shquote "$LIVE_TASK_WINDOW")" \
+            < "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" 2>/dev/null || echo unknown)"
+        RUNNING_COUNT="$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')"
+        case "$RUNNING_COUNT" in
+            0)
+                if (( WAITED > 0 )); then
+                    info "The task(s) on $TARGET finished after ${WAITED}s; nothing is running there now."
+                else
+                    info "No task is running on $TARGET."
+                fi
+                break
+                ;;
+            ""|*[!0-9]*)
+                # Not an answer.  Reading "I could not look" as "nothing is
+                # running" is how a deploy kills the task it was told to look for.
+                die "Could not tell whether a task is running on $TARGET (answer:" \
+                    "'${RUNNING_COUNT:-none}'). Fix the connection, or the database" \
+                    "there, or set SORCAR_FORCE_RESTART=1 to deploy anyway."
+                ;;
+        esac
+        # A task is running.  Say which, then wait for it -- its end sets its
+        # end time, so the next poll no longer counts it -- as long as the
+        # wait allows.  The list is printed again only when it changes.
+        LISTED="$(printf '%s\n' "$RUNNING" | tail -n +2 | awk '{print $1}' | sort | tr '\n' ' ')"
+        if [[ "${LISTED_BEFORE:-}" != "$LISTED" ]]; then
+            printf '%s\n' "$RUNNING" | tail -n +2 \
+                | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/'
+            LISTED_BEFORE="$LISTED"
+        fi
+        if (( WAITED >= LIVE_TASK_WAIT )); then
+            if (( LIVE_TASK_WAIT > 0 )); then
+                die "$RUNNING_COUNT task(s) are still running on $TARGET after waiting" \
+                    "${WAITED}s, and this deploy would restart the web app and kill" \
+                    "them. Wait for them to finish (SORCAR_LIVE_TASK_WAIT=<seconds>" \
+                    "waits longer), or set SORCAR_FORCE_RESTART=1 to deploy anyway."
+            fi
             die "$RUNNING_COUNT task(s) are still running on $TARGET, and this deploy" \
                 "would restart the web app and kill them. Wait for them to finish," \
                 "or set SORCAR_FORCE_RESTART=1 to deploy anyway."
-            ;;
-    esac
+        fi
+        if (( WAITED == 0 )); then
+            info "Waiting up to ${LIVE_TASK_WAIT}s for the task(s) on $TARGET to finish" \
+                 "(SORCAR_LIVE_TASK_WAIT=0 gives up at once) ..."
+        elif (( WAITED >= NEXT_REPORT )); then
+            info "Still waiting (${WAITED}s of ${LIVE_TASK_WAIT}s): $RUNNING_COUNT task(s) running on $TARGET."
+            NEXT_REPORT=$((WAITED + 60))
+        fi
+        NAP=$((LIVE_TASK_WAIT - WAITED))
+        (( NAP > LIVE_TASK_POLL )) && NAP=$LIVE_TASK_POLL
+        sleep "$NAP"
+        WAITED=$((SECONDS - WAIT_STARTED))
+    done
 fi
 if [[ "$REMOTE_DB" == sorcar.db ]]; then
     step "Renaming $TARGET's ~/.kiss/sorcar.db to history.db, its name since version 2026.10.2 ..."
@@ -380,12 +467,28 @@ if [[ "${SORCAR_SKIP_DISK_CHECK:-}" != "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Copy ~/.ssh/ — identity only, never authorized_keys
+# 2. Copy ~/.ssh/ — identity only, never authorized_keys — or, by default,
+#    leave it here and let the sync forward the ssh agent
 #
 # Before the sync, not after it: the deployment fetches and pushes its own
 # history over this key, and on a first deploy the host has none.
 # ---------------------------------------------------------------------------
-if [[ -d "$HOME/.ssh" ]]; then
+SKIP_SSH_COPY="${SORCAR_SKIP_SSH_COPY:-1}"
+# How the remote reaches GitHub once the deploy is over; the summary says so.
+GIT_TRANSPORT="ssh (this machine's key)"
+if [[ "$SKIP_SSH_COPY" != "0" ]]; then
+    step "Leaving ~/.ssh/ here (SORCAR_SKIP_SSH_COPY=1): the sync forwards this machine's ssh agent instead ..."
+    # ssh-add -l answers 0 with keys loaded, 1 for an agent without any and
+    # 2 for no agent at all; the forwarded agent is worth nothing without a
+    # key in it, and the sync would fail later with git's error, not this.
+    if ssh-add -l >/dev/null 2>&1; then
+        info "The ssh agent here has keys to forward (ssh-add -l)."
+    else
+        warn "No ssh agent with a key here (ssh-add -l): $TARGET can reach GitHub over ssh" \
+             "only with a key or token of its own. Run 'ssh-add', or set SORCAR_SKIP_SSH_COPY=0 to copy ~/.ssh/."
+    fi
+    GIT_TRANSPORT="ssh through a forwarded agent only (ssh -A)"
+elif [[ -d "$HOME/.ssh" ]]; then
     step "Copying ~/.ssh/ to $TARGET (keeping the remote's authorized_keys) ..."
     # The files travel as a tar stream over the ssh connection itself, and
     # scripts/install-ssh-identity.sh unpacks them on the other side: a fresh
@@ -455,10 +558,12 @@ GIT_EMAIL="${SORCAR_GIT_EMAIL:-$GITHUB_USER@users.noreply.github.com}"
 # checkout and the remote one meet on origin, every branch of both is
 # mirrored, and uncommitted work is committed before it travels.  The
 # repository that is synced is the main one — a worktree shares its refs, and
-# a worktree's branch is not deployable anyway.
+# a worktree's branch is not deployable anyway.  SORCAR_SKIP_SSH_COPY tells
+# it whether the remote has this machine's key (step 2) or needs the ssh
+# agent forwarded for the session.
 step "Syncing $MAIN_REPO and $TARGET:$REMOTE_DIR through origin (branch $GIT_BRANCH) ..."
 SORCAR_GITHUB_USER="$GITHUB_USER" SORCAR_GIT_NAME="$GIT_NAME" \
-SORCAR_GIT_EMAIL="$GIT_EMAIL" \
+SORCAR_GIT_EMAIL="$GIT_EMAIL" SORCAR_SKIP_SSH_COPY="$SKIP_SSH_COPY" \
     bash "$SCRIPT_DIR/scripts/sync-repo.sh" \
         "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" "$GIT_BRANCH" \
     || die "Could not sync the project with $TARGET."
@@ -673,6 +778,7 @@ step "Installing KISS Sorcar on $TARGET (this takes a few minutes) ..."
 ssh "$TARGET" "REMOTE_DIR=$(shquote "$REMOTE_DIR") WEB_PORT=$(shquote "$WEB_PORT") \
     PASSWORD=$(shquote "$PASSWORD") LOCAL_NTFY_TOPIC=$(shquote "$LOCAL_NTFY_TOPIC") \
     LIVE_TASK_WINDOW=$(shquote "$LIVE_TASK_WINDOW") \
+    LIVE_TASK_WAIT=$(shquote "$LIVE_TASK_WAIT") LIVE_TASK_POLL=$(shquote "$LIVE_TASK_POLL") \
     FORCE_RESTART=$(shquote "${SORCAR_FORCE_RESTART:-}") \
     bash -s" <<'REMOTE'
 set -euo pipefail
@@ -873,17 +979,58 @@ systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
 # what a bare pattern does — takes that down too.
 #
 # A task may have started in the minutes this deploy has been running; the
-# restart below would end it mid-step.
+# restart below would end it mid-step.  It is waited for, as in step 1b:
+# an hourly cron job that fired while the environment was being built is
+# over in a minute or two, and a deploy that had done all its work and gave
+# up here for that was the common failure.
 if [ "${FORCE_RESTART:-}" != "1" ] && [ "${LIVE_TASK_WINDOW:-300}" != "0" ]; then
-    # The braces keep a failing probe from ending the pipeline (and, under
-    # ``set -e``, this script) before its answer has been read.
-    LIVE=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/history.db" \
-                  "${LIVE_TASK_WINDOW:-300}" || true; } | head -1 | tr -d '[:space:]')
-    if [ "$LIVE" != "0" ]; then
-        echo "ERROR: '$LIVE' task(s) are running on this host now (none were when" \
-             "the deploy started); restarting the web app would kill them. Deploy" \
-             "again when they are done, or with SORCAR_FORCE_RESTART=1." >&2
-        exit 1
+    WAIT_STARTED=$SECONDS   # the wait is measured, probes included
+    WAITED=0
+    NEXT_REPORT=60
+    while :; do
+        # The braces keep a failing probe from ending the pipeline (and, under
+        # ``set -e``, this script) before its answer has been read.
+        RUNNING=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/history.db" \
+                        "${LIVE_TASK_WINDOW:-300}" || true; } )
+        LIVE=$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')
+        [ "$LIVE" = "0" ] && break
+        case "$LIVE" in
+            ''|*[!0-9]*)
+                # Not an answer; waiting will not make it one.
+                echo "ERROR: could not tell whether a task is running on this host" \
+                     "(answer: '${LIVE:-none}'); restarting the web app would kill" \
+                     "one. Fix the database there, or deploy with" \
+                     "SORCAR_FORCE_RESTART=1." >&2
+                exit 1
+                ;;
+        esac
+        if [ "$WAITED" -ge "${LIVE_TASK_WAIT:-900}" ]; then
+            printf '%s\n' "$RUNNING" | tail -n +2 \
+                | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/' >&2
+            STILL=""
+            [ "$WAITED" -gt 0 ] && STILL=", and still after waiting ${WAITED}s"
+            echo "ERROR: '$LIVE' task(s) are running on this host now (none were when" \
+                 "the deploy started$STILL); restarting the web app would kill them." \
+                 "Deploy again when they are done (SORCAR_LIVE_TASK_WAIT=<seconds>" \
+                 "waits longer), or with SORCAR_FORCE_RESTART=1." >&2
+            exit 1
+        fi
+        if [ "$WAITED" -eq 0 ]; then
+            printf '%s\n' "$RUNNING" | tail -n +2 \
+                | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/'
+            rinfo "'$LIVE' task(s) started on this host while the deploy ran; waiting" \
+                  "up to ${LIVE_TASK_WAIT:-900}s for them to finish before restarting kiss-web ..."
+        elif [ "$WAITED" -ge "$NEXT_REPORT" ]; then
+            rinfo "Still waiting (${WAITED}s of ${LIVE_TASK_WAIT:-900}s): '$LIVE' task(s) running."
+            NEXT_REPORT=$((WAITED + 60))
+        fi
+        NAP=$((${LIVE_TASK_WAIT:-900} - WAITED))
+        [ "$NAP" -gt "${LIVE_TASK_POLL:-15}" ] && NAP=${LIVE_TASK_POLL:-15}
+        sleep "$NAP"
+        WAITED=$((SECONDS - WAIT_STARTED))
+    done
+    if [ "$WAITED" -gt 0 ]; then
+        rinfo "The task(s) finished after ${WAITED}s; restarting kiss-web now."
     fi
 fi
 systemctl --user stop kiss-web.service >/dev/null 2>&1 || true
@@ -917,12 +1064,18 @@ REMOTE
 # ---------------------------------------------------------------------------
 # 8. Copy this machine's GitHub.com credentials
 #
-# The ssh key of step 2 makes the remote you for git over ssh.  This makes it
-# you for everything else GitHub offers: ``gh pr create``, a private
-# repository, a push over https.  The token never becomes an argument of a
-# command on either machine (arguments are readable by every account on the
-# host, standard input is not) and it never becomes a file here: it is held in
-# a shell variable and piped straight into the installer.
+# The ssh key of step 2 (when it was copied) makes the remote you for git over
+# ssh.  This makes it you for everything else GitHub offers: ``gh pr
+# create``, a private repository, a push over https.  The token never becomes
+# an argument of a command on either machine (arguments are readable by every
+# account on the host, standard input is not) and it never becomes a file
+# here: it is held in a shell variable and piped straight into the installer.
+#
+# When the key stayed here (step 2's default), this token is the only way the
+# remote reaches GitHub once the deploy's forwarded agent is gone, so the
+# deployed checkout's git@github.com: URLs are pointed at https://github.com/
+# — the rewrite scripts/sync-repo.sh makes in the other direction when the
+# key was copied.  Later deploys sync over https too, with this token.
 #
 # Not having any is worth a warning and no more.  A deployment that cannot
 # open pull requests still runs tasks.
@@ -936,12 +1089,26 @@ else
         # One guard around all three: a deploy is not abandoned because the
         # copy of a helper script failed, any more than because the install
         # of the credentials did.
-        {
-            ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"' \
-            && scp -q "$SCRIPT_DIR/scripts/install-github-auth.sh" "$TARGET:.kiss/" \
-            && printf '%s\n' "$GH_PAYLOAD" \
-               | ssh "$TARGET" 'bash "$HOME/.kiss/install-github-auth.sh"'
-        } || warn "The GitHub.com credentials were not installed (see above); continuing."
+        if ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"' \
+           && scp -q "$SCRIPT_DIR/scripts/install-github-auth.sh" "$TARGET:.kiss/" \
+           && printf '%s\n' "$GH_PAYLOAD" \
+              | ssh "$TARGET" 'bash "$HOME/.kiss/install-github-auth.sh"'; then
+            if [[ "$SKIP_SSH_COPY" != "0" ]]; then
+                # Both spellings of a GitHub ssh URL; the key is replaced
+                # whole so a repeated deploy leaves two values, not a pile.
+                if ssh "$TARGET" "cd $(shquote "$REMOTE_DIR") \
+                        && { git config --unset-all url.https://github.com/.insteadOf || [ \$? -eq 5 ]; } \
+                        && git config --add url.https://github.com/.insteadOf git@github.com: \
+                        && git config --add url.https://github.com/.insteadOf ssh://git@github.com/"; then
+                    info "$REMOTE_DIR reaches GitHub over https with this token (no ssh key there)."
+                    GIT_TRANSPORT="https (gh token)"
+                else
+                    warn "Could not point $REMOTE_DIR's git@github.com: URLs at https; continuing."
+                fi
+            fi
+        else
+            warn "The GitHub.com credentials were not installed (see above); continuing."
+        fi
         unset GH_PAYLOAD
     else
         warn "No GitHub.com credentials on this machine, so the remote agent gets none:" \
@@ -977,7 +1144,7 @@ echo "  │  Password:  $PASSWORD"
 echo "  │  Host:      $TARGET   Folder: $REMOTE_DIR"
 echo "  │  Service:   systemctl --user status kiss-web   (log: ~/.kiss/kiss-web-stderr.log)"
 echo "  │  Git:       branch $GIT_BRANCH, commit $GIT_STATE(uncommitted files)"
-echo "  │             commits as $GIT_NAME <$GIT_EMAIL>, pushes as $GITHUB_USER over ssh"
+echo "  │             commits as $GIT_NAME <$GIT_EMAIL>, pushes as $GITHUB_USER over $GIT_TRANSPORT"
 echo "  └──────────────────────────────────────────────────────────────"
 echo ""
 

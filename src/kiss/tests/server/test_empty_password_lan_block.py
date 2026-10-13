@@ -69,6 +69,7 @@ import websockets
 from websockets.asyncio.client import connect
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
@@ -316,7 +317,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         """
         ip = self._require_lan_ip()
         api = self._server._server_api
-        results: list[str | None] = []
+        results: list[sorcar_api.Auth | None] = []
 
         async def handshake(ws: Any) -> None:
             results.append(await api.authenticate(ws))

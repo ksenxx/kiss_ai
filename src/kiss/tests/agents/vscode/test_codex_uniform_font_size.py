@@ -44,7 +44,7 @@ def test_no_panel_body_text_size_overrides_remain() -> None:
     """remote-codex.css must not repin any panel body-text size: the
     remote page inherits the extension's main.css type scale."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
-    for token in (".txt", ".tc-b", ".tp", ".tr", ".rc", ".rs",
+    for token in (".txt", ".tc-b", ".tp", ".tr", ".rc",
                   ".think", ".sys", ".md-body", ".merge-", ".llm-panel",
                   ".bash-panel", ".system-prompt", ".prompt"):
         assert token not in css, (

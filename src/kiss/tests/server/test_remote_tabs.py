@@ -49,7 +49,7 @@ from unittest import IsolatedAsyncioTestCase
 from kiss.agents.sorcar import machines as mach
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import LocalWriter, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
 
 SUMMARY = "<p>Hello from box</p>"
@@ -414,3 +414,204 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.25)
         self.assertEqual(self.server._server_api.remote_tabs.machine_of(child), "")
         self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "box")
+
+    async def _box_row(self, title: str) -> dict[str, Any]:
+        """The history row of box's task *title*, as the CHATS panel gets it."""
+        reply = await self._ask({"type": "getHistory", "machine": "box"}, "history")
+        row: dict[str, Any] = next(s for s in reply["sessions"] if s["title"] == title)
+        self.assertEqual(row["machine"], "box")
+        return row
+
+    async def _click_history_row(
+        self, tab: str, row: dict[str, Any], machine: str = "box", scoped: bool = False,
+        writer: LocalWriter | None = None,
+    ) -> None:
+        """Send what a click on a CHATS-panel row of a remote machine sends."""
+        cmd: dict[str, Any] = {
+            "type": "resumeSession", "id": row["id"], "taskId": row["task_id"],
+            "tabId": tab, "machine": machine, "title": row["title"],
+        }
+        if scoped:
+            cmd["scoped"] = True
+        if writer is None:
+            await self._send(cmd)
+        else:
+            writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
+            await writer.drain()
+
+    async def _replay_of(self, tab: str) -> dict[str, Any]:
+        """The binding and transcript a resume of *tab* answers with, by frame type."""
+        seen: dict[str, dict[str, Any]] = {}
+        for _ in range(300):
+            msg = await self._next()
+            if msg.get("tabId") == tab and msg["type"] in ("tabMachine", "task_events"):
+                seen.setdefault(str(msg["type"]), msg)
+            if "task_events" in seen:
+                return seen
+        raise AssertionError(f"no replay of {tab}: {sorted(seen)}")
+
+    async def test_a_history_click_shows_the_machines_chat_here(self) -> None:
+        """A CHATS-panel row of a remote machine opens its chat in a local tab.
+
+        The click's ``resumeSession`` names the machine: the daemon binds
+        the tab to it and forwards the resume, the machine replays the
+        chat into the tab, the tab's next prompt continues that chat on
+        the machine, and every surface shows it; the machine's own web
+        UI is never involved.
+        """
+        remote_tabs = self.server._server_api.remote_tabs
+        # Two chats on box, their tabs closed: nothing of them is shown here.
+        await self._submit("tab-a", "Say hello", "box")
+        await self._run_until_idle("tab-a")
+        await self._submit("tab-b", "Say goodbye", "box")
+        await self._run_until_idle("tab-b")
+        for tab in ("tab-a", "tab-b"):
+            await self._send({"type": "closeTab", "tabId": tab})
+            await self._until("tabs_state")
+        hello = await self._box_row("Say hello")
+        goodbye = await self._box_row("Say goodbye")
+        self.assertNotEqual(hello["id"], goodbye["id"], "two chats")
+
+        # The click: a fresh tab, bound to box on the resume.
+        tab = "tab-click"
+        await self._send({"type": "openTab", "tabId": tab, "title": "Say hello"})
+        await self._click_history_row(tab, hello)
+        seen = await self._replay_of(tab)
+        self.assertEqual(seen["tabMachine"]["machine"], "box", "the binding is announced")
+        self.assertEqual(seen["task_events"]["task"], "Say hello")
+        self.assertEqual(seen["task_events"]["chat_id"], hello["id"])
+        self.assertIn(SUMMARY, json.dumps(seen["task_events"]["events"]))
+        self.assertEqual(remote_tabs.machine_of(tab), "box")
+        tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
+        self.assertEqual(
+            next(t["title"] for t in tabs["tabs"] if t["tabId"] == tab), "Say hello",
+            "the registry names the tab after the task",
+        )
+        self.assertNotIn("Say hello", await self._titles(mach.LOCAL_MACHINE),
+                         "nothing of the chat was copied here")
+
+        # The next prompt continues the chat on box (the chat header's
+        # drop-down shows the binding, so the submit names the machine).
+        await self._submit(tab, "Say hello again", "box")
+        frames = await self._run_until_idle(tab)
+        self.assertIn(SUMMARY, json.dumps(next(f for f in frames if f["type"] == "result")))
+        again = await self._box_row("Say hello again")
+        self.assertEqual(again["id"], hello["id"], "the same chat, continued on box")
+
+        # A surface connecting now gets the binding and the chat at its
+        # latest task (the submit's).
+        late = await self._late_replay(tab)
+        self.assertEqual(late["tabMachine"]["machine"], "box")
+        self.assertEqual(late["task_events"]["chat_id"], hello["id"])
+        self.assertEqual(late["task_events"]["task"], "Say hello again")
+
+        # Clicking the chat's FIRST task pins the tab to it: a surface
+        # connecting later sees that task, as it would for a local chat.
+        await self._click_history_row(tab, hello)
+        seen = await self._replay_of(tab)
+        self.assertEqual(seen["task_events"]["task"], "Say hello")
+        late = await self._late_replay(tab)
+        self.assertEqual(late["task_events"]["task"], "Say hello")
+
+        # Another of box's chats clicked into the same tab: the tab stays
+        # bound (one stream), shows that chat, and a surface connecting
+        # later gets that chat, not the first.
+        await self._click_history_row(tab, goodbye)
+        seen = await self._replay_of(tab)
+        self.assertEqual(seen["task_events"]["chat_id"], goodbye["id"])
+        self.assertEqual(remote_tabs.machine_of(tab), "box")
+        late = await self._late_replay(tab)
+        self.assertEqual(late["task_events"]["chat_id"], goodbye["id"])
+
+        # A scoped resume (the fetch of a deferred replay) answers the
+        # asking connection alone: this one sees no transcript of it.
+        reader, writer = await open_local_connection(self.server)
+        try:
+            await self._click_history_row(tab, hello, scoped=True, writer=writer)
+            for _ in range(300):
+                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
+                msg = json.loads(line.decode("utf-8"))
+                if msg.get("type") == "task_events" and msg.get("tabId") == tab:
+                    self.assertEqual(msg["chat_id"], hello["id"])
+                    break
+            else:
+                raise AssertionError("the scoped resume was not answered")
+        finally:
+            writer.close()
+        await self._send({"type": "getInputHistory"})
+        for _ in range(300):
+            msg = await self._next()
+            self.assertNotEqual((msg.get("type"), msg.get("tabId")), ("task_events", tab))
+            if msg.get("type") == "inputHistory":
+                break
+
+        # A local chat clicked into the tab brings it home (no machine).
+        await self._send({"type": "resumeSession", "id": "no-such-chat", "tabId": tab})
+        for _ in range(40):
+            if not remote_tabs.machine_of(tab):
+                break
+            await asyncio.sleep(0.25)
+        self.assertEqual(remote_tabs.machine_of(tab), "")
+
+        # A row of a machine that is not registered (removed meanwhile).
+        await self._click_history_row("tab-z", hello, machine="nowhere")
+        error = await self._until("error", "tab-z")
+        self.assertEqual(error["code"], "prompt_refused")
+        self.assertIn("nowhere is not a registered machine", error["text"])
+        self.assertEqual(remote_tabs.machine_of("tab-z"), "")
+
+    async def _late_replay(self, tab: str) -> dict[str, dict[str, Any]]:
+        """Connect a surface, send ``ready``, and collect its binding and transcript of *tab*."""
+        reader, writer = await open_local_connection(self.server)
+        try:
+            writer.write(json.dumps({"type": "ready", "restoredTabs": []}).encode() + b"\n")
+            await writer.drain()
+            seen: dict[str, dict[str, Any]] = {}
+            for _ in range(400):
+                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
+                msg = json.loads(line.decode("utf-8"))
+                if msg.get("tabId") == tab and msg["type"] in ("tabMachine", "task_events"):
+                    seen.setdefault(str(msg["type"]), msg)
+                if len(seen) == 2:
+                    return seen
+            raise AssertionError(f"incomplete replay: {sorted(seen)}")
+        finally:
+            writer.close()
+
+    async def test_sub_agents_of_a_chat_shown_from_a_machine_are_fetched(self) -> None:
+        """A finished sub-agent of a chat opened from a machine's row is fetched over its stream.
+
+        The stream never saw the sub-agent's ``new_tab`` (the run ended
+        before the chat was opened here), so the fan-out panel's resume
+        names the parent tab, whose stream the sub-agent tab joins.
+        """
+        _FinishingModel.parallel_on_first_call = True
+        remote_tabs = self.server._server_api.remote_tabs
+        await self._submit("tab-p", "Fan out", "box")
+        child_task = ""
+        for _ in range(500):
+            msg = await self._next()
+            if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == "tab-p":
+                child_task = str(msg["task_id"])
+            if msg.get("type") == "status" and msg.get("tabId") == "tab-p" and not msg["running"]:
+                break
+        self.assertTrue(child_task, "the run fanned out")
+        await self._send({"type": "closeTab", "tabId": "tab-p"})
+        await self._until("tabs_state")
+
+        tab = "tab-click"
+        await self._send({"type": "openTab", "tabId": tab, "title": "Fan out"})
+        await self._click_history_row(tab, await self._box_row("Fan out"))
+        seen = await self._replay_of(tab)
+        self.assertEqual(seen["task_events"]["task"], "Fan out")
+        # What unfolding the fan-out panel sends: a sub-agent tab under
+        # the parent, resumed by the child's task id.
+        sub = f"{tab}__sub_{child_task}"
+        await self._send({
+            "type": "resumeSession", "taskId": child_task, "tabId": sub, "parentTabId": tab,
+        })
+        events = await self._until("task_events", sub)
+        self.assertEqual(str(events["task_id"]), child_task)
+        self.assertIn(SUMMARY, json.dumps(events["events"]))
+        self.assertEqual(remote_tabs.machine_of(sub), "box", "the sub-agent tab joined the stream")
+        self.assertEqual(remote_tabs.machine_of(tab), "box")

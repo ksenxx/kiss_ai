@@ -17,7 +17,9 @@ A machine registered as ``user@host`` (an *SSH machine*) is reached
 through an SSH tunnel instead of a public address and needs no
 password: :class:`SshTunnel` reads the remote daemon's endpoint file
 (``~/<brand home>/sorcar-local.json``: its loopback port and per-start
-local token) with ``ssh user@host cat ...``, forwards a free local
+local token; see :data:`REMOTE_ENDPOINT_COMMAND` for how that home is
+found whatever the remote's brand) with ``ssh user@host sh -c ...``,
+forwards a free local
 port to that loopback port with ``ssh -N -L`` and the link
 authenticates through the tunnel with the token, which the remote
 daemon accepts from a loopback peer whatever its ``remote_password``.
@@ -91,11 +93,24 @@ SSH_TIMEOUT = 30.0
 SSH_CONFIG_ENV = "KISS_SSH_CONFIG"
 """Environment variable naming an ``ssh`` config file to use instead of the user's."""
 REMOTE_ENDPOINT_COMMAND = (
-    f"sh -c 'cd \"${{KISS_HOME:-$HOME/{HOME_DIR}}}\" && cat {LOCAL_ENDPOINT_FILE} "
-    "&& cat remote-url.json 2>/dev/null'"
+    "sh -c '"
+    f'for d in "$KISS_HOME" "$HOME/{HOME_DIR}" "$HOME"/.*; do '
+    'case "$d" in ""|*/.|*/..) continue;; esac; '
+    f'if [ -f "$d/{LOCAL_ENDPOINT_FILE}" ]; then '
+    f'cat "$d/{LOCAL_ENDPOINT_FILE}"; cat "$d/remote-url.json" 2>/dev/null; exit 0; '
+    "fi; done; "
+    f'echo "no $HOME/.*/{LOCAL_ENDPOINT_FILE}" >&2; exit 1\''
 )
-"""Remote command printing the daemon's endpoint file, then its published URLs if any
-(both under ``$KISS_HOME`` or the brand home)."""
+"""Remote command printing the daemon's endpoint file, then its published URLs if any.
+
+Both files are read from the first directory holding an endpoint file
+among ``$KISS_HOME``, the local brand's home (``~/.kiss``) and every
+other ``~/.*``: the remote daemon's brand (hence its state directory)
+may differ from the local one and may change when it is re-installed,
+and a stopped daemon removes its endpoint file, so the file found is
+the running daemon's.  The login shell only sees a single-quoted
+string, so the command avoids ``!`` (csh expands history even in
+quotes); ``.`` and ``..`` are skipped by the ``case``."""
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 
@@ -629,7 +644,11 @@ class MachineLink:
     machine down without trying again for :data:`DOWN_BACKOFF` seconds,
     so an offline machine does not add a connection timeout to every
     CHATS refresh and a rejected password is not retried often enough
-    to trip the remote daemon's brute-force lockout.
+    to trip the remote daemon's brute-force lockout.  One exception: an
+    SSH machine whose daemon rejects the tunnel's token has usually
+    just restarted on the same port with a new token (the ``ssh -N``
+    forward survives that), so the link reads the endpoint file again
+    and retries once at once before it backs off.
     """
 
     def __init__(self, machine: Machine, cert_file: Path | None = None) -> None:
@@ -681,11 +700,34 @@ class MachineLink:
             self.tunnel.close()
         return MachineError(message)
 
-    def _connect(self, deadline: float) -> ClientConnection:
+    def _connect(
+        self, deadline: float, stream: bool = False, retry: bool = True,
+    ) -> ClientConnection:
         """Open and authenticate the socket before the monotonic *deadline*.
 
         An SSH machine (tunnel already open) is authenticated with its
-        local token, any other with the registered password.
+        local token, any other with the registered password.  When the
+        daemon rejects the token and *retry* is true, the request
+        socket (dead with its tunnel) is dropped, the tunnel is closed
+        and opened again (which reads the endpoint file afresh, on the
+        tunnel's own :data:`SSH_TIMEOUT` budget, as when a request
+        opens it) and the handshake is tried once more before the same
+        *deadline*: the token is stale when the daemon restarted on
+        the same port under the living tunnel.  A second rejection
+        backs off like any other failure.  The
+        shared request socket (*stream* false) announces itself as a
+        daemon link (``"link": true`` in its ``auth`` frame): the
+        daemon answers its requests but leaves it out of the task-event
+        fan-out, so another user's history click on the machine does
+        not push a whole transcript at a socket that only wants its
+        replies.  A stream socket (:meth:`open_connection`) relays a
+        tab's events and stays an ordinary peer.
+
+        No frame-size limit is applied in either case (``max_size``
+        ``None``): the daemon is an authenticated, certificate-pinned
+        peer, and with the library default of 1 MiB a transcript
+        larger than that closed the socket with 1009 and reported the
+        machine unreachable for :data:`DOWN_BACKOFF` seconds.
         """
         machine = self.machine
         where = f"{machine.name} ({machine.address()})"
@@ -698,14 +740,15 @@ class MachineLink:
         except (OSError, ssl.SSLError) as exc:
             raise self._fail(f"{where} has no usable pinned certificate: {exc}") from exc
         ctx.check_hostname = False
+        auth: dict[str, Any] = {"type": "auth", "link": not stream}
         if self.tunnel is not None:
-            url, auth = self.tunnel.url, {"type": "auth", "token": self.tunnel.token}
+            url, auth["token"] = self.tunnel.url, self.tunnel.token
         else:
-            url, auth = machine.url, {"type": "auth", "password": machine.password}
+            url, auth["password"] = machine.url, machine.password
         try:
             ws = _ws_connect(
                 ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
-                close_timeout=2.0, compression=None,
+                close_timeout=2.0, compression=None, max_size=None,
             )
         except (OSError, InvalidHandshake, InvalidURI, ssl.SSLError) as exc:
             raise self._fail(f"{where} is unreachable: {exc}") from exc
@@ -715,12 +758,18 @@ class MachineLink:
         except (ConnectionClosed, OSError, ValueError) as exc:
             ws.close()
             raise self._fail(f"{where} did not complete the handshake: {exc}") from exc
-        if not isinstance(reply, dict) or reply.get("type") != "auth_ok":
-            ws.close()
-            if isinstance(reply, dict) and reply.get("type") == "auth_required":
-                raise self._fail(f"{where} rejected the password")
+        if isinstance(reply, dict) and reply.get("type") == "auth_ok":
+            return ws
+        ws.close()
+        if not (isinstance(reply, dict) and reply.get("type") == "auth_required"):
             raise self._fail(f"{where} refused the connection: {reply!r}")
-        return ws
+        if self.tunnel is None or not retry:
+            raise self._fail(f"{where} rejected the password")
+        logger.info("%s rejected the tunnel's token: reading its endpoint file again", where)
+        self._drop()
+        self.tunnel.close()
+        self._open_tunnel()
+        return self._connect(deadline, stream, retry=False)
 
     def request(
         self, cmd: dict[str, Any], reply_type: str, timeout: float = REQUEST_TIMEOUT,
@@ -787,8 +836,9 @@ class MachineLink:
         A stream (a chat tab running on the machine, see
         :mod:`kiss.server.remote_tabs`) relays frames for as long as it
         lives, so it cannot take turns on the socket :meth:`request`
-        shares; an SSH machine's tunnel is shared.  The caller owns the
-        returned socket and closes it.
+        shares; an SSH machine's tunnel is shared.  Unlike that socket
+        it is an ordinary peer of the daemon (it needs the tab's task
+        events).  The caller owns the returned socket and closes it.
 
         Raises:
             MachineError: When the daemon is unreachable or rejects the
@@ -798,7 +848,7 @@ class MachineLink:
             if self.tunnel is not None and not self.tunnel.is_open():
                 self._drop()
                 self._open_tunnel()
-            return self._connect(time.monotonic() + timeout)
+            return self._connect(time.monotonic() + timeout, stream=True)
 
     def close(self) -> None:
         """Close the socket and the tunnel; the next :meth:`request` re-connects."""
@@ -852,6 +902,36 @@ def close_links() -> None:
 atexit.register(close_links)
 
 
+# The short host name each registered machine's daemon last gave of
+# itself (registered name -> host), from the ``machine`` of its
+# ``pong`` and the ``localMachine`` of its ``history`` replies; kept
+# while the machine is down.
+_hosts: dict[str, str] = {}
+
+
+def note_host(machine: Machine, host: Any) -> None:
+    """Record the host name *host* that *machine*'s daemon gave of itself.
+
+    Ignored unless a non-empty string.
+    """
+    if isinstance(host, str) and host:
+        _hosts[machine.name] = host
+
+
+def machine_label(machine: Machine) -> str:
+    """Return what to call *machine* on screen.
+
+    Its daemon's own host name (:func:`note_host`) when it was
+    registered under the default name, the host of its address
+    (:func:`default_name`), so an address-registered machine reads
+    ``gpu-box`` rather than ``10.0.0.7``; a name the user chose is
+    kept, as is the name while the daemon has never answered.
+    """
+    if machine.name == default_name(machine.ssh or machine.url):
+        return _hosts.get(machine.name) or machine.name
+    return machine.name
+
+
 def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> HistoryPage:
     """Return up to *limit* history rows of *machine* matching *query* and *tag*.
 
@@ -861,7 +941,8 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
     query each other without end, and stamps every row with ``machine``
     (the name) and ``machine_url`` (the registered URL, or an SSH
     machine's :attr:`SshTunnel.web_url`).  The page's date range is
-    the remote history's.
+    the remote history's.  The reply's ``localMachine`` is the
+    machine's own host name (:func:`note_host`).
 
     Raises:
         MachineError: When the machine cannot be queried.
@@ -873,6 +954,7 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
             "type": "getHistory", "query": query, "tag": tag, "offset": len(page.rows),
             "machine": LOCAL_MACHINE,
         }, "history")
+        note_host(machine, reply.get("localMachine"))
         url = link.tunnel.web_url if link.tunnel is not None else machine.url
         rows = [s for s in reply.get("sessions") or [] if isinstance(s, dict)]
         for session in rows:

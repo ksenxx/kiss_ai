@@ -34,7 +34,7 @@ import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import goto_retrying_network_change, mark_version_seen
 
 # --sidebar-min-w / --chat-min-w from remote-codex.css: the sliver a
 # drag may collapse either docked panel down to, and the chat width
@@ -123,8 +123,10 @@ def browser() -> Iterator[Browser]:
 
 
 def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
-    """Open the remote page at ``width`` in desktop mode."""
+    """Open the remote page at ``width`` in desktop mode, as a profile
+    that already saw the running version (every section expanded)."""
     page = browser.new_page(viewport={"width": width, "height": 900})
+    mark_version_seen(page)
     goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.evaluate(_PREPARE_JS)

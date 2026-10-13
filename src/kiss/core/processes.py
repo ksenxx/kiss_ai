@@ -145,6 +145,33 @@ def pid_alive(pid: int) -> bool:
 # keeps every descendant, however re-parented, and terminates them all.
 _WINDOWS_JOBS: dict[int, int] = {}
 _WINDOWS_JOBS_LOCK = threading.Lock()
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+
+
+def _windows_job_active_processes(job: int) -> int:  # pragma: no cover — Windows-only branch
+    """Return how many processes are still alive in Job Object *job* (0 when unknown)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Accounting(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", wintypes.LARGE_INTEGER),
+            ("TotalKernelTime", wintypes.LARGE_INTEGER),
+            ("ThisPeriodTotalUserTime", wintypes.LARGE_INTEGER),
+            ("ThisPeriodTotalKernelTime", wintypes.LARGE_INTEGER),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    info = _Accounting()
+    ok = kernel32.QueryInformationJobObject(
+        ctypes.c_void_p(job), _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(info), ctypes.sizeof(info), None,
+    )
+    return int(info.ActiveProcesses) if ok else 0
 
 
 def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no cover — Windows-only
@@ -163,7 +190,13 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
         kernel32.CloseHandle(ctypes.c_void_p(job))
         return
     with _WINDOWS_JOBS_LOCK:
-        stale = [(p, h) for p, h in list(_WINDOWS_JOBS.items()) if not pid_alive(p)]
+        # A job stays reachable while ANY of its processes lives: the
+        # leader may exit and leave grandchildren behind that a later
+        # :func:`kill_process_group` must still be able to terminate.
+        stale = [
+            (p, h) for p, h in list(_WINDOWS_JOBS.items())
+            if _windows_job_active_processes(h) == 0
+        ]
         for pid, handle in stale:
             if _WINDOWS_JOBS.pop(pid, None) is not None:
                 kernel32.CloseHandle(ctypes.c_void_p(handle))
@@ -221,8 +254,10 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
     if pid <= 0:
         raise ProcessLookupError(pid)
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        if not pid_alive(pid):
-            raise ProcessLookupError(pid)
+        # The job comes first, whatever the leader's state: a leader
+        # that exited on its own (or on the first termination) may have
+        # left grandchildren in the job, and those are exactly what the
+        # caller's SIGKILL escalation must take down.
         with _WINDOWS_JOBS_LOCK:
             job = _WINDOWS_JOBS.get(pid)
         if job is not None:
@@ -231,6 +266,8 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
             if kernel32.TerminateJobObject(ctypes.c_void_p(job), 1):
                 return
+        if not pid_alive(pid):
+            raise ProcessLookupError(pid)
         try:
             result = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],

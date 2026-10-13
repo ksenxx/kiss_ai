@@ -9,8 +9,11 @@ loopback port with its own host key, a fresh client key as the only
 authorised key, and ``KISS_HOME`` set (``SetEnv``) to the home of the
 daemon that plays the remote machine, so ``ssh <user>@127.0.0.1:<port>
 cat "$KISS_HOME/sorcar-local.json"`` reads that daemon's endpoint file.
-The client side is a config file (key, known-hosts file) meant for
-``$KISS_SSH_CONFIG``; nothing under ``~/.ssh`` is read or written.
+Sessions also get a private ``HOME`` (that directory unless *home* says
+otherwise), so the endpoint lookup's ``~/.*`` fallback never meets the
+developer's own ``~/.kiss`` daemon.  The client side is a config file
+(key, known-hosts file) meant for ``$KISS_SSH_CONFIG``; nothing under
+``~/.ssh`` is read or written.
 """
 
 from __future__ import annotations
@@ -57,13 +60,22 @@ class SshServer:
         self.process.wait(timeout=20)
 
 
-def start_sshd(workdir: Path, remote_home: Path, timeout: float = 30.0) -> SshServer:
+def start_sshd(
+    workdir: Path, remote_home: Path | None, home: Path | None = None, timeout: float = 30.0,
+) -> SshServer:
     """Start an ``sshd`` under *workdir* whose sessions see ``KISS_HOME=remote_home``.
 
-    A second server started under the same *workdir* reuses its keys
-    and client config (it differs by port and ``KISS_HOME`` only).
+    Args:
+        workdir: Where the keys and the client config live.  A second
+            server started under the same *workdir* reuses them (it
+            differs by port and environment only).
+        remote_home: The sessions' ``KISS_HOME``; ``None`` leaves it empty.
+        home: The sessions' ``HOME``; default *remote_home* (one of the
+            two must be given).
+        timeout: Seconds to wait for the port to open.
 
     Raises:
+        RuntimeError: When ``sshd`` exits or the port stays closed.
         RuntimeError: When ``sshd`` exits or the port stays closed.
     """
     workdir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +100,8 @@ def start_sshd(workdir: Path, remote_home: Path, timeout: float = 30.0) -> SshSe
         "-o", "ListenAddress=127.0.0.1", "-o", "PidFile=none",
         "-o", f"AuthorizedKeysFile={authorized}", "-o", "StrictModes=no",
         "-o", "PasswordAuthentication=no", "-o", "UsePAM=no",
-        "-o", f"SetEnv=KISS_HOME={remote_home}", "-o", "LogLevel=ERROR",
+        "-o", f"SetEnv=KISS_HOME={remote_home or ''} HOME={home or remote_home}",
+        "-o", "LogLevel=ERROR",
     ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

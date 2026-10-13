@@ -78,8 +78,23 @@ def _kill(pid_file: Path) -> None:
                 os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
+def _wait_dead(pid: int, timeout: float = 5.0) -> bool:
+    """Return whether *pid* disappears within *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not pid_alive(pid)
+
+
 def _grandchild_holds_stdin(pid_file: Path) -> str:
-    """Stand-in body: spawn a grandchild that inherits stdin, reply, exit."""
+    """Stand-in body: spawn a grandchild that inherits stdin, reply, exit.
+
+    The grandchild starts its own session so that ``close()``'s group
+    kill does not reach it (on POSIX; Windows ignores
+    ``start_new_session`` and the grandchild dies with the Job Object):
+    it keeps the prompt pipe open for its whole lifetime, and only the
+    writer's cancellation can bring the supervisor back.
+    """
     return f"""
     import json
     import subprocess
@@ -91,6 +106,7 @@ def _grandchild_holds_stdin(pid_file: Path) -> str:
         [sys.executable, "-c", "import time; time.sleep({_GRANDCHILD_LIFETIME})"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     with open({str(pid_file)!r}, "w") as f:
         f.write(str(grandchild.pid))
@@ -192,8 +208,13 @@ class TestWriterIsCancelledAndStdinReleased:
             assert not _writer_threads()
             assert elapsed < _TURN_TIMEOUT / 2, f"turn took {elapsed:.1f}s"
             assert pid_file.exists(), "the stand-in never recorded its grandchild"
-            # The grandchild is still alive: only cancellation could have freed us.
-            assert pid_alive(int(pid_file.read_text()))
+            grandchild = int(pid_file.read_text())
+            if os.name == "nt":
+                # No session to escape to: the grandchild is killed with the job.
+                assert _wait_dead(grandchild), f"grandchild {grandchild} survived close()"
+            else:
+                # The grandchild is still alive: only cancellation could have freed us.
+                assert pid_alive(grandchild)
         finally:
             _kill(pid_file)
 
@@ -441,6 +462,8 @@ class TestNonBlockingWriterDeliversThePrompt:
         after the child exited (review 2026-10-12), so its reader drains
         to EOF and stderr is closed like the other pipes.
         """
+        if escapes_group and os.name == "nt":
+            pytest.skip("Windows ignores start_new_session: no grandchild leaves the Job Object")
         pid_file = tmp_path / "grandchild.pid"
         script = tmp_path / "child.py"
         script.write_text(textwrap.dedent(_grandchild_holds_stderr(pid_file, escapes_group)))
