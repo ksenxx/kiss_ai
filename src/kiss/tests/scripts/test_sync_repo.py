@@ -21,6 +21,7 @@ being lost or forced.
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -36,7 +37,12 @@ pytestmark = posix_only("runs the bash sync-repo.sh with a bash ssh stand-in")
 
 _FAKE_SSH = """#!/bin/bash
 # Stand-in for ssh: run the command locally, keeping stdin (the script the
-# driver pipes to "bash -s") attached.
+# driver pipes to "bash -s") attached.  The options in front of the target
+# (-A for the agent forwarding) are recorded, one call per line, then dropped.
+printf '%s\\n' "$*" >> "@LOG@"
+while [[ "${1:-}" == -* ]]; do
+    if [[ "$1" == -o ]]; then shift 2; else shift; fi
+done
 shift                       # drop the user@host argument
 exec bash -c "$*"
 """
@@ -53,7 +59,8 @@ class SyncRepoTest(unittest.TestCase):
         bindir = self.tmp / "bin"
         bindir.mkdir()
         fake_ssh = bindir / "ssh"
-        fake_ssh.write_text(_FAKE_SSH)
+        self.ssh_log = self.tmp / "ssh-args.txt"
+        fake_ssh.write_text(_FAKE_SSH.replace("@LOG@", str(self.ssh_log)))
         fake_ssh.chmod(0o755)
         self.env = dict(os.environ)
         self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
@@ -536,6 +543,105 @@ class SyncRepoTest(unittest.TestCase):
                          "Bob O'Brien")
         self.assertTrue((self.local / "agent_work.txt").exists())
         self.assert_in_sync("main")
+
+    def ssh_calls(self) -> list[str]:
+        """Return every ssh command line issued so far, options first."""
+        if not self.ssh_log.exists():
+            return []
+        return self.ssh_log.read_text().splitlines()
+
+    def insteadof(self, base: str) -> str:
+        """Return the server checkout's ``url.<base>.insteadOf``, or ''."""
+        done = subprocess.run(
+            ["git", "-C", str(self.remote), "config", "--get-all",
+             f"url.{base}.insteadOf"],
+            env=self.env, capture_output=True, text=True, timeout=120)
+        return done.stdout.strip()
+
+    def test_without_the_key_the_agent_is_forwarded_and_ssh_urls_are_not_forced(self) -> None:
+        """SORCAR_SKIP_SSH_COPY=1 (the default): the sync ssh call carries -A,
+        and the server is not told to turn https URLs into ssh ones."""
+        done = self.sync_ok()
+
+        self.assertEqual(
+            [line for line in self.ssh_calls() if line.startswith("-A user@server ")],
+            [line for line in self.ssh_calls() if "--sync" in line],
+            done.stdout + done.stderr)
+        self.assertEqual(self.insteadof("git@github.com:"), "")
+        self.assertEqual(self.insteadof("https://github.com/"), "")
+        self.assert_in_sync("main")
+
+    def test_the_https_rewrite_a_keyless_deploy_made_survives_a_keyless_sync(self) -> None:
+        """./rsorcar points git@github.com: at https once the token is on the
+        server; the next keyless sync drops a stale ssh rewrite, not that."""
+        self.sync_ok()
+        self.git(self.remote, "config", "url.https://github.com/.insteadOf",
+                 "git@github.com:")
+        self.git(self.remote, "config", "url.git@github.com:.insteadOf",
+                 "https://github.com/")
+
+        self.sync_ok()
+
+        self.assertEqual(self.insteadof("https://github.com/"), "git@github.com:")
+        self.assertEqual(self.insteadof("git@github.com:"), "")
+
+    def test_with_the_key_copied_ssh_urls_are_forced_and_no_agent_is_forwarded(self) -> None:
+        """SORCAR_SKIP_SSH_COPY=0: no -A, https URLs become ssh ones on the
+        server, and the rewrite the keyless default makes goes away."""
+        self.sync_ok()
+        self.git(self.remote, "config", "url.https://github.com/.insteadOf",
+                 "git@github.com:")
+
+        self.sync_ok(SORCAR_SKIP_SSH_COPY="0")
+
+        self.assertFalse([line for line in self.ssh_calls() if line.startswith("-")
+                          and "SYNC_SSH_KEY_COPIED=1" in line])
+        self.assertTrue([line for line in self.ssh_calls()
+                         if "SYNC_SSH_KEY_COPIED=1" in line])
+        self.assertEqual(self.insteadof("git@github.com:"), "https://github.com/")
+        self.assertEqual(self.insteadof("https://github.com/"), "")
+        self.assert_in_sync("main")
+
+    def sync_remote_half(self, remotes: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        """Run the server half alone, as a keyless deploy's ssh session runs it.
+
+        *remotes* is the "name<TAB>url" list the driver sends; the fake ssh
+        serves ``git@github.com:/<path>`` from this machine's disk, which
+        stands in for a forwarded agent that GitHub accepts.
+        """
+        env = {**self.env, "SYNC_SSH_KEY_COPIED": "0",
+               "SYNC_REMOTES_B64": base64.b64encode(remotes.encode()).decode()}
+        env.pop("SSH_AUTH_SOCK", None)      # this machine's agent is not the test's
+        env.update(overrides)
+        return subprocess.run(
+            ["bash", str(_SCRIPT), "--sync", str(self.remote), "main"],
+            env=env, capture_output=True, text=True, timeout=600)
+
+    def test_with_the_agent_forwarded_an_https_origin_is_fetched_over_ssh(self) -> None:
+        """A private https origin needs no token on a fresh keyless server:
+        for the session the forwarded agent carries it over ssh, and the
+        rewrite that does so is not written into the repository."""
+        done = self.sync_remote_half(f"origin\thttps://github.com/{self.origin}\n",
+                                     SSH_AUTH_SOCK="/tmp/forwarded-agent.sock")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.remote / "README.md").read_text(), "hello\n")
+        self.assertTrue([line for line in self.ssh_calls()
+                         if "git@github.com git-upload-pack" in line])
+        self.assertEqual(self.git(self.remote, "remote", "get-url", "origin"),
+                         f"https://github.com/{self.origin}")
+        self.assertEqual(self.insteadof("git@github.com:"), "")
+        self.assertEqual(self.insteadof("https://github.com/"), "")
+
+    def test_without_a_forwarded_agent_an_https_origin_stays_https(self) -> None:
+        """No agent in the session: https is left to the token, and a
+        server without one cannot fetch — the rewrite to ssh is not made."""
+        done = self.sync_remote_half(f"origin\thttps://github.com/{self.origin}\n")
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("Cannot fetch from origin", done.stdout + done.stderr)
+        self.assertFalse([line for line in self.ssh_calls()
+                          if "git-upload-pack" in line])
 
     def test_a_single_branch_clone_still_learns_every_branch(self) -> None:
         """A narrow fetch refspec must not hide origin's other branches."""

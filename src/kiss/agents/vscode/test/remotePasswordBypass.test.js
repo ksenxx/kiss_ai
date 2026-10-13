@@ -1848,6 +1848,100 @@ async function run() {
     window.close();
   }
 
+  // WebSocket auth is invisible to the browser's login heuristics, so an
+  // interactive login is completed explicitly through the Credential
+  // Management API on auth_ok (otherwise Terminal's later fetch opened a
+  // "Save password?" prompt).  jsdom has no PasswordCredential: provide
+  // one that records what was stored, and make store() resolve, reject
+  // and throw in turn; none of these may block the login.  A reload that
+  // reuses the stored password is a silent login and must not re-offer.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    const stored = [];
+    let storeMode = 'resolve';
+    window.PasswordCredential = function PasswordCredential(init) {
+      this.id = init.id;
+      this.password = init.password;
+    };
+    Object.defineProperty(window.navigator, 'credentials', {
+      configurable: true,
+      value: {
+        store(cred) {
+          stored.push(cred);
+          if (storeMode === 'throw') throw new Error('store is not allowed here');
+          if (storeMode === 'reject') return Promise.reject(new Error('user declined'));
+          return Promise.resolve(cred);
+        },
+      },
+    });
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const sock = sockets[0];
+    const modal = doc.getElementById('auth-modal');
+    const input = doc.getElementById('auth-modal-input');
+    try {
+      sock.fireOpen();
+      for (const [mode, pwd] of [['resolve', 'pw1'], ['reject', 'pw2'], ['throw', 'pw3']]) {
+        storeMode = mode;
+        sock.fireMessage({type: 'auth_required'});
+        assert.ok(isVisible(modal), `the dialog opens (${mode})`);
+        input.value = pwd;
+        doc.getElementById('auth-modal-ok').click();
+        await tick();
+        assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
+          {type: 'auth', password: pwd});
+        sock.fireMessage({type: 'auth_ok'});
+        await tick();
+        assert.ok(!isVisible(modal), `the dialog closes on auth_ok (${mode})`);
+        const last = stored[stored.length - 1];
+        assert.ok(last instanceof window.PasswordCredential,
+          `a PasswordCredential is offered to the browser (${mode})`);
+        assert.deepStrictEqual({id: last.id, password: last.password},
+          {id: 'remote', password: pwd},
+          `the typed password is what the browser is asked to save (${mode})`);
+      }
+      assert.strictEqual(stored.length, 3,
+        'every interactive login offers the password to the browser exactly once');
+      ok('an interactive login offers the password to the browser; store rejecting or throwing is harmless');
+    } catch (err) {
+      fail('credential store on auth_ok broken', err);
+    }
+    window.close();
+  }
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    window.localStorage.setItem('sorcar-remote-pwd', 'saved');
+    const stored = [];
+    window.PasswordCredential = function PasswordCredential() {};
+    Object.defineProperty(window.navigator, 'credentials', {
+      configurable: true,
+      value: {store(cred) { stored.push(cred); return Promise.resolve(cred); }},
+    });
+    evalShim(window, shimJs);
+    const sock = sockets[0];
+    try {
+      sock.fireOpen();
+      assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
+        {type: 'auth', password: 'saved'});
+      sock.fireMessage({type: 'auth_ok'});
+      await tick();
+      assert.deepStrictEqual(stored, [],
+        'a silent login with the stored password never re-offers it to the browser');
+      ok('a silent login with the stored password is not offered to the browser');
+    } catch (err) {
+      fail('silent login credential handling broken', err);
+    }
+    window.close();
+  }
+
   console.log('\nAll remotePasswordBypass tests passed.');
 }
 

@@ -218,6 +218,8 @@ export type PanelEvent =
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
+      // The remote machine the chat lives on ('' / absent: this one).
+      machine?: string;
       // The connect task's prompt, submitted in a new chat (autoSubmit).
       pendingText?: string;
       autoSubmit?: boolean;
@@ -1354,6 +1356,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // A deferred tab's fetch (replay_deferred): this webview's
           // connection alone gets the transcript.
           ...(message.scoped ? {scoped: true} : {}),
+          // A remote machine's chat: the daemon binds the tab to the
+          // machine and forwards the resume (the title names the tab
+          // until the replay arrives).
+          ...(message.machine
+            ? {machine: message.machine, title: message.title || ''}
+            : {}),
         });
         break;
       }
@@ -1625,6 +1633,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           chatId: message.chatId,
           taskId: message.taskId,
           title: message.title,
+          machine: message.machine,
           pendingText: message.pendingText,
           autoSubmit: message.autoSubmit,
         });
@@ -1963,13 +1972,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * the task text read-only when there is nothing to resume).
    *
    * @param event The clicked chat/task: backend chat id ('' or absent
-   *     when the task has nothing to resume), the task's id and the
-   *     task text for the read-only fallback.
+   *     when the task has nothing to resume), the task's id, the
+   *     task text for the read-only fallback and the remote machine
+   *     the chat lives on ('' or absent for this one).
    */
   public async openChatFromHistory(event: {
     chatId?: string;
     taskId?: string | number | null;
     title?: string;
+    machine?: string;
   }): Promise<void> {
     await this.focusChatInput();
     await this._waitForWebviewReady();
@@ -1987,6 +1998,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       chatId: event.chatId ? String(event.chatId) : '',
       taskId: event.taskId === undefined ? null : event.taskId,
       title: event.title || '',
+      machine: event.machine || '',
     });
   }
 

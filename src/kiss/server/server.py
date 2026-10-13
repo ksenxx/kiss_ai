@@ -40,6 +40,7 @@ from kiss.agents.sorcar.machines import (
     Machine,
     load_machines,
     local_machine_name,
+    machine_label,
     merged_history,
 )
 from kiss.agents.sorcar.persistence import (
@@ -1226,6 +1227,9 @@ class VSCodeServer(
             "generation": generation,
             "dateRange": {"min": min_ts, "max": max_ts},
             "machines": [m.name for m in registered],
+            # What the CHATS panel calls each registered machine: its
+            # own host name when it was registered by its address.
+            "machineLabels": {m.name: machine_label(m) for m in registered},
             "localMachine": local_machine_name(),
         }
         # The WORKDIR dropdown's options, sent with page one of a view

@@ -227,9 +227,11 @@ function testHeaderShowsMachineThenDirectory(remote) {
   assert.ok(selects, 'the shared select rule');
   assert.ok(/padding:\s*0 1\.1em 0 0/.test(selects[1]), 'room for the chevron');
   assert.ok(/appearance:\s*none/.test(selects[1]), 'no native arrow');
-  // A remote pick colours the name and its chevron orange; an empty
-  // machine list hides the span, chevron included.
-  assert.ok(/#chat-machine-wrap:has\(> \.remote\)\s*\{\s*color:\s*var\(--orange\)/.test(css));
+  // A remote pick colours the name and its chevron green (red once
+  // the daemon reports the machine down); an empty machine list hides
+  // the span, chevron included.
+  assert.ok(/#chat-machine-wrap:has\(> \.remote\)\s*\{\s*color:\s*var\(--status-ok\)/.test(css));
+  assert.ok(/#chat-machine-wrap:has\(> \.remote\.down\)\s*\{\s*color:\s*var\(--status-fail\)/.test(css));
   assert.ok(/#chat-machine-wrap:has\(> #chat-machine:empty\)\s*\{\s*display:\s*none/.test(css));
   // Nothing known yet: no machine name, no ":", the placeholder
   // selected and "Choose ..." a pick away.

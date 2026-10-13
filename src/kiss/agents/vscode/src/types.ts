@@ -308,6 +308,12 @@ export type FromWebviewMessage =
       // The transcript goes to the sending connection only (the fetch
       // of a tab whose replay the daemon deferred on `ready`).
       scoped?: boolean;
+      // A chat of a registered remote machine (a CHATS-panel row of
+      // that machine): the daemon binds the tab to the machine and
+      // forwards the resume, so the chat shows here; `title` names
+      // the tab on every surface until the replay sets it.
+      machine?: string;
+      title?: string;
     }
   | {type: 'getWelcomeInfo'}
   // activeFile / activeFileContent: the file tab the webview's user
@@ -448,6 +454,8 @@ export type FromWebviewMessage =
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
+      // The remote machine the chat lives on ('' / absent: this one).
+      machine?: string;
       pendingText?: string;
       autoSubmit?: boolean;
     }
@@ -939,6 +947,9 @@ type ToWebviewMessageBody =
       generation?: number;
       dateRange?: {min: number | null; max: number | null};
       machines?: string[];
+      // What to call each registered machine (its own host name when
+      // it was registered by its address), by registered name.
+      machineLabels?: Record<string, string>;
       localMachine?: string;
       // The WORKDIR filter's options: the chat header's working
       // directories (the current one, then the ones adopted before,
@@ -1090,6 +1101,8 @@ type ToWebviewMessageBody =
       chatId: string;
       taskId: string | number | null;
       title: string;
+      // The remote machine the chat lives on ('' for this one).
+      machine: string;
     }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.

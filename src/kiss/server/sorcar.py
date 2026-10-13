@@ -116,6 +116,7 @@ from kiss.agents.sorcar.daemon_client import (
 from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
+from kiss.agents.sorcar.machines import local_machine_name
 from kiss.core.config import kiss_home
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
@@ -448,6 +449,30 @@ def passwords_equal(a: str, b: str) -> bool:
 
 AuthKind = Literal["local", "remote"]
 """How a connection authenticated: local token or remote password."""
+
+
+@dataclass(frozen=True)
+class Auth:
+    """The outcome of a successful ``auth`` handshake.
+
+    Attributes:
+        kind: ``"local"`` for a token-authenticated loopback client,
+            ``"remote"`` for a password-authenticated one.
+        link: The peer is another daemon's
+            :class:`~kiss.agents.sorcar.machines.MachineLink` request
+            socket (``"link": true`` in its ``auth`` frame): it is
+            answered, and told global events, but left out of the
+            task-event fan-out (see
+            :meth:`~kiss.server.web_server.WebPrinter.add_client`).
+    """
+
+    kind: AuthKind
+    link: bool = False
+
+
+def _auth_result(kind: AuthKind, msg: Any) -> Auth:
+    """Return the :class:`Auth` of an accepted ``auth`` frame *msg*."""
+    return Auth(kind, link=isinstance(msg, dict) and msg.get("link") is True)
 
 _NO_PASSWORD_LOG = (
     "Refusing non-localhost auth handshake from %s: remote_password is empty"
@@ -832,7 +857,7 @@ class ServerApi:
         except Exception:
             pass
 
-    async def authenticate(self, websocket: Any) -> AuthKind | None:
+    async def authenticate(self, websocket: Any) -> Auth | None:
         """Authenticate a WSS client with the ``auth`` handshake.
 
         Every client's entry point into the API: before a connection
@@ -886,10 +911,11 @@ class ServerApi:
             websocket: The client's WebSocket connection.
 
         Returns:
+            The :class:`Auth` of the admitted client (``kind``
             ``"local"`` for a token-authenticated loopback client,
-            ``"remote"`` for a password-authenticated client, ``None``
-            when authentication failed (the socket is then already
-            closed).
+            ``"remote"`` for a password-authenticated one; ``link`` when
+            its ``auth`` frame declared it a daemon link), ``None`` when
+            authentication failed (the socket is then already closed).
         """
         backend = self._backend
         ip = backend._client_ip(websocket)
@@ -904,7 +930,7 @@ class ServerApi:
                 msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
                 if self._is_local_auth(msg, websocket):
                     await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
-                    return "local"
+                    return _auth_result("local", msg)
             except Exception:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
             await self._refuse(websocket, _auth_locked(lock_remaining))
@@ -932,7 +958,7 @@ class ServerApi:
                     await websocket.send(json.dumps({
                         "type": "auth_ok", "local": True,
                     }))
-                    return "local"
+                    return _auth_result("local", msg)
                 if backend.local_only:
                     # The private daemon admits no password at all.
                     await self._refuse(websocket, {
@@ -986,7 +1012,7 @@ class ServerApi:
                     await websocket.send(json.dumps({
                         "type": "auth_ok", "local": False,
                     }))
-                    return "remote"
+                    return _auth_result("remote", msg)
                 if not is_retry and msg.get("type") != "auth":
                     await websocket.close()
                     return None
@@ -1766,7 +1792,11 @@ class ServerApi:
         on that: after a (re)connect it flushes the commands queued
         while the socket was down, sends ``ping`` and keeps the batch
         until ``pong`` arrives, re-sending it on the next connection if
-        this one dies first.
+        this one dies first.  Another daemon's
+        :class:`~kiss.agents.sorcar.machines.MachineLink` pings this
+        one the same way; the ``pong`` names this machine (its short
+        host name, ``machine``) so that daemon can label this machine
+        by its name rather than by the address it was registered at.
 
         Args:
             cmd: The ``ping`` command (no fields are used).
@@ -1774,7 +1804,7 @@ class ServerApi:
                 goes to this sender only.
         """
         await self._backend._endpoint_send(
-            ctx.endpoint, json.dumps({"type": "pong"}),
+            ctx.endpoint, json.dumps({"type": "pong", "machine": local_machine_name()}),
         )
 
     async def server_reset(

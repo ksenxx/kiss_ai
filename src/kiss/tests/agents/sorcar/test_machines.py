@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from websockets.sync.client import ClientConnection
 
 from kiss.agents.sorcar import machines as mach
 from kiss.tests.conftest import find_free_port
@@ -131,9 +132,13 @@ def test_ssh_addresses_are_recognised_normalised_and_named() -> None:
     assert mach.Machine("b", ssh="ksen@box").address() == "ssh ksen@box"
     assert mach.Machine("b", "https://h:1").address() == "https://h:1"
     assert mach.REMOTE_ENDPOINT_COMMAND == (
-        "sh -c 'cd \"${KISS_HOME:-$HOME/" + mach.HOME_DIR + "}\" && cat sorcar-local.json "
-        "&& cat remote-url.json 2>/dev/null'"
+        "sh -c 'for d in \"$KISS_HOME\" \"$HOME/" + mach.HOME_DIR + "\" \"$HOME\"/.*; do "
+        'case "$d" in ""|*/.|*/..) continue;; esac; '
+        'if [ -f "$d/sorcar-local.json" ]; then cat "$d/sorcar-local.json"; '
+        'cat "$d/remote-url.json" 2>/dev/null; exit 0; fi; done; '
+        "echo \"no $HOME/.*/sorcar-local.json\" >&2; exit 1'"
     )
+    assert "!" not in mach.REMOTE_ENDPOINT_COMMAND  # csh expands history inside quotes
     assert mach._decode_two('{"a": 1}\n{"b": 2}\n') == ({"a": 1}, {"b": 2})
     assert mach._decode_two('{"a": 1}') == ({"a": 1}, {})
     assert mach._decode_two('{"a": 1} [1, 2] {"c": 3}') == ({"a": 1}, {})
@@ -455,6 +460,17 @@ def _endpoint_token(daemon: RemoteDaemon) -> str:
     return str(json.loads((daemon.home / "sorcar-local.json").read_text(encoding="utf-8"))["token"])
 
 
+def _pong(stream: ClientConnection) -> bool:
+    """Ping the daemon over the stream socket *stream*; true when it answers within 10 s."""
+    stream.send(json.dumps({"type": "ping"}))
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        frame = json.loads(stream.recv(timeout=deadline - time.monotonic()))
+        if isinstance(frame, dict) and frame.get("type") == "pong":
+            return True
+    return False
+
+
 @needs_sshd
 def test_ssh_machine_tunnels_the_daemon_port_and_logs_in_with_its_token(
     remote: RemoteDaemon, remote_leaf: RemoteDaemon, sshd: SshServer,
@@ -617,6 +633,70 @@ def test_ssh_machine_failures_are_reported_and_store_nothing(
 
 
 @needs_sshd
+def test_ssh_machine_finds_the_daemon_whatever_its_brand_home(
+    remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
+) -> None:
+    """The endpoint is read from ``$KISS_HOME``, else ``~/<local brand>``, else any ``~/.*``.
+
+    A remote re-installed under another brand moves its state directory
+    (``~/.kiss`` to ``~/.s10s`` or back); a registered machine must stay
+    reachable through such a change without any remote configuration.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".s10s").symlink_to(remote.home)  # another brand's daemon, its endpoint file live
+    stale = {"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "stale"}
+    missing = tmp_path / "missing"
+    # ``~/.`` and ``~/..`` are not brand homes: neither file is ever read.
+    for decoy in (home / "sorcar-local.json", tmp_path / "sorcar-local.json"):
+        decoy.write_text(json.dumps({"url": "wss://127.0.0.1:1/ws", "token": "decoy"}), "utf-8")
+
+    def endpoint_via(remote_home: Path | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        server = start_sshd(sshd.config.parent, remote_home, home=home)
+        try:
+            tunnel = mach.SshTunnel(mach.Machine("brand", ssh=server.login))
+            return tunnel._read_endpoint(time.monotonic() + mach.SSH_TIMEOUT)
+        finally:
+            server.stop()
+
+    published = json.loads((remote.home / "remote-url.json").read_text(encoding="utf-8"))
+    live = (json.loads((remote.home / "sorcar-local.json").read_text("utf-8")), published)
+    # No KISS_HOME and no ~/<local brand>: the other brand's directory is found,
+    # its published URLs with it; a KISS_HOME naming no endpoint file is skipped.
+    assert endpoint_via(None) == live
+    assert endpoint_via(missing) == live
+    # The local brand's home wins over other brands' directories.
+    (home / mach.HOME_DIR).mkdir()
+    (home / mach.HOME_DIR / "sorcar-local.json").write_text(json.dumps(stale), encoding="utf-8")
+    assert endpoint_via(None) == (stale, {})
+    # KISS_HOME wins over both.
+    assert endpoint_via(remote.home) == live
+    # A one-letter brand home (brand.py allows any name but "." and "..") is found too.
+    (home / mach.HOME_DIR / "sorcar-local.json").unlink()
+    (home / ".s10s").rename(home / ".x")
+    assert endpoint_via(None) == live
+    # A home with no endpoint file anywhere: the usual error, naming what was searched.
+    (home / ".x").unlink()
+    with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*/\.\*/"):
+        endpoint_via(None)
+    # End to end: the machine registered while the remote was one brand
+    # keeps working after it moved to the other.
+    (home / ".s10s").symlink_to(remote.home)
+    server = start_sshd(sshd.config.parent, None, home=home)
+    try:
+        machine = mach.add_machine("brand", server.login)
+        assert _titles(mach.fetch_history(machine, "alpha", "", 50)) == ["remote alpha"]
+        (home / ".s10s").unlink()
+        (home / mach.HOME_DIR).rmdir()
+        (home / mach.HOME_DIR).symlink_to(remote.home)
+        mach.close_links()
+        assert mach.machine_status(machine) == "reachable"
+    finally:
+        mach.close_links()
+        server.stop()
+
+
+@needs_sshd
 def test_ssh_machine_recovers_from_a_daemon_restart_and_a_dead_tunnel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -654,6 +734,83 @@ def test_ssh_machine_recovers_from_a_daemon_restart_and_a_dead_tunnel(
         assert not link.tunnel.is_open()
         assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
         assert link.tunnel.is_open()
+    finally:
+        mach.close_links()
+        daemon.stop()
+        server.stop()
+
+
+@needs_sshd
+def test_ssh_machine_retries_at_once_when_the_tunnel_token_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon restarted on the same port under a living tunnel is found without a backoff.
+
+    The ``ssh -N`` forward connects on demand, so it outlives the
+    daemon it points at; the token the link read when it opened the
+    tunnel is then stale and the restarted daemon answers
+    ``auth_required``.  The link re-reads the endpoint file and
+    authenticates again right away, whether a stream
+    (:meth:`MachineLink.open_connection`) or a request runs into the
+    stale token first, and a request socket cached from before the
+    restart is dropped with the old tunnel.  A token the daemon
+    rejects twice (the file itself is wrong) still backs off.
+    """
+    home = tmp_path / "remote-home"
+    daemon = start_remote_daemon(home, password="pw", seed=[{"chat_id": "c", "task": "one"}])
+    server = start_sshd(tmp_path / "sshd", home)
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(server.config))
+    endpoint_file = home / "sorcar-local.json"
+    try:
+        machine = mach.add_machine("box", server.login)
+        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["one"]
+        link = mach.link_for(machine)
+        assert link.tunnel is not None and link.tunnel.process is not None
+        first_ssh, first_token = link.tunnel.process.pid, link.tunnel.token
+        assert first_token == _endpoint_token(daemon)
+
+        port = daemon.port
+        daemon.stop()
+        daemon = start_remote_daemon(
+            home, password="pw", seed=[{"chat_id": "c", "task": "two"}], port=port,
+        )
+        assert daemon.port == port and _endpoint_token(daemon) != first_token
+        assert link.tunnel.is_open()  # the forward survived the restart
+
+        # A stream (a tab on the machine) runs into the stale token
+        # first: it gets a socket on a new tunnel, without a backoff.
+        started = time.monotonic()
+        stream = link.open_connection()
+        assert time.monotonic() - started < mach.DOWN_BACKOFF
+        assert link._retry_at == 0.0  # no backoff was started
+        assert link.tunnel.token == _endpoint_token(daemon)
+        assert link.tunnel.process is not None and link.tunnel.process.pid != first_ssh
+        assert _pong(stream)
+        # The request socket cached before the restart went with the
+        # old tunnel: the next request connects anew instead of failing
+        # on it (and closing the new tunnel under the stream).
+        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
+        assert link._retry_at == 0.0
+        assert _pong(stream)
+        stream.close()
+        assert mach.fetch_history(machine, "", "", 50).rows[0]["machine_url"] == link.tunnel.url
+
+        # A token the file itself gets wrong is rejected twice: the
+        # second rejection backs off like any failure.
+        endpoint = json.loads(endpoint_file.read_text(encoding="utf-8"))
+        endpoint_file.write_text(json.dumps(endpoint | {"token": "0" * 64}), encoding="utf-8")
+        link.close()
+        with pytest.raises(mach.MachineError, match="rejected the password"):
+            mach.fetch_history(machine, "", "", 50)
+        assert link._retry_at > time.monotonic()
+        assert not link.tunnel.is_open()
+        with pytest.raises(mach.MachineError, match="rejected the password"):
+            mach.fetch_history(machine, "", "", 50)  # within the backoff: not retried
+
+        # The file is right again: the backoff over, the link recovers.
+        endpoint_file.write_text(json.dumps(endpoint), encoding="utf-8")
+        link._retry_at = 0.0
+        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
     finally:
         mach.close_links()
         daemon.stop()

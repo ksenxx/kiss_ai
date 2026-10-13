@@ -431,9 +431,31 @@ sync_repo() {
         git config user.email "${SYNC_GIT_EMAIL:-$GIT_EMAIL_DEFAULT}"
         git config github.user "${SYNC_GITHUB_USER:-$GITHUB_USER_DEFAULT}"
         git config credential.username "${SYNC_GITHUB_USER:-$GITHUB_USER_DEFAULT}"
-        # GitHub over ssh with the key this host was given, so no token is
-        # ever needed (or shipped) for the deployment to fetch and push.
-        git config url."git@github.com:".insteadOf "https://github.com/"
+        if [[ "${SYNC_SSH_KEY_COPIED:-0}" == "1" ]]; then
+            # GitHub over ssh with the key this host was given, so no token
+            # is ever needed (or shipped) for the deployment to fetch and
+            # push.  The rewrite a keyless deploy made the other way goes.
+            git config url."git@github.com:".insteadOf "https://github.com/"
+            git config --unset-all url."https://github.com/".insteadOf || true
+        else
+            # No key of this machine's here, so nothing in this repository
+            # may send GitHub traffic over ssh once the deploy is over: the
+            # rewrite to ssh goes, and the rewrite to https ./rsorcar makes
+            # once the GitHub token is installed is left as it is.  For this
+            # session the driver forwards its ssh agent (SSH_AUTH_SOCK is
+            # the forwarded socket), and through it GitHub is reached over
+            # ssh — an https origin too, by a rewrite that lives in this
+            # process alone (GIT_CONFIG_COUNT, git 2.31+) and so never
+            # outlives the agent.  A git@github.com: origin that the token's
+            # rewrite points at https goes over https, with the token; git
+            # applies one rewrite to a URL, never a chain.
+            git config --unset-all url."git@github.com:".insteadOf || true
+            if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+                export GIT_CONFIG_COUNT=1 \
+                    GIT_CONFIG_KEY_0="url.git@github.com:.insteadOf" \
+                    GIT_CONFIG_VALUE_0="https://github.com/"
+            fi
+        fi
         if [[ -n "${SYNC_REMOTES_B64:-}" ]]; then
             printf '%s' "$SYNC_REMOTES_B64" | base64 -d | while IFS=$'\t' read -r name url; do
                 [[ -n "$name" && -n "$url" ]] || continue
@@ -578,10 +600,21 @@ step "1/3  Syncing $LOCAL_REPO with origin ..."
 sync_repo "$LOCAL_REPO"
 
 step "2/3  Syncing $TARGET:$REMOTE_DIR with origin (branch $BRANCH) ..."
-ssh "$TARGET" "SYNC_REMOTES_B64=$(shquote "$REMOTES_B64") \
+# Without this machine's key on the remote (SORCAR_SKIP_SSH_COPY=1, the
+# default), the ssh agent is forwarded (-A) so the remote fetches and pushes
+# as this machine for this one session and keeps no key.
+SSH_KEY_COPIED=1
+SSH_FORWARD_AGENT=""        # a word, not an array: bash 3.2 (macOS) and set -u
+if [[ "${SORCAR_SKIP_SSH_COPY:-1}" != "0" ]]; then
+    SSH_KEY_COPIED=0
+    SSH_FORWARD_AGENT="-A"
+fi
+# shellcheck disable=SC2086  # an empty SSH_FORWARD_AGENT must vanish
+ssh $SSH_FORWARD_AGENT "$TARGET" "SYNC_REMOTES_B64=$(shquote "$REMOTES_B64") \
     SYNC_GIT_NAME=$(shquote "$GIT_NAME_DEFAULT") \
     SYNC_GIT_EMAIL=$(shquote "$GIT_EMAIL_DEFAULT") \
     SYNC_GITHUB_USER=$(shquote "$GITHUB_USER_DEFAULT") \
+    SYNC_SSH_KEY_COPIED=$SSH_KEY_COPIED \
     bash -s -- --sync $(shquote "$REMOTE_DIR") $(shquote "$BRANCH")" < "$SELF" \
     || die "Syncing $TARGET:$REMOTE_DIR failed."
 

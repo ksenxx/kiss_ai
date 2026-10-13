@@ -1067,6 +1067,10 @@
   // time, so a zone change invalidates the identical-refresh fast path
   // in renderHistory.
   let historyRenderedTz = '';
+  // The machine labels (machineLabels as one string) the rows' machine
+  // chips were last built with: a reply that relabels a machine
+  // invalidates the fast path the same way.
+  let historyRenderedLabels = '';
   // Row elements in allHistSessions order, for the fast path's in-place
   // refresh of time-derived metrics text.
   let historyRenderedRows = [];
@@ -1165,6 +1169,10 @@
   // daemon's binding (`tabMachine`) does not overwrite it.
   const tabMachines = new Map();
   const tabMachinePicked = new Set();
+  // Per tab, the machine the daemon bound it to (its `tabMachine`
+  // announcements alone, never a pick): where the chat the tab SHOWS
+  // lives.  Not persisted: the daemon announces it again on `ready`.
+  const tabBoundMachines = new Map();
   // The file tab the user looked at most recently (see editorContext).
   let lastViewedContentTabId = '';
   // The tab the bar last scrolled into view.  renderTabBar() runs on
@@ -1362,10 +1370,24 @@
   }
   // modelpick-coverage:end
 
-  function getTabByBackendChatId(chatId) {
+  /**
+   * The open tab showing chat *chatId* of *machine* ('' for this one).
+   * A chat's copy on another machine (a database copied between them)
+   * is another chat, shown in its own tab bound to its machine, so a
+   * tab bound elsewhere does not count.  The daemon's binding is what
+   * counts (tabBoundMachines): the drop-down's unsent pick only says
+   * where the tab's NEXT task goes.
+   */
+  function getChatTabOnMachine(chatId, machine) {
     if (chatId === undefined || chatId === null || chatId === '') return null;
     const key = String(chatId);
-    return tabs.find(t => String(t.backendChatId || '') === key) || null;
+    return (
+      tabs.find(
+        t =>
+          String(t.backendChatId || '') === key &&
+          (tabBoundMachines.get(t.id) || '') === (machine || ''),
+      ) || null
+    );
   }
 
   function placeSubagentTabAfterParent(subTab, parentId) {
@@ -2459,6 +2481,7 @@
       forgetPendingFileLinks(id);
       tabMachines.delete(id);
       tabMachinePicked.delete(id);
+      tabBoundMachines.delete(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
@@ -3058,14 +3081,28 @@
   }
 
   /**
+   * The `resumeSession` request *req* for a chat of a remote machine:
+   * `machine` binds the tab to it (the daemon forwards the resume, the
+   * machine replays the chat into the tab) and `title` names the tab
+   * on every surface until the replay sets it.  A local chat's request
+   * is returned as it is.
+   */
+  function remoteResume(req, machine, title) {
+    if (!machine) return req;
+    return Object.assign({}, req, {machine: machine, title: title || ''});
+  }
+
+  /**
    * A history click on a chat whose tab is open: show the tab and,
    * when the clicked task is not in its transcript, replay the tab at
    * that task.  A tab whose transcript the daemon withheld
    * (replayPending) is replayed at the clicked task outright: that
    * explicit resume supersedes the deferred fetch the activation would
-   * send, so one transcript is loaded, not two.
+   * send, so one transcript is loaded, not two.  *machine* is the
+   * remote machine the chat lives on ('' for a local chat): a replay
+   * must name it, or the daemon would look the chat up here.
    */
-  function resumeExistingChatTab(tab, chatId, taskId) {
+  function resumeExistingChatTab(tab, chatId, taskId, machine) {
     const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
     const deferred = !tab.isContentTab && !!tab.replayPending;
     if (deferred && hasTaskId) tab.replayPending = null;
@@ -3075,7 +3112,13 @@
       hasTaskId &&
       (deferred || !scrollChatToTask(taskId))
     ) {
-      api.resumeSession({id: chatId, taskId: taskId, tabId: tab.id});
+      api.resumeSession(
+        remoteResume(
+          {id: chatId, taskId: taskId, tabId: tab.id},
+          machine,
+          tab.title,
+        ),
+      );
     }
   }
 
@@ -5598,6 +5641,7 @@
       // tab closed here does (closeTab): both maps are persisted.
       tabMachines.delete(id);
       tabMachinePicked.delete(id);
+      tabBoundMachines.delete(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
@@ -5927,8 +5971,10 @@
   // as headers over 0px bodies; applyMetaSectionLayout publishes the
   // equal share as --meta-body-share on the panel.  Collapse state
   // and dragged heights persist in localStorage; every section starts
-  // expanded.  Adding a panel is one more <section> plus its resizer in
-  // chat.html: nothing here names a particular section.
+  // expanded, except on the first load after an install or an update
+  // (resetMetaSectionsForVersion: only Recommendations).  Adding a
+  // panel is one more <section> plus its resizer in chat.html: nothing
+  // else here names a particular section.
   const META_SECTION_COLLAPSED_KEY = 'kiss-meta-section-collapsed:';
   const META_SECTION_HEIGHT_KEY = 'kiss-meta-section-h:';
   const META_SECTION_KEY_STEP = 16;
@@ -6061,6 +6107,45 @@
         section,
         !RUN_START_SECTIONS.includes(section.id),
       );
+  }
+
+  /** The one section a fresh install or an update leaves expanded. */
+  const FRESH_VERSION_SECTION = 'meta-recommendations';
+  /** localStorage key: the version whose fresh layout this profile saw. */
+  const META_SECTIONS_VERSION_KEY = 'kiss-meta-sections-version';
+
+  /**
+   * The first page load after an install or an update: expand only
+   * Recommendations and fold every other section, whatever collapse
+   * state this browser profile stored before.  *version* is the
+   * daemon's running version, the same stamp tips.js keys its
+   * once-per-version guard on (the remote page embeds it in
+   * window.__TIPS__; a VS Code webview gets it with `tipsData`);
+   * the version is remembered so the reset happens once per version
+   * per profile.  An empty version (the VS Code page's placeholder
+   * bootstrap) is not a version.  Without storage the version cannot
+   * be remembered across loads, so every load there is a first one;
+   * within a page it is remembered in memory, so the `tipsData` a
+   * reconnect re-sends never resets the page's own choices.
+   */
+  let metaSectionsVersionApplied = null;
+  function resetMetaSectionsForVersion(version) {
+    if (!version || version === metaSectionsVersionApplied) return;
+    metaSectionsVersionApplied = version;
+    let seen = null;
+    try {
+      seen = localStorage.getItem(META_SECTIONS_VERSION_KEY);
+    } catch (_e) {
+      /* storage unavailable: treat the load as the first of this version */
+    }
+    if (seen === version) return;
+    for (const section of metaSections())
+      setMetaSectionCollapsed(section, section.id !== FRESH_VERSION_SECTION);
+    try {
+      localStorage.setItem(META_SECTIONS_VERSION_KEY, version);
+    } catch (_e) {
+      /* storage unavailable: the reset repeats on the next load */
+    }
   }
 
   /**
@@ -6229,6 +6314,10 @@
       setupMetaSectionResizer(resizer);
     }
     applyMetaSectionLayout();
+    // The remote page knows the running version at load; a VS Code
+    // webview learns it from the `tipsData` event (see onMessage).
+    if (window.__TIPS__ && typeof window.__TIPS__.version === 'string')
+      resetMetaSectionsForVersion(window.__TIPS__.version);
     // The equal share changes with the panel's height (a window resize,
     // the drawer opening): re-measure it then.
     const panel = document.getElementById('meta-panel');
@@ -7456,7 +7545,9 @@
   /**
    * Render the daemon's `machines` reply into the Machines subpanel:
    * the local machine first, then every registered one.  A row shows
-   * a reachability dot, the machine's name, a `local` badge, and
+   * a reachability dot, the machine's label (its own host name when
+   * it was registered by its address, else the name it was registered
+   * by; see machineLabel), a `local` badge, and
    * buttons to copy the machine's address to the clipboard and delete
    * it (after an inline confirmation; the local machine cannot be
    * deleted); the header's `+` adds a machine (openMachineAddForm, an
@@ -7498,7 +7589,9 @@
       dot.setAttribute('role', 'img');
       dot.setAttribute('aria-label', m.status);
       top.appendChild(dot);
-      top.appendChild(sidebarPanelSpan('sidebar-panel-name', m.name));
+      top.appendChild(
+        sidebarPanelSpan('sidebar-panel-name', machineLabel(m.name)),
+      );
       if (m.local)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'local'));
       const copyBtn = makeSidebarCopyButton(
@@ -7546,10 +7639,29 @@
   const chatMachineSelect = document.getElementById('chat-machine');
   const chatWorkDirSelect = document.getElementById('chat-workdir');
   // This daemon's machine (configData.machine / the `local` row of a
-  // `machines` reply) and the registered machines that answered the
-  // daemon's last ping.
+  // `machines` reply), the registered machines that answered the
+  // daemon's last ping (null until a reply has come), and the label of
+  // every registered machine (name -> label, machineLabel).
   let localMachineName = '';
-  let reachableMachines = [];
+  let reachableMachines = null;
+  const machineLabels = new Map();
+  // The daemon's last `machines` reply, repainted into the Machines
+  // subpanel when a `history` reply relabels a machine.
+  let lastMachinesEvent = null;
+  /**
+   * What the registered machine `name` is called wherever it is shown
+   * (the drop-down, the Machines subpanel, the CHATS panel): the label
+   * of the daemon's last `machines` reply -- the machine's own host
+   * name when it was registered by its address, else its name -- or
+   * the name until that reply.
+   *
+   * @param {string} name The registered name.
+   * @returns {string} The label.
+   */
+  function machineLabel(name) {
+    return machineLabels.get(name) || name;
+  }
+
   /**
    * The machine `tabId`'s tasks run on.
    *
@@ -7564,16 +7676,22 @@
    * Repaint the drop-down for the active tab: this machine first, then
    * every reachable registered machine, plus the tab's own pick when
    * that machine is down right now (the pick is kept, the daemon
-   * refuses the submit with the reason).  Disabled while the chat runs:
-   * a running chat cannot move.  Empty (hidden) until a name is known.
+   * refuses the submit with the reason).  A remote pick is `remote`
+   * (green: its machine answered the daemon's last ping) and, once a
+   * `machines` reply has shown the machine down, `down` as well
+   * (red).  Stays enabled while the chat
+   * runs: the running task is not moved (a message typed meanwhile is
+   * appended to it wherever it runs), the pick is where the NEXT
+   * submit goes.  Empty (hidden) until a name is known.
    */
   function renderChatMachine() {
     if (!chatMachineSelect) return;
     const tab = getTab(activeTabId);
     const chosen = tab && !tab.isContentTab ? tabMachine(tab.id) : '';
+    const reachable = reachableMachines || [];
     chatMachineSelect.textContent = '';
-    if (localMachineName || reachableMachines.length || chosen) {
-      const names = reachableMachines.slice();
+    if (localMachineName || reachable.length || chosen) {
+      const names = reachable.slice();
       if (chosen && !names.includes(chosen)) names.push(chosen);
       const option = (value, label) => {
         const el = document.createElement('option');
@@ -7582,16 +7700,23 @@
         chatMachineSelect.appendChild(el);
       };
       option('', localMachineName || 'this machine');
-      names.forEach(name => option(name, name));
+      names.forEach(name => option(name, machineLabel(name)));
       chatMachineSelect.value = chosen;
-      chatMachineSelect.disabled = !!(tab && tab.isRunning);
       chatMachineSelect.classList.toggle('remote', !!chosen);
+      chatMachineSelect.classList.toggle(
+        'down',
+        !!chosen && !!reachableMachines && !reachable.includes(chosen),
+      );
     }
     renderChatHeaderSeparator();
   }
 
   /**
-   * Note the daemon's `machines` reply for the drop-down.
+   * Note the daemon's `machines` reply: the reachable machines and the
+   * labels for the drop-down, the Machines subpanel and the CHATS
+   * panel.  A label that changed (the first reply after a load names
+   * an address-registered machine by its host name) repaints the
+   * CHATS panel's machine chips and filter.
    *
    * @param {Array<Object>} rows The machines (the local one flagged `local`).
    */
@@ -7601,7 +7726,33 @@
       .map(m => String(m.name));
     const local = rows.find(m => m && m.local && m.name);
     if (local) localMachineName = String(local.name);
+    const labels = {};
+    for (const m of rows) {
+      if (m && !m.local && m.name && m.label) labels[m.name] = m.label;
+    }
+    const relabelled = noteMachineLabels(labels);
     renderChatMachine();
+    if (relabelled && sidebar.classList.contains('open')) {
+      requestHistoryFromStart();
+    }
+  }
+
+  /**
+   * Note machine labels (name -> label) from a daemon reply: the rows
+   * of a `machines` reply or the `machineLabels` of a `history` reply.
+   *
+   * @param {Object<string, *>} labels The labels by registered name.
+   * @returns {boolean} Whether any label changed.
+   */
+  function noteMachineLabels(labels) {
+    let changed = false;
+    for (const name of Object.keys(labels || {})) {
+      const label = String(labels[name] || name);
+      if (!name || machineLabel(name) === label) continue;
+      machineLabels.set(name, label);
+      changed = true;
+    }
+    return changed;
   }
 
   if (chatMachineSelect) {
@@ -14293,7 +14444,14 @@
           subTab.currentTaskId = en.taskId;
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
-          api.resumeSession({taskId: en.taskId, tabId: subTab.id});
+          // The parent names the stream a sub-agent of a chat shown
+          // from a remote machine is fetched over (the daemon never
+          // saw that finished sub-agent's new_tab).
+          api.resumeSession({
+            taskId: en.taskId,
+            tabId: subTab.id,
+            parentTabId: panelEl._rpParentTabId,
+          });
         }
       }
     } finally {
@@ -14615,14 +14773,7 @@
     rc.innerHTML =
       '<div class="rc-h"><h3>' +
       esc(titleOverride || 'Result') +
-      '</h3><div class="rs">' +
-      '<span>Tokens <b class="rs-tokens">' +
-      fmtTokens(ev.total_tokens || 0) +
-      '</b></span>' +
-      '<span>Cost <b class="rs-cost">' +
-      esc(eventCost(ev) == null ? 'N/A' : fmtCost(eventCost(ev))) +
-      '</b></span>' +
-      '</div></div><div class="rc-body md-body' +
+      '</h3></div><div class="rc-body md-body' +
       (usePre ? ' pre' : '') +
       '">' +
       rb +
@@ -15053,10 +15204,6 @@
     const evOwnerTab = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
     const t = ev.type;
-    // A Result panel follows the run total only until anything else is
-    // said in the transcript: a continuation session's first event ends
-    // the earlier session's panel's claim on later usage totals.
-    if (t !== 'usage_info' && t !== 'result') tState.resultPanelEl = null;
     switch (t) {
       // The model's thinking tokens stream as plain text straight into
       // the Thinking panel (a dim `.think` block, no header or box of
@@ -15584,7 +15731,6 @@
             ),
           );
         }
-        tState.resultPanelEl = target.lastElementChild;
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
         if (statusBudget && eventCost(ev) != null)
@@ -15665,21 +15811,6 @@
             statusBudget.textContent = 'Cost: ' + fmtCost(eventCost(ev));
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
-          // Spend folded after the run's terminal result (the pre-run
-          // classifier, a sub-task reclaimed at the end) arrives as this
-          // run total, so the Result panel just rendered must show the
-          // same figure as the header.  Only the panel nothing has
-          // followed yet is refreshed (see the reset at the top of this
-          // function): once a continuation session says anything after
-          // it, its figures are that session's history.
-          const panel = tState.resultPanelEl;
-          if (panel) {
-            const tokensEl = panel.querySelector('.rs-tokens');
-            if (tokensEl) tokensEl.textContent = fmtTokens(ev.total_tokens);
-            const costEl = panel.querySelector('.rs-cost');
-            if (costEl && eventCost(ev) != null)
-              costEl.textContent = fmtCost(eventCost(ev));
-          }
         } else {
           updateUsageMetrics(ev.text || '');
         }
@@ -17673,7 +17804,12 @@
         // connect and get this event, and each VS Code webview type has
         // its own localStorage, so the once-per-version guard in
         // tips.js cannot stop them from opening a second and third
-        // window of their own.
+        // window of their own.  Every surface with a task-info panel
+        // (the chat editor tab's own one, the Task Info view) does take
+        // the version: the first load of a fresh install or an update
+        // leaves only Recommendations expanded.
+        if (typeof ev.version === 'string')
+          resetMetaSectionsForVersion(ev.version);
         if (HISTORY_PANEL_MODE || META_PANEL_MODE) break;
         if (typeof window.__kissApplyTipsConfig === 'function') {
           window.__kissApplyTipsConfig({
@@ -17706,6 +17842,7 @@
         break;
       case 'machines':
         noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
+        lastMachinesEvent = ev;
         renderMachines(ev);
         break;
       case 'tabMachine':
@@ -17715,6 +17852,8 @@
         // where THEIR next task goes.
         if (typeof ev.tabId === 'string' && ev.tabId) {
           const machine = ev.machine ? String(ev.machine) : '';
+          if (machine) tabBoundMachines.set(ev.tabId, machine);
+          else tabBoundMachines.delete(ev.tabId);
           if (
             tabMachinePicked.has(ev.tabId) &&
             tabMachine(ev.tabId) !== machine
@@ -17764,6 +17903,13 @@
         }
         break;
       case 'history':
+        // The labels first: the rows' machine chips are built with
+        // them (and the chat header's drop-down and the Machines
+        // subpanel follow).
+        if (noteMachineLabels(ev.machineLabels)) {
+          renderChatMachine();
+          if (lastMachinesEvent) renderMachines(lastMachinesEvent);
+        }
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
         refreshHistoryMachineOptions(ev.machines, ev.localMachine);
@@ -18003,21 +18149,25 @@
       // The primary-sidebar history panel clicked a task: open the
       // chat here, exactly like the in-webview history rows do — switch
       // to the chat's tab, resume the chat in a fresh tab, or (no chat
-      // id) show the task text read-only in a fresh tab.
+      // id) show the task text read-only in a fresh tab.  A chat of a
+      // remote machine (ev.machine) is resumed in a tab bound to it.
       case 'openChatFromHistory': {
         const chatId = typeof ev.chatId === 'string' ? ev.chatId : '';
         const taskText = typeof ev.title === 'string' ? ev.title : '';
-        const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
+        const ocMachine = sessionMachine(ev);
+        const ocTab = getChatTabOnMachine(chatId, ocMachine);
         const ocLeft = getTab(activeTabId);
         if (ocTab) {
-          resumeExistingChatTab(ocTab, chatId, ev.taskId);
+          resumeExistingChatTab(ocTab, chatId, ev.taskId, ocMachine);
         } else if (chatId) {
           openHistoryTaskInNewTab(taskText);
-          api.resumeSession({
-            id: chatId,
-            taskId: ev.taskId,
-            tabId: activeTabId,
-          });
+          api.resumeSession(
+            remoteResume(
+              {id: chatId, taskId: ev.taskId, tabId: activeTabId},
+              ocMachine,
+              taskText,
+            ),
+          );
         } else {
           openHistoryTaskInNewTab(taskText);
           focusInputWithRetry();
@@ -23033,7 +23183,8 @@
   /**
    * Rebuild the machine filter from the daemon's `history` reply: All,
    * this machine (named after its host) and every registered remote
-   * machine, in registration order.  The filter is hidden while no
+   * machine (shown by its label, machineLabel), in registration
+   * order.  The filter is hidden while no
    * remote machine is registered.  The current selection survives a
    * rebuild; a selection naming a machine that was removed falls back
    * to All and refetches, since the daemon no longer answers for it.
@@ -23054,7 +23205,7 @@
     };
     addOption('', 'All');
     addOption(HF_MACHINE_LOCAL, (localMachine || 'local') + ' (this machine)');
-    names.forEach(name => addOption(name, name));
+    names.forEach(name => addOption(name, machineLabel(name)));
     hfMachine.value =
       selected === HF_MACHINE_LOCAL || names.includes(selected) ? selected : '';
     hfMachine.parentElement.hidden = names.length === 0;
@@ -23063,38 +23214,26 @@
     }
   }
 
-  /**
-   * The label naming the remote machine a history row came from; null
-   * for the local daemon's own rows.  It links to the machine's web UI,
-   * where the chat can be opened (the link opens in the browser from
-   * both surfaces).
-   */
-  function makeTaskMachineLabel(session) {
-    const machine =
-      typeof session.machine === 'string' ? session.machine.trim() : '';
-    if (!machine) return null;
-    const link = document.createElement('a');
-    link.className = 'sidebar-item-machine';
-    link.textContent = machine;
-    link.title = 'On machine ' + machine + ' (opens its web UI)';
-    link.href =
-      typeof session.machine_url === 'string' ? session.machine_url : '#';
-    link.target = '_blank';
-    link.rel = 'noopener';
-    return link;
+  /** The trimmed name of the remote machine a history row came from ('' for a local row). */
+  function sessionMachine(session) {
+    return typeof session.machine === 'string' ? session.machine.trim() : '';
   }
 
   /**
-   * Open the web UI of the remote machine a history row came from, in
-   * the browser (an anchor click: both surfaces open it externally).
+   * The chip naming the remote machine a history row came from; null
+   * for the local daemon's own rows.  A plain label (the machine's
+   * label, machineLabel): the row itself
+   * opens the chat here, in a tab bound to that machine (never the
+   * machine's own web UI).
    */
-  function openRemoteMachine(session) {
-    const link = makeTaskMachineLabel(session);
-    if (!link) return;
-    link.hidden = true;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+  function makeTaskMachineLabel(session) {
+    const machine = sessionMachine(session);
+    if (!machine) return null;
+    const chip = document.createElement('span');
+    chip.className = 'sidebar-item-machine';
+    chip.textContent = machineLabel(machine);
+    chip.title = 'On machine ' + machineLabel(machine);
+    return chip;
   }
 
   /** The machine chosen in the history panel's machine dropdown ('' = all). */
@@ -23618,7 +23757,10 @@
     );
     const chip = actions.querySelector(':scope > .history-chat-machine');
     const remote = group._kissLastLocalSession ? null : group._kissLastSession;
-    if (chip && (!remote || chip.textContent !== remote.machine.trim())) {
+    if (
+      chip &&
+      (!remote || chip.textContent !== machineLabel(sessionMachine(remote)))
+    ) {
       chip.remove();
     }
     if (remote && !actions.querySelector(':scope > .history-chat-machine')) {
@@ -23636,26 +23778,27 @@
    * task), or open a new tab that resumes the chat at the task (in
    * editor-tabs mode the host opens or reveals the chat's own panel).
    * A task with nothing to resume is shown read-only in a fresh tab.
+   * A row of a remote machine is resumed the same way, in a tab the
+   * daemon binds to that machine (the resume names the machine; the
+   * machine's daemon replays the chat into the tab, whose next prompts
+   * run there): the remote machine's own web UI is never opened.
    *
    * @param {Object} s The history row from the daemon.
    * @param {boolean} wholeChat The click was on the CHAT's panel (its
    *   row *s* is the chat's last task): the chat is always resumed by
    *   id, even when that task has no persisted events — a read-only
    *   tab would bind to no chat, so a second click could not find the
-   *   chat on screen.
+   *   chat on screen.  A remote row is always resumed by id for the
+   *   same reason: a read-only tab would be bound to no machine.
    */
   function openHistoryTask(s, wholeChat) {
-    // A task of a remote machine cannot be resumed on this daemon: it is
-    // opened on its own machine's web UI instead.
-    if (typeof s.machine === 'string' && s.machine.trim()) {
-      openRemoteMachine(s);
-      return;
-    }
     // The task text goes to the read-only task panel only.  #task-input
     // holds the user's own draft for the NEXT prompt and is never written.
     const taskText = s.preview || s.title || '';
-    const existingChatTab = getTabByBackendChatId(s.id);
-    const resumable = !!s.id && (s.has_events || s.is_running || !!wholeChat);
+    const machine = sessionMachine(s);
+    const existingChatTab = getChatTabOnMachine(s.id, machine);
+    const resumable =
+      !!s.id && (s.has_events || s.is_running || !!wholeChat || !!machine);
     // The primary-sidebar history panel runs no chats: the host opens
     // the chat in the chat editor tab.
     if (HISTORY_PANEL_MODE) {
@@ -23665,18 +23808,25 @@
         taskId:
           s.task_id === undefined || s.task_id === null ? null : s.task_id,
         title: taskText,
+        machine: machine,
       });
       return;
     }
     const left = getTab(activeTabId);
     if (existingChatTab) {
-      resumeExistingChatTab(existingChatTab, s.id, s.task_id);
+      resumeExistingChatTab(existingChatTab, s.id, s.task_id, machine);
       retireIdleChat(left, false);
     } else if (resumable) {
       // A running task is resumable even before its first event is
       // persisted: the server reattaches the live chat on replay.
       openHistoryTaskInNewTab(taskText);
-      api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
+      api.resumeSession(
+        remoteResume(
+          {id: s.id, taskId: s.task_id, tabId: activeTabId},
+          machine,
+          taskText,
+        ),
+      );
       retireIdleChat(left, false);
     } else {
       // Nothing to resume, but the row still knows what the task was, so
@@ -24254,10 +24404,12 @@
       // across a time-zone change (row times are localized at build
       // time).  Everything else rebuilds as before.
       const tzNow = historyTzIdentity();
+      const labelsNow = JSON.stringify(Array.from(machineLabels));
       if (
         allHistSessions.length === sessions.length &&
         sessions.length > 0 &&
         historyRenderedTz === tzNow &&
+        historyRenderedLabels === labelsNow &&
         historyRenderedLegacy === historyLegacyView &&
         historySessionsEqual(allHistSessions, sessions)
       ) {
@@ -24342,6 +24494,7 @@
       // must not advance the cursor past what is on screen.
       historyOffset = 0;
       historyRenderedTz = tzNow;
+      historyRenderedLabels = labelsNow;
       historyRenderedLegacy = historyLegacyView;
       historyList.classList.toggle('legacy-view', historyLegacyView);
       historyRenderedRows = [];
@@ -24475,8 +24628,8 @@
       if (tagsLabel) actions.appendChild(tagsLabel);
       const seaLabel = makeTaskSeaLabel(s);
       if (seaLabel) actions.appendChild(seaLabel);
-      const machineLabel = makeTaskMachineLabel(s);
-      if (machineLabel) actions.appendChild(machineLabel);
+      const machineChip = makeTaskMachineLabel(s);
+      if (machineChip) actions.appendChild(machineChip);
       div.appendChild(actions);
 
       const info = document.createElement('div');
@@ -24547,9 +24700,7 @@
 
       div.appendChild(info);
 
-      div.addEventListener('click', e => {
-        // The machine chip is a link that opens the machine itself.
-        if (e.target.closest('.sidebar-item-machine')) return;
+      div.addEventListener('click', () => {
         openHistoryTask(s);
         closeSidebar();
       });

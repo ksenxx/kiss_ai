@@ -349,20 +349,26 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
                 goto_retrying_network_change(page, f"https://127.0.0.1:{port}/", wait_until="load")
                 page.wait_for_selector("#output", state="attached")
                 page.evaluate(_INJECT_JS)
+                # The theme sheet (code background), #send-btn's 0.2s colour
+                # transition (main.css) and the highlight.js sheet, a separate
+                # <link> whose href is swapped per theme (keyword colour), all
+                # settle independently: wait for every one of them before probing.
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('probe-code'))"
-                    ".backgroundColor === 'rgb(248, 248, 248)'",
+                    ".backgroundColor === 'rgb(248, 248, 248)' && "
+                    "getComputedStyle(document.querySelector('#probe-code .hljs-keyword'))"
+                    ".color === 'rgb(0, 0, 255)'",
                     timeout=10000,
                 )
                 light = page.evaluate(_PROBE_JS)
                 page.evaluate("() => document.getElementById('theme-btn').click()")
-                # The dark sheet has to load and #send-btn's 0.2s
-                # colour transition (main.css) has to settle.
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('probe-code'))"
                     ".backgroundColor === 'rgb(43, 43, 43)' && "
                     "getComputedStyle(document.getElementById('send-btn'))"
-                    ".backgroundColor === 'rgb(0, 120, 212)'",
+                    ".backgroundColor === 'rgb(0, 120, 212)' && "
+                    "getComputedStyle(document.querySelector('#probe-code .hljs-keyword'))"
+                    ".color === 'rgb(86, 156, 214)'",
                     timeout=10000,
                 )
                 dark = page.evaluate(_PROBE_JS)
@@ -370,7 +376,9 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
                 page.wait_for_function(
                     "() => document.body.classList.contains('light-theme') && "
                     "getComputedStyle(document.getElementById('send-btn'))"
-                    ".backgroundColor === 'rgb(0, 95, 184)'",
+                    ".backgroundColor === 'rgb(0, 95, 184)' && "
+                    "getComputedStyle(document.querySelector('#probe-code .hljs-keyword'))"
+                    ".color === 'rgb(0, 0, 255)'",
                     timeout=10000,
                 )
                 back = page.evaluate(_PROBE_JS)

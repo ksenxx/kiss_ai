@@ -11,9 +11,15 @@
 // * the pick is per tab: it survives a tab switch, a submit carries it
 //   as `machine` ('' for this machine), a closed tab forgets it, a
 //   reload restores it from the persisted state;
-// * the drop-down is disabled while the chat runs and turns `remote`
-//   for a registered machine; a pick whose machine went down stays
-//   listed so it is not lost;
+// * the drop-down turns `remote` (green) for a registered machine, and
+//   `down` (red) once the daemon reports that machine unreachable;
+//   a pick whose machine went down stays listed so it is not lost;
+// * a machine is listed by the `label` of the `machines` reply (its
+//   own host name when it was registered by its address), its value
+//   stays the registered name;
+// * the drop-down stays enabled while the chat runs: a pick made then
+//   does not move the running task (a message typed meanwhile is
+//   appended to it, no `machine`), it is where the next submit goes;
 // * the daemon's `tabMachine` (the binding it made for a submit from
 //   any surface) sets or clears the tab's pick, so every surface shows
 //   the same machine for the tab.
@@ -171,9 +177,9 @@ function testThePickIsPerTabAndTravelsWithTheSubmit() {
   assert.strictEqual(sub.tabId, first);
   assert.strictEqual(sub.machine, 'gpu-box', 'the submit names the machine');
   send(win, {type: 'status', running: true, tabId: first});
-  assert.ok(select(win).disabled, 'disabled while the chat runs');
+  assert.ok(!select(win).disabled, 'still enabled while the chat runs');
   send(win, {type: 'status', running: false, tabId: first});
-  assert.ok(!select(win).disabled, 'enabled again once the chat is idle');
+  assert.ok(!select(win).disabled);
 
   // Back home: the next submit carries no machine.
   pick(win, '');
@@ -204,6 +210,125 @@ function testADownMachineKeepsThePickListed() {
   );
   win.close();
   console.log('  ok - a pick whose machine is down stays listed');
+}
+
+// A remote pick is painted like the Machines subpanel's dot: `remote`
+// alone (green) while its machine answers the daemon's pings, `down`
+// too (red) once a `machines` reply has shown it unreachable, and
+// never `down` before any reply (a pick restored at load is not
+// presumed dead).
+function testARemotePickIsGreenUntilTheDaemonReportsItDown() {
+  const {win, state} = makeWebview();
+  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+  pick(win, 'gpu-box');
+  assert.ok(select(win).classList.contains('remote'));
+  assert.ok(!select(win).classList.contains('down'), 'reachable: not down');
+  const down = MACHINES.map(m =>
+    m.name === 'gpu-box' ? Object.assign({}, m, {status: 'unreachable'}) : m,
+  );
+  send(win, {type: 'machines', machines: down, checkedAt: 2});
+  assert.ok(select(win).classList.contains('remote'));
+  assert.ok(select(win).classList.contains('down'), 'reported down');
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 3});
+  assert.ok(!select(win).classList.contains('down'), 'back up');
+  pick(win, '');
+  assert.ok(!select(win).classList.contains('remote'));
+  assert.ok(!select(win).classList.contains('down'));
+  pick(win, 'gpu-box');
+  const first = win._testApi.getActiveTabId();
+  const persisted = state();
+  win.close();
+
+  const again = makeWebview(persisted);
+  send(again.win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(again.win, {
+    type: 'tabs_state',
+    tabs: [{tabId: first, title: 'gpu chat'}],
+  });
+  again.win._testApi.switchToTab(first);
+  assert.strictEqual(select(again.win).value, 'gpu-box');
+  assert.ok(select(again.win).classList.contains('remote'));
+  assert.ok(
+    !select(again.win).classList.contains('down'),
+    'no machines reply yet: the restored pick is not presumed down',
+  );
+  send(again.win, {type: 'machines', machines: down, checkedAt: 4});
+  assert.ok(select(again.win).classList.contains('down'));
+  again.win.close();
+  console.log('  ok - a remote pick is green until the daemon reports it down');
+}
+
+// A machine registered by its address (its name is the address's
+// host) is listed under the label of the daemon's `machines` reply --
+// the machine's own host name -- while its value stays the registered
+// name, which is what the submit carries.  The label is kept for a
+// pick whose machine is down, and is the name until the first reply.
+function testAnAddressNamedMachineIsListedByItsHostName() {
+  const rows = MACHINES.concat([
+    {
+      name: '10.0.0.7',
+      label: 'rack-7',
+      status: 'reachable',
+      address: 'ssh me@10.0.0.7',
+    },
+  ]);
+  const {win, posted, state} = makeWebview();
+  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(win, {type: 'machines', machines: rows, checkedAt: 1});
+  assert.deepStrictEqual(options(win), [
+    ['', 'laptop'],
+    ['gpu-box', 'gpu-box'],
+    ['10.0.0.7', 'rack-7'],
+  ]);
+  pick(win, '10.0.0.7');
+  submit(win, 'hello rack');
+  assert.strictEqual(
+    lastSubmit(posted).machine,
+    '10.0.0.7',
+    'the submit carries the registered name',
+  );
+  send(win, {type: 'status', running: false, tabId: win._testApi.getActiveTabId()});
+  const down = rows.map(m =>
+    m.name === '10.0.0.7' ? Object.assign({}, m, {status: 'unreachable'}) : m,
+  );
+  send(win, {type: 'machines', machines: down, checkedAt: 2});
+  assert.deepStrictEqual(
+    options(win),
+    [
+      ['', 'laptop'],
+      ['gpu-box', 'gpu-box'],
+      ['10.0.0.7', 'rack-7'],
+    ],
+    'the down pick keeps its label',
+  );
+  const first = win._testApi.getActiveTabId();
+  const persisted = state();
+  win.close();
+
+  const again = makeWebview(persisted);
+  send(again.win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(again.win, {
+    type: 'tabs_state',
+    tabs: [{tabId: first, title: 'rack chat'}],
+  });
+  again.win._testApi.switchToTab(first);
+  assert.deepStrictEqual(
+    options(again.win),
+    [
+      ['', 'laptop'],
+      ['10.0.0.7', '10.0.0.7'],
+    ],
+    'the registered name until the first machines reply',
+  );
+  send(again.win, {type: 'machines', machines: rows, checkedAt: 3});
+  assert.deepStrictEqual(options(again.win), [
+    ['', 'laptop'],
+    ['gpu-box', 'gpu-box'],
+    ['10.0.0.7', 'rack-7'],
+  ]);
+  again.win.close();
+  console.log('  ok - an address-named machine is listed by its host name');
 }
 
 function testAClosedTabForgetsAndAReloadRestores() {
@@ -330,14 +455,67 @@ function testTheDaemonsBindingSyncsThePick() {
   console.log("  ok - the daemon's tabMachine syncs the pick across surfaces");
 }
 
+function testAPickMadeWhileTheChatRunsGoesToTheNextTask() {
+  const {win, posted, state} = makeWebview();
+  const api = win._testApi;
+  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+  const tab = api.getActiveTabId();
+  submit(win, 'run here');
+  assert.strictEqual(lastSubmit(posted).machine, '', 'the task runs here');
+  send(win, {type: 'status', running: true, tabId: tab});
+  assert.ok(!select(win).disabled, 'the drop-down stays usable mid-run');
+
+  // The user picks gpu-box while the local task runs: the pick is
+  // taken and persisted...
+  pick(win, 'gpu-box');
+  assert.strictEqual(select(win).value, 'gpu-box');
+  assert.ok(select(win).classList.contains('remote'));
+  assert.deepStrictEqual(persistedPicks(state), {[tab]: 'gpu-box'});
+
+  // ...a message typed meanwhile still goes to the running task, as a
+  // follow-up without a machine (the daemon keeps it where it runs)...
+  posted.length = 0;
+  submit(win, 'and also do this');
+  assert.deepStrictEqual(
+    posted.filter(m => m.type === 'submit'),
+    [],
+    'no new task while one runs',
+  );
+  const appended = posted.find(m => m.type === 'appendUserMessage');
+  assert.ok(appended, 'the text is appended to the running task');
+  assert.strictEqual(appended.tabId, tab);
+  assert.ok(!('machine' in appended), 'the follow-up names no machine');
+  assert.strictEqual(select(win).value, 'gpu-box', 'the pick is kept');
+
+  // ...the daemon's binding of the running task (replayed on a
+  // reconnect, say) does not override the unsent pick...
+  send(win, {type: 'tabMachine', tabId: tab, machine: ''});
+  assert.strictEqual(select(win).value, 'gpu-box');
+
+  // ...and once the task is over, the next submit carries it.
+  send(win, {type: 'status', running: false, tabId: tab});
+  assert.strictEqual(select(win).value, 'gpu-box');
+  posted.length = 0;
+  submit(win, 'now on the gpu');
+  const sub = lastSubmit(posted);
+  assert.strictEqual(sub.tabId, tab);
+  assert.strictEqual(sub.machine, 'gpu-box', 'the next task goes there');
+  win.close();
+  console.log('  ok - a pick made while the chat runs goes to the next task');
+}
+
 try {
   testListsThisMachineThenTheReachableOnes();
   testTheDaemonsBindingSyncsThePick();
   testThePickIsPerTabAndTravelsWithTheSubmit();
   testADownMachineKeepsThePickListed();
+  testARemotePickIsGreenUntilTheDaemonReportsItDown();
+  testAnAddressNamedMachineIsListedByItsHostName();
   testAClosedTabForgetsAndAReloadRestores();
   testReachingForTheDropDownAsksForAFreshList();
-  console.log('\n6 passed, 0 failed');
+  testAPickMadeWhileTheChatRunsGoesToTheNextTask();
+  console.log('\n9 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

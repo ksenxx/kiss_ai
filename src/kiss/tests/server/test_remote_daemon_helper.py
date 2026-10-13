@@ -13,6 +13,7 @@ home) and that a child dying before it seeds the database is reported.
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -36,7 +37,10 @@ def test_port_comes_from_the_child_endpoint_record(tmp_path: Path) -> None:
         assert remote.url == f"https://127.0.0.1:{remote.port}"
         endpoint = local_endpoint.read_endpoint(stale)
         assert endpoint is not None
-        assert endpoint.pid == remote.process.pid
+        # The daemon's own pid; on Windows Popen.pid is the venv launcher's.
+        assert endpoint.pid == remote.pid
+        if os.name != "nt":
+            assert remote.pid == remote.process.pid
         assert endpoint.url == f"wss://127.0.0.1:{remote.port}/ws"
         with socket.create_connection(("127.0.0.1", remote.port), timeout=5):
             pass

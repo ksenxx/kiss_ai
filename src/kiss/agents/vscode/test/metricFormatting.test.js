@@ -9,8 +9,8 @@
 //    usage_info, result events, and the text-fallback parser);
 //  - token counts render as exactly three significant digits with a
 //    K/M/B/T suffix (thousands/millions/billions/trillions), plain
-//    below one thousand, in the header, the result panel, and the
-//    history rows;
+//    below one thousand, in the header and the history rows (the result
+//    panel's header carries no metrics at all);
 //  - model-list items wrap the name in a .model-item-name span (the
 //    CSS start-truncation hook that keeps the list from scrolling
 //    horizontally on narrow screens) with U+200E bidi guards.
@@ -146,7 +146,9 @@ function testHeaderCostTwoDecimalsOnAllPaths() {
   console.log('  ok - header cost shows two decimals on every write path');
 }
 
-function testResultPanelUsesCompactFormats() {
+function testResultPanelHeaderCarriesNoMetrics() {
+  // The run's spend lives in the status bar only; the Result panel's
+  // header is just its title.
   const {win} = makeWebview();
   send(win, {
     type: 'result',
@@ -155,32 +157,13 @@ function testResultPanelUsesCompactFormats() {
     total_tokens: 45678,
     cost: '$0.4123',
   });
-  const rs = win.document.querySelector('.rc .rs');
-  assert.ok(rs, 'the result panel must render its metrics strip');
-  const text = rs.textContent;
-  assert.ok(
-    text.includes('Tokens 45.7K'),
-    'result panel tokens must be compact; got: ' + text,
-  );
-  assert.ok(
-    text.includes('Cost $0.41'),
-    'result panel cost must show two decimals; got: ' + text,
-  );
+  const header = win.document.querySelector('.rc .rc-h');
+  assert.ok(header, 'the result panel must render its header');
+  assert.strictEqual(header.textContent.trim(), 'Result');
+  assert.strictEqual(headerTokens(win), 'Tokens: 45.7K');
+  assert.strictEqual(headerBudget(win), 'Cost: $0.41');
   win.close();
-  console.log('  ok - the result panel uses the compact formats');
-}
-
-function testResultPanelKeepsNAForMissingCost() {
-  const {win} = makeWebview();
-  send(win, {type: 'result', success: true, text: 'done', total_tokens: 10});
-  const rs = win.document.querySelector('.rc .rs');
-  assert.ok(rs, 'the result panel must render its metrics strip');
-  assert.ok(
-    rs.textContent.includes('Cost N/A'),
-    'a missing cost must stay N/A; got: ' + rs.textContent,
-  );
-  win.close();
-  console.log('  ok - a missing result cost stays N/A');
+  console.log('  ok - the result panel header shows no tokens or cost');
 }
 
 function testHistoryRowsUseCompactFormats() {
@@ -252,8 +235,7 @@ function testModelItemsWrapNameForStartTruncation() {
 
 testHeaderTokensCompactOnStructuredUsageInfo();
 testHeaderCostTwoDecimalsOnAllPaths();
-testResultPanelUsesCompactFormats();
-testResultPanelKeepsNAForMissingCost();
+testResultPanelHeaderCarriesNoMetrics();
 testHistoryRowsUseCompactFormats();
 testModelItemsWrapNameForStartTruncation();
 console.log('metricFormatting.test.js: all tests passed');
