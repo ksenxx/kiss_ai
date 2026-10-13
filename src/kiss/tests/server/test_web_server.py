@@ -45,6 +45,7 @@ from kiss.server.web_server import (
     _discover_tunnel_url_from_metrics,
     _generate_self_signed_cert,
     _get_local_ips,
+    _parse_version_py,
     _pick_free_local_port,
     _print_url,
     _probe_tunnel_ready,
@@ -4627,30 +4628,33 @@ class TestDiscoverTunnelFakePgrep(unittest.TestCase):
 
 
 class TestReadVersionNoMatch(unittest.TestCase):
-    """Test _read_version when _version.py has no __version__ line."""
+    """Test _read_version's bundled-``_version.py`` fallback."""
 
-    def test_no_version_line_returns_empty(self) -> None:
-        """When the bundled _version.py has no __version__ line, returns ''.
+    def test_bundled_fallback_and_no_version_line(self) -> None:
+        """With no installed extension the bundled version is reported.
 
         The installed-extensions scan is redirected at an empty tmpdir so
         the bundled ``_version.py`` fallback branch is actually exercised
         (otherwise the scanner would pick up the machine's real installed
-        extension and mask the fallback).
+        extension and mask the fallback).  The "no ``__version__`` line"
+        case is checked on a copy in the tmpdir: an earlier version of this
+        test rewrote the real ``src/kiss/core/_version.py`` and restored it,
+        and every CLI subprocess another test spawned in that window died
+        with ``ImportError: cannot import name '__version__'``.
         """
+        import kiss
         import kiss.server.web_server as ws_mod
 
-        vfile = Path(ws_mod.__file__).parent.parent / "core" / "_version.py"
-        original = vfile.read_text()
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
         with tempfile.TemporaryDirectory() as empty_root:
             ws_mod._INSTALLED_EXTENSIONS_ROOT = Path(empty_root)
             try:
-                vfile.write_text("# no version here\nfoo = 'bar'\n")
-                result = _read_version()
-                self.assertEqual(result, "")
+                self.assertEqual(_read_version(), kiss.__version__)
             finally:
                 ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
-                vfile.write_text(original)
+            bad = Path(empty_root) / "_version.py"
+            bad.write_text("# no version here\nfoo = 'bar'\n")
+            self.assertEqual(_parse_version_py(bad), "")
 
 
 class TestBroadcastLoopNone(unittest.TestCase):

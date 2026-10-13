@@ -529,6 +529,28 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     _navigate_retrying_network_change(page, functools.partial(page.goto, url, **goto_kwargs), url)
 
 
+def mark_version_seen(context_or_page) -> None:
+    """Make a fresh Playwright profile one that already saw the running version.
+
+    The first page load of a version (a fresh install, an update) leaves
+    only the Recommendations section of the task-info panel expanded
+    (``resetMetaSectionsForVersion`` in ``media/main.js``).  Tests about
+    the panel's everyday layout want what every later load shows (every
+    section expanded, the user's folds kept), so this stores the running
+    version under the key main.js checks before the page's scripts run.
+
+    Args:
+        context_or_page: A Playwright ``BrowserContext`` or ``Page``;
+            ``add_init_script`` is called on it.
+    """
+    from kiss.server.web_server import _read_version
+
+    version = _read_version().replace("\\", "\\\\").replace("'", "\\'")
+    context_or_page.add_init_script(
+        f"localStorage.setItem('kiss-meta-sections-version', '{version}')"
+    )
+
+
 def reload_retrying_network_change(page, **reload_kwargs) -> None:
     """Reload the Playwright *page*, retrying ``ERR_NETWORK_CHANGED``.
 

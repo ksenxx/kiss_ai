@@ -224,7 +224,10 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
 
 
 _machines_lock = threading.Lock()
-_machines_cache: list[dict[str, Any]] = []
+# The last ping of every registered machine: (machine, its row without
+# the label, which is put on when the report is served, since a history
+# fetch may have taught the daemon the host name meanwhile).
+_machines_cache: list[tuple[machines.Machine, dict[str, Any]]] = []
 _machines_checked_at = 0.0
 
 
@@ -236,20 +239,26 @@ def _resolve_ip(host: str) -> str:
         return host
 
 
-def _machine_row(machine: machines.Machine) -> dict[str, Any]:
+def _machine_row(machine: machines.Machine) -> tuple[machines.Machine, dict[str, Any]]:
     """Ping one registered machine through its cached link and describe it.
 
+    The ``pong`` names the machine's own host name
+    (:func:`~kiss.agents.sorcar.machines.note_host`).
+
     Returns:
-        ``name``, ``address`` (as registered), ``ip`` (the host's
-        address), ``port`` (the daemon port of a URL machine, the local
-        port of an SSH machine's tunnel, 0 while the tunnel is closed),
-        ``local`` (False), ``status`` (``"reachable"`` or
-        ``"unreachable"``) and ``error`` (the reason when unreachable).
+        The machine and its row: ``name`` (as registered), ``address``
+        (as registered), ``ip`` (the host's address), ``port`` (the
+        daemon port of a URL machine, the local port of an SSH
+        machine's tunnel, 0 while the tunnel is closed), ``local``
+        (False), ``status`` (``"reachable"`` or ``"unreachable"``) and
+        ``error`` (the reason when unreachable).  :func:`machines_report`
+        adds ``label``.
     """
     link = machines.link_for(machine)
     try:
-        link.request({"type": "ping"}, "pong")
+        pong = link.request({"type": "ping"}, "pong")
         status, error = "reachable", ""
+        machines.note_host(machine, pong.get("machine"))
     except machines.MachineError as exc:
         status, error = "unreachable", str(exc)
     if link.tunnel is not None:
@@ -258,7 +267,7 @@ def _machine_row(machine: machines.Machine) -> dict[str, Any]:
     else:
         parts = urlsplit(machine.url)
         host, port = parts.hostname or "", parts.port or machines.DEFAULT_PORT
-    return {
+    return machine, {
         "name": machine.name, "address": machine.address(), "ip": _resolve_ip(host),
         "port": port, "local": False, "status": status, "error": error,
     }
@@ -283,7 +292,10 @@ def machines_report(
 
     Returns:
         ``(rows, checked_at)``: the rows of :func:`_machine_row` after the
-        local one, and the epoch-millisecond time of the ping they came
+        local one, each with ``label`` (what to call the machine,
+        :func:`~kiss.agents.sorcar.machines.machine_label`, as of now:
+        the machine's own host name for a machine registered by its
+        address), and the epoch-millisecond time of the ping they came
         from.
     """
     global _machines_cache, _machines_checked_at
@@ -297,11 +309,16 @@ def machines_report(
             with ThreadPoolExecutor(max_workers=max(1, len(registered))) as pool:
                 _machines_cache = list(pool.map(_machine_row, registered))
             _machines_checked_at = time.time()
+        name = machines.local_machine_name()
         local = {
-            "name": machines.local_machine_name(), "address": f"https://{local_ip}:{local_port}",
+            "name": name, "label": name, "address": f"https://{local_ip}:{local_port}",
             "ip": local_ip, "port": local_port, "local": True, "status": "reachable", "error": "",
         }
-        return [local, *_machines_cache], _epoch_ms(_machines_checked_at)
+        rows = [
+            {**row, "label": machines.machine_label(machine)}
+            for machine, row in _machines_cache
+        ]
+        return [local, *rows], _epoch_ms(_machines_checked_at)
 
 
 def machine_action(action: str, name: str, address: str = "", password: str = "") -> str:

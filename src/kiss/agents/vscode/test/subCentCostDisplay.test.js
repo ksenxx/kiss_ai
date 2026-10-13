@@ -3,8 +3,8 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// October 2026 cost audit: the header, result panel, history rows and
-// Spend panel formatted every cost with two decimals, so a task that
+// October 2026 cost audit: the header, history rows and Spend panel
+// formatted every cost with two decimals, so a task that
 // spent $0.0049 read "Cost: $0.00" — indistinguishable from a free
 // run.  A positive amount below half a cent now shows four decimals,
 // and below $0.00005 the lower bound "<$0.0001"; larger amounts and an
@@ -124,14 +124,6 @@ function testSubCentSpendIsNotShownAsFree() {
     'Cost: $0.0012',
     'result prefers cost_usd',
   );
-  const panels = win.document.querySelectorAll('.rs-cost');
-  const panelCost = panels[panels.length - 1];
-  assert.ok(panelCost, 'the result panel renders a cost');
-  assert.strictEqual(
-    panelCost.textContent,
-    '$0.0012',
-    'result panel prefers cost_usd',
-  );
   send(win, {
     type: 'usage_info',
     text: '',
@@ -142,19 +134,19 @@ function testSubCentSpendIsNotShownAsFree() {
     taskId: 'cheap-task',
   });
   assert.strictEqual(
-    panelCost.textContent,
-    '$0.0013',
-    'late fold refreshes the panel',
+    headerCost(win),
+    'Cost: $0.0013',
+    'late fold refreshes the header',
   );
   win.close();
   console.log('  ok - sub-cent spend shows four decimals, never $0.00');
 }
 
 // A result whose exact cost is the number 0 is a free run, not an
-// unknown one: the panel must say "$0.00", not "N/A".  And an event
+// unknown one: the header must say "$0.00", not "N/A".  And an event
 // whose display string is "N/A" but carries a finite cost_usd must
-// still update the header and the panel, while one with neither leaves
-// the last known figure in place.
+// still update the header, while one with neither leaves the last known
+// figure in place.
 function testZeroAndNaCostsResolveFromCostUsd() {
   const win = makeWebview();
   send(win, {
@@ -166,12 +158,6 @@ function testZeroAndNaCostsResolveFromCostUsd() {
     step_count: 1,
     taskId: 'free-task',
   });
-  let panels = win.document.querySelectorAll('.rs-cost');
-  assert.strictEqual(
-    panels[panels.length - 1].textContent,
-    '$0.00',
-    'zero cost_usd is $0.00',
-  );
   assert.strictEqual(
     headerCost(win),
     'Cost: $0.00',
@@ -192,11 +178,6 @@ function testZeroAndNaCostsResolveFromCostUsd() {
     'Cost: $0.0012',
     'N/A string yields to cost_usd',
   );
-  assert.strictEqual(
-    panels[panels.length - 1].textContent,
-    '$0.0012',
-    'late fold despite N/A',
-  );
 
   send(win, {
     type: 'usage_info',
@@ -211,11 +192,6 @@ function testZeroAndNaCostsResolveFromCostUsd() {
     'Cost: $0.0012',
     'a cost-less event keeps the header',
   );
-  assert.strictEqual(
-    panels[panels.length - 1].textContent,
-    '$0.0012',
-    'and the panel',
-  );
 
   send(win, {
     type: 'result',
@@ -225,16 +201,10 @@ function testZeroAndNaCostsResolveFromCostUsd() {
     step_count: 2,
     taskId: 'free-task',
   });
-  panels = win.document.querySelectorAll('.rs-cost');
-  assert.strictEqual(
-    panels[panels.length - 1].textContent,
-    'N/A',
-    'no cost at all renders N/A',
-  );
   assert.strictEqual(
     headerCost(win),
     'Cost: $0.0012',
-    'and does not clobber the header',
+    'a cost-less result does not clobber the header',
   );
   win.close();
   console.log('  ok - zero and N/A costs resolve from cost_usd');

@@ -650,7 +650,9 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
 
     async def test_young_task_replies_when_its_first_update_is_due(self) -> None:
         """A task under a minute old gets no run yet, only the time of the first one."""
+        before = time.time()
         task_id = self._register_task("t-young", age_s=5.0)
+        after = time.time()
         ws = await self._connect()
         try:
             reply = await self._poll(ws, {"tabId": "t-young", "token": "5"})
@@ -662,8 +664,13 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
         self.assertEqual(reply["taskId"], task_id)
         self.assertEqual(reply["updatedAt"], 0)
         self.assertEqual(reply["sig"], "0.000:0")
-        due_s = reply["dueAt"] / 1000.0 - (time.time() - 5.0)
-        self.assertAlmostEqual(due_s, task_update.FIRST_UPDATE_DELAY_S, places=0)
+        # dueAt is the row's start (5 s before registration, truncated to
+        # the millisecond) plus the first-update delay; recover that start
+        # and bound it by the registration window so a slow connect or
+        # poll under load cannot skew the check.
+        started = reply["dueAt"] / 1000.0 - task_update.FIRST_UPDATE_DELAY_S + 5.0
+        self.assertGreaterEqual(started, before - 0.001)
+        self.assertLessEqual(started, after)
         self.assertEqual(self.sea.calls, [])
 
     async def test_running_task_is_reported_polled_and_refreshed(self) -> None:
