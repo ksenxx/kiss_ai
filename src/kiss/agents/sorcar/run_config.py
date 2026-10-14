@@ -162,17 +162,6 @@ def inherited_keys(provenance: Any) -> list[str]:
     return [str(key) for key, mark in provenance.items() if mark == PROVENANCE_INHERITED]
 
 
-def is_explicit(provenance: Any, key: str) -> bool:
-    """Return whether a ``run`` command's ``provenance`` marks *key* as passed explicitly.
-
-    Args:
-        provenance: The command's ``provenance`` wire field (anything
-            but a dict counts as empty).
-        key: The setting key (``model``, ``max_budget``, ...).
-    """
-    return isinstance(provenance, Mapping) and provenance.get(key) == PROVENANCE_EXPLICIT
-
-
 def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     """Render a task's effective configuration as one line.
 

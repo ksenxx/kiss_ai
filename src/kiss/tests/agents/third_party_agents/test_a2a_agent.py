@@ -15,7 +15,6 @@ audit log, and the full outbound tool loop (``a2a_discover`` /
 from __future__ import annotations
 
 import json
-import socket
 import sys
 import uuid
 from pathlib import Path
@@ -31,6 +30,7 @@ from kiss.agents.third_party_agents.a2a.a2a_sea import (
     _config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
 _AUTH_TRIO = {"check_a2a_auth", "authenticate_a2a", "clear_a2a_auth"}
 _BACKEND_TOOLS = {"a2a_discover", "a2a_call", "a2a_get_task"}
@@ -251,14 +251,14 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
             timeout=10,
         )
         assert bad.json()["error"]["code"] == -32700
-        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-            sock.sendall(
-                b"POST / HTTP/1.1\r\nHost: peer\r\nAuthorization: Bearer sekret\r\n"
-                b"Content-Type: application/json\r\n"
-                b"Content-Length: 2097152\r\n\r\n"
+        assert (
+            raw_post_status(
+                port,
+                "Authorization: Bearer sekret\r\nContent-Type: application/json\r\n"
+                "Content-Length: 2097152\r\n",
             )
-            status_line = sock.recv(4096).decode("utf-8", "replace").splitlines()[0]
-        assert " 413 " in status_line
+            == 413
+        )
 
         # Replying to a context with no pending task raises, with either
         # an unknown task id or an empty thread_ts.
@@ -360,15 +360,6 @@ def test_turn_limit_per_context_per_hour() -> None:
         backend.disconnect()
 
 
-def _raw_post(port: int, headers: str, payload: bytes = b"") -> str:
-    """Send one raw HTTP POST and return the response status line."""
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        sock.sendall(b"POST / HTTP/1.1\r\nHost: peer\r\n" + headers.encode("latin-1") + b"\r\n\r\n")
-        if payload:
-            sock.sendall(payload)
-        return sock.recv(4096).decode("utf-8", "replace").splitlines()[0]
-
-
 def _audit_entries() -> list[dict]:
     """Read all JSONL entries from the audit log."""
     return [json.loads(line) for line in _audit_path().read_text().splitlines()]
@@ -467,11 +458,11 @@ def test_bad_content_length_is_handled_and_server_stays_up() -> None:
     backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
     try:
-        assert " 400 " in _raw_post(port, "Content-Length: -1")
-        assert " 400 " in _raw_post(port, "Content-Length: nope")
-        assert " 400 " in _raw_post(port, "Content-Length: \u00b2")
-        assert " 400 " in _raw_post(port, "Content-Type: application/json")
-        assert " 413 " in _raw_post(port, f"Content-Length: {2 * 1024 * 1024}")
+        assert raw_post_status(port, "Content-Length: -1\r\n") == 400
+        assert raw_post_status(port, "Content-Length: nope\r\n") == 400
+        assert raw_post_status(port, "Content-Length: \u00b2\r\n") == 400
+        assert raw_post_status(port, "Content-Type: application/json\r\n") == 400
+        assert raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
         # The server survives all of the above.
         good = _rpc(base, "message/send", _send_params("after bad lengths", "ctx-len"))
         assert good.json()["result"]["status"] == {"state": "submitted"}
@@ -524,7 +515,7 @@ def test_overlong_content_length_rejected_400() -> None:
     backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
     try:
-        assert " 400 " in _raw_post(port, "Content-Length: " + "9" * 5000)
+        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n") == 400
         good = _rpc(base, "message/send", _send_params("after overlong length", "ctx-len2"))
         assert good.json()["result"]["status"] == {"state": "submitted"}
     finally:

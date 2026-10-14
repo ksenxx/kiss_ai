@@ -9,7 +9,7 @@ entry and only re-publish it after ``_add_task``.  Between those two
 statements sit a SQLite read (``build_chat_prompt``'s chat/task-chain
 context load) and a SQLite write — a window of tens of milliseconds,
 far longer under DB contention.  Server threads read the attribute
-during that window (``commands._owner_task_id`` and the printer's
+during that window (``commands._queue_prompt_on_owner`` and the printer's
 broadcast fan-out), and all resolve ``None``: the user's queued
 message is then stamped with no task id and mis-routed or dropped.
 ``_task_id_lock`` did not help, because only the writer ever took it.
@@ -29,8 +29,8 @@ from typing import Any, cast
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 from kiss.server import agent_state
-from kiss.server.commands import _owner_task_id
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -120,7 +120,7 @@ def test_followup_run_never_exposes_a_none_task_id(
                 "still being written; every server-thread reader now "
                 "resolves None"
             )
-            assert _owner_task_id(state) == first_task_id, (
+            assert _persisted_task_id(state.agent) == first_task_id, (
                 "a user message queued during run #2's startup would be "
                 "stamped with no task id"
             )
@@ -134,7 +134,7 @@ def test_followup_run_never_exposes_a_none_task_id(
         assert agent._last_task_id != first_task_id, (
             "run #2 must publish its own task id once allocated"
         )
-        assert _owner_task_id(state) == agent._last_task_id
+        assert _persisted_task_id(state.agent) == agent._last_task_id
     finally:
         agent.release.set()
         server.stop()
@@ -156,7 +156,7 @@ def test_concurrent_readers_always_see_a_usable_task_id(
 
     def reader() -> None:
         while not stop.is_set():
-            observed.append(_owner_task_id(state))
+            observed.append(_persisted_task_id(state.agent))
 
     try:
         _run_task(env, agent, server, "WARMUP TASK")

@@ -122,8 +122,12 @@ def test_finish_connects_and_calls_on_connected(composio) -> None:
     }
 
 
-def test_finish_pending_and_failed_do_not_call_on_connected(composio) -> None:
+def test_finish_pending_and_failed_do_not_call_on_connected(
+    composio, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Unapproved or failed sign-ins leave the agent unconnected."""
+    # The pending grace: the SDK polls once, sleeps 1 s, then gives up.
+    monkeypatch.setattr(composio_google, "_FINISH_WAIT_SECONDS", 0.2)
     calls: list[str] = []
     tools = _tools(calls)
     started = json.loads(tools["authenticate_google_calendar"]())

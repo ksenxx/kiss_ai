@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import stat
-import threading
 import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
@@ -37,7 +36,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _oauth_apps
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents.discord.discord_sea import (
     DiscordAgent,
@@ -51,6 +50,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import serving
 from kiss.tests.conftest import IS_WINDOWS
 
 _USER_TOKEN = "user-access-token"
@@ -141,17 +141,14 @@ def discord_server(
 
     The redirect listener runs on the test's own ephemeral port.
     """
-    server = _DiscordServer()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setenv("DISCORD_OAUTH_BASE", server.base)
-    monkeypatch.setenv("DISCORD_API_BASE", f"{server.base}/api/v10")
-    monkeypatch.setenv("KISS_DISCORD_CLIENT_ID", "kiss-discord-app")
-    monkeypatch.setenv("KISS_HEADLESS", "1")
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    yield server
-    ConsentSession.cancel_active("discord")
-    stop_http_server(server, thread)
+    with serving(_DiscordServer()) as server:
+        monkeypatch.setenv("DISCORD_OAUTH_BASE", server.base)
+        monkeypatch.setenv("DISCORD_API_BASE", f"{server.base}/api/v10")
+        monkeypatch.setenv("KISS_DISCORD_CLIENT_ID", "kiss-discord-app")
+        monkeypatch.setenv("KISS_HEADLESS", "1")
+        monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+        yield server
+        ConsentSession.cancel_active("discord")
 
 
 def _start(tools: dict[str, Any]) -> str:

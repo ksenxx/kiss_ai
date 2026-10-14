@@ -203,7 +203,10 @@ class TestStopCascadeOnInterrupt:
             tid = worker.ident
             assert tid is not None
             assert inject_keyboard_interrupt(tid) == 1
-            worker.join(timeout=10)
+            # The abort path ends with ``ws.close()``, whose close
+            # handshake waits up to the library's 10 s close_timeout
+            # when the daemon's loop is slow (a loaded 8-split run).
+            worker.join(timeout=30)
             assert not worker.is_alive(), "client wait never aborted"
             assert isinstance(outcome["exc"], KeyboardInterrupt)
             assert daemon.wait_for_command("stop"), (

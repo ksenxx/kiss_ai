@@ -48,6 +48,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiss.core.locked import locked_call
 from kiss.core.utils import atomic_write_text, is_root_dir
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,9 @@ class TabRegistry:
                 (``KISS_HOME/tabs.json``).
         """
         self._path = path
-        self._lock = threading.Lock()
+        # Re-entrant: task threads take it through ``locked_call``
+        # (see ``kiss.core.locked``) so a Stop injection cannot leak it.
+        self._lock = threading.RLock()
         self._tabs: list[dict[str, str]] = []
         self._persist_failed = False
         self._heal_pending = False
@@ -277,9 +280,12 @@ class TabRegistry:
         reach the disk even when no tab was ever mutated.  A no-op
         when the file already matches the in-memory state.
         """
-        with self._lock:
-            if self._persist_failed or self._heal_pending:
-                self._save_locked()
+        locked_call(self._lock, self._flush_locked)
+
+    def _flush_locked(self) -> None:
+        """Under ``_lock``: the body of :meth:`flush`."""
+        if self._persist_failed or self._heal_pending:
+            self._save_locked()
 
     def _bump_generation_locked(self, tab_id: str) -> int:
         """Stamp *tab_id* with a fresh publication token (lock held).
@@ -303,17 +309,23 @@ class TabRegistry:
 
     def snapshot(self) -> list[dict[str, str]]:
         """Return a deep copy of the ordered tab entries."""
-        with self._lock:
-            return [dict(entry) for entry in self._tabs]
+        return locked_call(self._lock, self._snapshot_locked)
+
+    def _snapshot_locked(self) -> list[dict[str, str]]:
+        """Under ``_lock``: the body of :meth:`snapshot`."""
+        return [dict(entry) for entry in self._tabs]
 
     def bindings(self) -> dict[str, str]:
         """Return ``{tabId: chatId}`` for every chat-bound tab."""
-        with self._lock:
-            return {
-                entry["tabId"]: entry["chatId"]
-                for entry in self._tabs
-                if entry["chatId"]
-            }
+        return locked_call(self._lock, self._bindings_locked)
+
+    def _bindings_locked(self) -> dict[str, str]:
+        """Under ``_lock``: the body of :meth:`bindings`."""
+        return {
+            entry["tabId"]: entry["chatId"]
+            for entry in self._tabs
+            if entry["chatId"]
+        }
 
     def bound_tabs(self) -> list[tuple[str, str, str]]:
         """Return ``(tabId, chatId, taskId)`` for every chat-bound tab.
@@ -323,21 +335,27 @@ class TabRegistry:
         ready replay path passes it through so a reconnect never
         silently switches a tab to a different task.
         """
-        with self._lock:
-            return [
-                (
-                    entry["tabId"],
-                    entry["chatId"],
-                    entry.get("taskId", ""),
-                )
-                for entry in self._tabs
-                if entry["chatId"]
-            ]
+        return locked_call(self._lock, self._bound_tabs_locked)
+
+    def _bound_tabs_locked(self) -> list[tuple[str, str, str]]:
+        """Under ``_lock``: the body of :meth:`bound_tabs`."""
+        return [
+            (
+                entry["tabId"],
+                entry["chatId"],
+                entry.get("taskId", ""),
+            )
+            for entry in self._tabs
+            if entry["chatId"]
+        ]
 
     def has_tab(self, tab_id: str) -> bool:
         """Return whether *tab_id* is registered."""
-        with self._lock:
-            return self._find_locked(_clean_str(tab_id)) is not None
+        return locked_call(self._lock, self._has_tab_locked, tab_id)
+
+    def _has_tab_locked(self, tab_id: str) -> bool:
+        """Under ``_lock``: the body of :meth:`has_tab`."""
+        return self._find_locked(_clean_str(tab_id)) is not None
 
     def generation(self, tab_id: str) -> int:
         """Return *tab_id*'s current publication token.
@@ -350,8 +368,11 @@ class TabRegistry:
             the tab is unknown or was never published by this process
             (an entry loaded from disk).
         """
-        with self._lock:
-            return self._generations.get(_clean_str(tab_id), 0)
+        return locked_call(self._lock, self._generation_locked, tab_id)
+
+    def _generation_locked(self, tab_id: str) -> int:
+        """Under ``_lock``: the body of :meth:`generation`."""
+        return self._generations.get(_clean_str(tab_id), 0)
 
     def stamp_unregistered(self, tab_id: str) -> int:
         """Stamp a publication token for a tab that has NO registry row.
@@ -382,10 +403,13 @@ class TabRegistry:
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return 0
-        with self._lock:
-            if self._find_locked(tab_id) is not None:
-                return 0
-            return self._bump_generation_locked(tab_id)
+        return locked_call(self._lock, self._stamp_unregistered_locked, tab_id)
+
+    def _stamp_unregistered_locked(self, tab_id: str) -> int:
+        """Under ``_lock``: the body of :meth:`stamp_unregistered`."""
+        if self._find_locked(tab_id) is not None:
+            return 0
+        return self._bump_generation_locked(tab_id)
 
     def retire_unregistered(self, tab_id: str) -> None:
         """Invalidate a rowless publication token on tab close.
@@ -405,9 +429,12 @@ class TabRegistry:
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return
-        with self._lock:
-            if self._find_locked(tab_id) is None:
-                self._generations.pop(tab_id, None)
+        locked_call(self._lock, self._retire_unregistered_locked, tab_id)
+
+    def _retire_unregistered_locked(self, tab_id: str) -> None:
+        """Under ``_lock``: the body of :meth:`retire_unregistered`."""
+        if self._find_locked(tab_id) is None:
+            self._generations.pop(tab_id, None)
 
     def retire_unregistered_and_observe(self, tab_id: str) -> int:
         """Retire a rowless token AND read the clock, atomically.
@@ -435,10 +462,13 @@ class TabRegistry:
             stamps a strictly larger generation.
         """
         tab_id = _clean_str(tab_id)
-        with self._lock:
-            if tab_id and self._find_locked(tab_id) is None:
-                self._generations.pop(tab_id, None)
-            return self._generation_counter
+        return locked_call(self._lock, self._retire_unregistered_and_observe_locked, tab_id)
+
+    def _retire_unregistered_and_observe_locked(self, tab_id: str) -> int:
+        """Under ``_lock``: the body of :meth:`retire_unregistered_and_observe`."""
+        if tab_id and self._find_locked(tab_id) is None:
+            self._generations.pop(tab_id, None)
+        return self._generation_counter
 
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",
@@ -461,26 +491,29 @@ class TabRegistry:
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return OpenTabOutcome.EXISTS
-        with self._lock:
-            if self._find_locked(tab_id) is not None:
-                return OpenTabOutcome.EXISTS
-            if len(self._tabs) >= _MAX_TABS:
-                logger.warning(
-                    "Tab registry full (%d); refusing to open %r",
-                    _MAX_TABS, tab_id,
-                )
-                return OpenTabOutcome.FULL
-            self._tabs.append({
-                "tabId": tab_id,
-                "chatId": "",
-                "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
-                "workDir": _clean_work_dir(work_dir),
-                "scopeWorkDir": "",
-                "taskId": "",
-            })
-            self._bump_generation_locked(tab_id)
-            self._save_locked()
-            return OpenTabOutcome.OPENED
+        return locked_call(self._lock, self._open_tab_locked, tab_id, title, work_dir)
+
+    def _open_tab_locked(self, tab_id: str, title: str, work_dir: str) -> OpenTabOutcome:
+        """Under ``_lock``: the body of :meth:`open_tab`."""
+        if self._find_locked(tab_id) is not None:
+            return OpenTabOutcome.EXISTS
+        if len(self._tabs) >= _MAX_TABS:
+            logger.warning(
+                "Tab registry full (%d); refusing to open %r",
+                _MAX_TABS, tab_id,
+            )
+            return OpenTabOutcome.FULL
+        self._tabs.append({
+            "tabId": tab_id,
+            "chatId": "",
+            "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
+            "workDir": _clean_work_dir(work_dir),
+            "scopeWorkDir": "",
+            "taskId": "",
+        })
+        self._bump_generation_locked(tab_id)
+        self._save_locked()
+        return OpenTabOutcome.OPENED
 
     def _removal_token_locked(self) -> int:
         """Draw a removal token from the shared generation clock.
@@ -514,8 +547,11 @@ class TabRegistry:
             tab — its current owner is that later publisher, so any
             cleanup keyed to *token* must not touch it.
         """
-        with self._lock:
-            return self._generations.get(_clean_str(tab_id), 0) > token
+        return locked_call(self._lock, self._republished_since_locked, tab_id, token)
+
+    def _republished_since_locked(self, tab_id: str, token: int) -> bool:
+        """Under ``_lock``: the body of :meth:`republished_since`."""
+        return self._generations.get(_clean_str(tab_id), 0) > token
 
     def _reopened_since_locked(self, tab_id: str, token: int) -> bool:
         """Locked body of :meth:`reopened_since` (*tab_id* pre-cleaned)."""
@@ -545,8 +581,7 @@ class TabRegistry:
             ``True`` when a later publication owns the tab.
         """
         tab_id = _clean_str(tab_id)
-        with self._lock:
-            return self._reopened_since_locked(tab_id, token)
+        return locked_call(self._lock, self._reopened_since_locked, tab_id, token)
 
     def finalize_removal(self, tab_id: str, token: int) -> bool:
         """Atomically confirm a teardown's ownership and retire the stamp.
@@ -578,14 +613,17 @@ class TabRegistry:
             must stand down).
         """
         tab_id = _clean_str(tab_id)
-        with self._lock:
-            if self._reopened_since_locked(tab_id, token):
-                return False
-            # No row exists (just checked), so this only drops a
-            # rowless stamp at or below *token* — never a row owner's
-            # publication token.
-            self._generations.pop(tab_id, None)
-            return True
+        return locked_call(self._lock, self._finalize_removal_locked, tab_id, token)
+
+    def _finalize_removal_locked(self, tab_id: str, token: int) -> bool:
+        """Under ``_lock``: the body of :meth:`finalize_removal`."""
+        if self._reopened_since_locked(tab_id, token):
+            return False
+        # No row exists (just checked), so this only drops a
+        # rowless stamp at or below *token* — never a row owner's
+        # publication token.
+        self._generations.pop(tab_id, None)
+        return True
 
     def close_tab(self, tab_id: str) -> int:
         """Remove a tab.
@@ -601,15 +639,18 @@ class TabRegistry:
             to stand down when a later publication has legitimately
             reopened the tab.
         """
-        with self._lock:
-            entry = self._find_locked(_clean_str(tab_id))
-            if entry is None:
-                return 0
-            self._tabs.remove(entry)
-            self._generations.pop(_clean_str(tab_id), None)
-            token = self._removal_token_locked()
-            self._save_locked()
-            return token
+        return locked_call(self._lock, self._close_tab_locked, tab_id)
+
+    def _close_tab_locked(self, tab_id: str) -> int:
+        """Under ``_lock``: the body of :meth:`close_tab`."""
+        entry = self._find_locked(_clean_str(tab_id))
+        if entry is None:
+            return 0
+        self._tabs.remove(entry)
+        self._generations.pop(_clean_str(tab_id), None)
+        token = self._removal_token_locked()
+        self._save_locked()
+        return token
 
     def clock(self) -> int:
         """Return the publication clock's current reading.
@@ -632,8 +673,11 @@ class TabRegistry:
             The current generation counter (``0`` on a registry that
             never published).
         """
-        with self._lock:
-            return self._generation_counter
+        return locked_call(self._lock, self._clock_locked)
+
+    def _clock_locked(self) -> int:
+        """Under ``_lock``: the body of :meth:`clock`."""
+        return self._generation_counter
 
     def close_tab_if_generation(self, tab_id: str, generation: int) -> bool:
         """Remove a tab only if nobody republished it since *generation*.
@@ -662,14 +706,17 @@ class TabRegistry:
             # 0); a caller could otherwise capture that 0 and "match"
             # it here.  A real publication token is always positive.
             return False
-        with self._lock:
-            entry = self._find_locked(tab_id)
-            if entry is None or self._generations.get(tab_id, 0) != generation:
-                return False
-            self._tabs.remove(entry)
-            self._generations.pop(tab_id, None)
-            self._save_locked()
-            return True
+        return locked_call(self._lock, self._close_tab_if_generation_locked, tab_id, generation)
+
+    def _close_tab_if_generation_locked(self, tab_id: str, generation: int) -> bool:
+        """Under ``_lock``: the body of :meth:`close_tab_if_generation`."""
+        entry = self._find_locked(tab_id)
+        if entry is None or self._generations.get(tab_id, 0) != generation:
+            return False
+        self._tabs.remove(entry)
+        self._generations.pop(tab_id, None)
+        self._save_locked()
+        return True
 
     def update_tab(
         self,
@@ -722,63 +769,78 @@ class TabRegistry:
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return False, [], 0
-        with self._lock:
-            entry = self._find_locked(tab_id)
-            changed = False
-            displaced: list[tuple[str, int]] = []
-            if entry is None:
-                if not create or len(self._tabs) >= _MAX_TABS:
-                    return False, [], 0
-                entry = {
-                    "tabId": tab_id, "chatId": "",
-                    "title": "new chat", "workDir": "",
-                    "scopeWorkDir": "",
-                    "taskId": "",
-                }
-                self._tabs.append(entry)
-                changed = True
-            # Every publication — even one that changes no field —
-            # re-stamps the tab: a reopen (``resumeSession``) may
-            # write values identical to the current ones, yet it must
-            # still invalidate any older caller's pending
-            # ``close_tab_if_generation`` undo.
-            generation = self._bump_generation_locked(tab_id)
-            if chat_id is not None:
-                chat_id = _clean_str(chat_id)
-                if chat_id:
-                    for other in [
-                        t for t in self._tabs
-                        if t is not entry and t["chatId"] == chat_id
-                    ]:
-                        self._tabs.remove(other)
-                        self._generations.pop(other["tabId"], None)
-                        displaced.append(
-                            (other["tabId"], self._removal_token_locked())
-                        )
-                        changed = True
-                if entry["chatId"] != chat_id:
-                    entry["chatId"] = chat_id
+        return locked_call(
+            self._lock, self._update_tab_locked,
+            tab_id, chat_id, title, work_dir, scope_work_dir, task_id, create,
+        )
+
+    def _update_tab_locked(
+        self,
+        tab_id: str,
+        chat_id: str | None,
+        title: str | None,
+        work_dir: str | None,
+        scope_work_dir: str | None,
+        task_id: str | None,
+        create: bool,
+    ) -> tuple[bool, list[tuple[str, int]], int]:
+        """Under ``_lock``: the body of :meth:`update_tab`."""
+        entry = self._find_locked(tab_id)
+        changed = False
+        displaced: list[tuple[str, int]] = []
+        if entry is None:
+            if not create or len(self._tabs) >= _MAX_TABS:
+                return False, [], 0
+            entry = {
+                "tabId": tab_id, "chatId": "",
+                "title": "new chat", "workDir": "",
+                "scopeWorkDir": "",
+                "taskId": "",
+            }
+            self._tabs.append(entry)
+            changed = True
+        # Every publication — even one that changes no field —
+        # re-stamps the tab: a reopen (``resumeSession``) may
+        # write values identical to the current ones, yet it must
+        # still invalidate any older caller's pending
+        # ``close_tab_if_generation`` undo.
+        generation = self._bump_generation_locked(tab_id)
+        if chat_id is not None:
+            chat_id = _clean_str(chat_id)
+            if chat_id:
+                for other in [
+                    t for t in self._tabs
+                    if t is not entry and t["chatId"] == chat_id
+                ]:
+                    self._tabs.remove(other)
+                    self._generations.pop(other["tabId"], None)
+                    displaced.append(
+                        (other["tabId"], self._removal_token_locked())
+                    )
                     changed = True
-            if task_id is not None:
-                task_id = _clean_str(task_id)
-                if entry.get("taskId", "") != task_id:
-                    entry["taskId"] = task_id
-                    changed = True
-            new_title = _clean_str(title, _MAX_TITLE_CHARS)
-            if new_title and entry["title"] != new_title:
-                entry["title"] = new_title
+            if entry["chatId"] != chat_id:
+                entry["chatId"] = chat_id
                 changed = True
-            new_wd = _clean_work_dir(work_dir)
-            if new_wd and entry["workDir"] != new_wd:
-                entry["workDir"] = new_wd
+        if task_id is not None:
+            task_id = _clean_str(task_id)
+            if entry.get("taskId", "") != task_id:
+                entry["taskId"] = task_id
                 changed = True
-            new_scope = _clean_work_dir(scope_work_dir)
-            if new_scope and entry.get("scopeWorkDir", "") != new_scope:
-                entry["scopeWorkDir"] = new_scope
-                changed = True
-            if changed:
-                self._save_locked()
-            return changed, displaced, generation
+        new_title = _clean_str(title, _MAX_TITLE_CHARS)
+        if new_title and entry["title"] != new_title:
+            entry["title"] = new_title
+            changed = True
+        new_wd = _clean_work_dir(work_dir)
+        if new_wd and entry["workDir"] != new_wd:
+            entry["workDir"] = new_wd
+            changed = True
+        new_scope = _clean_work_dir(scope_work_dir)
+        if new_scope and entry.get("scopeWorkDir", "") != new_scope:
+            entry["scopeWorkDir"] = new_scope
+            changed = True
+        if changed:
+            self._save_locked()
+        return changed, displaced, generation
 
     def merge_if_empty(self, entries: list[dict[str, str]]) -> bool:
         """Adopt a legacy client's persisted tabs into an EMPTY registry.
@@ -797,14 +859,17 @@ class TabRegistry:
         Returns:
             ``True`` when the registry adopted the entries.
         """
-        with self._lock:
-            if self._tabs:
-                return False
-            adopted = _sanitize_entries(
-                list(entries), keep_task_id=False,
-            )
-            if not adopted:
-                return False
-            self._tabs = adopted
-            self._save_locked()
-            return True
+        return locked_call(self._lock, self._merge_if_empty_locked, entries)
+
+    def _merge_if_empty_locked(self, entries: list[dict[str, str]]) -> bool:
+        """Under ``_lock``: the body of :meth:`merge_if_empty`."""
+        if self._tabs:
+            return False
+        adopted = _sanitize_entries(
+            list(entries), keep_task_id=False,
+        )
+        if not adopted:
+            return False
+        self._tabs = adopted
+        self._save_locked()
+        return True

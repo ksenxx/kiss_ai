@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked_call
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
@@ -45,7 +46,11 @@ _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # self-deadlock — see that function).  Every holder calls only helpers
 # that take neither this lock nor the flock again (the ``_locked``
 # variants), so nothing nests today; it stays an RLock so a nested
-# acquisition of THIS lock can never be the thing that deadlocks.
+# acquisition of THIS lock can never be the thing that deadlocks.  The
+# writers a task thread reaches (``save_config`` behind the model
+# picker, ``save_api_key`` behind a tool) take it through
+# ``locked_call``: a Stop injection landing right after a plain
+# ``with``'s ``__enter__`` would leak it for every later config access.
 _config_lock = threading.RLock()
 
 if TYPE_CHECKING:
@@ -279,9 +284,13 @@ def save_config(data: dict[str, Any]) -> None:
     Args:
         data: Configuration dict.
     """
-    data = sanitize_config(data)
+    locked_call(_config_lock, _save_config_locked, sanitize_config(data))
+
+
+def _save_config_locked(data: dict[str, Any]) -> None:
+    """Merge *data* into ``config.json`` under its flock; the caller holds ``_config_lock``."""
     cfg_path = _config_path()
-    with _config_lock, exclusive_file_lock(_config_dir() / ".config.lock"):
+    with exclusive_file_lock(_config_dir() / ".config.lock"):
         existing = _read_stored_config(cfg_path)
         for k, v in data.items():
             if k not in API_KEY_ENV_VARS:
@@ -751,9 +760,12 @@ def save_api_key(key_name: str, key_value: str) -> None:
             "Refusing to save API key %s with an embedded NUL", key_name,
         )
         return
-    user_shell = _get_user_shell()
+    locked_call(_config_lock, _save_api_key_locked, key_name, key_value, _get_user_shell())
 
-    with _config_lock, _api_keys_store_flock():
+
+def _save_api_key_locked(key_name: str, key_value: str, user_shell: str) -> None:
+    """The store edit and RC scrub of :func:`save_api_key`; the caller holds ``_config_lock``."""
+    with _api_keys_store_flock():
         _edit_api_keys_env_file_locked({key_name: key_value or None})
         # The key must disappear from EVERY RC a previous release may
         # have written it to, not only the current $SHELL's: a copy left

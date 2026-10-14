@@ -268,7 +268,10 @@ class TestBrowserTabHandoffRegistration(_DaemonHarness):
         """start_async registers the Browser-tab opener; stop_async clears it."""
         from kiss.core import browser_handoff
 
-        self.assertIsNone(browser_handoff._browser_tab_opener)
+        # Process-global: a daemon an earlier test of this process left
+        # serving (or still stopping) may have registered its opener.
+        # What is asserted is this daemon's own registration and clearing.
+        browser_handoff._browser_tab_opener = None
         await self.server.start_async()
         opener = browser_handoff._browser_tab_opener
         self.assertIsNotNone(opener, "a served daemon must hand sign-in pages to its tab")

@@ -503,9 +503,10 @@ function testBackgroundReplayKeepsTokensAndCost() {
 // renders. A replayed transcript that carries no usage event (a run
 // recorded before usage_info was persisted, or a task that has not
 // spent anything yet) must NOT walk off with the numbers the visible
-// tab left on that row -- the hidden tab keeps its own previous
-// numbers, exactly as staticTaskPanelVisibleTask.test.js pins for a
-// same-task replay.
+// tab left on that row -- nor keep the numbers of the transcript it
+// replaced (a different task's cost under the new transcript); the
+// server appends the row's own totals to a transcript that lacks them
+// (json_printer.with_synthesized_events), so nothing is lost.
 function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
   const {win} = makeWebview();
   const tabA = win._testApi.getActiveTabId();
@@ -546,12 +547,14 @@ function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
   const hidden = snapshot(win);
   assert.strictEqual(
     hidden.tokens,
-    'Tokens: 12.3K',
+    '',
     'a metric-free replay must not inherit the visible tab\u2019s ' +
-      'token count -- the tab keeps its own',
+      'token count, nor keep the previous transcript\u2019s: the ' +
+      'replay REPLACED that transcript, exactly as the active tab\u2019s ' +
+      'replayTaskEvents clears the row first',
   );
-  assert.strictEqual(hidden.budget, 'Cost: $0.42', 'nor its cost');
-  assert.strictEqual(hidden.steps, 'Steps: 7', 'nor its step count');
+  assert.strictEqual(hidden.budget, '', 'nor a cost');
+  assert.strictEqual(hidden.steps, '', 'nor a step count');
   win.close();
   console.log(
     '  ok - a metric-free replay does not steal the visible numbers',

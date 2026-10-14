@@ -73,6 +73,8 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, channel_work_dir
+from kiss.core.stop_signal import stop_requested
+from kiss.core.tool_interrupt import ToolCallInterrupted
 
 logger = logging.getLogger(__name__)
 
@@ -523,7 +525,10 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
             import time (``BaseException`` included: a file raising
             ``KeyboardInterrupt`` or ``SystemExit`` at import time is a
             broken file, not a cancelled task; the original raise stays
-            reachable as ``__cause__``).
+            reachable as ``__cause__``).  A Stop that lands inside the
+            import is re-raised unchanged instead: the per-tool Stop's
+            ``ToolCallInterrupted``, and a ``KeyboardInterrupt`` while
+            the calling thread's stop event is set.
     """
     # Type-check FIRST: comparing or repr-ing an untrusted non-string
     # object could run arbitrary code (raising ``__eq__``/``__repr__``),
@@ -554,11 +559,15 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
             code = compile(source, str(path), "exec", dont_inherit=True)
             exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
         except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-            logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
             if previous is None:
                 sys.modules.pop(module_name, None)
             else:
                 sys.modules[module_name] = previous
+            if isinstance(exc, ToolCallInterrupted) or (
+                isinstance(exc, KeyboardInterrupt) and stop_requested()
+            ):
+                raise  # a Stop (per-tool or the task's) landed inside the import
+            logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
             raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
     return module.__dict__
 

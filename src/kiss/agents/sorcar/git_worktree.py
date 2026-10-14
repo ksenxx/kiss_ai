@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 import weakref
 from collections.abc import Callable, Iterator, Sequence
@@ -34,6 +35,7 @@ from typing import IO, Any
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.html_to_markdown import html_to_markdown
+from kiss.core.locked import locked_call
 from kiss.core.processes import (
     SIGKILL,
     kill_process_group,
@@ -195,15 +197,27 @@ _repo_locks_guard = threading.Lock()
 
 # ``(resolved repo root, branch)`` pairs whose keep-for-review decision
 # is held in THIS process only: :meth:`GitWorktreeOps.save_preserve_marker`
-# could not write the durable ``kiss-preserve`` marker (e.g.
-# ``.git/config.lock`` held by another git process).  Recorded on every
-# failed write and dropped by the next successful one, so
-# :meth:`GitWorktreeOps.load_preserve_marker` — and through it every
-# same-process :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`, whose
-# owner-pid protection deliberately exempts this process — treats the
-# branch as preserved until the marker really is on disk.
+# could not write the durable marker file (an unwritable git dir).
+# Recorded on every failed write and dropped by the next successful
+# one, so :meth:`GitWorktreeOps.load_preserve_marker` — and through it
+# every same-process :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`,
+# whose owner-pid protection deliberately exempts this process — treats
+# the branch as preserved until the marker really is on disk.
 _volatile_preserve_claims: set[tuple[str, str]] = set()
-_volatile_preserve_guard = threading.Lock()
+_volatile_preserve_guard = threading.RLock()
+
+
+def _record_volatile_claim(key: tuple[str, str], saved: bool) -> None:
+    """Drop *key* from the volatile claims after a saved marker, add it after a failed one."""
+    if saved:
+        _volatile_preserve_claims.discard(key)
+    else:
+        _volatile_preserve_claims.add(key)
+
+
+def _has_volatile_claim(key: tuple[str, str]) -> bool:
+    """Return whether this process holds a volatile preserve claim for *key*."""
+    return key in _volatile_preserve_claims
 
 _REPO_SCOPED_GIT_ENV = (
     "GIT_DIR",
@@ -460,25 +474,17 @@ def _git(
     try:
         stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
         _kill_git(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-            proc.kill()
-            stdout = (
-                exc.stdout.decode("utf-8", "surrogateescape")
-                if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            )
-            stderr = (
-                exc.stderr.decode("utf-8", "surrogateescape")
-                if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            )
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", "surrogateescape")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "surrogateescape")
+            # Only a descendant that left the process group (its own
+            # setsid) can still hold the pipes; git itself is dead, so
+            # reap it and give up on its output.
+            stdout, stderr = "", ""
+            proc.wait()
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
@@ -1526,10 +1532,11 @@ class GitWorktreeOps:
 
     @staticmethod
     def delete_branch(repo: Path, branch: str) -> bool:
-        """Delete a branch and its git config section (best-effort).
+        """Delete a branch, its git config section and its preserve marker (best-effort).
 
         Tries ``-d`` first (safe delete), falls back to ``-D`` (force).
-        Also removes the ``branch.<name>.*`` config section.
+        Also removes the ``branch.<name>.*`` config section and the
+        preserve-for-review marker file.
 
         Args:
             repo: Git repo root path.
@@ -1546,6 +1553,10 @@ class GitWorktreeOps:
             result = _git("branch", "-D", branch, cwd=repo)
         if result.returncode == 0:
             GitWorktreeOps._remove_branch_config_section(repo, branch)
+            marker = GitWorktreeOps._preserve_marker_path(repo, branch)
+            if marker is not None:
+                with contextlib.suppress(OSError):
+                    marker.unlink()
             return True
         if GitWorktreeOps.branch_exists(repo, branch):
             logger.warning(
@@ -1922,8 +1933,19 @@ class GitWorktreeOps:
         publish that preserved work — the persisted marker makes
         that decision durable across process restarts.
 
-        When the write fails the decision is recorded in the process-
-        local :data:`_volatile_preserve_claims` instead, so within this
+        The marker is a file of its own under the repo's git dir
+        (:meth:`_preserve_marker_path`), created with one ``touch``: it
+        contends with nothing, neither a repo lock (a live owner's
+        worktree is never reclaimed by another process, and waiting for
+        one would park the caller behind a sibling's merge for as long
+        as that merge runs) nor git's own ``.git/config.lock``, which a
+        marker kept in ``git config`` lost to any concurrent git command
+        holding that file.  The file goes away with the branch
+        (:meth:`delete_branch`).
+
+        When the write fails all the same (an unwritable git dir) the
+        decision is recorded in the process-local
+        :data:`_volatile_preserve_claims` instead, so within this
         process :meth:`load_preserve_marker` already reports the branch
         as preserved; the caller keeps its in-memory claim and retries
         later, and the successful retry drops the volatile record.
@@ -1936,30 +1958,66 @@ class GitWorktreeOps:
             True if the marker was saved successfully.
         """
         key = (str(repo.resolve()), branch)
-        saved = GitWorktreeOps._save_branch_config(
-            repo, branch, "kiss-preserve", "1", "preserve-for-review marker",
-        )
-        with _volatile_preserve_guard:
-            if saved:
-                _volatile_preserve_claims.discard(key)
-            else:
-                _volatile_preserve_claims.add(key)
+        saved = False
+        path = GitWorktreeOps._preserve_marker_path(repo, branch)
+        if path is not None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+                saved = True
+            except OSError:
+                logger.warning(
+                    "Failed to write the preserve-for-review marker of branch '%s'",
+                    branch, exc_info=True,
+                )
+        locked_call(_volatile_preserve_guard, _record_volatile_claim, key, saved)
         return saved
 
     @staticmethod
     def load_preserve_marker(repo: Path, branch: str) -> bool:
         """Return True when *branch* is preserved for manual review.
 
-        Either the durable ``kiss-preserve`` marker is on disk, or this
-        process holds a volatile claim for *branch* because its marker
-        write failed (see :meth:`save_preserve_marker`).
+        Either the durable marker is on disk, or this process holds a
+        volatile claim for *branch* because its marker write failed
+        (see :meth:`save_preserve_marker`).
         """
-        if GitWorktreeOps._load_branch_config(
-            repo, branch, "kiss-preserve",
-        ) == "1":
+        if GitWorktreeOps._preserve_marker_on_disk(repo, branch):
             return True
-        with _volatile_preserve_guard:
-            return (str(repo.resolve()), branch) in _volatile_preserve_claims
+        key = (str(repo.resolve()), branch)
+        return locked_call(_volatile_preserve_guard, _has_volatile_claim, key)
+
+    @staticmethod
+    def _preserve_marker_on_disk(repo: Path, branch: str) -> bool:
+        """Return True when *branch*'s durable preserve marker exists.
+
+        The marker file, or the ``branch.<name>.kiss-preserve`` git
+        config key earlier versions wrote.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+        """
+        path = GitWorktreeOps._preserve_marker_path(repo, branch)
+        if path is not None and path.exists():
+            return True
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-preserve") == "1"
+
+    @staticmethod
+    def _preserve_marker_path(repo: Path, branch: str) -> Path | None:
+        """Return the preserve-for-review marker file of *branch*, or ``None``.
+
+        ``<git common dir>/kiss-preserve/<branch>``, the branch name
+        percent-encoded into one path component; ``None`` outside a
+        git repo.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+        """
+        git_common = _git_common_dir(repo)
+        if git_common is None:  # pragma: no cover — not a git repo
+            return None
+        return git_common / "kiss-preserve" / urllib.parse.quote(branch, safe="")
 
     @staticmethod
     def save_owner_pid(repo: Path, branch: str) -> bool:
@@ -3611,12 +3669,6 @@ _PRECOMMIT_FIX_LINES = (
     "    # fix pre-commit issues, then:\n"
     "    git commit --no-verify\n"
 )
-
-# Attempts to write the end-of-run preserve marker and the pause between
-# them (``.git/config.lock`` of a concurrent git command is short-lived).
-_PRESERVE_MARKER_ATTEMPTS = 3
-_PRESERVE_MARKER_RETRY_DELAY = 0.2
-
 
 def inside_kiss_worktree(path: Path | str) -> bool:
     """Whether *path* lies inside a ``<repo>/.kiss-worktrees/kiss_wt-*`` worktree.

@@ -19,152 +19,34 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import threading
-from collections import defaultdict
-from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, cast
-from urllib.parse import parse_qs, urlsplit
+from typing import Any
 
 import httplib2  # type: ignore[import-untyped]
 import pytest
 import requests
 
 from kiss.agents.third_party_agents import _composio_google as cg
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    API,
+    API_KEY,
+    FakeComposioServer,
+)
 from kiss.tests.conftest import IS_WINDOWS
-
-_API = "/api/v3.1"
-_KEY = "test-project-key"  # the project API key the ``composio`` fixture configures
-
-
-class _Request:
-    """One request the fake Composio API received."""
-
-    def __init__(self, method: str, path: str, query: dict[str, list[str]], body: Any) -> None:
-        self.method = method
-        self.path = path
-        self.query = query
-        self.body = body
-
-
-class _ComposioHandler(BaseHTTPRequestHandler):
-    def _handle(self) -> None:
-        parts = urlsplit(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length)
-        body = json.loads(raw) if raw else None
-        server = cast(_FakeComposio, self.server)
-        server.requests.append(_Request(self.command, parts.path, parse_qs(parts.query), body))
-        status, reply = server.route(self.command, parts.path, self.headers.get("x-api-key", ""))
-        if isinstance(reply, bytes):
-            payload, ctype = reply, "application/octet-stream"
-        else:
-            payload, ctype = json.dumps(reply).encode(), "application/json"
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    do_GET = do_POST = do_DELETE = _handle  # noqa: N815 - http.server naming
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence per-request logging."""
-
-
-class _FakeComposio(ThreadedHTTPServer):
-    """In-memory Composio project: auth configs, connected accounts, proxy."""
-
-    def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), _ComposioHandler)
-        self.requests: list[_Request] = []
-        self.auth_configs: list[dict[str, Any]] = []
-        # account id -> statuses returned by successive GETs (last one sticks)
-        self.accounts: dict[str, list[str]] = {}
-        self.undeletable: set[str] = set()
-        self.next_account = "ca_new"
-        self.proxy_reply: dict[str, Any] = {"status": 200, "data": {"ok": True}, "headers": {}}
-        self.download: tuple[int, bytes] = (200, b"%PDF-1.7 bytes")
-        # Per API key, set once that caller has polled a connected-account
-        # status: the ``finish_connect`` using the key has read its
-        # ``pending_id`` by then.  Concurrent callers are told apart by
-        # the key ``_client()`` reads from COMPOSIO_API_KEY when they start.
-        self.status_polled: defaultdict[str, threading.Event] = defaultdict(threading.Event)
-        # Per API key, an Event a status GET waits for before it is
-        # answered (a 503 if the wait expires): lets a test hold one
-        # caller's poll until another caller has finished.
-        # ``status_held[key]`` is set once such a poll is waiting.
-        self.status_holds: dict[str, threading.Event] = {}
-        self.status_held: defaultdict[str, threading.Event] = defaultdict(threading.Event)
-
-    @property
-    def base(self) -> str:
-        return f"http://127.0.0.1:{self.server_address[1]}"
-
-    def route(self, method: str, path: str, api_key: str) -> tuple[int, Any]:
-        if path == f"{_API}/auth_configs" and method == "GET":
-            return 200, {"items": self.auth_configs, "total_pages": 1, "current_page": 1}
-        if path == f"{_API}/auth_configs" and method == "POST":
-            created = {"id": "ac_created", "auth_scheme": "OAUTH2", "is_composio_managed": True}
-            self.auth_configs.append(created)
-            return 201, {"auth_config": created, "toolkit": {"slug": "gmail"}}
-        if path == f"{_API}/connected_accounts" and method == "GET":
-            return 200, {"items": [], "total_pages": 1, "current_page": 1}
-        if path == f"{_API}/connected_accounts/link":
-            self.accounts.setdefault(self.next_account, ["INITIATED"])
-            return 201, {
-                "connected_account_id": self.next_account,
-                "redirect_url": "https://connect.composio.test/link/abc",
-                "link_token": "lt_1",
-                "expires_at": "2030-01-01T00:00:00Z",
-            }
-        if path.startswith(f"{_API}/connected_accounts/"):
-            account = path.rsplit("/", 1)[1]
-            if account not in self.accounts or (method == "DELETE" and account in self.undeletable):
-                return 404, {"error": {"message": "not found", "status": 404}}
-            if method == "DELETE":
-                del self.accounts[account]
-                return 200, {"success": True}
-            hold = self.status_holds.get(api_key)
-            if hold is not None:
-                self.status_held[api_key].set()
-                if not hold.wait(timeout=15.0):
-                    # An expired hold is a test failure, never a normal answer.
-                    return 503, {"error": {"message": "status poll hold expired", "status": 503}}
-            statuses = self.accounts[account]
-            status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
-            self.status_polled[api_key].set()
-            return 200, {"id": account, "status": status}
-        if path == f"{_API}/tools/execute/proxy":
-            return 200, self.proxy_reply
-        if path == "/download":
-            return self.download
-        return 404, {"error": {"message": f"no route {method} {path}"}}
-
-    def paths(self, method: str) -> list[str]:
-        return [r.path for r in self.requests if r.method == method]
 
 
 @pytest.fixture
-def composio(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeComposio]:
-    server = _FakeComposio()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setenv("COMPOSIO_BASE_URL", server.base)
-    monkeypatch.setenv("COMPOSIO_API_KEY", _KEY)
-    # A developer's shell may pin auth configs for any service
-    # (KISS_COMPOSIO_AUTH_CONFIG_GOOGLE_CALENDAR=ac_...); every override
-    # must go so the tests exercise the list/create path.
-    monkeypatch.delenv("KISS_COMPOSIO_USER_ID", raising=False)
-    for name in [n for n in os.environ if n.startswith("KISS_COMPOSIO_AUTH_CONFIG_")]:
-        monkeypatch.delenv(name)
-    try:
-        yield server
-    finally:
-        stop_http_server(server, thread)
+def composio(composio: FakeComposioServer, isolated_kiss_home: Path) -> FakeComposioServer:
+    """The shared fake, with this module's conventions.
+
+    Every Connect Link creates ``ca_new`` (a test changes ``next_account``
+    for a second sign-in) and the proxy answers a canned reply the tests
+    override per case.
+    """
+    composio.next_account = "ca_new"
+    composio.proxy_reply = {"status": 200, "data": {"ok": True}, "headers": {}}
+    return composio
 
 
 def _state(service: str) -> dict[str, Any]:
@@ -225,7 +107,7 @@ def test_invalid_state_files_read_as_empty(isolated_kiss_home: Path) -> None:
 
 
 def test_start_connect_reuses_newest_auth_config(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("KISS_COMPOSIO_USER_ID", "bob")
     composio.auth_configs = [
@@ -236,56 +118,56 @@ def test_start_connect_reuses_newest_auth_config(
     answer = cg.start_connect("gmail", "Gmail")
     assert answer["ok"] is True
     assert answer["status"] == "consent_required"
-    assert answer["verification_uri"] == "https://connect.composio.test/link/abc"
+    assert answer["verification_uri"] == "https://connect.composio.dev/link/ca_new"
     assert answer["browser_opened"] is False
     assert "finish_gmail_auth()" in answer["instructions"]
-    assert "https://connect.composio.test/link/abc" in answer["instructions"]
+    assert "https://connect.composio.dev/link/ca_new" in answer["instructions"]
 
     listing = composio.requests[0]
-    assert (listing.method, listing.path) == ("GET", f"{_API}/auth_configs")
-    assert listing.query["toolkit_slug"] == ["gmail"]
-    assert f"{_API}/auth_configs" not in composio.paths("POST")
-    link = next(r for r in composio.requests if r.path.endswith("/link"))
-    assert link.body == {"auth_config_id": "ac_newest", "user_id": "bob"}
+    assert (listing["method"], listing["path"]) == ("GET", f"{API}/auth_configs")
+    assert listing["query"]["toolkit_slug"] == ["gmail"]
+    assert f"{API}/auth_configs" not in composio.paths("POST")
+    link = next(r for r in composio.requests if r["path"].endswith("/link"))
+    assert link["body"] == {"auth_config_id": "ac_newest", "user_id": "bob"}
     assert _state("gmail") == {"pending_id": "ca_new"}
 
 
-def test_start_connect_creates_auth_config_when_none(composio: _FakeComposio) -> None:
+def test_start_connect_creates_auth_config_when_none(composio: FakeComposioServer) -> None:
     answer = cg.start_connect("google_calendar", "Google Calendar")
     assert answer["ok"] is True
-    create = next(
-        r for r in composio.requests if r.method == "POST" and r.path.endswith("/auth_configs")
-    )
-    assert create.body["toolkit"] == {"slug": "googlecalendar"}
-    assert create.body["auth_config"]["type"] == "use_composio_managed_auth"
-    link = next(r for r in composio.requests if r.path.endswith("/link"))
-    assert link.body["auth_config_id"] == "ac_created"
+    create = next(r for r in composio.requests if r["method"] == "POST")
+    assert create["path"].endswith("/auth_configs")
+    assert create["body"]["toolkit"] == {"slug": "googlecalendar"}
+    assert create["body"]["auth_config"]["type"] == "use_composio_managed_auth"
+    link = next(r for r in composio.requests if r["path"].endswith("/link"))
+    assert link["body"]["auth_config_id"] == composio.auth_configs[0]["id"]
 
 
 def test_start_connect_auth_config_override(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("KISS_COMPOSIO_AUTH_CONFIG_GMAIL", " ac_pinned ")
     _connect("gmail", "ca_existing")
     answer = cg.start_connect("gmail", "Gmail")
     assert answer["ok"] is True
-    assert not [r for r in composio.requests if r.path.endswith("/auth_configs")]
-    link = next(r for r in composio.requests if r.path.endswith("/link"))
-    assert link.body["auth_config_id"] == "ac_pinned"
+    assert not [r for r in composio.requests if r["path"].endswith("/auth_configs")]
+    link = next(r for r in composio.requests if r["path"].endswith("/link"))
+    assert link["body"]["auth_config_id"] == "ac_pinned"
     # The existing connection is kept until the new one becomes active.
     assert _state("gmail") == {"connected_account_id": "ca_existing", "pending_id": "ca_new"}
 
 
 def test_start_connect_uses_saved_api_key(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("COMPOSIO_API_KEY")
     cg.save_api_key("saved-key")
+    composio.api_keys.add("saved-key")
     assert cg.start_connect("gmail", "Gmail")["ok"] is True
 
 
 def test_start_connect_missing_api_key(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("COMPOSIO_API_KEY")
     answer = cg.start_connect("gmail", "Gmail")
@@ -300,7 +182,7 @@ def test_start_connect_missing_api_key(
 # ---------------------------------------------------------------------------
 
 
-def test_finish_connect_without_pending(composio: _FakeComposio) -> None:
+def test_finish_connect_without_pending(composio: FakeComposioServer) -> None:
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {
         "ok": False,
@@ -308,7 +190,11 @@ def test_finish_connect_without_pending(composio: _FakeComposio) -> None:
     }
 
 
-def test_finish_connect_pending_timeout(composio: _FakeComposio) -> None:
+def test_finish_connect_pending_timeout(
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pending grace: the SDK polls once, sleeps 1 s, then gives up.
+    monkeypatch.setattr(cg, "_FINISH_WAIT_SECONDS", 0.2)
     assert cg.start_connect("gmail", "Gmail")["ok"]
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer["ok"] is False
@@ -316,57 +202,57 @@ def test_finish_connect_pending_timeout(composio: _FakeComposio) -> None:
     assert _state("gmail") == {"pending_id": "ca_new"}
 
 
-def test_finish_connect_active_replaces_and_deletes_previous(composio: _FakeComposio) -> None:
-    composio.accounts["ca_prev"] = ["ACTIVE"]
+def test_finish_connect_active_replaces_and_deletes_previous(composio: FakeComposioServer) -> None:
+    composio.accounts["ca_prev"] = "ACTIVE"
     _connect("gmail", "ca_prev")
     assert cg.start_connect("gmail", "Gmail")["ok"]
-    composio.accounts["ca_new"] = ["INITIATED", "INITIATED", "ACTIVE"]
+    composio.set_statuses("ca_new", "INITIATED", "INITIATED", "ACTIVE")
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {"ok": True, "message": "Gmail connected through Composio."}
     assert _state("gmail") == {"connected_account_id": "ca_new"}
-    assert composio.paths("DELETE") == [f"{_API}/connected_accounts/ca_prev"]
+    assert composio.paths("DELETE") == [f"{API}/connected_accounts/ca_prev"]
     assert "ca_prev" not in composio.accounts
 
 
-def test_finish_connect_active_same_account_not_deleted(composio: _FakeComposio) -> None:
+def test_finish_connect_active_same_account_not_deleted(composio: FakeComposioServer) -> None:
     cg.service_dir("gmail").mkdir(parents=True)
     (cg.service_dir("gmail") / "composio.json").write_text(
         json.dumps({"connected_account_id": "ca_same", "pending_id": "ca_same"})
     )
-    composio.accounts["ca_same"] = ["ACTIVE"]
+    composio.accounts["ca_same"] = "ACTIVE"
     assert cg.finish_connect("gmail", "Gmail")["ok"] is True
     assert composio.paths("DELETE") == []
 
 
-def test_finish_connect_previous_delete_failure_is_ignored(composio: _FakeComposio) -> None:
-    composio.accounts["ca_prev"] = ["ACTIVE"]
+def test_finish_connect_previous_delete_failure_is_ignored(composio: FakeComposioServer) -> None:
+    composio.accounts["ca_prev"] = "ACTIVE"
     composio.undeletable.add("ca_prev")
     _connect("gmail", "ca_prev")
     cg.start_connect("gmail", "Gmail")
-    composio.accounts["ca_new"] = ["ACTIVE"]
+    composio.accounts["ca_new"] = "ACTIVE"
     assert cg.finish_connect("gmail", "Gmail")["ok"] is True
     assert _state("gmail") == {"connected_account_id": "ca_new"}
 
 
-def test_finish_connect_failed_state(composio: _FakeComposio) -> None:
+def test_finish_connect_failed_state(composio: FakeComposioServer) -> None:
     _connect("gmail", "ca_prev")
     cg.start_connect("gmail", "Gmail")
-    composio.accounts["ca_new"] = ["FAILED"]
+    composio.accounts["ca_new"] = "FAILED"
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {"ok": False, "error": "Gmail connection ended in state FAILED"}
     assert _state("gmail") == {"connected_account_id": "ca_prev"}
 
 
-def test_finish_connect_fails_while_waiting(composio: _FakeComposio) -> None:
+def test_finish_connect_fails_while_waiting(composio: FakeComposioServer) -> None:
     cg.start_connect("gmail", "Gmail")
-    composio.accounts["ca_new"] = ["INITIATED", "FAILED"]
+    composio.set_statuses("ca_new", "INITIATED", "FAILED")
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer["ok"] is False
     assert answer["error"].startswith("Gmail connection failed:")
     assert "FAILED" in answer["error"]
 
 
-def test_finish_connect_unknown_account_error(composio: _FakeComposio) -> None:
+def test_finish_connect_unknown_account_error(composio: FakeComposioServer) -> None:
     cg.service_dir("gmail").mkdir(parents=True)
     (cg.service_dir("gmail") / "composio.json").write_text(json.dumps({"pending_id": "ca_gone"}))
     answer = cg.finish_connect("gmail", "Gmail")
@@ -374,29 +260,29 @@ def test_finish_connect_unknown_account_error(composio: _FakeComposio) -> None:
     assert answer["error"].startswith("Gmail connection failed:")
 
 
-def test_finish_connect_keeps_waiting_through_inactive(composio: _FakeComposio) -> None:
+def test_finish_connect_keeps_waiting_through_inactive(composio: FakeComposioServer) -> None:
     """INACTIVE is not terminal: the wait continues until the account activates."""
     assert cg.start_connect("gmail", "Gmail")["ok"]
     # One status per poll.  finish_connect's own GET, then the SDK's
     # ``from_id`` GET, then the SDK wait loop's first GET all see
     # INACTIVE, so the loop keeps waiting (one 1 s sleep) until the
     # fourth poll answers ACTIVE.
-    composio.accounts["ca_new"] = ["INACTIVE", "INACTIVE", "INACTIVE", "ACTIVE"]
+    composio.set_statuses("ca_new", "INACTIVE", "INACTIVE", "INACTIVE", "ACTIVE")
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {"ok": True, "message": "Gmail connected through Composio."}
     assert _state("gmail") == {"connected_account_id": "ca_new"}
-    assert composio.paths("GET").count(f"{_API}/connected_accounts/ca_new") == 4
+    assert composio.paths("GET").count(f"{API}/connected_accounts/ca_new") == 4
 
 
 def test_start_connect_twice_deletes_the_superseded_pending_account(
-    composio: _FakeComposio,
+    composio: FakeComposioServer,
 ) -> None:
     """A second Connect Link deletes the first, unfinished account at Composio."""
     assert cg.start_connect("gmail", "Gmail")["ok"]
     assert _state("gmail") == {"pending_id": "ca_new"}
     composio.next_account = "ca_second"
     assert cg.start_connect("gmail", "Gmail")["ok"]
-    assert composio.paths("DELETE") == [f"{_API}/connected_accounts/ca_new"]
+    assert composio.paths("DELETE") == [f"{API}/connected_accounts/ca_new"]
     assert "ca_new" not in composio.accounts and "ca_second" in composio.accounts
     assert _state("gmail") == {"pending_id": "ca_second"}
 
@@ -406,7 +292,7 @@ def test_start_connect_twice_deletes_the_superseded_pending_account(
 
 
 def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account(
-    composio: _FakeComposio,
+    composio: FakeComposioServer,
 ) -> None:
     """A sign-in started during the wait owns the state; the stale one is deleted.
 
@@ -418,16 +304,16 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
     deleted again and nothing is recorded for it.
     """
     assert cg.start_connect("gmail", "Gmail")["ok"]  # A = ca_new
-    composio.accounts["ca_new"] = ["INACTIVE"]
+    composio.accounts["ca_new"] = "INACTIVE"
     composio.undeletable.add("ca_new")
     started_b: dict[str, Any] = {}
 
     def start_b_then_activate_a() -> None:
         # Inject only once finish_connect(A) has polled A, i.e. holds A as pending.
-        started_b["polled"] = composio.status_polled[_KEY].wait(timeout=10.0)
+        started_b["polled"] = composio.status_polled[API_KEY].wait(timeout=10.0)
         composio.next_account = "ca_b"
         started_b.update(cg.start_connect("gmail", "Gmail"))
-        composio.accounts["ca_new"] = ["ACTIVE"]
+        composio.accounts["ca_new"] = "ACTIVE"
 
     injector = threading.Thread(target=start_b_then_activate_a)
     injector.start()
@@ -441,18 +327,18 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
         "error": "a newer Gmail sign-in was started; finish that one instead",
     }
     # start_connect(B) tried to delete A, then finish_connect(A) did too.
-    assert composio.paths("DELETE") == [f"{_API}/connected_accounts/ca_new"] * 2
+    assert composio.paths("DELETE") == [f"{API}/connected_accounts/ca_new"] * 2
     assert _state("gmail") == {"pending_id": "ca_b"}
     assert cg.connected_account_id("gmail") == ""
 
     # Only B, once ACTIVE, gets recorded.
-    composio.accounts["ca_b"] = ["ACTIVE"]
+    composio.accounts["ca_b"] = "ACTIVE"
     assert cg.finish_connect("gmail", "Gmail")["ok"] is True
     assert _state("gmail") == {"connected_account_id": "ca_b"}
 
 
 def test_overlapping_finish_calls_keep_the_recorded_account(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A finish that loses the race to another finish must not delete the account.
 
@@ -463,7 +349,7 @@ def test_overlapping_finish_calls_keep_the_recorded_account(
     and answers ok without deleting or rewriting anything.
     """
     assert cg.start_connect("gmail", "Gmail")["ok"]  # A = ca_new
-    composio.accounts["ca_new"] = ["INACTIVE"]
+    composio.accounts["ca_new"] = "INACTIVE"
     state_file = cg.service_dir("gmail") / "composio.json"
     first: dict[str, Any] = {}
     second: dict[str, Any] = {}
@@ -476,18 +362,19 @@ def test_overlapping_finish_calls_keep_the_recorded_account(
     # wait deadline exists) is the one held.  The second finish uses its
     # own API key so the fake can tell its polls apart.
     release_first = threading.Event()
-    composio.status_holds[_KEY] = release_first
+    composio.status_holds[API_KEY] = release_first
     finishers = [
         threading.Thread(target=finish_into, args=(first,)),
         threading.Thread(target=finish_into, args=(second,)),
     ]
     try:
         finishers[0].start()
-        assert composio.status_held[_KEY].wait(timeout=10.0)
+        assert composio.status_held[API_KEY].wait(timeout=10.0)
+        composio.api_keys.add("second-key")
         monkeypatch.setenv("COMPOSIO_API_KEY", "second-key")
         finishers[1].start()
         assert composio.status_polled["second-key"].wait(timeout=10.0)
-        composio.accounts["ca_new"] = ["ACTIVE"]
+        composio.accounts["ca_new"] = "ACTIVE"
         finishers[1].join(timeout=15.0)
         assert not finishers[1].is_alive()
         assert second == {"ok": True, "message": "Gmail connected through Composio."}
@@ -512,18 +399,18 @@ def test_overlapping_finish_calls_keep_the_recorded_account(
 # ---------------------------------------------------------------------------
 
 
-def test_clear_connection_deletes_remote_account(composio: _FakeComposio) -> None:
-    composio.accounts["ca_live"] = ["ACTIVE"]
+def test_clear_connection_deletes_remote_account(composio: FakeComposioServer) -> None:
+    composio.accounts["ca_live"] = "ACTIVE"
     _connect("gmail", "ca_live")
     cg.clear_connection("gmail")
-    assert composio.paths("DELETE") == [f"{_API}/connected_accounts/ca_live"]
+    assert composio.paths("DELETE") == [f"{API}/connected_accounts/ca_live"]
     assert not (cg.service_dir("gmail") / "composio.json").exists()
     cg.clear_connection("gmail")  # nothing connected: no request, no error
     assert len(composio.requests) == 1
 
 
 def test_clear_connection_without_api_key_only_forgets(
-    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("COMPOSIO_API_KEY")
     _connect("gmail", "ca_live")
@@ -532,12 +419,12 @@ def test_clear_connection_without_api_key_only_forgets(
     assert cg.connected_account_id("gmail") == ""
 
 
-def test_clear_connection_deletes_a_pending_only_account(composio: _FakeComposio) -> None:
+def test_clear_connection_deletes_a_pending_only_account(composio: FakeComposioServer) -> None:
     """An unfinished sign-in is deleted at Composio too, not just forgotten."""
     assert cg.start_connect("gmail", "Gmail")["ok"]
     assert _state("gmail") == {"pending_id": "ca_new"}
     cg.clear_connection("gmail")
-    assert composio.paths("DELETE") == [f"{_API}/connected_accounts/ca_new"]
+    assert composio.paths("DELETE") == [f"{API}/connected_accounts/ca_new"]
     assert "ca_new" not in composio.accounts
     assert not (cg.service_dir("gmail") / "composio.json").exists()
     assert cg.finish_connect("gmail", "Gmail")["ok"] is False
@@ -548,11 +435,11 @@ def test_clear_connection_deletes_a_pending_only_account(composio: _FakeComposio
 # ---------------------------------------------------------------------------
 
 
-def _proxy_bodies(server: _FakeComposio) -> list[Any]:
-    return [r.body for r in server.requests if r.path == f"{_API}/tools/execute/proxy"]
+def _proxy_bodies(server: FakeComposioServer) -> list[Any]:
+    return [r["body"] for r in server.requests if r["path"] == f"{API}/tools/execute/proxy"]
 
 
-def test_session_get_params_and_headers(composio: _FakeComposio) -> None:
+def test_session_get_params_and_headers(composio: FakeComposioServer) -> None:
     _connect("gmail", "ca_live")
     composio.proxy_reply = {"status": 200, "data": {"messages": [1]}, "headers": {"X-Up": "1"}}
     response = cg.ComposioSession("gmail").get(
@@ -586,7 +473,7 @@ def test_session_get_params_and_headers(composio: _FakeComposio) -> None:
     response.raise_for_status()
 
 
-def test_session_bodies_and_methods(composio: _FakeComposio) -> None:
+def test_session_bodies_and_methods(composio: FakeComposioServer) -> None:
     _connect("gmail", "ca_live")
     session = cg.ComposioSession("gmail")
     url = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
@@ -601,7 +488,7 @@ def test_session_bodies_and_methods(composio: _FakeComposio) -> None:
     assert all(b.get("parameters") is None for b in bodies)
 
 
-def test_session_sends_non_json_bodies_as_binary(composio: _FakeComposio) -> None:
+def test_session_sends_non_json_bodies_as_binary(composio: FakeComposioServer) -> None:
     """Non-JSON bodies travel base64-encoded in ``binary_body`` with their content type."""
     _connect("gmail", "ca_live")
     session = cg.ComposioSession("gmail")
@@ -637,7 +524,7 @@ def test_session_sends_non_json_bodies_as_binary(composio: _FakeComposio) -> Non
     ]
 
 
-def test_http_method_override_becomes_a_get(composio: _FakeComposio) -> None:
+def test_http_method_override_becomes_a_get(composio: FakeComposioServer) -> None:
     """googleapiclient's over-long-GET-as-POST is sent to the proxy as the real GET."""
     _connect("gmail", "ca_live")
     cg.ComposioHttp("gmail").request(
@@ -659,12 +546,12 @@ def test_http_method_override_becomes_a_get(composio: _FakeComposio) -> None:
     )
 
 
-def test_session_not_connected(composio: _FakeComposio) -> None:
+def test_session_not_connected(composio: FakeComposioServer) -> None:
     with pytest.raises(RuntimeError, match="gmail is not connected; call authenticate_gmail"):
         cg.ComposioSession("gmail").get("https://gmail.googleapis.com/x")
 
 
-def test_proxy_text_and_empty_data(composio: _FakeComposio) -> None:
+def test_proxy_text_and_empty_data(composio: FakeComposioServer) -> None:
     _connect("gmail", "ca_live")
     composio.proxy_reply = {
         "status": 201,
@@ -685,13 +572,14 @@ def test_proxy_text_and_empty_data(composio: _FakeComposio) -> None:
     assert dict(response.headers) == {}
 
 
-def test_proxy_binary_data_download(composio: _FakeComposio) -> None:
+def test_proxy_binary_data_download(composio: FakeComposioServer) -> None:
     _connect("google_drive", "ca_drive")
+    composio.downloads.append(("application/pdf", b"%PDF-1.7 bytes"))
     composio.proxy_reply = {
         "status": 200,
         "headers": {"X-Drive": "1"},
         "binary_data": {
-            "url": f"{composio.base}/download",
+            "url": f"{composio.base_url}/download/0",
             "content_type": "application/pdf",
             "size": 14,
         },
@@ -703,12 +591,12 @@ def test_proxy_binary_data_download(composio: _FakeComposio) -> None:
     assert response.headers["Content-Type"] == "application/pdf"
     assert response.headers["X-Drive"] == "1"
 
-    composio.download = (404, b"gone")
+    composio.proxy_reply["binary_data"]["url"] = f"{composio.base_url}/download/1"  # none
     with pytest.raises(requests.HTTPError):
         cg.ComposioSession("google_drive").get("https://www.googleapis.com/drive/v3/files/f1")
 
 
-def test_composio_http_returns_httplib2_response(composio: _FakeComposio) -> None:
+def test_composio_http_returns_httplib2_response(composio: FakeComposioServer) -> None:
     _connect("google_docs", "ca_docs")
     composio.proxy_reply = {
         "status": 404,

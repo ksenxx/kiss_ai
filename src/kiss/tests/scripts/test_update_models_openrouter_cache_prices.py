@@ -226,10 +226,11 @@ def test_get_current_model_info_reports_only_stored_cache_prices(
     loaded = model_info._load_model_info()
     for name, info in loaded.items():
         model_info._apply_cache_pricing(name, info)
-    # Load-time defaults: gemma got the Google 0.1x rule, gemini kept its stored read price
-    # and did NOT receive a default write price.
-    assert loaded["openrouter/google/gemma-9-it"].cache_read_price_per_1M == pytest.approx(0.008)
-    assert loaded["openrouter/google/gemma-9-it"].cache_write_price_per_1M == 0.0
+    # Load-time defaults: gemma (open-weight, no published cache discount) gets
+    # none and bills cached tokens at the input price; gemini kept its stored
+    # read price and did NOT receive a default write price.
+    assert loaded["openrouter/google/gemma-9-it"].cache_read_price_per_1M is None
+    assert loaded["openrouter/google/gemma-9-it"].cache_write_price_per_1M is None
     assert loaded["openrouter/google/gemini-9-pro"].cache_read_price_per_1M == pytest.approx(0.2)
     assert loaded["openrouter/google/gemini-9-pro"].cache_write_price_per_1M is None
     monkeypatch.setattr(model_info, "MODEL_INFO", loaded)

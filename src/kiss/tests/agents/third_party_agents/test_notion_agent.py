@@ -893,10 +893,10 @@ def test_non_json_response_returns_ok_false(backend) -> None:
     assert json.loads(err) == {"ok": False, "error": "non-JSON response from Notion API"}
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(refusing_port: int) -> None:
     """Every tool returns ok:false when the API is unreachable — never raises."""
     b = NotionChannelBackend()
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._token = _TOKEN
     for out in _call_every_tool(b):
         result = json.loads(out)

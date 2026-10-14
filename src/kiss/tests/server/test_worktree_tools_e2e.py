@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -395,14 +397,15 @@ class TestFailedMergeFromAnIgnoredSubdirectory(_ScriptedRun):
         self.assertEqual(list((self.repo / ".kiss-worktrees").glob("kiss_wt-*")), [])
 
 
-class TestPreserveMarkerWaitsForRepoLocks(unittest.TestCase):
-    """The end-of-run preserve marker is written under the repo locks.
+class TestPreserveMarkerDoesNotWaitForRepoLocks(unittest.TestCase):
+    """The end-of-run preserve marker is queued behind no lock at all.
 
-    Another thread (standing in for a reclaim in another process)
-    holds ``repo_lock`` + the cross-process reclaim lock and git's own
-    ``.git/config.lock`` for longer than the write's retries would
-    cover; the marker must still land once the locks are released,
-    because the write waits for them instead of failing past them.
+    Another thread (standing in for a sibling task's merge, whose
+    conflict-resolving agent can hold ``repo_lock`` + the cross-process
+    reclaim lock for minutes, and whose git commands hold
+    ``.git/config.lock``) holds all three; the marker is a file of its
+    own, so it lands while the locks are still held, is durable (a
+    fresh process sees it), and this task's run can finish.
     """
 
     HOLD_SECONDS = 1.0
@@ -421,13 +424,15 @@ class TestPreserveMarkerWaitsForRepoLocks(unittest.TestCase):
 
     def _hold_locks(self, released_at: list[float]) -> None:
         config_lock = self.repo / ".git" / "config.lock"
-        with repo_lock(self.repo), _reclaim_process_lock(self.repo):
-            config_lock.write_text("")
-            time.sleep(self.HOLD_SECONDS)
+        config_lock.write_text("")
+        try:
+            with repo_lock(self.repo), _reclaim_process_lock(self.repo):
+                time.sleep(self.HOLD_SECONDS)
+                released_at.append(time.monotonic())
+        finally:
             config_lock.unlink()
-            released_at.append(time.monotonic())
 
-    def test_marker_is_written_after_the_locks_are_released(self) -> None:
+    def test_marker_is_written_while_the_locks_are_held(self) -> None:
         wt = self.agent._wt
         assert wt is not None
         released_at: list[float] = []
@@ -436,9 +441,21 @@ class TestPreserveMarkerWaitsForRepoLocks(unittest.TestCase):
         time.sleep(0.1)  # let the holder take the locks first
         self.agent._mark_unmerged_worktree_preserved()
         written_at = time.monotonic()
+        marked = GitWorktreeOps.load_preserve_marker(self.repo, wt.branch)
+        durable = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys; from pathlib import Path\n"
+                "from kiss.agents.sorcar.git_worktree import GitWorktreeOps\n"
+                "print(GitWorktreeOps.load_preserve_marker(Path(sys.argv[1]), sys.argv[2]))",
+                str(self.repo), wt.branch,
+            ],
+            capture_output=True, text=True, timeout=120,
+        ).stdout.strip()
         holder.join()
-        self.assertTrue(GitWorktreeOps.load_preserve_marker(self.repo, wt.branch))
-        self.assertGreaterEqual(written_at, released_at[0])
+        self.assertTrue(marked)
+        self.assertEqual(durable, "True")
+        self.assertLess(written_at, released_at[0])
 
 
 class TestEmptyWorktreeIsDiscardedWithRescue(_ScriptedRun):

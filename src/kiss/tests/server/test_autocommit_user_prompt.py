@@ -12,7 +12,7 @@ original task prompt so the commit is traceable to the request that
 produced it.
 
 These tests exercise the real
-:func:`~kiss.server.helpers.generate_commit_message_from_diff`
+:func:`~kiss.agents.sorcar.commit_message.generate_commit_message_from_diff`
 and
 :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._auto_commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
@@ -24,8 +24,10 @@ external model.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.commit_message import _append_user_prompt
-from kiss.server.helpers import generate_commit_message_from_diff
+from kiss.agents.sorcar.commit_message import (
+    _append_user_prompt,
+    generate_commit_message_from_diff,
+)
 from kiss.tests.agents.sorcar.test_autocommit_user_prompt import (  # noqa: F401
     _LLMUnavailable,
 )

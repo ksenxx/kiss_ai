@@ -10,7 +10,7 @@ it as the ``last_task_id`` property, which reads under the *same*
 lock.  Two server-side readers still reached past that property into
 the private attribute:
 
-* ``commands._owner_task_id`` — stamps a follow-up prompt queued while
+* ``commands._queue_prompt_on_owner`` — stamps a follow-up prompt queued while
   a task runs, so the echo lands in the running task's transcript.
 * ``json_printer._persist_event`` — decides which task an event
   belongs to before persisting it.
@@ -122,7 +122,7 @@ class _ReaderHarness(unittest.TestCase):
 
 
 class TestQueuedPromptIsStampedWithTheLiveTaskId(_ReaderHarness):
-    """``commands._owner_task_id`` resolves the running agent's id."""
+    """``commands._queue_prompt_on_owner`` resolves the running agent's id."""
 
     def test_followup_echo_carries_the_running_tasks_id(self) -> None:
         """A prompt typed mid-run is echoed into that run's transcript."""

@@ -24,6 +24,7 @@ from typing import Any, NamedTuple, cast
 
 import yaml
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.agent_dispatch import (
     kill_jobs_of,
     live_agent_jobs,
@@ -38,8 +39,6 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.git_worktree import (
     _PRECOMMIT_FIX_LINES,
-    _PRESERVE_MARKER_ATTEMPTS,
-    _PRESERVE_MARKER_RETRY_DELAY,
     _WORKTREE_SUBDIR,
     GitWorktree,
     GitWorktreeOps,
@@ -843,25 +842,48 @@ def _attribute_sub_usage(
             # session-start rebase (``_set_printer_offsets``) also takes,
             # so publishes land in snapshot order and the offsets never
             # decrease.
-            with _OFFSET_PUBLISH_LOCK:
-                # One coherent triple (see _agent_usage): separate property
-                # reads could tear across a concurrent snapshot publish.
-                budget_total, tokens_total, steps_total = _agent_usage(agent)
-                # The offsets belong to the PARENT's task.  This runs on
-                # whatever thread finished the child (a fan-out's tool
-                # thread, but also the ``/update`` worker or a server
-                # thread), so a thread-keyed setter would file them under
-                # that thread's task; name the parent's task when it has one.
-                task_id = str(getattr(agent, "last_task_id", "") or "")
-                set_offsets = getattr(printer, "set_usage_offsets", None)
-                if task_id and callable(set_offsets):
-                    set_offsets(task_id, budget_total, tokens_total, steps_total)
-                else:
-                    printer.budget_offset = budget_total
-                    printer.tokens_offset = tokens_total
-                    printer.steps_offset = steps_total
+            locked_call(_OFFSET_PUBLISH_LOCK, _publish_usage_offsets, agent, printer)
         except Exception:
             pass
+
+
+def _first_cleanup_error(
+    first: BaseException | None, step: str, exc: BaseException,
+) -> BaseException:
+    """Log that run-cleanup *step* raised *exc*; return the first exception so far.
+
+    Args:
+        first: The first exception an earlier step raised, or ``None``.
+        step: The failing step's name.
+        exc: Its exception (the current one; logged with its traceback).
+    """
+    logger.warning("run cleanup step %s raised", step, exc_info=True)
+    return exc if first is None else first
+
+
+def _publish_usage_offsets(agent: Any, printer: Any) -> None:
+    """Publish *agent*'s usage totals as *printer*'s offsets (lock held).
+
+    Args:
+        agent: The agent whose ledger totals are published.
+        printer: Its printer.
+    """
+    # One coherent triple (see _agent_usage): separate property
+    # reads could tear across a concurrent snapshot publish.
+    budget_total, tokens_total, steps_total = _agent_usage(agent)
+    # The offsets belong to the PARENT's task.  This runs on
+    # whatever thread finished the child (a fan-out's tool
+    # thread, but also the ``/update`` worker or a server
+    # thread), so a thread-keyed setter would file them under
+    # that thread's task; name the parent's task when it has one.
+    task_id = str(getattr(agent, "last_task_id", "") or "")
+    set_offsets = getattr(printer, "set_usage_offsets", None)
+    if task_id and callable(set_offsets):
+        set_offsets(task_id, budget_total, tokens_total, steps_total)
+    else:
+        printer.budget_offset = budget_total
+        printer.tokens_offset = tokens_total
+        printer.steps_offset = steps_total
 
 
 def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
@@ -1009,7 +1031,7 @@ class SorcarAgent(RelentlessAgent):
         self._wts: dict[Path, GitWorktree] = {}
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
-        self._warning_lock: threading.Lock = threading.Lock()
+        self._warning_lock: threading.RLock = threading.RLock()
         # Start of the current task block, stamped by the daemon's task
         # runner (``cmd["_start_ms"]``) and read back when a tab rebinds.
         self._task_start_ms: int = 0
@@ -2344,49 +2366,7 @@ class SorcarAgent(RelentlessAgent):
                     tool_call_hook=tool_call_hook,
                 )
             finally:
-                # No sub-task outlives its caller: a run_agent job the run
-                # neither waited for nor killed is stopped here, before the
-                # run's terminal status goes out.  The cancels are sent
-                # before its bounded join, and a stop's injected interrupt
-                # landing in that join must not skip the cleanup below: it
-                # is held and re-raised after it when the run was otherwise
-                # returning normally (the stop must still be honoured), or
-                # dropped when the run is already unwinding on an exception.
-                unwinding = sys.exc_info()[1] is not None
-                interrupted: BaseException | None = None
-                try:
-                    if kill_jobs_of(self):
-                        logger.info("stopped run_agent jobs still running at the end of the task")
-                except BaseException as exc:  # noqa: BLE001 — held, see above
-                    logger.warning("interrupted while waiting for cancelled run_agent jobs")
-                    interrupted = None if unwinding else exc
-                # A worktree the run leaves unmerged awaits the user's
-                # decision: marked on disk so no orphan reclaim in another
-                # process merges its branch behind the user's back.
-                self._mark_unmerged_worktree_preserved()
-                self._fold_classifier_usage()
-                if self.web_use_tool:
-                    self.web_use_tool.close()
-                self.web_use_tool = None
-                self._memory_tools = None
-                self._ask_user_question_callback = None
-                self.pre_step_hook = None
-                self.tool_call_guard = None
-                # The hook is a bound method of this run's UsefulTools;
-                # left in place it would keep that instance (its read
-                # cache, stream callback, stop event) alive for the next
-                # run and be called by a docker run that never installs one.
-                self.context_reset_hook = None
-                # The run's last word on its spend, always: a sub-task's
-                # fold can land on its own thread at any point after the
-                # run's last event (between a session's final event and its
-                # bank, during the join above, or ahead of the classifier
-                # fold), so no snapshot taken here can tell whether that
-                # event already carried it.  The persisted row reads the
-                # same totals after ``run`` returns.
-                self._emit_usage_totals()
-                if interrupted is not None:
-                    raise interrupted
+                self._finish_run(unwinding=sys.exc_info()[1] is not None)
         except (KISSError, SeaError):
             # A broken SEA method (its ``system_prompt`` or ``tools``
             # run inside the agent) is a setup failure the caller must
@@ -3002,7 +2982,11 @@ class SorcarAgent(RelentlessAgent):
         # merge/reclaim/discard stashes, checks out and resets that same
         # tree under the cross-process flock, so the capture takes the
         # flock too (repo_lock -> flock order, like every other taker).
-        with repo_lock(repo), _reclaim_process_lock(repo):
+        return locked_call(repo_lock(repo), self._setup_worktree_locked, repo, work_dir_str)
+
+    def _setup_worktree_locked(self, repo: Path, work_dir_str: str) -> Path | None:
+        """Body of :meth:`_try_setup_worktree`; the caller holds ``repo_lock(repo)``."""
+        with _reclaim_process_lock(repo):
             original_branch = GitWorktreeOps.current_branch(repo)
             if original_branch is None:
                 logger.warning("Detached HEAD, no worktree for %s", repo)
@@ -3303,12 +3287,20 @@ class SorcarAgent(RelentlessAgent):
             returns :attr:`MergeResult.STASH_FAILED` without touching
             the repo.
         """
-        stash_warning = ""
-        cleanup_warning = ""
         self._last_merge_resolved_by_agent = False
+        return locked_call(repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver)
+
+    def _do_merge_locked(
+        self,
+        wt: GitWorktree,
+        conflict_resolver: MergeConflictResolver | None,
+    ) -> tuple[MergeResult, str, str]:
+        """Body of :meth:`_do_merge`; the caller holds ``repo_lock(wt.repo_root)``."""
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "", "")
-        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
+        stash_warning = ""
+        cleanup_warning = ""
+        with _reclaim_process_lock(wt.repo_root):
             try:
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
             except Exception:  # pragma: no cover — filesystem permission error
@@ -3581,9 +3573,13 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             The confirmation or "Discard deferred" message.
         """
+        return locked_call(repo_lock(wt.repo_root), self._discard_one_locked, wt, rescue_ignored)
+
+    def _discard_one_locked(self, wt: GitWorktree, rescue_ignored: bool) -> str:
+        """Body of :meth:`_discard_one`; the caller holds ``repo_lock(wt.repo_root)``."""
         checkout_warning = ""
         delete_warning = ""
-        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
+        with _reclaim_process_lock(wt.repo_root):
             if rescue_ignored and wt.wt_dir.exists() and not _rescue_ignored_files(wt):
                 logger.warning(
                     "Deferring discard of worktree '%s': its "
@@ -3776,11 +3772,14 @@ class SorcarAgent(RelentlessAgent):
             merge: New ``_merge_conflict_warning`` value, or ``None`` to
                 leave it unchanged.
         """
-        with self._warning_lock:
-            if stash is not None:
-                self._stash_pop_warning = stash
-            if merge is not None:
-                self._merge_conflict_warning = merge
+        locked_call(self._warning_lock, self._set_warnings_locked, stash, merge)
+
+    def _set_warnings_locked(self, stash: str | None, merge: str | None) -> None:
+        """Body of :meth:`_set_warnings`; the caller holds ``_warning_lock``."""
+        if stash is not None:
+            self._stash_pop_warning = stash
+        if merge is not None:
+            self._merge_conflict_warning = merge
 
     def add_warning(self, text: str, *, prepend: bool = False) -> None:
         """Combine *text* with the pending merge warning atomically.
@@ -3792,15 +3791,18 @@ class SorcarAgent(RelentlessAgent):
             prepend: Put *text* before the pending warning instead of
                 after it.
         """
-        with self._warning_lock:
-            current = self._merge_conflict_warning
-            if not current:
-                combined = text
-            elif prepend:
-                combined = f"{text}\n{current}"
-            else:
-                combined = f"{current}\n{text}"
-            self._merge_conflict_warning = combined
+        locked_call(self._warning_lock, self._add_warning_locked, text, prepend)
+
+    def _add_warning_locked(self, text: str, prepend: bool) -> None:
+        """Body of :meth:`add_warning`; the caller holds ``_warning_lock``."""
+        current = self._merge_conflict_warning
+        if not current:
+            combined = text
+        elif prepend:
+            combined = f"{text}\n{current}"
+        else:
+            combined = f"{current}\n{text}"
+        self._merge_conflict_warning = combined
 
     def _flush_warnings(self, printer: Any) -> None:
         """Broadcast and clear any pending stash/merge warnings.
@@ -3817,11 +3819,7 @@ class SorcarAgent(RelentlessAgent):
         """
         if printer is None or not hasattr(printer, "broadcast"):
             return
-        with self._warning_lock:
-            stash_warning = self._stash_pop_warning
-            self._stash_pop_warning = None
-            merge_warning = self._merge_conflict_warning
-            self._merge_conflict_warning = None
+        stash_warning, merge_warning = locked_call(self._warning_lock, self._take_warnings)
         if stash_warning:
             try:
                 self._broadcast_to_watchers(
@@ -3829,11 +3827,7 @@ class SorcarAgent(RelentlessAgent):
                 )
             except Exception:
                 logger.debug("stash warning broadcast failed", exc_info=True)
-                with self._warning_lock:
-                    current = self._stash_pop_warning
-                    self._stash_pop_warning = (
-                        f"{stash_warning}\n{current}" if current else stash_warning
-                    )
+                locked_call(self._warning_lock, self._restore_stash_warning, stash_warning)
         if merge_warning:
             try:
                 self._broadcast_to_watchers(
@@ -3843,32 +3837,128 @@ class SorcarAgent(RelentlessAgent):
                 logger.debug("merge warning broadcast failed", exc_info=True)
                 self.add_warning(merge_warning, prepend=True)
 
+    def _take_warnings(self) -> tuple[str | None, str | None]:
+        """Clear and return ``(stash, merge)`` warnings; the caller holds ``_warning_lock``."""
+        stash_warning = self._stash_pop_warning
+        self._stash_pop_warning = None
+        merge_warning = self._merge_conflict_warning
+        self._merge_conflict_warning = None
+        return stash_warning, merge_warning
+
+    def _restore_stash_warning(self, stash_warning: str) -> None:
+        """Put *stash_warning* back before any newer one; caller holds ``_warning_lock``."""
+        current = self._stash_pop_warning
+        self._stash_pop_warning = (
+            f"{stash_warning}\n{current}" if current else stash_warning
+        )
+
+    def _finish_run(self, unwinding: bool) -> None:
+        """Release the run's resources, every step regardless of the others.
+
+        The runner's stop injects ``KeyboardInterrupt`` again while the
+        task thread is still alive, so a second interrupt can land
+        anywhere here, in a step (the bounded job join, a git call, the
+        browser shutdown) or between two steps.  The steps are
+        therefore literally nested ``try``/``finally`` blocks: every
+        bytecode after the first step's call lies inside a ``finally``
+        region that runs the remaining steps, so no interrupt can skip
+        one (a loop's backedge would be unprotected).  The first
+        exception is re-raised after the last step when the run was
+        otherwise returning normally (the stop must still be honoured),
+        or logged and dropped when the run is already unwinding on an
+        exception.
+
+        Order: the browser first (an OS process that would leak for the
+        daemon's lifetime), then the run's remaining ``run_agent`` jobs
+        (no sub-task outlives its caller; bounded join), the preserve
+        marker of a worktree left unmerged (so no orphan reclaim in
+        another process merges its branch behind the user's back), the
+        classifier spend, the per-run hooks, and last the run's final
+        word on its spend: a sub-task's fold can land on its own
+        thread at any point after the run's last event, so no snapshot
+        taken earlier can tell whether that event already carried it
+        (the persisted row reads the same totals after ``run`` returns).
+
+        Args:
+            unwinding: Whether an exception is already propagating out
+                of the run.
+        """
+        first: BaseException | None = None
+        try:
+            self._close_browser()
+        except BaseException as exc:  # noqa: BLE001 — held, see above
+            first = _first_cleanup_error(first, "_close_browser", exc)
+        finally:
+            try:
+                self._kill_remaining_jobs()
+            except BaseException as exc:  # noqa: BLE001
+                first = _first_cleanup_error(first, "_kill_remaining_jobs", exc)
+            finally:
+                try:
+                    self._mark_unmerged_worktree_preserved()
+                except BaseException as exc:  # noqa: BLE001
+                    first = _first_cleanup_error(
+                        first, "_mark_unmerged_worktree_preserved", exc,
+                    )
+                finally:
+                    try:
+                        self._fold_classifier_usage()
+                    except BaseException as exc:  # noqa: BLE001
+                        first = _first_cleanup_error(first, "_fold_classifier_usage", exc)
+                    finally:
+                        try:
+                            self._release_run_hooks()
+                        except BaseException as exc:  # noqa: BLE001
+                            first = _first_cleanup_error(first, "_release_run_hooks", exc)
+                        finally:
+                            try:
+                                self._emit_usage_totals()
+                            except BaseException as exc:  # noqa: BLE001
+                                first = _first_cleanup_error(
+                                    first, "_emit_usage_totals", exc,
+                                )
+        if first is not None and not unwinding:
+            raise first
+
+    def _close_browser(self) -> None:
+        """Shut down the run's browser tool, dropping it even when the shutdown fails."""
+        try:
+            if self.web_use_tool:
+                self.web_use_tool.close()
+        finally:
+            self.web_use_tool = None
+
+    def _kill_remaining_jobs(self) -> None:
+        """Stop the ``run_agent`` jobs the run neither waited for nor killed."""
+        if kill_jobs_of(self):
+            logger.info("stopped run_agent jobs still running at the end of the task")
+
+    def _release_run_hooks(self) -> None:
+        """Drop the per-run callbacks so the next run cannot call this run's objects.
+
+        ``context_reset_hook`` is a bound method of this run's
+        ``UsefulTools``; left in place it would keep that instance (its
+        read cache, stream callback, stop event) alive for the next run
+        and be called by a docker run that never installs one.
+        """
+        self._memory_tools = None
+        self._ask_user_question_callback = None
+        self.pre_step_hook = None
+        self.tool_call_guard = None
+        self.context_reset_hook = None
+
     def _mark_unmerged_worktree_preserved(self) -> None:
         """Record on disk that the pending worktree awaits the user's decision.
 
         Called when a run ends with ``create_worktree``'s branch still
         unmerged; the marker keeps
         :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` of any later
-        process from committing and squash-merging the branch.  The
-        write is serialised with the other git-config transactions on
-        the repo (``repo_lock`` then the cross-process reclaim lock)
-        and retried a few times, since a concurrent ``git`` command
-        can hold ``.git/config.lock`` briefly; when it still fails only
-        the in-memory claim protects the branch within this process.
+        process from committing and squash-merging the branch.  When
+        the write fails only the in-memory claim protects the branch
+        within this process.
         """
         for wt in self.worktrees:
-            marked = False
-            for _ in range(_PRESERVE_MARKER_ATTEMPTS):
-                # One ``git config`` per attempt under the locks; the
-                # retry delay is slept with both released, so the other
-                # takers (this process's merges and setups, peer daemons
-                # waiting on the flock) are not parked for it.
-                with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
-                    marked = GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
-                if marked:
-                    break
-                time.sleep(_PRESERVE_MARKER_RETRY_DELAY)
-            if not marked:
+            if not GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch):
                 logger.warning(
                     "Could not mark branch '%s' as preserved; a reclaim in another "
                     "process may merge it", wt.branch,
