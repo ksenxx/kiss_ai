@@ -35,11 +35,12 @@ import threading
 import time
 import unittest
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar import channel_workspace, local_endpoint
+from kiss.agents.sorcar import channel_workspace
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
@@ -131,33 +132,23 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
     def _shutdown_server(self) -> None:
         async def _shutdown() -> None:
-            try:
-                if self._viewer_writer is not None:
-                    self._viewer_writer.close()
+            if self._viewer_writer is not None:
+                self._viewer_writer.close()
+                with suppress(OSError):  # the viewer may already be gone
                     await self._viewer_writer.wait_closed()
-            except Exception:
-                pass
-            ws_server = self.server._ws_server
-            if ws_server is not None:
-                ws_server.close()
-                await ws_server.wait_closed()
-            local_endpoint.remove_endpoint_if_owned(
-                self.server._local_endpoint_file,
-                self.server._local_token,
-            )
+            # Closes the listener (and with it every established local
+            # connection), removes the endpoint file and joins the
+            # handlers before the loop stops.
+            await self.server.stop_async()
             pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             for t in pending:
                 t.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
-        try:
-            asyncio.run_coroutine_threadsafe(
-                _shutdown(),
-                self.loop,
-            ).result(timeout=5)
-        except Exception:
-            pass
+        # A shutdown that overruns or fails surfaces here: ``_stop_loop``
+        # must not close a loop that is still running.
+        asyncio.run_coroutine_threadsafe(_shutdown(), self.loop).result(timeout=30)
 
     def _stop_loop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)

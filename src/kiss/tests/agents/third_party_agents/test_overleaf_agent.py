@@ -26,7 +26,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import threading
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler
@@ -37,7 +36,7 @@ from typing import Any
 import pytest
 
 import kiss.agents.third_party_agents.overleaf.overleaf_sea as overleaf_mod
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._overleaf_realtime import flatten_tree
 from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     OverleafAgent,
@@ -47,6 +46,7 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _normalize_cookie,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.recording_http import serving
 
 _COOKIE = "s%3Aabc123.sig"
 _GIT_TOKEN = "olp_gittoken"
@@ -443,12 +443,8 @@ def overleaf_server():
     server.git_root = Path("/nonexistent")
     server.tree = copy.deepcopy(_ROOT_FOLDER)
     server.contents = {"d-main": b"\\documentclass{article}"}
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with serving(server):
         yield f"http://127.0.0.1:{server.server_address[1]}", server
-    finally:
-        stop_http_server(server, thread)
 
 
 @pytest.fixture()
@@ -1129,7 +1125,7 @@ def test_chat_tags_history_notifications(backend, tmp_path: Path) -> None:
 
 def _run_git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=60
     ).stdout
 
 

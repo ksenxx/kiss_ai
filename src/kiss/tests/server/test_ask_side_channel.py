@@ -63,9 +63,9 @@ from kiss.tests.server.conftest import clear_agent_states
 
 
 class _AgentStub:
-    """State-stub carrying a ``last_task_id`` for ``_owner_task_id``.
+    """State-stub carrying a ``last_task_id`` for ``_persisted_task_id``.
 
-    ``_owner_task_id`` reads ``state.agent.last_task_id``; nothing
+    ``_persisted_task_id`` reads ``state.agent.last_task_id``; nothing
     else on the agent object is touched by the code paths under
     test, so this two-attribute stub is enough.
     """
@@ -96,7 +96,7 @@ def _register_running_task(
         task_id, tab_id=tab_id, chat_id=chat_id, server_owned=True,
     )
     st.is_task_active = True
-    # ``_owner_task_id`` reads only ``last_task_id`` off the agent; the
+    # ``_persisted_task_id`` reads only ``last_task_id`` off the agent; the
     # stub is not a ChatSorcarAgent and the annotation says so.
     st.agent = _AgentStub(task_id)  # type: ignore[assignment]
     agent_state.register(st)
@@ -361,7 +361,7 @@ def test_ask_message_without_allocated_owner_task_id_falls_through() -> None:
         server_owned=True,
     )
     st.is_task_active = True
-    # No ``agent`` attached — ``_owner_task_id`` returns ``""``, the
+    # No ``agent`` attached — ``_persisted_task_id`` returns ``""``, the
     # exact pre-allocation window the fix protects.
     agent_state.register(st)
     calls = _install_dispatch_capture(server)

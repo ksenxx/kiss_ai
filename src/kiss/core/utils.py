@@ -109,7 +109,21 @@ def seed_file_atomically(path: Path, content: str) -> None:
     except FileExistsError:
         logger.debug("Exception caught", exc_info=True)
     finally:
-        Path(staged).unlink(missing_ok=True)
+        # Windows sharing modes belong to the file, not the name: a
+        # reader that opened *path* the instant the link published it
+        # (the autocomplete worker) makes unlinking the staging name a
+        # PermissionError until it closes.  Wait that out; the seed is
+        # already in place, so a staging name that outlives the budget
+        # is left behind rather than reported as a failed seed.
+        deadline = time.monotonic() + SHARING_RETRY_SECONDS
+        while True:
+            try:
+                Path(staged).unlink(missing_ok=True)
+                break
+            except PermissionError:
+                if not _sharing_violation_may_clear(Path(staged), deadline):
+                    break
+                time.sleep(_SHARING_RETRY_INTERVAL)
 
 
 def atomic_write_text(

@@ -87,7 +87,12 @@ class TestLocalListener(IsolatedAsyncioTestCase):
         max_events: int = 50,
         timeout: float = 1.0,
     ) -> dict[str, object]:
-        """Read events until *wanted_type* is observed or budget expires."""
+        """Read events until *wanted_type* is observed or budget expires.
+
+        Callers pass a generous *timeout*: it only bounds a hang, while a
+        ``ready`` reply took over 2 s on a Windows box running 49 test
+        splits.
+        """
         for _ in range(max_events):
             msg = await self._read_event(reader, timeout=timeout)
             if msg.get("type") == wanted_type:
@@ -141,7 +146,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
                 ).encode("utf-8") + b"\n",
             )
             await writer.drain()
-            focus = await self._drain_events(reader, "focusInput", timeout=2.0)
+            focus = await self._drain_events(reader, "focusInput", timeout=10.0)
             self.assertEqual(focus.get("tabId"), "tab-local-1")
         finally:
             writer.close()
@@ -161,12 +166,12 @@ class TestLocalListener(IsolatedAsyncioTestCase):
                 ).encode("utf-8") + b"\n",
             )
             await writer.drain()
-            await self._drain_events(reader, "focusInput", timeout=2.0)
+            await self._drain_events(reader, "focusInput", timeout=10.0)
 
             self.server._printer.broadcast(
                 {"type": "ping", "tabId": "tab-local-3", "value": 42},
             )
-            ping = await self._drain_events(reader, "ping", timeout=2.0)
+            ping = await self._drain_events(reader, "ping", timeout=10.0)
             self.assertEqual(ping.get("value"), 42)
             self.assertEqual(ping.get("tabId"), "tab-local-3")
         finally:
@@ -194,7 +199,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
                 ).encode("utf-8") + b"\n",
             )
             await writer.drain()
-            await self._drain_events(reader, "focusInput", timeout=2.0)
+            await self._drain_events(reader, "focusInput", timeout=10.0)
 
             big_b64 = "A" * (200 * 1024)
             submit = {
@@ -246,7 +251,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
             writer.write(query + b"\n")
             await writer.drain()
             msg = await self._drain_events(
-                reader, "activeTasksResponse", timeout=2.0,
+                reader, "activeTasksResponse", timeout=10.0,
             )
             self.assertEqual(msg.get("count"), 0)
             self.assertEqual(msg.get("tabs"), [])
@@ -286,7 +291,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
                 )
                 await writer.drain()
                 msg = await self._drain_events(
-                    reader, "activeTasksResponse", timeout=2.0,
+                    reader, "activeTasksResponse", timeout=10.0,
                 )
                 self.assertEqual(msg.get("count"), 1)
                 tabs = msg.get("tabs")

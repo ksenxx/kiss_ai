@@ -325,12 +325,16 @@ def test_silent_cli_times_out_and_partial_usage_is_billed(
         tmp_path, monkeypatch, "claude", events, final_sleep=30.0
     )
     agent = KISSAgent("run-to-completion stall billing")
+    # The inactivity clock starts before the fake CLI's Python interpreter is
+    # up; with a 1 s timeout a loaded Windows box timed out before the two
+    # events were even printed, billing 0 tokens.  5 s leaves startup room
+    # and is still far below the fake's 30 s silence.
     with pytest.raises(TimeoutError):
         agent.run(
             model_name="cc/sonnet",
             prompt_template=TASK,
             is_agentic=True,
-            model_config={"timeout": 1},
+            model_config={"timeout": 5},
             verbose=False,
         )
     assert agent.total_tokens_used == 150, (

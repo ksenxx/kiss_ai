@@ -38,6 +38,7 @@ from kiss.agents.sorcar.sea_commands import (
     list_commands,
     run_picked_hook,
 )
+from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
@@ -74,50 +75,6 @@ def _kiss_home_is_default() -> bool:
         return Path(custom).resolve() == (Path.home() / HOME_DIR).resolve()
     except OSError:
         return False
-
-
-def _owner_task_id(state: AgentState) -> str:
-    """Return the persisted task id of *state*'s live agent, or ``""``.
-
-    Reads ``state.agent.last_task_id`` — the ``task_history`` row id
-    the agent allocated for its current run, through the property that
-    takes the same lock the publishing assignment takes.  MUST be
-    called while
-    holding :data:`agent_state.STATE_LOCK` (the server's
-    ``_state_lock``): task teardown replaces/clears ``state.agent``
-    under that lock, so capturing the id inside the same critical
-    section that queued a pending user message guarantees the id
-    belongs to the state the message was queued on (not a successor
-    task that re-armed the tab after the lock was released).
-
-    Returns ``""`` when the state has no agent yet or the agent has
-    not allocated its task row (the narrow window between
-    ``run()`` entry and ``_add_task``); callers then emit a transient
-    (unstamped) echo rather than mis-attributing the prompt to a
-    previous task.
-
-    Known accepted attribution nuances (by design):
-
-    * In a multi-``<task>`` run, a prompt queued BETWEEN two subtasks
-      is stamped with the subtask currently on screen (the one whose
-      id ``last_task_id`` still names) even though the NEXT subtask's
-      pre-step drain consumes it — the echo lands in the trajectory
-      the user was looking at when they typed.
-    * If the whole task tears down between queueing and the echo
-      broadcast, the stamped echo may find its recording/persistence
-      already cleaned up and stay transient.  The queued message
-      itself is not lost: ``TaskRunner._run_task``'s cleanup
-      re-submits whatever is left in ``pending_user_messages`` as the
-      tab's next run (see :func:`_reruns_after_teardown`).
-
-    Args:
-        state: The running-agent state whose task id to resolve.
-
-    Returns:
-        The owning task id, or ``""`` when it cannot be determined.
-    """
-    agent = state.agent
-    return str(getattr(agent, "last_task_id", "") or "")
 
 
 def _reruns_after_teardown(owner: AgentState) -> bool:
@@ -1205,10 +1162,17 @@ class _CommandsMixin:
         re-run as the tab's next run (:func:`_reruns_after_teardown`),
         that run echoes it itself and the caller must emit no steering
         echo; when the owner has no task row yet
-        (:func:`_owner_task_id` is ``""``), the prompt is remembered on
+        (``_persisted_task_id`` is ``""``), the prompt is remembered on
         ``unattributed_prompt_echoes`` so the row can claim it later.
 
-        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+        MUST be called while holding :data:`agent_state.STATE_LOCK`:
+        task teardown replaces/clears ``owner.agent`` under that lock,
+        so reading the id inside the critical section that queued the
+        prompt guarantees it belongs to the state the prompt was
+        queued on, not to a successor task that re-armed the tab.
+        ``""`` (no row yet — the narrow window between ``run()`` entry
+        and ``_add_task``) makes the caller emit a transient echo
+        rather than mis-attribute the prompt to a previous task.
 
         Args:
             owner: The running-task state that accepted the prompt.
@@ -1224,7 +1188,7 @@ class _CommandsMixin:
         remember = self._route_prompt_to_owner(owner, prompt, tab_id)
         if _reruns_after_teardown(owner):
             return None
-        owner_task = _owner_task_id(owner)
+        owner_task = _persisted_task_id(owner.agent)
         if not owner_task:
             owner.unattributed_prompt_echoes.append(prompt)
         return remember, owner_task
@@ -1341,7 +1305,7 @@ class _CommandsMixin:
             prompt: The queued follow-up text.
             owner_task: The owning task id captured under
                 ``_state_lock`` at queueing time (see
-                :func:`_owner_task_id`), or ``""`` when the task row
+                :meth:`_queue_prompt_on_owner`), or ``""`` when the task row
                 is not allocated yet.
             remember: Whether to save *prompt* for autocomplete.
         """
@@ -1397,6 +1361,9 @@ class _CommandsMixin:
         The answering session's spend (including a timed-out, stopped
         session's) is charged to the owner task with
         :func:`~kiss.server.task_update.charge_side_channel_usage`.
+        When the worker thread itself cannot be started (thread
+        exhaustion) the same failed ``ask_answer`` panel is broadcast
+        synchronously instead.
 
         The answering session is dispatched with the owner as its
         ``parent_task_id``: the daemon applies the ask SEA's
@@ -1484,9 +1451,26 @@ class _CommandsMixin:
                 success=success,
             )
 
-        threading.Thread(
-            target=_run, daemon=True, name="kiss-ask-sidechannel",
-        ).start()
+        try:
+            threading.Thread(
+                target=_run, daemon=True, name="kiss-ask-sidechannel",
+            ).start()
+        except RuntimeError as exc:
+            # Thread exhaustion (``can't start new thread``).  The
+            # ``/ask`` line is already echoed into the transcript, so
+            # the user gets a failed answer panel right under it
+            # instead of the error escaping to the command reader and
+            # the question hanging there unanswered forever.
+            logger.exception(
+                "/ask side-channel thread could not start for tab %s", tab_id,
+            )
+            self._broadcast_ask_answer(
+                tab_id=tab_id,
+                owner_task_id=owner_task_id,
+                question=question,
+                text=f"The /ask agent could not be started: {exc}",
+                success=False,
+            )
 
     def _broadcast_ask_answer(
         self,
@@ -1608,7 +1592,7 @@ class _CommandsMixin:
             # through the normal steering queue like any other typed
             # message.
             question = _split_ask_command(prompt)
-            owner_task = _owner_task_id(owner)
+            owner_task = _persisted_task_id(owner.agent)
             # An empty ``owner_task`` means the running task has not
             # allocated its ``task_history`` row yet (the narrow
             # window between ``run()`` entry and ``_add_task``): the

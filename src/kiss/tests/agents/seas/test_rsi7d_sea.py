@@ -21,14 +21,12 @@ import ast
 import json
 import os
 import shutil
-import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
@@ -46,14 +44,10 @@ from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
 from kiss.server import agent_state
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    tool_call_body,
-)
+from kiss.tests.agents.seas.conftest import git, run_sea
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.server.conftest import init_repo, run_git
+from kiss.tests.server.conftest import init_repo
 
 _SEA_PATH = Path(sea.__file__).resolve()
 _SEAS_DIR = _SEA_PATH.parents[1]
@@ -975,35 +969,12 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
     state = agent_state.AgentState(
         "rsi7d-sea-test", agent=agent, task_thread=threading.current_thread(), is_task_active=True
     )
+    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], task)
     agent_state.register(state)
     try:
-        result = _run_registered(agent, task, script, work_dir)
+        return run_sea(run, script, work_dir, agent=agent, use_memory=False, is_parallel=False)
     finally:
         agent_state.unregister(state.task_id, state)
-    return yaml.safe_load(result[0]), [r for r in result[1] if r.get("tools")]
-
-
-def _run_registered(
-    agent: ChatSorcarAgent, task: str, script: list[bytes], work_dir: Path
-) -> tuple[str, list[dict[str, Any]]]:
-    """Run *agent* on *task* against the scripted model; return the raw result and requests."""
-    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], task)
-    with serve(script) as (url, requests):
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(work_dir),
-            max_steps=8,
-            max_budget=run.settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tools_hook=run.tools_hook,
-            web_tools=run.settings["use_web_tools"],
-            use_memory=False,
-            is_parallel=False,
-            verbose=False,
-        )
-    return result, requests
 
 
 def _tool_results(agentic: list[Any]) -> list[str]:
@@ -1140,13 +1111,10 @@ def _commit(
     for name, text in (files or {}).items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(text, encoding="utf-8")
-    run_git(repo, "add", "-A")
-    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{when} +0000") if when else None
-    subprocess.run(
-        ["git", "commit", "-q", "--allow-empty", "-m", message],
-        cwd=repo, env=env, capture_output=True, check=True,
-    )
-    return run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "add", "-A")
+    env = {"GIT_COMMITTER_DATE": f"@{when} +0000"} if when else None
+    git(repo, "commit", "-q", "--allow-empty", "-m", message, env=env)
+    return git(repo, "rev-parse", "HEAD")
 
 
 def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
@@ -1184,7 +1152,7 @@ def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     assert clone == tmp_path / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
     assert prepared["commit"] == broader  # the earlier and the two broader commits do not match
     assert prepared["commit_source"] == f"first parent of the task's auto-commit {auto[:12]}"
-    assert run_git(clone, "rev-parse", "HEAD").stdout.strip() == broader
+    assert git(clone, "rev-parse", "HEAD") == broader
     assert (clone / "docs" / "paper.tex").read_text(encoding="utf-8") == "v1\n"
     assert prepared["task"] == (
         f"Update the paper at {clone}/docs/paper.tex  with the results\nin {clone}/results.md"
@@ -1210,7 +1178,7 @@ def test_task_tree_resolves_live_dirs_through_git_and_removed_worktrees_by_name(
     (outer / "docs").mkdir()
     inner = outer / "tmp" / "inner"
     init_repo(inner)
-    run_git(outer, "worktree", "add", "-q", "-b", "wt", ".kiss-worktrees/kiss_wt-live")
+    git(outer, "worktree", "add", "-q", "-b", "wt", ".kiss-worktrees/kiss_wt-live")
     live = outer / ".kiss-worktrees" / "kiss_wt-live"
     (live / "docs").mkdir()
     resolved = outer.resolve()
@@ -1295,9 +1263,9 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
 
     rooted = tmp_path / "rooted"
     rooted.mkdir()
-    run_git(rooted, "init", "-q")
-    run_git(rooted, "config", "user.email", "kiss-test@example.com")
-    run_git(rooted, "config", "user.name", "Kiss Test")
+    git(rooted, "init", "-q")
+    git(rooted, "config", "user.email", "kiss-test@example.com")
+    git(rooted, "config", "user.name", "Kiss Test")
     root = _commit(rooted, f"first{USER_PROMPT_HEADING}Start the notes", {"notes.md": "n\n"})
     first = _persist("Start the notes", [], work_dir=str(rooted), sea="demo_sea")
     prepared = sea.prepare_replay_clone(first)  # a root auto-commit has no parent to go back to

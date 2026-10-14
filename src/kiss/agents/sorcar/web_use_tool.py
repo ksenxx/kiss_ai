@@ -1144,7 +1144,9 @@ class WebUseTool:
         such token, so this is a no-op there.
         """
         try:
-            user_agent = self._page.evaluate("navigator.userAgent")
+            # Bounded like every other page read (``_read_page``), not a
+            # bare ``evaluate`` with no timeout.
+            user_agent = str(self._read_page(self._page, "() => [navigator.userAgent]")[0])
             if _HEADLESS_UA_TOKEN not in user_agent:
                 return
             headed = user_agent.replace(_HEADLESS_UA_TOKEN, _HEADED_UA_TOKEN)

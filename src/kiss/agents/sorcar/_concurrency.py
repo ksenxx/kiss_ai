@@ -7,6 +7,9 @@
 One copy of the ``KISS_RACE_DELAY`` test hook that widens
 read-modify-write windows in concurrency tests, for every module
 (sorcar and server) that coordinates across threads or processes.
+:func:`locked_call` / :func:`locked`, the way a task thread takes a
+shared lock, live in :mod:`kiss.core.locked` (core must not import
+sorcar) and are re-exported here under their established names.
 The ``pid_alive`` liveness probe lives in :mod:`kiss.core.processes`
 and cross-process file locks in :mod:`kiss.core.file_lock`.
 """
@@ -15,6 +18,10 @@ from __future__ import annotations
 
 import os
 import time
+
+from kiss.core.locked import locked, locked_call
+
+__all__ = ["locked", "locked_call"]
 
 
 def _race_delay() -> None:

@@ -21,6 +21,7 @@ import json
 import socket
 import threading
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler
 
 import pytest
@@ -36,6 +37,7 @@ from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import start_serving
 
 
 class _FakeIRCServer:
@@ -137,14 +139,12 @@ class TestIRCBugs:
     @pytest.fixture(autouse=True)
     def _isolated(self):
         """Clean IRC config, a fake IRC server and a backend per test."""
-        with config_backup(_irc_config.path):
-            self.server = _FakeIRCServer()
+        with config_backup(_irc_config.path), closing(_FakeIRCServer()) as self.server:
             self.backend = IRCChannelBackend()
             try:
                 yield
             finally:
                 self.backend.disconnect()
-                self.server.close()
 
     def test_use_tls_false_connects_plaintext(self) -> None:
         """(A) connect_irc(use_tls=False) must not attempt TLS."""
@@ -289,8 +289,7 @@ class TestZaloBugs:
     def _start_server(self, body: bytes) -> None:
         handler = type("Handler", (_JSONResponder,), {"body": body})
         self._server = ThreadedHTTPServer(("127.0.0.1", 0), handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
+        self._thread = start_serving(self._server)
         port = self._server.server_address[1]
         zalo_sea._API_BASE = f"http://127.0.0.1:{port}/v2.0/oa"
 

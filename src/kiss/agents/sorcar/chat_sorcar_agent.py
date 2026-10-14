@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
@@ -213,8 +213,7 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             The row id, or ``""`` before this agent's first ``run``.
         """
-        with self._task_id_lock:
-            return self._last_task_id or ""
+        return locked_call(self._task_id_lock, getattr, self, "_last_task_id") or ""
 
     @property
     def last_user_prompt(self) -> str:
@@ -304,6 +303,31 @@ class ChatSorcarAgent(SorcarAgent):
             "## Previous tasks and results from the chat session for reference\n\n"
             + body + "\n\n---\n\n# Task (work on it now)\n\n" + prompt
         )
+
+    def _save_final_usage(
+        self, extra_payload: dict[str, Any], task_id: str,
+    ) -> tuple[float, int, int]:
+        """Stamp the ledger totals and the end time on the row (``TASK_USAGE_LOCK`` held).
+
+        Args:
+            extra_payload: The row's extra payload, completed in place.
+            task_id: The task row.
+
+        Returns:
+            The ``(cost, tokens, steps)`` triple that was saved.
+        """
+        # One coherent triple (see usage_snapshot): three property reads
+        # could tear across a concurrent abandoned-subagent reclaim.
+        final_cost, final_tokens, final_steps = self.usage_snapshot()
+        _race_delay()  # test hook: widens the snapshot-to-save window
+        extra_payload["tokens"] = final_tokens
+        extra_payload["cost"] = round(final_cost, 6)
+        extra_payload["steps"] = final_steps
+        # The run is over: stamp its end so sub-agents (which no server
+        # runner finalises) get a duration too.
+        extra_payload["endTs"] = int(time.time() * 1000)
+        _save_task_extra(extra_payload, task_id=task_id)
+        return final_cost, final_tokens, final_steps
 
     def _build_extra_payload(
         self,
@@ -649,8 +673,7 @@ class ChatSorcarAgent(SorcarAgent):
         task_id, self._chat_id = _add_task(
             history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
-        with self._task_id_lock:
-            self._last_task_id = task_id
+        locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         result_summary = ""
@@ -814,22 +837,15 @@ class ChatSorcarAgent(SorcarAgent):
                 # TASK_USAGE_LOCK, so a sub-task's late charge either
                 # lands on the ledger before this read or finds the
                 # finished row and adds to it (charge_side_channel_usage).
-                with TASK_USAGE_LOCK:
-                    final_cost, final_tokens, final_steps = self.usage_snapshot()
-                    _race_delay()  # test hook: widens the snapshot-to-save window
-                    extra_payload["tokens"] = final_tokens
-                    extra_payload["cost"] = round(final_cost, 6)
-                    extra_payload["steps"] = final_steps
-                    # The run is over: stamp its end so sub-agents (which
-                    # no server runner finalises) get a duration too.
-                    extra_payload["endTs"] = int(time.time() * 1000)
-                    _save_task_extra(extra_payload, task_id=task_id)
+                final_usage = locked_call(
+                    TASK_USAGE_LOCK, self._save_final_usage, extra_payload, task_id,
+                )
                 if self._persist_replay_events_if_missing(
                     task_id=task_id,
                     prompt=agent_prompt,
                     result_raw=result_raw,
                     result_summary=result_summary,
-                    usage=(final_cost, final_tokens, final_steps),
+                    usage=final_usage,
                 ):
                     # The synthesized events joined the trajectory after
                     # its tags were derived: derive them again so a secret

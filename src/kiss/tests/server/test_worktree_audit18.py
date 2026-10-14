@@ -377,9 +377,10 @@ class TestRaceSetupRespectsRepoLock:
     def test_setup_holds_repo_lock_across_dirty_state_copy(
         self,
     ) -> None:
-        """Structural confirmation: ``_try_setup_worktree``'s body
-        is enclosed by a ``with repo_lock(repo):`` block that
-        contains the ``copy_dirty_state`` call.
+        """Structural confirmation: ``_try_setup_worktree`` runs its
+        whole body (``_setup_worktree_locked``, which contains the
+        ``copy_dirty_state`` and ``save_baseline_commit`` calls) under
+        ``repo_lock(repo)`` via ``locked_call``.
         """
         src = (
             Path(__file__).resolve().parents[2]
@@ -388,23 +389,19 @@ class TestRaceSetupRespectsRepoLock:
 
         start = src.index("def _try_setup_worktree")
         end = src.index("\n    def ", start + 1)
-        body = src[start:end]
-
-        # Matched without the trailing colon: the statement also takes
-        # ``_reclaim_process_lock(repo)`` in the same ``with``.
-        lock_idx = body.find("with repo_lock(repo)")
-        copy_idx = body.find("GitWorktreeOps.copy_dirty_state")
-        baseline_idx = body.find("GitWorktreeOps.save_baseline_commit")
-        assert lock_idx != -1, (
+        assert "locked_call(repo_lock(repo), self._setup_worktree_locked" in src[start:end], (
             "RACE-2 regression: ``_try_setup_worktree`` must hold "
             "``repo_lock(repo)`` across the setup body."
         )
-        assert copy_idx != -1 and baseline_idx != -1
-        assert lock_idx < copy_idx < baseline_idx, (
+
+        start = src.index("def _setup_worktree_locked")
+        end = src.index("\n    def ", start + 1)
+        body = src[start:end]
+        copy_idx = body.find("GitWorktreeOps.copy_dirty_state")
+        baseline_idx = body.find("GitWorktreeOps.save_baseline_commit")
+        assert copy_idx != -1 and baseline_idx != -1, (
             "RACE-2 regression: ``repo_lock`` must enclose both "
-            f"``copy_dirty_state`` (idx {copy_idx}) and "
-            f"``save_baseline_commit`` (idx {baseline_idx}) — "
-            f"lock at idx {lock_idx}."
+            "``copy_dirty_state`` and ``save_baseline_commit``."
         )
 
     def test_repo_lock_is_reentrant(self) -> None:

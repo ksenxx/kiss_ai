@@ -47,20 +47,15 @@ _START_WAIT_LINE = _START_FIRST_LINE + next(
 def _stop_once_the_thread_runs(frame: FrameType, event: str, arg: Any) -> Any:
     """Trace function: raise KeyboardInterrupt at the first line where ``job.thread`` is alive.
 
-    A line boundary inside a ``with`` block's exit sequence is skipped
-    (the registry lock is still held there): an injected interrupt is
-    delivered after a call completes, so it never lands between the
-    instructions that call ``__exit__``.
+    Only lines of ``start_agent_job``'s own frame count: the registry
+    lock is taken and released inside ``locked_call`` (a separate
+    frame), so every such line runs with the lock free.
     """
     if frame.f_code.co_name != "start_agent_job":
         return None
     if event == "line":
         thread = getattr(frame.f_locals.get("job"), "thread", None)
-        if (
-            thread is not None
-            and thread.is_alive()
-            and not agent_dispatch._AGENT_JOBS_LOCK.locked()
-        ):
+        if thread is not None and thread.is_alive():
             sys.settrace(None)
             raise KeyboardInterrupt
     return _stop_once_the_thread_runs

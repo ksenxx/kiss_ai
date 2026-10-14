@@ -87,6 +87,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent, local_endpoint
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
@@ -117,7 +118,7 @@ from kiss.server.commands import broadcast_to_conn
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
-    with_task_settings_event,
+    with_synthesized_events,
 )
 from kiss.server.server import VSCodeServer
 from kiss.server.stall_watchdog import start_stall_watchdog
@@ -497,7 +498,7 @@ def _share_subagent_entries(
                     "task": row.get("task", ""),
                     "task_id": sub_id,
                     "parent_task_id": parent_id,
-                    "events": with_task_settings_event(events, row),
+                    "events": with_synthesized_events(events, row),
                 }
                 if max_bytes is not None:
                     used += len(json.dumps(entry).encode("utf-8"))
@@ -2635,7 +2636,7 @@ class WebPrinter(JsonPrinter):
         self._local_webview_conns: set[str] = set()
         self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
         self._conn_endpoints: dict[str, ServerConnection] = {}
-        self._ws_lock = threading.Lock()
+        self._ws_lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
@@ -2712,15 +2713,17 @@ class WebPrinter(JsonPrinter):
             # finding).  A result naming another repository's worktree
             # (one per repository from commit_and_merge) leaves the
             # recorded one, still pending, alone.
-            result_dir = event.get("worktreeDir")
-            with self._lock:
-                recorded = self._tab_worktree_dirs.get(tab_id, "")
-                if (
-                    recorded and isinstance(result_dir, str) and result_dir
-                    and not Path(recorded).is_relative_to(result_dir)
-                ):
-                    return
-                self._tab_worktree_dirs.pop(tab_id, None)
+            locked_call(self._lock, self._forget_tab_worktree_dir, tab_id, event.get("worktreeDir"))
+
+    def _forget_tab_worktree_dir(self, tab_id: str, result_dir: Any) -> None:
+        """Under ``_lock``: drop *tab_id*'s worktree entry once *result_dir* merged it."""
+        recorded = self._tab_worktree_dirs.get(tab_id, "")
+        if (
+            recorded and isinstance(result_dir, str) and result_dir
+            and not Path(recorded).is_relative_to(result_dir)
+        ):
+            return
+        self._tab_worktree_dirs.pop(tab_id, None)
 
     def _record_tab_worktree_dir(
         self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool = False,
@@ -2747,15 +2750,22 @@ class WebPrinter(JsonPrinter):
                 worktree directory yet (a second repository's worktree
                 must not displace the work dir's).
         """
-        with self._lock:
-            if task_id is not None:
-                key = self._coerce_task_id(task_id)
-                viewers = self._subscribers.get(key) if key else None
-                if not viewers or tab_id not in viewers:
-                    return
-            if keep_existing and self._tab_worktree_dirs.get(tab_id):
+        locked_call(
+            self._lock, self._store_tab_worktree_dir, tab_id, wt_dir, task_id, keep_existing,
+        )
+
+    def _store_tab_worktree_dir(
+        self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool,
+    ) -> None:
+        """Under ``_lock``: the subscription re-check and write of ``_record_tab_worktree_dir``."""
+        if task_id is not None:
+            key = self._coerce_task_id(task_id)
+            viewers = self._subscribers.get(key) if key else None
+            if not viewers or tab_id not in viewers:
                 return
-            self._tab_worktree_dirs[tab_id] = wt_dir
+        if keep_existing and self._tab_worktree_dirs.get(tab_id):
+            return
+        self._tab_worktree_dirs[tab_id] = wt_dir
 
     def worktree_dir_for_tab(self, tab_id: str) -> str:
         """Return the pending worktree dir recorded for *tab_id*.
@@ -2800,8 +2810,7 @@ class WebPrinter(JsonPrinter):
         """
         super().cleanup_tab(tab_id, keep_task_id)
         if tab_id:
-            with self._lock:
-                self._tab_worktree_dirs.pop(tab_id, None)
+            locked_call(self._lock, self._tab_worktree_dirs.pop, tab_id, None)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
@@ -2883,18 +2892,7 @@ class WebPrinter(JsonPrinter):
             # lock serializes every task's deliveries.
             kept = self._tab_stamped_task_record(event)
             data = "" if record_only else json.dumps(event)
-            with self.delivery_lock:
-                self._track_worktree_event(event, event.get("tabId"))
-                if kept is not None:
-                    self._keep_tab_stamped_task_event(*kept)
-                if data:
-                    self._send_to_ws_clients(data)
-                    # An explicit empty stamp is a global event sent
-                    # verbatim (``tabs_state``, ``tasks_updated``), so
-                    # daemon-link peers get it; a tab's event is a
-                    # task copy they never want.
-                    if not event["tabId"]:
-                        self._send_to_link_clients(data)
+            locked_call(self.delivery_lock, self._deliver_tab_stamped, event, kept, data)
             return
 
         event = self._inject_task_id(event)
@@ -2919,15 +2917,38 @@ class WebPrinter(JsonPrinter):
         # images): persisted as is, and spliced per subscribed tab.
         # The tabId branch above returned, so ``event`` has no tabId.
         data = "" if talk else json.dumps(event)
-        with self.delivery_lock:
-            self._record_task_event(event)
-            if persist_id:
-                _queue_chat_event(data, task_id=persist_id)
-            if not record_only and not talk:
-                self._fanout_stamped(event, data)
-
+        locked_call(
+            self.delivery_lock, self._deliver_task_event, event, data, persist_id,
+            record_only or talk,
+        )
         if talk and not record_only:
             self._fanout_stamped(event)
+
+    def _deliver_tab_stamped(
+        self, event: dict[str, Any], kept: tuple[dict[str, Any], str] | None, data: str,
+    ) -> None:
+        """Under ``delivery_lock``: record and send a ``tabId``-stamped event."""
+        self._track_worktree_event(event, event.get("tabId"))
+        if kept is not None:
+            self._keep_tab_stamped_task_event(*kept)
+        if data:
+            self._send_to_ws_clients(data)
+            # An explicit empty stamp is a global event sent
+            # verbatim (``tabs_state``, ``tasks_updated``), so
+            # daemon-link peers get it; a tab's event is a
+            # task copy they never want.
+            if not event["tabId"]:
+                self._send_to_link_clients(data)
+
+    def _deliver_task_event(
+        self, event: dict[str, Any], data: str, persist_id: str, record_only: bool,
+    ) -> None:
+        """Under ``delivery_lock``: record, persist and fan out a task event."""
+        self._record_task_event(event)
+        if persist_id:
+            _queue_chat_event(data, task_id=persist_id)
+        if not record_only:
+            self._fanout_stamped(event, data)
 
     def _fanout_stamped(self, event: dict[str, Any], encoded: str = "") -> None:
         """Send one ``tabId``-stamped copy of *event* per subscribed tab.
@@ -2987,18 +3008,17 @@ class WebPrinter(JsonPrinter):
         Returns:
             The connections to schedule the copy on.
         """
-        with self._ws_lock:
-            skip: set[Any] = set()
-            for conn_id, tabs in self._local_tab_sets.items():
-                if (
-                    tabs
-                    and tab_id not in tabs
-                    and conn_id not in self._local_webview_conns
-                ):
-                    endpoint = self._conn_endpoints.get(conn_id)
-                    if endpoint is not None:
-                        skip.add(endpoint)
-            return [w for w in self._local_clients if w not in skip]
+        return locked_call(self._ws_lock, self._local_clients_for_tab_locked, tab_id)
+
+    def _local_clients_for_tab_locked(self, tab_id: str) -> list[ServerConnection]:
+        """``_local_clients_for_tab`` under ``_ws_lock``."""
+        skip: set[Any] = set()
+        for conn_id, tabs in self._local_tab_sets.items():
+            if tabs and tab_id not in tabs and conn_id not in self._local_webview_conns:
+                endpoint = self._conn_endpoints.get(conn_id)
+                if endpoint is not None:
+                    skip.add(endpoint)
+        return [w for w in self._local_clients if w not in skip]
 
     def set_local_tab_visibility(
         self, decide: Callable[[str, bool, bool], bool],
@@ -3062,16 +3082,23 @@ class WebPrinter(JsonPrinter):
         Returns:
             The ids a local webview currently shows.
         """
-        with self._ws_lock:
-            addressed = set().union(*self._local_tab_sets.values())
-            interested = {t for t in tab_ids if t in addressed}
-            webview_attached = bool(self._local_webview_conns)
-            decide = self._local_tab_visibility
+        interested, webview_attached, decide = locked_call(
+            self._ws_lock, self._local_tab_interest, tab_ids,
+        )
         if decide is None:
             return interested
         return {
             t for t in tab_ids if decide(t, t in interested, webview_attached)
         }
+
+    def _local_tab_interest(
+        self, tab_ids: set[str],
+    ) -> tuple[set[str], bool, Callable[[str, bool, bool], bool] | None]:
+        """Under ``_ws_lock``: the addressed ids among *tab_ids*, whether a webview is
+        attached, and the visibility rule."""
+        addressed = set().union(*self._local_tab_sets.values())
+        interested = {t for t in tab_ids if t in addressed}
+        return interested, bool(self._local_webview_conns), self._local_tab_visibility
 
     def register_local_tab(
         self, conn_id: str, tab_id: str, local_tabs: set[str]
@@ -3130,9 +3157,14 @@ class WebPrinter(JsonPrinter):
         Args:
             tab_id: The frontend tab id the registry removed.
         """
-        with self._ws_lock:
-            for local_tabs in self._local_tab_sets.values():
-                local_tabs.discard(tab_id)
+        # A displacement runs on the task thread (``_registry_update_tab``
+        # at task startup): ``locked_call``, never ``with``.
+        locked_call(self._ws_lock, self._prune_local_tab_locked, tab_id)
+
+    def _prune_local_tab_locked(self, tab_id: str) -> None:
+        """Under ``_ws_lock``: the body of :meth:`prune_local_tab`."""
+        for local_tabs in self._local_tab_sets.values():
+            local_tabs.discard(tab_id)
 
     def unregister_local_tabs(self, conn_id: str) -> None:
         """Drop a disconnected local connection's local-tab registrations.
@@ -3234,9 +3266,7 @@ class WebPrinter(JsonPrinter):
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
         """
-        with self._ws_lock:
-            endpoints = list(self._remote_clients)
-        for endpoint in endpoints:
+        for endpoint in locked_call(self._ws_lock, self._remote_clients.copy):
             self._schedule_send(endpoint, data)
 
     def _send_to_local_clients(self, data: Payload, tab_id: str = "") -> None:
@@ -3255,11 +3285,11 @@ class WebPrinter(JsonPrinter):
                 receive it (see :meth:`_local_clients_for_tab`).  Empty
                 for global events, which reach every peer.
         """
+        endpoints: Iterable[ServerConnection]
         if tab_id:
             endpoints = self._local_clients_for_tab(tab_id)
         else:
-            with self._ws_lock:
-                endpoints = list(self._local_clients)
+            endpoints = locked_call(self._ws_lock, self._local_clients.copy)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
@@ -3299,9 +3329,7 @@ class WebPrinter(JsonPrinter):
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
         """
-        with self._ws_lock:
-            endpoints = list(self._link_clients)
-        for endpoint in endpoints:
+        for endpoint in locked_call(self._ws_lock, self._link_clients.copy):
             self._schedule_send(endpoint, data)
 
     def _reserve_replay_send(
@@ -3339,8 +3367,7 @@ class WebPrinter(JsonPrinter):
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
         """
-        with self._ws_lock:
-            endpoint = self._conn_endpoints.get(conn_id)
+        endpoint = locked_call(self._ws_lock, self._conn_endpoints.get, conn_id)
         if endpoint is None:
             return
         self._schedule_send(endpoint, data)
@@ -3360,13 +3387,16 @@ class WebPrinter(JsonPrinter):
         Returns:
             The (lazily created) :class:`FifoSendLock` for *endpoint*.
         """
-        with self._ws_lock:
-            lock = self._send_locks.get(endpoint)
-            if lock is None:
-                lock = FifoSendLock()
-                if endpoint in self._pending_sends:
-                    self._send_locks[endpoint] = lock
-            return lock
+        return locked_call(self._ws_lock, self._send_lock_locked, endpoint)
+
+    def _send_lock_locked(self, endpoint: Any) -> FifoSendLock:
+        """``send_lock`` under ``_ws_lock``: the lock is kept only for a registered endpoint."""
+        lock = self._send_locks.get(endpoint)
+        if lock is None:
+            lock = FifoSendLock()
+            if endpoint in self._pending_sends:
+                self._send_locks[endpoint] = lock
+        return lock
 
     async def _locked_send(
         self, endpoint: ServerConnection, data: Payload,
@@ -3414,11 +3444,7 @@ class WebPrinter(JsonPrinter):
         except Exception:
             logger.debug("Failed to send to client", exc_info=True)
             return
-        with self._ws_lock:
-            pending = self._pending_sends.get(endpoint)
-            if pending is not None:
-                pending.add(fut)
-        if pending is None:
+        if not locked_call(self._ws_lock, self._track_pending_send, endpoint, fut):
             fut.cancel()
             return
         fut.add_done_callback(
@@ -3534,10 +3560,22 @@ class WebPrinter(JsonPrinter):
         limit on a long-running healthy connection.
 
         """
-        with self._ws_lock:
-            pending = self._pending_sends.get(client)
-            if pending is not None:
-                pending.discard(fut)
+        locked_call(self._ws_lock, self._untrack_pending_send, client, fut)
+
+    def _track_pending_send(self, endpoint: Any, fut: ConcurrentFuture[None]) -> bool:
+        """Under ``_ws_lock``: add *fut* to *endpoint*'s pending sends; False once it
+        unregistered."""
+        pending = self._pending_sends.get(endpoint)
+        if pending is None:
+            return False
+        pending.add(fut)
+        return True
+
+    def _untrack_pending_send(self, client: Any, fut: ConcurrentFuture[None]) -> None:
+        """Under ``_ws_lock``: forget *client*'s completed send *fut*."""
+        pending = self._pending_sends.get(client)
+        if pending is not None:
+            pending.discard(fut)
 
 
 def _media_url(name: str) -> str:
@@ -5580,6 +5618,27 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
         pass
 
 
+def _read_log_from(path: Path, offset: int) -> bytes:
+    """Return the bytes of the append-only log *path* from *offset* on.
+
+    Seeks instead of reading the whole file: the update log grows for
+    the lifetime of the installation.  Blocking; run it off the loop.
+
+    Args:
+        path: The log file.
+        offset: Byte position where the wanted slice begins.
+
+    Returns:
+        The slice, or ``b""`` when the log cannot be read.
+    """
+    try:
+        with open(path, "rb") as log:
+            log.seek(offset)
+            return log.read()
+    except OSError:
+        return b""
+
+
 def _close_orphaned_listener(bind: asyncio.Future[WebSocketServer]) -> None:
     """Close a listener whose creator was cancelled while awaiting the bind.
 
@@ -6425,7 +6484,7 @@ class RemoteAccessServer:
         # cancels the running task.
         spawned = None
         try:
-            if self._cancel_update_when_idle():
+            if await self._cancel_update_when_idle():
                 await self._broadcast_update_available()
             # When the clone (or its install.sh) is missing — the
             # extension was installed from a .vsix, or ~/.kiss/kiss_ai
@@ -6488,14 +6547,21 @@ class RemoteAccessServer:
         ``run`` submitted between the poller's "no active tasks"
         observation and the installer spawn is either counted as
         active (and defers the update) or refused by the barrier.
+        The armed flag is read in the same section — and
+        :meth:`_cancel_update_when_idle` clears it under the same lock
+        — so a Cancel that lands while this thread waits for the lock
+        is seen here and nothing is armed for an update nobody will
+        run (the cancelled poller has already lowered the barrier and
+        no exit watcher would ever lower it again).
         Blocks on the lock: call it off the event loop.
 
         Returns:
             ``True`` when the barrier was raised (idle), ``False`` when
-            a task is still live and the poller must wait.
+            a task is still live and the poller must wait, or the idle
+            update was cancelled meanwhile.
         """
         with agent_state.STATE_LOCK:
-            if _snapshot_active_tabs():
+            if not self._update_when_idle_armed or _snapshot_active_tabs():
                 return False
             self._vscode_server._update_installing = True
             return True
@@ -6587,11 +6653,52 @@ class RemoteAccessServer:
             cwd = str(Path.home())
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"
+        spawned = self._spawn_detached(
+            argv, cwd, env, self._update_log_path, conn_id,
+            f"{PRODUCT_NAME} update",
+        )
+        if spawned is not None:
+            self._update_proc = spawned[0]
+        return spawned
+
+    def _spawn_detached(
+        self,
+        argv: list[str],
+        cwd: str,
+        env: dict[str, str] | None,
+        log_path: Path,
+        conn_id: str,
+        what: str,
+    ) -> tuple[subprocess.Popen[bytes], int] | None:
+        """Start *argv* detached from the daemon, appending its output to *log_path*.
+
+        Shared by the self-updater and the model-catalog updater: both
+        must survive a restart of this daemon (``start_new_session=True``,
+        ``stdin=DEVNULL``) and both report a spawn failure as an
+        ``error`` event stamped with the requesting connection instead
+        of raising.  Blocking (file I/O, process spawn): run it in the
+        executor.
+
+        Args:
+            argv: The command line.
+            cwd: Working directory of the child.
+            env: Environment of the child (``None`` inherits the daemon's).
+            log_path: Append-only log the child's stdout/stderr go to.
+            conn_id: Requesting connection id (``""`` to broadcast).
+            what: What is being started, for the error text.
+
+        Returns:
+            The started process and the log's size at that moment (the
+            start of this run's output), or ``None`` when the spawn
+            failed.
+        """
         try:
-            self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._update_log_path, "ab") as log:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "ab") as log:
+                # Before the spawn: the child shares the open file
+                # description, so its first output would move ``tell``.
                 log_offset = log.tell()
-                self._update_proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     argv,
                     cwd=cwd,
                     env=env,
@@ -6600,11 +6707,11 @@ class RemoteAccessServer:
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
-                return self._update_proc, log_offset
+                return proc, log_offset
         except OSError as exc:
             self._broadcast_to_conn({
                 "type": "error",
-                "text": f"Failed to start {PRODUCT_NAME} update: {exc}",
+                "text": f"Failed to start {what}: {exc}",
             }, conn_id)
             return None
 
@@ -6636,10 +6743,9 @@ class RemoteAccessServer:
         self._set_update_barrier(False)
         if proc.returncode == 0:
             return
-        try:
-            output = self._update_log_path.read_bytes()[log_offset:]
-        except OSError:
-            output = b""
+        output = await asyncio.to_thread(
+            _read_log_from, self._update_log_path, log_offset,
+        )
         text = f"{PRODUCT_NAME} update failed (exit {proc.returncode}), see {self._update_log_path}"
         for line in output.decode("utf-8", errors="replace").splitlines():
             if "another KISS update is already running" in line:
@@ -6726,25 +6832,15 @@ class RemoteAccessServer:
             The started process, or ``None`` when the spawn failed.
         """
         try:
-            self._update_models_log_path.parent.mkdir(
-                parents=True, exist_ok=True,
+            spawned = self._spawn_detached(
+                self._update_models_argv, str(Path.home()), None,
+                self._update_models_log_path, conn_id,
+                "the model catalog update",
             )
-            with open(self._update_models_log_path, "ab") as log:
-                self._update_models_proc = subprocess.Popen(
-                    self._update_models_argv,
-                    cwd=str(Path.home()),
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                return self._update_models_proc
-        except OSError as exc:
-            self._broadcast_to_conn({
-                "type": "error",
-                "text": f"Failed to start the model catalog update: {exc}",
-            }, conn_id)
-            return None
+            if spawned is None:
+                return None
+            self._update_models_proc = spawned[0]
+            return self._update_models_proc
         finally:
             self._update_models_starting = False
 
@@ -7459,7 +7555,7 @@ class RemoteAccessServer:
                     # The settings event lets the export's synthesized
                     # task panels carry the same settings info the live
                     # panel shows (see shareTaskPanel in media/main.js).
-                    "events": with_task_settings_event(
+                    "events": with_synthesized_events(
                         cast("list[dict[str, Any]]", row.get("events") or []),
                         row,
                     ),
@@ -8298,7 +8394,7 @@ class RemoteAccessServer:
             self._update_proc is not None and self._update_proc.poll() is None
         )
 
-    def _cancel_update_when_idle(self) -> bool:
+    async def _cancel_update_when_idle(self) -> bool:
         """Disarm an "Update when idle" still waiting for idle.
 
         Returns:
@@ -8306,14 +8402,36 @@ class RemoteAccessServer:
             idle and is launching the installer is left alone: the
             update is under way and the single-flight guard in
             :meth:`_handle_run_update` covers any concurrent request.
+            The flag is cleared under :data:`agent_state.STATE_LOCK`
+            so an idle check already started in the executor
+            (:meth:`_arm_update_barrier_if_idle`) cannot raise the
+            barrier after this cancel lowered it.  That acquisition
+            waits behind task threads holding the lock, so it runs in
+            the executor like the idle check itself and never stalls
+            the event loop; only ``Task.cancel`` runs on the loop.
         """
         if not self._update_when_idle_armed:
             return False
-        self._update_when_idle_armed = False
-        assert self._update_when_idle_task is not None
-        self._update_when_idle_task.cancel()
-        self._update_when_idle_task = None
+        if not await asyncio.to_thread(self._disarm_update_when_idle):
+            # The poller armed the barrier and cleared the flag during
+            # the wait: it is launching the installer, leave it alone.
+            return False
+        task = self._update_when_idle_task
+        if task is not None:
+            task.cancel()
+            self._update_when_idle_task = None
         return True
+
+    def _disarm_update_when_idle(self) -> bool:
+        """Executor thread: clear the armed flag under the state lock.
+
+        Returns:
+            Whether the flag was set (this call disarmed the update).
+        """
+        with agent_state.STATE_LOCK:  # executor thread: no Stop injection
+            was_armed = self._update_when_idle_armed
+            self._update_when_idle_armed = False
+            return was_armed
 
     async def _handle_update_when_idle(self, cancel: bool = False) -> None:
         """Arm (or cancel) an update that runs once no task is running.
@@ -8329,7 +8447,7 @@ class RemoteAccessServer:
                 arming one.
         """
         if cancel:
-            self._cancel_update_when_idle()
+            await self._cancel_update_when_idle()
         elif (
             self._update_when_idle_task is None
             and not self._update_in_progress()
@@ -10344,7 +10462,10 @@ class RemoteAccessServer:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
-            cron_agent.stop_scheduler_thread(cron_stop)
+            # Joins the scheduler thread (up to 30 s when a tick is
+            # stuck on a slow disk): off the loop, which is still
+            # delivering the final frames to connected clients.
+            await asyncio.to_thread(cron_agent.stop_scheduler_thread, cron_stop)
             self._close_ws_listeners()
             if not serve_task.done():
                 serve_task.cancel()
@@ -10810,29 +10931,40 @@ class RemoteAccessServer:
             # death -> rotated public URL).  A no-op when the sigterm
             # thread already detached.
             self._detach_tunnel()
-            self._stop_active_agent_tasks()
-            self._await_active_merges()
-            self._disconnect_mcp_servers()
-            # Re-persist tab-registry mutations whose save failed
-            # (e.g. a briefly unwritable KISS dir); no-op when the
-            # last save succeeded.
-            self._vscode_server.tab_registry.flush()
-            # The Browser tab dies with this server: a later hand-off in
-            # this process must fall back to the default browser, and
-            # the streamed browser is closed here rather than killed by
-            # the driver at process exit (same as ``stop_async``).
-            set_browser_tab_opener(None)
-            self._vscode_server.browser_tabs.shutdown()
-            # Terminal-tab shells are hung up (and killed when they
-            # ignore it) rather than left to outlive the daemon.
-            self._vscode_server.terminals.shutdown()
-            # Streams of the tabs running on remote machines.
-            self._server_api.remote_tabs.close_all()
-            self._stop_sea_command_watcher()
+            self._shutdown_children()
             file_index.stop()
             if stall_watchdog is not None:
                 stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)
+
+    def _shutdown_children(self) -> None:
+        """Stop everything the daemon owns besides its listeners and tunnel.
+
+        The one shutdown sequence shared by :meth:`start`'s ``finally``
+        (called inline, the loop is gone) and :meth:`stop_async` (run
+        through ``asyncio.to_thread``, the loop is still serving the
+        final frames).  Blocking, with bounded waits: in-flight agent
+        worker threads (12 s aggregate), interactive merges/discards
+        running in the default executor (30 s aggregate — they rewrite
+        the repository, so nothing else is torn down before them),
+        MCP servers, the tab registry's deferred re-save (a no-op when
+        the last save succeeded), the streamed Browser tab (unregistered
+        as the hand-off target first, so a later hand-off in this process
+        falls back to the default browser, then closed rather than
+        killed by the driver at process exit), terminal-tab shells (hung
+        up, killed when they ignore it), the streams of tabs running on
+        remote machines, and the SEA-registry watcher.  Every step is
+        idempotent: the SIGTERM thread runs the first three early.
+        """
+        self._stop_active_agent_tasks()
+        self._await_active_merges()
+        self._disconnect_mcp_servers()
+        self._vscode_server.tab_registry.flush()
+        set_browser_tab_opener(None)
+        self._vscode_server.browser_tabs.shutdown()
+        self._vscode_server.terminals.shutdown()
+        self._server_api.remote_tabs.close_all()
+        self._stop_sea_command_watcher()
 
     async def start_async(self) -> None:
         """Start the server asynchronously (for use in existing event loops).
@@ -10920,8 +11052,9 @@ class RemoteAccessServer:
             self._version_check_task = None
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
-            self._update_when_idle_armed = False
-            await _cancel_task(self._update_when_idle_task)
+            idle_poller = self._update_when_idle_task
+            await self._cancel_update_when_idle()
+            await _cancel_task(idle_poller)
             self._update_when_idle_task = None
             await _cancel_task(self._update_models_watch_task)
             self._update_models_watch_task = None
@@ -10942,33 +11075,16 @@ class RemoteAccessServer:
                 local_endpoint.remove_endpoint_if_owned,
                 self._local_endpoint_file, self._local_token,
             )
-            # The streamed browser (if one was opened) is a child of this
-            # daemon: close it so no orphan browser survives shutdown.
-            set_browser_tab_opener(None)
-            await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
-            # Terminal-tab shells are children of this daemon too.
-            await asyncio.to_thread(self._vscode_server.terminals.shutdown)
-            # Streams of the tabs running on remote machines.
-            await asyncio.to_thread(self._server_api.remote_tabs.close_all)
-            # An interactive merge/discard runs in the default executor,
-            # not on a task thread: WAIT for it before anything else is
-            # torn down, or the repository keeps being rewritten after
-            # this method promised the server was down.
-            await asyncio.to_thread(self._await_active_merges)
-            await asyncio.to_thread(self._stop_active_agent_tasks)
-            await asyncio.to_thread(self._disconnect_mcp_servers)
-            # Re-persist tab-registry mutations whose save failed
-            # (e.g. a briefly unwritable KISS dir) so they survive
-            # the restart; a no-op when the last save succeeded.
-            await asyncio.to_thread(self._vscode_server.tab_registry.flush)
+            # Every child of this daemon (worker threads, merges, MCP,
+            # the streamed browser, terminal shells, remote streams):
+            # the same sequence as ``start()``'s ``finally``, off the
+            # loop so the final frames to connected clients (and any
+            # embedder's own tasks) are not frozen by its bounded waits.
+            await asyncio.to_thread(self._shutdown_children)
             # ``_stop_tunnel`` blocks in ``Popen.wait(timeout=5)`` while
-            # cloudflared shuts down; keep it off the loop like every
-            # other blocking step above so the final frames to
-            # connected clients (and any embedder's own tasks) are
-            # not frozen for the grace period.
+            # cloudflared shuts down; off the loop for the same reason.
             await asyncio.to_thread(self._stop_tunnel)
             _remove_url_file(self._url_file)
-            await asyncio.to_thread(self._stop_sea_command_watcher)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

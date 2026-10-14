@@ -33,6 +33,8 @@ from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar._concurrency import locked_call
+from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.machines import (
     LOCAL_MACHINE,
@@ -73,14 +75,11 @@ from kiss.server.autocomplete import (
 from kiss.server.browser_tab import BrowserTabService
 from kiss.server.commands import _CommandsMixin
 from kiss.server.file_index import FileIndexRegistry
-from kiss.server.helpers import (
-    generate_commit_message_from_diff,
-    model_vendor,
-)
+from kiss.server.helpers import model_vendor
 from kiss.server.json_printer import (
     JsonPrinter,
     _coalesce_events,
-    with_task_settings_event,
+    with_synthesized_events,
 )
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.tab_registry import TabRegistry
@@ -362,6 +361,15 @@ def _bound_replay_events(evs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     if kept and "ts" in kept[0]:
         note["ts"] = kept[0]["ts"]
+    if not any(ev.get("type") in ("usage_info", "result") for ev in kept):
+        # The run's totals live in its newest usage event; when that
+        # fell in the omitted prefix (a long tool output followed it)
+        # the reader would see no cost at all.  Carry it across: the
+        # event is cumulative, so the latest one alone is exact.
+        for ev in reversed(evs[:kept_from]):
+            if ev.get("type") == "usage_info":
+                kept = [ev, *kept]
+                break
     return [note, *kept]
 
 
@@ -381,9 +389,13 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
     """
     if not (isinstance(sub_task_id, str) and sub_task_id):
         return True
-    with agent_state.STATE_LOCK:
-        state = agent_state.get(sub_task_id)
-        return state is None or not state.running()
+    return locked_call(agent_state.STATE_LOCK, _no_live_state_locked, sub_task_id)
+
+
+def _no_live_state_locked(task_id: str) -> bool:
+    """Under ``STATE_LOCK``: no registered state for *task_id* is running."""
+    state = agent_state.get(task_id)
+    return state is None or not state.running()
 
 
 def _is_side_channel_row(row: dict[str, object]) -> bool:
@@ -625,11 +637,20 @@ class VSCodeServer(
             return True
         if not interested:
             return False
-        with self._state_lock:
-            state = agent_state.find_by_tab(tab_id)
-            if state is not None:
-                return not state.frontend_closed
+        # On the task thread (a ``talk`` broadcast): ``locked_call``,
+        # never ``with`` (see ``kiss.core.locked``).
+        shown = locked_call(self._state_lock, self._tab_state_shown_locked, tab_id)
+        if shown is not None:
+            return shown
         return not in_registry
+
+    @staticmethod
+    def _tab_state_shown_locked(tab_id: str) -> bool | None:
+        """Under ``_state_lock``: whether *tab_id*'s own state is open; ``None`` without one."""
+        state = agent_state.find_by_tab(tab_id)
+        if state is None:
+            return None
+        return not state.frontend_closed
 
     @staticmethod
     def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
@@ -837,8 +858,11 @@ class VSCodeServer(
         Returns:
             The tab's selected model name.
         """
-        with self._state_lock:
-            return self._tab_models.get(tab_id, "") or self._default_model
+        return locked_call(self._state_lock, self._tab_model_locked, tab_id)
+
+    def _tab_model_locked(self, tab_id: str) -> str:
+        """Under ``_state_lock``: *tab_id*'s pick or the default model."""
+        return self._tab_models.get(tab_id, "") or self._default_model
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
@@ -1584,84 +1608,102 @@ class VSCodeServer(
         Args:
             tab_id: The frontend tab identifier being dropped.
         """
+        # Reached from the task thread too (``_registry_update_tab``
+        # displacing an older tab at task startup), so the locked
+        # section goes through ``locked_call`` (``kiss.core.locked``).
+        teardown, state = locked_call(
+            self._state_lock, self._drop_tab_state_locked, tab_id, removal_token,
+        )
+        if teardown:
+            self._teardown_tab_resources(tab_id, state, removal_token=removal_token)
+
+    def _drop_tab_state_locked(
+        self, tab_id: str, removal_token: int | None,
+    ) -> tuple[bool, AgentState | None]:
+        """Under ``_state_lock``: the close's linearization point of :meth:`_drop_tab_state`.
+
+        Returns:
+            ``(True, state)`` when the caller must run the unlocked
+            teardown tail for the claimed *state*; ``(False, None)``
+            when the drop stood down or the tab is busy.
+        """
+        if removal_token is not None and self._tab_reopened_since(
+            tab_id, removal_token
+        ):
+            # A later publication reopened the tab between the
+            # registry removal and this cleanup; it owns the state
+            # now (its own rebind runs under this same lock).
+            return False, None
+        state = agent_state.find_by_tab(tab_id)
+        is_subagent_tab = (
+            state is not None and state.is_subagent
+        ) or "__sub_" in tab_id
         busy = False
-        with self._state_lock:
-            if removal_token is not None and self._tab_reopened_since(
-                tab_id, removal_token
-            ):
-                # A later publication reopened the tab between the
-                # registry removal and this cleanup; it owns the state
-                # now (its own rebind runs under this same lock).
-                return
-            state = agent_state.find_by_tab(tab_id)
-            is_subagent_tab = (
-                state is not None and state.is_subagent
-            ) or "__sub_" in tab_id
-            if state is not None:
-                state.frontend_closed = True
-                if state.busy():
-                    busy = True
-                    # Retire any rowless capacity-replay stamp HERE, at
-                    # the close's linearization point: the busy path
-                    # returns below without reaching
-                    # ``_teardown_tab_resources``, whose retire would
-                    # only run at the deferred ``_dispose_if_closed`` —
-                    # but a pending capacity commit qualified by that
-                    # stamp would clear ``frontend_closed`` first,
-                    # reopening the closed backend view and preventing
-                    # that deferred disposal from ever running
-                    # (gpt-5.6-sol round-3 review, finding 1).  The
-                    # retire re-verifies ownership and drops the stamp
-                    # in ONE registry-locked step
-                    # (:meth:`TabRegistry.finalize_removal`): a replay
-                    # stamped BEFORE it stands down at its commit,
-                    # while one stamped after it (or between the guard
-                    # above and this line) survives and re-bumps the
-                    # generation, superseding the close as on the
-                    # immediate path (gpt-5.6-sol round-6 review,
-                    # finding 1).  A no-op when the tab has a registry
-                    # row (the row's own publication token belongs to
-                    # its owner).
-                    if removal_token is not None:
-                        self.tab_registry.finalize_removal(
-                            tab_id, removal_token,
-                        )
-                    else:
-                        self.tab_registry.retire_unregistered(tab_id)
+        if state is not None:
+            state.frontend_closed = True
+            if state.busy():
+                busy = True
+                # Retire any rowless capacity-replay stamp HERE, at
+                # the close's linearization point: the busy path
+                # returns below without reaching
+                # ``_teardown_tab_resources``, whose retire would
+                # only run at the deferred ``_dispose_if_closed`` —
+                # but a pending capacity commit qualified by that
+                # stamp would clear ``frontend_closed`` first,
+                # reopening the closed backend view and preventing
+                # that deferred disposal from ever running
+                # (gpt-5.6-sol round-3 review, finding 1).  The
+                # retire re-verifies ownership and drops the stamp
+                # in ONE registry-locked step
+                # (:meth:`TabRegistry.finalize_removal`): a replay
+                # stamped BEFORE it stands down at its commit,
+                # while one stamped after it (or between the guard
+                # above and this line) survives and re-bumps the
+                # generation, superseding the close as on the
+                # immediate path (gpt-5.6-sol round-6 review,
+                # finding 1).  A no-op when the tab has a registry
+                # row (the row's own publication token belongs to
+                # its owner).
+                if removal_token is not None:
+                    self.tab_registry.finalize_removal(
+                        tab_id, removal_token,
+                    )
                 else:
-                    state.is_merging = True
-                    # Published with every claim that retires a
-                    # worktree so shutdown's ``_await_active_merges``
-                    # waits for it (see ``_finalize_pending_worktree``).
-                    state.merge_thread = threading.current_thread()
-            # Sub-agent tabs are not in the registry, so their close
-            # cannot mirror via ``tabs_state``: broadcast a canonical
-            # close event instead.  Every client removes the tab, so
-            # a torn-down shared per-tab printer subscription cannot
-            # starve a client that still shows the tab.  Recorded and
-            # broadcast in the same locked step as
-            # ``_open_persisted_subagent_tabs`` checks the record and
-            # announces a live child, so the close is ordered wholly
-            # before that announcement (which then stands down) or
-            # wholly after it (and closes the tab it opened).
-            if is_subagent_tab:
-                self._broadcast_subagent_close(tab_id)
-                self._remember_closed_subagent_tab(tab_id)
-            if busy:
-                # The task keeps running with no tab showing it.  Drop
-                # the tab's printer subscriptions now (the task's
-                # recording is per task and survives): the viewer
-                # registry then lists only OPEN tabs, which is what
-                # ``SorcarAgent._subagent_parent_tab_id`` relies on to
-                # parent later spawns under the tab a history reopen
-                # gave the chat instead of this closed one.  Under the
-                # lock, after the reopen check above: a replay that
-                # republished this id either landed before (this close
-                # stood down) or commits after, re-subscribing the tab
-                # (``_commit_replay_publication``).
-                self._printer_cleanup_tab(tab_id)
-                return
-        self._teardown_tab_resources(tab_id, state, removal_token=removal_token)
+                    self.tab_registry.retire_unregistered(tab_id)
+            else:
+                state.is_merging = True
+                # Published with every claim that retires a
+                # worktree so shutdown's ``_await_active_merges``
+                # waits for it (see ``_finalize_pending_worktree``).
+                state.merge_thread = threading.current_thread()
+        # Sub-agent tabs are not in the registry, so their close
+        # cannot mirror via ``tabs_state``: broadcast a canonical
+        # close event instead.  Every client removes the tab, so
+        # a torn-down shared per-tab printer subscription cannot
+        # starve a client that still shows the tab.  Recorded and
+        # broadcast in the same locked step as
+        # ``_open_persisted_subagent_tabs`` checks the record and
+        # announces a live child, so the close is ordered wholly
+        # before that announcement (which then stands down) or
+        # wholly after it (and closes the tab it opened).
+        if is_subagent_tab:
+            self._broadcast_subagent_close(tab_id)
+            self._remember_closed_subagent_tab(tab_id)
+        if busy:
+            # The task keeps running with no tab showing it.  Drop
+            # the tab's printer subscriptions now (the task's
+            # recording is per task and survives): the viewer
+            # registry then lists only OPEN tabs, which is what
+            # ``SorcarAgent._subagent_parent_tab_id`` relies on to
+            # parent later spawns under the tab a history reopen
+            # gave the chat instead of this closed one.  Under the
+            # lock, after the reopen check above: a replay that
+            # republished this id either landed before (this close
+            # stood down) or commits after, re-subscribing the tab
+            # (``_commit_replay_publication``).
+            self._printer_cleanup_tab(tab_id)
+            return False, None
+        return True, state
 
     def _remember_closed_subagent_tab(self, tab_id: str) -> None:
         """Record that the user closed the running sub-agent tab *tab_id*.
@@ -1678,12 +1720,15 @@ class VSCodeServer(
             tab_id: The shared sub-agent tab identifier
                 (``{parent_tab_id}__sub_{task_id}``).
         """
-        with self._state_lock:
-            self._closed_subagent_tabs.add(tab_id)
-            self._closed_subagent_tabs.difference_update({
-                t for t in self._closed_subagent_tabs
-                if _subagent_is_done(t.rsplit("__sub_", 1)[-1])
-            })
+        locked_call(self._state_lock, self._remember_closed_subagent_tab_locked, tab_id)
+
+    def _remember_closed_subagent_tab_locked(self, tab_id: str) -> None:
+        """Under ``_state_lock``: the body of :meth:`_remember_closed_subagent_tab`."""
+        self._closed_subagent_tabs.add(tab_id)
+        self._closed_subagent_tabs.difference_update({
+            t for t in self._closed_subagent_tabs
+            if _subagent_is_done(t.rsplit("__sub_", 1)[-1])
+        })
 
     def _broadcast_subagent_close(self, tab_id: str) -> None:
         """Tell every client to close the sub-agent tab *tab_id*.
@@ -1734,22 +1779,34 @@ class VSCodeServer(
         """
         if not tab_id:
             return
-        with self._state_lock:
-            state = agent_state.find_by_tab(tab_id)
-            if state is None or not state.frontend_closed:
-                return
-            if state.busy():
-                return
-            if self.tab_registry.has_tab(tab_id):
-                # A row exists only through a publication AFTER the
-                # close that set ``frontend_closed`` (the close removed
-                # the row): the reopen owns the tab, and its commit
-                # clears the flag under this same lock.
-                return
-            state.is_merging = True
-            state.merge_thread = threading.current_thread()
-            token = self.tab_registry.retire_unregistered_and_observe(tab_id)
-        self._teardown_tab_resources(tab_id, state, removal_token=token)
+        # Runs on the task thread at every lifecycle transition, so
+        # the claim goes through ``locked_call`` (``kiss.core.locked``).
+        claim = locked_call(self._state_lock, self._claim_closed_tab_locked, tab_id)
+        if claim is not None:
+            state, token = claim
+            self._teardown_tab_resources(tab_id, state, removal_token=token)
+
+    def _claim_closed_tab_locked(self, tab_id: str) -> tuple[AgentState, int] | None:
+        """Under ``_state_lock``: claim a closed, idle *tab_id* for disposal.
+
+        Returns:
+            ``(state, removal_token)`` for :meth:`_teardown_tab_resources`,
+            or ``None`` when the tab is open, busy, reopened or gone.
+        """
+        state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.frontend_closed:
+            return None
+        if state.busy():
+            return None
+        if self.tab_registry.has_tab(tab_id):
+            # A row exists only through a publication AFTER the
+            # close that set ``frontend_closed`` (the close removed
+            # the row): the reopen owns the tab, and its commit
+            # clears the flag under this same lock.
+            return None
+        state.is_merging = True
+        state.merge_thread = threading.current_thread()
+        return state, self.tab_registry.retire_unregistered_and_observe(tab_id)
 
     def _teardown_tab_resources(
         self,
@@ -1846,6 +1903,21 @@ class VSCodeServer(
         claim_retained = bool(
             wt_agent is not None and getattr(wt_agent, "_wt_pending", False)
         )
+        # On the task thread for a displaced or deferred-disposed tab:
+        # ``locked_call``, never ``with`` (see ``kiss.core.locked``).
+        locked_call(
+            self._state_lock, self._finish_tab_teardown_locked,
+            tab_id, state, removal_token, claim_retained,
+        )
+
+    def _finish_tab_teardown_locked(
+        self,
+        tab_id: str,
+        state: AgentState | None,
+        removal_token: int | None,
+        claim_retained: bool,
+    ) -> None:
+        """Under ``_state_lock``: the destructive tail of :meth:`_finish_tab_teardown`."""
         # ONE ``_state_lock`` section for every destructive step, with
         # ONE atomic ownership decision (``finalize_removal``: re-check
         # + rowless stamp retirement under a single registry lock
@@ -1860,38 +1932,37 @@ class VSCodeServer(
         # ``_state_lock``, wins) or strictly after it (the stamp
         # survives and the commit replays into a fully torn-down tab —
         # the serial "closed, then reopened" order).
-        with self._state_lock:
-            if state is not None:
-                state.is_merging = False
-                state.merge_thread = None
-            if removal_token is not None:
-                if not self.tab_registry.finalize_removal(
-                    tab_id, removal_token,
-                ):
-                    # Reopened since the claim (e.g. while the worktree
-                    # was being retired): the new publication owns this
-                    # state — and any fresh rowless stamp — from here on.
-                    return
+        if state is not None:
+            state.is_merging = False
+            state.merge_thread = None
+        if removal_token is not None:
+            if not self.tab_registry.finalize_removal(
+                tab_id, removal_token,
+            ):
+                # Reopened since the claim (e.g. while the worktree
+                # was being retired): the new publication owns this
+                # state — and any fresh rowless stamp — from here on.
+                return
+        else:
+            # Direct callers with no registry ordering keep the
+            # unconditional behaviour; the retire is a no-op when
+            # the tab has a registry row (the row's own publication
+            # token must survive for its owner).
+            self.tab_registry.retire_unregistered(tab_id)
+        if state is not None:
+            if claim_retained:
+                logger.warning(
+                    "Tab %s closed but its worktree's keep-for-review "
+                    "decision is not durable yet; keeping its state "
+                    "registered so the worktree stays protected",
+                    tab_id,
+                )
             else:
-                # Direct callers with no registry ordering keep the
-                # unconditional behaviour; the retire is a no-op when
-                # the tab has a registry row (the row's own publication
-                # token must survive for its owner).
-                self.tab_registry.retire_unregistered(tab_id)
-            if state is not None:
-                if claim_retained:
-                    logger.warning(
-                        "Tab %s closed but its worktree's keep-for-review "
-                        "decision is not durable yet; keeping its state "
-                        "registered so the worktree stays protected",
-                        tab_id,
-                    )
-                else:
-                    agent_state.unregister(state.task_id, state)
-            self._printer_cleanup_tab(tab_id)
-            self._tab_chat_views.pop(tab_id, None)
-            self._tab_opened_task_ids.pop(tab_id, None)
-            self._tab_models.pop(tab_id, None)
+                agent_state.unregister(state.task_id, state)
+        self._printer_cleanup_tab(tab_id)
+        self._tab_chat_views.pop(tab_id, None)
+        self._tab_opened_task_ids.pop(tab_id, None)
+        self._tab_models.pop(tab_id, None)
 
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
@@ -2239,7 +2310,7 @@ class VSCodeServer(
         ) as live_events:
             if live_events:
                 result["events"] = live_events
-            replayed_events = with_task_settings_event(
+            replayed_events = with_synthesized_events(
                 _coalesced_replay_events(result["events"]), result,
             )
             self.printer.broadcast(
@@ -2600,7 +2671,7 @@ class VSCodeServer(
                     self.printer.broadcast(
                         {
                             "type": "task_events",
-                            "events": with_task_settings_event(
+                            "events": with_synthesized_events(
                                 _coalesced_replay_events(row["events"]), row,
                             ),
                             "task": description,
@@ -2942,7 +3013,7 @@ class VSCodeServer(
             "task": result["task"] if result else "",
             "task_id": result["task_id"] if result else None,
             "events": (
-                with_task_settings_event(
+                with_synthesized_events(
                     _coalesced_replay_events(result["events"]), result,
                 )
                 if result

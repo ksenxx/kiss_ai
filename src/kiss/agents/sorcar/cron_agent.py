@@ -96,6 +96,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from kiss.agents.seas.base.base_sea import ChannelSea
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
@@ -107,7 +108,7 @@ logger = logging.getLogger(__name__)
 COMMAND_TIMEOUT_SECONDS = 600.0
 PROMPT_TIMEOUT_SECONDS = 3600.0
 
-_running_lock = threading.Lock()
+_running_lock = threading.RLock()
 _running: dict[str, threading.Thread] = {}
 """Job id -> thread of every job run in progress in this process.
 
@@ -684,6 +685,12 @@ def _run_in_chat_job(
     """
     from kiss.agents.sorcar import daemon_client
 
+    # The CANONICAL module's recorded endpoint, as a prompt job's: this
+    # module's own global is never set in the synthetic copy a
+    # dispatched cron session's ``run_now`` runs (see
+    # :data:`_daemon_endpoint_file`).
+    from kiss.agents.sorcar.agent_dispatch import _daemon_endpoint_file as daemon_endpoint_file
+
     raw_budget = job.get("max_budget")
     try:
         result = daemon_client.run(
@@ -693,7 +700,7 @@ def _run_in_chat_job(
             max_budget=float(raw_budget) if raw_budget else None,
             timeout=timeout,
             stop_on_timeout=True,
-            endpoint_file=_daemon_endpoint_file,
+            endpoint_file=daemon_endpoint_file(),
         )
     except daemon_client.StopUnconfirmedTimeoutError as exc:
         raise TimeoutError(
@@ -1477,6 +1484,21 @@ def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
     return ""
 
 
+def _claim_run(running: dict[str, threading.Thread], job_id: str, me: threading.Thread) -> bool:
+    """Register *me* as the thread running *job_id* in *running*; ``False`` when one is alive."""
+    current = running.get(job_id)
+    if current is not None and current.is_alive():
+        return False
+    running[job_id] = me
+    return True
+
+
+def _release_run(running: dict[str, threading.Thread], job_id: str, me: threading.Thread) -> None:
+    """Drop *me*'s registration of *job_id* from *running* (a newer thread's is kept)."""
+    if running.get(job_id) is me:
+        del running[job_id]
+
+
 def start_job(job: dict[str, Any]) -> str:
     """Run *job* now in its own thread (as a tick does), without waiting.
 
@@ -1876,21 +1898,8 @@ def cron_job(
     if action in ("remove", "pause", "resume"):
         if not job_id:
             return _dump({"error": f"{action} requires job_id"})
-        with _jobs_lock(blocking=True):
-            jobs = load_jobs()
-            match = [job for job in jobs if job["id"] == job_id]
-            if not match:
-                return _dump({"error": f"no job with id {job_id!r}"})
-            if action == "remove":
-                jobs = [job for job in jobs if job["id"] != job_id]
-            elif action == "pause":
-                match[0]["enabled"] = False
-            else:
-                error = _enable(match[0])
-                if error:
-                    return _dump({"error": error})
-            save_jobs(jobs)
-        return _dump({action: job_id})
+        error = apply_job_action(action, job_id)
+        return _dump({"error": error} if error else {action: job_id})
 
     if action == "run_now":
         match = [job for job in load_jobs() if job["id"] == job_id]
@@ -1908,17 +1917,19 @@ def cron_job(
         # between the store and the run still unregisters this thread
         # (a stale entry would refuse every later run_now while the
         # thread lives on in its dispatcher).
+        # ``_running_lock`` is taken through ``locked_call``: this runs
+        # on the cron agent's task thread, where the stop injection
+        # would leak a plain ``with`` (CPython gh-74174).
         try:
-            with _jobs_lock(blocking=True), canonical._running_lock:
-                running = canonical._running.get(job_id)
-                if running is not None and running.is_alive():
-                    return _dump({"error": f"job {job_id!r} is already running"})
-                canonical._running[job_id] = me
+            with _jobs_lock(blocking=True):
+                claimed = locked_call(
+                    canonical._running_lock, _claim_run, canonical._running, job_id, me,
+                )
+            if not claimed:
+                return _dump({"error": f"job {job_id!r} is already running"})
             _execute_job(match[0])
         finally:
-            with canonical._running_lock:
-                if canonical._running.get(job_id) is me:
-                    del canonical._running[job_id]
+            locked_call(canonical._running_lock, _release_run, canonical._running, job_id, me)
         refreshed = [job for job in load_jobs() if job["id"] == job_id]
         return _dump({"ran": _job_view(refreshed[0] if refreshed else match[0])})
 

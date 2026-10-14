@@ -1162,7 +1162,7 @@ def test_graph_file_click_opens_a_diff_editor(browser, harness, worktree):
         rows = page.locator("#scm-graph .scm-commit.is-worktree")
         _panel_click(rows.first)
         wt_files = rows.first.locator("xpath=following-sibling::*[1]").locator(".scm-row")
-        wt_files.filter(has_text="README.md").first.click()
+        _panel_click(wt_files.filter(has_text="README.md").first)
         _wait_tab_count(page, tabs_before + 3)
         diff = _wait_diff_tab(page, "# readme changed")
         assert diff["original"] == "# readme\n"
@@ -1181,7 +1181,7 @@ def test_graph_file_click_opens_a_diff_editor(browser, harness, worktree):
         # The linked worktree's row diffs ITS HEAD against ITS file.
         _panel_click(rows.nth(1))
         lt_files = rows.nth(1).locator("xpath=following-sibling::*[1]").locator(".scm-row")
-        lt_files.filter(has_text="README.md").first.click()
+        _panel_click(lt_files.filter(has_text="README.md").first)
         _wait_tab_count(page, tabs_before + 4)
         diff = _wait_diff_tab(page, "# readme edited in the worktree")
         assert diff["original"] == "# readme\n"

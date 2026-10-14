@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import yaml
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core import config as config_module
 from kiss.core.base import Base
@@ -210,8 +211,10 @@ _COMPACTION_THRESHOLD = 200
 # outside it could be published after a newer, larger one and leave the
 # tab under-counting the child's spend for the whole session.  Only
 # ledger reads and the printer's own lock are taken under it, so no
-# caller can deadlock on it.
-_OFFSET_PUBLISH_LOCK = threading.Lock()
+# caller can deadlock on it.  Taken through ``locked_call`` (hence
+# reentrant, though never taken reentrantly): on the task thread a
+# stop's injected interrupt can leak a plain ``with``.
+_OFFSET_PUBLISH_LOCK = threading.RLock()
 
 
 class _UsageLedger:
@@ -1627,11 +1630,15 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
-        with _OFFSET_PUBLISH_LOCK:
-            budget, tokens, steps = self.usage_snapshot()
-            self.printer.tokens_offset = tokens  # type: ignore[attr-defined]
-            self.printer.budget_offset = budget  # type: ignore[attr-defined]
-            self.printer.steps_offset = steps  # type: ignore[attr-defined]
+        locked_call(_OFFSET_PUBLISH_LOCK, self._publish_printer_offsets)
+
+    def _publish_printer_offsets(self) -> None:
+        """Snapshot the totals into the printer's offsets (lock held)."""
+        printer: Any = self.printer
+        budget, tokens, steps = self.usage_snapshot()
+        printer.tokens_offset = tokens
+        printer.budget_offset = budget
+        printer.steps_offset = steps
 
     def _summarize_failed_session(
         self,
@@ -1782,26 +1789,30 @@ class RelentlessAgent(Base):
             return
         from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
 
-        with TASK_USAGE_LOCK:
-            # One snapshot for both the text and the structured fields,
-            # so a reclaim landing between two reads cannot make them
-            # disagree.
-            budget, tokens, steps = self.usage_snapshot()
-            # No limits in the text: this runs in ``SorcarAgent.run``'s
-            # ``finally``, also for a run that never reached ``_reset``.
-            text = f"Steps: {steps}, Total tokens: {tokens:,}, Budget: ${budget:.4f}, "
-            cost = f"${budget:.4f}"
-            broadcast = getattr(self.printer, "broadcast", None)
-            if callable(broadcast):
-                broadcast({
-                    "type": "usage_info", "text": text, "total_tokens": tokens,
-                    "cost": cost, "cost_usd": budget, "total_steps": steps,
-                })
-                return
-            self.printer.print(
-                text, type="usage_info", total_tokens=tokens, cost=cost, cost_usd=budget,
-                total_steps=steps,
-            )
+        locked_call(TASK_USAGE_LOCK, self._publish_usage_totals)
+
+    def _publish_usage_totals(self) -> None:
+        """Send the ledger's totals as one ``usage_info`` event (lock held)."""
+        # One snapshot for both the text and the structured fields,
+        # so a reclaim landing between two reads cannot make them
+        # disagree.
+        printer: Any = self.printer
+        budget, tokens, steps = self.usage_snapshot()
+        # No limits in the text: this runs in ``SorcarAgent.run``'s
+        # ``finally``, also for a run that never reached ``_reset``.
+        text = f"Steps: {steps}, Total tokens: {tokens:,}, Budget: ${budget:.4f}, "
+        cost = f"${budget:.4f}"
+        broadcast = getattr(printer, "broadcast", None)
+        if callable(broadcast):
+            broadcast({
+                "type": "usage_info", "text": text, "total_tokens": tokens,
+                "cost": cost, "cost_usd": budget, "total_steps": steps,
+            })
+            return
+        printer.print(
+            text, type="usage_info", total_tokens=tokens, cost=cost, cost_usd=budget,
+            total_steps=steps,
+        )
 
     def _usage_net_of_printer_offsets(self) -> tuple[float, int, int]:
         """Return this task's cumulative ``(budget, tokens, steps)`` minus the printer offsets.

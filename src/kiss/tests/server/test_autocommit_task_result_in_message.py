@@ -10,7 +10,7 @@ commit is created, so the commit is fully traceable: what was asked,
 and what the agent reported it did.
 
 These tests exercise the real
-:func:`~kiss.server.helpers.generate_commit_message_from_diff`,
+:func:`~kiss.agents.sorcar.commit_message.generate_commit_message_from_diff`,
 :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`, and
 :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._auto_commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
@@ -22,8 +22,10 @@ model.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.commit_message import _append_task_result
-from kiss.server.helpers import generate_commit_message_from_diff
+from kiss.agents.sorcar.commit_message import (
+    _append_task_result,
+    generate_commit_message_from_diff,
+)
 from kiss.tests.agents.sorcar.test_autocommit_task_result_in_message import (  # noqa: F401
     _LLMUnavailable,
 )

@@ -414,11 +414,15 @@ class RemoteTabs:
                 tab = self._tabs.get(tab_id)
             if tab is None:
                 return False
+        self._forward(tab, tab_id, cmd)
+        return True
+
+    def _forward(self, tab: RemoteTab, tab_id: str, cmd: dict[str, Any]) -> None:
+        """Send *cmd* down *tab*'s stream; a lost stream fails the command on *tab_id*."""
         try:
             tab.send(cmd)
         except MachineError as exc:
             self._backend._vscode_server._refuse_run(tab_id, str(exc))
-        return True
 
     def _bind(
         self, tab_id: str, machine_name: str, cmd: dict[str, Any], title: str,
@@ -432,7 +436,9 @@ class RemoteTabs:
         happened to the tab in between decides what the new stream is
         worth: a ``closeTab`` (``_unbinds`` moved) stands it down, a
         bind to the same machine that won the race is kept instead of
-        it, one to another machine is retired for it.
+        it, one to another machine is retired for it, and a stream the
+        remote dropped meanwhile (its relay thread ran :meth:`dropped`
+        before this registration) refuses the run instead of binding.
         """
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
@@ -458,21 +464,37 @@ class RemoteTabs:
                 self._backend._vscode_server._refuse_run(tab_id, str(exc))
                 return None
             displaced: RemoteTab | None = None
+            same: RemoteTab | None = None  # a bind to the same machine that won
+            lost = False
             with self._lock:
-                if self._unbinds.get(tab_id, 0) != unbinds:
-                    tab.close()
-                    return None
+                stood_down = self._unbinds.get(tab_id, 0) != unbinds
                 winner = self._tabs.get(tab_id)
                 if winner is not None and winner.machine == machine:
-                    tab.close()
-                    tab = winner
-                else:
-                    if winner is not None:
-                        displaced = self._retire(winner)
-                    self._tabs[tab_id] = tab
+                    same = winner
+                elif not stood_down:
+                    with tab.lock:
+                        lost = tab.retired  # dropped before it could be registered
+                    if not lost:
+                        if winner is not None:
+                            displaced = self._retire(winner)
+                        self._tabs[tab_id] = tab
+            # Closed outside the lock: a close handshake can wait on the
+            # peer (up to the socket's close timeout), and the other
+            # tabs' commands must not.
             if displaced is not None:
                 displaced.close()
-            announce = tab is not winner
+            if stood_down or same is not None or lost:
+                tab.close()
+            if stood_down:
+                return None
+            if lost:
+                self._backend._vscode_server._refuse_run(
+                    tab_id, f"lost the connection to {machine.name}",
+                )
+                return None
+            if same is not None:
+                tab = same
+            announce = same is None
         # Every surface shows the tab (same registry entry a local run
         # publishes); its chat and task stay unbound here, they are the
         # remote daemon's.  Registered before the binding is announced:
@@ -568,10 +590,7 @@ class RemoteTabs:
                 tab.shown_task_id = str(cmd.get("taskId") or "")
                 if cmd.get("scoped") and conn_id:
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
-            try:
-                tab.send(cmd)
-            except MachineError as exc:
-                self._backend._vscode_server._refuse_run(tab_id, str(exc))
+            self._forward(tab, tab_id, cmd)
             return True
         with self._lock:
             tab = next(
@@ -593,10 +612,7 @@ class RemoteTabs:
             self._unbind(tab_id)
         if tab is None:
             return False
-        try:
-            tab.send(cmd)
-        except MachineError as exc:
-            self._backend._vscode_server._refuse_run(tab_id, str(exc))
+        self._forward(tab, tab_id, cmd)
         return True
 
     def replay_to(self, conn_id: str, single_tab_id: str) -> None:
@@ -657,11 +673,12 @@ class RemoteTabs:
         A stream already retired (replaced, unbound) is nobody's loss.
         """
         with self._lock:
-            if self._tabs.get(tab.tab_id) is tab:
-                self._retire(tab)
-            else:
-                lost = False
-        if lost:
+            # Retired even when not (or no longer) registered: a stream
+            # lost while _bind is still about to register it must not be
+            # installed; _bind checks the flag.
+            registered = self._tabs.get(tab.tab_id) is tab
+            self._retire(tab)
+        if lost and registered:
             self._backend._vscode_server._refuse_run(
                 tab.tab_id, f"lost the connection to {tab.machine.name}",
             )

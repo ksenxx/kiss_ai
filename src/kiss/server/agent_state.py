@@ -24,13 +24,23 @@ import queue
 import threading
 from typing import TYPE_CHECKING
 
+from kiss.agents.sorcar._concurrency import locked_call
+
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
 STATE_LOCK = threading.RLock()
-"""Guards :data:`agent_states` and every :class:`AgentState` field."""
+"""Guards :data:`agent_states` and every :class:`AgentState` field.
+
+Every function here takes it through :func:`locked_call`: they run on
+task threads (each display event a task broadcasts files itself for
+persistence through :func:`get`), where the runner's Stop injects
+``KeyboardInterrupt`` at any check point, including the one right
+after a plain ``with``'s ``__enter__`` returned, which leaks the lock
+for the daemon's life (CPython gh-74174).
+"""
 
 agent_states: dict[str, AgentState] = {}
 """The registry: task id → live agent state."""
@@ -209,20 +219,22 @@ class AgentState:
         clear a fresh claim that another thread installed between the
         liveness check and the release.
         """
-        with STATE_LOCK:
-            if not self.is_merging:
-                return False
-            thread = self.merge_thread
-            if thread is None or thread.ident is None or thread.is_alive():
-                return True
-            logger.warning(
-                "Releasing orphaned merge claim on tab %s (task %s): thread %s "
-                "died without releasing it",
-                self.tab_id, self.task_id, thread.name,
-            )
-            self.is_merging = False
-            self.merge_thread = None
+        return locked_call(STATE_LOCK, self._merge_in_progress_locked)
+
+    def _merge_in_progress_locked(self) -> bool:
+        if not self.is_merging:
             return False
+        thread = self.merge_thread
+        if thread is None or thread.ident is None or thread.is_alive():
+            return True
+        logger.warning(
+            "Releasing orphaned merge claim on tab %s (task %s): thread %s "
+            "died without releasing it",
+            self.tab_id, self.task_id, thread.name,
+        )
+        self.is_merging = False
+        self.merge_thread = None
+        return False
 
     def busy(self) -> bool:
         """True when the state is owned by a live task or merge/discard.
@@ -245,8 +257,20 @@ def register(state: AgentState) -> None:
     Args:
         state: The state to install.
     """
-    with STATE_LOCK:
-        agent_states[state.task_id] = state
+    # ``state.task_id`` is read under the lock: ``rekey`` moves the
+    # state (and rewrites the key) under the same lock, so reading it
+    # first would install the state under a key ``rekey`` just retired.
+    locked_call(STATE_LOCK, _register_locked, state)
+
+
+def _register_locked(state: AgentState) -> None:
+    agent_states[state.task_id] = state
+
+
+def _unregister_locked(task_id: str, state: AgentState | None) -> None:
+    if state is not None and agent_states.get(task_id) is not state:
+        return
+    agent_states.pop(task_id, None)
 
 
 def unregister(task_id: str, state: AgentState | None = None) -> None:
@@ -258,10 +282,14 @@ def unregister(task_id: str, state: AgentState | None = None) -> None:
             exact object — a replaced owner must not delete its
             replacement.
     """
-    with STATE_LOCK:
-        if state is not None and agent_states.get(task_id) is not state:
-            return
-        agent_states.pop(task_id, None)
+    locked_call(STATE_LOCK, _unregister_locked, task_id, state)
+
+
+def _rekey_locked(state: AgentState, new_task_id: str) -> None:
+    if agent_states.get(state.task_id) is state:
+        agent_states.pop(state.task_id, None)
+    state.task_id = new_task_id
+    agent_states[new_task_id] = state
 
 
 def rekey(state: AgentState, new_task_id: str) -> None:
@@ -277,11 +305,7 @@ def rekey(state: AgentState, new_task_id: str) -> None:
     """
     if not new_task_id:
         return
-    with STATE_LOCK:
-        if agent_states.get(state.task_id) is state:
-            agent_states.pop(state.task_id, None)
-        state.task_id = new_task_id
-        agent_states[new_task_id] = state
+    locked_call(STATE_LOCK, _rekey_locked, state, new_task_id)
 
 
 def get(task_id: object) -> AgentState | None:
@@ -292,8 +316,17 @@ def get(task_id: object) -> AgentState | None:
     """
     if task_id is None or task_id == "":
         return None
-    with STATE_LOCK:
-        return agent_states.get(str(task_id))
+    return locked_call(STATE_LOCK, agent_states.get, str(task_id))
+
+
+def _find_by_tab_locked(tab_id: str) -> AgentState | None:
+    for state in agent_states.values():
+        if state.tab_id == tab_id and state.server_owned:
+            return state
+    for state in agent_states.values():
+        if state.tab_id == tab_id:
+            return state
+    return None
 
 
 def find_by_tab(tab_id: str) -> AgentState | None:
@@ -308,13 +341,13 @@ def find_by_tab(tab_id: str) -> AgentState | None:
     """
     if not tab_id:
         return None
-    with STATE_LOCK:
-        for state in agent_states.values():
-            if state.tab_id == tab_id and state.server_owned:
-                return state
-        for state in agent_states.values():
-            if state.tab_id == tab_id:
-                return state
+    return locked_call(STATE_LOCK, _find_by_tab_locked, tab_id)
+
+
+def _find_by_agent_locked(agent: object) -> AgentState | None:
+    for state in agent_states.values():
+        if state.agent is agent:
+            return state
     return None
 
 
@@ -326,10 +359,13 @@ def find_by_agent(agent: object) -> AgentState | None:
     """
     if agent is None:
         return None
-    with STATE_LOCK:
-        for state in agent_states.values():
-            if state.agent is agent:
-                return state
+    return locked_call(STATE_LOCK, _find_by_agent_locked, agent)
+
+
+def _agent_of_thread_locked(thread: threading.Thread) -> ChatSorcarAgent | None:
+    for state in agent_states.values():
+        if state.task_thread is thread and state.agent is not None:
+            return state.agent
     return None
 
 
@@ -341,12 +377,7 @@ def current_agent() -> ChatSorcarAgent | None:
     its ``work_dir``, model and usage counters).  ``None`` when the
     calling thread is not a registered task thread.
     """
-    me = threading.current_thread()
-    with STATE_LOCK:
-        for state in agent_states.values():
-            if state.task_thread is me and state.agent is not None:
-                return state.agent
-    return None
+    return locked_call(STATE_LOCK, _agent_of_thread_locked, threading.current_thread())
 
 
 def snapshot() -> list[AgentState]:
@@ -356,5 +387,4 @@ def snapshot() -> list[AgentState]:
     callers that need ``(task_id, state)`` pairs read it off the
     snapshot directly.
     """
-    with STATE_LOCK:
-        return list(agent_states.values())
+    return locked_call(STATE_LOCK, list, agent_states.values())

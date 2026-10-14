@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kiss.core.locked import locked, locked_call
+
 logger = logging.getLogger(__name__)
 
 # Where open_for_user() put the page.
@@ -85,6 +87,9 @@ class _Opening:
 
 
 _recent: dict[str, _Opening] = {}
+# Over the default RLock: every taker runs on a task thread, where a
+# Stop injection landing right after a plain ``with``'s ``__enter__``
+# would leak the lock for every later hand-off of the daemon.
 _lock = threading.Condition()
 # Registered by the kiss-web daemon: opens a URL in the streamed Browser
 # tab, focused on every surface; returns whether it could.
@@ -128,33 +133,36 @@ def _claim(url: str, surface: str) -> str | None:
         the page itself.  So concurrent callers never open a second
         copy, nor report a page that never appeared.
     """
-    deadline = time.monotonic() + _SETTLE_TIMEOUT
-    with _lock:
-        while True:
-            now = time.monotonic()
-            opening = _recent.get(url)
-            if opening is None or now - opening.opened_at >= _REOPEN_AFTER:
-                _recent[url] = _Opening(now, surface)
-                return None
-            if opening.settled or now >= deadline:
-                return opening.surface
-            _lock.wait(deadline - now)
+    return locked_call(_lock, _claim_locked, url, surface, time.monotonic() + _SETTLE_TIMEOUT)
 
 
+def _claim_locked(url: str, surface: str, deadline: float) -> str | None:
+    """The body of :func:`_claim`; the caller holds ``_lock``."""
+    while True:
+        now = time.monotonic()
+        opening = _recent.get(url)
+        if opening is None or now - opening.opened_at >= _REOPEN_AFTER:
+            _recent[url] = _Opening(now, surface)
+            return None
+        if opening.settled or now >= deadline:
+            return opening.surface
+        _lock.wait(deadline - now)
+
+
+@locked(_lock)
 def _settle(url: str) -> None:
     """Mark the claimed launch of *url* as succeeded and wake waiting callers."""
-    with _lock:
-        opening = _recent.get(url)
-        if opening is not None:
-            opening.settled = True
-        _lock.notify_all()
+    opening = _recent.get(url)
+    if opening is not None:
+        opening.settled = True
+    _lock.notify_all()
 
 
+@locked(_lock)
 def _release(url: str) -> None:
     """Forget a claim whose launch failed, so the next attempt opens again."""
-    with _lock:
-        _recent.pop(url, None)
-        _lock.notify_all()
+    _recent.pop(url, None)
+    _lock.notify_all()
 
 
 def is_headless_environment() -> bool:

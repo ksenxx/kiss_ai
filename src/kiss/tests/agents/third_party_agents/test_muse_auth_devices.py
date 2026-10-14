@@ -58,7 +58,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -67,7 +66,6 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import govee
-from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
 from kiss.agents.third_party_agents.discord.discord_sea import _config as discord_config
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
@@ -97,7 +95,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    serve_recording,
+    serving,
+)
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
 _REAL_HA_TOKEN = "ha-real-secret"
@@ -273,10 +275,8 @@ def lan_api_server() -> Any:
         pytest.skip("machine has no non-loopback IPv4 address")
     server = _DeviceApiServer(("0.0.0.0", 0), _DeviceApiHandler)
     server.lan_ip = ip  # type: ignore[attr-defined]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    with serving(server):
+        yield server
 
 
 @pytest.fixture()

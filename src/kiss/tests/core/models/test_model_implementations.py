@@ -356,15 +356,19 @@ class TestCachePricing:
             assert d.cache_read_price_per_1M is not None
             assert 0 < d.cache_read_price_per_1M < cap
             assert d.cache_write_price_per_1M is None
+        # Same for Qwen: the 2026-10-13 catalog sync dropped the
+        # cache-write price OpenRouter no longer publishes for this model.
         q = MODEL_INFO["openrouter/qwen/qwen3.8-max-0902"]
         assert q.cache_read_price_per_1M == pytest.approx(0.25)
-        assert q.cache_write_price_per_1M == pytest.approx(2.5)
+        assert q.cache_write_price_per_1M is None
         assert MODEL_INFO["openrouter/qwen/qwen3.7-plus"].cache_read_price_per_1M == pytest.approx(
             0.064
         )
-        assert MODEL_INFO[
-            "openrouter/moonshotai/kimi-k2.5"
-        ].cache_read_price_per_1M == pytest.approx(0.07)
+        # Kimi's cache-read price is another multi-provider average
+        # (0.07 → 0.15 in the same sync); pin the discount, not the number.
+        k = MODEL_INFO["openrouter/moonshotai/kimi-k2.5"]
+        assert k.cache_read_price_per_1M is not None
+        assert 0 < k.cache_read_price_per_1M < k.input_price_per_1M
         assert MODEL_INFO["openrouter/x-ai/grok-4.3"].cache_read_price_per_1M == pytest.approx(0.2)
         assert MODEL_INFO["openrouter/x-ai/grok-4.5"].cache_read_price_per_1M == pytest.approx(0.3)
         assert MODEL_INFO["openrouter/x-ai/grok-4.5-high"].cache_read_price_per_1M == pytest.approx(

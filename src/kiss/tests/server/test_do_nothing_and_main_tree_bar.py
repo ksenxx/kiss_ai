@@ -251,13 +251,15 @@ class TestWorktreeDoNothing(_Base):
         """
         self._patch_run()
         self._run_task("tab-wt3")
-        self._pending_agent("tab-wt3")
+        agent = self._pending_agent("tab-wt3")
         self.events.clear()
 
-        # `git config` writes .git/config.lock first; a read-only .git
-        # makes that fail exactly like a locked/unwritable config.
-        git_dir = Path(self.repo) / ".git"
-        git_dir.chmod(0o555)
+        # As if the run-end marker write had failed too: no marker on
+        # disk, and a read-only marker directory refuses a new one.
+        marker = GitWorktreeOps._preserve_marker_path(Path(self.repo), agent._wt.branch)
+        assert marker is not None
+        marker.unlink()
+        marker.parent.chmod(0o555)
         try:
             self.server._handle_command({
                 "type": "worktreeAction",
@@ -265,7 +267,7 @@ class TestWorktreeDoNothing(_Base):
                 "tabId": "tab-wt3",
             })
         finally:
-            git_dir.chmod(0o755)
+            marker.parent.chmod(0o755)
 
         result = self._only("worktree_result")
         assert result["success"] is False, result

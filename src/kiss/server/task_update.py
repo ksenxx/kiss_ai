@@ -32,7 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.seas.ask.ask_sea import AskSea
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
 from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.server.json_printer import stamp_event_ts
@@ -188,6 +188,27 @@ def charge_side_channel_usage(
             started (see ``RelentlessAgent._attribute_usage``), or
             ``None`` for its current one.
     """
+    if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
+        return
+    locked_call(
+        TASK_USAGE_LOCK, _charge_locked,
+        printer, task_agent, task_id, budget, tokens, steps, epoch,
+    )
+
+
+def _charge_locked(
+    printer: Any,
+    task_agent: Any,
+    task_id: str,
+    budget: float,
+    tokens: int,
+    steps: int,
+    epoch: Any,
+) -> None:
+    """Charge the spend to the row or the live agent (``TASK_USAGE_LOCK`` held).
+
+    See :func:`charge_side_channel_usage` for the arguments.
+    """
     from kiss.agents.sorcar.persistence import (
         _add_late_task_usage,
         _append_chat_event,
@@ -195,82 +216,83 @@ def charge_side_channel_usage(
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
     from kiss.server import agent_state
 
-    if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
+    try:
+        updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
+    except Exception:
+        log.warning(
+            "could not add side-channel spend to task %s", task_id,
+            exc_info=True,
+        )
         return
-    with TASK_USAGE_LOCK:
-        try:
-            updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
-        except Exception:
+    _race_delay()  # test hook: widens the row-check-to-bank window
+    if not updated and not running:
+        # No row for the task (its run persists none, or has not
+        # saved one yet): the live agent is the only place the
+        # spend can go, exactly as for an unfinished row.
+        running = task_id
+    banked = False
+    if running:
+        # Banked first: the task can finish (saving its counters) at
+        # any moment after the transaction above released it.
+        if running == task_id:
+            agent = task_agent
+        else:
+            state = agent_state.get(running)
+            agent = state.agent if state is not None else None
+            epoch = None
+        if agent is None:
             log.warning(
-                "could not add side-channel spend to task %s", task_id,
-                exc_info=True,
+                "side-channel spend of task %s not charged to running "
+                "task %s: no live agent", task_id, running,
             )
-            return
-        _race_delay()  # test hook: widens the row-check-to-bank window
-        if not updated and not running:
-            # No row for the task (its run persists none, or has not
-            # saved one yet): the live agent is the only place the
-            # spend can go, exactly as for an unfinished row.
-            running = task_id
-        banked = False
-        if running:
-            # Banked first: the task can finish (saving its counters) at
-            # any moment after the transaction above released it.
-            if running == task_id:
-                agent = task_agent
-            else:
-                state = agent_state.get(running)
-                agent = state.agent if state is not None else None
-                epoch = None
-            if agent is None:
-                log.warning(
-                    "side-channel spend of task %s not charged to running "
-                    "task %s: no live agent", task_id, running,
-                )
-            else:
-                _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
-                banked = True
-                if printer is not None:
-                    # Publish the new totals (banked plus the in-flight
-                    # session's) as one of the running task's own
-                    # events, recorded and persisted like its other
-                    # usage events: the task may already be past its
-                    # last one, and both its replayed transcript and a
-                    # ``run_agent`` caller waiting on it
-                    # (daemon_client.run) take the cost from the latest.
-                    live_budget, live_tokens, live_steps = _live_agent_usage(agent)
-                    printer.broadcast({
-                        "type": "usage_info",
-                        "text": "",
-                        "taskId": running,
-                        "total_tokens": live_tokens,
-                        "cost": f"${live_budget:.4f}",
-                        "cost_usd": live_budget,
-                        "total_steps": live_steps,
-                    })
-        for row_id, row_tokens, row_cost, row_steps in updated:
-            event: dict[str, Any] = {
-                "type": "usage_info",
-                "text": "",
-                "total_tokens": row_tokens,
-                "cost": f"${row_cost:.4f}",
-                "cost_usd": row_cost,
-                "total_steps": row_steps,
-            }
-            if banked:
-                # The spend was banked on the running ancestor above,
-                # so a ``run_agent`` caller still waiting on this row's
-                # task must not fold it again (daemon_client._net_totals
-                # subtracts it).
-                event["ancestor_charged"] = {
-                    "cost": budget, "tokens": tokens, "steps": steps,
-                }
-            stamp_event_ts(event)
+        else:
+            _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
+            banked = True
             if printer is not None:
-                printer.broadcast_transient(event, task_id=row_id)
-            _append_chat_event(dict(event), task_id=row_id)
-        if updated and printer is not None:
-            printer.broadcast({"type": "tasks_updated"})
+                # Publish the new totals (banked plus the in-flight
+                # session's) as one of the running task's own
+                # events, recorded and persisted like its other
+                # usage events: the task may already be past its
+                # last one, and both its replayed transcript and a
+                # ``run_agent`` caller waiting on it
+                # (daemon_client.run) take the cost from the latest.
+                live_budget, live_tokens, live_steps = _live_agent_usage(agent)
+                printer.broadcast({
+                    "type": "usage_info",
+                    "text": "",
+                    "taskId": running,
+                    "total_tokens": live_tokens,
+                    "cost": f"${live_budget:.4f}",
+                    "cost_usd": live_budget,
+                    "total_steps": live_steps,
+                })
+    for row_id, row_tokens, row_cost, row_steps in updated:
+        # ``taskId``: the tab that showed this row may already run a
+        # newer task, whose cost this late event must not overwrite
+        # (the webview drops usage events of another task).
+        event: dict[str, Any] = {
+            "type": "usage_info",
+            "text": "",
+            "taskId": row_id,
+            "total_tokens": row_tokens,
+            "cost": f"${row_cost:.4f}",
+            "cost_usd": row_cost,
+            "total_steps": row_steps,
+        }
+        if banked:
+            # The spend was banked on the running ancestor above,
+            # so a ``run_agent`` caller still waiting on this row's
+            # task must not fold it again (daemon_client._net_totals
+            # subtracts it).
+            event["ancestor_charged"] = {
+                "cost": budget, "tokens": tokens, "steps": steps,
+            }
+        stamp_event_ts(event)
+        if printer is not None:
+            printer.broadcast_transient(event, task_id=row_id)
+        _append_chat_event(dict(event), task_id=row_id)
+    if updated and printer is not None:
+        printer.broadcast({"type": "tasks_updated"})
 
 
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:

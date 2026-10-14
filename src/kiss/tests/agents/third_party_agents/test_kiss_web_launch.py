@@ -61,6 +61,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.third_party_agents.recording_http import start_serving
 from kiss.tests.server.parallel_agent_harness import (
     _PROVIDER_KEYS,
     STANDIN_MODEL,
@@ -175,8 +176,7 @@ class LaunchModelServer:
         cast(Any, server).launch = self
         cast(Any, server).responder = self._record_and_answer
         self._server = server
-        self._thread = threading.Thread(target=server.serve_forever, daemon=True)
-        self._thread.start()
+        self._thread = start_serving(server)
 
     @property
     def url(self) -> str:

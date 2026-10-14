@@ -1276,9 +1276,14 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
     if bare is not None:
         write_mult = 1.25 if _openai_charges_cache_writes(bare) else 0.0
         return inp * _openai_cache_read_multiplier(bare), inp * write_mult, None
-    if name.startswith("gemini-") or name.startswith(_GOOGLE_OPENROUTER_PREFIXES):
+    if name.startswith("gemini-") or (
+        name.startswith(_GOOGLE_OPENROUTER_PREFIXES)
+        and name.rsplit("/", 1)[-1].startswith("gemini-")
+    ):
         # OpenRouter passes Google's 0.1x cache-read rate through unchanged
         # (e.g. google/gemini-3.1-pro-preview: $2.00 input, $0.20 cache read).
+        # Only Gemini: Google's open-weight Gemma models on OpenRouter are
+        # served by third parties that publish no cache discount.
         return inp * 0.1, 0.0, None
     if name.startswith(("kimi-", "moonshot-")):
         # Moonshot bills a 5-minute cache write at the uncached input rate

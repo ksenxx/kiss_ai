@@ -3138,6 +3138,10 @@
     // back on the surface (preview / source) they were on.
     tab.contentSourceText = '';
     tab.contentHasText = false;
+    // The stamp belongs to the text the view shows: the next render
+    // sets it again when it shows a file read from disk, and a report
+    // or listing in the same tab must not keep the old one.
+    tab.contentFileVersion = '';
     tab.contentPreviewHolder = null;
     tab.contentMonacoHolder = null;
     tab.contentModeBtn = null;
@@ -4840,7 +4844,24 @@
       // path above): another chat's open of the same path meanwhile
       // must neither replace the edits nor consume the pending reload.
       const reloading = existing.contentReloadRequested === owner;
-      if (existing.contentDirty && !reloading) {
+      // The bytes a live editor already shows (a double-click's second
+      // reply, a link clicked twice) likewise only jump to the line:
+      // rebuilding the editor would drop the caret, scroll and undo
+      // history for nothing. The text is compared, not the daemon's
+      // version stamp (mtime and size, which a same-sized rewrite with
+      // its metadata restored keeps), and only an editor counts: the
+      // Monaco-failed fallback and a report view that took the tab
+      // over are re-rendered, so the reopen gets its editor back.
+      const sameText =
+        typeof ev.version === 'string' &&
+        existing.contentFileVersion !== '' &&
+        existing.contentEditor &&
+        !existing.contentDiffModels &&
+        contentSourceValue(existing) === (ev.content || '');
+      if ((existing.contentDirty || sameText) && !reloading) {
+        // A touched file (new stamp, same bytes): the tab adopts the
+        // stamp so its next save is not refused as a conflict.
+        if (sameText) existing.contentFileVersion = ev.version;
         const line = parseInt(ev.line, 10);
         existing.contentRevealLine = line > 0 ? line : 0;
         revealPendingContentLine(existing);
@@ -6970,16 +6991,28 @@
     if (refreshApps) setRefreshSpin(appsRefreshBtn, true);
   }
 
+  // The refresh buttons send nothing while the daemon is away: the
+  // request would never be answered and the button would spin until
+  // the reconnect's own refresh (stopSidebarRefreshSpins only stops a
+  // spin that was already running when the connection dropped).
+
   /** Ask the daemon for the recommendations again (the Recommendations refresh button). */
   function requestRecommendationsRefresh() {
+    if (!daemonConnected) return;
     api.getRecommendations();
     setRefreshSpin(recommendationsRefreshBtn, true);
   }
 
   /** Ask the daemon to ping every machine again (the Machines refresh button). */
   function requestMachinesRefresh() {
+    if (!daemonConnected) return;
     api.getMachines({refresh: true});
     setRefreshSpin(machinesRefreshBtn, true);
+  }
+
+  /** Ask the daemon to re-probe the apps' sign-in state (the Apps refresh button). */
+  function requestAppsRefresh() {
+    if (daemonConnected) requestSidebarPanels(true);
   }
 
   /** Boot the subpanels: refresh buttons, hover and resize handlers, the first request. */
@@ -6994,9 +7027,12 @@
     );
     machinesRefreshBtn.addEventListener('click', requestMachinesRefresh);
     machinesAddBtn.addEventListener('click', () =>
-      openMachineAddForm({name: '', address: '', password: ''}),
+      openMachineAddForm({
+        values: {name: '', address: '', password: ''},
+        saving: false,
+      }),
     );
-    appsRefreshBtn.addEventListener('click', () => requestSidebarPanels(true));
+    appsRefreshBtn.addEventListener('click', requestAppsRefresh);
     spendRefreshBtn.addEventListener('click', () => api.getSpendReport());
     recommendationsRefreshBtn.addEventListener(
       'click',
@@ -7149,8 +7185,12 @@
    *     multiline?: boolean, type?: string,
    *     options?: Array<[string, string]>}>} fields The inputs; a
    *     field with `options` ([value, text] pairs) is a select.
-   * @param {function(Object<string, string>): void} onSave Gets the
-   *     values by key.
+   * @param {function(Object<string, string>): (boolean|void)} onSave
+   *     Gets the values by key; it returns false when it sent nothing
+   *     (the daemon is away) so the form stays armed.  Otherwise Save
+   *     is disabled until the reply re-renders the form or the
+   *     connection drops (releaseSidebarFormSaves): a repeated Enter
+   *     or click meanwhile sends nothing again.
    * @param {function(): void} onCancel Closes the form.
    * @returns {HTMLFormElement} The form; its first input gets focus
    *     once attached (`form.querySelector('[name]').focus()`).
@@ -7205,27 +7245,59 @@
     form.addEventListener('click', e => e.stopPropagation());
     form.addEventListener('submit', e => {
       e.preventDefault();
+      if (save.disabled) return;
       const values = {};
       for (const field of fields)
         values[field.key] = form.elements[field.key].value;
-      onSave(values);
+      if (onSave(values) !== false) save.disabled = true;
     });
     return form;
   }
 
-  // The job whose in-place editor is open ({id, values}), the job add
-  // form that is open ({values, saving}; at most one of the two, see
-  // closeScheduleForms) and the machine add form that is open
-  // ({values}), kept across re-renders: the periodic poll and a reply
-  // that reports an error re-open the form with the values typed so
-  // far, so neither costs retyping; only the reply acknowledging the
-  // form's own action (`update`, `create`, `add`) without an error
-  // closes it (`saving`: the add form sent its create and awaits that
-  // reply, so a reply to an earlier form's create, arriving after the
-  // `+` opened a fresh one, leaves the fresh one alone).
+  /**
+   * Refuse an in-place form's save while the daemon is away: the
+   * command would sit in a queue (and expire) and the form would await
+   * a reply that never comes.  The typed values stay for a retry.
+   *
+   * @param {HTMLElement} status The list's status line for the note.
+   * @returns {boolean} Whether the save was refused.
+   */
+  function sidebarFormOffline(status) {
+    if (daemonConnected) return false;
+    status.textContent = 'Not connected: try again when reconnected';
+    status.classList.add('is-error');
+    return true;
+  }
+
+  // The job whose in-place editor is open ({id, values, saving}), the
+  // job add form that is open ({values, saving}; at most one of the
+  // two, see closeScheduleForms) and the machine add form that is open
+  // ({values, saving}), kept across re-renders: the periodic poll and
+  // a reply that reports an error re-open the form with the values
+  // typed so far, so neither costs retyping; only the reply
+  // acknowledging the form's own action (`update`, `create`, `add`)
+  // without an error closes it (`saving`: the form sent its action
+  // and awaits that reply -- its Save stays disabled across the
+  // re-renders meanwhile -- so a reply to an earlier form's create,
+  // arriving after the `+` opened a fresh one, leaves the fresh one
+  // alone).
   let scheduleEdit = null;
   let scheduleAdd = null;
   let machineAdd = null;
+
+  /**
+   * The daemon connection dropped: no save an open in-place form sent
+   * will be answered, so its Save works again (and the add forms no
+   * longer await a reply).
+   */
+  function releaseSidebarFormSaves() {
+    if (scheduleEdit) scheduleEdit.saving = false;
+    if (scheduleAdd) scheduleAdd.saving = false;
+    if (machineAdd) machineAdd.saving = false;
+    for (const list of [scheduleList, machinesList])
+      for (const save of list.querySelectorAll('.sidebar-inline-form-save'))
+        save.disabled = false;
+  }
 
   /**
    * The values typed into the open in-place form of a list, by field.
@@ -7274,10 +7346,13 @@
    *
    * @param {HTMLLIElement} li The row.
    * @param {Object} job The job of the row.
-   * @param {Object<string, string>} values The values to show.
+   * @param {{id: string, values: Object<string, string>, saving: boolean}} state
+   *     The editor's state (see scheduleEdit): the values to show and
+   *     whether its update is in flight.
    */
-  function openScheduleEditor(li, job, values) {
-    scheduleEdit = {id: job.id, values: values};
+  function openScheduleEditor(li, job, state) {
+    scheduleEdit = state;
+    const values = state.values;
     const form = sidebarInlineForm(
       [
         {key: 'name', label: 'Name', value: values.name},
@@ -7290,7 +7365,8 @@
         },
       ],
       saved => {
-        scheduleEdit = {id: job.id, values: saved};
+        if (sidebarFormOffline(scheduleStatus)) return false;
+        scheduleEdit = {id: job.id, values: saved, saving: true};
         api.cronAction({
           action: 'update',
           jobId: job.id,
@@ -7305,6 +7381,7 @@
         li.focus();
       },
     );
+    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
     li.appendChild(form);
     form.querySelector('[name]').focus();
   }
@@ -7350,6 +7427,7 @@
         },
       ],
       saved => {
+        if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleAdd = {values: saved, saving: true};
         api.cronAction({
           action: 'create',
@@ -7365,6 +7443,7 @@
         scheduleAddBtn.focus();
       },
     );
+    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
     const kind = form.elements.kind;
     const whatLabel = form.elements.what.previousElementSibling;
     kind.addEventListener('change', () => {
@@ -7408,7 +7487,10 @@
         ? ''
         : 'No scheduled jobs. Click + to schedule one, or ask Sorcar, e.g. "every morning at 9 summarize my email".');
     scheduleStatus.classList.toggle('is-error', Boolean(error));
-    if (ev.action === 'update' && !error) scheduleEdit = null;
+    if (ev.action === 'update' && scheduleEdit && scheduleEdit.saving) {
+      if (error) scheduleEdit.saving = false;
+      else scheduleEdit = null;
+    }
     if (ev.action === 'create' && scheduleAdd && scheduleAdd.saving)
       scheduleAdd = error ? {values: scheduleAdd.values, saving: false} : null;
     for (const job of jobs) {
@@ -7439,7 +7521,11 @@
           'Edit the job',
           () => {
             closeScheduleForms();
-            openScheduleEditor(li, job, values);
+            openScheduleEditor(li, job, {
+              id: job.id,
+              values: values,
+              saving: false,
+            });
           },
         ),
       );
@@ -7490,7 +7576,7 @@
       li.dataset.tooltip = tip.join('\n\n');
       scheduleList.appendChild(li);
       if (scheduleEdit && scheduleEdit.id === job.id)
-        openScheduleEditor(li, job, scheduleEdit.values);
+        openScheduleEditor(li, job, scheduleEdit);
     }
     if (scheduleAdd) openScheduleAddForm(scheduleAdd);
     applyMetaSectionLayout();
@@ -7503,12 +7589,15 @@
    * `user@host` of an SSH login) and the daemon's password (unused for
    * SSH).  One form at a time: an open one is replaced.
    *
-   * @param {Object<string, string>} values The values to show.
+   * @param {{values: Object<string, string>, saving: boolean}} state
+   *     The form's state (see machineAdd): the values to show and
+   *     whether its add is in flight.
    */
-  function openMachineAddForm(values) {
+  function openMachineAddForm(state) {
     const open = machinesList.querySelector('.machine-add-row');
     if (open) open.remove();
-    machineAdd = {values: values};
+    machineAdd = state;
+    const values = state.values;
     const row = document.createElement('li');
     row.className = 'sidebar-panel-row machine-add-row';
     const form = sidebarInlineForm(
@@ -7523,7 +7612,8 @@
         },
       ],
       saved => {
-        machineAdd = {values: saved};
+        if (sidebarFormOffline(machinesStatusLine)) return false;
+        machineAdd = {values: saved, saving: true};
         api.machineAction({
           action: 'add',
           name: saved.name,
@@ -7537,6 +7627,7 @@
         machinesAddBtn.focus();
       },
     );
+    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
     row.appendChild(form);
     machinesList.prepend(row);
     form.querySelector('[name]').focus();
@@ -7572,7 +7663,8 @@
     machinesStatusLine.textContent =
       error || (rows.length ? '' : 'No machines.');
     machinesStatusLine.classList.toggle('is-error', Boolean(error));
-    if (ev.action === 'add' && !error) machineAdd = null;
+    if (ev.action === 'add' && machineAdd && machineAdd.saving)
+      machineAdd = error ? {values: machineAdd.values, saving: false} : null;
     for (const m of rows) {
       const reachable = m.status === 'reachable';
       const li = document.createElement('li');
@@ -7624,7 +7716,7 @@
       li.dataset.tooltip = tip.join('\n\n');
       machinesList.appendChild(li);
     }
-    if (machineAdd) openMachineAddForm(machineAdd.values);
+    if (machineAdd) openMachineAddForm(machineAdd);
     applyMetaSectionLayout();
   }
 
@@ -7646,7 +7738,10 @@
   let reachableMachines = null;
   const machineLabels = new Map();
   // The daemon's last `machines` reply, repainted into the Machines
-  // subpanel when a `history` reply relabels a machine.
+  // subpanel when a `history` reply relabels a machine. Cached without
+  // its `action`: a repaint is not a reply, so it must not acknowledge
+  // the add form's action a second time (a refused add, retried, would
+  // otherwise take the replay of the refusal for the retry's answer).
   let lastMachinesEvent = null;
   /**
    * What the registered machine `name` is called wherever it is shown
@@ -11731,6 +11826,16 @@
     if (folderPickerEl) folderPickerEl.hidden = true;
   }
 
+  /**
+   * The daemon is back: an open picker lists its folder again, since
+   * the listing it was waiting for when the connection dropped never
+   * comes (a late copy is ignored: the new request has a new token).
+   */
+  function relistFolderPicker() {
+    if (folderPickerEl && !folderPickerEl.hidden)
+      folderPickerNavigate(folderPickerDir);
+  }
+
   function folderPickerNavigate(path) {
     if (!folderPickerEl || !path) return;
     // Any navigation supersedes a Select still waiting on its listing.
@@ -12957,6 +13062,11 @@
     const savedTaskFailed = savedTab ? savedTab.lastTaskFailed : false;
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
     // visibletask-coverage:end
+    // Start the row empty: a neighbour whose transcript carries no usage
+    // event must not inherit the live task's numbers below.
+    if (statusTokens) statusTokens.textContent = '';
+    if (statusBudget) statusBudget.textContent = '';
+    if (statusSteps) statusSteps.textContent = '';
     if (events && events.length > 0) {
       // tableak-coverage:start
       replayEventsInto(container, events, {
@@ -16287,7 +16397,37 @@
   }
   // tableak-coverage:end
 
+  /**
+   * Whether a cost-bearing event (`result` / `usage_info`) stamped with a
+   * `taskId` belongs to a task other than the one `tab` currently shows.
+   * A finished task's late side-channel charge, or a sub-agent's
+   * totals, must not repaint the Cost of the newer task on that tab.
+   */
+  function isUsageOfAnotherTask(ev, tab) {
+    if (!ev.taskId || (ev.type !== 'result' && ev.type !== 'usage_info')) {
+      return false;
+    }
+    if (
+      !tab ||
+      tab.currentTaskId === undefined ||
+      tab.currentTaskId === null ||
+      String(tab.currentTaskId) === String(ev.taskId)
+    ) {
+      return false;
+    }
+    console.warn(
+      'Dropping mis-routed',
+      ev.type,
+      'event for task',
+      ev.taskId,
+      'in tab whose currentTaskId is',
+      tab.currentTaskId,
+    );
+    return true;
+  }
+
   function processOutputEventForBgTab(ev, tab) {
+    if (isUsageOfAnotherTask(ev, tab)) return;
     normalizeEventTs(ev);
     if (!tab.outputFragment)
       tab.outputFragment = document.createDocumentFragment();
@@ -17351,6 +17491,7 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           stopSidebarRefreshSpins();
+          releaseSidebarFormSaves();
           abandonExplorerListings();
           setAutocommitInFlight(false);
           tabs.forEach(t => {
@@ -17431,6 +17572,7 @@
           // The checks the outage swallowed have to be asked again, or
           // the file links they were for stay grey for ever.
           reissueFileLinkChecks();
+          relistFolderPicker();
           refreshHistory();
           requestSidebarPanels(false);
         }
@@ -17842,7 +17984,7 @@
         break;
       case 'machines':
         noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
-        lastMachinesEvent = ev;
+        lastMachinesEvent = {machines: ev.machines, error: ev.error};
         renderMachines(ev);
         break;
       case 'tabMachine':
@@ -18389,20 +18531,20 @@
               // hidden tab's tokens and cost onto the borrowed status
               // row; keep them on the tab (exactly like the live
               // processOutputEventForBgTab does) — otherwise a switch
-              // to this tab shows only "Steps: N". A transcript that
-              // painted nothing keeps the tab's previous numbers (the
-              // row was cleared above, so what it holds here is the
-              // replay's own, never another tab's). The capture runs
-              // through this callback, BEFORE the replay's collapse
-              // pass: collapsing a finished run_parallel panel can
-              // close the tab on screen, and the tab-switch that
-              // follows repaints the row before the replay returns.
+              // to this tab shows only "Steps: N". The row was cleared
+              // above, so a transcript that painted nothing leaves the
+              // tab with no numbers rather than the ones of whatever
+              // task it showed before. The capture runs through this
+              // callback, BEFORE the replay's collapse pass: collapsing
+              // a finished run_parallel panel can close the tab on
+              // screen, and the tab-switch that follows repaints the
+              // row before the replay returns.
               onEventsRendered: function () {
-                if (statusTokens && statusTokens.textContent)
+                if (statusTokens)
                   teTab.statusTokensText = statusTokens.textContent;
-                if (statusBudget && statusBudget.textContent)
+                if (statusBudget)
                   teTab.statusBudgetText = statusBudget.textContent;
-                if (statusSteps && statusSteps.textContent)
+                if (statusSteps)
                   teTab.statusStepsText = statusSteps.textContent;
               },
               onFollowupClick: copyFollowupToInput,
@@ -19090,25 +19232,7 @@
             }
           }
         }
-        if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {
-          const activeTab = getTab(activeTabId);
-          if (
-            activeTab &&
-            activeTab.currentTaskId !== undefined &&
-            activeTab.currentTaskId !== null &&
-            String(activeTab.currentTaskId) !== String(ev.taskId)
-          ) {
-            console.warn(
-              'Dropping mis-routed',
-              ev.type,
-              'event for task',
-              ev.taskId,
-              'in active tab whose currentTaskId is',
-              activeTab.currentTaskId,
-            );
-            break;
-          }
-        }
+        if (isUsageOfAnotherTask(ev, getTab(activeTabId))) break;
         processOutputEvent(ev);
         if (isActiveTabRunning()) showSpinner();
         break;
@@ -19882,33 +20006,11 @@
     link.textContent = displayUrl;
     link.className = 'remote-url-link';
     const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
     copyBtn.className = 'remote-url-copy';
     copyBtn.title = 'Copy URL';
-    const copySvg =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
-    const checkSvg =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-    copyBtn.innerHTML = copySvg;
-    // urlflash0903-coverage:start
-    // The icon-revert timer is tracked per button and restarted on
-    // every copy, or a rapid second click's check mark would be
-    // reverted early by the first click's stale timer.
-    let urlFlashTimer = null;
-    copyBtn.addEventListener('click', e => {
-      e.preventDefault();
-      // A failed copy (webview unfocused and no execCommand) just
-      // skips the flash.
-      window.PanelCopy.copyText(displayUrl).then(ok => {
-        if (!ok) return;
-        copyBtn.innerHTML = checkSvg;
-        if (urlFlashTimer) clearTimeout(urlFlashTimer);
-        urlFlashTimer = setTimeout(() => {
-          urlFlashTimer = null;
-          copyBtn.innerHTML = copySvg;
-        }, 1500);
-      });
-    });
-    // urlflash0903-coverage:end
+    copyBtn.setAttribute('aria-label', 'Copy URL to clipboard');
+    wireCopyButton(copyBtn, displayUrl);
     row.appendChild(link);
     row.appendChild(copyBtn);
     wrapper.appendChild(label);

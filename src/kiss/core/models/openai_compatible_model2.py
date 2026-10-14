@@ -1525,8 +1525,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             content += emitted
                             self._invoke_token_callback(emitted)
             elif etype in ("response.failed", "error"):
-                self._close_thinking_if_open()
                 resp = getattr(event, "response", None)
+                # Any usage the failed response carries was billed: stored
+                # before the thinking callback runs, which a Stop can
+                # interrupt.
+                self._rejected_response = resp
+                self._close_thinking_if_open()
                 err = getattr(resp, "error", None) if resp is not None else None
                 if err is None:
                     err = getattr(event, "error", None)
@@ -1535,15 +1539,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     message = str(getattr(err, "message", "") or "")
                     if not message and isinstance(err, dict):
                         message = str(err.get("message", "") or "")
-                # Any usage the failed response carries was billed.
-                self._rejected_response = resp
                 raise KISSError(
                     f"Responses API stream ended with {etype}"
                     + (f": {message}" if message else "")
                 )
             elif etype == "response.incomplete":
-                self._close_thinking_if_open()
                 resp = getattr(event, "response", None)
+                # The truncated response was billed: keep its usage before
+                # the thinking callback runs (a Stop can interrupt it).
+                self._rejected_response = resp
+                self._close_thinking_if_open()
                 details = (
                     getattr(resp, "incomplete_details", None)
                     if resp is not None
@@ -1554,8 +1559,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     reason = str(getattr(details, "reason", "") or "")
                     if not reason and isinstance(details, dict):
                         reason = str(details.get("reason", "") or "")
-                # The truncated response was billed: keep its usage.
-                self._rejected_response = resp
                 raise KISSError(
                     "Responses API stream ended incomplete"
                     + (f": {reason}" if reason else "")

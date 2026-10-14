@@ -652,10 +652,10 @@ def test_main_prints_usage_without_args() -> None:
     assert "Usage: kiss-firecrawl" in proc.stdout
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b = FirecrawlChannelBackend()
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._api_key = _API_KEY
     result = json.loads(b.firecrawl_scrape("https://example.com"))
     assert result["ok"] is False

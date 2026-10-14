@@ -136,9 +136,12 @@ class RecordingDaemon:
         ``websockets`` server busy for its 10 s close timeout, so the join
         waits longer than that and the loop is closed only once its
         thread has really exited (closing a running loop would raise and
-        skip the cleanup below).
+        skip the cleanup below).  Idempotent: a second call (the
+        constructor's own on a failed start, then the fixture's) finds
+        the loop closed and only repeats the harmless cleanup.
         """
-        self._loop.call_soon_threadsafe(self._closed.set)
+        if not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._closed.set)
         self._thread.join(timeout=30)
         if not self._thread.is_alive():
             self._loop.close()

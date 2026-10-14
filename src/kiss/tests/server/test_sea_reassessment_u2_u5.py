@@ -5,8 +5,8 @@
 """U2–U5 of the second SEA / run_agent reassessment
 (``reports/sea-run-agent-semantics-reassessment-2-2026-10-05.html``).
 
-U2: ``is_explicit`` reads a run command's ``provenance`` field (the
-explicit-beats-classifier rule itself went with the worktree setting).
+U2 (``is_explicit``) is gone: the explicit-beats-classifier rule went
+with the worktree setting and the helper had no caller left.
 U3: a relative ``work_dir`` in a SEA's ``settings()`` is relative to the
 SEA's own folder.
 U4: the inferred ``review`` profile is marked on the ``ran:`` line and
@@ -32,7 +32,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     resolve_agent,
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, is_explicit, run_config_line
+from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
 from kiss.agents.sorcar.sea_apply import apply_sea, calling_work_dir
 from kiss.agents.sorcar.sea_commands import (
     declared_settings,
@@ -78,14 +78,6 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     monkeypatch.setattr(daemon_client, "run", capture_run)
     return calls
-
-
-def test_is_explicit_reads_the_provenance_field() -> None:
-    assert is_explicit({"max_budget": "explicit"}, "max_budget")
-    assert not is_explicit({"max_budget": "inherited"}, "max_budget")
-    assert not is_explicit({"model": "explicit"}, "max_budget")
-    assert not is_explicit(None, "max_budget") and not is_explicit("explicit", "max_budget")
-    assert "tool_profile_inferred" in RUN_CONFIG_KEYS
 
 
 # --- U3: a relative work_dir is a path under the calling task's directory ------------
@@ -190,6 +182,7 @@ class Sea(BaseSea):
 
 
 def test_run_config_line_marks_an_inferred_review_profile() -> None:
+    assert "tool_profile_inferred" in RUN_CONFIG_KEYS
     named = {"sea": "", "tool_profile": "review", "max_budget": 0.3}
     assert "tools=review budget=$0.30" in run_config_line(named)
     inferred = {**named, "tool_profile_inferred": True}

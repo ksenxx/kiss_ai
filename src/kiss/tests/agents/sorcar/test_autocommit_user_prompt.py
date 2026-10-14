@@ -11,7 +11,7 @@ commit message should include the user's original task prompt so the
 commit is traceable to the request that produced it.
 
 These tests exercise the real
-:func:`~kiss.server.helpers.generate_commit_message_from_diff`
+:func:`~kiss.agents.sorcar.commit_message.generate_commit_message_from_diff`
 and
 :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the

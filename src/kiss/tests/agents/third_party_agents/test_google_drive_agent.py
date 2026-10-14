@@ -647,10 +647,10 @@ def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
     assert "Usage: kiss-gdrive" in capsys.readouterr().out
 
 
-def test_connection_refused_returns_ok_false(backend, tmp_path) -> None:
+def test_connection_refused_returns_ok_false(backend, tmp_path, refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     for call in (
         b.gdrive_search_files,
         lambda: b.gdrive_get_file("bin1"),

@@ -515,7 +515,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "getHistory"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "history")
             self.assertIn("sessions", resp)
 
@@ -526,7 +526,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "getConfig"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "configData")
             self.assertIn("config", resp)
 
@@ -548,7 +548,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "totallyBogusCommand"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "error")
             self.assertIn("Unknown command", resp["text"])
 
@@ -687,7 +687,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "userActionDone"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "error")
             self.assertIn("Unknown command: userActionDone", resp.get("text", ""))
 
@@ -804,7 +804,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "getFiles", "prefix": ""}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "files")
             self.assertIn("files", resp)
 
@@ -824,7 +824,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "adjacent_task_events")
 
     async def test_ws_save_config(self) -> None:

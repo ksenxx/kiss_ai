@@ -50,6 +50,7 @@ from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.tool_verdict import ALLOW
+from kiss.tests.agents.seas.conftest import git
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -80,18 +81,13 @@ class Ledger:
 WITHDRAW = "\n\ndef withdraw(account, amount):\n    account['balance'] -= amount\n"
 
 
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
-    ).stdout.strip()
-
-
 def _init(root: Path, name: str) -> Path:
+    """Create an empty repository *name* under *root* whose commits are by Alice."""
     repo = root / name
     repo.mkdir(parents=True)
-    _git(root, "init", "-q", "-b", "main", str(repo))
-    _git(repo, "config", "user.email", "alice@example.com")
-    _git(repo, "config", "user.name", "Alice")
+    git(root, "init", "-q", "-b", "main", str(repo))
+    git(repo, "config", "user.email", "alice@example.com")
+    git(repo, "config", "user.name", "Alice")
     return repo
 
 
@@ -106,15 +102,15 @@ def _make_repo(root: Path, name: str = "ledger") -> Path:
     (repo / "docs" / "readme.bin").write_bytes(b"\x00\xff")  # a binary README is not quoted
     (repo / "logo.bin").write_bytes(b"\x00\x01\x02binary")
     (repo / "app.min.js").write_text("var a=1;" * 50)
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "initial ledger\n\nStarts the accounts domain.")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "initial ledger\n\nStarts the accounts domain.")
     (repo / "src" / "pkg" / "bank.py").write_text(BANK_PY + WITHDRAW)
-    _git(repo, "commit", "-q", "-am", "add withdraw")
-    _git(repo, "tag", "-a", "v0.1", "-m", "first release")
-    _git(repo, "branch", "feature/audit")
+    git(repo, "commit", "-q", "-am", "add withdraw")
+    git(repo, "tag", "-a", "v0.1", "-m", "first release")
+    git(repo, "branch", "feature/audit")
     (repo / "docs" / "notes.txt").write_text("interest rates\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "notes on interest")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "notes on interest")
     return repo
 
 
@@ -222,12 +218,12 @@ def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> N
     assert counts["branch"] == 2 and counts["author"] == 1 and counts["repo"] == 1
 
     bank = store.get("file:src/pkg/bank.py")
-    assert bank is not None and bank.sha == _git(repo, "rev-parse", "HEAD:src/pkg/bank.py")
+    assert bank is not None and bank.sha == git(repo, "rev-parse", "HEAD:src/pkg/bank.py")
     assert "language: Python" in bank.text
     assert "symbols: def open_account, class Ledger, def deposit, def withdraw" in bank.text
     assert "from decimal import Decimal" in bank.text
     last = bank.text.split("last commit: ")[1]
-    assert last.startswith(_git(repo, "rev-parse", "--short=12", "HEAD~1"))
+    assert last.startswith(git(repo, "rev-parse", "--short=12", "HEAD~1"))
     symbol = store.get("symbol:src/pkg/bank.py:11:Ledger")
     assert symbol is not None and symbol.title == "class Ledger — src/pkg/bank.py:11"
     assert "def deposit(self, account, amount):" in symbol.text
@@ -241,18 +237,18 @@ def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> N
     assert minified is not None and "content: not indexed (generated)" in minified.text
     assert store.get("chunk:logo.bin:1") is None and store.get("chunk:app.min.js:1") is None
 
-    head = _git(repo, "rev-parse", "HEAD")
-    first = _git(repo, "rev-list", "--max-parents=0", "HEAD")
+    head = git(repo, "rev-parse", "HEAD")
+    first = git(repo, "rev-list", "--max-parents=0", "HEAD")
     commit = store.get(f"commit:{first}")
     assert commit is not None
     assert "message:\ninitial ledger\n\nStarts the accounts domain." in commit.text
     assert "parents: (root commit)" in commit.text and "src/pkg/bank.py" in commit.text
-    change = store.get(f"change:{_git(repo, 'rev-parse', 'HEAD~1')}:src/pkg/bank.py")
+    change = store.get(f"change:{git(repo, 'rev-parse', 'HEAD~1')}:src/pkg/bank.py")
     assert change is not None and "+def withdraw(account, amount):" in change.text
     assert change.title.endswith("src/pkg/bank.py (+4 -0)")
     tag = store.get("tag:v0.1")
     assert tag is not None and "message: first release" in tag.text
-    assert tag.sha == _git(repo, "rev-parse", "HEAD~1")
+    assert tag.sha == git(repo, "rev-parse", "HEAD~1")
     main = store.get("branch:main")
     assert store.get("branch:feature/audit") is not None and main is not None
     assert main.sha == head
@@ -298,10 +294,10 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
     )
     (repo / "src" / "pkg" / "audit.py").write_text(audit)
     (repo / "src" / "pkg" / "bank.py").write_text(BANK_PY)  # withdraw removed again
-    _git(repo, "rm", "-q", "docs/notes.txt")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "audit module; drop notes")
-    head = _git(repo, "rev-parse", "HEAD")
+    git(repo, "rm", "-q", "docs/notes.txt")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "audit module; drop notes")
+    head = git(repo, "rev-parse", "HEAD")
     report = index.index_repo(repo, store)
     assert report.mode == "incremental"
     assert report.changed_paths == ["src/pkg/audit.py", "src/pkg/bank.py"]
@@ -327,13 +323,13 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
 
     # Notes written by the agent survive every re-index; an amended-away commit is dropped.
     sea.write_knowledge_page(str(repo), "overview", "# Overview\n\nA ledger.", "Overview", "x")
-    _git(repo, "commit", "-q", "--amend", "-m", "audit module (amended)")
+    git(repo, "commit", "-q", "--amend", "-m", "audit module (amended)")
     report = index.index_repo(repo, store)
     assert report.mode == "incremental"
     assert report.commits_indexed == 1 and report.commits_removed == 1
     assert store.get(f"commit:{head}") is None
     assert store.get(f"change:{head}:src/pkg/audit.py") is None
-    assert store.get(f"commit:{_git(repo, 'rev-parse', 'HEAD')}") is not None
+    assert store.get(f"commit:{git(repo, 'rev-parse', 'HEAD')}") is not None
     assert store.get("note:overview") is not None
     assert store.counts()["commit"] == 4
 
@@ -342,10 +338,10 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
     guide = repo / "docs" / "guide.md"
     original = guide.read_text()
     guide.write_text(original + "\ntemporary line\n")
-    _git(repo, "commit", "-q", "-am", "guide: temporary line")
+    git(repo, "commit", "-q", "-am", "guide: temporary line")
     guide.write_text(original)
-    _git(repo, "commit", "-q", "-am", "guide: revert the temporary line")
-    revert = _git(repo, "rev-parse", "HEAD")
+    git(repo, "commit", "-q", "-am", "guide: revert the temporary line")
+    revert = git(repo, "rev-parse", "HEAD")
     report = index.index_repo(repo, store)
     assert report.commits_indexed == 2 and report.changed_paths == ["docs/guide.md"]
     block = store.get("file:docs/guide.md")
@@ -371,24 +367,24 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     # Git calls a file binary from its first 8 KB only: this one gets a real patch
     # that contains a NUL byte, which must not be mistaken for a record boundary.
     (repo / "late_nul.txt").write_bytes(b"a" * 9000 + b"\n\x00\nNULFACT\n")
-    _git(repo, "add", "-A")
+    git(repo, "add", "-A")
     message = tmp_path / "message.txt"
     message.write_bytes(b"subject with \x1f byte\n\nbody with \x1e and \x1d bytes CTRLFACT\n")
-    _git(repo, "commit", "-q", "-F", str(message))
-    root = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", "-qb", "side")
+    git(repo, "commit", "-q", "-F", str(message))
+    root = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-qb", "side")
     (repo / "rules.txt").write_text("side SIDEFACT\n")
-    _git(repo, "commit", "-qam", "side change")
-    side = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "tag", "side-tag")
-    _git(repo, "checkout", "-q", "main")
+    git(repo, "commit", "-qam", "side change")
+    side = git(repo, "rev-parse", "HEAD")
+    git(repo, "tag", "side-tag")
+    git(repo, "checkout", "-q", "main")
     (repo / "rules.txt").write_text("main\n")
-    _git(repo, "commit", "-qam", "main change")
-    subprocess.run(["git", "-C", str(repo), "merge", "side"], capture_output=True, check=False)
+    git(repo, "commit", "-qam", "main change")
+    git(repo, "merge", "side", check=False)  # conflicts on rules.txt
     (repo / "rules.txt").write_text("MERGERESOLUTIONFACT\n")
-    _git(repo, "add", "rules.txt")
-    _git(repo, "-c", "core.editor=true", "commit", "-q", "--no-edit")
-    merge = _git(repo, "rev-parse", "HEAD")
+    git(repo, "add", "rules.txt")
+    git(repo, "-c", "core.editor=true", "commit", "-q", "--no-edit")
+    merge = git(repo, "rev-parse", "HEAD")
 
     sea.index_repo(str(repo))
     store = _store(repo)
@@ -424,13 +420,13 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
 
     # Checking out another branch changes files without any new commit: their
     # last touch is looked up per file.  A staged, never committed file has none.
-    _git(repo, "checkout", "-q", "side")
+    git(repo, "checkout", "-q", "side")
     (repo / "tab\tname.txt").chmod(0o755)  # mode-only change of a C-quoted name
-    _git(repo, "add", "tab\tname.txt")
-    _git(repo, "commit", "-q", "-m", "tab file executable")
-    mode_only = _git(repo, "rev-parse", "HEAD")
+    git(repo, "add", "tab\tname.txt")
+    git(repo, "commit", "-q", "-m", "tab file executable")
+    mode_only = git(repo, "rev-parse", "HEAD")
     (repo / "staged.txt").write_text("STAGEDFACT\n")
-    _git(repo, "add", "staged.txt")
+    git(repo, "add", "staged.txt")
     report = index.index_repo(repo, store)
     # The mode-only change left the blob alone, but the file's last commit moved.
     assert report.changed_paths == ["rules.txt", "staged.txt", "tab\tname.txt"]
@@ -447,7 +443,7 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     # for the next run (none of these staged files has a commit to find anyway).
     for i in range(index.MAX_LAST_TOUCH_LOOKUPS + 1):
         (repo / f"bulk{i}.txt").write_text(f"bulk {i}\n")
-    _git(repo, "add", "-A")
+    git(repo, "add", "-A")
     report = index.index_repo(repo, store)
     assert report.files_indexed == index.MAX_LAST_TOUCH_LOOKUPS + 1
     bulk = store.get("file:bulk0.txt")
@@ -459,21 +455,21 @@ def test_unshallowed_history_is_indexed_on_the_next_run(tmp_path: Path) -> None:
     shutil.rmtree(kiss_home() / "memories" / "shallow", ignore_errors=True)
     origin = _make_repo(tmp_path, "origin")
     shallow = tmp_path / "shallow"
-    _git(tmp_path, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
+    git(tmp_path, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
     store = _store(shallow)
     assert index.index_repo(shallow, store).commits_indexed == 1
-    head = _git(shallow, "rev-parse", "HEAD")
+    head = git(shallow, "rev-parse", "HEAD")
     boundary = store.get(f"commit:{head}")
     assert boundary is not None and "parents: (root commit)" in boundary.text
     assert store.get(f"change:{head}:README.md") is not None  # diff against nothing
-    _git(shallow, "fetch", "-q", "--unshallow")
+    git(shallow, "fetch", "-q", "--unshallow")
     report = index.index_repo(shallow, store)
     # The two revealed ancestors plus the former boundary commit, whose parents
     # and diff changed, are indexed; its invented changes are gone.
     assert report.commits_indexed == 3 and report.commits_removed == 1
     assert store.counts()["commit"] == 3
     repaired = store.get(f"commit:{head}")
-    parent = _git(shallow, "rev-parse", "HEAD~1")
+    parent = git(shallow, "rev-parse", "HEAD~1")
     assert repaired is not None and f"parents: {parent}" in repaired.text
     assert store.get(f"change:{head}:README.md") is None
     assert store.get(f"change:{head}:docs/notes.txt") is not None
@@ -490,23 +486,23 @@ def test_revealed_history_does_not_age_a_file_s_last_commit(tmp_path: Path) -> N
     shutil.rmtree(kiss_home() / "memories" / "recreated", ignore_errors=True)
     origin = _init(tmp_path, "origin-recreated")
     (origin / "f.txt").write_text("first\n")
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "add f")
-    _git(origin, "rm", "-q", "f.txt")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-q", "-m", "add f")
+    git(origin, "rm", "-q", "f.txt")
     (origin / "g.txt").write_text("g\n")
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "delete f, add g")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-q", "-m", "delete f, add g")
     (origin / "f.txt").write_text("first\n")
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "recreate f")
-    recreate = _git(origin, "rev-parse", "HEAD")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-q", "-m", "recreate f")
+    recreate = git(origin, "rev-parse", "HEAD")
     shallow = tmp_path / "recreated"
-    _git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
+    git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
     store = _store(shallow)
     index.index_repo(shallow, store)
     block = store.get("file:f.txt")
     assert block is not None and f"last commit: {recreate[:12]}" in block.text
-    _git(shallow, "fetch", "-q", "--unshallow")
+    git(shallow, "fetch", "-q", "--unshallow")
     report = index.index_repo(shallow, store)
     assert report.commits_indexed == 2  # the revealed root and the re-indexed boundary
     block = store.get("file:f.txt")
@@ -527,14 +523,14 @@ def test_unshallowing_keeps_the_head_commit_of_a_file_the_boundary_changed(
     origin = _init(tmp_path, "origin-thrice")
     for i in range(3):
         (origin / "f.txt").write_text(f"version {i}\n")
-        _git(origin, "add", "-A")
-        _git(origin, "commit", "-q", "-m", f"f version {i}")
-    head = _git(origin, "rev-parse", "HEAD")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-q", "-m", f"f version {i}")
+    head = git(origin, "rev-parse", "HEAD")
     shallow = tmp_path / "thrice"
-    _git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
+    git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
     store = _store(shallow)
     index.index_repo(shallow, store)
-    _git(shallow, "fetch", "-q", "--unshallow")
+    git(shallow, "fetch", "-q", "--unshallow")
     report = index.index_repo(shallow, store)
     assert report.commits_indexed == 2 and report.changed_paths == ["f.txt"]
     block = store.get("file:f.txt")
@@ -549,14 +545,14 @@ def test_lookups_beyond_the_budget_are_drained_by_the_next_runs(
     repo = _init(tmp_path, "budget")
     for i in range(3):
         (repo / f"f{i}.txt").write_text(f"file {i}\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "three files")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "three files")
     store = _store(repo)
     index.index_repo(repo, store)
     for i in range(3):  # mode-only: blobs unchanged, all three touched (NTFS has no x bit)
-        _git(repo, "update-index", "--chmod=+x", f"f{i}.txt")
-    _git(repo, "commit", "-q", "-m", "executable")
-    executable = _git(repo, "rev-parse", "HEAD")
+        git(repo, "update-index", "--chmod=+x", f"f{i}.txt")
+    git(repo, "commit", "-q", "-m", "executable")
+    executable = git(repo, "rev-parse", "HEAD")
     monkeypatch.setattr(index, "MAX_LAST_TOUCH_LOOKUPS", 2)
     report = index.index_repo(repo, store)
     assert report.commits_indexed == 1 and report.changed_paths == ["f0.txt", "f1.txt"]
@@ -580,7 +576,7 @@ def test_index_errors_for_bad_specs_and_empty_repositories(tmp_path: Path) -> No
     plain.mkdir()
     assert "not inside a git work tree" in sea.index_repo(str(plain))
     empty = tmp_path / "empty"
-    _git(tmp_path, "init", "-q", str(empty))
+    git(tmp_path, "init", "-q", str(empty))
     assert "has no commits yet" in sea.index_repo(str(empty))
     assert sea.knowledge_status(str(plain)).startswith("Error: ")
     assert sea.knowledge_search(str(plain), "x").startswith("Error: ")
@@ -598,13 +594,13 @@ def test_url_specs_are_cloned_under_kiss_home_and_kept_in_sync(tmp_path: Path) -
     shutil.rmtree(kiss_home() / "memories" / "ledger-remote", ignore_errors=True)
     origin = _make_repo(tmp_path, "origin-ledger")
     bare = tmp_path / "ledger-remote.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(origin), str(bare))
+    git(tmp_path, "clone", "-q", "--bare", str(origin), str(bare))
     url = bare.as_uri()
     assert index.is_url(url) and index.is_url("git@github.com:o/r.git")
     assert not index.is_url("/x/y")
     checkout = index.resolve_repo(url)
     assert checkout == (kiss_home() / "knowledge" / "checkouts" / "ledger-remote").resolve()
-    assert _git(checkout, "rev-parse", "HEAD") == _git(origin, "rev-parse", "HEAD")
+    assert git(checkout, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
     assert sea.knowledge_status(url).startswith("No memory yet")
     assert "mode: full" in sea.index_repo(url)
     assert index.memory_location(checkout)[0] == "ledger-remote"
@@ -612,11 +608,11 @@ def test_url_specs_are_cloned_under_kiss_home_and_kept_in_sync(tmp_path: Path) -
     assert sea.main(["status", url]) == 0  # the CLI passes URLs through untouched
 
     (origin / "docs" / "more.md").write_text("# More\n")
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "more docs")
-    _git(origin, "push", "-q", str(bare), "main")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-q", "-m", "more docs")
+    git(origin, "push", "-q", str(bare), "main")
     assert index.resolve_repo(url) == checkout
-    assert _git(checkout, "rev-parse", "HEAD") == _git(origin, "rev-parse", "HEAD")
+    assert git(checkout, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
     report = index.index_repo(checkout, _store(checkout))
     assert report.mode == "incremental" and report.changed_paths == ["docs/more.md"]
 
@@ -625,10 +621,10 @@ def test_url_specs_are_cloned_under_kiss_home_and_kept_in_sync(tmp_path: Path) -
     other_dir.mkdir()
     other = _make_repo(other_dir, "other-origin")
     (other / "ONLY_IN_OTHER").write_text("x\n")
-    _git(other, "add", "-A")
-    _git(other, "commit", "-q", "-m", "other")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "other")
     other_bare = other_dir / "ledger-remote.git"
-    _git(other_dir, "clone", "-q", "--bare", str(other), str(other_bare))
+    git(other_dir, "clone", "-q", "--bare", str(other), str(other_bare))
     second = index.resolve_repo(other_bare.as_uri())
     assert second != checkout and second.name.startswith("ledger-remote-")
     assert (second / "ONLY_IN_OTHER").exists() and not (checkout / "ONLY_IN_OTHER").exists()
@@ -842,7 +838,7 @@ def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
     def cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", sea.MODULE, *args], capture_output=True, text=True, env=env,
-            cwd=cwd,
+            cwd=cwd, timeout=600,
         )
 
     out = cli("index", "ledger", cwd=tmp_path)  # relative to the shell's directory
@@ -877,7 +873,7 @@ def test_lookup_page_commands_run_for_paths_with_spaces(tmp_path: Path) -> None:
     command = next(line.strip() for line in page.splitlines() if " status " in line)
     out = subprocess.run(
         shlex.split(command), capture_output=True, text=True, cwd=tmp_path,
-        env={**os.environ, "KISS_HOME": str(kiss_home())},
+        env={**os.environ, "KISS_HOME": str(kiss_home())}, timeout=600,
     )
     assert out.returncode == 0 and f"repository: {repo}" in out.stdout, out.stderr
 
@@ -960,11 +956,11 @@ def test_submodule_gitlinks_are_not_files(tmp_path: Path) -> None:
     """A submodule entry (mode 160000) is skipped by the file scan."""
     outer = _make_repo(tmp_path, "outer")
     inner = _make_repo(tmp_path, "inner")
-    _git(
+    git(
         outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner),
         "vendor/inner",
     )
-    _git(outer, "commit", "-q", "-m", "add submodule")
+    git(outer, "commit", "-q", "-m", "add submodule")
     files = index.ls_files(outer)
     assert ".gitmodules" in files and not any(path.startswith("vendor/inner") for path in files)
 
@@ -1152,11 +1148,11 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     shutil.rmtree(kiss_home() / "memories" / "s256", ignore_errors=True)
     repo = tmp_path / "s256"
     repo.mkdir()
-    _git(tmp_path, "init", "-q", "-b", "main", "--object-format=sha256", str(repo))
-    _git(repo, "config", "user.email", "alice@example.com")
-    _git(repo, "config", "user.name", "Alice")
-    _git(repo, "config", "diff.noprefix", "true")  # would drop a/ b/ from patch headers
-    _git(repo, "config", "log.showRoot", "false")  # would hide the root commit's diff
+    git(tmp_path, "init", "-q", "-b", "main", "--object-format=sha256", str(repo))
+    git(repo, "config", "user.email", "alice@example.com")
+    git(repo, "config", "user.name", "Alice")
+    git(repo, "config", "diff.noprefix", "true")  # would drop a/ b/ from patch headers
+    git(repo, "config", "log.showRoot", "false")  # would hide the root commit's diff
     (repo / "f:2").write_text("COLONFACT\n")
     (repo / "f").write_text("".join(f"f line {i}\n" for i in range(900)))  # a 2-part patch
     (repo / "café.sh").write_text("echo QUOTEDFACT\n")
@@ -1171,23 +1167,20 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
         if exc.errno != errno.EILSEQ:
             raise
         has_raw_name = False
-    _git(repo, "add", "-A")
+    git(repo, "add", "-A")
     future = "2030-01-01T00:00:00+00:00"  # both dates: the committer date drives traversal
-    skewed = {**os.environ, "GIT_AUTHOR_DATE": future, "GIT_COMMITTER_DATE": future}
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-q", "-m", "root in the future"],
-        check=True, env=skewed,
-    )
-    root = _git(repo, "rev-parse", "HEAD")
+    skewed = {"GIT_AUTHOR_DATE": future, "GIT_COMMITTER_DATE": future}
+    git(repo, "commit", "-q", "-m", "root in the future", env=skewed)
+    root = git(repo, "rev-parse", "HEAD")
     assert len(root) == 64
     tag_message = tmp_path / "tag.txt"
     tag_message.write_bytes(b"tag subject \x1e\x1f\x1d\n\nTAGCTRLFACT body\n")
-    _git(repo, "tag", "-a", "v1", "-F", str(tag_message))
+    git(repo, "tag", "-a", "v1", "-F", str(tag_message))
     (repo / "café.sh").chmod(0o755)  # mode-only change: no ---/+++ lines in the patch
     (repo / "skew.txt").write_text("v2 SKEWFACT\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "child in the past")
-    child = _git(repo, "rev-parse", "HEAD")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "child in the past")
+    child = git(repo, "rev-parse", "HEAD")
 
     sea.index_repo(str(repo))
     store = _store(repo)
@@ -1231,8 +1224,8 @@ def test_store_is_replaced_when_another_repository_takes_the_slug(tmp_path: Path
     assert store.counts()["commit"] == 3 and store.get("note:overview") is not None
     second = _init(tmp_path / "b", "twin")
     (second / "other.txt").write_text("OTHERFACT\n")
-    _git(second, "add", "-A")
-    _git(second, "commit", "-q", "-m", "unrelated history")
+    git(second, "add", "-A")
+    git(second, "commit", "-q", "-m", "unrelated history")
     report = index.index_repo(second, store)
     assert report.mode == "full" and report.commits_indexed == 1 and report.commits_removed == 0
     counts = store.counts()
@@ -1267,13 +1260,13 @@ def test_first_build_attributes_files_to_head_history_only(tmp_path: Path) -> No
     repo = _init(tmp_path, "diverge")
     (repo / "rules.txt").write_text("MAINFACT\n")
     (repo / "x.txt").write_text("x\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "main rules")
-    main_commit = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", "-qb", "side")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "main rules")
+    main_commit = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-qb", "side")
     (repo / "rules.txt").write_text("SIDEFACT\n")
-    _git(repo, "commit", "-qam", "side rules")
-    _git(repo, "checkout", "-q", "main")
+    git(repo, "commit", "-qam", "side rules")
+    git(repo, "checkout", "-q", "main")
     store = _store(repo)
     assert index.index_repo(repo, store).commits_indexed == 2
     rules = store.get("file:rules.txt")
@@ -1284,7 +1277,7 @@ def test_first_build_attributes_files_to_head_history_only(tmp_path: Path) -> No
     odd_names = ["[x].txt"] if IS_WINDOWS else [":(bogus)name.txt", "[x].txt"]
     for name in odd_names:
         (repo / name).write_text("odd\n")
-    _git(repo, "--literal-pathspecs", "add", *odd_names)
+    git(repo, "--literal-pathspecs", "add", *odd_names)
     report = index.index_repo(repo, store)
     assert report.changed_paths == odd_names
     for path in report.changed_paths:
@@ -1299,7 +1292,7 @@ def test_interrupted_run_is_repaired_and_shallowing_keeps_the_store(tmp_path: Pa
     origin = _make_repo(tmp_path, "again")
     store = _store(origin)
     index.index_repo(origin, store)
-    head = _git(origin, "rev-parse", "HEAD")
+    head = git(origin, "rev-parse", "HEAD")
     symbols = store.counts()["symbol"]
     # Simulate the interruption: the children are there, the markers are not.
     assert store.delete(key="file:src/pkg/bank.py") == 1
@@ -1314,7 +1307,7 @@ def test_interrupted_run_is_repaired_and_shallowing_keeps_the_store(tmp_path: Pa
     assert store.counts()["symbol"] == symbols  # re-indexed symbols replaced, not doubled
 
     shallow = tmp_path / "elsewhere" / "again"
-    _git(tmp_path, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
+    git(tmp_path, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
     report = index.index_repo(shallow, store)  # same slug, same store
     assert report.mode == "incremental" and report.files_removed == 0
     assert report.commits_removed == 2 and report.commits_indexed == 0  # HEAD is kept as is
@@ -1331,9 +1324,9 @@ def test_giant_files_and_diffs_are_flagged_not_dropped(tmp_path: Path) -> None:
     (repo / "after.txt").write_text("AFTERFACT\n")  # sorts after dump.txt in the diff
     (repo / "before.txt").write_text("BEFOREFACT\n")
     (repo / "zz_nul.txt").write_bytes(b"a" * 9000 + b"\n\x00\nZFACT\n")  # NUL past the cap
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "dump")
-    sha = _git(repo, "rev-parse", "HEAD")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "dump")
+    sha = git(repo, "rev-parse", "HEAD")
     store = _store(repo)
     index.index_repo(repo, store)
     dump = store.get("file:dump.txt")

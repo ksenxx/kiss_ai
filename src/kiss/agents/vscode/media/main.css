@@ -1099,7 +1099,9 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   color: var(--dim); padding: var(--space-0-5); display: flex; align-items: center;
   border-radius: var(--radius-sm); transition: color var(--dur-base);
 }
+.remote-url-copy svg { width: 14px; height: 14px; }
 .remote-url-copy:hover { color: var(--fg); }
+.remote-url-copy.copied { color: var(--status-ok); }
 
 /* One-line note under the Local/LAN URL bars telling the user how to
    trust the local CA that signs their certificate (kiss-web --trust-ca

@@ -18,6 +18,7 @@ The lock is not reentrant across separate opens on either platform.
 
 from __future__ import annotations
 
+import errno
 import os
 import time
 from collections.abc import Iterator
@@ -38,8 +39,15 @@ except ImportError:  # POSIX has no msvcrt
 # is the range every locker agrees on (it may lie beyond the end of an
 # empty lock file, which Windows allows).
 _WINDOWS_LOCK_BYTES = 1
-_WINDOWS_RETRY_INTERVAL = 0.05
-# How often a bounded wait re-probes the lock.
+# ``msvcrt.locking`` errnos that mean "another holder has it": EACCES
+# for the ``LK_NBLCK`` probe, EDEADLK (Windows' EDEADLOCK, the same
+# value 36) for ``LK_LOCK``'s own timeout.  ``errno.EDEADLOCK`` is only
+# defined where the C library has that alias — Linux and Windows, not
+# macOS — so naming it here made ``import kiss`` fail on a Mac.
+# Any other errno (EBADF for a closed descriptor, EINVAL) is a caller
+# bug and propagates, as it does on POSIX.
+_WINDOWS_CONTENDED_ERRNOS = (errno.EACCES, errno.EDEADLK)
+# How often a polled wait re-probes the lock.
 _POLL_INTERVAL = 0.05
 
 
@@ -47,7 +55,29 @@ def _fileno(target: int | IO[str] | IO[bytes]) -> int:
     return target if isinstance(target, int) else target.fileno()
 
 
-def lock_exclusive(target: int | IO[str] | IO[bytes], blocking: bool = True) -> bool:
+def _try_lock(fd: int) -> bool:
+    """Probe the lock once without waiting; ``True`` when it is now held."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    if msvcrt is not None:  # pragma: no cover — Windows-only branch
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, _WINDOWS_LOCK_BYTES)  # pyright: ignore[reportAttributeAccessIssue]
+        except OSError as e:
+            if e.errno in _WINDOWS_CONTENDED_ERRNOS:
+                return False
+            raise
+        return True
+    return True  # pragma: no cover — platform without either primitive
+
+
+def lock_exclusive(
+    target: int | IO[str] | IO[bytes], blocking: bool = True, timeout: float | None = None
+) -> bool:
     """Take an exclusive advisory lock on the open file *target*.
 
     Args:
@@ -56,38 +86,38 @@ def lock_exclusive(target: int | IO[str] | IO[bytes], blocking: bool = True) -> 
             by closing it, or by the process ending.
         blocking: Whether to wait for another holder to release the
             lock.  ``False`` gives up immediately instead.
+        timeout: With *blocking*, the most seconds to wait; ``None``
+            waits without limit.  A bounded wait polls the non-blocking
+            lock every ``_POLL_INTERVAL`` instead of blocking in the
+            kernel, so a holder that wedged costs the waiter at most
+            *timeout*.  Windows always polls this way: ``LK_LOCK`` sleeps
+            a full second between each of its ten internal attempts, so
+            a holder that kept the lock for a millisecond still cost
+            every waiter one second (two cron jobs finishing together
+            took over 2 s to record their results).
 
     Returns:
         ``True`` when the lock is held.  ``False`` only when *blocking*
         is ``False`` and another process holds the lock.  On a platform
         with neither ``fcntl`` nor ``msvcrt`` the lock is a no-op and
         ``True`` is returned.
+
+    Raises:
+        TimeoutError: When *timeout* elapsed with the lock still held
+            by another process.
     """
     fd = _fileno(target)
-    if fcntl is not None:
-        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-        try:
-            fcntl.flock(fd, flags)
-        except BlockingIOError:
-            return False
+    if blocking and timeout is None and fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         return True
-    if msvcrt is not None:  # pragma: no cover — Windows-only branch
-        # Always the non-blocking ``LK_NBLCK`` probe: ``LK_LOCK`` sleeps a
-        # full second between each of its ten internal attempts, so a
-        # holder that keeps the lock for a millisecond still cost every
-        # waiter one second (two cron jobs finishing together took over
-        # 2 s to record their results).  The blocking case polls at
-        # ``_WINDOWS_RETRY_INTERVAL`` until the lock is held.
-        while True:
-            os.lseek(fd, 0, os.SEEK_SET)
-            try:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, _WINDOWS_LOCK_BYTES)  # pyright: ignore[reportAttributeAccessIssue]
-                return True
-            except OSError:
-                if not blocking:
-                    return False
-                time.sleep(_WINDOWS_RETRY_INTERVAL)
-    return True  # pragma: no cover — platform without either primitive
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not _try_lock(fd):
+        if not blocking:
+            return False
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"still locked by another process after {timeout:g}s")
+        time.sleep(_POLL_INTERVAL)
+    return True
 
 
 def unlock(target: int | IO[str] | IO[bytes]) -> None:
@@ -147,16 +177,10 @@ def exclusive_file_lock(
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     locked = False
     try:
-        if blocking and timeout is not None:
-            deadline = time.monotonic() + timeout
-            while not (locked := lock_exclusive(descriptor, blocking=False)):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"{lock_path} still locked by another process after {timeout:g}s"
-                    )
-                time.sleep(_POLL_INTERVAL)
-        else:
-            locked = lock_exclusive(descriptor, blocking=blocking)
+        try:
+            locked = lock_exclusive(descriptor, blocking, timeout)
+        except TimeoutError as e:
+            raise TimeoutError(f"{lock_path} {e}") from None
         yield locked
     finally:
         try:

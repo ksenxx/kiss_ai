@@ -7,8 +7,7 @@
 These helpers live in sorcar (not the server layer) because sorcar's
 auto-commit path (:mod:`kiss.agents.sorcar.sorcar_agent` /
 ``git_worktree``) is their primary consumer and sorcar code must only
-depend on itself and ``kiss.core``.  The server layer re-exports them
-from :mod:`kiss.server.helpers` for its own callers.
+depend on itself and ``kiss.core``.
 """
 
 from __future__ import annotations
@@ -65,8 +64,8 @@ def _run_oneshot_llm(
 ) -> str:
     """Run a single non-agentic LLM call and return the cleaned text.
 
-    Wraps the boilerplate shared by *every* short LLM helper here and
-    in :mod:`kiss.server.helpers`: construct a
+    Wraps the boilerplate shared by every short LLM helper here:
+    construct a
     :class:`~kiss.core.kiss_agent.KISSAgent`, call ``run`` with
     ``is_agentic=False`` and ``verbose=False``, clean the response,
     and fall back to *fallback* on any exception or empty response.
