@@ -126,7 +126,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    serve_recording,
+    start_serving,
+)
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
 _REAL_MS_SECRET = "msteams-real-client-secret"
@@ -1206,8 +1210,7 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
 ) -> None:
     """A hop to a host off every allowlist follows bodyless and redacted."""
     rogue = _TokenXApiServer(("127.0.0.2", 0), _TokenXApiHandler)
-    thread = threading.Thread(target=rogue.serve_forever, daemon=True)
-    thread.start()
+    thread = start_serving(rogue)
     try:
         tg_config.save({"bot_token": _REAL_TG_TOKEN})
         backend = _tg_backend(api_server)

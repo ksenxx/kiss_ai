@@ -16,7 +16,17 @@ type NotificationPost = (message: NotificationMessage) => void;
 
 let poster: NotificationPost | undefined;
 let nextId = 1;
-const pendingActions = new Map<string, (value: string | undefined) => void>();
+// An action toast awaiting the user's click, with everything needed to
+// show it again natively should its webview go away (see
+// rehomePendingActions).
+type PendingAction = {
+  severity: Severity;
+  message: string;
+  options: vscode.MessageOptions | undefined;
+  actions: string[];
+  resolve: (value: string | undefined) => void;
+};
+const pendingActions = new Map<string, PendingAction>();
 // Cancellation sources of the progress operations still running, keyed
 // by toast id.  Unlike pendingActions these are not one-shot: closing
 // the toast (action undefined) does not end the operation, whose next
@@ -25,17 +35,28 @@ const pendingActions = new Map<string, (value: string | undefined) => void>();
 // surface that receives the re-posted toast can cancel too.
 const progressSources = new Map<string, vscode.CancellationTokenSource>();
 
-function resolveAllPendingActions(): void {
-  const resolvers = Array.from(pendingActions.values());
+// The surface showing the open action toasts is going away (its webview
+// disposed, or the poster handed to another surface).  Nobody answered
+// them, and answering `undefined` on the user's behalf would record a
+// dismissal they never made (editorActionsLocation remembers it as
+// 'keep' forever, ensureApiKeys as 'Skip').  Show each one again as a
+// native window notification instead, which outlives any panel; the
+// promise settles with that notification's answer.
+function rehomePendingActions(): void {
+  const pending = Array.from(pendingActions.values());
   pendingActions.clear();
-  for (const resolve of resolvers) resolve(undefined);
+  for (const {severity, message, options, actions, resolve} of pending) {
+    nativeShow(severity, message, options, actions).then(resolve, () =>
+      resolve(undefined),
+    );
+  }
 }
 
 export function setWebviewNotificationPoster(
   notificationPoster: NotificationPost | undefined,
 ): void {
   if (notificationPoster !== poster) {
-    resolveAllPendingActions();
+    rehomePendingActions();
   }
   poster = notificationPoster;
 }
@@ -55,7 +76,7 @@ export function clearWebviewNotificationPoster(
   notificationPoster: NotificationPost,
 ): void {
   if (poster === notificationPoster) {
-    resolveAllPendingActions();
+    rehomePendingActions();
     poster = undefined;
   }
 }
@@ -77,10 +98,10 @@ export function resolveWebviewNotificationAction(
     if (action === 'Cancel') source.cancel();
     return;
   }
-  const resolve = pendingActions.get(id);
-  if (!resolve) return;
+  const pending = pendingActions.get(id);
+  if (!pending) return;
   pendingActions.delete(id);
-  resolve(action);
+  pending.resolve(action);
 }
 
 /**
@@ -151,7 +172,7 @@ function showNotification(
   poster(toast);
   if (actions.length === 0) return Promise.resolve(undefined);
   return new Promise(resolve => {
-    pendingActions.set(id, resolve);
+    pendingActions.set(id, {severity, message, options, actions, resolve});
   });
 }
 

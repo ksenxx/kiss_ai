@@ -17,6 +17,7 @@ from typing import Any, ClassVar
 
 from kiss.core import config as config_module
 from kiss.core.brand import render_brand
+from kiss.core.locked import locked_call
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.printer import Printer
 from kiss.core.utils import atomic_write_text, config_to_dict, dump_yaml
@@ -62,7 +63,9 @@ class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
     agent_counter: ClassVar[int] = 1
-    _class_lock: ClassVar[threading.Lock] = threading.Lock()
+    # Reentrant for ``locked_call``: a task thread's Stop injection can
+    # land right after a plain ``with``'s ``__enter__`` and leak the lock.
+    _class_lock: ClassVar[threading.RLock] = threading.RLock()
 
     model_name: str
     messages: list[dict[str, Any]]
@@ -81,9 +84,7 @@ class Base:
             name: The name identifier for the agent.
         """
         self.name = name
-        with Base._class_lock:
-            self.id = Base.agent_counter
-            Base.agent_counter += 1
+        self.id = locked_call(Base._class_lock, Base._take_agent_id)
         self.printer: Printer | None = None
         self.model_name = ""
         self.messages: list[dict[str, Any]] = []
@@ -98,6 +99,13 @@ class Base:
         self.budget_used = 0.0
         self.total_tokens_used = 0
         self.step_count = 0
+
+    @staticmethod
+    def _take_agent_id() -> int:
+        """Return the next agent id; the caller holds ``_class_lock``."""
+        agent_id = Base.agent_counter
+        Base.agent_counter += 1
+        return agent_id
 
     def set_printer(
         self,

@@ -295,14 +295,14 @@ def test_poll_filters_by_channel(simplex_server: str) -> None:
         backend.disconnect()
 
 
-def test_tool_errors_when_unreachable() -> None:
+def test_tool_errors_when_unreachable(refusing_port: int) -> None:
     """Tools return ok:false JSON (never raise) when the CLI is unreachable."""
     backend = SimpleXChannelBackend()
     result = json.loads(backend.send_simplex_message("alice", "hi"))
     assert result["ok"] is False
     assert "not configured" in result["error"].lower()
 
-    backend._ws_url = "ws://127.0.0.1:9"  # discard port: connection refused
+    backend._ws_url = f"ws://127.0.0.1:{refusing_port}"
     for tool in (
         lambda: backend.send_simplex_message("alice", "hi"),
         backend.list_simplex_contacts,

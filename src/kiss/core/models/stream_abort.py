@@ -28,6 +28,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 from kiss.core import stop_signal
+from kiss.core.locked import locked_call
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,11 @@ class StreamAbortWatchdog:
         self._stall_timeout = stall_timeout
         self._stop_event = stop_event
         self._last_event = time.monotonic()
-        self._lock = threading.Lock()
+        # Reentrant for ``locked_call``: ``beat`` and ``stop`` run on the
+        # task thread, and ``stop`` is the stream's ``finally``, so a
+        # Stop injection leaking the lock through ``beat`` would hang
+        # the stopping task in its own cleanup.
+        self._lock = threading.RLock()
         self._done = threading.Event()
         self.stalled = False
         self.stopped = False
@@ -99,8 +104,7 @@ class StreamAbortWatchdog:
 
     def beat(self) -> None:
         """Record that an event arrived (resets the stall clock)."""
-        with self._lock:
-            self._last_event = time.monotonic()
+        locked_call(self._lock, setattr, self, "_last_event", time.monotonic())
 
     def stop(self) -> None:
         """Disarm the watchdog and wait for its thread to finish.
@@ -117,8 +121,7 @@ class StreamAbortWatchdog:
         timeout, so a transport that wedges during teardown delays the
         caller instead of stalling it forever.
         """
-        with self._lock:
-            self._done.set()
+        locked_call(self._lock, self._done.set)
         try:
             self._thread.join(timeout=self._STOP_JOIN_SECONDS)
         except RuntimeError:

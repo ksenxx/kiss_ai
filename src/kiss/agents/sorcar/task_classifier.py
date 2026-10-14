@@ -97,6 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.decide_tool import (
     DEFAULT_DECISIONS_MODEL,
     decisions_tool_available,
@@ -218,8 +219,11 @@ CLASSIFIER_CACHE_TTL_SECONDS = 7 * 24 * 3600.0
 
 # In-process mirror of the cache file, keyed by :func:`_cache_key`, in
 # insertion order.  ``None`` until first use.  Guarded by
-# ``_cache_lock`` together with the file it mirrors.
-_cache_lock = threading.Lock()
+# ``_cache_lock`` together with the file it mirrors; taken through
+# ``locked_call`` (hence reentrant, though never taken reentrantly)
+# because classification runs on the task thread, where a stop's
+# injected interrupt can leak a plain ``with``.
+_cache_lock = threading.RLock()
 _cache: dict[str, dict[str, Any]] | None = None
 _cache_loaded_from: Path | None = None
 
@@ -621,8 +625,7 @@ def cached_classification(
         or when the memo is older than :data:`CLASSIFIER_CACHE_TTL_SECONDS`.
     """
     key = _cache_key(task, model_name, model_config, criteria)
-    with _cache_lock:
-        entry = _load_cache_locked().get(key)
+    entry = locked_call(_cache_lock, _cache_entry_locked, key)
     if entry is None or entry["ts"] < time.time() - CLASSIFIER_CACHE_TTL_SECONDS:
         return None
     return TaskClassification(is_simple=entry["is_simple"])
@@ -652,31 +655,37 @@ def remember_classification(
         criteria: The classifier's criteria text, see :func:`_cache_key`.
     """
     key = _cache_key(task, model_name, model_config, criteria)
-    with _cache_lock:
-        cache = _load_cache_locked()
-        path = _cache_path()
-        for other_key, other in _read_cache_file(path).items():
-            mine = cache.get(other_key)
-            if mine is None or mine["ts"] < other["ts"]:
-                cache[other_key] = other
-        cache.pop(key, None)
-        cache[key] = {
-            "is_simple": classification.is_simple,
-            "ts": time.time(),
-        }
-        while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
-            del cache[next(iter(cache))]
-        tmp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
+    locked_call(_cache_lock, _remember_locked, key, classification.is_simple)
+
+
+def _cache_entry_locked(key: str) -> dict[str, Any] | None:
+    """Return the memo under *key*, or ``None`` (``_cache_lock`` held)."""
+    return _load_cache_locked().get(key)
+
+
+def _remember_locked(key: str, is_simple: bool) -> None:
+    """Store the verdict under *key* and persist the cache (``_cache_lock`` held)."""
+    cache = _load_cache_locked()
+    path = _cache_path()
+    for other_key, other in _read_cache_file(path).items():
+        mine = cache.get(other_key)
+        if mine is None or mine["ts"] < other["ts"]:
+            cache[other_key] = other
+    cache.pop(key, None)
+    cache[key] = {"is_simple": is_simple, "ts": time.time()}
+    while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
+        del cache[next(iter(cache))]
+    tmp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(cache), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError:
+        logger.debug("Could not persist classifier cache", exc_info=True)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path.write_text(json.dumps(cache), encoding="utf-8")
-            os.replace(tmp_path, path)
+            tmp_path.unlink()
         except OSError:
-            logger.debug("Could not persist classifier cache", exc_info=True)
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+            pass
 
 
 def clear_classification_cache() -> None:
@@ -685,14 +694,18 @@ def clear_classification_cache() -> None:
     Used by tests and by callers that change the classifier prompt
     semantics.
     """
+    locked_call(_cache_lock, _clear_locked)
+
+
+def _clear_locked() -> None:
+    """Drop the mirror and the cache file (``_cache_lock`` held)."""
     global _cache, _cache_loaded_from
-    with _cache_lock:
-        _cache = None
-        _cache_loaded_from = None
-        try:
-            _cache_path().unlink()
-        except OSError:
-            pass
+    _cache = None
+    _cache_loaded_from = None
+    try:
+        _cache_path().unlink()
+    except OSError:
+        pass
 
 
 def _attempt_classification(

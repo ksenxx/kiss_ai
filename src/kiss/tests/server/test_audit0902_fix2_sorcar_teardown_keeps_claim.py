@@ -6,7 +6,7 @@
 keep the worktree protected from a same-daemon reclaim.
 
 ``ChatSorcarAgent._keep_for_review`` fails closed — when the
-``kiss-preserve`` marker cannot be written (``.git/config.lock`` held)
+preserve marker cannot be written (a file sits where its directory goes)
 the agent keeps ``self._wt`` — but the tab-teardown paths in
 :class:`VSCodeServer` (``_drop_tab_state`` / ``_dispose_if_closed``)
 used to unregister the :class:`AgentState` BEFORE running that
@@ -20,7 +20,7 @@ and deleted the worktree.
 Everything here is real: a real git repository whose ``pre-commit``
 hook refuses every commit (so the parked work is genuinely
 uncommittable and the preserve step keeps the worktree directory), a
-real ``.git/config.lock`` held during the close, the real server teardown,
+real unwritable marker directory during the close, the real server teardown,
 the real reclaim pass with the exclusion set a second agent in the same
 process would build, and a real retry once the lock is gone.
 """
@@ -138,7 +138,7 @@ def _assert_untouched(env: _Env, agent: ChatSorcarAgent, wt_dir: Path, branch: s
 
 
 def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -> None:
-    """closeTab while ``.git/config.lock`` is held: the state stays registered,
+    """closeTab while the marker cannot be written: the state stays registered,
     the live exclusion still names the branch, a same-process reclaim leaves
     the worktree alone, and the retry after the lock is gone writes the marker."""
     tab_id = "audit0902-fix2-close"
@@ -147,7 +147,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
     assert wt is not None
     wt_dir, branch = wt.wt_dir, wt.branch
 
-    lock = env.repo / ".git" / "config.lock"
+    lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         env.server._close_tab(tab_id)
@@ -155,7 +155,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
         # (a) the agent kept its claim and the decision is not durable yet.
         assert agent._wt is wt, "the in-memory claim was dropped"
         assert agent._wt_pending
-        assert GitWorktreeOps._load_branch_config(env.repo, branch, "kiss-preserve") is None
+        assert not GitWorktreeOps._preserve_marker_on_disk(env.repo, branch)
         # (b) the state is still registered, so the live exclusion sees it.
         state = agent_state.find_by_tab(tab_id)
         assert state is not None and state.agent is agent, (
@@ -174,7 +174,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
         assert GitWorktreeOps.reclaim_orphaned_worktrees(env.repo, exclude_branches=set()) == 0
         _assert_untouched(env, agent, wt_dir, branch)
         # Still not on disk: only the process-local claim protected it.
-        assert GitWorktreeOps._load_branch_config(env.repo, branch, "kiss-preserve") is None
+        assert not GitWorktreeOps._preserve_marker_on_disk(env.repo, branch)
     finally:
         if lock.exists():
             lock.unlink()
@@ -190,10 +190,9 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
     _assert_untouched(env, agent, wt_dir, branch)
     # With the marker durable the process-local claim is gone: a reclaim
     # in a fresh process would now rely on the marker alone.
-    subprocess.run(
-        ["git", "-C", str(env.repo), "config", "--unset", f"branch.{branch}.kiss-preserve"],
-        check=True, capture_output=True,
-    )
+    marker = GitWorktreeOps._preserve_marker_path(env.repo, branch)
+    assert marker is not None
+    marker.unlink()
     assert not GitWorktreeOps.load_preserve_marker(env.repo, branch)
     GitWorktreeOps.save_preserve_marker(env.repo, branch)
     assert GitWorktreeOps.reclaim_orphaned_worktrees(env.repo, exclude_branches=set()) == 0
@@ -215,7 +214,7 @@ def test_deferred_disposal_with_marker_failure_keeps_state(env: _Env) -> None:
     assert state is not None and state.frontend_closed is True
     assert agent._wt is wt
 
-    lock = env.repo / ".git" / "config.lock"
+    lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         # The task ends: the runner drops the lifecycle flag and disposes.
@@ -268,7 +267,7 @@ def test_concurrent_close_during_teardown_is_deferred_not_duplicated(env: _Env) 
     # close provably arrives while the first teardown is in flight.
     agent._preserve_pending_worktree_for_review = blocking_preserve  # type: ignore[method-assign]
 
-    lock = env.repo / ".git" / "config.lock"
+    lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         first = threading.Thread(target=env.server._close_tab, args=(tab_id,), daemon=True)

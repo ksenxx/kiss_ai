@@ -25,7 +25,6 @@ from threading import Barrier, Event
 from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.seas import agents_md
 from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
@@ -34,16 +33,11 @@ from kiss.agents.seas.forget.forget_sea import ForgetSea
 from kiss.agents.seas.remember import remember_sea
 from kiss.agents.seas.remember.remember_sea import RememberSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    tool_call_body,
-)
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _REMEMBER_PATH = Path(remember_sea.__file__).resolve()
 _FORGET_PATH = Path(forget_sea.__file__).resolve()
@@ -69,25 +63,8 @@ def _fresh_agents_md() -> Iterator[Path]:
 def _run(sea: BaseSea, prompt: str, script: list[bytes], work_dir: Path) -> tuple[Any, list]:
     """Run *sea* on *prompt* against the scripted model; return (parsed result, requests)."""
     run = sea_commands.evaluate_sea([sea], prompt)
-    settings = run.settings
     assert run.prompt == prompt
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent(f"{type(sea).__name__}-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(work_dir),
-            max_steps=6,
-            max_budget=settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            system_prompt_hook=run.system_prompt_hook,
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    return yaml.safe_load(result), [r for r in requests if r.get("tools")]
+    return run_sea(run, script, work_dir, max_steps=6)
 
 
 def test_sea_methods_follow_the_contract() -> None:

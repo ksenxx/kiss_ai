@@ -37,7 +37,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, Literal, cast
 
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
 from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
@@ -58,22 +58,38 @@ def _immediate_txn(db: sqlite3.Connection) -> Iterator[None]:
     IMMEDIATE`` takes SQLite's write lock for the whole block, which
     every process on the database respects.
 
+    The ``BEGIN`` runs inside the ``try``: a Stop injected on the task
+    thread lands at the bytecode boundary right after the statement
+    returned, and with the BEGIN outside the handler the interrupt
+    escaped with the transaction still open on this thread's
+    connection — SQLite's write lock then stayed held for the
+    connection's life and every other thread's next write sat in the
+    30 s ``busy_timeout`` ("a peer hung on a leaked lock" in the
+    persistence hammer).  ``in_transaction`` tells whether the BEGIN
+    took effect before the interrupt, so nothing is rolled back that
+    was never begun.  The ``COMMIT`` is inside too: SQLite keeps the
+    transaction open after a ``COMMIT`` that failed with ``BUSY``
+    (possible in rollback-journal mode while another connection
+    reads), and the connection would otherwise answer every later
+    ``BEGIN`` with "cannot start a transaction within a transaction".
+
     Args:
         db: The connection to run the transaction on.
 
     Yields:
         ``None`` — run the statements inside the ``with`` block.
     """
-    db.execute("BEGIN IMMEDIATE")
     try:
+        db.execute("BEGIN IMMEDIATE")
         yield
+        db.execute("COMMIT")
     except BaseException:
         try:
-            db.execute("ROLLBACK")
-        except sqlite3.Error:  # pragma: no cover — rollback of a dead conn
+            if db.in_transaction:  # raises too once the connection is closed
+                db.execute("ROLLBACK")
+        except sqlite3.Error:  # a closed connection: nothing left to roll back
             pass
         raise
-    db.execute("COMMIT")
 
 
 class _Token:
@@ -416,7 +432,7 @@ class _RWLock:
 
 _rw_lock = _RWLock()
 
-_init_tables_lock = threading.Lock()
+_init_tables_lock = threading.RLock()
 
 # Serializes a task's usage finalization against spend charged to it
 # from another thread: a run's final "read the ledger, save the row with
@@ -427,15 +443,19 @@ _init_tables_lock = threading.Lock()
 # the final save, then bank on a ledger nothing reads again — or publish
 # newer totals that the run's stale last event then overwrites.  Held
 # only around those short DB/ledger/printer sections, never across a
-# join or a model call.
-TASK_USAGE_LOCK = threading.Lock()
+# join or a model call.  Task threads take it through
+# :func:`kiss.agents.sorcar._concurrency.locked_call` (hence the
+# reentrant type: it is never taken reentrantly, but a Stop interrupt
+# landing right after the acquisition must be able to release it).
+TASK_USAGE_LOCK = threading.RLock()
 
 
 _chat_context_text_cache: dict[str, str] = {}
-_chat_context_cache_lock = threading.Lock()
+_chat_context_cache_lock = threading.RLock()
 _chat_context_cache_gen: int = 0
 
 
+@locked(_chat_context_cache_lock)
 def _invalidate_chat_context_cache(chat_id: str = "") -> None:
     """Drop the cached chat-context text for *chat_id*.
 
@@ -443,12 +463,11 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
     fixtures that swap the underlying database file).
     """
     global _chat_context_cache_gen
-    with _chat_context_cache_lock:
-        if chat_id:
-            _chat_context_text_cache.pop(chat_id, None)
-        else:
-            _chat_context_text_cache.clear()
-        _chat_context_cache_gen += 1
+    if chat_id:
+        _chat_context_text_cache.pop(chat_id, None)
+    else:
+        _chat_context_text_cache.clear()
+    _chat_context_cache_gen += 1
 
 
 def _default_kiss_dir() -> Path:
@@ -492,7 +511,7 @@ _MAX_INPUT_HISTORY = 500
 _OWNER_DIR_NAME = "task-owners"
 
 _owner_state: tuple[str, str, IO[Any]] | None = None
-_owner_state_lock = threading.Lock()
+_owner_state_lock = threading.RLock()
 
 
 def _ensure_kiss_dir() -> None:
@@ -504,6 +523,7 @@ def _owner_dir() -> Path:
     return _KISS_DIR / _OWNER_DIR_NAME
 
 
+@locked(_owner_state_lock)
 def _process_owner_token() -> str:
     """Return this process's owner token, publishing its liveness marker.
 
@@ -533,28 +553,27 @@ def _process_owner_token() -> str:
     """
     global _owner_state
     current_dir = str(_owner_dir())
-    with _owner_state_lock:
-        if _owner_state is not None and _owner_state[0] == current_dir:
-            return _owner_state[1]
-        _discard_owner_state()
-        token = f"{os.getpid()}-{uuid.uuid4().hex}"
-        try:
-            _ensure_kiss_dir()
-            Path(current_dir).mkdir(parents=True, exist_ok=True)
-            handle = open(
-                Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
-            )
-            if not lock_exclusive(handle, blocking=False):  # pragma: no cover
-                raise BlockingIOError(f"{token}.lock is already held")
-            handle.write(f"{os.getpid()}\n")
-            handle.flush()
-        except OSError:
-            logger.warning(
-                "could not publish task-owner liveness marker", exc_info=True,
-            )
-            return ""
-        _owner_state = (current_dir, token, handle)
-        return token
+    if _owner_state is not None and _owner_state[0] == current_dir:
+        return _owner_state[1]
+    _discard_owner_state()
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        _ensure_kiss_dir()
+        Path(current_dir).mkdir(parents=True, exist_ok=True)
+        handle = open(
+            Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
+        )
+        if not lock_exclusive(handle, blocking=False):  # pragma: no cover
+            raise BlockingIOError(f"{token}.lock is already held")
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+    except OSError:
+        logger.warning(
+            "could not publish task-owner liveness marker", exc_info=True,
+        )
+        return ""
+    _owner_state = (current_dir, token, handle)
+    return token
 
 
 def _discard_owner_state() -> None:
@@ -582,8 +601,7 @@ def _discard_owner_state() -> None:
 
 def _release_owner_marker() -> None:
     """``atexit`` hook: drop this process's liveness marker on exit."""
-    with _owner_state_lock:
-        _discard_owner_state()
+    locked_call(_owner_state_lock, _discard_owner_state)
 
 
 atexit.register(_release_owner_marker)
@@ -736,40 +754,35 @@ class _LockedCursor(sqlite3.Cursor):
 
     def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
         """Run *sql* with *parameters* under the connection's lock."""
-        with self.lock:
-            super().execute(sql, parameters)
+        locked_call(self.lock, super().execute, sql, parameters)
         return self
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
         """Run *sql* once per parameter set under the connection's lock."""
-        with self.lock:
-            super().executemany(sql, seq_of_parameters)
+        locked_call(self.lock, super().executemany, sql, seq_of_parameters)
         return self
 
     def fetchone(self) -> Any:
         """Return the next row, or ``None``, stepping under the lock."""
-        with self.lock:
-            return super().fetchone()
+        return locked_call(self.lock, super().fetchone)
 
     def fetchmany(self, size: int | None = None) -> list[Any]:
         """Return up to *size* (default ``arraysize``) rows, stepping under the lock."""
-        with self.lock:
-            return super().fetchmany(self.arraysize if size is None else size)
+        return locked_call(
+            self.lock, super().fetchmany, self.arraysize if size is None else size,
+        )
 
     def fetchall(self) -> list[Any]:
         """Return every remaining row, stepping under the lock."""
-        with self.lock:
-            return super().fetchall()
+        return locked_call(self.lock, super().fetchall)
 
     def executescript(self, sql_script: str, /) -> _LockedCursor:
         """Run *sql_script* under the connection's lock."""
-        with self.lock:
-            super().executescript(sql_script)
+        locked_call(self.lock, super().executescript, sql_script)
         return self
 
     def __next__(self) -> Any:
-        with self.lock:
-            return super().__next__()
+        return locked_call(self.lock, super().__next__)
 
 
 class _LockedConnection(sqlite3.Connection):
@@ -812,18 +825,15 @@ class _LockedConnection(sqlite3.Connection):
 
     def commit(self) -> None:
         """Commit the open transaction under the lock."""
-        with self.lock:
-            super().commit()
+        locked_call(self.lock, super().commit)
 
     def rollback(self) -> None:
         """Roll back the open transaction under the lock."""
-        with self.lock:
-            super().rollback()
+        locked_call(self.lock, super().rollback)
 
     def close(self) -> None:
         """Close the connection; waits for a statement in flight on it."""
-        with self.lock:
-            super().close()
+        locked_call(self.lock, super().close)
 
     def __exit__(
         self,
@@ -834,8 +844,7 @@ class _LockedConnection(sqlite3.Connection):
     ) -> Literal[False]:
         # ``with conn:`` commits or rolls back from C, bypassing the
         # Python overrides above, so the lock is taken here.
-        with self.lock:
-            return super().__exit__(exc_type, exc, tb)
+        return locked_call(self.lock, super().__exit__, exc_type, exc, tb)
 
 
 #: Every connection :func:`_get_db` has opened in this process and not
@@ -972,78 +981,86 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
     Idempotent under ``_init_tables_lock``: a racing thread that finds
     the mapping already dropped returns without doing anything.
     """
+    if locked_call(_init_tables_lock, _recover_orphaned_sidecars_locked, current_path):
+        _invalidate_chat_context_cache("")
+
+
+def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
+    """Body of :func:`_recover_orphaned_sidecars`; the caller holds ``_init_tables_lock``.
+
+    Returns:
+        True when connections were recovered, False when nothing was to do.
+    """
     global _db_conn, _db_generation
-    with _init_tables_lock:
-        if current_path not in _attached_shm:
-            return
-        _prune_dead_thread_conns()
-        doomed = [
-            (key, conn) for key, (conn, _owner, path) in _open_conns.items()
-            if path == current_path
-        ]
-        logger.error(
-            "%s-wal/-shm were deleted or replaced under this process while "
-            "%d connection(s) were open; checkpointing and reconnecting "
-            "every thread (new connections were failing with 'disk I/O "
-            "error' until now)",
-            current_path,
-            len(doomed),
-        )
-        deadline = time.monotonic() + _RECOVERY_IDLE_WAIT_S
-        checkpointed = False
-        for key, conn in doomed:
-            # Thread-safe by SQLite's contract; a statement another
-            # thread is stepping on this handle aborts with
-            # "interrupted", which releases the handle's lock.  (A
-            # busy-timeout wait is not interruptible, so a thread
-            # queued behind another process's write transaction can
-            # keep its lock past the deadline.)
-            try:
-                conn.interrupt()
-            except sqlite3.Error:  # already closed behind the registry's back
-                logger.debug("Exception caught", exc_info=True)
-            if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-                continue  # busy: its owner closes it on its next _get_db()
-            try:
-                if not checkpointed:
-                    # Fails with "interrupted" on a handle whose
-                    # paused statement the interrupt above hit; the
-                    # next idle handle checkpoints instead.
-                    try:
-                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                        checkpointed = True
-                    except sqlite3.Error:
-                        logger.debug("Exception caught", exc_info=True)
+    if current_path not in _attached_shm:
+        return False
+    _prune_dead_thread_conns()
+    doomed = [
+        (key, conn) for key, (conn, _owner, path) in _open_conns.items()
+        if path == current_path
+    ]
+    logger.error(
+        "%s-wal/-shm were deleted or replaced under this process while "
+        "%d connection(s) were open; checkpointing and reconnecting "
+        "every thread (new connections were failing with 'disk I/O "
+        "error' until now)",
+        current_path,
+        len(doomed),
+    )
+    deadline = time.monotonic() + _RECOVERY_IDLE_WAIT_S
+    checkpointed = False
+    for key, conn in doomed:
+        # Thread-safe by SQLite's contract; a statement another
+        # thread is stepping on this handle aborts with
+        # "interrupted", which releases the handle's lock.  (A
+        # busy-timeout wait is not interruptible, so a thread
+        # queued behind another process's write transaction can
+        # keep its lock past the deadline.)
+        try:
+            conn.interrupt()
+        except sqlite3.Error:  # already closed behind the registry's back
+            logger.debug("Exception caught", exc_info=True)
+        if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            continue  # busy: its owner closes it on its next _get_db()
+        try:
+            if not checkpointed:
+                # Fails with "interrupted" on a handle whose
+                # paused statement the interrupt above hit; the
+                # next idle handle checkpoints instead.
                 try:
-                    conn.close()
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    checkpointed = True
                 except sqlite3.Error:
                     logger.debug("Exception caught", exc_info=True)
-            finally:
-                conn.lock.release()
-            _drop_open_conn_locked(key)
-        _db_conn = None
-        _db_generation += 1
-        busy = sum(1 for _c, _o, path in _open_conns.values() if path == current_path)
-        if busy:
-            # A connection opened now would join the dead mapping for
-            # good (SQLite keeps one shared-memory node per database
-            # per process while any handle uses it), so nothing is
-            # reopened: the ``_attached_shm`` entry stays, every
-            # ``_get_db()`` re-runs this recovery until the owners
-            # retire their handles, and this call fails instead.
-            raise sqlite3.OperationalError(
-                f"disk I/O error: {current_path}-wal/-shm were deleted while "
-                f"{busy} connection(s) are still busy; retry once their "
-                "statements finish"
-            )
-        _attached_shm.pop(current_path, None)
-    _invalidate_chat_context_cache("")
+            try:
+                conn.close()
+            except sqlite3.Error:
+                logger.debug("Exception caught", exc_info=True)
+        finally:
+            conn.lock.release()
+        _drop_open_conn_locked(key)
+    _db_conn = None
+    _db_generation += 1
+    busy = sum(1 for _c, _o, path in _open_conns.values() if path == current_path)
+    if busy:
+        # A connection opened now would join the dead mapping for
+        # good (SQLite keeps one shared-memory node per database
+        # per process while any handle uses it), so nothing is
+        # reopened: the ``_attached_shm`` entry stays, every
+        # ``_get_db()`` re-runs this recovery until the owners
+        # retire their handles, and this call fails instead.
+        raise sqlite3.OperationalError(
+            f"disk I/O error: {current_path}-wal/-shm were deleted while "
+            f"{busy} connection(s) are still busy; retry once their "
+            "statements finish"
+        )
+    _attached_shm.pop(current_path, None)
+    return True
 
 
 def _forget_open_conn(conn: sqlite3.Connection) -> None:
     """Remove *conn* from :data:`_open_conns` (no-op if absent)."""
-    with _init_tables_lock:
-        _drop_open_conn_locked(id(conn))
+    locked_call(_init_tables_lock, _drop_open_conn_locked, id(conn))
 
 
 def _retire_conn(conn: sqlite3.Connection) -> None:
@@ -1982,6 +1999,53 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
             return
 
 
+def _register_new_conn(conn: _LockedConnection, current_path: str) -> None:
+    """Switch *conn* to WAL, create the schema and enter it in :data:`_open_conns`.
+
+    The caller holds ``_init_tables_lock`` (see :func:`_open_db_connection`).
+    """
+    wal_deadline = time.monotonic() + 30.0
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            busy = (
+                code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                if code is not None
+                else "locked" in str(exc).lower()
+                or "busy" in str(exc).lower()
+            )
+            if not busy or time.monotonic() >= wal_deadline:
+                raise
+            time.sleep(0.05)
+    _migrate_old_schema_if_needed(conn)
+    _init_tables(conn)
+    # The first live connection is the one that created (or
+    # re-created) the process's -shm mapping; a later one only
+    # joins it.  Re-record for the first so an identity left
+    # over from a fully closed earlier generation (SQLite
+    # deletes the sidecars on the last close) is not compared
+    # against the new mapping.
+    _prune_dead_thread_conns()
+    first_live = not _path_has_open_conns(current_path)
+    _open_conns[id(conn)] = (
+        conn, threading.current_thread(), current_path,
+    )
+    db_id = _db_file_identity(current_path)
+    shm_id = _db_file_identity(current_path + "-shm")
+    attached = _attached_shm.get(current_path)
+    if (
+        db_id is not None
+        and db_id is not _FILE_ID_UNKNOWN
+        and shm_id is not None
+        and shm_id is not _FILE_ID_UNKNOWN
+        and (first_live or attached is None or attached[0] != db_id)
+    ):
+        _attached_shm[current_path] = (db_id, shm_id)
+
+
 def _open_db_connection(current_path: str) -> _LockedConnection:
     """Open, configure and register one new connection to *current_path*.
 
@@ -2020,47 +2084,7 @@ def _open_db_connection(current_path: str) -> _LockedConnection:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
-        with _init_tables_lock:
-            wal_deadline = time.monotonic() + 30.0
-            while True:
-                try:
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    break
-                except sqlite3.OperationalError as exc:
-                    code = getattr(exc, "sqlite_errorcode", None)
-                    busy = (
-                        code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                        if code is not None
-                        else "locked" in str(exc).lower()
-                        or "busy" in str(exc).lower()
-                    )
-                    if not busy or time.monotonic() >= wal_deadline:
-                        raise
-                    time.sleep(0.05)
-            _migrate_old_schema_if_needed(conn)
-            _init_tables(conn)
-            # The first live connection is the one that created (or
-            # re-created) the process's -shm mapping; a later one only
-            # joins it.  Re-record for the first so an identity left
-            # over from a fully closed earlier generation (SQLite
-            # deletes the sidecars on the last close) is not compared
-            # against the new mapping.
-            _prune_dead_thread_conns()
-            first_live = not _path_has_open_conns(current_path)
-            _open_conns[id(conn)] = (
-                conn, threading.current_thread(), current_path,
-            )
-            db_id = _db_file_identity(current_path)
-            shm_id = _db_file_identity(current_path + "-shm")
-            attached = _attached_shm.get(current_path)
-            if (
-                db_id is not None
-                and db_id is not _FILE_ID_UNKNOWN
-                and shm_id is not None
-                and shm_id is not _FILE_ID_UNKNOWN
-                and (first_live or attached is None or attached[0] != db_id)
-            ):
-                _attached_shm[current_path] = (db_id, shm_id)
+        locked_call(_init_tables_lock, _register_new_conn, conn, current_path)
     except BaseException:
         _forget_open_conn(conn)
         try:
@@ -3539,15 +3563,15 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
 
 _event_queue: queue.Queue = queue.Queue()
 _event_writer_thread: threading.Thread | None = None
-_event_writer_lock = threading.Lock()
+_event_writer_lock = threading.RLock()
 _event_writer_stop = threading.Event()
-_journal_lock = threading.Lock()
+_journal_lock = threading.RLock()
 _pending_cond = threading.Condition()
 _pending_by_task: dict[str, int] = {}
 _next_seq_cache: dict[str, int] = {}
 _marked_has_events: set[str] = set()
 _caches_db_key: tuple[str, tuple[int, int] | None] | None = None
-_caches_lock = threading.Lock()
+_caches_lock = threading.RLock()
 
 
 def _maybe_reset_caches(
@@ -3561,17 +3585,28 @@ def _maybe_reset_caches(
     counters and has-events marks were seeded from the previous
     database and are meaningless for the new one.
     """
-    global _caches_db_key
     key = (current_path, file_id)
     if _caches_db_key == key:
         return
-    with _caches_lock:
-        if _caches_db_key == key:
-            return
-        _next_seq_cache.clear()
-        _marked_has_events.clear()
-        _caches_db_key = key
-    _invalidate_chat_context_cache("")
+    if locked_call(_caches_lock, _reset_caches_locked, key):
+        _invalidate_chat_context_cache("")
+
+
+def _reset_caches_locked(key: tuple[str, tuple[int, int] | None]) -> bool:
+    """Clear the seq/has_events caches unless *key* is already current.
+
+    The caller holds ``_caches_lock``.
+
+    Returns:
+        True when the caches were cleared, False when *key* was current.
+    """
+    global _caches_db_key
+    if _caches_db_key == key:
+        return False
+    _next_seq_cache.clear()
+    _marked_has_events.clear()
+    _caches_db_key = key
+    return True
 
 _BATCH_MAX = 256
 _BATCH_WINDOW_S = 0.020
@@ -3579,22 +3614,26 @@ _BATCH_WINDOW_S = 0.020
 
 def _start_event_writer() -> None:
     """Lazily spawn the background event writer thread (idempotent)."""
+    if _event_writer_thread is not None and _event_writer_thread.is_alive():
+        return
+    locked_call(_event_writer_lock, _start_event_writer_locked)
+
+
+def _start_event_writer_locked() -> None:
+    """Spawn the writer thread unless one is alive; caller holds ``_event_writer_lock``."""
     global _event_writer_thread, _event_writer_stop
     if _event_writer_thread is not None and _event_writer_thread.is_alive():
         return
-    with _event_writer_lock:
-        if _event_writer_thread is not None and _event_writer_thread.is_alive():
-            return
-        stop = threading.Event()
-        t = threading.Thread(
-            target=_event_writer_loop,
-            args=(stop,),
-            name="kiss-event-writer",
-            daemon=True,
-        )
-        _event_writer_stop = stop
-        _event_writer_thread = t
-        t.start()
+    stop = threading.Event()
+    t = threading.Thread(
+        target=_event_writer_loop,
+        args=(stop,),
+        name="kiss-event-writer",
+        daemon=True,
+    )
+    _event_writer_stop = stop
+    _event_writer_thread = t
+    t.start()
 
 
 def _event_writer_loop(stop: threading.Event) -> None:
@@ -3713,27 +3752,31 @@ def _journal_final_result(
     line = json.dumps({
         "task_id": task_id, "result": result, "success": success, "ts": time.time(),
     })
-    with _journal_lock:
-        try:
-            with _journal_file_lock(sidecar):
-                # A process killed mid-append can leave a torn last
-                # record with no trailing newline; appending directly
-                # onto that fragment would fuse THIS record into one
-                # malformed line and lose it too.  Terminate any torn
-                # tail first so only the torn record is discarded.
-                prefix = ""
-                if os.path.exists(sidecar) and os.path.getsize(sidecar):
-                    with open(sidecar, "rb") as tail:
-                        tail.seek(-1, os.SEEK_END)
-                        if tail.read(1) != b"\n":
-                            prefix = "\n"
-                with open(sidecar, "a", encoding="utf-8") as stream:
-                    stream.write(prefix + line + "\n")
-        except OSError:
-            logger.warning(
-                "final result for task %s could not be journalled in %s",
-                task_id, sidecar, exc_info=True,
-            )
+    locked_call(_journal_lock, _append_final_result, sidecar, task_id, line)
+
+
+def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
+    """Append *line* to the final-results journal; caller holds ``_journal_lock``."""
+    try:
+        with _journal_file_lock(sidecar):
+            # A process killed mid-append can leave a torn last
+            # record with no trailing newline; appending directly
+            # onto that fragment would fuse THIS record into one
+            # malformed line and lose it too.  Terminate any torn
+            # tail first so only the torn record is discarded.
+            prefix = ""
+            if os.path.exists(sidecar) and os.path.getsize(sidecar):
+                with open(sidecar, "rb") as tail:
+                    tail.seek(-1, os.SEEK_END)
+                    if tail.read(1) != b"\n":
+                        prefix = "\n"
+            with open(sidecar, "a", encoding="utf-8") as stream:
+                stream.write(prefix + line + "\n")
+    except OSError:
+        logger.warning(
+            "final result for task %s could not be journalled in %s",
+            task_id, sidecar, exc_info=True,
+        )
 
 
 def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
@@ -3960,7 +4003,12 @@ def _replay_failed_events() -> None:
         # Checked before locking so a healthy database never pays for
         # the lock file or the lock itself.
         return
-    with _journal_lock, _journal_file_lock(path):
+    locked_call(_journal_lock, _replay_journal_files, path)
+
+
+def _replay_journal_files(path: str) -> None:
+    """Replay every snapshot of the journal at *path*; caller holds ``_journal_lock``."""
+    with _journal_file_lock(path):
         for snapshot in _claim_journal_snapshots(path):
             if not _replay_journal_snapshot(snapshot):
                 break
@@ -4229,25 +4277,38 @@ def _write_event_batch(
         return
     db = _get_db()
     task_ids = {tid for (tid, _ej, _ts, _op) in batch}
-    with _rw_lock.write_lock(), _caches_lock:
+    with _rw_lock.write_lock():
+        locked_call(_caches_lock, _write_event_batch_retrying, db, batch, task_ids, replay_marker)
+
+
+def _write_event_batch_retrying(
+    db: sqlite3.Connection,
+    batch: list[tuple[str, str, float, str]],
+    task_ids: set[str],
+    replay_marker: str | None,
+) -> None:
+    """Write *batch*, retrying once after a cross-process seq collision.
+
+    The caller holds the write lock and ``_caches_lock``.
+    """
+    try:
+        _write_event_batch_locked(db, batch, task_ids, replay_marker)
+    except sqlite3.IntegrityError:
+        # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
+        # seq)``: another PROCESS (journal replay from a CLI run,
+        # a second daemon) inserted seqs this process's
+        # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
+        # from the database and retry ONCE; a second refusal is a
+        # real error and propagates like any other failure.
+        _rollback_event_batch(db, task_ids)
         try:
             _write_event_batch_locked(db, batch, task_ids, replay_marker)
-        except sqlite3.IntegrityError:
-            # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
-            # seq)``: another PROCESS (journal replay from a CLI run,
-            # a second daemon) inserted seqs this process's
-            # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
-            # from the database and retry ONCE; a second refusal is a
-            # real error and propagates like any other failure.
-            _rollback_event_batch(db, task_ids)
-            try:
-                _write_event_batch_locked(db, batch, task_ids, replay_marker)
-            except Exception:
-                _rollback_event_batch(db, task_ids)
-                raise
         except Exception:
             _rollback_event_batch(db, task_ids)
             raise
+    except Exception:
+        _rollback_event_batch(db, task_ids)
+        raise
 
 
 def _rollback_event_batch(db: sqlite3.Connection, task_ids: set[str]) -> None:
@@ -4392,10 +4453,10 @@ def _queue_chat_event(
         _start_event_writer()
 
 
+@locked(_pending_cond)
 def _reserve_pending(task_id: str) -> None:
     """Record one queued-but-unwritten event for *task_id*."""
-    with _pending_cond:
-        _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
+    _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
 
 
 def _decrement_pending_locked(task_id: str) -> None:
@@ -4413,19 +4474,27 @@ def _unreserve_pending(task_id: str) -> None:
     Unlike :func:`_release_pending` this must NOT call
     ``_event_queue.task_done()`` — nothing was enqueued.
     """
-    with _pending_cond:
-        _decrement_pending_locked(task_id)
-        _pending_cond.notify_all()
+    locked_call(_pending_cond, _unreserve_pending_locked, task_id)
+
+
+def _unreserve_pending_locked(task_id: str) -> None:
+    """Drop one reservation of *task_id* and wake waiters; caller holds ``_pending_cond``."""
+    _decrement_pending_locked(task_id)
+    _pending_cond.notify_all()
 
 
 def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:
     """Mark every event in *batch* as no longer pending and wake waiters."""
-    with _pending_cond:
-        for task_id, _ev, _ts, _origin in batch:
-            _decrement_pending_locked(task_id)
-        _pending_cond.notify_all()
+    locked_call(_pending_cond, _release_batch_locked, batch)
     for _ in batch:
         _event_queue.task_done()
+
+
+def _release_batch_locked(batch: list[tuple[str, str, float, str]]) -> None:
+    """Drop the reservations of *batch* and wake waiters; caller holds ``_pending_cond``."""
+    for task_id, _ev, _ts, _origin in batch:
+        _decrement_pending_locked(task_id)
+    _pending_cond.notify_all()
 
 
 def _pending_count(task_id: str | None) -> int:
@@ -4454,16 +4523,23 @@ def _flush_chat_events(task_id: str | None = None) -> None:
             updating task A must not be delayed by a high-volume run
             in task B.  ``None`` waits for every queued event.
     """
-    while True:
-        with _pending_cond:
-            if _pending_count(task_id) == 0:
-                break
-            writer = _event_writer_thread
-            if writer is not None and writer.is_alive():
-                _pending_cond.wait(0.05)
-                continue
+    while not locked_call(_pending_cond, _pending_drained, task_id):
         _start_event_writer()
     _replay_failed_events()
+
+
+def _pending_drained(task_id: str | None) -> bool:
+    """Return True when no event of *task_id* is pending; else wait one tick.
+
+    The caller holds ``_pending_cond``.  The wait is skipped when no
+    writer is alive, so the caller starts one before retrying.
+    """
+    if _pending_count(task_id) == 0:
+        return True
+    writer = _event_writer_thread
+    if writer is not None and writer.is_alive():
+        _pending_cond.wait(0.05)
+    return False
 
 
 def _stop_event_writer() -> None:
@@ -4476,12 +4552,9 @@ def _stop_event_writer() -> None:
     writer if needed) until nothing is left unfinished, so no queued
     event is ever stranded.
     """
-    global _event_writer_thread, _caches_db_key
     while True:
         _flush_chat_events()
-        with _event_writer_lock:
-            t = _event_writer_thread
-            stop = _event_writer_stop
+        t, stop = locked_call(_event_writer_lock, _writer_and_stop)
         if t is not None:
             stop.set()
             try:
@@ -4495,15 +4568,30 @@ def _stop_event_writer() -> None:
                     "deferring writer cleanup until it exits"
                 )
                 return
-            with _event_writer_lock:
-                if _event_writer_thread is t:
-                    _event_writer_thread = None
+            locked_call(_event_writer_lock, _forget_writer, t)
         if not _event_queue.unfinished_tasks:
             break
-    with _caches_lock:
-        _next_seq_cache.clear()
-        _marked_has_events.clear()
-        _caches_db_key = None
+    locked_call(_caches_lock, _clear_seq_caches)
+
+
+def _clear_seq_caches() -> None:
+    """Drop the seq/has_events caches and their database key; caller holds ``_caches_lock``."""
+    global _caches_db_key
+    _next_seq_cache.clear()
+    _marked_has_events.clear()
+    _caches_db_key = None
+
+
+def _writer_and_stop() -> tuple[threading.Thread | None, threading.Event]:
+    """Return the current writer thread and its stop flag; caller holds ``_event_writer_lock``."""
+    return _event_writer_thread, _event_writer_stop
+
+
+def _forget_writer(t: threading.Thread) -> None:
+    """Clear ``_event_writer_thread`` if it is still *t*; caller holds ``_event_writer_lock``."""
+    global _event_writer_thread
+    if _event_writer_thread is t:
+        _event_writer_thread = None
 
 
 def _drain_events_at_exit() -> None:
@@ -4553,7 +4641,10 @@ def _append_chat_event(
     if resolved is None:
         return
     _queue_chat_event(event, resolved, origin_db_path)
-    _flush_chat_events()
+    # Only this task's events: a side-channel charge calls this under
+    # TASK_USAGE_LOCK, and waiting for every task's queue there would
+    # park another task's finishing write behind a high-volume run.
+    _flush_chat_events(resolved)
 
 
 def _task_has_transcript_events(task_id: str) -> bool:
@@ -5115,9 +5206,7 @@ def _load_chat_context_text(chat_id: str) -> str:
         return ""
     current_path = _current_db_path()
     _maybe_reset_caches(current_path, _db_file_identity(current_path))
-    with _chat_context_cache_lock:
-        cached = _chat_context_text_cache.get(chat_id)
-        snapshot_gen = _chat_context_cache_gen
+    cached, snapshot_gen = locked_call(_chat_context_cache_lock, _cached_chat_context, chat_id)
     if cached is not None:
         return cached
     parts: list[str] = []
@@ -5129,10 +5218,19 @@ def _load_chat_context_text(chat_id: str) -> str:
         if isinstance(result, str):
             parts.append(result)
     text = "\n".join(parts)
-    with _chat_context_cache_lock:
-        if _chat_context_cache_gen == snapshot_gen:
-            _chat_context_text_cache[chat_id] = text
+    locked_call(_chat_context_cache_lock, _store_chat_context, chat_id, text, snapshot_gen)
     return text
+
+
+def _cached_chat_context(chat_id: str) -> tuple[str | None, int]:
+    """Return the cached text of *chat_id* (or None) and the cache generation."""
+    return _chat_context_text_cache.get(chat_id), _chat_context_cache_gen
+
+
+def _store_chat_context(chat_id: str, text: str, snapshot_gen: int) -> None:
+    """Cache *text* for *chat_id* unless the cache changed since *snapshot_gen*."""
+    if _chat_context_cache_gen == snapshot_gen:
+        _chat_context_text_cache[chat_id] = text
 
 
 def _load_model_usage() -> dict[str, int]:

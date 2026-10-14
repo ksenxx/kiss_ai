@@ -67,6 +67,12 @@ _INTERRUPT_PROBE_TIMEOUT = 3.0
 # How long ``page.close()`` gets before the page is closed through
 # DevTools instead (a normal close takes milliseconds; see _close_page).
 _CLOSE_TIMEOUT = 2.0
+# How long closing the browser (``context.close()``: Playwright waits for
+# the browser *process* to exit, with no deadline of its own) and stopping
+# the driver each get in _teardown_locked.  A healthy browser exits in well
+# under a second; one that does not exit on ``Browser.close`` must not
+# keep the lifecycle lock, or every later open would queue behind it.
+_TEARDOWN_TIMEOUT = 5.0
 
 _MODIFIER_BITS = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}
 _KEY_TEXT = {"Enter": "\r"}
@@ -645,11 +651,15 @@ class BrowserTabService:
 
     async def _on_page_closed(self, rec: _PageRecord) -> None:
         with self._lock:
-            self._pages.pop(rec.tab_id, None)
+            known = self._pages.pop(rec.tab_id, None) is not None
             self._by_page.pop(id(rec.page), None)
             remaining = len(self._pages)
         if rec.flush_handle is not None:
             rec.flush_handle.cancel()
+        if not known:
+            # Already withdrawn by a teardown, whose context close is
+            # what fired this event: nothing left to announce or close.
+            return
         self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
         if remaining:
             return
@@ -666,7 +676,17 @@ class BrowserTabService:
             await self._teardown_locked(announce)
 
     async def _teardown_locked(self, announce: bool) -> None:
-        """Close the browser and forget every page (caller holds ``_launch_lock``)."""
+        """Close the browser and forget every page (caller holds ``_launch_lock``).
+
+        Both awaits are bounded by ``_TEARDOWN_TIMEOUT``: a browser that
+        does not exit on ``Browser.close`` (wedged, stopped, waiting on a
+        native modal) would otherwise hold ``_launch_lock`` for good and
+        kill the feature until the daemon restarts.  Stopping the driver
+        closes its stdin: the driver then SIGKILLs a browser whose close
+        is still pending and exits, which frees the profile for the next
+        launch.  A driver that does not even manage that is abandoned (it
+        is a child process; it force-exits by itself within 30 s).
+        """
         with self._lock:
             records = list(self._pages.values())
             self._pages.clear()
@@ -680,11 +700,16 @@ class BrowserTabService:
                 self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
         if context is not None:
             try:
-                await context.close()
+                await asyncio.wait_for(context.close(), _TEARDOWN_TIMEOUT)
+            except TimeoutError:
+                logger.warning("browser tab: the browser did not exit; stopping the driver")
             except Exception as exc:  # noqa: BLE001 — browser may already be gone
                 logger.debug("browser tab: context close: %s", exc)
         if playwright is not None:
-            await playwright.stop()
+            try:
+                await asyncio.wait_for(playwright.stop(), _TEARDOWN_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 — the driver exits on its own
+                logger.warning("browser tab: driver stop: %r", exc)
 
     # ------------------------------------------------------------------
     # Navigation and state

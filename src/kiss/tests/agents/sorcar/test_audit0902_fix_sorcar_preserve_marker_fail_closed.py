@@ -8,20 +8,21 @@
 with a worktree the agent never merged) and
 ``_preserve_pending_worktree_for_review`` (stopped/failed task, tab
 close) deliberately leave the worktree on disk and write the durable
-``branch.<b>.kiss-preserve`` marker so a later
+preserve marker (a file under the repo's git dir) so a later
 ``GitWorktreeOps.reclaim_orphaned_worktrees`` — in a fresh process,
 after this one died — does not squash-merge and delete work the user
 never accepted.  The preserve commits the work to its ``kiss/wt-*``
 branch and removes the worktree directory; the branch is the only
 copy of the work.  Before the fix both paths ignored the marker write's
 result and dropped the only in-memory claim (``self._wt``) anyway, so
-a transient ``git config`` failure (``.git/config.lock`` held) turned
-"kept for review" into "silently published on the next restart".
+a transient marker-write failure turned "kept for review" into
+"silently published on the next restart".
 
 The owner really exits here: each scenario runs the agent in a real
-child process that holds a real ``.git/config.lock`` during the first
-preserve attempt, retries the way a later user action would, and then
-exits; the parent process then runs the real reclaim.
+child process whose first preserve attempt cannot write the marker (a
+regular file sits where the marker directory ``.git/kiss-preserve``
+goes), retries the way a later user action would, and then exits; the
+parent process then runs the real reclaim.
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ _CHILD = """
     wt = agent._wt
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\\n", encoding="utf-8")
 
-    lock = repo / ".git" / "config.lock"
+    lock = repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         first = agent.{first_call}
@@ -78,7 +79,7 @@ _CHILD = """
         "claim_kept": agent._wt is wt,
         "pending_after_failure": agent._wt_pending,
         "marker_after_failure": (
-            GitWorktreeOps._load_branch_config(repo, wt.branch, "kiss-preserve") == "1"
+            GitWorktreeOps._preserve_marker_on_disk(repo, wt.branch)
         ),
         # Review-2 #1(c): the failed write leaves a process-local claim
         # that load_preserve_marker (hence reclaim) already honours.
@@ -114,6 +115,13 @@ def _run_owner(
     line = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")][-1]
     report: dict = json.loads(line[len("RESULT "):])
     return report
+
+
+def _unlink_marker(repo: Path, branch: str) -> None:
+    """Remove *branch*'s durable preserve marker file."""
+    marker = GitWorktreeOps._preserve_marker_path(repo, branch)
+    assert marker is not None
+    marker.unlink()
 
 
 def _branch_has_agent_file(repo: Path, branch: str) -> bool:
@@ -193,7 +201,7 @@ def test_create_worktree_keeps_the_unretired_claim(
     assert wt is not None
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\n", encoding="utf-8")
 
-    lock = env.repo / ".git" / "config.lock"
+    lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         agent._retire_previous_worktree()
@@ -204,7 +212,7 @@ def test_create_worktree_keeps_the_unretired_claim(
     assert "already active" in second, second
     assert agent._wt is wt
     assert agent._wt_pending
-    assert GitWorktreeOps._load_branch_config(env.repo, wt.branch, "kiss-preserve") is None
+    assert not GitWorktreeOps._preserve_marker_on_disk(env.repo, wt.branch)
     assert "still pending" in (agent._merge_conflict_warning or "")
     # The work is parked on its branch; no second worktree was made.
     assert _branch_has_agent_file(env.repo, wt.branch)
@@ -234,12 +242,12 @@ def test_same_process_reclaim_honours_the_volatile_claim(env: IsolatedKissHome) 
     assert wt is not None
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\n", encoding="utf-8")
 
-    lock = env.repo / ".git" / "config.lock"
+    lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")
     try:
         agent._retire_previous_worktree()
         assert agent._wt is wt
-        assert GitWorktreeOps._load_branch_config(env.repo, wt.branch, "kiss-preserve") is None
+        assert not GitWorktreeOps._preserve_marker_on_disk(env.repo, wt.branch)
         assert GitWorktreeOps.load_preserve_marker(env.repo, wt.branch), (
             "the process-local keep decision is invisible to load_preserve_marker"
         )
@@ -252,13 +260,10 @@ def test_same_process_reclaim_honours_the_volatile_claim(env: IsolatedKissHome) 
 
     agent._retire_previous_worktree()
     assert agent._wt is None
-    assert GitWorktreeOps._load_branch_config(env.repo, wt.branch, "kiss-preserve") == "1"
-    # The durable marker replaced the volatile claim: without the config
-    # entry nothing in this process still reports the branch preserved.
-    subprocess.run(
-        ["git", "-C", str(env.repo), "config", "--unset", f"branch.{wt.branch}.kiss-preserve"],
-        check=True, capture_output=True,
-    )
+    assert GitWorktreeOps._preserve_marker_on_disk(env.repo, wt.branch)
+    # The durable marker replaced the volatile claim: without the marker
+    # file nothing in this process still reports the branch preserved.
+    _unlink_marker(env.repo, wt.branch)
     assert not GitWorktreeOps.load_preserve_marker(env.repo, wt.branch)
 
 

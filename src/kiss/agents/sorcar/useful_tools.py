@@ -1685,9 +1685,14 @@ class UsefulTools:
                 # redirects its own stdout away (``exec >log 2>&1; …``) is
                 # still running, so wait for it until the caller's
                 # deadline — expiry there is a genuine timeout, and a stop
-                # ends the wait through the monitor's group kill.
+                # ends the wait through the monitor's group kill.  The
+                # wait has a short floor: a shell whose output ended at
+                # the deadline edge is in its last microseconds of
+                # exiting, and a zero wait (one ``waitpid(WNOHANG)``)
+                # would report it timed out and SIGKILL the group, with
+                # any ``nohup job &`` the command meant to leave behind.
                 try:
-                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    process.wait(timeout=max(0.5, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     _kill_process_group(process)

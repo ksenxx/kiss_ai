@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import socket
 import ssl
 import threading
@@ -26,7 +27,6 @@ import pytest
 from websockets.sync.client import ClientConnection
 
 from kiss.agents.sorcar import machines as mach
-from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import make_test_tls
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
@@ -74,11 +74,18 @@ def remote_leaf(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RemoteDaem
 
 
 def _closed_port() -> int:
-    """Return a loopback port nothing listens on (8787 when it is free)."""
-    with socket.socket() as sock:
-        if sock.connect_ex(("127.0.0.1", mach.DEFAULT_PORT)) != 0:
-            return mach.DEFAULT_PORT
-    return find_free_port()
+    """Return a loopback port nothing listens on.
+
+    Drawn below every OS ephemeral range (Linux 32768+, macOS and
+    Windows 49152+), so a listener another test process binds on port
+    0 meanwhile can never land on it; the daemon default port 8787 is
+    not used either, as sibling processes start daemons there.
+    """
+    while True:
+        port = random.randrange(21000, 32000)
+        with socket.socket() as sock:
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
 
 
 def _titles(page: mach.HistoryPage) -> list[str]:
@@ -496,7 +503,7 @@ def test_ssh_machine_tunnels_the_daemon_port_and_logs_in_with_its_token(
         published.get("tunnel") or (published.get("lan") or [link.tunnel.url])[0]
     )
     assert link.tunnel.token == _endpoint_token(remote)
-    assert "-L" in link.tunnel.command and "-N" in link.tunnel.command
+    assert "-L" in link.tunnel.command and link.tunnel.command[-1] == mach.TUNNEL_COMMAND
     assert link.tunnel.log_file().exists()
     assert link.base_url() == link.tunnel.url  # an open tunnel is reused
     assert mach.machine_status(machine) == "reachable"
@@ -627,7 +634,7 @@ def test_ssh_machine_failures_are_reported_and_store_nothing(
     monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
     with pytest.raises(mach.MachineError, match="ssh is not installed"):
         tunnel.open()
-    # Not covered: ``ssh -N -L`` logging in but never binding the local
+    # Not covered: ``ssh -L`` logging in but never binding the local
     # port ("did not forward port ... within"); OpenSSH binds it before
     # the session is up, so only a fake ssh could produce that.
 
@@ -746,7 +753,7 @@ def test_ssh_machine_retries_at_once_when_the_tunnel_token_is_stale(
 ) -> None:
     """A daemon restarted on the same port under a living tunnel is found without a backoff.
 
-    The ``ssh -N`` forward connects on demand, so it outlives the
+    The ``ssh`` forward connects on demand, so it outlives the
     daemon it points at; the token the link read when it opened the
     tunnel is then stale and the restarted daemon answers
     ``auth_required``.  The link re-reads the endpoint file and

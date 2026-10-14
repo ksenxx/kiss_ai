@@ -17,20 +17,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from kiss.agents.seas.base.base_sea import (
     SUMMARY_EVERY_STEPS,
     BaseSea,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_commands import evaluate_sea
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    tool_call_body,
-)
+from kiss.tests.agents.seas.conftest import run_sea
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 
 def _bash(step: int) -> bytes:
@@ -42,31 +35,12 @@ def _bash(step: int) -> bytes:
 
 def _run(tmp_path: Path, script: list[bytes], tool_profile: str) -> tuple[Any, list[dict]]:
     run = evaluate_sea([BaseSea()], "count to twelve with Bash")
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("summary-guardrail-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=20,
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tools_hook=run.tools_hook,
-            tool_call_hook=run.tool_call_hook,
-            llm_call_hook=run.llm_call_hook,
-            tool_profile=tool_profile,
-            web_tools=False,
-            use_memory=False,
-            verbose=False,
-        )
-    return yaml.safe_load(result), requests
+    return run_sea(run, script, tmp_path, max_steps=20, tool_profile=tool_profile)
 
 
-def _tool_results(requests: list[dict[str, Any]]) -> list[str]:
+def _tool_results(agentic: list[dict[str, Any]]) -> list[str]:
     """The tool-result message contents of the last agentic request, in order."""
-    last = [request for request in requests if request.get("tools")][-1]
-    return [str(m["content"]) for m in last["messages"] if m["role"] == "tool"]
+    return [str(m["content"]) for m in agentic[-1]["messages"] if m["role"] == "tool"]
 
 
 def test_tenth_step_tool_call_is_refused_until_summary_runs(tmp_path: Path) -> None:
@@ -95,7 +69,7 @@ def test_finish_is_allowed_on_a_tenth_step(tmp_path: Path) -> None:
     parsed, requests = _run(tmp_path, script, "shell+control")
     assert parsed["success"] is True
     assert "finished at ten" in parsed["summary"]
-    assert len([r for r in requests if r.get("tools")]) == 10
+    assert len(requests) == 10
 
 
 def test_without_the_summary_tool_nothing_is_refused(tmp_path: Path) -> None:
@@ -123,24 +97,8 @@ def test_a_second_run_on_the_same_hooks_starts_its_count_afresh(tmp_path: Path) 
     second.append(finish_body("<p>second</p>", prompt_tokens=900))
     results = []
     for script in (first, second):
-        with serve(script) as (url, requests):
-            agent = ChatSorcarAgent("summary-guardrail-two-tasks")
-            agent.run(
-                prompt_template=run.prompt,
-                model_name=MODEL,
-                work_dir=str(tmp_path),
-                max_steps=20,
-                max_budget=1.0,
-                model_config={"base_url": url, "api_key": "local"},
-                tools_hook=run.tools_hook,
-                tool_call_hook=run.tool_call_hook,
-                llm_call_hook=run.llm_call_hook,
-                tool_profile="shell+control",
-                web_tools=False,
-                use_memory=False,
-                verbose=False,
-            )
-            results.append(_tool_results(requests))
+        _, requests = run_sea(run, script, tmp_path, max_steps=20, tool_profile="shell+control")
+        results.append(_tool_results(requests))
     assert len(results[0]) == 9 and "step-9" in results[0][8], results[0]
     assert len(results[1]) == 2, results[1]
     assert "step-1" in results[1][0] and "step-2" in results[1][1], results[1]

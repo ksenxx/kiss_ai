@@ -91,6 +91,25 @@ def test_late_usage_updates_the_finished_row_and_finished_ancestors() -> None:
     assert any(e.get("type") == "tasks_updated" for e in events)
 
 
+def test_late_usage_of_a_finished_row_names_its_task() -> None:
+    """A finished row's late ``usage_info`` carries the row's ``taskId``.
+
+    The tab that showed the row may already run a newer task; without
+    the id the webview could not tell the late event apart from that
+    task's own totals and would repaint its Cost with the old one.
+    """
+    root = _task(finished=True, cost=5.0)
+    child = _task(finished=True, parent=root, cost=2.0)
+    server, events = _server()
+
+    charge_side_channel_usage(server.printer, SorcarAgent("late-usage"), child, 0.25, 50, 3)
+
+    by_task = {
+        e["taskId"]: e["cost"] for e in events if e.get("type") == "usage_info"
+    }
+    assert by_task == {child: "$2.2500", root: "$5.2500"}
+
+
 def test_running_task_banks_the_spend_on_its_live_agent() -> None:
     """While the task runs its row is untouched and its agent pays."""
     task = _task(finished=False)

@@ -568,14 +568,15 @@ async function main() {
       what: 'summarize my email',
     };
     eq(posted, [update]);
+    // The update is in flight: Save is disabled and a repeated Enter
+    // or click sends nothing more until the reply re-renders the form.
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
     posted.length = 0;
     form.elements.schedule.dispatchEvent(
       new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
     );
-    eq(posted, [update]);
-    posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [update]);
+    eq(posted, []);
     // A refused update re-opens the editor with the typed values; the
     // periodic poll (no action) and another row's action keep it too,
     // with whatever was typed meanwhile; the reply acknowledging the
@@ -585,14 +586,59 @@ async function main() {
     assert.ok(form, 'the editor is back under its row');
     assert.strictEqual(form.elements.name.value, 'Morning digest');
     assert.strictEqual(form.elements.what.value, 'summarize my email');
+    // Enter in an input and the Save button each send the update.
+    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled);
+    form.elements.schedule.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    eq(posted, [update]);
+    send(win, {type: 'cronJobs', jobs, action: 'update', error: 'still no'});
+    form = list.children[0].querySelector('form');
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [update]);
+    send(win, {type: 'cronJobs', jobs, action: 'update', error: "schedule 'every 2h' never fires"});
+    form = list.children[0].querySelector('form');
     assert.strictEqual(el(win, 'meta-schedule-status').textContent, "schedule 'every 2h' never fires");
     form.elements.schedule.value = 'every 3h';
     send(win, {type: 'cronJobs', jobs});
     form = list.children[0].querySelector('form');
     assert.ok(form, 'a poll keeps the editor open');
     assert.strictEqual(form.elements.schedule.value, 'every 3h', 'with the draft');
+    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled);
+    // Sent again: a poll and another row's action arriving while the
+    // update is in flight keep the editor AND keep its Save disabled
+    // (the rebuilt form is still waiting for the same reply).
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [Object.assign({}, update, {schedule: 'every 3h'})]);
+    send(win, {type: 'cronJobs', jobs});
+    form = list.children[0].querySelector('form');
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled, 'in flight across a poll');
     send(win, {type: 'cronJobs', jobs, action: 'pause', error: ''});
-    assert.ok(list.children[0].querySelector('form'), "another row's action keeps it");
+    form = list.children[0].querySelector('form');
+    assert.ok(form, "another row's action keeps it");
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [], 'no resend while in flight');
+    // The daemon drops: no reply is coming, so Save is re-armed, and a
+    // save while disconnected is refused with a note (the draft stays).
+    send(win, {type: 'daemonStatus', connected: false});
+    form = list.children[0].querySelector('form');
+    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled);
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, []);
+    assert.strictEqual(
+      el(win, 'meta-schedule-status').textContent,
+      'Not connected: try again when reconnected',
+    );
+    assert.ok(el(win, 'meta-schedule-status').classList.contains('is-error'));
+    assert.strictEqual(form.elements.schedule.value, 'every 3h');
+    send(win, {type: 'daemonStatus', connected: true});
+    posted.length = 0; // the reconnect re-requests the panels
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [Object.assign({}, update, {schedule: 'every 3h'})]);
     send(win, {type: 'cronJobs', jobs, action: 'update', error: ''});
     assert.strictEqual(list.querySelectorAll('form').length, 0);
     // A poll with no editor open changes nothing.
@@ -687,9 +733,13 @@ async function main() {
       kind: 'command',
     };
     eq(posted, [create]);
+    // The create is in flight: a second click sends nothing more (the
+    // daemon would refuse the duplicate and paint that over the first
+    // create's success).
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
     posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [create]);
+    eq(posted, []);
     // A refused create re-opens the form, at the top, with the typed
     // values (the kind included); the periodic poll and another job's
     // action keep it, with whatever was typed meanwhile; the reply
@@ -697,6 +747,11 @@ async function main() {
     send(win, {type: 'cronJobs', jobs, action: 'create', error: 'duplicate: job a'});
     form = topForm();
     assert.ok(form, 'the form is back at the top');
+    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled, 'a refusal re-enables Save');
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [create], 'the Save button sends the create too');
+    send(win, {type: 'cronJobs', jobs, action: 'create', error: 'duplicate: job a'});
+    form = topForm();
     assert.strictEqual(form.elements.kind.value, 'command');
     assert.strictEqual(form.elements.what.value, 'echo night');
     eq(labels(form), ['Name', 'Schedule', 'Run', 'Command'], 'relabelled for the kind');
@@ -987,9 +1042,17 @@ async function main() {
       password: 'pw',
     };
     eq(posted, [addCmd]);
+    // The add is in flight: a repeated Enter sends nothing more.
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
+    form.elements.address.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    eq(posted, [addCmd]);
     // A refused add re-opens the form, at the top, with the typed
     // values; the periodic poll keeps it (with the draft); the reply
-    // acknowledging the add (the machine registered) closes it.
+    // acknowledging the retried add (the machine registered) closes
+    // it, while one acknowledging nothing this form sent (another
+    // window's add) leaves it alone.
     send(win, {
       type: 'machines', machines: MACHINES, checkedAt: 2, action: 'add', error: 'lab: unreachable',
     });
@@ -1003,6 +1066,12 @@ async function main() {
     assert.ok(form, 'a poll keeps the form open');
     assert.strictEqual(form.elements.name.value, 'lab2', 'with the draft');
     send(win, {type: 'machines', machines: MACHINES, checkedAt: 4, action: 'add', error: ''});
+    form = topForm();
+    assert.ok(form, "an add this form did not send leaves it open");
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    assert.strictEqual(posted[0].name, 'lab2', 'the retry sends the draft');
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 5, action: 'add', error: ''});
     assert.strictEqual(list.querySelectorAll('form').length, 0);
   });
 
@@ -1088,8 +1157,17 @@ async function main() {
     recBtn.click();
     send(win, {type: 'daemonStatus', connected: false});
     assert.ok(!recBtn.disabled, 'a dropped connection stops the recommendations spin');
+    // While disconnected a click neither sends (nothing would answer)
+    // nor spins.
     posted.length = 0;
     const machinesBtn = el(win, 'meta-machines-refresh');
+    machinesBtn.click();
+    recBtn.click();
+    btn.click();
+    eq(posted, []);
+    assert.ok(!machinesBtn.disabled && !recBtn.disabled && !btn.disabled);
+    send(win, {type: 'daemonStatus', connected: true});
+    posted.length = 0;
     machinesBtn.click();
     eq(posted, [{type: 'getMachines', refresh: true}]);
     assert.ok(machinesBtn.disabled && machinesBtn.classList.contains('spinning'));

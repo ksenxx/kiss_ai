@@ -22,17 +22,19 @@ are forwarded directly without recording or persistence.
 import base64
 import json
 import logging
+import operator
 import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import _queue_chat_event
 from kiss.core import stop_signal
 from kiss.core.printer import (
@@ -298,6 +300,65 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _session_extra(session: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the parsed ``extra`` dict of a loader session, or ``None``.
+
+    Args:
+        session: A loader session dict whose ``extra`` is the JSON string
+            synthesized by ``_row_to_extra_json``.
+    """
+    extra_raw = session.get("extra")
+    if not isinstance(extra_raw, str) or not extra_raw:
+        return None
+    try:
+        extra = json.loads(extra_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return extra if isinstance(extra, dict) else None
+
+
+def _usage_info_event_from_session(
+    session: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Synthesize the ``usage_info`` totals event from a task's row.
+
+    A task whose transcript carries no ``usage_info`` / ``result``
+    event (it was stopped or failed before its first usage event was
+    recorded, or the events were lost) still has its spend in the
+    ``task_history`` row; this builds the trailing totals event the
+    live run would have broadcast so a replay shows that cost instead
+    of nothing.
+
+    Args:
+        session: A loader session dict.
+
+    Returns:
+        The event dict, or None when the session has no task id, no
+        parsable ``extra``, or neither cost nor tokens.
+    """
+    task_id = str(session.get("task_id") or "")
+    extra = _session_extra(session)
+    if not task_id or extra is None:
+        return None
+    try:
+        cost = float(extra.get("cost") or 0.0)
+        tokens = int(extra.get("tokens") or 0)
+        steps = int(extra.get("steps") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if cost <= 0 and tokens <= 0:
+        return None
+    return {
+        "type": "usage_info",
+        "text": "",
+        "taskId": task_id,
+        "total_tokens": tokens,
+        "cost": f"${cost:.4f}",
+        "cost_usd": cost,
+        "total_steps": steps,
+    }
+
+
 def _task_settings_event_from_session(
     session: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -320,16 +381,8 @@ def _task_settings_event_from_session(
         ``extra`` does not parse to a dict.
     """
     task_id = str(session.get("task_id") or "")
-    if not task_id:
-        return None
-    extra_raw = session.get("extra")
-    if not isinstance(extra_raw, str) or not extra_raw:
-        return None
-    try:
-        extra = json.loads(extra_raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(extra, dict):
+    extra = _session_extra(session)
+    if not task_id or extra is None:
         return None
     settings: dict[str, Any] = {
         "model": str(extra.get("model") or ""),
@@ -358,18 +411,19 @@ def _task_settings_event_from_session(
     return {"type": "task_settings", "settings": settings, "taskId": task_id}
 
 
-def with_task_settings_event(
+def with_synthesized_events(
     events: list[dict[str, Any]],
     session: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Return *events* with a leading ``task_settings`` event ensured.
+    """Return *events* with the row-derived events a replay needs ensured.
 
-    Used by every replay / share reply builder: when the persisted
-    stream already carries the run's own ``task_settings`` event the
-    list is returned unchanged; otherwise the event synthesized from
-    *session* (see :func:`_task_settings_event_from_session`) is
-    prepended.  When nothing can be synthesized the list is returned
-    unchanged.
+    Used by every replay / share reply builder.  A leading
+    ``task_settings`` event is prepended when the persisted stream
+    carries none (:func:`_task_settings_event_from_session`), and a
+    trailing ``usage_info`` totals event is appended when the stream
+    carries neither a ``usage_info`` nor a ``result`` event but the row
+    has a spend (:func:`_usage_info_event_from_session`).  When nothing
+    can be synthesized the list is returned unchanged.
 
     Args:
         events: The task's replay events (already coalesced or raw).
@@ -378,12 +432,68 @@ def with_task_settings_event(
     Returns:
         The events list, never None.
     """
-    if any(ev.get("type") == "task_settings" for ev in events):
-        return events
-    synthesized = _task_settings_event_from_session(session)
-    if synthesized is None:
-        return events
-    return [synthesized, *events]
+    types = {ev.get("type") for ev in events}
+    out = events
+    if "task_settings" not in types:
+        settings = _task_settings_event_from_session(session)
+        if settings is not None:
+            out = [settings, *out]
+    if "usage_info" not in types and "result" not in types:
+        usage = _usage_info_event_from_session(session)
+        if usage is not None:
+            out = [*out, usage]
+    return out
+
+
+def _register_agent_task(agent: Any, key: str, chat_id: str) -> None:
+    """Under ``STATE_LOCK``: register *agent*'s run under *key*, or re-key its pre-registered
+    state."""
+    state = agent_state.find_by_agent(agent)
+    if state is None:
+        sub_info = getattr(agent, "_subagent_info", None)
+        parent_task_id: str | None = None
+        if isinstance(sub_info, dict):
+            parent_task_id = str(sub_info.get("parent_task_id") or "")
+        state = agent_state.AgentState(
+            key,
+            agent=agent,
+            tab_id=str(getattr(agent, "_tab_id", "") or ""),
+            parent_task_id=parent_task_id,
+            stop_event=stop_signal.get_thread_stop_event(),
+            task_thread=threading.current_thread(),
+            is_task_active=True,
+        )
+        agent_state.register(state)
+    else:
+        agent_state.rekey(state, key)
+        state.is_task_active = True
+        if state.stop_event is None:
+            state.stop_event = stop_signal.get_thread_stop_event()
+        if state.task_thread is None:
+            state.task_thread = threading.current_thread()
+    if chat_id:
+        state.chat_id = chat_id
+
+
+def _unregister_bridge_state(agent: Any, key: str) -> None:
+    """Under ``STATE_LOCK``: deactivate and drop *agent*'s state unless the server owns it."""
+    state = agent_state.get(key)
+    if state is None or state.agent is not agent:
+        state = agent_state.find_by_agent(agent)
+    if state is None or state.server_owned:
+        return
+    state.is_task_active = False
+    state.task_thread = None
+    agent_state.unregister(state.task_id, state)
+
+
+def _take_pending_messages(state: agent_state.AgentState) -> tuple[list[str], list[str]]:
+    """Under ``STATE_LOCK``: pop *state*'s queued prompts and its deferred prompt echoes."""
+    queued = list(state.pending_user_messages)
+    state.pending_user_messages.clear()
+    deferred = list(state.unattributed_prompt_echoes)
+    state.unattributed_prompt_echoes.clear()
+    return queued, deferred
 
 
 class _BashState:
@@ -416,7 +526,7 @@ class _BashState:
         #: True once the cut happened: the rest of the call's output is
         #: dropped, and its tool result is shown instead of blanked.
         self.capped: bool = False
-        self.flush_lock = threading.Lock()
+        self.flush_lock = threading.RLock()
 
     def take_fragment(self, fragment: str) -> str:
         """Return the part of *fragment* still within the stream cap.
@@ -440,6 +550,31 @@ class _BashState:
             return fragment
         self.capped = True
         return fragment[:room] + SYSTEM_OUTPUT_CAP_MARKER
+
+
+def _clear_bash_state(bs: _BashState) -> None:
+    """Under ``_bash_lock`` and *bs*'s ``flush_lock``: drop its buffer and pending timer."""
+    bs.buffer.clear()
+    bs.streamed = False
+    if bs.timer is not None:
+        bs.timer.cancel()
+        bs.timer = None
+
+
+def _take_bash_text(bs: _BashState) -> str:
+    """Under ``_bash_lock`` and *bs*'s ``flush_lock``: pop its buffered text, cancelling the
+    timer."""
+    if bs.timer is not None:
+        bs.timer.cancel()
+        bs.timer = None
+    text = "".join(bs.buffer)
+    bs.buffer.clear()
+    bs.last_flush = time.monotonic()
+    return text
+
+
+def _nothing() -> None:
+    """Body of a ``locked_call`` whose point is the lock hold itself (waiting a holder out)."""
 
 
 class _PrinterThreadLocal(threading.local):
@@ -562,8 +697,13 @@ class JsonPrinter(Printer):
 
     def __init__(self) -> None:
         self._thread_local = _PrinterThreadLocal()
-        self._lock = threading.Lock()
-        self._bash_lock = threading.Lock()
+        # Every printer lock is an RLock taken through ``locked_call``:
+        # the runner's Stop injects KeyboardInterrupt into task threads,
+        # and a plain ``with lock:`` leaks the lock when it lands right
+        # after ``__enter__`` (gh-74174).  The printer is shared by every
+        # task of the daemon, so a leak would wedge printing for good.
+        self._lock = threading.RLock()
+        self._bash_lock = threading.RLock()
         self._bash_states: dict[str, _BashState] = {}
         self._tokens_offsets: dict[str, int] = {}
         self._budget_offsets: dict[str, float] = {}
@@ -625,7 +765,7 @@ class JsonPrinter(Printer):
         # WebPrinter: worktree tracking + socket send; MemoryPrinter:
         # list append), and no caller of the three methods holds any
         # printer lock.  Order: ``_model_pick_lock`` → ``_lock``.
-        self._model_pick_lock = threading.Lock()
+        self._model_pick_lock = threading.RLock()
         # Makes "record a task event + choose its live recipients +
         # schedule their sends" atomic with respect to "snapshot a
         # running task's recording + schedule the replay that carries
@@ -709,25 +849,38 @@ class JsonPrinter(Printer):
         # broadcast repainted the dead agent's model with the tab no
         # longer in _model_override_tabs — a stale label no later
         # restore could fix (restore early-returns for non-members).
-        with self._model_pick_lock:
-            with self._lock:
-                self._sweep_expired_subscribers()
-                viewers = self._subscribers.get(key)
-                if viewers is None:
-                    viewers = set()
-                    self._subscribers[key] = viewers
-                viewers.add(tab_id)
-                recording = self._recording_ref(key)
-                # A tab joining a task whose agent already switched
-                # models missed that one-shot event, and would
-                # otherwise sit on the wrong label until the task
-                # ended.
-                catch_up = self._task_model_override.get(key, "")
-                if catch_up:
-                    self._model_override_tabs.add(tab_id)
-            if catch_up:
-                self.broadcast_model_pick(catch_up, "agent", tab_id)
+        return locked_call(self._model_pick_lock, self._subscribe_tab_locked, key, tab_id)
+
+    def _subscribe_tab_locked(
+        self, key: str, tab_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """``subscribe_tab`` under ``_model_pick_lock``: subscribe, then catch up the model
+        label."""
+        recording, catch_up = locked_call(self._lock, self._add_subscriber, key, tab_id)
+        if catch_up:
+            self.broadcast_model_pick(catch_up, "agent", tab_id)
         return recording
+
+    def _add_subscriber(
+        self, key: str, tab_id: str,
+    ) -> tuple[list[dict[str, Any]] | None, str]:
+        """Under ``_lock``: add *tab_id* to *key*'s viewers.
+
+        Returns the task's recording and the model the task's agent
+        picked, if any: a tab joining a task whose agent already
+        switched models missed that one-shot event, and would
+        otherwise sit on the wrong label until the task ended.
+        """
+        self._sweep_expired_subscribers()
+        viewers = self._subscribers.get(key)
+        if viewers is None:
+            viewers = set()
+            self._subscribers[key] = viewers
+        viewers.add(tab_id)
+        catch_up = self._task_model_override.get(key, "")
+        if catch_up:
+            self._model_override_tabs.add(tab_id)
+        return self._recording_ref(key), catch_up
 
     def agent_task_allocated(
         self,
@@ -752,32 +905,7 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(task_id)
         if not key:
             return
-        with agent_state.STATE_LOCK:
-            state = agent_state.find_by_agent(agent)
-            if state is None:
-                sub_info = getattr(agent, "_subagent_info", None)
-                parent_task_id: str | None = None
-                if isinstance(sub_info, dict):
-                    parent_task_id = str(sub_info.get("parent_task_id") or "")
-                state = agent_state.AgentState(
-                    key,
-                    agent=agent,
-                    tab_id=str(getattr(agent, "_tab_id", "") or ""),
-                    parent_task_id=parent_task_id,
-                    stop_event=stop_signal.get_thread_stop_event(),
-                    task_thread=threading.current_thread(),
-                    is_task_active=True,
-                )
-                agent_state.register(state)
-            else:
-                agent_state.rekey(state, key)
-                state.is_task_active = True
-                if state.stop_event is None:
-                    state.stop_event = stop_signal.get_thread_stop_event()
-                if state.task_thread is None:
-                    state.task_thread = threading.current_thread()
-            if chat_id:
-                state.chat_id = chat_id
+        locked_call(agent_state.STATE_LOCK, _register_agent_task, agent, key, chat_id)
 
     def agent_task_finished(self, agent: Any, task_id: Any) -> None:
         """Mark *agent*'s run as finished and drop non-server states.
@@ -796,15 +924,7 @@ class JsonPrinter(Printer):
             task_id: The task id the run was registered under.
         """
         key = self._coerce_task_id(task_id)
-        with agent_state.STATE_LOCK:
-            state = agent_state.get(key)
-            if state is None or state.agent is not agent:
-                state = agent_state.find_by_agent(agent)
-            if state is None or state.server_owned:
-                return
-            state.is_task_active = False
-            state.task_thread = None
-            agent_state.unregister(state.task_id, state)
+        locked_call(agent_state.STATE_LOCK, _unregister_bridge_state, agent, key)
 
     def charge_task_usage(
         self, task_agent: Any, task_id: str, budget: float, tokens: int, steps: int,
@@ -848,11 +968,7 @@ class JsonPrinter(Printer):
         state = agent_state.get(self._task_key())
         if state is None:
             return []
-        with agent_state.STATE_LOCK:
-            queued = list(state.pending_user_messages)
-            state.pending_user_messages.clear()
-            deferred = list(state.unattributed_prompt_echoes)
-            state.unattributed_prompt_echoes.clear()
+        queued, deferred = locked_call(agent_state.STATE_LOCK, _take_pending_messages, state)
         for msg in deferred:
             try:
                 self.broadcast(
@@ -870,8 +986,9 @@ class JsonPrinter(Printer):
                     "recordOnly prompt echo broadcast failed",
                     exc_info=True,
                 )
-                with agent_state.STATE_LOCK:
-                    state.unattributed_prompt_echoes.append(msg)
+                locked_call(
+                    agent_state.STATE_LOCK, state.unattributed_prompt_echoes.append, msg,
+                )
         return queued
 
     def has_pending_user_messages(self) -> bool:
@@ -884,8 +1001,7 @@ class JsonPrinter(Printer):
         state = agent_state.get(self._task_key())
         if state is None:
             return False
-        with agent_state.STATE_LOCK:
-            return bool(state.pending_user_messages)
+        return bool(locked_call(agent_state.STATE_LOCK, len, state.pending_user_messages))
 
     def live_worktree_branches(self) -> set[str]:
         """Return the ``kiss/wt-*`` branches owned by live agents.
@@ -916,12 +1032,12 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(task_id)
         if not key:
             return []
-        with self._lock:
-            self._sweep_expired_subscribers()
-            viewers = self._subscribers.get(key)
-            if not viewers:
-                return []
-            return list(viewers)
+        return locked_call(self._lock, self._live_viewers, key)
+
+    def _live_viewers(self, key: str) -> list[str]:
+        """Under ``_lock``: the unexpired subscriber tab ids of *key*."""
+        self._sweep_expired_subscribers()
+        return list(self._subscribers.get(key) or ())
 
     def tasks_for_tab(self, tab_id: str) -> list[str]:
         """Return the task keys *tab_id* is currently subscribed to.
@@ -940,13 +1056,12 @@ class JsonPrinter(Printer):
             The subscribed task keys (``task_history`` ids as strings),
             empty when *tab_id* is subscribed to nothing.
         """
-        with self._lock:
-            self._sweep_expired_subscribers()
-            return [
-                key
-                for key, viewers in self._subscribers.items()
-                if tab_id in viewers
-            ]
+        return locked_call(self._lock, self._subscribed_keys, tab_id)
+
+    def _subscribed_keys(self, tab_id: str) -> list[str]:
+        """Under ``_lock``: the task keys whose unexpired viewers include *tab_id*."""
+        self._sweep_expired_subscribers()
+        return [key for key, viewers in self._subscribers.items() if tab_id in viewers]
 
     def _transient_targets(
         self, task_id: Any, tab_id: str = "",
@@ -1115,31 +1230,38 @@ class JsonPrinter(Printer):
         # form one atomic step w.r.t. restore_model_pick, so a restore
         # that observes a target in _model_override_tabs always puts
         # its own broadcast AFTER the agent broadcast it overrides.
-        with self._model_pick_lock:
-            # The task key is resolved ONCE, by _transient_targets
-            # itself (D-R5): re-deriving it here duplicated the
-            # resolution rule and could drift from the key the targets
-            # were computed for.
-            task_key, targets = self._transient_targets(task_id, tab_id)
-            with self._lock:
-                self._model_override_tabs.update(targets)
-                # Never (re)store the override of a task cleanup_task
-                # already closed: the entry would resurrect the
-                # completed task's metadata and every LATER subscriber
-                # would catch up to the dead agent's model, with no
-                # cleanup left to pop it (gpt-5.6-sol conc review,
-                # finding 4).  cleanup_task marks _closed_tasks and
-                # pops the override under this same _model_pick_lock →
-                # _lock pair, so the check cannot be interleaved.  The
-                # transient broadcast below still goes out to the
-                # lingering subscribers — post-task broadcasts reaching
-                # their tabs during the linger window is the
-                # subscriber set's documented purpose (see
-                # _transient_targets).
-                if task_key and task_key not in self._closed_tasks:
-                    self._task_model_override[task_key] = model
-            for target in targets:
-                self.broadcast_model_pick(model, "agent", target)
+        locked_call(self._model_pick_lock, self._agent_model_pick_locked, model, tab_id, task_id)
+
+    def _agent_model_pick_locked(self, model: str, tab_id: str, task_id: Any) -> None:
+        """``broadcast_agent_model_pick`` under ``_model_pick_lock``."""
+        # The task key is resolved ONCE, by _transient_targets
+        # itself (D-R5): re-deriving it here duplicated the
+        # resolution rule and could drift from the key the targets
+        # were computed for.
+        task_key, targets = self._transient_targets(task_id, tab_id)
+        locked_call(self._lock, self._remember_agent_model_pick, task_key, targets, model)
+        for target in targets:
+            self.broadcast_model_pick(model, "agent", target)
+
+    def _remember_agent_model_pick(
+        self, task_key: str, targets: list[str], model: str,
+    ) -> None:
+        """Under ``_lock``: mark *targets* as overridden and store the task's model."""
+        self._model_override_tabs.update(targets)
+        # Never (re)store the override of a task cleanup_task
+        # already closed: the entry would resurrect the
+        # completed task's metadata and every LATER subscriber
+        # would catch up to the dead agent's model, with no
+        # cleanup left to pop it (gpt-5.6-sol conc review,
+        # finding 4).  cleanup_task marks _closed_tasks and
+        # pops the override under this same _model_pick_lock →
+        # _lock pair, so the check cannot be interleaved.  The
+        # transient broadcast still goes out to the lingering
+        # subscribers — post-task broadcasts reaching their tabs
+        # during the linger window is the subscriber set's
+        # documented purpose (see _transient_targets).
+        if task_key and task_key not in self._closed_tasks:
+            self._task_model_override[task_key] = model
 
     def restore_model_pick(self, model: str, tab_id: str) -> None:
         """Put *tab_id*'s own picker back to *model*, if an agent took it.
@@ -1155,12 +1277,19 @@ class JsonPrinter(Printer):
         # are atomic w.r.t. the two agent-pick writers, so the wire
         # order of modelPick events always matches the final
         # _model_override_tabs state (see the lock's __init__ comment).
-        with self._model_pick_lock:
-            with self._lock:
-                if tab_id not in self._model_override_tabs:
-                    return
-                self._model_override_tabs.discard(tab_id)
+        locked_call(self._model_pick_lock, self._restore_model_pick_locked, model, tab_id)
+
+    def _restore_model_pick_locked(self, model: str, tab_id: str) -> None:
+        """``restore_model_pick`` under ``_model_pick_lock``."""
+        if locked_call(self._lock, self._forget_model_override, tab_id):
             self.broadcast_model_pick(model, "restore", tab_id)
+
+    def _forget_model_override(self, tab_id: str) -> bool:
+        """Under ``_lock``: drop *tab_id*'s override membership; False when it had none."""
+        if tab_id not in self._model_override_tabs:
+            return False
+        self._model_override_tabs.discard(tab_id)
+        return True
 
     def _inject_task_id(self, event: dict[str, Any]) -> dict[str, Any]:
         """Return *event* with ``taskId`` injected from thread-local storage.
@@ -1229,8 +1358,7 @@ class JsonPrinter(Printer):
             record: The tabId-stripped event.
             encoded: Its JSON.
         """
-        with self._lock:
-            self._record_event(record)
+        self._record_task_event(record)
         _queue_chat_event(encoded, task_id=str(record["taskId"]))
 
     def _persistence_task_id(self, event: dict[str, Any]) -> str:
@@ -1284,8 +1412,8 @@ class JsonPrinter(Printer):
         Returns:
             The current task's offset, or *default*.
         """
-        with self._lock:
-            return offsets.get(self._task_key(), default)
+        get: Callable[[str, _OffsetT], _OffsetT] = offsets.get
+        return locked_call(self._lock, get, self._task_key(), default)
 
     def _write_offset(
         self, offsets: dict[str, _OffsetT], value: _OffsetT,
@@ -1305,10 +1433,13 @@ class JsonPrinter(Printer):
             offsets: The task-keyed offset dict to write.
             value: The new offset for the current task.
         """
-        key = self._task_key()
-        with self._lock:
-            if key in self._closed_tasks:
-                return
+        locked_call(self._lock, self._store_offset, offsets, self._task_key(), value)
+
+    def _store_offset(
+        self, offsets: dict[str, _OffsetT], key: str, value: _OffsetT,
+    ) -> None:
+        """Under ``_lock``: ``offsets[key] = value`` unless *key*'s task was cleaned up."""
+        if key not in self._closed_tasks:
             offsets[key] = value
 
     def set_usage_offsets(
@@ -1334,12 +1465,17 @@ class JsonPrinter(Printer):
             steps: The parent's banked step total.
         """
         key = self._coerce_task_id(task_id)
-        with self._lock:
-            if key in self._closed_tasks:
-                return
-            self._budget_offsets[key] = budget
-            self._tokens_offsets[key] = tokens
-            self._steps_offsets[key] = steps
+        locked_call(self._lock, self._store_usage_offsets, key, budget, tokens, steps)
+
+    def _store_usage_offsets(
+        self, key: str, budget: float, tokens: int, steps: int,
+    ) -> None:
+        """Under ``_lock``: store *key*'s three offsets unless its task was cleaned up."""
+        if key in self._closed_tasks:
+            return
+        self._budget_offsets[key] = budget
+        self._tokens_offsets[key] = tokens
+        self._steps_offsets[key] = steps
 
     @property
     def tokens_offset(self) -> int:
@@ -1407,17 +1543,23 @@ class JsonPrinter(Printer):
         # agent modelPick to it) — resurrecting state no later restore
         # could fix (gpt-5.6-sol conc review, finding 4).  Order:
         # _model_pick_lock → _lock, the established edge.
-        with self._model_pick_lock, self._lock:
-            self._model_override_tabs.discard(tab_id)
-            self._sweep_expired_subscribers()
-            for task_key in list(self._subscribers.keys()):
-                if task_key == keep_key:
-                    continue
-                viewers = self._subscribers[task_key]
-                viewers.discard(tab_id)
-                if not viewers:
-                    self._subscribers.pop(task_key, None)
-                    self._subscriber_expiry.pop(task_key, None)
+        locked_call(
+            self._model_pick_lock, locked_call, self._lock, self._unsubscribe_tab, tab_id, keep_key,
+        )
+
+    def _unsubscribe_tab(self, tab_id: str, keep_key: str) -> None:
+        """Under ``_model_pick_lock`` and ``_lock``: drop *tab_id* from every task but
+        *keep_key*."""
+        self._model_override_tabs.discard(tab_id)
+        self._sweep_expired_subscribers()
+        for task_key in list(self._subscribers.keys()):
+            if task_key == keep_key:
+                continue
+            viewers = self._subscribers[task_key]
+            viewers.discard(tab_id)
+            if not viewers:
+                self._subscribers.pop(task_key, None)
+                self._subscriber_expiry.pop(task_key, None)
 
     def cleanup_task(
         self,
@@ -1479,40 +1621,49 @@ class JsonPrinter(Printer):
         # recreate the completed task's override, feeding a dead
         # agent's model to every later subscriber (gpt-5.6-sol conc
         # review, finding 4).  Order: _model_pick_lock → _lock.
-        with self._model_pick_lock, self._lock:
-            self._recordings.pop(key, None)
-            self._retired_recordings.pop(key, None)
-            self._task_model_override.pop(key, None)
-            self._tokens_offsets.pop(key, None)
-            self._budget_offsets.pop(key, None)
-            self._steps_offsets.pop(key, None)
-            self._tool_call_started.pop(key, None)
-            self._image_b64_used.pop(key, None)
-            self._closed_tasks.pop(key, None)
-            self._closed_tasks[key] = None
-            while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
-                self._closed_tasks.pop(next(iter(self._closed_tasks)))
-                self._closed_tasks_evicted = True
-            if key in self._subscribers:
-                if subscriber_linger_seconds <= 0:
-                    self._subscribers.pop(key, None)
-                    self._subscriber_expiry.pop(key, None)
-                else:
-                    self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
-            self._sweep_expired_subscribers()
-        with self._bash_lock:
-            bs = self._bash_states.pop(key, None)
-            if bs is not None:
-                if bs.timer is not None:
-                    bs.timer.cancel()
-                bs.buffer.clear()
+        locked_call(
+            self._model_pick_lock, locked_call, self._lock,
+            self._free_task_state, key, subscriber_linger_seconds,
+        )
+        bs = locked_call(self._bash_lock, self._pop_bash_state, key)
         if bs is not None:
             # Wait out a flush that captured its text before the clear
             # and is still broadcasting under ``flush_lock`` — its
             # output belongs to the task's lifetime and must land
             # before cleanup completes.
-            with bs.flush_lock:
-                pass
+            locked_call(bs.flush_lock, _nothing)
+
+    def _free_task_state(self, key: str, subscriber_linger_seconds: float) -> None:
+        """Under ``_model_pick_lock`` and ``_lock``: drop *key*'s per-task state."""
+        self._recordings.pop(key, None)
+        self._retired_recordings.pop(key, None)
+        self._task_model_override.pop(key, None)
+        self._tokens_offsets.pop(key, None)
+        self._budget_offsets.pop(key, None)
+        self._steps_offsets.pop(key, None)
+        self._tool_call_started.pop(key, None)
+        self._image_b64_used.pop(key, None)
+        self._closed_tasks.pop(key, None)
+        self._closed_tasks[key] = None
+        while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
+            self._closed_tasks.pop(next(iter(self._closed_tasks)))
+            self._closed_tasks_evicted = True
+        if key in self._subscribers:
+            if subscriber_linger_seconds <= 0:
+                self._subscribers.pop(key, None)
+                self._subscriber_expiry.pop(key, None)
+            else:
+                self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
+        self._sweep_expired_subscribers()
+
+    def _pop_bash_state(self, key: str) -> _BashState | None:
+        """Under ``_bash_lock``: remove *key*'s bash state, cancelling its flush timer."""
+        bs = self._bash_states.pop(key, None)
+        if bs is not None:
+            if bs.timer is not None:
+                bs.timer.cancel()
+            bs.buffer.clear()
+        return bs
 
     def _sweep_expired_subscribers(self) -> None:
         """Drop subscriber sets whose post-task linger has expired.
@@ -1540,22 +1691,103 @@ class JsonPrinter(Printer):
         stale bash text from the previous turn can be broadcast.
         """
         self._current_block_type = ""
-        with self._bash_lock:
-            # Non-creating lookup, like _flush_bash and the tool_call /
-            # tool_result branches: there is nothing to reset when the
-            # task has no bash state, and creating one here retained an
-            # entry under the "" key of a task-less thread that
-            # cleanup_task can never remove (R09-7).
-            bs = self._bash_states.get(self._task_key())
+        # Non-creating lookup, like _flush_bash and the tool_call /
+        # tool_result branches: there is nothing to reset when the
+        # task has no bash state, and creating one here retained an
+        # entry under the "" key of a task-less thread that
+        # cleanup_task can never remove (R09-7).
+        bs = locked_call(self._bash_lock, self._bash_states.get, self._task_key())
         if bs is None:
             return
-        with bs.flush_lock:
-            with self._bash_lock:
-                bs.buffer.clear()
-                bs.streamed = False
-                if bs.timer is not None:
-                    bs.timer.cancel()
-                    bs.timer = None
+        locked_call(bs.flush_lock, locked_call, self._bash_lock, _clear_bash_state, bs)
+
+    def _buffer_bash_fragment(self, text: str) -> tuple[_BashState | None, bool]:
+        """Under ``_lock``: append a bash_stream fragment to the task's buffer.
+
+        Returns the task's bash state and whether the caller must flush
+        now; ``(None, False)`` when the fragment is dropped.
+
+        No-resurrection guard, closing the one straggler path the
+        sibling guards (_flush_bash, _emit_tool_result,
+        _format_tool_call, _collect_result_images, _write_offset) left
+        open: a bash fragment arriving after ``cleanup_task`` must not
+        re-create the freed ``_BashState`` — the creating
+        ``_bash_state`` property would insert an entry keyed by a dead
+        task id that nothing ever pops (a permanent leak), and its
+        immediate flush (``last_flush`` 0.0) would broadcast post-task
+        ``system_output`` to the lingering subscriber set.  The check
+        and the create are ATOMIC w.r.t. ``cleanup_task``, which marks
+        ``_closed_tasks`` under ``_lock`` BEFORE popping the state
+        under ``_bash_lock``: either the mark precedes this block
+        (fragment dropped) or the state created here still exists when
+        the pop runs.  Lock order ``_lock`` → ``_bash_lock`` is acyclic
+        — no path acquires ``_lock`` while holding ``_bash_lock``
+        (broadcasts run under ``flush_lock`` only).  The task-less
+        ""-key path is unaffected: cleanup_task never closes "".
+        """
+        key = self._task_key()
+        if key in self._closed_tasks:
+            return None, False
+        return locked_call(self._bash_lock, self._append_bash_fragment, key, text)
+
+    def _append_bash_fragment(self, key: str, text: str) -> tuple[_BashState | None, bool]:
+        """Under ``_lock`` and ``_bash_lock``: the buffering step of ``_buffer_bash_fragment``."""
+        if key and key not in self._bash_states and not self._bash_task_may_create_state(key):
+            return None, False
+        bs = self._bash_state
+        fragment = bs.take_fragment(text)
+        if fragment:
+            bs.buffer.append(fragment)
+        flush_now = bool(fragment) and time.monotonic() - bs.last_flush >= 0.1
+        if fragment and not flush_now and bs.timer is None:
+            owner_task = getattr(self._thread_local, "task_id", None)
+            bs.timer = threading.Timer(0.1, partial(self._timer_flush_for_task, owner_task))
+            bs.timer.daemon = True
+            bs.timer.start()
+        return bs, flush_now
+
+    def _end_bash_stream(self, key: str) -> bool:
+        """Under ``_bash_lock``: reset *key*'s stream flags for the next tool call.
+
+        Returns whether the ending call's output was streamed in full:
+        a stream cut at the cap is not a substitute for the result (the
+        bounded result is the only copy of the tail).  A non-creating
+        lookup: a tool event arriving after ``cleanup_task`` must not
+        resurrect the freed state.
+        """
+        live = self._bash_states.get(key)
+        if live is None:
+            return False
+        streamed = live.streamed and not live.capped
+        live.streamed = False
+        live.capped = False
+        live.streamed_chars = 0
+        return streamed
+
+    def _mark_tool_call_started(self, key: str) -> None:
+        """Under ``_lock``: stamp the start time of *key*'s current tool call.
+
+        Same guard as ``_write_offset``: a straggler tool_call for a
+        cleaned-up task must not re-create an entry nothing pops.
+        Taskless calls (key "") are not recorded at all — no
+        ``cleanup_task`` ever pops "".
+        """
+        if key and key not in self._closed_tasks:
+            self._tool_call_started[key] = time.time()
+
+    def _reserve_image_budget(self, key: str, size: int) -> bool:
+        """Under ``_lock``: charge *size* embedded-image bytes to *key*; False when over budget.
+
+        Same guards as ``_write_offset`` / ``_tool_call_started``: no
+        empty key (nothing pops ""), no resurrection after
+        ``cleanup_task``.
+        """
+        used = self._image_b64_used.get(key, 0)
+        if used + size > _MAX_TASK_IMAGE_B64_BYTES:
+            return False
+        if key and key not in self._closed_tasks:
+            self._image_b64_used[key] = used + size
+        return True
 
     def _timer_flush_for_task(self, task_id: str | None) -> None:
         """Timer callback that sets the thread-local task_id and flushes bash.
@@ -1599,20 +1831,16 @@ class JsonPrinter(Printer):
         and allowing a stale ``system_output`` broadcast attributed to
         the finished task.  A missing state has nothing to flush.
         """
-        with self._bash_lock:
-            bs = self._bash_states.get(self._task_key())
+        bs = locked_call(self._bash_lock, self._bash_states.get, self._task_key())
         if bs is None:
             return
-        with bs.flush_lock:
-            with self._bash_lock:
-                if bs.timer is not None:
-                    bs.timer.cancel()
-                    bs.timer = None
-                text = "".join(bs.buffer)
-                bs.buffer.clear()
-                bs.last_flush = time.monotonic()
-            if text:
-                self.broadcast({"type": "system_output", "text": text})
+        locked_call(bs.flush_lock, self._flush_bash_state, bs)
+
+    def _flush_bash_state(self, bs: _BashState) -> None:
+        """Under *bs*'s ``flush_lock``: take its buffered text and broadcast it."""
+        text = locked_call(self._bash_lock, _take_bash_text, bs)
+        if text:
+            self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self) -> None:
         """Start recording broadcast events for the current task.
@@ -1622,8 +1850,7 @@ class JsonPrinter(Printer):
         key = self._task_key()
         if not key:
             return
-        with self._lock:
-            self._recordings[key] = []
+        locked_call(self._lock, operator.setitem, self._recordings, key, [])
 
     def ensure_recording_for_task(self, task_id: Any) -> None:
         """Make sure an event recording exists for *task_id*.
@@ -1644,8 +1871,7 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(task_id)
         if not key:
             return
-        with self._lock:
-            self._recordings.setdefault(key, [])
+        locked_call(self._lock, self._recordings.setdefault, key, [])
 
     @staticmethod
     def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1681,13 +1907,23 @@ class JsonPrinter(Printer):
         key = self._task_key()
         if not key:
             return []
-        with agent_state.STATE_LOCK, self._lock:
-            raw = self._recordings.pop(key, None)
-            if raw is None:
-                return []
-            if key in agent_state.agent_states:
-                self._retired_recordings[key] = raw
+        raw = locked_call(
+            agent_state.STATE_LOCK, locked_call, self._lock, self._retire_recording, key,
+        )
         return self._filter_and_coalesce(raw)
+
+    def _retire_recording(self, key: str) -> list[dict[str, Any]]:
+        """Under ``STATE_LOCK`` and ``_lock``: pop *key*'s live recording.
+
+        A recording whose state is still registered is kept as retired
+        for late viewers; see ``_retired_recordings``.
+        """
+        raw = self._recordings.pop(key, None)
+        if raw is None:
+            return []
+        if key in agent_state.agent_states:
+            self._retired_recordings[key] = raw
+        return raw
 
     def _recording_ref(self, task_id: Any) -> list[dict[str, Any]] | None:
         """Return *task_id*'s live or retired raw recording list itself.
@@ -1741,9 +1977,15 @@ class JsonPrinter(Printer):
             retired by ``stop_recording`` still counts until
             ``cleanup_task``).
         """
-        with self._lock:
-            raw = list(self._recording_ref(task_id) or ())
-        return self._filter_and_coalesce(raw)
+        return self._filter_and_coalesce(locked_call(self._lock, self._snapshot_recording, task_id))
+
+    def _snapshot_recording(
+        self, task_id: Any, recording: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Under ``_lock``: a copy of *recording*, or of *task_id*'s recording when ``None``."""
+        if recording is None:
+            recording = self._recording_ref(task_id)
+        return list(recording or ())
 
     @contextmanager
     def replay_snapshot(
@@ -1786,17 +2028,23 @@ class JsonPrinter(Printer):
         """
         slot: Future[str] = Future()
         try:
-            with self.delivery_lock:
-                with self._lock:
-                    if recording is None:
-                        recording = self._recording_ref(task_id)
-                    raw = list(recording or ())
-                self._reserve_replay_send(slot, conn_id)
+            raw = locked_call(
+                self.delivery_lock, self._replay_snapshot_locked, task_id, conn_id, recording, slot,
+            )
             self._replay_slot.future = slot
             yield [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
         finally:
             self._replay_slot.future = None
             slot.cancel()
+
+    def _replay_snapshot_locked(
+        self, task_id: Any, conn_id: str, recording: list[dict[str, Any]] | None,
+        slot: Future[str],
+    ) -> list[dict[str, Any]]:
+        """Under ``delivery_lock``: snapshot the recording and reserve the replay's send slot."""
+        raw = locked_call(self._lock, self._snapshot_recording, task_id, recording)
+        self._reserve_replay_send(slot, conn_id)
+        return raw
 
     def _reserve_replay_send(self, slot: Future[str], conn_id: str) -> None:
         """Schedule replay sends whose payload *slot* supplies later.
@@ -1834,8 +2082,7 @@ class JsonPrinter(Printer):
         Args:
             event: A broadcast event, already task-id-injected.
         """
-        with self._lock:
-            self._record_event(event)
+        locked_call(self._lock, self._record_event, event)
 
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append *event* to the active recording for its task.
@@ -1985,75 +2232,24 @@ class JsonPrinter(Printer):
             self._handle_message(content, **kwargs)
             return ""
         if type == "bash_stream":
-            flush_now = False
-            with self._lock:
-                # No-resurrection guard, closing the one straggler
-                # path the sibling guards (_flush_bash,
-                # _emit_tool_result, _format_tool_call,
-                # _collect_result_images, _write_offset) left open: a
-                # bash fragment arriving after ``cleanup_task`` must
-                # not re-create the freed ``_BashState`` — the creating
-                # ``_bash_state`` property would insert an entry keyed
-                # by a dead task id that nothing ever pops (a permanent
-                # leak), and its immediate flush (``last_flush`` 0.0)
-                # would broadcast post-task ``system_output`` to the
-                # lingering subscriber set.  The check and the create
-                # are ATOMIC w.r.t. ``cleanup_task``, which marks
-                # ``_closed_tasks`` under ``_lock`` BEFORE popping the
-                # state under ``_bash_lock``: either the mark precedes
-                # this block (fragment dropped) or the state created
-                # here still exists when the pop runs.  Lock order
-                # ``_lock`` → ``_bash_lock`` is new and acyclic — no
-                # path acquires ``_lock`` while holding ``_bash_lock``
-                # (broadcasts run under ``flush_lock`` only).  The
-                # task-less ""-key path is unaffected: cleanup_task
-                # never closes "".
-                key = self._task_key()
-                if key in self._closed_tasks:
-                    return ""
-                with self._bash_lock:
-                    if (
-                        key
-                        and key not in self._bash_states
-                        and not self._bash_task_may_create_state(key)
-                    ):
-                        return ""
-                    bs = self._bash_state
-                    fragment = bs.take_fragment(str(content))
-                    if fragment:
-                        bs.buffer.append(fragment)
-                    flush_now = bool(fragment) and (
-                        time.monotonic() - bs.last_flush >= 0.1
-                    )
-                    if fragment and not flush_now and bs.timer is None:
-                        owner_task = getattr(self._thread_local, "task_id", None)
-                        bs.timer = threading.Timer(
-                            0.1,
-                            partial(self._timer_flush_for_task, owner_task),
-                        )
-                        bs.timer.daemon = True
-                        bs.timer.start()
+            bs, flush_now = locked_call(self._lock, self._buffer_bash_fragment, str(content))
+            if bs is None:
+                return ""
             if flush_now:
                 # Outside ``_lock``: _flush_bash broadcasts under the
                 # state's ``flush_lock``, and broadcast() takes
                 # ``_lock`` — holding ``_lock`` here would close a
                 # ``_lock`` → ``flush_lock`` → ``_lock`` cycle.
                 self._flush_bash()
-            with self._bash_lock:
-                # Use the state captured above — the creating
-                # ``_bash_state`` property would resurrect a state
-                # that ``cleanup_task`` freed while ``broadcast`` was
-                # running, leaking it forever under a dead task id.
-                bs.streamed = True
+            # Use the state captured above — the creating
+            # ``_bash_state`` property would resurrect a state
+            # that ``cleanup_task`` freed while ``broadcast`` was
+            # running, leaking it forever under a dead task id.
+            locked_call(self._bash_lock, setattr, bs, "streamed", True)
             return ""
         if type == "tool_call":
             self._flush_bash()
-            with self._bash_lock:
-                live = self._bash_states.get(self._task_key())
-                if live is not None:
-                    live.streamed = False
-                    live.capped = False
-                    live.streamed_chars = 0
+            locked_call(self._bash_lock, self._end_bash_stream, self._task_key())
             self.broadcast({"type": "text_end"})
             self._format_tool_call(
                 str(content),
@@ -2156,25 +2352,12 @@ class JsonPrinter(Printer):
         """
         self._flush_bash()
         show_result = tool_name != "finish"
-        with self._bash_lock:
-            # Non-creating lookup: a tool result arriving after
-            # ``cleanup_task`` must not resurrect the freed state.
-            live = self._bash_states.get(self._task_key())
-            # A stream cut at the cap is not a substitute for the
-            # result: the bounded result is the only copy of the tail.
-            streamed = (
-                live.streamed and not live.capped if live is not None else False
-            )
-            if live is not None:
-                live.streamed = False
-                live.capped = False
-                live.streamed_chars = 0
+        streamed = locked_call(self._bash_lock, self._end_bash_stream, self._task_key())
         # Consume the pairing tool_call's start time: this result ends
         # the call, and a LATER result arriving without its own
         # tool_call (message routes, extra blocks) must use the short
         # fallback window rather than this call's stale cutoff.
-        with self._lock:
-            started = self._tool_call_started.pop(self._task_key(), None)
+        started = locked_call(self._lock, self._tool_call_started.pop, self._task_key(), None)
         result_content = (
             "" if streamed and not interrupted else truncate_result(str(content))
         )
@@ -2289,20 +2472,9 @@ class JsonPrinter(Printer):
             except OSError:
                 logger.debug("Skipping unreadable result image", exc_info=True)
                 continue
-            task_key = self._task_key()
-            with self._lock:
-                used = self._image_b64_used.get(task_key, 0)
-                if used + len(b64) > _MAX_TASK_IMAGE_B64_BYTES:
-                    logger.debug(
-                        "Per-task image budget exhausted; not embedding %s",
-                        candidate,
-                    )
-                    continue
-                # Same guards as _write_offset / _tool_call_started:
-                # no empty key (nothing pops ""), no resurrection
-                # after cleanup_task.
-                if task_key and task_key not in self._closed_tasks:
-                    self._image_b64_used[task_key] = used + len(b64)
+            if not locked_call(self._lock, self._reserve_image_budget, self._task_key(), len(b64)):
+                logger.debug("Per-task image budget exhausted; not embedding %s", candidate)
+                continue
             images.append(
                 {
                     "path": candidate,
@@ -2361,14 +2533,7 @@ class JsonPrinter(Printer):
                 stamped as ``callId`` so the panel's Stop button can
                 name exactly this call in its ``interruptTool`` command.
         """
-        key = self._task_key()
-        with self._lock:
-            # Same guard as _write_offset: a straggler tool_call for a
-            # cleaned-up task must not re-create an entry nothing pops.
-            # Taskless calls (key "") are not recorded at all — no
-            # cleanup_task ever pops "".
-            if key and key not in self._closed_tasks:
-                self._tool_call_started[key] = time.time()
+        locked_call(self._lock, self._mark_tool_call_started, self._task_key())
         file_path, lang = extract_path_and_lang(tool_input)
         event: dict[str, Any] = {"type": "tool_call", "name": name}
         if isinstance(call_id, int) and not isinstance(call_id, bool):

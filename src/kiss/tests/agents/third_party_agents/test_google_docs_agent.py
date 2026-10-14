@@ -523,11 +523,11 @@ def test_server_error_returns_ok_false(backend) -> None:
     assert "500" in result["error"]
 
 
-def test_connection_refused_returns_ok_false(backend) -> None:
+def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
-    b._drive_base_url = "http://127.0.0.1:9/drive/v3"
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
+    b._drive_base_url = f"http://127.0.0.1:{refusing_port}/drive/v3"
     for call in (
         lambda: b.gdocs_create_document("t"),
         lambda: b.gdocs_read_document("doc123"),

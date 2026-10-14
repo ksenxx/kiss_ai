@@ -1848,6 +1848,81 @@ async function run() {
     window.close();
   }
 
+  // An interactively typed password is handed to the Credential
+  // Management API on auth_ok so the browser's Save Password bubble is
+  // settled here and never surfaces later on Terminal's xterm fetch.  A
+  // rejected store and a throwing constructor must both leave the
+  // handshake intact, and a silent reconnect with the cached password
+  // never re-offers a save.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    const stored = [];
+    let ctorThrows = false;
+    window.PasswordCredential = function PasswordCredential(data) {
+      if (ctorThrows) throw new TypeError('PasswordCredential disabled');
+      this.id = data.id;
+      this.password = data.password;
+    };
+    Object.defineProperty(window.navigator, 'credentials', {
+      configurable: true,
+      value: {
+        store(cred) {
+          stored.push({id: cred.id, password: cred.password});
+          return Promise.reject(new window.Error('NotAllowedError'));
+        },
+      },
+    });
+    evalShim(window, shimJs);
+    const doc = window.document;
+    try {
+      const s0 = sockets[0];
+      s0.fireOpen();
+      s0.fireMessage({type: 'auth_required'});
+      doc.getElementById('auth-modal-input').value = 'typed-secret';
+      doc.getElementById('auth-modal-ok').click();
+      await tick();
+      s0.fireMessage({type: 'auth_ok'});
+      await tick();
+      assert.deepStrictEqual(stored, [{id: 'remote', password: 'typed-secret'}],
+        'the typed password is stored once on auth_ok');
+      assert.ok(!isVisible(doc.getElementById('auth-modal')),
+        'a rejected credential store does not keep the dialog open');
+      assert.strictEqual(doc.getElementById('auth-modal-input').value, '',
+        'the dialog input is cleared once the password is stored');
+      // Silent reconnect: the cached password goes out from onopen and
+      // must not be offered to the credential store again.
+      s0.fireClose();
+      for (let i = 0; i < 40 && sockets.length < 2; i++) await sleep(50);
+      const s1 = sockets[sockets.length - 1];
+      s1.fireOpen();
+      assert.deepStrictEqual(JSON.parse(s1.sent[0]),
+        {type: 'auth', password: 'typed-secret'}, 'the cached password reconnects');
+      s1.fireMessage({type: 'auth_ok'});
+      await tick();
+      assert.strictEqual(stored.length, 1, 'a silent reconnect never re-offers a save');
+      // A constructor that throws (the API exists but is disabled) must
+      // not break the handshake either.
+      ctorThrows = true;
+      s1.fireMessage({type: 'auth_required'});
+      doc.getElementById('auth-modal-input').value = 'typed-again';
+      doc.getElementById('auth-modal-ok').click();
+      await tick();
+      s1.fireMessage({type: 'auth_ok'});
+      await tick();
+      assert.strictEqual(stored.length, 1, 'a throwing constructor stores nothing');
+      assert.ok(!isVisible(doc.getElementById('auth-modal')),
+        'auth_ok still completes when PasswordCredential throws');
+      ok('an interactive password is stored via the Credential Management API on auth_ok');
+    } catch (err) {
+      fail('credential store on auth_ok broken', err);
+    }
+    window.close();
+  }
+
   // WebSocket auth is invisible to the browser's login heuristics, so an
   // interactive login is completed explicitly through the Credential
   // Management API on auth_ok (otherwise Terminal's later fetch opened a

@@ -20,6 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import locked
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
     TOOL_RESULT_ATTACHMENT_NOTE,
@@ -91,9 +92,16 @@ def _openai_fast_multiplier(model_name: str) -> float:
         The published Fast/Standard ratio from
         :data:`_OPENAI_FAST_EXCEPTIONS`, else :data:`_OPENAI_FAST_MULTIPLIER`.
     """
-    from kiss.core.models.model_info import _strip_provider_prefix, _strip_thinking_alias
+    from kiss.core.models.model_info import (
+        _openai_bare_name,
+        _strip_provider_prefix,
+        _strip_thinking_alias,
+    )
 
-    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
+    # ``openrouter/openai/gpt-5.5`` and ``gpt-5.5-high`` both bill as gpt-5.5.
+    bare = _openai_bare_name(model_name) or _strip_thinking_alias(
+        _strip_provider_prefix(model_name)
+    )
     for prefix, factor in _OPENAI_FAST_EXCEPTIONS:
         if bare.startswith(prefix):
             return factor
@@ -183,9 +191,13 @@ DEEPSEEK_REASONING_MODELS = {
 }
 
 _ADAPTIVE_TOOL_EFFORT_VERDICTS: dict[tuple[str, str], bool] = {}
-_ADAPTIVE_TOOL_EFFORT_LOCK = threading.Lock()
+# Reentrant for ``locked``: both takers run on task threads, where a
+# Stop injection landing right after a plain ``with``'s ``__enter__``
+# would leak the lock for every later model call of the daemon.
+_ADAPTIVE_TOOL_EFFORT_LOCK = threading.RLock()
 
 
+@locked(_ADAPTIVE_TOOL_EFFORT_LOCK)
 def _tool_effort_verdict(key: tuple[str, str]) -> bool | None:
     """Return the learned ``tools`` + ``reasoning_effort`` verdict, if any.
 
@@ -199,10 +211,10 @@ def _tool_effort_verdict(key: tuple[str, str]) -> bool | None:
         ``True``/``False`` when the pair has been probed, ``None``
         otherwise.
     """
-    with _ADAPTIVE_TOOL_EFFORT_LOCK:
-        return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(key)
+    return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(key)
 
 
+@locked(_ADAPTIVE_TOOL_EFFORT_LOCK)
 def _record_tool_effort_verdict(key: tuple[str, str], accepted: bool) -> None:
     """Record what one ``(endpoint, model)`` did with the combination.
 
@@ -216,11 +228,10 @@ def _record_tool_effort_verdict(key: tuple[str, str], accepted: bool) -> None:
         key: The ``(base_url, api_model_name)`` that was probed.
         accepted: Whether the endpoint accepted the combination.
     """
-    with _ADAPTIVE_TOOL_EFFORT_LOCK:
-        if accepted:
-            _ADAPTIVE_TOOL_EFFORT_VERDICTS.setdefault(key, True)
-        else:
-            _ADAPTIVE_TOOL_EFFORT_VERDICTS[key] = False
+    if accepted:
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS.setdefault(key, True)
+    else:
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS[key] = False
 
 
 # The attachment formats OpenAI accepts as input.  Images: PNG, JPEG,
@@ -1865,9 +1876,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             function_calls, content, response = delegate.generate_and_process_with_tools(
                 function_map, tools
             )
-        except Exception:
+        except BaseException:
             # A rejected delegated response was still billed; the agent
-            # drains this model's hook, not the delegate's.
+            # drains this model's hook, not the delegate's.  BaseException:
+            # a Stop surfaces as KeyboardInterrupt and is billed too.
             rejected = delegate.take_partial_usage_response()
             if rejected is not None:
                 self._rejected_response = rejected

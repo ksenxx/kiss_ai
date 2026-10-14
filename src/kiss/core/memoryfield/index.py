@@ -41,6 +41,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from kiss.core.locked import locked_call
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, split_frontmatter
 from kiss.core.utils import read_bytes_waiting_for_writer
 
@@ -178,18 +179,25 @@ class ModelEmbedder:
     def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
         self.model_name = model_name
         self._model: Any = None
-        self._lock = threading.Lock()
+        # Reentrant for ``locked_call``: the memory tools run on a task
+        # thread, where a Stop injection landing right after a plain
+        # ``with``'s ``__enter__`` would leak the lock to the agent's
+        # next run.
+        self._lock = threading.RLock()
 
     def _client(self) -> Any:
         """The initialised model, created on first use."""
-        with self._lock:
-            if self._model is None:
-                from kiss.core.models.model_info import model as create_model
+        return locked_call(self._lock, self._client_locked)
 
-                model = create_model(self.model_name)
-                model.initialize("")
-                self._model = model
-            return self._model
+    def _client_locked(self) -> Any:
+        """The body of :meth:`_client`; the caller holds ``_lock``."""
+        if self._model is None:
+            from kiss.core.models.model_info import model as create_model
+
+            model = create_model(self.model_name)
+            model.initialize("")
+            self._model = model
+        return self._model
 
     def __call__(self, text: str) -> list[float]:
         """Embed *text* with the configured model (lazily initialised)."""
@@ -418,7 +426,7 @@ class VectorIndex:
         # token paired with another load's rows.
         self._cache: tuple[tuple[Any, ...], dict[int, _Rows]] | None = None
         self._query_vectors: OrderedDict[str, list[float]] = OrderedDict()
-        self._query_lock = threading.Lock()
+        self._query_lock = threading.RLock()  # reentrant for ``locked_call``
 
     def embed_query(self, query: str) -> list[float]:
         """Return the unit embedding of *query*, from a small LRU cache when possible.
@@ -426,17 +434,25 @@ class VectorIndex:
         Args:
             query: Natural-language query.
         """
-        with self._query_lock:
-            vector = self._query_vectors.get(query)
-            if vector is not None:
-                self._query_vectors.move_to_end(query)
-                return vector
+        vector = locked_call(self._query_lock, self._cached_query_vector, query)
+        if vector is not None:
+            return vector
         vector = normalize(self.embed(query))
-        with self._query_lock:
-            self._query_vectors[query] = vector
-            if len(self._query_vectors) > QUERY_CACHE_SIZE:
-                self._query_vectors.popitem(last=False)
+        locked_call(self._query_lock, self._remember_query_vector, query, vector)
         return vector
+
+    def _cached_query_vector(self, query: str) -> list[float] | None:
+        """The cached embedding of *query*, freshened; the caller holds ``_query_lock``."""
+        vector = self._query_vectors.get(query)
+        if vector is not None:
+            self._query_vectors.move_to_end(query)
+        return vector
+
+    def _remember_query_vector(self, query: str, vector: list[float]) -> None:
+        """Cache *vector* for *query*, evicting the oldest; the caller holds ``_query_lock``."""
+        self._query_vectors[query] = vector
+        if len(self._query_vectors) > QUERY_CACHE_SIZE:
+            self._query_vectors.popitem(last=False)
 
     def _connect(self) -> sqlite3.Connection:
         """Open the index database, creating or migrating the schema when needed.

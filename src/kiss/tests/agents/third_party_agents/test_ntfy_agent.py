@@ -31,6 +31,7 @@ from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     _config,
 )
 from kiss.core.config import kiss_home
+from kiss.tests.agents.third_party_agents.recording_http import start_serving
 
 
 class _NtfyEmulator:
@@ -104,8 +105,7 @@ class _NtfyEmulator:
 
         self.server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self._thread.start()
+        self._thread = start_serving(self.server)
 
     def stop(self) -> None:
         """Shut down the emulator server."""

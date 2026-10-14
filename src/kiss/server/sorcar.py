@@ -96,6 +96,7 @@ import logging
 import math
 import secrets
 import time
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -126,10 +127,26 @@ from kiss.server.tips import TIPS_OPT_OUT_MARKER
 
 logger = logging.getLogger(__name__)
 
-# In-flight ``appsStatus`` and ``machines`` replies (see
-# ServerApi.get_apps_status, get_machines): the event loop keeps only
-# weak references to tasks.
-_APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
+# In-flight background replies (``appsStatus``, ``machines``): the
+# event loop keeps only weak references to tasks.
+_BACKGROUND_REPLIES: set[asyncio.Task[None]] = set()
+
+
+def _spawn_reply(reply: Coroutine[Any, Any, None]) -> None:
+    """Run *reply* as a background task that outlives the command that asked for it.
+
+    For replies that take seconds (app probes, machine pings): each
+    connection's commands are dispatched one at a time, so producing
+    them inline would hold up a ``submit`` or ``stop`` sent right after
+    the poll.
+
+    Args:
+        reply: The coroutine that sends the direct reply.
+    """
+    task = asyncio.create_task(reply)
+    _BACKGROUND_REPLIES.add(task)
+    task.add_done_callback(_BACKGROUND_REPLIES.discard)
+
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
     """Create (``opt_out``) or remove the tips opt-out marker file.
@@ -1264,11 +1281,7 @@ class ServerApi:
             cmd: The ``getAppsStatus`` command (optional ``refresh``).
             ctx: The transport context of the current call.
         """
-        task = asyncio.create_task(
-            self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh")))
-        )
-        _APPS_STATUS_REPLIES.add(task)
-        task.add_done_callback(_APPS_STATUS_REPLIES.discard)
+        _spawn_reply(self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh"))))
 
     async def _reply_apps_status(self, endpoint: Any, refresh: bool) -> None:
         """Probe (or read the cache) and send the ``appsStatus`` reply.
@@ -1320,7 +1333,11 @@ class ServerApi:
         )
 
     def _local_machine_address(self) -> tuple[str, int]:
-        """Return the (ip, port) the local daemon is reached at: its first LAN IP, else loopback."""
+        """Return the (ip, port) the local daemon is reached at: its first LAN IP, else loopback.
+
+        Reads the config file (``_lan_urls`` checks for a password):
+        call it off the event loop.
+        """
         lan = self._backend._lan_urls()
         host = urlsplit(lan[0]).hostname if lan else "127.0.0.1"
         return host or "127.0.0.1", int(self._backend.port)
@@ -1340,11 +1357,9 @@ class ServerApi:
             cmd: The ``getMachines`` command (optional ``refresh``).
             ctx: The transport context of the current call.
         """
-        task = asyncio.create_task(
+        _spawn_reply(
             self._reply_machines(ctx.endpoint, bool(cmd.get("refresh")), "", "", "getMachines")
         )
-        _APPS_STATUS_REPLIES.add(task)
-        task.add_done_callback(_APPS_STATUS_REPLIES.discard)
 
     async def _reply_machines(
         self, endpoint: Any, refresh: bool, action: str, error: str, command: str
@@ -1359,7 +1374,7 @@ class ServerApi:
             command: The command being answered (for the reply log).
         """
         try:
-            ip, port = self._local_machine_address()
+            ip, port = await asyncio.to_thread(self._local_machine_address)
             rows, checked_at = await asyncio.to_thread(
                 sidebar_panels.machines_report, ip, port, refresh
             )

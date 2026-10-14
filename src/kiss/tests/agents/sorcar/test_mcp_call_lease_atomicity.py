@@ -114,9 +114,11 @@ class _EvictionGateLock:
     already taken.
 
     The hook also records the first release after which the connection
-    was observed leased (``in_flight > 0``): it backdates ``last_used``
-    so the connection is idle-expired, runs another eviction pass, and
-    stores whether the leased connection survived it.
+    was observed leased (``in_flight > 0``), the first one in the
+    current ``call_tool``, whose only lock takes are the lease and its
+    release: it backdates ``last_used`` so the connection is
+    idle-expired, runs another eviction pass, and stores whether the
+    leased connection survived it.
     """
 
     def __init__(self, manager: MCPManager, key: str) -> None:
@@ -170,7 +172,8 @@ class _EvictionGateLock:
                 # interleaving that stranded the call.
                 manager._loop.call_soon_threadsafe(time.sleep, 0.5)
                 manager._evict_surplus("")
-            elif (
+                conn = manager._connections.get(self._key)
+            if (
                 conn is not None
                 and conn.in_flight > 0
                 and self.leased_attack is None

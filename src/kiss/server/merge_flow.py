@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -42,7 +43,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.helpers import generate_commit_message_from_diff
 from kiss.server.json_printer import stamp_event_ts
 
 if TYPE_CHECKING:

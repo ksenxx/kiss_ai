@@ -22,6 +22,8 @@ import sys
 import threading
 from typing import Any
 
+from kiss.core.locked import locked_call
+
 IS_WINDOWS = sys.platform == "win32"
 
 _WINDOWS_BASH_CANDIDATES = (
@@ -144,7 +146,11 @@ def pid_alive(pid: int) -> bool:
 # exited (Git bash's fork+exec leaves exactly such orphans); a Job Object
 # keeps every descendant, however re-parented, and terminates them all.
 _WINDOWS_JOBS: dict[int, int] = {}
-_WINDOWS_JOBS_LOCK = threading.Lock()
+# Reentrant for ``locked_call``: both takers run on task threads (the
+# Bash tool's spawn and its cleanup kill), where a Stop injection
+# landing right after a plain ``with``'s ``__enter__`` would leak the
+# lock for every later child of the daemon.
+_WINDOWS_JOBS_LOCK = threading.RLock()
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 
 
@@ -189,18 +195,31 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
     if not kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), process_handle):
         kernel32.CloseHandle(ctypes.c_void_p(job))
         return
-    with _WINDOWS_JOBS_LOCK:
-        # A job stays reachable while ANY of its processes lives: the
-        # leader may exit and leave grandchildren behind that a later
-        # :func:`kill_process_group` must still be able to terminate.
-        stale = [
-            (p, h) for p, h in list(_WINDOWS_JOBS.items())
-            if _windows_job_active_processes(h) == 0
-        ]
-        for pid, handle in stale:
-            if _WINDOWS_JOBS.pop(pid, None) is not None:
-                kernel32.CloseHandle(ctypes.c_void_p(handle))
-        _WINDOWS_JOBS[proc.pid] = job
+    locked_call(_WINDOWS_JOBS_LOCK, _windows_record_job, kernel32, proc.pid, job)
+
+
+def _windows_record_job(kernel32: Any, pid: int, job: int) -> None:  # pragma: no cover — Windows
+    """Register *job* for *pid*, dropping dead jobs; the caller holds ``_WINDOWS_JOBS_LOCK``."""
+    import ctypes
+
+    # A job stays reachable while ANY of its processes lives: the
+    # leader may exit and leave grandchildren behind that a later
+    # :func:`kill_process_group` must still be able to terminate.
+    stale = [
+        (p, h) for p, h in list(_WINDOWS_JOBS.items())
+        if _windows_job_active_processes(h) == 0
+    ]
+    for stale_pid, handle in stale:
+        if _WINDOWS_JOBS.pop(stale_pid, None) is not None:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    # Windows reuses the pid of an exited leader whose job still
+    # holds grandchildren: that job's entry is replaced here, so its
+    # handle must be closed rather than leaked (closing a job handle
+    # does not terminate the job without KILL_ON_JOB_CLOSE).
+    reused = _WINDOWS_JOBS.pop(pid, None)
+    if reused is not None:
+        kernel32.CloseHandle(ctypes.c_void_p(reused))
+    _WINDOWS_JOBS[pid] = job
 
 
 def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
@@ -258,14 +277,12 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
         # that exited on its own (or on the first termination) may have
         # left grandchildren in the job, and those are exactly what the
         # caller's SIGKILL escalation must take down.
-        with _WINDOWS_JOBS_LOCK:
-            job = _WINDOWS_JOBS.get(pid)
-        if job is not None:
-            import ctypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-            if kernel32.TerminateJobObject(ctypes.c_void_p(job), 1):
-                return
+        # The handle is used under the lock: ``_windows_enrol_in_job``
+        # closes (and may let the kernel reuse) the handle of a reused
+        # pid under the same lock, so a snapshot taken here and used
+        # after the release could terminate nothing, or another job.
+        if locked_call(_WINDOWS_JOBS_LOCK, _windows_terminate_job, pid):
+            return
         if not pid_alive(pid):
             raise ProcessLookupError(pid)
         try:
@@ -284,6 +301,17 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
             )
         return
     os.killpg(pid, sig)
+
+
+def _windows_terminate_job(pid: int) -> bool:  # pragma: no cover — Windows-only branch
+    """Terminate the Job Object of *pid*, if any; the caller holds ``_WINDOWS_JOBS_LOCK``."""
+    job = _WINDOWS_JOBS.get(pid)
+    if job is None:
+        return False
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    return bool(kernel32.TerminateJobObject(ctypes.c_void_p(job), 1))
 
 
 def _windows_process_identity(pid: int) -> str | None:  # pragma: no cover — Windows-only branch

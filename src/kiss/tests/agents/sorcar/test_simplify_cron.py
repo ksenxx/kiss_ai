@@ -138,22 +138,22 @@ def test_run_now_stopped_between_registration_and_run_is_unregistered(tmp_path: 
     job_id = created["created"]["id"]
     source_lines = inspect.getsource(cron_agent).splitlines()
     first_line = inspect.getsourcelines(cron_job)[1]
-    with_line = next(
+    claimed_line = next(
         first_line + i
         for i, line in enumerate(source_lines[first_line - 1 :])
-        if line.strip() == "with _jobs_lock(blocking=True), canonical._running_lock:"
+        if line.strip() == "if not claimed:"
     )
     me = threading.current_thread()
 
     def interrupt_after_registration(frame: Any, event: str, _arg: Any) -> Any:
         if frame.f_code is not cron_job.__code__:
             return None
-        # The first statement after the registration block (the store
-        # is the block's last line, four lines below the ``with``), i.e.
+        # The first statement after the registration block (the
+        # ``locked_call`` of ``_claim_run`` under the jobs lock), i.e.
         # once both locks are released again.
         if (
             event == "line"
-            and frame.f_lineno > with_line + 4
+            and frame.f_lineno >= claimed_line
             and cron_agent._running.get(job_id) is me
         ):
             raise KeyboardInterrupt

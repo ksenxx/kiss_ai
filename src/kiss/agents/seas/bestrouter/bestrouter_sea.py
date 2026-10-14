@@ -40,33 +40,25 @@ SYSTEM_PROMPT = f"""\
 
 Use '{PRIMARY_MODEL}' model for all tasks, including software development. Use
 {REVIEW_MODEL} (not codex) using `run_parallel` tool for a thorough read-only review and
-debugging of the other model's work. Thoroughly check whether the other model has missed
-any code or wiring or introduced any bugs. Use at most 75% of the task budget in
-{REVIEW_MODEL} for reviewing and debugging, and ask the model not to invent new problems.
-Use the model names literally without hallucinating new model names.
-""" """\
+debugging of the other model's work. Check thoroughly whether the other model missed
+code or wiring or introduced bugs. Use at most 75% of the task budget in {REVIEW_MODEL},
+and ask the model not to invent new problems. Use the model names literally without
+hallucinating new model names.
 
-
-## Lessons from recent runs (rsi7d)
-
-- `Read` the region of a file before its first `Edit`, and `Read` an existing file before
-  a `Write` that replaces it (an unread file is refused either way); after an `Edit` is
-  rejected with "has not been read in this session" send no further `Edit` of that file
-  until the `Read` is done; three rejected edits of one file fired in a single block are
-  three wasted steps.
+Working rules:
+- `Read` a file region before its first `Edit`, and `Read` an existing file before a
+  `Write` that replaces it; an unread file is refused either way. After an `Edit` is
+  rejected as unread, `Read` the file before any further `Edit` of it.
 - Before each `run_parallel` / `run_agent` wave, add up the children's `max_budget`s and
-  compare the sum with what is left of your own budget (the `Budget: $spent/$max` footer
-  of every tool result counts the children); keep at least 15% of the budget for the
-  final verification and report. When the wave does not fit, do not launch it: write the
-  report with what is done and finish. A 22-child audit launched a $32 wave at $105 of
-  $120 and was killed at $139.94 before writing its report.
-- Write a file longer than about 150 lines in several `Write` / `Edit` calls of at most
-  150 lines each, the first chunk on disk before you compose the next, and save gathered
-  facts (sub-agent findings, counts) to `tmp/` files before composing. One call that
-  emitted a whole 461-line document stalled the stream three times and lost $30 of
-  research with nothing written.
-- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`: the
-  10th, 20th, ... call is refused otherwise and has to be repeated."""
+  compare with your remaining budget (the `Budget: $spent/$max` footer counts the
+  children). Keep at least 15% for the final verification and report. If the wave does
+  not fit, do not launch it: report what is done and finish.
+- Write a file longer than about 150 lines in `Write` / `Edit` calls of at most 150 lines
+  each, the first chunk on disk before you compose the next. Save gathered facts to
+  `tmp/` files before composing.
+- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
+  otherwise the 10th, 20th, ... call is refused.
+"""
 """The routing protocol added to the system prompt of every run."""
 
 

@@ -23,7 +23,7 @@ from typing import Any
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
@@ -101,6 +101,12 @@ def _join_demuxed(stdout_parts: list[bytes], stderr_parts: list[bytes]) -> str:
     texts = [b"".join(parts).decode("utf-8", errors="replace")
              for parts in (stdout_parts, stderr_parts)]
     return "\n".join(text for text in texts if text)
+
+
+def _mark_cancelled(state: dict[str, bool]) -> bool:
+    """Cancel the exec *state*; return whether its start was already committed."""
+    state["cancelled"] = True
+    return state["start_committed"]
 
 
 def _stop_requested(cancel: threading.Event | None) -> bool:
@@ -280,7 +286,12 @@ class DockerManager:
         # two concurrent open() calls both passed the "already open"
         # check while ``container`` was still None and each started a
         # container and a temp dir; the manager kept only the last one.
-        self._lifecycle_lock = threading.Lock()
+        # RLock, taken through ``locked_call``: ``open``/``close`` run
+        # on the task thread (``with DockerManager(...)`` in the agent),
+        # where the runner's Stop injection would leak a plain ``with``
+        # (CPython gh-74174) and make the same thread's ``close()`` in
+        # ``__exit__`` hang on it for good.
+        self._lifecycle_lock = threading.RLock()
 
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
@@ -314,8 +325,7 @@ class DockerManager:
                 volume directory still cannot be removed (starting anyway
                 would replace the only reference to it).
         """
-        with self._lifecycle_lock:
-            self._open_locked()
+        locked_call(self._lifecycle_lock, self._open_locked)
 
     def _open_locked(self) -> None:
         """Body of :meth:`open`; the caller holds ``_lifecycle_lock``."""
@@ -584,7 +594,7 @@ class DockerManager:
         # hands the exec to a reaper that kills it once it has started.
         token = uuid.uuid4().hex
         container_id = container.id
-        state_lock = threading.Lock()
+        state_lock = threading.RLock()
         state = {"cancelled": False, "start_committed": False}
 
         def run_exec() -> None:
@@ -619,10 +629,10 @@ class DockerManager:
                 error_holder["error"] = exc
 
         def cancel_exec() -> None:
-            with state_lock:
-                state["cancelled"] = True
-                committed = state["start_committed"]
-            if committed:
+            # On the task thread (timeout or injected Stop): through
+            # ``locked_call`` so a second injection cannot leak the
+            # lock under the worker.
+            if locked_call(state_lock, _mark_cancelled, state):
                 # ``exec_id`` is guaranteed set: the worker stores it
                 # before committing, and the shared lock publishes it.
                 self._reap_timed_out_exec(result_holder["exec_id"], token)
@@ -882,8 +892,7 @@ class DockerManager:
         created for shared volumes — including a directory an earlier
         ``close()`` failed to delete, which is retried here.
         """
-        with self._lifecycle_lock:
-            self._close_locked()
+        locked_call(self._lifecycle_lock, self._close_locked)
 
     def _close_locked(self) -> None:
         """Body of :meth:`close`; the caller holds ``_lifecycle_lock``."""

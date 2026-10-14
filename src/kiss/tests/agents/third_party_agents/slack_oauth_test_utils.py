@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -26,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.tests.agents.third_party_agents.recording_http import start_serving
 
 CLIENT_ID = "kiss-test-slack-client"
 
@@ -133,8 +133,7 @@ class SlackApiServer(ThreadedHTTPServer):
         self.oauth = oauth
         self.requests: list[tuple[str, str]] = []
         self.base_url = f"http://127.0.0.1:{self.server_address[1]}"
-        self._thread = threading.Thread(target=self.serve_forever, daemon=True)
-        self._thread.start()
+        self._thread = start_serving(self)
 
     def stop(self) -> None:
         """Shut the server down."""

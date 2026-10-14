@@ -38,7 +38,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _oauth_apps
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._device_auth import (
     ConsentSession,
     LoopbackPkceSession,
@@ -47,6 +47,7 @@ from kiss.agents.third_party_agents._device_auth import (
     _loopback_step,
     consent_instructions,
 )
+from kiss.tests.agents.third_party_agents.recording_http import serving
 
 # ---------------------------------------------------------------------------
 # Local token endpoint
@@ -91,13 +92,8 @@ class _TokenServer(ThreadedHTTPServer):
 
 @pytest.fixture
 def token_server() -> Iterator[_TokenServer]:
-    server = _TokenServer()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with serving(_TokenServer()) as server:
         yield server
-    finally:
-        stop_http_server(server, thread)
 
 
 @pytest.fixture

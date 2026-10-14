@@ -115,9 +115,9 @@ class _TlsLiteServer:
     wrapped, and the wrapped socket plus its handler thread are tracked
     from the accept loop (the handshake itself runs on the handler, so
     a silent peer parks only that thread, on a tracked socket).
-    ``close()`` wakes the accept thread with ``shutdown(SHUT_RDWR)``
-    (closing the fd alone does not interrupt a blocked ``accept()`` on
-    Linux), shuts down every accepted connection the same way, and
+    ``close()`` wakes the accept thread with a throw-away connection
+    (closing the fd alone does not interrupt a blocked ``accept()``),
+    shuts down every accepted connection with ``shutdown(SHUT_RDWR)``, and
     joins the accept thread and every handler with a bound, so no test
     leaves a thread parked on a dead or silent socket.
     """
@@ -137,10 +137,16 @@ class _TlsLiteServer:
     def close(self) -> None:
         """Stop accepting, shut down every connection and join all threads."""
         self._stopping.set()
+        # A throw-away connection wakes ``accept()`` everywhere; the
+        # ``shutdown`` below does so on Linux only (macOS/BSD answer
+        # ENOTCONN and keep the accept thread parked for the join bound).
+        with suppress(OSError):
+            socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
         with suppress(OSError):
             self._sock.shutdown(socket.SHUT_RDWR)
         self._sock.close()
         self._thread.join(timeout=5)
+        assert not self._thread.is_alive(), "accept thread did not stop"
         with self._handlers_lock:
             handlers = list(self._handlers)
         for tls, thread in handlers:
@@ -151,10 +157,13 @@ class _TlsLiteServer:
 
     def _accept_loop(self) -> None:
         """Accept and serve connections until closed."""
-        while not self._stopping.is_set():
+        while True:
             try:
                 conn, _ = self._sock.accept()
             except OSError:
+                return
+            if self._stopping.is_set():
+                conn.close()  # the wake-up connection from close()
                 return
             try:
                 conn.settimeout(_CONNECTION_TIMEOUT)

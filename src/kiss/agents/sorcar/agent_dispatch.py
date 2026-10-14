@@ -64,6 +64,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.machines import find_machine, is_local_machine, load_machines
@@ -1546,9 +1547,14 @@ def run_agents_parallel(
         for job in jobs:
             join_agent_job(job, max(0.0, deadline - time.monotonic()))
     except BaseException:
+        # As in :func:`_run_agent`: the sub-tasks are cancelled, not
+        # joined, and only the run's end collects owned jobs, so jobs
+        # without an owner are dropped here.
         for job in started:
             if isinstance(job, AgentJob):
                 job.cancel.set()
+                if parent_agent is None:
+                    forget_agent_job(job)
         raise
     results = []
     for job in started:
@@ -1629,7 +1635,7 @@ when its owner's run ends (:func:`kill_jobs_of`).  Guarded by
 :data:`_AGENT_JOBS_LOCK`.
 """
 
-_AGENT_JOBS_LOCK = threading.Lock()
+_AGENT_JOBS_LOCK = threading.RLock()
 
 
 def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
@@ -1674,10 +1680,14 @@ def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
     # looks unstarted yet runs later.  kill_jobs_of therefore cancels
     # every registered job, and _finish_agent_job dispatches nothing
     # once its cancel is set.
-    with _AGENT_JOBS_LOCK:
-        _AGENT_JOBS[job_id] = job
-        job.thread.start()
+    locked_call(_AGENT_JOBS_LOCK, _register_and_start, job)
     return job
+
+
+def _register_and_start(job: AgentJob) -> None:
+    """Enter *job* in the registry and start its thread; caller holds ``_AGENT_JOBS_LOCK``."""
+    _AGENT_JOBS[job.job_id] = job
+    job.thread.start()
 
 
 def wait_until_started(job: AgentJob) -> None:
@@ -1801,14 +1811,13 @@ def kill_agent_job(job: AgentJob) -> str:
 
 def forget_agent_job(job: AgentJob) -> None:
     """Drop *job* from the registry (its result has been taken)."""
-    with _AGENT_JOBS_LOCK:
-        _AGENT_JOBS.pop(job.job_id, None)
+    locked_call(_AGENT_JOBS_LOCK, _AGENT_JOBS.pop, job.job_id, None)
 
 
+@locked(_AGENT_JOBS_LOCK)
 def agent_jobs_of(owner: Any) -> dict[str, AgentJob]:
     """Return the registered jobs *owner*'s ``run_agent`` started, by job id."""
-    with _AGENT_JOBS_LOCK:
-        return {job_id: job for job_id, job in _AGENT_JOBS.items() if job.owner is owner}
+    return {job_id: job for job_id, job in _AGENT_JOBS.items() if job.owner is owner}
 
 
 def live_agent_jobs(owner: Any) -> list[AgentJob]:

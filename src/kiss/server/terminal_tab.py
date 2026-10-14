@@ -122,6 +122,23 @@ class _Session:
     reaped: bool = False
 
 
+@dataclass
+class _Opening:
+    """An ``open`` in progress (waiting its turn or spawning), before its session exists.
+
+    ``close``, ``viewer_gone`` and ``shutdown`` act on it as they would
+    on the session it is about to become.
+    """
+
+    tab_id: str
+    conn_id: str
+    # Set by ``close`` and ``shutdown``: no session is started (a shell
+    # already forked is discarded).
+    cancelled: bool = False
+    # Set by ``viewer_gone``: the session starts detached, its grace running.
+    detached: bool = False
+
+
 class TerminalService:
     """The daemon's terminal sessions: one pty shell per terminal tab.
 
@@ -134,7 +151,13 @@ class TerminalService:
         """Create an idle service that emits events through *printer*."""
         self._printer = printer
         self._sessions: dict[str, _Session] = {}
+        # Guards ``_sessions`` and ``_openings``; never held across a fork.
         self._lock = threading.Lock()
+        # One spawn at a time: the start-up files are written through
+        # one temporary name, and a fork must not run while another
+        # spawn is between its fork and its session's registration.
+        self._spawn_lock = threading.Lock()
+        self._openings: list[_Opening] = []
 
     # ------------------------------------------------------------------
     # Commands
@@ -154,44 +177,23 @@ class TerminalService:
         """
         cols = _clamp_dim(cols, 80)
         rows = _clamp_dim(rows, 24)
+        if sys.platform == "win32":  # pragma: no cover — no pty there
+            self._error(
+                tab_id, conn_id, "The terminal needs a pseudo-terminal, which Windows has none of.",
+            )
+            return
+        # Registered first, so ``close``/``viewer_gone``/``shutdown``
+        # reach an open that is waiting its turn or forking.
+        opening = _Opening(tab_id, conn_id)
         with self._lock:
-            session = self._sessions.get(tab_id)
-            if session is not None:
-                # A page that reconnected within the grace period (or
-                # re-sent its open): the shell carries on where it was.
-                session.conn_id = conn_id
-                self._cancel_grace(session)
-                self._set_winsize(session, cols, rows)
-                self._emit_opened(session, attached=True)
-                return
-            if sys.platform == "win32":  # pragma: no cover — no pty there
-                self._emit(
-                    {
-                        "type": "terminalError",
-                        "tab_id": tab_id,
-                        "text": "The terminal needs a pseudo-terminal, which Windows has none of.",
-                    },
-                    conn_id,
-                )
-                return
-            try:
-                session = self._spawn(tab_id, conn_id, work_dir, cols, rows)
-            except Exception as exc:  # noqa: BLE001 — reported to the tab
-                logger.warning("terminal spawn failed: %s", exc, exc_info=True)
-                self._emit(
-                    {
-                        "type": "terminalError",
-                        "tab_id": tab_id,
-                        "text": f"The shell could not be started: {exc}",
-                    },
-                    conn_id,
-                )
-                return
-            self._sessions[tab_id] = session
-            # Announced before the reader runs, so a shell that exits
-            # at once still reports ``terminalOpened`` before its
-            # ``terminalExit``.
-            self._emit_opened(session, attached=False)
+            self._openings.append(opening)
+        try:
+            session = self._start(opening, work_dir, cols, rows)
+        finally:
+            with self._lock:
+                self._openings.remove(opening)
+        if session is None:
+            return
         threading.Thread(
             target=self._write_loop, args=(session,), daemon=True,
             name=f"terminal-write-{tab_id[:8]}",
@@ -200,6 +202,49 @@ class TerminalService:
             target=self._pump, args=(session,), daemon=True,
             name=f"terminal-read-{tab_id[:8]}",
         ).start()
+
+    def _start(
+        self, opening: _Opening, work_dir: str, cols: int, rows: int,
+    ) -> _Session | None:
+        """Spawn and register the shell of *opening*; ``None`` when nothing was started.
+
+        The fork (and the start-up files it is preceded by) runs under
+        the spawn lock but outside the session lock: keystrokes and
+        resizes of the other tabs take that lock on the server loop and
+        must not wait for a fork.
+        """
+        tab_id, conn_id = opening.tab_id, opening.conn_id
+        with self._spawn_lock:
+            with self._lock:
+                if opening.cancelled:
+                    return None
+                if tab_id in self._sessions:
+                    # The shell is up (an earlier open of the tab): a
+                    # live connection re-attaches; a dropped one has
+                    # nothing to claim.
+                    if not opening.detached:
+                        self._reattach_locked(tab_id, conn_id, cols, rows)
+                    return None
+            try:
+                session = self._spawn(tab_id, conn_id, work_dir, cols, rows)
+            except Exception as exc:  # noqa: BLE001 — reported to the tab
+                logger.warning("terminal spawn failed: %s", exc, exc_info=True)
+                self._error(tab_id, conn_id, f"The shell could not be started: {exc}")
+                return None
+            with self._lock:
+                cancelled = opening.cancelled
+                if not cancelled:
+                    self._sessions[tab_id] = session
+                    # Announced before the reader runs, so a shell that
+                    # exits at once still reports ``terminalOpened``
+                    # before its ``terminalExit``.
+                    self._emit_opened(session, attached=False)
+                    if opening.detached:
+                        self._detach_locked(session)
+        if cancelled:
+            self._discard(session)
+            return None
+        return session
 
     def input(self, tab_id: str, conn_id: str, data: Any) -> None:
         """Queue *data* (the keystrokes xterm.js produced) for the shell.
@@ -246,6 +291,9 @@ class TerminalService:
                 the tab.
         """
         with self._lock:
+            for opening in self._openings:
+                if opening.tab_id == tab_id and (not conn_id or opening.conn_id == conn_id):
+                    opening.cancelled = True
             session = self._sessions.get(tab_id)
             if session is None or (conn_id and session.conn_id != conn_id):
                 return
@@ -258,26 +306,23 @@ class TerminalService:
     def viewer_gone(self, conn_id: str) -> None:
         """The connection *conn_id* dropped: keep its shells for a re-attach.
 
-        Each shell owned by the connection is detached and hung up
-        ``GRACE_SECONDS`` later unless a reconnecting page claims it
-        with ``terminalOpen`` first.
+        Each shell owned by the connection (one still spawning included)
+        is detached and hung up ``GRACE_SECONDS`` later unless a
+        reconnecting page claims it with ``terminalOpen`` first.
         """
-        now = time.monotonic()
         with self._lock:
+            for opening in self._openings:
+                if opening.conn_id == conn_id:
+                    opening.detached = True
             for session in self._sessions.values():
-                if session.conn_id != conn_id:
-                    continue
-                self._cancel_grace(session)
-                session.detached_at = now
-                session.grace_timer = threading.Timer(
-                    GRACE_SECONDS, self._expire_detached, [session],
-                )
-                session.grace_timer.daemon = True
-                session.grace_timer.start()
+                if session.conn_id == conn_id:
+                    self._detach_locked(session)
 
     def shutdown(self) -> None:
-        """Hang up every shell (the daemon is stopping)."""
+        """Hang up every shell, the ones still opening included (the daemon is stopping)."""
         with self._lock:
+            for opening in self._openings:
+                opening.cancelled = True
             sessions = list(self._sessions.values())
             for session in sessions:
                 self._hang_up(session)
@@ -304,10 +349,39 @@ class TerminalService:
             return None
         return session
 
+    def _reattach_locked(self, tab_id: str, conn_id: str, cols: int, rows: int) -> None:
+        """Hand the live shell of *tab_id* to *conn_id* (caller holds the lock).
+
+        A page that reconnected within the grace period (or re-sent its
+        open) carries on where the shell was.
+        """
+        session = self._sessions[tab_id]
+        session.conn_id = conn_id
+        self._cancel_grace(session)
+        self._set_winsize(session, cols, rows)
+        self._emit_opened(session, attached=True)
+
+    def _detach_locked(self, session: _Session) -> None:
+        """Mark *session* detached and start its grace timer (caller holds the lock)."""
+        self._cancel_grace(session)
+        session.detached_at = time.monotonic()
+        session.grace_timer = threading.Timer(GRACE_SECONDS, self._expire_detached, [session])
+        session.grace_timer.daemon = True
+        session.grace_timer.start()
+
+    def _discard(self, session: _Session) -> None:
+        """Kill and reap a freshly forked shell whose open was cancelled meanwhile."""
+        try:
+            os.kill(session.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os.close(session.fd)
+        os.waitpid(session.pid, 0)
+
     def _spawn(
         self, tab_id: str, conn_id: str, work_dir: str, cols: int, rows: int,
     ) -> _Session:
-        """Fork the shell on a new pty; return its session (caller holds the lock)."""
+        """Fork the shell on a new pty and return its session (not yet registered)."""
         shell = default_shell()
         # The shell's command history outlives the tab (and reaches
         # the other tabs) through start-up files of our own.
@@ -328,6 +402,8 @@ class TerminalService:
             os._exit(127)
         # ``forkpty`` hands back an inheritable master: without this a
         # later shell would hold every earlier terminal's master open.
+        # No other terminal forks before this line runs (the spawn
+        # lock), and subprocesses close every fd above 2 at exec.
         os.set_inheritable(fd, False)
         session = _Session(
             tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
@@ -507,6 +583,9 @@ class TerminalService:
             },
             session.conn_id,
         )
+
+    def _error(self, tab_id: str, conn_id: str, text: str) -> None:
+        self._emit({"type": "terminalError", "tab_id": tab_id, "text": text}, conn_id)
 
     def _emit(self, event: dict[str, Any], conn_id: str) -> None:
         """Deliver *event* to the connection *conn_id* only."""

@@ -22,12 +22,12 @@ from kiss.agents.seas.recommendations.recommendations_sea import load_recommenda
 
 SYSTEM_PROMPT = (
     "You open the user's day in a fresh chat.\n\n"
-    "1. Call `stored_recommendations()` once: the tasks the scheduled /recommendations "
-    "run last suggested, and when. Never invent, change or regenerate suggestions.\n"
-    "2. Call `finish` with success=true and this HTML as the summary: one short greeting "
-    "line; the stored suggestions as an ordered list, word for word, with when they were "
-    "suggested; one closing question asking which of them, or what else, the user wants "
-    "done today. Nothing else.\n\n"
+    "1. Call `stored_recommendations()` once. It returns the tasks the last scheduled "
+    "/recommendations run suggested, and when. Never invent, change or regenerate them.\n"
+    "2. Call `finish` with success=true and this HTML: one short greeting; the stored "
+    "suggestions as an ordered list, word for word, with when they were suggested; one "
+    "closing question asking which of them, or what else, the user wants done today. "
+    "Nothing else.\n\n"
     "If none are stored, greet, say the first suggestions arrive after the next scheduled "
     "/recommendations run, and ask what to do today."
 )

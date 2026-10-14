@@ -490,7 +490,7 @@ class TestReplayBoundary(TabMirroringBase):
             release.wait(15)
 
         def replay() -> None:
-            sys.settrace(_hook("with_task_settings_event", "call", park))
+            sys.settrace(_hook("with_synthesized_events", "call", park))
             try:
                 vs._replay_session(chat_id, "tab-t", conn_id=conn_b)
             finally:

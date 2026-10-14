@@ -179,6 +179,11 @@ class DecisionsModel(Model):
         self.endpoint_url = base_url.rstrip("/") + DECISIONS_PATH
         self.api_key = api_key
         self.timeout = float(self.model_config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
+        # One pooled connection per adapter: the ``decide`` tool keeps a
+        # single adapter for the agent's lifetime and calls it for every
+        # routing decision, so a fresh TCP+TLS handshake per call would
+        # dominate a request the endpoint answers in milliseconds.
+        self._session = requests.Session()
 
     def decide(
         self,
@@ -219,7 +224,7 @@ class DecisionsModel(Model):
             "Content-Type": "application/json",
         }
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.endpoint_url, json=body, headers=headers, timeout=self.timeout
             )
         except requests.RequestException as e:

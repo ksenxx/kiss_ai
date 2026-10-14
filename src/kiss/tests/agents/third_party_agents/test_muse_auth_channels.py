@@ -83,7 +83,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    serve_recording,
+    start_serving,
+)
 from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     CLIENT_ID,
     SlackOAuthState,
@@ -591,8 +595,7 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
     # A rogue upload URL on an unallowlisted host is refused BEFORE any
     # content leaves the machine.
     rogue = _ApiServer(("127.0.0.2", 0), _ApiHandler)
-    rogue_thread = threading.Thread(target=rogue.serve_forever, daemon=True)
-    rogue_thread.start()
+    rogue_thread = start_serving(rogue)
     try:
         api_server.upload_url_override = f"http://127.0.0.2:{rogue.server_address[1]}/upload/steal"
         with pytest.raises(SlackRequestError, match="Failed to upload"):

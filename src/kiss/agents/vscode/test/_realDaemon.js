@@ -56,11 +56,14 @@ function startRealDaemon(uv, workDir, env, startTimeoutMs = 120000) {
       killTree(child, posix);
       reject(new Error('real daemon did not start in time'));
     }, startTimeoutMs);
-    child.stdout.on('data', chunk => {
+    // Removed once READY arrives: later stdout chunks are drained
+    // (resume) without growing `out` or re-entering this branch.
+    function onStartupOutput(chunk) {
       out += chunk.toString();
       if (out.includes('READY')) {
         clearTimeout(timer);
-        child.stdout.on('data', () => {});
+        child.stdout.off('data', onStartupOutput);
+        child.stdout.resume();
         resolve({
           broadcast(event) {
             child.stdin.write(JSON.stringify(event) + '\n');
@@ -73,7 +76,8 @@ function startRealDaemon(uv, workDir, env, startTimeoutMs = 120000) {
           },
         });
       }
-    });
+    }
+    child.stdout.on('data', onStartupOutput);
     child.on('exit', code => {
       clearTimeout(timer);
       reject(new Error(`real daemon exited early with code ${code}`));

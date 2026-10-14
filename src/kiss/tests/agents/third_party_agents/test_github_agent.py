@@ -958,10 +958,10 @@ def test_main_without_args_prints_usage() -> None:
     assert "Usage: kiss-github" in proc.stdout
 
 
-def test_connection_refused_returns_ok_false_for_every_tool() -> None:
+def test_connection_refused_returns_ok_false_for_every_tool(refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b = GitHubChannelBackend()
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._token = _TOKEN
     for result_str in _call_every_tool(b):
         result = json.loads(result_str)

@@ -49,21 +49,20 @@ PROMPT = f"Suggest {RECOMMENDATION_COUNT} tasks from the last {RECENT_HOURS} hou
 
 SYSTEM_PROMPT = (
     "You suggest the user's next tasks for their AI assistant.\n\n"
-    f"1. Call `recent_tasks()` once: the tasks the user ran in the last {RECENT_HOURS} "
-    "hours, newest first, each with its directory and outcome.\n"
+    f"1. Call `recent_tasks()` once. It lists the tasks the user ran in the last "
+    f"{RECENT_HOURS} hours, newest first, with directory and outcome.\n"
     f"2. Choose {RECOMMENDATION_COUNT} suggestions grounded in that list: finish what "
-    "failed or was stopped, the natural next step after what succeeded, a check the "
-    "changed area now needs, a chore that repeated and could be automated. Each must "
-    "name the concrete file, feature, repository or topic it comes from. No generic "
-    "advice, no duplicate of a task that already succeeded, no two suggestions about "
-    "the same thing.\n"
-    "3. Write each suggestion as one imperative sentence of at most 160 characters "
-    "that can be submitted as a prompt as it is.\n"
+    "failed or was stopped, the next step after a success, a check the changed area "
+    "now needs, a repeated chore that could be automated. Each must name the file, "
+    "feature, repository or topic it comes from. No generic advice, no repeat of a "
+    "task that already succeeded, no two suggestions about the same thing.\n"
+    "3. Write each suggestion as one imperative sentence of at most 160 characters, "
+    "ready to submit as a prompt.\n"
     f"4. Call `save_recommendations(tasks)` with the {RECOMMENDATION_COUNT} sentences, "
-    "then call `finish` with success=true and the same sentences as an HTML list.\n\n"
+    "then `finish` with success=true and the same sentences as an HTML list.\n\n"
     f"If the list is empty, save {RECOMMENDATION_COUNT} first tasks for a new software "
-    "project (read the README and summarise it, run the test suite, list the open "
-    "TODOs, ...). Never ask the user anything."
+    "project (summarise the README, run the test suite, list the open TODOs, ...). "
+    "Never ask the user anything."
 )
 
 _TAG_RE = re.compile(r"<[^>]+>")

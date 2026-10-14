@@ -1718,19 +1718,26 @@ class TaskResult:
   `machine_list` over the registry in `$KISS_HOME/machines.json`
   (`kiss.agents.sorcar.machines`): `/machine add [name] <address> [password]`
   takes either `user@host[:port]`, an SSH login (the daemon reads the
-  machine's `sorcar-local.json` endpoint file over ssh, forwards a free
-  local port to its daemon with an `ssh -N -L` tunnel and logs in with
-  the machine's local token, so no password is needed; `$KISS_SSH_CONFIG`
-  names the ssh config to use, and the login shell there must be a POSIX
-  shell), or `https://host:port` with the machine's remote password,
-  which pins the remote `kiss-web`'s TLS certificate and checks the
-  password with one handshake before saving; the name defaults to the
-  host; `/machine remove <name>` forgets it, `/machine list` shows each
-  machine's address and reachability; once a machine is registered the
-  Chats panel lists its tasks next to the local ones, de-duplicated by
-  task id and filterable by machine name, the chat header's machine
-  drop-down offers it, and `run_agent(machine=...)` can run a sub-task on
-  it; with the `https://` form the password may be left out only for a
+  machine's `sorcar-local.json` endpoint file over ssh, looking in
+  `$KISS_HOME`, then the local brand's home directory, then every other
+  `~/.*` directory there, so the machine may run another brand of the
+  daemon; forwards a free local port to its daemon with an `ssh -L`
+  tunnel whose remote command prints a readiness line once the local
+  port is bound and then holds the session open, and logs in with the
+  machine's local token, so no password is
+  needed; `$KISS_SSH_CONFIG` names the ssh config to use, and the login
+  shell there must be a POSIX shell), or `https://host:port` with the
+  machine's remote password, which pins the remote `kiss-web`'s TLS
+  certificate and checks the password with one handshake before saving;
+  the name defaults to the host; `/machine remove <name>` forgets it,
+  `/machine list` shows each machine's address and reachability; once a
+  machine is registered the Chats panel lists its tasks next to the
+  local ones, de-duplicated by task id and filterable by machine name,
+  and clicking one resumes that chat in a local tab bound to the machine
+  (its own web UI is never opened), the chat header's machine drop-down
+  offers it (a machine registered by its address is shown by the host
+  name its daemon reports with every ping), and `run_agent(machine=...)`
+  can run a sub-task on it; with the `https://` form the password may be left out only for a
   daemon that has no remote password set and is reached on a loopback
   port), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits

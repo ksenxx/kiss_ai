@@ -797,10 +797,14 @@ class GeminiModel(Model):
         )
         parts = self._parts_from_response(response)
         if self.token_callback is not None:
+            # Billed already: a Stop raised from a callback below still
+            # charges this response (take_partial_usage_response).
+            self._rejected_response = response
             try:
                 self._stream_parts(parts)
             finally:
                 self._close_thinking_if_open()
+            self._rejected_response = None
         return parts, response
 
     def generate(self) -> tuple[str, Any]:
