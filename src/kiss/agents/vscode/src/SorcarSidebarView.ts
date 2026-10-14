@@ -178,6 +178,7 @@ import {
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
 import {PRODUCT_NAME} from './brand';
+import {sleep} from './daemonHealth';
 
 /**
  * The webview surface a chat controller drives, abstracting over the
@@ -370,6 +371,11 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   terminalResize: ['tab_id', 'cols', 'rows'],
   terminalClose: ['tab_id'],
 };
+
+/** Escape *s* for use inside a single-quoted bash string. */
+function shellQuote(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
 
 /**
  * The bash that runs the Update terminal: `/bin/bash` on POSIX; on Windows
@@ -1828,8 +1834,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // install.sh, holding the same cross-process update lock.  The URL
       // travels via the environment (like KISS_HOME below) so no shell
       // quoting of it is ever needed inside the nested bash -c string.
-      const escHome = kissHomeDir().replace(/'/g, "'\\''");
-      const escUrl = bootstrapInstallUrl().replace(/'/g, "'\\''");
+      const escHome = shellQuote(kissHomeDir());
+      const escUrl = shellQuote(bootstrapInstallUrl());
       this._openUpdateTerminal(
         os.homedir(),
         `KISS_HOME='${escHome}' KISS_NONINTERACTIVE=1 ` +
@@ -1839,8 +1845,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       return;
     }
     // audit0902-coverage:end
-    const escScript = scriptPath.replace(/'/g, "'\\''");
-    const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
+    const escScript = shellQuote(scriptPath);
+    const escDir = shellQuote(path.dirname(scriptPath));
     // Pin KISS_HOME to the value THIS extension host resolved: install.sh
     // writes the .extension-updated marker into $KISS_HOME, and the reload
     // watcher (extension.ts) watches the extension host's $KISS_HOME.  The
@@ -1848,7 +1854,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // carry a different KISS_HOME, and then the marker would land where
     // no watcher looks — the update installs but this window never
     // reloads.
-    const escKissHome = kissHomeDir().replace(/'/g, "'\\''");
+    const escKissHome = shellQuote(kissHomeDir());
     // audit0902-coverage:start
     // scripts/install.sh (the curl bootstrap) syncs the clone with origin
     // and hands over to ./install.sh -- exactly this preflight -- but
@@ -1865,7 +1871,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       'install.sh',
     );
     if (fs.existsSync(bootstrap)) {
-      const escBootstrap = bootstrap.replace(/'/g, "'\\''");
+      const escBootstrap = shellQuote(bootstrap);
       this._openUpdateTerminal(
         path.dirname(scriptPath),
         `cd '${escDir}'; KISS_HOME='${escKissHome}' KISS_NONINTERACTIVE=1 ` +
@@ -1943,7 +1949,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   private async _waitForWebviewReady(): Promise<void> {
     for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
-      await new Promise(r => setTimeout(r, 200));
+      await sleep(200);
     }
   }
 
@@ -2051,12 +2057,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         'kissSorcar.chatViewSecondary.focus',
       );
       for (let i = 0; i < 10 && !this._view; i++) {
-        await new Promise(r => setTimeout(r, 200));
+        await sleep(200);
       }
     }
     if (this._view) {
       this._view.show();
-      await new Promise(r => setTimeout(r, 150));
+      await sleep(150);
       this._sendToWebview({type: 'focusInput'});
     }
   }
@@ -2187,7 +2193,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           ? 'workbench.action.increaseViewSize'
           : 'workbench.action.decreaseViewSize';
       await vscode.commands.executeCommand(cmd);
-      await new Promise(r => setTimeout(r, 60));
+      await sleep(60);
       if (Math.abs(cur - prev) < 1) {
         stuck += 1;
         if (stuck >= 2) return;

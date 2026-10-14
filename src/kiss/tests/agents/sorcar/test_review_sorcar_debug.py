@@ -52,6 +52,11 @@ def test_git_timeout_kills_hook_descendants_holding_capture_pipes(
     that inherited the capture pipes then keeps ``communicate`` blocked
     until the hook exits.  The wrapper starts git in a process group and
     terminates that whole group on timeout.
+
+    The timeout leaves the stub a full second to start its interpreter
+    and fork the "hook" before the group is killed: with 0.2 s, a loaded
+    machine had the kill race the fork, and a grandchild born after
+    ``killpg`` enumerated the group held the pipes for its whole sleep.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -60,13 +65,13 @@ def test_git_timeout_kills_hook_descendants_holding_capture_pipes(
         "#!/usr/bin/env python3\n"
         "import subprocess, sys, time\n"
         "subprocess.Popen([sys.executable, '-c', "
-        "'import time; time.sleep(4)'])\n"
-        "time.sleep(4)\n",
+        "'import time; time.sleep(8)'])\n"
+        "time.sleep(8)\n",
         encoding="utf-8",
     )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setattr(git_worktree, "_GIT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(git_worktree, "_GIT_TIMEOUT_SECONDS", 1.0)
 
     start = time.monotonic()
     result = git_worktree._git("status", cwd=tmp_path)
@@ -74,4 +79,5 @@ def test_git_timeout_kills_hook_descendants_holding_capture_pipes(
 
     assert result.returncode == 124
     assert "timed out" in result.stderr
-    assert elapsed < 1.5, f"descendant kept capture pipes open for {elapsed:.2f}s"
+    # Killed with its group: ~1 s.  A surviving hook: the whole 8 s sleep.
+    assert elapsed < 4.0, f"descendant kept capture pipes open for {elapsed:.2f}s"

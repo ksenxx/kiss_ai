@@ -15,7 +15,7 @@ same warning reached the user twice.  Symmetrically, a ``_set_warnings``
 landing in between was silently overwritten.
 
 The test drives the real failure path with a real git repository:
-a held ``.git/config.lock`` makes ``save_preserve_marker`` fail, so
+a file where the marker directory goes makes ``save_preserve_marker`` fail, so
 ``_keep_for_review`` takes its warning-appending branch.  Many
 concurrent flushes race it; after the fix the pre-existing warning
 text is broadcast exactly once.
@@ -60,8 +60,8 @@ def test_prior_warning_is_broadcast_exactly_once_under_concurrent_flush(
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
-    # What a concurrent ``git config`` holds: makes the marker write fail.
-    (repo / ".git" / "config.lock").write_text("")
+    # A file where the marker directory goes: makes the marker write fail.
+    (repo / ".git" / "kiss-preserve").write_text("")
 
     wt = GitWorktree(
         repo_root=repo,

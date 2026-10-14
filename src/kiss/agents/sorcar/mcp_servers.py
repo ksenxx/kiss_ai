@@ -65,6 +65,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
@@ -770,6 +771,12 @@ async def _maintain_connection(
         conn.finished.set()
 
 
+def _release_lease(conn: _Connection) -> None:
+    """Return the lease :meth:`MCPManager._lease` took on *conn* (under the manager lock)."""
+    conn.in_flight -= 1
+    conn.last_used = time.monotonic()
+
+
 class MCPManager:
     """Process-wide manager of live MCP server connections.
 
@@ -780,7 +787,12 @@ class MCPManager:
     """
 
     _instance: MCPManager | None = None
-    _instance_lock = threading.Lock()
+    # RLock: :func:`locked_call` needs the owner check on release.  The
+    # tool wrappers run on the task thread, where the runner's Stop
+    # injects ``KeyboardInterrupt``; a plain ``with`` there can leak
+    # the lock (CPython gh-74174) and wedge every later MCP call of
+    # the daemon.
+    _instance_lock = threading.RLock()
 
     def __init__(
         self,
@@ -807,7 +819,7 @@ class MCPManager:
         # eviction or a server crash can be rebuilt on demand.
         self._configs: dict[str, MCPServerConfig] = {}
         self._orphans: list[_Connection] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._shut_down = False
         self._idle_timeout_s = idle_timeout_s
         self._max_connections = max_connections
@@ -815,12 +827,12 @@ class MCPManager:
         atexit.register(self.shutdown)
 
     @classmethod
+    @locked(_instance_lock)
     def instance(cls) -> MCPManager:
         """Return the process-wide singleton manager."""
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = MCPManager()
-            return cls._instance
+        if cls._instance is None:
+            cls._instance = MCPManager()
+        return cls._instance
 
     def connect(
         self, config: MCPServerConfig, auth: Any = None,
@@ -837,39 +849,52 @@ class MCPManager:
             The connection record; ``error`` is non-empty on failure.
         """
         key = _connection_key(config)
-        with self._lock:
-            if self._shut_down:
-                conn = _Connection(config=config)
-                conn.error = "manager shut down"
-                conn.ready.set()
-                return conn
-            self._configs[key] = config
-            existing = self._connections.get(key)
-            if existing is not None and existing.error == "":
-                conn = existing
-                conn.last_used = time.monotonic()
-            else:
-                if existing is not None:
-                    self._loop.call_soon_threadsafe(existing.stop.set)
-                if config.transport in ("http", "sse") and auth is None:
-                    auth = build_oauth_provider(config)
-                conn = _Connection(config=config)
-                self._connections[key] = conn
-                conn.task = asyncio.run_coroutine_threadsafe(
-                    _maintain_connection(conn, auth, self._health_interval_s),
-                    self._loop,
-                )
+        conn = locked_call(self._lock, self._connection_for, key, config, auth)
+        if conn.task is None:
+            # The shut-down manager's already-failed record: it never
+            # started.  The global flag is no evidence about *conn*: a
+            # shutdown that began after ``_connection_for`` returned a
+            # pending connection stamps it in ``disconnect_all``, and
+            # the wait below sees that.
+            return conn
         self._evict_surplus(key)
         if not _wait_interruptible(conn.ready, CONNECT_TIMEOUT):
-            with self._lock:
-                if self._connections.get(key) is conn:
-                    del self._connections[key]
-                conn.error = conn.error or "connection timed out"
-                if conn.task is not None and not conn.task.done():
-                    self._orphans.append(conn)
+            locked_call(self._lock, self._orphan_timed_out, key, conn)
             self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn)
         return conn
+
+    def _connection_for(self, key: str, config: MCPServerConfig, auth: Any) -> _Connection:
+        """Return the live connection under *key*, starting one when there is none (locked)."""
+        if self._shut_down:
+            conn = _Connection(config=config)
+            conn.error = "manager shut down"
+            conn.ready.set()
+            return conn
+        self._configs[key] = config
+        existing = self._connections.get(key)
+        if existing is not None and existing.error == "":
+            existing.last_used = time.monotonic()
+            return existing
+        if existing is not None:
+            self._loop.call_soon_threadsafe(existing.stop.set)
+        if config.transport in ("http", "sse") and auth is None:
+            auth = build_oauth_provider(config)
+        conn = _Connection(config=config)
+        self._connections[key] = conn
+        conn.task = asyncio.run_coroutine_threadsafe(
+            _maintain_connection(conn, auth, self._health_interval_s),
+            self._loop,
+        )
+        return conn
+
+    def _orphan_timed_out(self, key: str, conn: _Connection) -> None:
+        """Drop the timed-out *conn* from the pool; its unfinished task is an orphan (locked)."""
+        if self._connections.get(key) is conn:
+            del self._connections[key]
+        conn.error = conn.error or "connection timed out"
+        if conn.task is not None and not conn.task.done():
+            self._orphans.append(conn)
 
     def _evict_surplus(self, keep: str) -> None:
         """Tear down connections that are idle or beyond the pool cap.
@@ -896,28 +921,30 @@ class MCPManager:
         Args:
             keep: The connection key just connected, never evicted.
         """
-        now = time.monotonic()
-        with self._lock:
-            evictable = {
-                key for key, conn in self._connections.items()
-                if key != keep and conn.in_flight == 0 and conn.ready.is_set()
-            }
-            doomed = {
-                key for key in evictable
-                if now - self._connections[key].last_used > self._idle_timeout_s
-            }
-            survivors = [key for key in self._connections if key not in doomed]
-            surplus = len(survivors) - self._max_connections
-            if surplus > 0:
-                oldest = sorted(
-                    (key for key in survivors if key in evictable),
-                    key=lambda key: self._connections[key].last_used,
-                )
-                doomed.update(oldest[:surplus])
-            conns = [self._connections.pop(key) for key in doomed]
-        for conn in conns:
+        for conn in locked_call(self._lock, self._pop_surplus, keep):
             conn.error = conn.error or "evicted: idle or over the connection cap"
             self._loop.call_soon_threadsafe(conn.stop.set)
+
+    def _pop_surplus(self, keep: str) -> list[_Connection]:
+        """Remove and return the idle and over-cap connections (locked; :meth:`_evict_surplus`)."""
+        now = time.monotonic()
+        evictable = {
+            key for key, conn in self._connections.items()
+            if key != keep and conn.in_flight == 0 and conn.ready.is_set()
+        }
+        doomed = {
+            key for key in evictable
+            if now - self._connections[key].last_used > self._idle_timeout_s
+        }
+        survivors = [key for key in self._connections if key not in doomed]
+        surplus = len(survivors) - self._max_connections
+        if surplus > 0:
+            oldest = sorted(
+                (key for key in survivors if key in evictable),
+                key=lambda key: self._connections[key].last_used,
+            )
+            doomed.update(oldest[:surplus])
+        return [self._connections.pop(key) for key in doomed]
 
     def _reap_straggler(self, conn: _Connection) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
@@ -935,7 +962,12 @@ class MCPManager:
         task = conn.task
         if task is None:
             return
-        task.add_done_callback(functools.partial(self._forget_orphan, conn))
+        # A future that already finished runs the callback right here,
+        # on the task thread, so it takes the manager lock through
+        # ``locked_call`` like every other task-reachable section.
+        task.add_done_callback(
+            functools.partial(locked_call, self._lock, self._forget_orphan, conn),
+        )
         # Cancelling the future propagates to the wrapped asyncio task,
         # raising ``CancelledError`` at its stuck ``await`` so the
         # transport context unwinds and its child dies.
@@ -944,12 +976,11 @@ class MCPManager:
         )
 
     def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
-        """Drop a finished straggler from ``_orphans`` (done callback)."""
-        with self._lock:
-            try:
-                self._orphans.remove(conn)
-            except ValueError:
-                pass
+        """Drop a finished straggler from ``_orphans`` (done callback; locked)."""
+        try:
+            self._orphans.remove(conn)
+        except ValueError:
+            pass
 
     def _lease(self, server: str) -> tuple[_Connection | None, Any]:
         """Atomically look up *server*'s connection and lease it.
@@ -972,13 +1003,16 @@ class MCPManager:
             the connection is live and was leased (the caller must
             release the lease by decrementing ``in_flight``).
         """
-        with self._lock:
-            conn = _pick(self._connections, server)
-            session = conn.session if conn is not None else None
-            if conn is not None and session is not None:
-                conn.in_flight += 1
-                conn.last_used = time.monotonic()
-            return conn, session
+        return locked_call(self._lock, self._lease_locked, server)
+
+    def _lease_locked(self, server: str) -> tuple[_Connection | None, Any]:
+        """Body of :meth:`_lease`; the caller holds the lock."""
+        conn = _pick(self._connections, server)
+        session = conn.session if conn is not None else None
+        if conn is not None and session is not None:
+            conn.in_flight += 1
+            conn.last_used = time.monotonic()
+        return conn, session
 
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         """Call *tool* on *server* and return the textual result.
@@ -997,12 +1031,8 @@ class MCPManager:
             The flattened result text (``Error: ...`` on tool errors).
         """
         display = _key_display_name(server)
-        with self._lock:
-            if self._shut_down:
-                return (
-                    f"Error: MCP server {display!r} is not connected "
-                    f"(manager shut down)"
-                )
+        if self._shut_down:
+            return f"Error: MCP server {display!r} is not connected (manager shut down)"
         conn, session = self._lease(server)
         if session is None:
             # Evicted from the pool, or the server died mid-task: rebuild
@@ -1030,9 +1060,7 @@ class MCPManager:
             # or an injected Stop must not leave the call running on
             # the loop with its lease released.
             future.cancel()
-            with self._lock:
-                conn.in_flight -= 1
-                conn.last_used = time.monotonic()
+            locked_call(self._lock, _release_lease, conn)
         return _result_text(result)
 
     def _reconnect(self, server: str) -> _Connection | None:
@@ -1048,8 +1076,7 @@ class MCPManager:
             needs no special case: :meth:`connect` answers with an
             already-failed connection.
         """
-        with self._lock:
-            config = _pick(self._configs, server)
+        config = locked_call(self._lock, _pick, self._configs, server)
         if config is None:
             return None
         return self.connect(config)

@@ -431,9 +431,17 @@ export function provisionalDefaultModel(): string {
 /**
  * Resolve the default model asynchronously: KISS's `get_default_model()`
  * via `uv run` (15s deadline), falling back to
- * `getFallbackDefaultModel()`.  Concurrent callers share one lookup.
+ * `getFallbackDefaultModel()`.  Concurrent callers share one lookup, and
+ * once a model is known it is reused for the rest of the session: every
+ * later chat panel would otherwise spawn `uv run` again only to have the
+ * daemon's `models` reply overwrite the answer moments later.  A
+ * fallback "No model" (catalog unreachable, e.g. before first-run setup
+ * finished) is not kept, so the next caller retries the catalog.
  */
 export function resolveDefaultModel(): Promise<string> {
+  if (lastResolvedDefaultModel && lastResolvedDefaultModel !== 'No model') {
+    return Promise.resolve(lastResolvedDefaultModel);
+  }
   if (!defaultModelInFlight) {
     defaultModelInFlight = resolveDefaultModelImpl()
       .then(model => {
@@ -1642,9 +1650,9 @@ function offerForcedRestart(
     'Keep waiting',
   ).then(choice => {
     if (choice === undefined) {
-      // No answer: the toast was dismissed, or its webview poster was
-      // replaced (a re-created sidebar resolves every pending toast
-      // with undefined).  Unlatch so the next retry can offer again.
+      // Dismissed without an answer (a toast whose webview went away
+      // is re-shown natively, so this is the user's own dismissal).
+      // Unlatch so the next retry can offer again.
       forcedRestartOffered = false;
       return;
     }
@@ -2076,7 +2084,7 @@ async function isDaemonRunning(): Promise<boolean> {
     const health = await probeDaemonHealth(8787);
     if (health === 'alive' && fs.existsSync(endpointPath)) return true;
     if (attempt < 2) {
-      await new Promise(r => setTimeout(r, 300));
+      await sleep(300);
     }
   }
   return false;
@@ -2157,7 +2165,7 @@ async function installGit(token?: vscode.CancellationToken): Promise<boolean> {
     } catch {}
 
     for (let i = 0; i < 120; i++) {
-      await new Promise(resolve => setTimeout(resolve, 5_000));
+      await sleep(5_000);
       throwIfCancelled(token);
       if (await gitWorks()) {
         log('Git installed via Xcode Command Line Tools');
@@ -2777,7 +2785,7 @@ export async function ensureApiKeys(
     log('another window is prompting for API keys — waiting for it');
     const deadline = Date.now() + API_KEYS_LOCK_WAIT_MS;
     while (fs.existsSync(lockFile) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await sleep(1000);
     }
     loadApiKeysFromShellRc();
     return hasAnyKey();
@@ -3250,7 +3258,7 @@ export async function ensureRemotePassword(
   log(
     'ensureRemotePassword: password not found on first read — retrying after 2 s',
   );
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await sleep(2000);
 
   if (await getStoredRemotePassword()) {
     log('ensureRemotePassword: password found on retry — skipping prompt');
@@ -3300,7 +3308,7 @@ export async function ensureRemotePassword(
       log('ensureRemotePassword: another window is prompting — waiting');
       waitLogged = true;
     }
-    await new Promise(resolve => setTimeout(resolve, pollMs));
+    await sleep(pollMs);
   }
   // audit0903-coverage:end
 }

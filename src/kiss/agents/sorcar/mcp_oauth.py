@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPServerConfig,
@@ -220,8 +221,12 @@ class MCPLoginSession:
     # ``_lock`` guards ``_active`` only and is never held across a wait,
     # so ``active()`` answers at once; ``_start_lock`` serialises whole
     # ``start()`` calls (cancel the previous session, bind the port).
-    _lock = threading.Lock()
-    _start_lock = threading.Lock()
+    # Both are taken through :func:`locked` / :func:`locked_call`
+    # (hence RLocks): the ``connect_mcp_server`` tools run on the task
+    # thread, where the runner's Stop injection would leak a plain
+    # ``with`` (CPython gh-74174) and refuse every later sign-in.
+    _lock = threading.RLock()
+    _start_lock = threading.RLock()
 
     def __init__(self, cfg: MCPServerConfig) -> None:
         self.cfg = cfg
@@ -251,20 +256,7 @@ class MCPLoginSession:
         storage = FileTokenStorage(cfg.name)
         if not seed_preregistered_client(storage, cfg.name):
             drop_stale_registration(storage)
-        with cls._start_lock:
-            with cls._lock:
-                previous = cls._active
-            if previous is not None:
-                # Outside ``_lock``: the previous login thread may sit in
-                # a network call for a while, and ``active()`` must not
-                # stall behind that wait.
-                previous.cancel()
-                previous._finished.wait(timeout=5.0)
-            session = cls(cfg)
-            session._server = _RedirectServer()
-            with cls._lock:
-                cls._active = session
-            session._thread.start()
+        session = locked_call(cls._start_lock, cls._replace_active, cfg)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline and not session._finished.is_set():
             if session._url_ready.wait(timeout=0.1):
@@ -272,10 +264,37 @@ class MCPLoginSession:
         return session
 
     @classmethod
+    def _replace_active(cls, cfg: MCPServerConfig) -> MCPLoginSession:
+        """Cancel the active session, if any, and start one for *cfg* (under ``_start_lock``)."""
+        previous = cls._get_active()
+        if previous is not None:
+            # Outside ``_lock``: the previous login thread may sit in
+            # a network call for a while, and ``active()`` must not
+            # stall behind that wait.
+            previous.cancel()
+            previous._finished.wait(timeout=5.0)
+        session = cls(cfg)
+        session._server = _RedirectServer()
+        cls._set_active(session)
+        session._thread.start()
+        return session
+
+    @classmethod
+    @locked(_lock)
+    def _get_active(cls) -> MCPLoginSession | None:
+        """Return the active session, whatever server it signs in to."""
+        return cls._active
+
+    @classmethod
+    @locked(_lock)
+    def _set_active(cls, session: MCPLoginSession) -> None:
+        """Publish *session* as the active one."""
+        cls._active = session
+
+    @classmethod
     def active(cls, name: str) -> MCPLoginSession | None:
         """Return the running session for server *name*, if any."""
-        with cls._lock:
-            session = cls._active
+        session = cls._get_active()
         return session if session is not None and session.cfg.name == name else None
 
     def cancel(self) -> None:

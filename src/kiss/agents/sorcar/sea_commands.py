@@ -77,6 +77,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import operator
 import os
 import re
 import sys
@@ -87,6 +88,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
+from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.sea_settings import (
     SEA_BASES,
     SeaError,
@@ -362,8 +364,6 @@ def refresh_registry() -> list[str]:
         ``_notify_lock``, outside ``_lock``) when the list differs
         from the previous broadcast, in publish order.
     """
-    global _last_broadcast
-
     sources: list[dict[str, Path]] = []
     # Built-in SEAs and the bundled ``seas/`` first: any
     # SEAS.md folder may shadow them.
@@ -383,32 +383,62 @@ def refresh_registry() -> list[str]:
     merged: dict[str, Path] = {}
     for src in sources:
         merged.update(src)
+    return _publish(merged)
 
-    # Compare-and-swap under ``_lock`` so two concurrent rescans can
-    # never both observe the old ``_last_broadcast`` and fire the
-    # same notification twice.  The whole publish-and-notify section
-    # runs under ``_notify_lock`` (order: ``_notify_lock`` -> ``_lock``)
-    # so snapshots reach subscribers in publish order; ``_lock`` itself
-    # is released before the callbacks run so a subscriber that calls
-    # back into the module — e.g. :func:`list_commands` — cannot
-    # deadlock.
-    with _notify_lock:
-        with _lock:
-            _registry.clear()
-            _registry.update(merged)
-            snapshot = sorted(_registry)
-            snapshot_tuple = tuple(snapshot)
-            if snapshot_tuple == _last_broadcast:
-                return snapshot
-            _last_broadcast = snapshot_tuple
-            callbacks = list(_subscribers)
 
-        for cb in callbacks:
-            try:
-                cb(list(snapshot))
-            except Exception:  # pragma: no cover - subscribers own errors
-                logger.debug("SEA registry subscriber failed", exc_info=True)
+@locked(_notify_lock)
+def _publish(merged: dict[str, Path]) -> list[str]:
+    """Install *merged* as the registry and notify the subscribers of a change.
+
+    Compare-and-swap under ``_lock`` so two concurrent rescans can
+    never both observe the old ``_last_broadcast`` and fire the
+    same notification twice.  The whole publish-and-notify section
+    runs under ``_notify_lock`` (order: ``_notify_lock`` -> ``_lock``)
+    so snapshots reach subscribers in publish order; ``_lock`` itself
+    is released before the callbacks run so a subscriber that calls
+    back into the module — e.g. :func:`list_commands` — cannot
+    deadlock.  Both locks are taken through :func:`locked` because a
+    task thread rescans too (:func:`get_command` on a miss) and the
+    runner's Stop injection must not leak them.
+    """
+    snapshot, callbacks = locked_call(_lock, _swap_registry, merged)
+    for cb in callbacks:
+        try:
+            cb(list(snapshot))
+        except Exception:  # pragma: no cover - subscribers own errors
+            logger.debug("SEA registry subscriber failed", exc_info=True)
     return snapshot
+
+
+def _swap_registry(merged: dict[str, Path]) -> tuple[list[str], list[Callable[[list[str]], None]]]:
+    """Replace the registry with *merged*; return the snapshot and the callbacks to notify."""
+    global _last_broadcast
+    _registry.clear()
+    _registry.update(merged)
+    snapshot = sorted(_registry)
+    snapshot_tuple = tuple(snapshot)
+    if snapshot_tuple == _last_broadcast:
+        return snapshot, []
+    _last_broadcast = snapshot_tuple
+    return snapshot, list(_subscribers)
+
+
+@locked(_lock)
+def _registered_names() -> list[str]:
+    """Return the sorted registry names (empty before the first rescan)."""
+    return sorted(_registry)
+
+
+@locked(_lock)
+def _registered_path(name: str) -> Path | None:
+    """Return the registered script of command *name*, or ``None``."""
+    return _registry.get(name)
+
+
+@locked(_lock)
+def _registered_entries() -> list[tuple[str, Path]]:
+    """Return the ``(name, script)`` registry entries sorted by name."""
+    return sorted(_registry.items())
 
 
 def list_commands() -> list[str]:
@@ -418,10 +448,7 @@ def list_commands() -> list[str]:
     (tests, CLI helpers) never see a stale-empty snapshot before the
     daemon watcher has run its first pass.
     """
-    with _lock:
-        if _registry:
-            return sorted(_registry)
-    return refresh_registry()
+    return _registered_names() or refresh_registry()
 
 
 def get_command(name: str) -> Path | None:
@@ -432,13 +459,11 @@ def get_command(name: str) -> Path | None:
     a stale in-memory copy) does not surface a spurious "unknown
     command" the very first time it is used.
     """
-    with _lock:
-        hit = _registry.get(name)
+    hit = _registered_path(name)
     if hit is not None:
         return hit
     refresh_registry()
-    with _lock:
-        return _registry.get(name)
+    return _registered_path(name)
 
 
 def subscribe(callback: Callable[[list[str]], None]) -> None:
@@ -1044,8 +1069,7 @@ def _registers_as_model(sea_path: Path) -> bool:
     try:
         st = sea_path.stat()
         stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
-        with _lock:
-            cached = _model_sea_cache.get(sea_path)
+        cached = locked_call(_lock, _model_sea_cache.get, sea_path)
         if cached is not None and cached[0] == stamp:
             return cached[1]
         source = sea_path.read_text(encoding="utf-8", errors="replace")
@@ -1058,8 +1082,7 @@ def _registers_as_model(sea_path: Path) -> bool:
             verdict = _call(_method(load_sea(sea_path), "register_as_model")) is True
         except SeaError:
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
-    with _lock:
-        _model_sea_cache[sea_path] = (stamp, verdict)
+    locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (stamp, verdict))
     return verdict
 
 
@@ -1075,9 +1098,7 @@ def model_seas() -> dict[str, Path]:
         ``{command_name: absolute_sea_path}``, sorted by name.
     """
     list_commands()  # populate the registry on a cold start
-    with _lock:
-        entries = sorted(_registry.items())
-    return {name: path for name, path in entries if _registers_as_model(path)}
+    return {name: path for name, path in _registered_entries() if _registers_as_model(path)}
 
 
 def model_sea(name: str) -> Path | None:
@@ -1101,8 +1122,7 @@ def model_sea(name: str) -> Path | None:
     if not name:
         return None
     list_commands()  # populate the registry on a cold start
-    with _lock:
-        path = _registry.get(name)
+    path = _registered_path(name)
     if path is None or not _registers_as_model(path):
         return None
     return path

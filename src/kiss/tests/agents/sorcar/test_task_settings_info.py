@@ -12,7 +12,7 @@ Covers the three surfaces the settings reach:
 * the persisted ``task_settings`` display event (broadcast by
   ``ChatSorcarAgent.run`` through a real ``JsonPrinter`` and read back
   from the real sqlite events table), and
-* the replay-side synthesis helper ``with_task_settings_event`` plus
+* the replay-side synthesis helper ``with_synthesized_events`` plus
   the new ``max_budget`` task-history column it reads.
 """
 
@@ -51,7 +51,8 @@ from kiss.server import agent_state
 from kiss.server.json_printer import (
     JsonPrinter,
     _task_settings_event_from_session,
-    with_task_settings_event,
+    _usage_info_event_from_session,
+    with_synthesized_events,
 )
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
@@ -363,7 +364,7 @@ class TestTaskSettingsEventPersisted(_DBRedirect):
         assert extra["max_budget"] == 3.5
         # A stream that already carries the event is left unchanged.
         assert (
-            with_task_settings_event(_events(session), session)
+            with_synthesized_events(_events(session), session)
             is session["events"]
         )
 
@@ -419,7 +420,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
         _append_chat_event({"type": "prompt", "text": "old"}, task_id=task_id)
         session = _load_chat_events_by_task_id(task_id)
         assert session is not None
-        events = with_task_settings_event(_events(session), session)
+        events = with_synthesized_events(_events(session), session)
         assert events[0]["type"] == "task_settings"
         assert events[0]["taskId"] == task_id
         assert events[1]["type"] == "prompt"
@@ -442,7 +443,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
         task_id, chat_id = _add_task("plain", extra={"model": "m4"})
         session = _load_chat_events_by_task_id(task_id)
         assert session is not None
-        events = with_task_settings_event(list(_events(session)), session)
+        events = with_synthesized_events(list(_events(session)), session)
         s = events[0]["settings"]
         assert "max_budget" not in s
         assert s["start_ts"] > 0
@@ -484,19 +485,19 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
 
     def test_degenerate_sessions_return_events_unchanged(self) -> None:
         events: list[dict[str, object]] = [{"type": "prompt", "text": "x"}]
-        assert with_task_settings_event(events, {}) is events
+        assert with_synthesized_events(events, {}) is events
         assert (
-            with_task_settings_event(events, {"task_id": "t1", "extra": ""})
+            with_synthesized_events(events, {"task_id": "t1", "extra": ""})
             is events
         )
         assert (
-            with_task_settings_event(
+            with_synthesized_events(
                 events, {"task_id": "t1", "extra": "not json"},
             )
             is events
         )
         assert (
-            with_task_settings_event(
+            with_synthesized_events(
                 events, {"task_id": "t1", "extra": "[1, 2]"},
             )
             is events
@@ -505,6 +506,67 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
             _task_settings_event_from_session({"task_id": "t1", "extra": 7})
             is None
         )
+
+
+class TestWithUsageSynthesis(_DBRedirect):
+    """A transcript without usage events gets the row's totals appended."""
+
+    def test_row_spend_becomes_a_trailing_usage_info(self) -> None:
+        task_id, _ = _add_task(
+            "stopped early", extra={"model": "m7", "cost": 1.5, "tokens": 2000, "steps": 3},
+        )
+        _append_chat_event({"type": "prompt", "text": "stopped early"}, task_id=task_id)
+        session = _load_chat_events_by_task_id(task_id)
+        assert session is not None
+        events = with_synthesized_events(_events(session), session)
+        assert [e["type"] for e in events] == ["task_settings", "prompt", "usage_info"]
+        usage = events[-1]
+        assert usage["taskId"] == task_id
+        assert usage["cost"] == "$1.5000"
+        assert usage["cost_usd"] == 1.5
+        assert usage["total_tokens"] == 2000
+        assert usage["total_steps"] == 3
+        assert usage["text"] == ""
+
+    def test_transcripts_with_their_own_totals_are_left_alone(self) -> None:
+        task_id, _ = _add_task(
+            "ran", extra={"model": "m8", "cost": 1.5, "tokens": 2000, "steps": 3},
+        )
+        for own in (
+            {"type": "usage_info", "text": "", "cost": "$0.2000", "total_tokens": 10},
+            {"type": "result", "text": "done", "cost": "$0.2000"},
+        ):
+            session = _load_chat_events_by_task_id(task_id)
+            assert session is not None
+            events = [{"type": "prompt", "text": "ran"}, own]
+            out = with_synthesized_events(events, session)
+            assert [e["type"] for e in out] == ["task_settings", "prompt", own["type"]]
+            assert out[-1] is own
+
+    def test_rows_without_spend_add_nothing(self) -> None:
+        task_id, _ = _add_task("free", extra={"model": "m9"})
+        session = _load_chat_events_by_task_id(task_id)
+        assert session is not None
+        events: list[dict[str, Any]] = [{"type": "prompt", "text": "free"}]
+        out = with_synthesized_events(events, session)
+        assert [e["type"] for e in out] == ["task_settings", "prompt"]
+        assert _usage_info_event_from_session({"task_id": "", "extra": "{}"}) is None
+        assert _usage_info_event_from_session({"task_id": "t", "extra": "[1]"}) is None
+        assert (
+            _usage_info_event_from_session({"task_id": "t", "extra": '{"cost": "x"}'})
+            is None
+        )
+        assert _usage_info_event_from_session(
+            {"task_id": "t", "extra": '{"cost": 0, "tokens": 5}'}
+        ) == {
+            "type": "usage_info",
+            "text": "",
+            "taskId": "t",
+            "total_tokens": 5,
+            "cost": "$0.0000",
+            "cost_usd": 0.0,
+            "total_steps": 0,
+        }
 
     def test_corrupt_numeric_fields_are_dropped(self) -> None:
         """Hand-edited Infinity/garbage numbers must not raise."""

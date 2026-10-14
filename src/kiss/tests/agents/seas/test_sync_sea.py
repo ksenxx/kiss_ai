@@ -17,46 +17,36 @@ merges and pushes.
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.sync import git_sync, sync_sea
 from kiss.agents.seas.sync.git_sync import GitSyncError, sync
 from kiss.agents.seas.sync.sync_sea import SyncSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
+from kiss.tests.agents.seas.conftest import HERMETIC_GIT, git, run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    tool_call_body,
-)
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _SEA_PATH = Path(sync_sea.__file__).resolve()
 
 # A fixed identity and no user or system git config: the same settings
-# for the test's own git calls and for the ones :func:`sync` spawns.
-# Otherwise a machine without a global ``user.name`` (a fresh CI VM)
-# fails the merge commit with "Committer identity unknown", and Git for
-# Windows' system ``core.autocrlf=true`` against the user's ``false``
-# makes the two sides disagree on which files are modified.
+# for the test's own git calls (:func:`git` reads the environment on
+# every call) and for the ones :func:`sync` spawns.  Otherwise a machine
+# without a global ``user.name`` (a fresh CI VM) fails the merge commit
+# with "Committer identity unknown", and Git for Windows' system
+# ``core.autocrlf=true`` against the user's ``false`` makes the two
+# sides disagree on which files are modified.
 _HERMETIC_GIT = {
+    **HERMETIC_GIT,
     "GIT_AUTHOR_NAME": "t",
     "GIT_AUTHOR_EMAIL": "t@t",
     "GIT_COMMITTER_NAME": "t",
     "GIT_COMMITTER_EMAIL": "t@t",
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_SYSTEM": os.devnull,
 }
-
-_GIT_ENV = {**os.environ, **_HERMETIC_GIT}
 
 
 @pytest.fixture(autouse=True)
@@ -66,46 +56,39 @@ def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(key, value)
 
 
-def _git(repo: Path, *args: str) -> str:
-    """Run ``git *args`` in *repo* (must succeed) and return its stripped stdout."""
-    return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=True, env=_GIT_ENV,
-    ).stdout.strip()
-
-
 def _commit(repo: Path, name: str, text: str) -> str:
     """Write *text* to *name* in *repo*, commit it and return the commit sha."""
     (repo / name).write_text(text, encoding="utf-8")
-    _git(repo, "add", name)
-    _git(repo, "commit", "-q", "-m", f"{name}: {text.strip()[:20]}")
-    return _git(repo, "rev-parse", "HEAD")
+    git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", f"{name}: {text.strip()[:20]}")
+    return git(repo, "rev-parse", "HEAD")
 
 
 def _remote_and_clones(tmp_path: Path, *names: str) -> list[Path]:
     """Create a bare ``origin`` with one commit on ``main`` and return one clone per name."""
     origin = tmp_path / "origin.git"
-    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     seed = tmp_path / "seed"
-    _git(tmp_path, "clone", "-q", str(origin), str(seed))
-    _git(seed, "checkout", "-q", "-b", "main")
+    git(tmp_path, "clone", "-q", str(origin), str(seed))
+    git(seed, "checkout", "-q", "-b", "main")
     _commit(seed, "README.md", "hello\n")
-    _git(seed, "push", "-q", "origin", "main")
+    git(seed, "push", "-q", "origin", "main")
     clones = []
     for name in names:
         clone = tmp_path / name
-        _git(tmp_path, "clone", "-q", str(origin), str(clone))
+        git(tmp_path, "clone", "-q", str(origin), str(clone))
         clones.append(clone)
     return clones
 
 
 def _remote_main(repo: Path) -> str:
     """Return the sha ``origin``'s ``main`` is at, as *repo* sees it after a fresh fetch."""
-    return _git(repo, "ls-remote", "origin", "refs/heads/main").split()[0]
+    return git(repo, "ls-remote", "origin", "refs/heads/main").split()[0]
 
 
 def _pre_push_hook(repo: Path, body: str) -> None:
     """Install a ``pre-push`` hook running the shell *body* in *repo*."""
-    hooks = Path(_git(repo, "rev-parse", "--git-path", "hooks"))
+    hooks = Path(git(repo, "rev-parse", "--git-path", "hooks"))
     if not hooks.is_absolute():
         hooks = repo / hooks
     hooks.mkdir(exist_ok=True)
@@ -186,18 +169,18 @@ def test_sync_fast_forwards_when_the_branch_has_no_own_commits(tmp_path: Path) -
     """A colleague's push is fast-forwarded in; the push then has nothing to send."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     pushed = _commit(theirs, "a.txt", "theirs\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
     # The checkout is named the way git prints it (forward slashes on Windows too).
     assert f"Checkout {mine.resolve().as_posix()}, branch main, syncing with origin/main." in report
     assert "main is 0 ahead and 1 behind." in report
     assert f"Fast-forwarded to origin/main: now at {pushed[:12]} (1 files changed)." in report
     assert "Pushed main to origin: Everything up-to-date" in report
-    assert _git(mine, "rev-parse", "HEAD") == pushed
+    assert git(mine, "rev-parse", "HEAD") == pushed
     assert (mine / "a.txt").read_text(encoding="utf-8") == "theirs\n"
     # An empty commit upstream changes no file: nothing to grep for markers.
-    _git(theirs, "commit", "-q", "--allow-empty", "-m", "empty")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "commit", "-q", "--allow-empty", "-m", "empty")
+    git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
     assert "(0 files changed)." in report
     assert "WARNING" not in report
@@ -207,7 +190,7 @@ def test_sync_merges_and_pushes_when_both_sides_moved(tmp_path: Path) -> None:
     """Own commits plus a remote move give a merge commit that is pushed to origin."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "a.txt", "theirs\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
     (mine / "untracked.txt").write_text("scratch\n", encoding="utf-8")
     report = sync(str(mine))
@@ -215,8 +198,8 @@ def test_sync_merges_and_pushes_when_both_sides_moved(tmp_path: Path) -> None:
     assert "Merged origin/main: now at " in report
     assert "(1 files changed)." in report  # the merge brought a.txt
     assert "uncommitted change" not in report  # untracked files are not changes
-    head = _git(mine, "rev-parse", "HEAD")
-    assert _git(mine, "rev-parse", "HEAD^1") == own
+    head = git(mine, "rev-parse", "HEAD")
+    assert git(mine, "rev-parse", "HEAD^1") == own
     assert "Pushed main to origin:" in report
     assert _remote_main(mine) == head
     assert (mine / "untracked.txt").read_text(encoding="utf-8") == "scratch\n"
@@ -241,7 +224,7 @@ def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
     """Conflicts stop the sync with the files listed; once committed, a second sync pushes."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "README.md", "theirs\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     _commit(mine, "README.md", "mine\n")
     with pytest.raises(GitSyncError) as info:
         sync(str(mine))
@@ -253,18 +236,18 @@ def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
     with pytest.raises(GitSyncError, match="A merge is already in progress"):
         sync(str(mine))
     (mine / "README.md").write_text("mine and theirs\n", encoding="utf-8")
-    _git(mine, "add", "README.md")
-    _git(mine, "commit", "-q", "--no-edit")
+    git(mine, "add", "README.md")
+    git(mine, "commit", "-q", "--no-edit")
     report = sync(str(mine))
     assert "Nothing to merge" in report
-    assert _remote_main(mine) == _git(mine, "rev-parse", "HEAD")
+    assert _remote_main(mine) == git(mine, "rev-parse", "HEAD")
 
 
 def test_sync_refuses_a_merge_that_would_overwrite_local_edits(tmp_path: Path) -> None:
     """git refuses to merge over an uncommitted edit of a file the remote changed."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "README.md", "theirs\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     (mine / "README.md").write_text("edited, not committed\n", encoding="utf-8")
     with pytest.raises(GitSyncError, match="git merge origin/main did not start"):
         sync(str(mine))
@@ -277,7 +260,7 @@ def test_sync_warns_about_conflict_markers_the_remote_committed(tmp_path: Path) 
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "notes.rst", "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> theirs\n")
     _commit(theirs, "title.rst", "Title\n=======\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
     assert "WARNING: conflict markers are committed in the merged files" in report
     assert "Pushed main to origin: Everything up-to-date" in report
@@ -296,7 +279,7 @@ def test_sync_retries_the_round_when_the_remote_moves_during_the_push(tmp_path: 
     assert report.count("Fetched origin/main") == 2
     assert "main is 1 ahead and 1 behind." in report
     assert "Merged origin/main" in report
-    assert _remote_main(mine) == _git(mine, "rev-parse", "HEAD")
+    assert _remote_main(mine) == git(mine, "rev-parse", "HEAD")
     assert (mine / "a.txt").read_text(encoding="utf-8") == "theirs\n"
 
 
@@ -325,11 +308,11 @@ def test_sync_refuses_what_it_cannot_sync(tmp_path: Path) -> None:
     with pytest.raises(GitSyncError, match="git rev-parse --show-toplevel failed"):
         sync(str(plain))
     (mine,) = _remote_and_clones(tmp_path, "mine")
-    _git(mine, "checkout", "-q", "--detach")
+    git(mine, "checkout", "-q", "--detach")
     with pytest.raises(GitSyncError, match="git symbolic-ref --short HEAD failed"):
         sync(str(mine))
-    _git(mine, "checkout", "-q", "main")
-    _git(mine, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    git(mine, "checkout", "-q", "main")
+    git(mine, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     with pytest.raises(GitSyncError, match="git fetch origin .* failed"):
         sync(str(mine))
 
@@ -344,7 +327,7 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     """
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "a.txt", "theirs\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
     script = [
         tool_call_body("git_sync", {"repo": str(mine), "ref": "origin/main"}, prompt_tokens=500),
@@ -352,30 +335,13 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     ]
     run = sea_commands.evaluate_sea([SyncSea()], "")
     assert run.prompt == sync_sea.ADD_TO_PROMPT
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("sync-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(mine),
-            max_steps=4,
-            max_budget=run.settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tools_hook=run.tools_hook,
-            tool_profile=run.settings["tool_profile"],
-            web_tools=run.settings["use_web_tools"],
-            use_memory=run.settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, mine, max_steps=4)
     assert parsed["success"] is True
     assert "pushed" in parsed["summary"]
-    assert _git(mine, "rev-parse", "HEAD^1") == own
-    assert _remote_main(mine) == _git(mine, "rev-parse", "HEAD")
+    assert git(mine, "rev-parse", "HEAD^1") == own
+    assert _remote_main(mine) == git(mine, "rev-parse", "HEAD")
 
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 2, [list(r) for r in requests]
+    assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert {"git_sync", "Bash", "Read", "Edit", "Write", "finish"} <= names, names
@@ -403,35 +369,35 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
     refspec still creates ``origin/main`` so the merge has a ref.
     """
     (seed,) = _remote_and_clones(tmp_path, "seed2")
-    _git(seed, "checkout", "-q", "-b", "feature")
+    git(seed, "checkout", "-q", "-b", "feature")
     _commit(seed, "f.txt", "feature\n")
-    _git(seed, "push", "-q", "origin", "feature")
-    _git(seed, "checkout", "-q", "main")
+    git(seed, "push", "-q", "origin", "feature")
+    git(seed, "checkout", "-q", "main")
     _commit(seed, "a.txt", "main moved\n")
-    _git(seed, "push", "-q", "origin", "main")
+    git(seed, "push", "-q", "origin", "main")
     mine = tmp_path / "mine"
-    _git(tmp_path, "clone", "-q", "--single-branch", "--branch", "feature",
+    git(tmp_path, "clone", "-q", "--single-branch", "--branch", "feature",
          str(tmp_path / "origin.git"), str(mine))
-    assert _git(mine, "branch", "-r") == "origin/feature"
+    assert git(mine, "branch", "-r") == "origin/feature"
     report = sync(str(mine))
     assert "branch feature, syncing with origin/main." in report
     assert "Fetched origin/main: feature is 1 ahead and 1 behind." in report
     assert "Merged origin/main" in report
     assert "Pushed feature to origin:" in report
-    head = _git(mine, "rev-parse", "HEAD")
-    assert _git(mine, "ls-remote", "origin", "refs/heads/feature").split()[0] == head
+    head = git(mine, "rev-parse", "HEAD")
+    assert git(mine, "ls-remote", "origin", "refs/heads/feature").split()[0] == head
     assert (mine / "a.txt").read_text(encoding="utf-8") == "main moved\n"
 
 
 def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path: Path) -> None:
     """A rejected push of ``feature`` merges ``origin/feature`` too, not only origin/main again."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
-    _git(mine, "checkout", "-q", "-b", "feature")
+    git(mine, "checkout", "-q", "-b", "feature")
     _commit(mine, "f.txt", "feature\n")
-    _git(mine, "push", "-q", "origin", "feature")
+    git(mine, "push", "-q", "origin", "feature")
     _commit(mine, "g.txt", "more\n")
-    _git(theirs, "fetch", "-q", "origin", "feature")
-    _git(theirs, "checkout", "-q", "-b", "feature", "origin/feature")
+    git(theirs, "fetch", "-q", "origin", "feature")
+    git(theirs, "checkout", "-q", "-b", "feature", "origin/feature")
     marker = _race_once(mine, theirs, "feature", tmp_path / "raced")
     report = sync(str(mine))
     assert marker.exists()
@@ -440,15 +406,15 @@ def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path:
     assert "Merged origin/feature" in report
     assert report.count("Fetched origin/main") == 2
     assert (mine / "a.txt").read_text(encoding="utf-8") == "theirs\n"
-    head = _git(mine, "rev-parse", "HEAD")
-    assert _git(mine, "ls-remote", "origin", "refs/heads/feature").split()[0] == head
+    head = git(mine, "rev-parse", "HEAD")
+    assert git(mine, "ls-remote", "origin", "refs/heads/feature").split()[0] == head
 
 
 def test_sync_warns_about_markers_in_a_file_with_a_non_ascii_name(tmp_path: Path) -> None:
     """Paths come from ``-z`` output, so a name git would quote still reaches the grep."""
     mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "r\u00e9sum\u00e9.txt", "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> x\n")
-    _git(theirs, "push", "-q", "origin", "main")
+    git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
     assert "WARNING" in report
     assert "r\u00e9sum\u00e9.txt" in report.split("WARNING", 1)[1]

@@ -51,7 +51,9 @@ def raw_post_status(port: int, headers: str, path: str = "/") -> int:
     """
     with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
         request = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n"
-        sock.sendall(request.encode())
+        # latin-1, as ``http.server`` decodes header lines: a non-ASCII
+        # header value reaches the server as the one character written.
+        sock.sendall(request.encode("latin-1"))
         sock.settimeout(10)
         data = b""
         while b"\r\n" not in data:
@@ -60,6 +62,42 @@ def raw_post_status(port: int, headers: str, path: str = "/") -> int:
                 break
             data += chunk
         return int(data.split(b" ")[1])
+
+
+def start_serving(server: ThreadedHTTPServer) -> threading.Thread:
+    """Serve *server* on a daemon thread; stop it with ``stop_http_server(server, thread)``.
+
+    ``serve_forever`` polls its shutdown flag every 50 ms (the stdlib
+    default of 0.5 s makes every teardown wait up to half a second).
+
+    Args:
+        server: A bound ``ThreadedHTTPServer`` (or subclass) not yet serving.
+
+    Returns:
+        The started thread, for ``stop_http_server``.
+    """
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    thread.start()
+    return thread
+
+
+@contextmanager
+def serving[S: ThreadedHTTPServer](server: S) -> Iterator[S]:
+    """Serve *server* on a daemon thread for the ``with`` body, then shut it down.
+
+    Args:
+        server: A bound ``ThreadedHTTPServer`` (or subclass) not yet serving.
+
+    Yields:
+        The running server.
+    """
+    thread = start_serving(server)
+    try:
+        yield server
+    finally:
+        stop_http_server(server, thread)
 
 
 class RecordingServer(ThreadedHTTPServer):
@@ -120,13 +158,8 @@ def serve_recording(
     Yields:
         The running server; ``server.server_address[1]`` is its port.
     """
-    server = server_cls(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with serving(server_cls(("127.0.0.1", 0), handler)) as server:
         yield server
-    finally:
-        stop_http_server(server, thread)
 
 
 # :func:`serve_recording` as a context manager: ``with recording_server(_Handler) as server:``.

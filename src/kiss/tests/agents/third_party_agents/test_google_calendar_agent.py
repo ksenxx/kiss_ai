@@ -508,10 +508,10 @@ def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
     assert "Usage: kiss-gcal" in capsys.readouterr().out
 
 
-def test_connection_refused_returns_ok_false(backend) -> None:
+def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     for call in (
         b.gcal_list_calendars,
         b.gcal_list_events,

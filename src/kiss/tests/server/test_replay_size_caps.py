@@ -301,6 +301,37 @@ class BoundReplayEventsTest(unittest.TestCase):
         self.assertLessEqual(total, server_mod.MAX_REPLAY_FRAME_BYTES)
         self.assertIn(f"[{count - len(kept)} earlier events", out[0]["text"])
 
+    def test_frame_budget_carries_the_latest_usage_totals(self) -> None:
+        """The newest usage_info in the cut prefix survives: the run's
+        cost must not vanish because a long tool output followed it."""
+        per_event = server_mod.MAX_REPLAY_EVENT_TEXT_CHARS
+        count = server_mod.MAX_REPLAY_FRAME_BYTES // per_event + 5
+        older = {"type": "usage_info", "text": "", "cost": "$0.1000", "ts": 1}
+        latest = {"type": "usage_info", "text": "", "cost": "$0.4000", "ts": 2}
+        evs = [
+            {"type": "prompt", "text": "p", "ts": 0},
+            older,
+            latest,
+            *(
+                {"type": "tool_call", "text": "e" * per_event, "n": i, "ts": 1000 + i}
+                for i in range(count)
+            ),
+        ]
+        out = server_mod._coalesced_replay_events(evs)
+        self.assertEqual(out[0]["type"], "system_output")
+        self.assertEqual(out[1], latest)
+        self.assertEqual([e for e in out if e.get("type") == "usage_info"], [latest])
+        self.assertEqual(out[-1]["n"], count - 1)
+        # A kept suffix that has its own totals carries nothing across.
+        evs_with_totals = [*evs, {"type": "usage_info", "text": "", "cost": "$0.9000"}]
+        out = server_mod._coalesced_replay_events(evs_with_totals)
+        self.assertEqual(
+            [e["cost"] for e in out if e.get("type") == "usage_info"], ["$0.9000"],
+        )
+        # No usage_info in the cut prefix: nothing to carry.
+        out = server_mod._coalesced_replay_events(evs[3:])
+        self.assertEqual([e for e in out if e.get("type") == "usage_info"], [])
+
     def test_note_without_timestamp(self) -> None:
         per_event = server_mod.MAX_REPLAY_EVENT_TEXT_CHARS
         count = server_mod.MAX_REPLAY_FRAME_BYTES // per_event + 2

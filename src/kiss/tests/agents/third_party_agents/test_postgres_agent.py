@@ -5,8 +5,9 @@
 """End-to-end tests for the PostgreSQL channel agent.
 
 Runs against a REAL PostgreSQL server in Docker — no mocks, patches,
-or fakes.  The Docker-backed tests are skipped when ``docker info``
-fails at collection time; the no-server tests always run.
+or fakes.  The Docker-backed tests are skipped at collection time unless a
+Docker daemon answers a ping AND the ``docker`` CLI the fixture shells out
+to is on PATH; the no-server tests always run.
 
 State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
 fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
@@ -31,25 +32,15 @@ from kiss.agents.third_party_agents.postgres.postgres_sea import (
     PostgresChannelBackend,
     _config,
 )
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 # Nothing listens on the discard port, so this URI is always unreachable.
 _UNREACHABLE_URI = "postgresql://user:x@127.0.0.1:9/db"
 
 
-def _docker_available() -> bool:
-    """Return True when the Docker daemon answers ``docker info``."""
-    try:
-        return (
-            subprocess.run(
-                ["docker", "info"], capture_output=True, timeout=60, check=False
-            ).returncode
-            == 0
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-_DOCKER_OK = _docker_available()
+# The live fixture drives the container through the ``docker`` CLI, so a
+# reachable daemon alone (what the SDK probe checks) is not enough.
+_DOCKER_OK = is_docker_available() and shutil.which("docker") is not None
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
@@ -224,7 +215,7 @@ def test_every_tool_returns_ok_false_when_unreachable() -> None:
         assert result["error"]
 
 
-@pytest.mark.skipif(not _DOCKER_OK, reason="docker daemon not available")
+@pytest.mark.skipif(not _DOCKER_OK, reason="docker daemon or docker CLI not available")
 class TestPostgresLive:
     """End-to-end tests against a real PostgreSQL 17 server in Docker."""
 

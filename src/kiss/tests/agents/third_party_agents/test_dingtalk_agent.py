@@ -16,7 +16,6 @@ import base64
 import hashlib
 import hmac
 import json
-import socket
 import sys
 import time
 from collections.abc import Iterator
@@ -33,6 +32,7 @@ from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
+    raw_post_status,
     serve_json_webhook,
 )
 
@@ -313,23 +313,6 @@ def test_inbound_callback_unverified_when_no_token_and_channel_filter() -> None:
         backend.disconnect()
 
 
-def _raw_http_post(port: int, content_length: str | None, body: bytes = b"") -> str:
-    """POST over a raw socket with a hand-crafted Content-Length header.
-
-    Returns the HTTP status line of the response.
-    """
-    lines = ["POST / HTTP/1.1", "Host: 127.0.0.1", "Connection: close"]
-    if content_length is not None:
-        lines.append(f"Content-Length: {content_length}")
-    request = ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + body
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        sock.sendall(request)
-        data = b""
-        while chunk := sock.recv(4096):
-            data += chunk
-    return data.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
-
-
 def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> None:
     """Bad Content-Length values get 400/413 without an unbounded read.
 
@@ -341,10 +324,10 @@ def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> No
         {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": "OUTtoken"}
     )
     try:
-        assert "400" in _raw_http_post(port, "-1")
-        assert "400" in _raw_http_post(port, "nope")
-        assert "400" in _raw_http_post(port, None)
-        assert "413" in _raw_http_post(port, str(2 * 1024 * 1024))
+        assert raw_post_status(port, "Content-Length: -1\r\n") == 400
+        assert raw_post_status(port, "Content-Length: nope\r\n") == 400
+        assert raw_post_status(port, "") == 400  # no Content-Length at all
+        assert raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
 
         ts = str(int(time.time() * 1000))
         payload = {

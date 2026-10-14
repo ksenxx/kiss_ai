@@ -430,10 +430,10 @@ def test_server_error_returns_ok_false(backend) -> None:
     assert "500" in result["error"]
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b = HomeAssistantChannelBackend()
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._token = _TOKEN
     result = json.loads(b.ha_get_states())
     assert result["ok"] is False

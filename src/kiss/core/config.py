@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from kiss.core.brand import HOME_DIR
 from kiss.core.context_compaction import COMPACTION_START_TOKENS, COMPACTION_STEP_TOKENS
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked_call
 
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
@@ -72,7 +73,11 @@ first.
 """
 
 _artifact_dir: str | None = None
-_artifact_dir_lock = threading.Lock()
+# Reentrant for ``locked_call``: the first ``get_artifact_dir`` of a
+# daemon runs on a task thread (the trajectory save in ``run``'s
+# ``finally``), where a Stop injection landing right after a plain
+# ``with``'s ``__enter__`` would leak the lock for every later task.
+_artifact_dir_lock = threading.RLock()
 
 
 def _artifact_root(base_dir: str | Path | None = None) -> Path:
@@ -271,12 +276,17 @@ def get_artifact_dir() -> str:
     hazard no lock can close, because it straddles the agent's lifetime
     rather than the assignment.
     """
+    if _artifact_dir is None:
+        locked_call(_artifact_dir_lock, _init_artifact_dir)
+    assert _artifact_dir is not None
+    return _artifact_dir
+
+
+def _init_artifact_dir() -> None:
+    """Choose the artifact directory once; the caller holds ``_artifact_dir_lock``."""
     global _artifact_dir
     if _artifact_dir is None:
-        with _artifact_dir_lock:
-            if _artifact_dir is None:
-                _artifact_dir = _generate_artifact_dir()
-    return _artifact_dir
+        _artifact_dir = _generate_artifact_dir()
 
 
 class _ArtifactDirProxy:

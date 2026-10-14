@@ -338,15 +338,25 @@ async function runTests() {
     {settled: false},
     'action notification promise should remain pending before webview disposal',
   );
+  // The webview goes away with the question open: it is re-shown as a
+  // native notification (the stub answers undefined at once) and the
+  // promise settles with that answer, not with a fabricated dismissal
+  // (audit1013_consent_teardown.test.js).
+  const nativeBeforeDispose = nativeNotificationCount;
   view.dispose();
   const pendingAfterDispose = await Promise.race([
     pendingActionPromise.then(value => ({settled: true, value})),
     new Promise(resolve => setTimeout(() => resolve({settled: false}), 200)),
   ]);
+  assert.strictEqual(
+    nativeNotificationCount,
+    nativeBeforeDispose + 1,
+    'disposing the active webview must re-show its pending action notification natively',
+  );
   assert.deepStrictEqual(
     pendingAfterDispose,
     {settled: true, value: undefined},
-    'disposing the active webview must resolve pending action notifications undefined',
+    'the pending action notification settles with the native answer',
   );
 
   const progressPosts = [];
@@ -405,15 +415,22 @@ async function runTests() {
     'pending action should remain pending while old poster is active',
   );
   const postedB = [];
+  const nativeBeforeSwap = nativeNotificationCount;
   notificationsApi.setWebviewNotificationPoster(message => postedB.push(message));
   const oldPosterAfterSwap = await Promise.race([
     oldPosterPending.then(value => ({settled: true, value})),
     new Promise(resolve => setTimeout(() => resolve({settled: false}), 200)),
   ]);
+  assert.strictEqual(
+    nativeNotificationCount,
+    nativeBeforeSwap + 1,
+    "replacing the poster must re-show the old poster's pending action notification natively",
+  );
+  assert.strictEqual(postedB.length, 0, 'nothing is re-posted to the new webview');
   assert.deepStrictEqual(
     oldPosterAfterSwap,
     {settled: true, value: undefined},
-    'replacing the poster must resolve pending action promises from the old poster as undefined',
+    'the pending action notification settles with the native answer',
   );
   notificationsApi.setWebviewNotificationPoster(undefined);
 }

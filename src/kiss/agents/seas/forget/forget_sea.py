@@ -30,18 +30,16 @@ from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
-    "You remove a standing instruction the user stored earlier with /remember. The "
-    "user's message names the instruction to forget. Procedure: (1) call "
-    "`forget_instruction` with the user's message verbatim as `instruction`; (2) if "
-    "it reports that nothing matches, read the stored instructions it lists (or call "
-    "`list_instructions`), pick the single stored instruction the user's message "
-    "refers to, and call `forget_instruction` again with that stored text exactly as "
-    "listed; when no stored instruction plausibly matches, or several do and the "
-    "message does not single one out, remove nothing; (3) call `finish` with "
-    "`success=true` when an instruction was removed, otherwise `success=false`, and "
-    "as `summary_in_html` one short HTML paragraph saying what was removed, or why "
-    "nothing was removed, listing the stored instructions in a `<ul>` in that case. "
-    "Do not use Bash to edit files, and never remove more than one instruction "
+    "You remove a standing instruction the user stored with /remember. The user's "
+    "message names it. (1) Call `forget_instruction` with the message verbatim as "
+    "`instruction`. (2) If it reports no match, read the stored instructions it lists "
+    "(or call `list_instructions`), pick the one the message refers to, and call "
+    "`forget_instruction` again with that stored text exactly as listed. If none "
+    "plausibly matches, or several do and the message does not single one out, remove "
+    "nothing. (3) Call `finish` with `success=true` if an instruction was removed, else "
+    "`success=false`, and as `summary_in_html` one short HTML paragraph saying what was "
+    "removed or why nothing was; in that case list the stored instructions in a "
+    "`<ul>`. Do not edit files with Bash. Never remove more than one instruction "
     "unless the message clearly asks for several.\n"
 )
 """The whole base system prompt of the forget agent (replaces ``SYSTEM.md``)."""

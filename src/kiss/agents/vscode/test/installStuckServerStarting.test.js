@@ -31,15 +31,36 @@ async function test(name, fn) {
   }
 }
 
-function freeTcpPort() {
-  return new Promise((resolve, reject) => {
+// Every scenario below needs a port that stays *dead* (connection refused) until the
+// test itself binds it.  A port obtained from `listen(0)` comes from the OS ephemeral
+// range and, once released, can be handed to any of the sibling test processes of a
+// parallel run before this test binds it (seen on an 80-core run: a foreign listener
+// made `probeDaemonHealth` report alive, and the restart's `listen` hit EADDRINUSE).
+// So use ports below the ephemeral ranges of Linux (32768+), macOS and Windows (49152+),
+// which `listen(0)` never allocates, and above the 20240-20259 metrics-port scan of the
+// tunnel tests.  Each process walks its own pid-derived slot of the range, so concurrent
+// copies of this suite do not step on each other either; a port that is taken is skipped.
+const PORT_MIN = 21000;
+const PORT_MAX = 32000;
+const PORTS_PER_PROCESS = 13;
+let nextPort =
+  PORT_MIN +
+  (process.pid % Math.floor((PORT_MAX - PORT_MIN) / PORTS_PER_PROCESS)) * PORTS_PER_PROCESS;
+
+function tryListen(port) {
+  return new Promise(resolve => {
     const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = srv.address().port;
-      srv.close(() => resolve(port));
-    });
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
   });
+}
+
+async function freeTcpPort() {
+  for (;;) {
+    const port = nextPort;
+    nextPort = port + 1 < PORT_MAX ? port + 1 : PORT_MIN;
+    if (await tryListen(port)) return port;
+  }
 }
 
 function startDaemonHalf(endpointPath, activeCount) {

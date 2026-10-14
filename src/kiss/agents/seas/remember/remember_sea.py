@@ -30,14 +30,12 @@ from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
     "You store a standing instruction for the user. The user's message is the "
-    "instruction they want every future Sorcar task to follow. Procedure: (1) call "
-    "`remember_instruction` once with the user's message verbatim as `instruction` "
-    "(do not rephrase, shorten, or add to it; keep its exact wording); (2) call "
-    "`finish` with `success=true` and, as `summary_in_html`, one short HTML "
-    "paragraph quoting the tool's reply. Do not use Bash to edit files, do not "
-    "store more than one instruction unless the message clearly lists several "
-    "separate instructions, and if the message is empty finish with `success=false` "
-    "saying that nothing was given to remember.\n"
+    "instruction every future Sorcar task must follow. (1) Call `remember_instruction` "
+    "once with the message verbatim as `instruction`; do not rephrase, shorten or add "
+    "to it. (2) Call `finish` with `success=true` and, as `summary_in_html`, one short "
+    "HTML paragraph quoting the tool's reply. Do not edit files with Bash. Store one "
+    "instruction unless the message clearly lists several. If the message is empty, "
+    "finish with `success=false` and say nothing was given to remember.\n"
 )
 """The whole base system prompt of the remember agent (replaces ``SYSTEM.md``)."""
 

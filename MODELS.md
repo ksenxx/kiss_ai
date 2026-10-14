@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **761 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -10,16 +10,16 @@ KISS Sorcar ships a catalog of **761 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 406 |
+| OpenRouter | 421 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **736** generation-capable models
-- **578** function-calling-capable models
+- **744** generation-capable models
+- **584** function-calling-capable models
 - **7** embedding models
-- **11** decision models
+- **18** decision models
 
 Full model list:
 
@@ -388,7 +388,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (406)</strong></summary>
+<summary><strong>OpenRouter (421)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -429,6 +429,7 @@ Full model list:
 - `openrouter/bytedance/ui-tars-1.5-7b`
 - `openrouter/cloudflare/clef`
 - `openrouter/cloudflare/clef-flash`
+- `openrouter/cloudflare/clef-omni`
 - `openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition`
 - `openrouter/cohere/command-a`
 - `openrouter/cohere/command-a-plus`
@@ -483,8 +484,10 @@ Full model list:
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inception/mercury-2`
 - `openrouter/inception/mercury-2.5`
+- `openrouter/inception/mercury-decide`
 - `openrouter/inclusionai/ling-3.0-flash`
 - `openrouter/inclusionai/ling-3.0-flash-fin`
+- `openrouter/inclusionai/ling-3.0-flash-sante`
 - `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
@@ -504,6 +507,8 @@ Full model list:
 - `openrouter/meta/muse-spark-1.1`
 - `openrouter/meta/muse-spark-1.2`
 - `openrouter/meta/muse-spark-1.3`
+- `openrouter/meta/muse-wonder`
+- `openrouter/microsoft/microsoft-decision-1`
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
@@ -538,6 +543,8 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nace-ai/drex-v1.5`
+- `openrouter/nace-ai/drex-v2.0`
 - `openrouter/nex-agi/nex-n2.5-mini`
 - `openrouter/nex-agi/nex-n2.5-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
@@ -659,6 +666,7 @@ Full model list:
 - `openrouter/qwen/qwen2.5-vl-72b-instruct`
 - `openrouter/qwen/qwen3-14b`
 - `openrouter/qwen/qwen3-235b-a22b-2507`
+- `openrouter/qwen/qwen3-235b-a22b-thinking-2507`
 - `openrouter/qwen/qwen3-30b-a3b`
 - `openrouter/qwen/qwen3-30b-a3b-instruct-2507`
 - `openrouter/qwen/qwen3-32b`
@@ -666,8 +674,12 @@ Full model list:
 - `openrouter/qwen/qwen3-coder-30b-a3b-instruct`
 - `openrouter/qwen/qwen3-coder-flash`
 - `openrouter/qwen/qwen3-coder-next`
+- `openrouter/qwen/qwen3-next-80b-a3b-instruct`
+- `openrouter/qwen/qwen3-next-80b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-30b-a3b-instruct`
+- `openrouter/qwen/qwen3-vl-30b-a3b-thinking`
+- `openrouter/qwen/qwen3-vl-8b-instruct`
 - `openrouter/qwen/qwen3.5-122b-a10b`
 - `openrouter/qwen/qwen3.5-27b`
 - `openrouter/qwen/qwen3.5-35b-a3b`
@@ -699,6 +711,8 @@ Full model list:
 - `openrouter/sao10k/l3-lunaris-8b`
 - `openrouter/sao10k/l3.1-euryale-70b`
 - `openrouter/sao10k/l3.3-euryale-70b`
+- `openrouter/scaledown/classify-1`
+- `openrouter/scaledown/summarize`
 - `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
 - `openrouter/stepfun/step-5-preview`
@@ -792,6 +806,7 @@ Full model list:
 - `openrouter/~openai/gpt-terra-latest-low`
 - `openrouter/~openai/gpt-terra-latest-medium`
 - `openrouter/~openai/gpt-terra-latest-xhigh`
+- `openrouter/~perplexity/pplx-decider-27b-latest`
 - `openrouter/~typesafe/jev-latest`
 - `openrouter/~x-ai/grok-latest`
 - `openrouter/~z-ai/glm-flash-latest`

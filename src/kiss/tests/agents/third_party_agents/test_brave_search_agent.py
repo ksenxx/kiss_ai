@@ -552,10 +552,10 @@ def test_server_error_returns_ok_false(backend) -> None:
         assert "500" in result["error"]
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(refusing_port: int) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
     b = BraveSearchChannelBackend()
-    b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
+    b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._api_key = _API_KEY
     for call in (
         lambda: b.brave_web_search("python"),

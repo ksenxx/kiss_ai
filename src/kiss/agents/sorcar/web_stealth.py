@@ -49,6 +49,7 @@ from importlib import import_module
 from types import ModuleType
 from urllib.parse import parse_qs, quote_plus, urlparse
 
+from kiss.agents.sorcar._concurrency import locked
 from kiss.core.processes import kill_process_group
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def disabled_blink_features(unattended: bool) -> str:
 # Virtual display (Xvfb)
 # ---------------------------------------------------------------------------
 
-_XVFB_LOCK = threading.Lock()
+_XVFB_LOCK = threading.RLock()
 _XVFB_PROC: subprocess.Popen[bytes] | None = None
 _XVFB_DISPLAY: str | None = None
 _XVFB_START_TIMEOUT_SECS = 15.0
@@ -163,6 +164,7 @@ _XVFB_WRAPPER = (
 )
 
 
+@locked(_XVFB_LOCK)
 def virtual_display() -> str | None:
     """Return the ``DISPLAY`` of a process-wide Xvfb, starting it on demand.
 
@@ -172,49 +174,53 @@ def virtual_display() -> str | None:
     launches and is torn down at interpreter exit (or, if the process is
     killed, by the wrapper shell loop within two seconds).
 
+    The lock is taken through :func:`locked`: the browser tools call
+    this on the task thread, where the runner's Stop injection would
+    leak a plain ``with`` (CPython gh-74174) and hang every later
+    browser launch of the daemon.
+
     Returns:
         A display name such as ``":1"``, or ``None`` when this is not
         Linux or the ``Xvfb`` binary is not installed (the caller then
         falls back to real headless mode).
     """
     global _XVFB_PROC, _XVFB_DISPLAY
-    with _XVFB_LOCK:
-        if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
-            return _XVFB_DISPLAY
-        _XVFB_PROC, _XVFB_DISPLAY = None, None
-        if not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
-            return None
-        read_fd, write_fd = os.pipe()
+    if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
+        return _XVFB_DISPLAY
+    _XVFB_PROC, _XVFB_DISPLAY = None, None
+    if not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
+        return None
+    read_fd, write_fd = os.pipe()
+    try:
         try:
-            try:
-                proc = subprocess.Popen(
-                    ["sh", "-c", _XVFB_WRAPPER, "xvfb", str(os.getpid()), str(write_fd)],
-                    pass_fds=(write_fd,),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            except OSError:
-                # Descriptor or process exhaustion: browse headless rather
-                # than fail the whole tool.
-                logger.warning("could not start Xvfb; falling back to headless", exc_info=True)
-                return None
-            os.close(write_fd)
-            write_fd = -1
-            display = _read_display_number(read_fd, proc)
-        finally:
-            # Both pipe ends are ours to close whether or not Popen raised.
-            if write_fd >= 0:
-                os.close(write_fd)
-            os.close(read_fd)
-        if display is None:
-            _killpg(proc)
-            logger.warning("Xvfb did not start; falling back to headless Chromium")
+            proc = subprocess.Popen(
+                ["sh", "-c", _XVFB_WRAPPER, "xvfb", str(os.getpid()), str(write_fd)],
+                pass_fds=(write_fd,),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            # Descriptor or process exhaustion: browse headless rather
+            # than fail the whole tool.
+            logger.warning("could not start Xvfb; falling back to headless", exc_info=True)
             return None
-        _XVFB_PROC, _XVFB_DISPLAY = proc, display
-        logger.info("virtual display %s started for headed Chromium", display)
-        return display
+        os.close(write_fd)
+        write_fd = -1
+        display = _read_display_number(read_fd, proc)
+    finally:
+        # Both pipe ends are ours to close whether or not Popen raised.
+        if write_fd >= 0:
+            os.close(write_fd)
+        os.close(read_fd)
+    if display is None:
+        _killpg(proc)
+        logger.warning("Xvfb did not start; falling back to headless Chromium")
+        return None
+    _XVFB_PROC, _XVFB_DISPLAY = proc, display
+    logger.info("virtual display %s started for headed Chromium", display)
+    return display
 
 
 def _read_display_number(read_fd: int, proc: subprocess.Popen[bytes]) -> str | None:

@@ -105,17 +105,19 @@ def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
     return dict(daemon.run_commands[-1])
 
 
-def _write_helper_script(caller: Path) -> Path:
-    """Create *caller* with a minimal ``helper.py`` SEA; return the script path."""
-    caller.mkdir()
-    script = caller / "helper.py"
-    script.write_text("""
+_HELPER_SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'model': 'm'}
-""")
+"""
+
+
+def _write_sea_script(script: Path) -> Path:
+    """Write a minimal SEA at *script* (creating its directory); return the path."""
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_HELPER_SEA)
     return script
 
 
@@ -212,7 +214,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     """
 
     caller = tmp_path / "caller_project"
-    script = _write_helper_script(caller)
+    script = _write_sea_script(caller / "helper.py")
     tool = make_run_agent_tool(str(caller))
 
     # Channel mode: executes in the shared channel_work scratch dir,
@@ -266,7 +268,7 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     the way the daemon does.
     """
     caller = tmp_path / "caller_project"
-    script = _write_helper_script(caller)
+    script = _write_sea_script(caller / "helper.py")
     tool = make_run_agent_tool(str(caller))
     for agent, task in (("ntfy", "say hi"), ("cron", "run 'echo hi' every 5 minutes")):
         tool(task, agent)
@@ -427,7 +429,7 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     """
 
     caller = tmp_path / "caller_project"
-    script = _write_helper_script(caller)
+    script = _write_sea_script(caller / "helper.py")
     tool = make_run_agent_tool(str(caller))
 
     # Nothing passed: the daemon's defaults decide.
@@ -520,7 +522,7 @@ def test_dispatch_forwards_parent_identity(tmp_path: Path, daemon: RecordingDaem
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     caller = tmp_path / "caller_project"
-    script = _write_helper_script(caller)
+    script = _write_sea_script(caller / "helper.py")
 
     # A calling agent with a persisted task row: its task id and its
     # frontend tab id ride along, so the daemon runs the sub-task as
@@ -604,14 +606,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     # unreachable daemon, named by the script's file stem.
     import os
 
-    script = tmp_path / "my_researcher.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
+    script = _write_sea_script(tmp_path / "my_researcher.py")
     # ``workspace`` is a channel option: a ``BaseSea`` SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
     assert out == (
@@ -738,15 +733,7 @@ def test_relative_path_resolves_against_captured_work_dir(
     # the user's project: a relative agent path must resolve against
     # the CALLING task's work directory captured by the factory.
     project = tmp_path / "project"
-    (project / "agents").mkdir(parents=True)
-    script = project / "agents" / "reviewer.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
+    _write_sea_script(project / "agents" / "reviewer.py")
     elsewhere = tmp_path / "daemon_cwd"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -767,15 +754,7 @@ def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
     # A path-named agent's sub-task runs in the calling task's work
     # directory — no agent_work/channel_work scratch dir is created.
     project = tmp_path / "project"
-    project.mkdir()
-    script = project / "helper.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
+    script = _write_sea_script(project / "helper.py")
     out = make_run_agent_tool(str(project))("say hi", str(script))
     assert out.startswith("Error: the helper agent task could not run:")
     assert not (tmp_path / "agent_work").exists()
@@ -787,14 +766,7 @@ def test_standalone_relative_path_resolves_against_cwd(
 ) -> None:
     # Without a captured work directory (standalone tool), a relative
     # path resolves against the process working directory.
-    script = tmp_path / "local_agent.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
+    _write_sea_script(tmp_path / "local_agent.py")
     monkeypatch.chdir(tmp_path)
     out = run_agent("say hi", "local_agent.py")
     assert out.startswith("Error: the local_agent agent task could not run:")
@@ -828,14 +800,7 @@ def test_dispatch_uses_recorded_daemon_endpoint(
     assert _daemon_endpoint_file() == str(recorded)
     out = run_agent("say hi", "ntfy")
     assert "recorded-daemon.json" in out
-    script = tmp_path / "probe_agent.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
+    script = _write_sea_script(tmp_path / "probe_agent.py")
     out = run_agent("say hi", str(script))
     assert "recorded-daemon.json" in out
 
