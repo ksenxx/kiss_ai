@@ -402,6 +402,20 @@ class _MergeFlowMixin:
         # is in (the clients' file-link fallback directory and SCM
         # view); ``worktrees`` lists every pending worktree, one per
         # repository, which Merge / Discard / Do nothing all act on.
+        # Each worktree is probed once; the singular ``hasConflict`` is
+        # derived from the rows (``_conflict_of`` spawns 7 git processes
+        # per worktree).
+        rows = [
+            {
+                "repoRoot": str(wt.repo_root),
+                "branch": wt.branch,
+                "worktreeDir": str(wt.wt_dir),
+                "originalBranch": wt.original_branch,
+                "changedFiles": self._changed_files_of(wt),
+                "hasConflict": self._conflict_of(wt),
+            }
+            for wt in _pending_worktrees(wt_agent)
+        ]
         self.printer.broadcast({
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,
@@ -409,18 +423,8 @@ class _MergeFlowMixin:
             "worktreeWorkDir": str(wt_agent._wt_work_dir),
             "originalBranch": wt_agent._original_branch,
             "changedFiles": changed,
-            "hasConflict": self._check_merge_conflict(tab_id),
-            "worktrees": [
-                {
-                    "repoRoot": str(wt.repo_root),
-                    "branch": wt.branch,
-                    "worktreeDir": str(wt.wt_dir),
-                    "originalBranch": wt.original_branch,
-                    "changedFiles": self._changed_files_of(wt),
-                    "hasConflict": self._conflict_of(wt),
-                }
-                for wt in _pending_worktrees(wt_agent)
-            ],
+            "hasConflict": any(row["hasConflict"] for row in rows),
+            "worktrees": rows,
             "tabId": tab_id,
         })
 
@@ -428,6 +432,8 @@ class _MergeFlowMixin:
         """Check if merging any pending worktree branch into its original would conflict.
 
         Pure query — does **not** commit or otherwise mutate git state.
+        ``_present_pending_worktree`` derives the same answer from its
+        per-worktree rows; this is the direct accessor the tests use.
 
         Args:
             tab_id: The tab whose worktrees to check.

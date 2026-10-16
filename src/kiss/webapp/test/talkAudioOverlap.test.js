@@ -7,6 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {installSpeech, assertNoSpeech} = require('./speech_helpers');
 
 function installAudio(win, playResult) {
   const players = [];
@@ -28,29 +29,6 @@ function installAudio(win, playResult) {
   return players;
 }
 
-function installSpeech(win) {
-  const spoken = [];
-  win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
-    this.text = text;
-    this.lang = '';
-    spoken.push(this);
-  };
-  win.speechSynthesis = {
-    speak: u => spoken.push(u),
-    cancel: () => {},
-    resume: () => {},
-    getVoices: () => [],
-  };
-  return spoken;
-}
-
-function assertNoSpeech(spoken) {
-  assert.strictEqual(
-    spoken.length, 0,
-    'the robotic Web Speech voice must NEVER be used: ' +
-      JSON.stringify(spoken.map(u => u.text)));
-}
-
 const B64 = 'SUQzBAAAAAAAAA==';
 
 function talkEv(id, text, extra) {
@@ -62,7 +40,6 @@ function talkEv(id, text, extra) {
 
 function testSecondAudioWaitsForFirstEnded() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('q1', 'first clip', {audioB64: B64}));
@@ -80,13 +57,11 @@ function testSecondAudioWaitsForFirstEnded() {
   assert.strictEqual(players[1].playCalls, 1,
     'second clip plays after the first ends');
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
-  assertNoSpeech(spoken);
   console.log('PASS: second audio clip waits for the first to end');
 }
 
 function testThreeAudioClipsPlayInFifoOrder() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('f1', 'one', {audioB64: B64}));
@@ -99,7 +74,6 @@ function testThreeAudioClipsPlayInFifoOrder() {
   players[1].fire('ended');
   assert.strictEqual(players.length, 3, 'then the third');
   assert.strictEqual(players[2].playCalls, 1);
-  assertNoSpeech(spoken);
   console.log('PASS: three audio clips play strictly one after another');
 }
 
@@ -115,7 +89,7 @@ function testAudioErrorAdvancesQueue() {
   assert.strictEqual(players.length, 2,
     'a decode/playback error must advance to the next clip');
   assert.strictEqual(players[1].playCalls, 1);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'audio error event');
   console.log('PASS: audio error event advances the talk queue');
 }
 
@@ -134,13 +108,12 @@ function testClipLessTalkIsSilentAndAdvancesQueue() {
   assert.strictEqual(players.length, 2,
     'a clip-less talk must complete at once and advance the queue');
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'clip-less talk');
   console.log('PASS: clip-less talk stays silent and advances the queue');
 }
 
 function testLeadingClipLessTalkDoesNotDelayAudio() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('s1', 'no clip here'));
@@ -149,7 +122,6 @@ function testLeadingClipLessTalkDoesNotDelayAudio() {
   assert.strictEqual(players.length, 1,
     'audio must start immediately after the silent clip-less talk');
   assert.strictEqual(players[0].playCalls, 1);
-  assertNoSpeech(spoken);
   console.log('PASS: a leading clip-less talk never delays the next clip');
 }
 
@@ -170,7 +142,7 @@ async function testRejectedPlayDegradesSilentlyThenAdvances() {
     'a rejected play() must complete silently and advance the queue');
   assert.strictEqual(players[1].playCalls, 1);
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'rejected play()');
   console.log('PASS: rejected play() degrades to silence, queue advances');
 }
 
@@ -200,7 +172,7 @@ async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
   players[1].fire('ended');
   assert.strictEqual(players.length, 3,
     'queue advances once the playing clip actually finishes');
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'late error after rejected play()');
   console.log('PASS: late media error never double-advances the queue');
 }
 
@@ -216,7 +188,7 @@ function testAudioAbortAdvancesQueue() {
   assert.strictEqual(players.length, 2,
     'an aborted clip must advance to the next talk');
   assert.strictEqual(players[1].playCalls, 1);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'audio abort event');
   console.log('PASS: audio abort event advances the talk queue');
 }
 
@@ -231,7 +203,7 @@ function testUnspeakableTextDoesNotDeadlockQueue() {
   assert.strictEqual(players.length, 1,
     'an unspeakable talk must not block the queue');
   assert.strictEqual(players[0].playCalls, 1);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'unspeakable talk text');
   console.log('PASS: unspeakable talk text does not deadlock the queue');
 }
 
@@ -243,26 +215,23 @@ function testMissingAudioApiDegradesToSilence() {
   send(win, talkEv('n1', 'cannot play me', {audioB64: B64}));
   send(win, talkEv('n2', 'me neither', {audioB64: B64}));
 
-  assertNoSpeech(spoken);
   const players = installAudio(win, Promise.resolve());
   send(win, talkEv('n3', 'now playable', {audioB64: B64}));
   assert.strictEqual(players.length, 1,
     'the queue must stay usable after silent degradation');
   assert.strictEqual(players[0].playCalls, 1);
-  assertNoSpeech(spoken);
+  assertNoSpeech(spoken, 'missing Audio API');
   console.log('PASS: missing Audio API degrades to silence, no deadlock');
 }
 
 function testSingleAudioTalkStillPlaysImmediately() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('one', 'hello', {audioB64: B64}));
 
   assert.strictEqual(players.length, 1);
   assert.strictEqual(players[0].playCalls, 1);
-  assertNoSpeech(spoken);
   console.log('PASS: a single audio talk still plays immediately');
 }
 

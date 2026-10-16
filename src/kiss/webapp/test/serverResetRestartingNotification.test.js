@@ -6,69 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const {JSDOM} = require('jsdom');
+const {makePage, send, waitFor} = require('./simplify2_harness');
 
 const SERVER_RESET_MESSAGE = 'Restarting the KISS Sorcar web server…';
 
-function makeDomPage() {
-  const mediaDir = path.join(__dirname, '..', 'media');
-  let html = fs.readFileSync(path.join(mediaDir, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => undefined,
-      setState: () => {},
-    };
-  };
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'panelCopy.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  return {win, posted, close: () => win.close()};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-async function waitFor(predicate, message) {
-  for (let i = 0; i < 100; i++) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise(r => setTimeout(r, 20));
-  }
-  throw new Error(message || 'waitFor timed out');
-}
-
 async function runTests() {
   {
-    const wv = makeDomPage();
+    const wv = makePage();
     try {
       send(wv.win, {
         type: 'notification',
@@ -106,12 +50,12 @@ async function runTests() {
         );
       }
     } finally {
-      wv.close();
+      wv.win.close();
     }
   }
 
   {
-    const wv = makeDomPage();
+    const wv = makePage();
     try {
       send(wv.win, {type: 'notice', text: SERVER_RESET_MESSAGE});
       const note = await waitFor(
@@ -131,7 +75,7 @@ async function runTests() {
         'control: legacy `notice` event must NOT raise a top-right notification toast',
       );
     } finally {
-      wv.close();
+      wv.win.close();
     }
   }
 }

@@ -257,16 +257,6 @@
   }
 
   /**
-   * Seal the ticking panels of the tab a terminal event names.
-   *
-   * The tab's transcript is #output when it is on screen and its
-   * detached fragment when it is hidden; a terminal event for a tab
-   * this client no longer has is a no-op.
-   *
-   * @param {string|undefined} evTabId The terminal event's tab id.
-   * @param {number|undefined} endTs The terminal event's timestamp.
-   */
-  /**
    * The transcript of tab *evTabId*: #output when it is the tab on
    * screen (or no tab is named), else the tab's parked fragment; null
    * for a tab this page does not have.
@@ -277,6 +267,16 @@
     return tab ? tab.outputFragment : null;
   }
 
+  /**
+   * Seal the ticking panels of the tab a terminal event names.
+   *
+   * The tab's transcript is #output when it is on screen and its
+   * detached fragment when it is hidden; a terminal event for a tab
+   * this client no longer has is a no-op.
+   *
+   * @param {string|undefined} evTabId The terminal event's tab id.
+   * @param {number|undefined} endTs The terminal event's timestamp.
+   */
   function sealTabPanelTimes(evTabId, endTs) {
     sealPanelTimes(tabTranscript(evTabId), endTs);
   }
@@ -1403,9 +1403,7 @@
     // visibletask-coverage:end
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
-    // autoscroll-coverage:start
     saveLockedSubpanelOffsets();
-    // autoscroll-coverage:end
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     // visibletask-coverage:start
@@ -1539,17 +1537,14 @@
     // report: viewing a file leaves the represented chat untouched.
     reportChatTab(tab.id);
     O.innerHTML = '';
-    // autoscroll-coverage:start
     // A switched-to (or newly created) tab is a fresh view, so any
     // scroll lock the user engaged on the previous tab's chat no
     // longer applies.
     resetUserScrollLock();
-    // autoscroll-coverage:end
     if (tab.outputFragment) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
       reviveActivePanelTimes(O);
-      // autoscroll-coverage:start
       // The detach reset the scroll offsets of the transcript's
       // subpanels (real browsers destroy detached scrollers): put the
       // locked ones back where the user was reading, then land the
@@ -1557,7 +1552,6 @@
       // streamed into the fragment while the tab was hidden.
       restoreLockedSubpanelOffsets();
       autoScrollLatestEventPanel(O.lastElementChild);
-      // autoscroll-coverage:end
     }
     currentTaskSettings = tab.taskSettings || null;
     currentTaskName = (tab.taskText || '').trim();
@@ -2298,9 +2292,7 @@
       tabMachines.delete(id);
       tabMachinePicked.delete(id);
       tabBoundMachines.delete(id);
-      // report-coverage:start
       discardReadyReports(id);
-      // report-coverage:end
       if (!fromServer) {
         armCloseShield(id);
         api.closeTab({tabId: id});
@@ -2665,7 +2657,6 @@
     syncTerminalTabVisibility(null);
   }
 
-  // browser-tab-coverage:start
   // ---- The daemon machine's browser, streamed as a tab ---------------
   //
   // kiss/server/browser_tab.py announces every page of the browser it
@@ -2675,7 +2666,12 @@
   // closeBrowserTab.  The view itself lives in browserTab.js; this
   // block is the tab plumbing.  Only the surface showing the tab
   // receives frames: showContentTab / hideContentArea report the
-  // visible size through browserViewport.
+  // visible size through browserViewport.  For a chat bound to a
+  // registered machine (the header's drop-down) the page opens in
+  // THAT machine's browser: browserOpen carries `machine`, the daemon
+  // (kiss/server/remote_views.py) relays the machine's events stamped
+  // `machine` with the tab id namespaced `browser__N@machine`, and
+  // every tab-addressed command finds its machine from the id.
 
   function syncBrowserTabVisibility(shownTab) {
     tabs.forEach(t => {
@@ -2701,10 +2697,15 @@
       tab.browserView.resubscribe();
     }
     if (!tab) {
-      tab = makeTab(browserTabTitle(ev));
+      // A page of a registered machine's browser (kiss/server/
+      // remote_views.py relays it, stamped with the machine): the tab
+      // names the machine, and its "+" opens the next page there.
+      const machine = String(ev.machine || '');
+      tab = makeTab(viewTabTitle(browserTabTitle(ev), machine));
       tab.id = ev.tab_id;
       tab.isContentTab = true;
       tab.isBrowserTab = true;
+      tab.browserMachine = machine;
       tab.contentPath = ev.url || '';
       tabs.push(tab);
       const area = ensureContentArea();
@@ -2715,7 +2716,8 @@
       area.appendChild(holder);
       tab.contentViewEl = holder;
       tab.browserView = window.BrowserTabView.create(tab.id, {
-        send: msg => api.send(msg),
+        send: msg =>
+          api.send(onMachine(msg, msg.type === 'browserOpen' ? machine : '')),
       });
       holder.appendChild(tab.browserView.el);
     }
@@ -2737,12 +2739,19 @@
   // The daemon's snapshot of live browser pages, sent on every `ready`:
   // tabs it no longer lists were closed while this surface was away
   // (or the daemon restarted), so they close here too.
+  // The `remote` snapshot (kiss/server/remote_views.py) lists the pages
+  // of every remote machine, each stamped `machine`, and reconciles
+  // all the remote tabs (a machine whose stream is gone has none left
+  // here); the daemon's own snapshot only the local ones.
   function reconcileBrowserTabs(ev) {
+    const remote = !!ev.remote;
     const live = new Set((ev.tabs || []).map(t => t.tab_id));
     tabs
-      .filter(t => t.isBrowserTab && !live.has(t.id))
+      .filter(
+        t => t.isBrowserTab && !!t.browserMachine === remote && !live.has(t.id),
+      )
       .forEach(t => closeTab(t.id, false, true));
-    (ev.tabs || []).forEach(openBrowserTab);
+    (ev.tabs || []).forEach(t => openBrowserTab(t));
   }
 
   function applyBrowserState(ev) {
@@ -2750,13 +2759,25 @@
     if (!tab || !tab.browserView) return;
     tab.browserView.state(ev);
     tab.contentPath = ev.url || '';
-    const title = browserTabTitle(ev);
+    const title = viewTabTitle(browserTabTitle(ev), tab.browserMachine || '');
     if (title !== tab.title) {
       tab.title = title;
       renderTabBar();
     }
   }
-  // browser-tab-coverage:end
+
+  /**
+   * The title of a terminal or browser tab: `title`, followed by the
+   * machine's label when the shell or the page is on a registered
+   * machine.
+   *
+   * @param {string} title The tab's own title.
+   * @param {string} machine The registered machine's name, '' for this one.
+   * @returns {string} The title shown in the tab bar.
+   */
+  function viewTabTitle(title, machine) {
+    return machine ? title + ' (' + machineLabel(machine) + ')' : title;
+  }
 
   // ---- A shell on the daemon machine, as a tab (remote webapp) -------
   //
@@ -2767,6 +2788,9 @@
   // integrated terminal belongs to its window: the daemon streams its
   // output to the connection that opened it and nowhere else.  The tab
   // id is minted here and names the shell in every command and event.
+  // For a chat bound to a registered machine the shell runs on that
+  // machine instead: terminalOpen carries `machine`, and the daemon
+  // (kiss/server/remote_views.py) forwards the tab's commands there.
 
   function terminalTabCount() {
     return tabs.filter(t => t.isTerminalTab).length;
@@ -2775,21 +2799,26 @@
   function openTerminalTab() {
     if (!window.TerminalTabView) return;
     const n = terminalTabCount() + 1;
-    const tab = makeTab(n > 1 ? 'Terminal ' + n : 'Terminal');
-    tab.isContentTab = true;
-    tab.isTerminalTab = true;
-    tab.contentNotAFile = true;
-    tab.contentPath = '';
     // The shell starts in the workspace the surface is browsing (the
     // chat's folder), which the side views keep showing for this tab
-    // as they do for a file opened from that chat.  The shell is this
-    // machine's: for a chat bound to a remote machine it starts in
-    // this daemon's working directory.
+    // as they do for a file opened from that chat.  For a chat bound
+    // to a registered machine (the header's drop-down) the shell runs
+    // on that machine, in the chat's folder there (kiss/server/
+    // remote_views.py forwards the commands), and the tab names it.
     const owner = getTab(chatTargetTabId());
+    const machine = owner ? tabMachine(owner.id) : '';
+    const tab = makeTab(
+      viewTabTitle(n > 1 ? 'Terminal ' + n : 'Terminal', machine),
+    );
+    tab.isContentTab = true;
+    tab.isTerminalTab = true;
+    tab.terminalMachine = machine;
+    tab.contentNotAFile = true;
+    tab.contentPath = '';
     tab.ownerTabId = owner ? owner.id : '';
-    tab.ownerBrowseMachine = owner ? tabMachine(owner.id) : '';
+    tab.ownerBrowseMachine = machine;
     tab.ownerBrowseWorkDir = owner ? tabBrowseWorkDir(owner.id) : '';
-    const workDir = sidebarMachine() ? workDirForTab('') : sidebarWorkDir();
+    const workDir = machine ? machineDirs(machine).workDir : sidebarWorkDir();
     tabs.push(tab);
     const area = ensureContentArea();
     const holder = document.createElement('div');
@@ -2801,6 +2830,7 @@
     tab.terminalView = window.TerminalTabView.create(tab.id, {
       send: msg => api.send(msg),
       workDir: workDir,
+      machine: machine,
     });
     holder.appendChild(tab.terminalView.el);
     switchToTab(tab.id);
@@ -3688,10 +3718,9 @@
     return action ? action.isSupported() : true;
   }
 
+  /** The platform's label for a menu item's `[win, mac, linux]` keys. */
   function contentMenuKeyLabel(keys) {
-    if (!keys) return '';
-    if (IS_MAC) return keys[1];
-    return (IS_LINUX && keys[2]) || keys[0];
+    return keys ? keyLabel(keys[0], keys[1], keys[2]) : '';
   }
 
   function runContentMenuItem(item, tab) {
@@ -4216,7 +4245,6 @@
   // navigation takes the page down (see persistTabState).
   window.addEventListener('pagehide', persistTabState);
 
-  // ctxmenu-coverage:start
   // An opened .html file renders inside an iframe sandboxed with
   // `allow-scripts` only, i.e. an opaque origin the page cannot script.
   // The Copy / Select All menu therefore has to be shipped *into* that
@@ -4273,7 +4301,6 @@
       shouldOpen: contentContextMenuAllowed,
     });
   }
-  // ctxmenu-coverage:end
 
   // A Ctrl/Cmd+S pressed while focus sits INSIDE a preview iframe
   // never reaches this document's keydown listener: the sandboxed
@@ -4366,9 +4393,7 @@
     iframe.className = 'content-html-frame';
     iframe.setAttribute('sandbox', 'allow-scripts');
     if (saveKeyBridge) html = withContentSaveKeyBridge(html || '');
-    // ctxmenu-coverage:start
     iframe.srcdoc = withMobileSwipe(withContentContextMenu(html));
-    // ctxmenu-coverage:end
     view.appendChild(iframe);
     return iframe;
   }
@@ -4461,14 +4486,12 @@
       renderCodeContent(tab, dirHolder, ev.content || '', 'plaintext', false);
       return;
     }
-    // pdfview-coverage:start
     // A PDF or an image the daemon served as bytes: pdfView.js draws
     // the PDF's pages, an <img> shows the picture.
     if (ev.binary) {
       renderBinaryContent(tab, view, ev);
       return;
     }
-    // pdfview-coverage:end
     // Text that is not a file on disk (a commit's patch, search
     // results, a comparison): a read-only viewer, highlighted by the
     // language hint, never previewed or edited.
@@ -4499,7 +4522,6 @@
     // carries no line, like VS Code.
     const line = parseInt(ev.line, 10);
     tab.contentRevealLine = line > 0 ? line : 0;
-    // mdlink-coverage:start
     // A clicked .md/.markdown link arrives as raw markdown text — unlike
     // a finished-task report, whose markdown openReadyReportTabs already
     // converted to HTML and flagged isReport. Render its converted
@@ -4511,14 +4533,11 @@
       renderPreviewableContent(tab, view, ev, true);
       return;
     }
-    // mdlink-coverage:end
-    // report-coverage:start
     // A finished task's report never gets the Edit source toggle: a
     // markdown report's content is the CONVERTED HTML, not the bytes
     // of the file on disk, so saving it back would overwrite the
     // markdown source with rendered HTML.
     if (ev.isReport) {
-      // report-coverage:end
       // The file's own text (ev.source) is what a completion sees as
       // the buffer, never the converted HTML.
       tab.contentSourceText = ev.source || '';
@@ -4552,7 +4571,6 @@
     );
   }
 
-  // pdfview-coverage:start
   /**
    * Show a binary file's bytes (base64 in *ev*) in *view*: a PDF in the
    * pdf.js viewer (pdfView.js), an image as a picture, anything else as
@@ -4610,7 +4628,6 @@
     link.textContent = 'Download ' + (ev.name || 'file');
     holder.appendChild(link);
   }
-  // pdfview-coverage:end
 
   // mayFocus tells whether this content tab is allowed to become the
   // active tab. It defaults to true because every caller but one acts on
@@ -4658,12 +4675,16 @@
       return;
     }
     const path = ev.path || '';
-    // The machine the file is on: the one the daemon stamped the reply
-    // with (a file of a remote machine's Explorer), else the one the
-    // requesting tab's files are on.
+    // The machine the file is on: the daemon stamps every reply a
+    // registered machine answered, so an unstamped reply is a file of
+    // this machine -- never the drop-down's unsent pick, which only
+    // says where the tab's NEXT task goes.  A report (a synthetic
+    // event, no reply) is on the machine the task ran on.
     const machine = ev.machine
       ? String(ev.machine)
-      : tabWorkspaceMachine(ownerTab);
+      : ev.isReport
+        ? tabBoundMachine(owner)
+        : '';
     // One content tab per path, like one editor per file in VS Code --
     // per machine: the same path on two machines is two files.
     const existing = tabs.find(t => {
@@ -4735,7 +4756,6 @@
     else renderTabBar();
   }
 
-  // report-coverage:start
   function reportPathInfo(p) {
     const raw = String(p || '').split(/[\\/]/);
     const segs = [];
@@ -4853,7 +4873,6 @@
       );
     });
   }
-  // report-coverage:end
 
   const tabCtxMenu = document.createElement('div');
   tabCtxMenu.id = 'tab-context-menu';
@@ -5037,11 +5056,9 @@
       closeTabContextMenu();
     }
   });
-  // ctxmenu-coverage:start
   // The handle's close() is what the sidebar's tree menus call so only
   // one context menu is ever open (showTreeMenu).
   const parentContentContextMenu = installParentContentContextMenu();
-  // ctxmenu-coverage:end
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeTabContextMenu();
   });
@@ -5309,7 +5326,6 @@
     });
   }
 
-  // tabmirror-coverage:start
   // Tab ids announced to the daemon in an `openTab` whose `tabs_state`
   // echo has not arrived yet, mapped to how many snapshots have since
   // arrived WITHOUT the id. A snapshot broadcast inside that window
@@ -5511,9 +5527,7 @@
       tabMachines.delete(id);
       tabMachinePicked.delete(id);
       tabBoundMachines.delete(id);
-      // report-coverage:start
       discardReadyReports(id);
-      // report-coverage:end
     });
     tabs = next;
     if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
@@ -5572,7 +5586,6 @@
     renderTabBar();
     persistTabState();
   }
-  // tabmirror-coverage:end
 
   // drawer-coverage:start
   function isMobileRemoteWebApp() {
@@ -6191,7 +6204,6 @@
   setupMetaSections();
   // metasections-coverage:end
 
-  // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
   // TASK UPDATE: the /ask agent's (src/kiss/agents/seas/ask/ask_sea.py)
   // short answer to "what has this task done so far, and what are its
@@ -6582,7 +6594,6 @@
     }
     if (!hidden) refreshSidebarDataViews(false);
   }
-  // metainfo-coverage:end
 
   /**
    * Write one #meta-* value's display text ('—' for an empty *text*)
@@ -7472,6 +7483,18 @@
   }
 
   /**
+   * The machine the chat `tabId` SHOWS lives on: the daemon's binding,
+   * never the drop-down's unsent pick (which only says where the tab's
+   * next task goes).  A transcript's file links belong to this machine.
+   *
+   * @param {string} tabId The tab.
+   * @returns {string} The registered machine's name, '' for this machine.
+   */
+  function tabBoundMachine(tabId) {
+    return tabBoundMachines.get(tabId) || '';
+  }
+
+  /**
    * The machine the active chat's next task runs on: the registered
    * machine's name, '' for this machine (and while a content tab is
    * shown).
@@ -8227,7 +8250,6 @@
   }
   // sidebarpanels-coverage:end
 
-  // workspaceviews-coverage:start
   // ---- Workspace views: the Explorer and Source Control sections ----
   //
   // The remote webapp's task-info panel carries two collapsible
@@ -9485,9 +9507,28 @@
     );
   }
 
+  /** The parts of a gitStatus reply the Source Control view shows. */
+  function scmStatusKey(status) {
+    return JSON.stringify([
+      status.repo,
+      status.branch,
+      status.error,
+      status.changes,
+      status.worktrees,
+    ]);
+  }
+
   function handleGitStatus(ev) {
     if (String(ev.token || '') !== String(scmGeneration)) return;
+    // The badge poll's usual answer repeats the status on screen (same
+    // request, same tree): rebuilding the lists for it would drop the
+    // keyboard focus and the open context menu every 5 s.
+    const repeat =
+      !!scmStatus &&
+      String(scmStatus.token || '') === String(ev.token || '') &&
+      scmStatusKey(scmStatus) === scmStatusKey(ev);
     scmStatus = ev;
+    if (repeat) return;
     renderScmChanges();
     if (scmPairComplete()) renderScmGraph();
   }
@@ -9510,10 +9551,13 @@
    * One tick of the badge poll: ask git for the sidebar workspace's
    * status under the current token, so the reply repaints the changes
    * and the badge; a workspace the view has not loaded yet is loaded
-   * whole instead.
+   * whole instead.  Nothing is asked while the badge is off screen
+   * (the task-info panel closed or hidden): the first tick after the
+   * panel comes back catches up.
    */
   function pollScmBadge() {
     if (document.hidden || !daemonConnected) return;
+    if (!metaPanelIsOpen() || !scmSection || scmSection.hidden) return;
     const wd = sidebarWorkDir();
     const machine = sidebarMachine();
     if (!wd) return;
@@ -10427,9 +10471,19 @@
    * repeating the action refreshes it instead of opening a second one.
    * *ownerTabId* is the tab the request was sent as (the reply echoes
    * it): a reply landing after a tab switch opens in that tab's
-   * workspace, not the current one's.
+   * workspace, not the current one's.  *machine* is the registered
+   * machine that answered (the daemon stamps its reply), '' / undefined
+   * for this machine: the same repository path on two machines is two
+   * results, so each keeps its own tab.
    */
-  function openTextResultTab(key, name, text, languageName, ownerTabId) {
+  function openTextResultTab(
+    key,
+    name,
+    text,
+    languageName,
+    ownerTabId,
+    machine,
+  ) {
     handleFileContent(
       {
         path: key,
@@ -10437,6 +10491,7 @@
         content: text,
         languageName: languageName || '',
         isVirtual: true,
+        machine: machine || '',
       },
       true,
       ownerTabId || activeTabId,
@@ -10540,6 +10595,7 @@
           text,
         '',
         ev.tabId,
+        ev.machine,
       );
       return;
     }
@@ -10550,6 +10606,7 @@
         ev.text || '',
         'x.diff',
         ev.tabId,
+        ev.machine,
       );
       return;
     }
@@ -11278,6 +11335,7 @@
         text,
         'x.diff',
         ev.tabId,
+        ev.machine,
       );
       return;
     }
@@ -11289,6 +11347,7 @@
         text,
         pathBaseName(ev.path),
         ev.tabId,
+        ev.machine,
       );
       return;
     }
@@ -11308,6 +11367,7 @@
       text,
       'x.diff',
       ev.tabId,
+      ev.machine,
     );
   }
 
@@ -11341,6 +11401,10 @@
         languageName: name,
         isVirtual: true,
         isDiff: true,
+        // The machine that answered (the daemon stamps its reply): the
+        // same file of the same commit on another machine is another
+        // diff, with its own tab.
+        machine: ev.machine || '',
       },
       true,
       // The tab that asked for the diff owns it (the reply echoes the
@@ -12493,7 +12557,6 @@
     }
     refreshSidebarDataViews(false);
   }
-  // workspaceviews-coverage:end
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -13248,11 +13311,9 @@
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
     forgetPendingFileLinks(activeTabId);
     O.innerHTML = '';
-    // autoscroll-coverage:start
     // The output was rebuilt from scratch (a new task's `clear`, a
     // replay, or a welcome reset): any user scroll lock is stale.
     resetUserScrollLock();
-    // autoscroll-coverage:end
   }
 
   function removeSpinner() {
@@ -13582,20 +13643,26 @@
   const _pendingPathChecks = new Set();
   const _pendingFileLinkSpans = new Set();
 
-  // share-coverage:start
   // Raised while a share export replays persisted tasks into detached
   // containers: their file-path spans can never be clicked, so
   // registering them would leak detached nodes into
   // _pendingFileLinkSpans and post needless checkPaths commands.
   let _suppressFileLinkChecks = false;
-  // share-coverage:end
 
   // tableak-coverage:start
   // Keyed by tab as well as workDir: a check in flight for one tab must
   // not suppress the same check for another, or that tab's links stay
   // permanently inert.
-  function _fileLinkCacheKey(tabId, workDir, p) {
-    return String(tabId) + '\u0000' + workDir + '\u0000' + p;
+  function _fileLinkCacheKey(tabId, workDir, p, machine) {
+    return (
+      String(tabId) +
+      '\u0000' +
+      workDir +
+      '\u0000' +
+      (machine || '') +
+      '\u0000' +
+      p
+    );
   }
   // tableak-coverage:end
 
@@ -13643,9 +13710,7 @@
   }
 
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
-    // share-coverage:start
     if (_suppressFileLinkChecks) return;
-    // share-coverage:end
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
     const wd =
@@ -13653,6 +13718,12 @@
     // tableak-coverage:start
     const owner = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
+    // The link stands for a file of the machine the shown chat runs
+    // on (the daemon's binding, not the drop-down's unsent pick): the
+    // check goes there, and so does a click's openFile.  The machine
+    // is stamped on the span so a later re-check and the reply keep
+    // the same identity whatever the drop-down says by then.
+    const machine = tabBoundMachine(owner);
     const toCheck = [];
     for (const span of spans) {
       const p = _stripLineSuffix(span.getAttribute('data-path-candidate'));
@@ -13660,34 +13731,44 @@
       // tableak-coverage:start
       span.setAttribute('data-path-tab', String(owner));
       // tableak-coverage:end
+      if (machine) span.setAttribute('data-path-machine', machine);
       _pendingFileLinkSpans.add(span);
-      const key = _fileLinkCacheKey(owner, wd, p);
+      const key = _fileLinkCacheKey(owner, wd, p, machine);
       if (!_pendingPathChecks.has(key)) {
         _pendingPathChecks.add(key);
         toCheck.push(p);
       }
     }
-    if (toCheck.length) {
-      api.send({
-        type: 'checkPaths',
-        paths: toCheck,
-        workDir: wd,
-        tabId: owner,
-      });
-    }
+    if (toCheck.length) sendCheckPaths(owner, wd, machine, toCheck);
+  }
+
+  /**
+   * Ask which of *paths* (relative to *wd*) exist for tab *owner* on
+   * *machine* ('' = this daemon).  For a registered machine the daemon
+   * forwards the `checkPaths` stamped `machine` there and stamps the
+   * `pathsExist` reply the same.
+   */
+  function sendCheckPaths(owner, wd, machine, paths) {
+    const cmd = {type: 'checkPaths', paths, workDir: wd, tabId: owner};
+    if (machine) cmd.machine = machine;
+    api.send(cmd);
   }
 
   function handlePathsExist(ev) {
     const results = ev.results;
     if (!results || typeof results !== 'object') return;
     const workDir = typeof ev.workDir === 'string' ? ev.workDir : '';
+    // A reply from a registered machine is stamped `machine`; it
+    // resolves only the spans checked there, and this daemon's reply
+    // only the spans of this machine.
+    const machine = typeof ev.machine === 'string' ? ev.machine : '';
     // tableak-coverage:start
     // The reply resolves only the spans of the tab that asked. Sweeping
     // every span in the document would promote or grey out another
     // conversation's file links whenever both tabs share a workspace.
     const owner = ev.tabId === undefined ? activeTabId : ev.tabId;
     for (const p of Object.keys(results)) {
-      _pendingPathChecks.delete(_fileLinkCacheKey(owner, workDir, p));
+      _pendingPathChecks.delete(_fileLinkCacheKey(owner, workDir, p, machine));
     }
     // tableak-coverage:end
     const spans = new Set(_pendingFileLinkSpans);
@@ -13701,6 +13782,7 @@
       }
       // tableak-coverage:end
       if ((span.getAttribute('data-path-wd') || '') !== workDir) continue;
+      if ((span.getAttribute('data-path-machine') || '') !== machine) continue;
       // A span re-registered by recheckFileLinksForTab() carries
       // data-path or data-path-missing instead of data-path-candidate;
       // _fileLinkPath() reads whichever state attribute holds the path.
@@ -13781,19 +13863,22 @@
       if (!raw) continue;
       const owner = span.getAttribute('data-path-tab') || '';
       const wd = span.getAttribute('data-path-wd') || '';
+      const machine = span.getAttribute('data-path-machine') || '';
       const p = _stripLineSuffix(raw);
-      const key = _fileLinkCacheKey(owner, wd, p);
+      const key = _fileLinkCacheKey(owner, wd, p, machine);
       if (_pendingPathChecks.has(key)) continue;
       _pendingPathChecks.add(key);
-      const groupKey = owner + '\u0000' + wd;
+      const groupKey = owner + '\u0000' + wd + '\u0000' + machine;
       let group = groups.get(groupKey);
       if (!group) {
-        group = {type: 'checkPaths', paths: [], workDir: wd, tabId: owner};
+        group = {owner, wd, machine, paths: []};
         groups.set(groupKey, group);
       }
       group.paths.push(p);
     }
-    for (const group of groups.values()) api.send(group);
+    for (const g of groups.values()) {
+      sendCheckPaths(g.owner, g.wd, g.machine, g.paths);
+    }
   }
 
   /**
@@ -13830,18 +13915,22 @@
         const raw = _fileLinkPath(span);
         if (!raw) continue;
         const wd = span.getAttribute('data-path-wd') || '';
+        const machine = span.getAttribute('data-path-machine') || '';
         const p = _stripLineSuffix(raw);
         _pendingFileLinkSpans.add(span);
-        _pendingPathChecks.add(_fileLinkCacheKey(owner, wd, p));
-        let group = groups.get(wd);
+        _pendingPathChecks.add(_fileLinkCacheKey(owner, wd, p, machine));
+        const groupKey = wd + '\u0000' + machine;
+        let group = groups.get(groupKey);
         if (!group) {
-          group = {type: 'checkPaths', paths: [], workDir: wd, tabId: id};
-          groups.set(wd, group);
+          group = {wd, machine, paths: []};
+          groups.set(groupKey, group);
         }
         if (group.paths.indexOf(p) < 0) group.paths.push(p);
       }
     }
-    for (const group of groups.values()) api.send(group);
+    for (const g of groups.values()) {
+      sendCheckPaths(id, g.wd, g.machine, g.paths);
+    }
   }
 
   /**
@@ -14438,7 +14527,6 @@
       }
     }
     _rpClosedSubagentTabs.delete(newTabId);
-    // report-coverage:start
     // Reports this sub-agent already wrote are pending under its old
     // tab id; they must still open when the sub-agent finishes.
     const oldReports = readyReportsByTab[reportTabKey(oldId)];
@@ -14446,7 +14534,6 @@
       delete readyReportsByTab[reportTabKey(oldId)];
       readyReportsByTab[reportTabKey(newTabId)] = oldReports;
     }
-    // report-coverage:end
     if (activeTabId === oldId) activeTabId = newTabId;
     // A retag is an identity rename of the tab already on screen, not
     // a tab switch: the scroll tracker must follow the rename or the
@@ -14739,7 +14826,6 @@
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
-  // imagepanel-coverage:start
   /**
    * Whether a panel contains an image or video, including rendered
    * Markdown and HTML. Automatic folding leaves these panels readable;
@@ -14751,7 +14837,6 @@
   function panelShowsMedia(panel) {
     return !!panel.querySelector('img, video');
   }
-  // imagepanel-coverage:end
 
   /**
    * True for a panel that no automatic pass ever folds or hides: a
@@ -14960,7 +15045,6 @@
       '">' +
       rb +
       '</div>';
-    // fmtcopy-coverage:start
     // An HTML summary's source went into dataset.rawText above only as
     // a placeholder: the copy button must copy the panel as the reader
     // SEES it (formatted text), never the raw HTML markup, so the
@@ -14977,7 +15061,6 @@
         );
       }
     }
-    // fmtcopy-coverage:end
     hlBlock(rc);
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
@@ -15137,7 +15220,6 @@
     return html;
   }
 
-  // resultimages-coverage:start
   /**
    * Render the images a tool call generated — server-embedded as
    * base64 payloads on the tool_result event (see
@@ -15172,7 +15254,6 @@
     }
     if (!wrap.childElementCount) return;
     container.appendChild(wrap);
-    // imagepanel-coverage:start
     // The panel now shows a picture: if an automatic pass folded it
     // before the result arrived (an older panel of a streaming
     // transcript), open it again -- see panelShowsMedia.
@@ -15181,11 +15262,8 @@
       panel.classList.remove('collapsed');
       collapsePreview(panel);
     }
-    // imagepanel-coverage:end
   }
-  // resultimages-coverage:end
 
-  // autoscroll-coverage:start
   // Auto-scroll: the chat follows the tail of the latest event panel
   // — unless the user
   // scroll lock below is engaged — and every scrollable subpanel of an
@@ -15345,14 +15423,63 @@
     }
     autoScrollChat();
   }
-  // autoscroll-coverage:end
+
+  // A character that can continue a file path (the character class of
+  // _LINK_FILEPATH_RE): a chunk starting with one may be the rest of a
+  // path whose head ended the previous chunk.
+  const _PATH_CHAR_RE = /^[A-Za-z0-9_.\\/+:-]/;
+  // A text node made only of path characters: the tail the matcher
+  // left outside a path span ("." after "/a/b", ":" or ":1" after
+  // "/a/b.py") that the next chunk may complete ("txt", "2").
+  const _PATH_TAIL_RE = /^[A-Za-z0-9_.\\/+:-]+$/;
+
+  /** Whether *node* is a file-link span made by linkifyFilePaths(). */
+  function _isPathSpan(node) {
+    return !!(
+      node &&
+      node.nodeType === 1 &&
+      node.dataset &&
+      (node.dataset.path ||
+        node.dataset.pathCandidate ||
+        node.dataset.pathMissing)
+    );
+  }
+
+  /**
+   * Append streamed *text* to *el* as a text node.  Never written
+   * through textContent: that would flatten the file-link spans
+   * linkifyFilePaths() made of the earlier chunks, and the next
+   * linkify pass would re-ask the daemon about every one.  The text
+   * merges into a trailing text node, and a path span the previous
+   * chunk ended inside -- or just after, leaving only path characters
+   * ("/a/b" + "." or "/a/b.py" + ":1") between the span and the new
+   * text -- is unwrapped first, so a path split across two chunks is
+   * matched (and checked) once, whole.
+   */
+  function appendStreamedText(el, text) {
+    if (_PATH_CHAR_RE.test(text)) {
+      let last = el.lastChild;
+      if (last && last.nodeType === 3 && _PATH_TAIL_RE.test(last.nodeValue)) {
+        last = last.previousSibling;
+      }
+      if (_isPathSpan(last)) {
+        el.replaceChild(document.createTextNode(last.textContent), last);
+      }
+    }
+    el.appendChild(document.createTextNode(text));
+    // Merge the trailing text nodes (the unwrapped span, its tail and
+    // the new text) so the matcher sees the path whole.
+    let last = el.lastChild;
+    while (last.previousSibling && last.previousSibling.nodeType === 3) {
+      last.previousSibling.appendData(last.nodeValue);
+      el.removeChild(last);
+      last = el.lastChild;
+    }
+  }
 
   /** Flush the buffered thinking text of *tState* into its `.think` block. */
   function appendThinkText(tState) {
-    const el = tState.thinkEl;
-    const last = el.lastChild;
-    if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
-    else el.appendChild(document.createTextNode(tState.thinkBuf));
+    appendStreamedText(tState.thinkEl, tState.thinkBuf);
     tState.thinkBuf = '';
   }
 
@@ -15389,7 +15516,7 @@
   function closeBashPanel(tState, workDir, ownerTabId) {
     let flushed = null;
     if (tState.bashPanel && tState.bashBuf) {
-      tState.bashPanel.textContent += tState.bashBuf;
+      appendStreamedText(tState.bashPanel, tState.bashBuf);
       tState.bashBuf = '';
       linkifyFilePaths(tState.bashPanel, workDir, ownerTabId);
       flushed = tState.bashPanel;
@@ -15432,9 +15559,7 @@
                 return;
               }
               appendThinkText(tState);
-              // autoscroll-coverage:start
               autoScrollStreamed(tState.thinkEl);
-              // autoscroll-coverage:end
             });
           }
         }
@@ -15445,9 +15570,7 @@
           tState.thinkRaf = 0;
           if (tState.thinkEl && tState.thinkBuf) {
             appendThinkText(tState);
-            // autoscroll-coverage:start
             autoScrollStreamed(tState.thinkEl);
-            // autoscroll-coverage:end
           }
           tState.thinkBuf = '';
         }
@@ -15473,9 +15596,7 @@
             tState.txtRaf = 0;
             if (tState.txtNode && tState.txtPending) {
               tState.txtNode.appendData(tState.txtPending);
-              // autoscroll-coverage:start
               autoScrollStreamed(tState.txtEl);
-              // autoscroll-coverage:end
             }
             tState.txtPending = '';
           });
@@ -15505,16 +15626,12 @@
         }
         break;
       case 'tool_call': {
-        // autoscroll-coverage:start
         // The flushed text belongs to the PREVIOUS tool's bash
         // subpanel; scroll it now, before this new tool call
         // becomes the latest event panel.
         const flushedBash = closeBashPanel(tState, evWorkDir, evOwnerTab);
         if (flushedBash) autoScrollStreamed(flushedBash);
-        // autoscroll-coverage:end
-        // report-coverage:start
         stashPendingReport(tState, ev);
-        // report-coverage:end
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
         const hdrName = mkEl('span', 'tc-h-name');
@@ -15674,7 +15791,6 @@
           c.classList.add('collapsed');
         addCollapse(c, hdr, ev.ts);
         collapsePreview(c);
-        // toolstop-coverage:start
         // The panel's own Stop: interrupts just this tool call on the
         // task that owns this transcript (a sub-agent tab names the
         // sub-agent's own task); the event's callId names exactly this
@@ -15691,7 +15807,6 @@
             api.interruptTool(req);
           });
         }
-        // toolstop-coverage:end
         target.appendChild(c);
         if (isSummary) {
           const sub = mkEl('div', 'summary-sub');
@@ -15781,12 +15896,9 @@
             rpCollapsePanel(fanout);
           }
         }
-        // report-coverage:start
         if (ev.is_error) tState.pendingReport = null;
         else confirmReadyReport(tState, ev);
-        // report-coverage:end
         if (hadBash && !ev.is_error) {
-          // toolstop-coverage:start
           // A Bash call the user stopped through its panel: its output
           // was streamed, so the result would otherwise close the panel
           // silently. The interrupt message ends the streamed output.
@@ -15795,18 +15907,11 @@
               ':scope > .bash-panel > .bash-panel-content',
             );
             if (cut) {
-              // Appended as a node: the streamed text may already hold
-              // linkified spans that a textContent write would flatten.
               const sep = cut.textContent && !cut.textContent.endsWith('\n');
-              cut.appendChild(
-                document.createTextNode((sep ? '\n' : '') + ev.content),
-              );
+              appendStreamedText(cut, (sep ? '\n' : '') + ev.content);
             }
           }
-          // toolstop-coverage:end
-          // resultimages-coverage:start
           appendResultImages(ev, tState.lastToolCallEl || target);
-          // resultimages-coverage:end
           break;
         }
         const resultTarget = tState.lastToolCallEl || target;
@@ -15849,9 +15954,7 @@
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
-          // resultimages-coverage:start
           appendResultImages(ev, resultTarget);
-          // resultimages-coverage:end
         }
         break;
       }
@@ -15862,11 +15965,9 @@
           if (!tState.bashRaf) {
             tState.bashRaf = requestAnimationFrame(() => {
               if (tState.bashPanel) {
-                tState.bashPanel.textContent += tState.bashBuf;
+                appendStreamedText(tState.bashPanel, tState.bashBuf);
                 linkifyFilePaths(tState.bashPanel, evWorkDir, evOwnerTab);
-                // autoscroll-coverage:start
                 autoScrollStreamed(tState.bashPanel);
-                // autoscroll-coverage:end
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
@@ -16428,7 +16529,6 @@
       return;
     }
     // streamtail-coverage:end
-    // autoscroll-coverage:start
     // Capture the latest event panel now: right below, a provisional
     // thoughts panel may be appended after a tool_result, which would
     // hide the tool panel that actually received the result output.
@@ -16436,7 +16536,6 @@
       target !== O
         ? target
         : (t === 'tool_result' && tState.lastToolCallEl) || O.lastElementChild;
-    // autoscroll-coverage:end
     streamEnd(ctx, ev, target);
     saveLiveStreamCtx(ctx);
     if (t === 'result' || t === 'usage_info') {
@@ -16444,9 +16543,7 @@
       currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
       currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
     }
-    // autoscroll-coverage:start
     autoScrollLatestEventPanel(autoScrollPanel);
-    // autoscroll-coverage:end
     applyChevronState(currentTaskName);
     // visibletask-coverage:start
     // The event may have changed the transcript's shape as well as the
@@ -16812,9 +16909,7 @@
   // visibletask-coverage:end
 
   O.addEventListener('scroll', () => {
-    // autoscroll-coverage:start
     updateUserScrollLock();
-    // autoscroll-coverage:end
     updateVisibleTask();
     prefetchNeighbourTask();
   });
@@ -17567,7 +17662,6 @@
       return;
     }
     switch (t) {
-      // browser-tab-coverage:start
       case 'openBrowserTab':
         openBrowserTab(ev);
         break;
@@ -17603,7 +17697,6 @@
         }
         break;
       }
-      // browser-tab-coverage:end
       case 'daemonStatus':
         // `reconnecting` is set by the remote webapp's shim when the
         // socket dropped after this page was authenticated: the app
@@ -17775,7 +17868,6 @@
         handleGitLog(ev);
         return;
       case 'share_tasks': {
-        // share-coverage:start
         // The export splices the transcript on screen into the chat's
         // persisted tasks, so a reply for a tab that is no longer
         // highlighted would serialize the WRONG screen: it is dropped,
@@ -17791,11 +17883,9 @@
           ev.chatId || (stTab && stTab.backendChatId) || activeTabId || '',
         );
         sendShareExport(stChatId, ev.tasks || [], !!ev.truncated);
-        // share-coverage:end
         break;
       }
       case 'share_done': {
-        // share-coverage:start
         flashShareBtn(!!ev.ok);
         // The saved-page banner belongs to the conversation that was
         // shared; a reply for a background tab must not write into the
@@ -17839,7 +17929,6 @@
         } else {
           notifyShareFailed(ev.error);
         }
-        // share-coverage:end
         break;
       }
       case 'status': {
@@ -17973,7 +18062,6 @@
         }
         renderModelList('');
         break;
-      // toolstop-coverage:start
       case 'tool_interrupt_ack': {
         // A rejected interrupt (no running tool call owned the tab)
         // gives the button back at once instead of after its reset
@@ -17989,7 +18077,6 @@
         }
         break;
       }
-      // toolstop-coverage:end
       case 'stop_ack':
         // The daemon found nothing to stop for this tab — the click
         // would otherwise have been swallowed in silence, which is
@@ -18006,11 +18093,6 @@
         applyModelPick(ev.tabId || '', ev.model, ev.source);
         break;
       // modelpick-coverage:end
-      case 'remotePasswordRotated':
-        // Settings > Rotate done: only the window that asked gets this,
-        // right before its refreshed configData.
-        showRotatedRemotePassword(String(ev.password || ''));
-        break;
       case 'configData':
         // The daemon stamps the server's machine name into every
         // configData reply; it names the machine the agent runs ON
@@ -18236,11 +18318,6 @@
         break;
       }
       case 'error':
-        // Settings > Rotate could not store a new password: the note
-        // under the box says so (the stored password is unchanged).
-        if (ev.code === 'rotate_remote_password_failed') {
-          setRemotePasswordNote(ev.text, true);
-        }
         // The daemon turned the prompt it was just sent away (a task is
         // already running there, say): the composer gets it back.
         if (ev.code === 'prompt_refused') {
@@ -18292,11 +18369,9 @@
         addWarning(ev.message || ev.text || '');
         break;
       case 'clear': {
-        // report-coverage:start
         // A new task is starting in this tab: any report queued by a
         // previous task that never reached a terminal event is stale.
         discardReadyReports(ev.tabId);
-        // report-coverage:end
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
@@ -18406,6 +18481,7 @@
           ev.loopbackUrl,
           ev.lanUrls,
           ev.localCa === true,
+          ev.inDocker === true,
         );
         break;
       case 'update_available':
@@ -18440,9 +18516,7 @@
         // tableak-coverage:end
         const fu = mkFollowupBar(ev.text, copyFollowupToInput);
         O.appendChild(fu);
-        // autoscroll-coverage:start
         autoScrollLatestEventPanel(fu);
-        // autoscroll-coverage:end
         break;
       }
       case 'tasks_updated':
@@ -18887,9 +18961,7 @@
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
-        // report-coverage:start
         openReadyReportTabs(ev.tabId);
-        // report-coverage:end
         // The task may have registered a machine (`/machine add`):
         // the daemon's report is cached unless the registry changed,
         // and a new machine brings the Machines subpanel on screen
@@ -18930,18 +19002,15 @@
               : 'Stopped';
         setReady(label, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
-        // report-coverage:start
         // The task finished (with an error / stop): a successfully
         // written report is still a real artifact — open it.
         openReadyReportTabs(ev.tabId);
-        // report-coverage:end
         break;
       }
       case 'new_tab': {
         const spawnParent = nearestOpenAncestorTab(ev.parent_tab_id);
         if (ev.parent_tab_id && !spawnParent) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
-        const parentTabBeforeNew = spawnParent;
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
         // that already has a tab must not open a second one.
         const spawned = openSubagentTabForTask(ev.task_id, '');
@@ -18950,7 +19019,7 @@
           if (spawnPanel) {
             rpRegisterSubagent(
               spawnPanel,
-              spawnPanel._rpParentTabId || parentTabBeforeNew,
+              spawnPanel._rpParentTabId || spawnParent,
               ev.task_id,
               spawned.id,
             );
@@ -18958,28 +19027,21 @@
           break;
         }
         let subAgentTabId;
-        if (parentTabBeforeNew) {
+        if (spawnParent) {
           // A late spawn belongs to its original dispatch panel, not
           // necessarily the newest call in the parent's transcript.
-          const rpPanel = rpPanelForNewSubagent(
-            parentTabBeforeNew,
-            ev.task_id,
-            {live: true},
-          );
+          const rpPanel = rpPanelForNewSubagent(spawnParent, ev.task_id, {
+            live: true,
+          });
           // A live spawn must open even when its transcript panel is folded.
           const subTab = createBackgroundSubagentTab(
-            parentTabBeforeNew,
+            spawnParent,
             subagentTabIdFor(ev.parent_tab_id, ev.task_id),
           );
           subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
           if (rpPanel) {
-            rpRegisterSubagent(
-              rpPanel,
-              parentTabBeforeNew,
-              ev.task_id,
-              subTab.id,
-            );
+            rpRegisterSubagent(rpPanel, spawnParent, ev.task_id, subTab.id);
           }
         } else {
           subAgentTabId = createBackgroundSubagentTab(
@@ -19020,7 +19082,7 @@
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
-        const parentId = announcedParent || ev.tabId || '';
+        const parentId = announcedParent || '';
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
         if (!rpPanel && parentId) {
           rpPanel = rpPanelForNewSubagent(parentId, subTaskId, {
@@ -19149,11 +19211,9 @@
         if (doneTab) {
           if (doneTab.currentTaskId)
             rememberFinishedSubagent(String(doneTab.currentTaskId));
-          // report-coverage:start
           // A sub-agent finishing is not the task finishing: the parent
           // task keeps running, so its report opens in the background.
           openReadyReportTabs(doneTab.id, false);
-          // report-coverage:end
           doneTab.isDone = true;
           setTabRunning(doneTab, false);
           if (doneTab.id === activeTabId) {
@@ -19407,9 +19467,7 @@
     const div = mkEl('div', 'ev tr ' + cls);
     div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
-    // autoscroll-coverage:start
     autoScrollLatestEventPanel(div);
-    // autoscroll-coverage:end
     return div;
   }
 
@@ -19464,7 +19522,6 @@
     addBanner('warn', 'Warning:', text);
   }
 
-  // share-coverage:start
   // The daemon reads one frame of at most 64 MiB (_MAX_LINE_BYTES in
   // web_server.py) and silently drops the connection on overflow, so
   // an export that cannot fit — measured as the REAL UTF-8 byte
@@ -19563,7 +19620,6 @@
     return live;
   }
 
-  // sharesub-coverage:start
   /**
    * Group one task's sub-agents (the flat, parents-before-children
    * `subagents` list of a `share_tasks` reply task) by their parent
@@ -19732,7 +19788,6 @@
     );
     return section;
   }
-  // sharesub-coverage:end
 
   /**
    * Wrap one task of the chat — its task panel and the children of
@@ -19937,7 +19992,6 @@
    *
    * @param {boolean} ok Whether the daemon saved the shared page.
    */
-  // shareflash0903-coverage:start
   // One tracked timer: a bare setTimeout let an earlier flash's stale
   // timer end a later flash early, and adding the new class without
   // removing the old one could leave ok and err stacked.
@@ -19953,8 +20007,6 @@
       shareBtn.classList.remove(cls);
     }, 2000);
   }
-  // shareflash0903-coverage:end
-  // share-coverage:end
 
   function _buildRemoteUrlBar(displayUrl, isNtfy, labelText) {
     const wrapper = document.createElement('div');
@@ -20005,7 +20057,25 @@
     return hint;
   }
 
-  function renderRemoteUrl(url, ntfyUrl, loopbackUrl, lanUrls, localCa) {
+  /**
+   * Paint the Settings panel's URL bars from a `remote_url` event.
+   * *inDocker* (the daemon runs in a Docker container) clears them: the
+   * container's 127.0.0.1 and LAN addresses reach nothing from outside
+   * and no tunnel runs there; the webapp is reached at whatever port
+   * the container was started with.
+   */
+  function renderRemoteUrl(
+    url,
+    ntfyUrl,
+    loopbackUrl,
+    lanUrls,
+    localCa,
+    inDocker,
+  ) {
+    const container = document.getElementById('remote-url');
+    if (!container) return;
+    container.innerHTML = '';
+    if (inDocker) return;
     const displayUrl = ntfyUrl || url;
     // Alongside the Cloudflare (or ntfy) URL, always show how to
     // reach the webapp from this machine (127.0.0.1) and from other
@@ -20030,9 +20100,6 @@
     const caBaseUrl = localCa
       ? (lanUrls || []).find(u => !!u) || loopbackUrl
       : '';
-    const container = document.getElementById('remote-url');
-    if (!container) return;
-    container.innerHTML = '';
     for (const [barUrl, isNtfy, labelText] of bars) {
       container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
     }
@@ -20254,9 +20321,7 @@
     const rWorkDir =
       ownerTabId !== undefined ? workDirForTab(ownerTabId) || '' : undefined;
     const ctx = mkStreamCtx(container, ownerTabId);
-    // report-coverage:start
     ctx.state.suppressReportOpen = true;
-    // report-coverage:end
     const prevDefer = _deferHighlight;
     const prevReplaying = _replaying;
     _deferHighlight = true;
@@ -20341,7 +20406,6 @@
   }
 
   function replayTaskEvents(events) {
-    // autoscroll-coverage:start
     // A transcript rebuilt while the user is reading it — a reconnect
     // replays the tab on screen — keeps the reading position: a view
     // the user scrolled away from the bottom is put back where it was
@@ -20350,7 +20414,6 @@
     const keepScroll =
       userScrollLock && Array.from(O.children).some(el => el !== welcome);
     const keptScrollTop = O.scrollTop;
-    // autoscroll-coverage:end
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
@@ -20370,7 +20433,6 @@
     state = rCtx.state;
     saveLiveStreamCtx(rCtx);
     if (rCtx.stepCount > 0) updateStepCount(rCtx.stepCount);
-    // autoscroll-coverage:start
     if (keepScroll) {
       O.scrollTop = keptScrollTop;
       // The lock follows the restored position (a shorter transcript
@@ -20381,7 +20443,6 @@
       // chat lands at the end of its latest event panel.
       autoScrollLatestEventPanel(O.lastElementChild);
     }
-    // autoscroll-coverage:end
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
     currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
@@ -20507,9 +20568,7 @@
 
   function appendActionResult(ev) {
     const div = appendActionResultInto(O, ev);
-    // autoscroll-coverage:start
     autoScrollLatestEventPanel(div);
-    // autoscroll-coverage:end
   }
 
   /**
@@ -20930,7 +20989,6 @@
       markStopping(target, true);
       api.stop({tabId: target});
     });
-    // share-coverage:start
     if (shareBtn) {
       shareBtn.addEventListener('click', () => {
         // A content tab shares the chat that produced it — never the
@@ -20984,7 +21042,6 @@
         api.shareChatTasks({tabId: activeTabId, chatId: chatId});
       });
     }
-    // share-coverage:end
     uploadBtn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -20996,21 +21053,9 @@
       input.onchange = handleFileSelect;
       input.click();
     });
-    // The remote password is read-only (install.sh chooses it); its eye
-    // button only reveals it and Rotate asks the daemon for a new one.
     FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
-      .concat(['cfg-custom-api-key', 'cfg-remote-password'])
+      .concat(['cfg-custom-api-key'])
       .forEach(setupSecretInput);
-    const rotatePasswordBtn = document.getElementById(
-      'cfg-rotate-password-btn',
-    );
-    if (rotatePasswordBtn) {
-      rotatePasswordBtn.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        confirmRemotePasswordRotation();
-      });
-    }
 
     if (autocommitBtn) {
       autocommitBtn.addEventListener('click', e => {
@@ -21208,7 +21253,12 @@
     const browserBtn = document.getElementById('browser-btn');
     if (browserBtn) {
       browserBtn.addEventListener('click', () => {
-        api.browserOpen({url: ''});
+        // The page opens in the browser of the machine the chat's
+        // tasks run on (the header's drop-down).
+        const owner = getTab(chatTargetTabId());
+        api.browserOpen(
+          onMachine({url: ''}, owner ? tabMachine(owner.id) : ''),
+        );
       });
     }
     const terminalBtn = document.getElementById('terminal-btn');
@@ -21331,7 +21381,6 @@
         setMetaDrawerOpen(false);
       });
     }
-    // mobilescreens-coverage:start
     // ---- The phone layout's four screens, swiped left and right ------
     //
     // Below the desktop breakpoint the remote page's four side-by-side
@@ -21451,7 +21500,6 @@
       });
       window.addEventListener('message', onPreviewSwipeMessage);
     }
-    // mobilescreens-coverage:end
     setupWorkspaceViews();
     setupChatWorkDir();
     applyRemoteTheme(getSavedRemoteTheme());
@@ -21963,6 +22011,12 @@
           workDir: workDirForTab(activeTabId),
           tabId: activeTabId,
         };
+        // A link of a tab bound to a registered machine names a file
+        // there (verifyFileLinkCandidates stamped the machine): the
+        // daemon forwards the openFile and that machine's daemon
+        // answers with the file's content.
+        const machine = el.getAttribute('data-path-machine') || '';
+        if (machine) msg.machine = machine;
         const match = raw.match(/^(.+):(\d+)$/);
         if (match) {
           msg.path = match[1];
@@ -22428,7 +22482,6 @@
     }
   }
 
-  // composerreset0903-coverage:start
   /**
    * Clear the composer after a prompt has been handed off: empty the
    * textarea, drop pending attachments and their errors, and reset the
@@ -22447,7 +22500,6 @@
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
   }
-  // composerreset0903-coverage:end
 
   async function sendMessage() {
     let prompt = inp.value.trim();
@@ -23053,35 +23105,17 @@
   }
 
   /**
-   * The text of a launched-ago label: "3 hours ago", led by *prefix*
-   * ("last launched") when one is given.
-   */
-  function launchedAgoLabelText(ms, prefix) {
-    const ago = taskLaunchedAgoText(ms);
-    return prefix ? prefix + ' ' + ago : ago;
-  }
-
-  /**
    * A "3 hours ago" label for the instant *ms*, refreshed by the 30 s
-   * sweep below; *prefix* adds a leading phrase ("last launched" for a
-   * chat panel; a task panel shows the bare age).  The tooltip spells
-   * out "Launched <local date>" (or "<Prefix> <local date>").  Null for
-   * an unusable instant.
+   * sweep below, with a "Launched <local date>" tooltip.  Null for an
+   * unusable instant.
    */
-  function makeLaunchedAgoLabelFor(ms, prefix) {
+  function makeLaunchedAgoLabelFor(ms) {
     if (!isFinite(ms)) return null;
-    const lead = prefix || '';
     const span = document.createElement('span');
     span.className = 'sidebar-item-launched';
     span.dataset.launchTs = String(ms);
-    span.dataset.launchPrefix = lead;
-    span.textContent = launchedAgoLabelText(ms, lead);
-    const tip = lead || 'launched';
-    span.title =
-      tip.charAt(0).toUpperCase() +
-      tip.slice(1) +
-      ' ' +
-      new Date(ms).toLocaleString();
+    span.textContent = taskLaunchedAgoText(ms);
+    span.title = 'Launched ' + new Date(ms).toLocaleString();
     scheduleLaunchedAgoRefresh();
     return span;
   }
@@ -23096,10 +23130,15 @@
   function makeLaunchedAgoLabel(session) {
     const endMs = Number(session.endTs || 0);
     if (!(endMs > 0 && endMs <= MAX_LAUNCH_EPOCH_MS)) {
-      return makeLaunchedAgoLabelFor(taskLaunchMs(session), '');
+      return makeLaunchedAgoLabelFor(taskLaunchMs(session));
     }
-    const span = makeLaunchedAgoLabelFor(endMs, '');
-    span.title = 'Finished ' + new Date(endMs).toLocaleString();
+    return makeFinishedAgoLabel(endMs);
+  }
+
+  /** A "3 hours ago" label counting from the completion instant *ms*. */
+  function makeFinishedAgoLabel(ms) {
+    const span = makeLaunchedAgoLabelFor(ms);
+    span.title = 'Finished ' + new Date(ms).toLocaleString();
     return span;
   }
 
@@ -23295,7 +23334,7 @@
     labels.forEach(el => {
       const ms = Number(el.dataset.launchTs);
       if (!isFinite(ms) || ms < 0) return;
-      const text = launchedAgoLabelText(ms, el.dataset.launchPrefix || '');
+      const text = taskLaunchedAgoText(ms);
       if (el.textContent !== text) el.textContent = text;
     });
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
@@ -23321,7 +23360,6 @@
   function wireCopyButton(btn, text) {
     btn.innerHTML = PANEL_COPY_SVG;
 
-    // sidebarflash0903-coverage:start
     // Every caller restarts the flash timer: the old resetFlashTimer
     // flag left the sidebar copy buttons with a stale timer that cut
     // a rapid second click's flash short.
@@ -23336,7 +23374,6 @@
         btn.classList.remove('copied');
       }, 1500);
     };
-    // sidebarflash0903-coverage:end
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -23647,33 +23684,54 @@
     if (titleEl.textContent === text) return;
     titleEl.textContent = text;
     // The title alone names the header for screen readers: without the
-    // label the name would run on into the chevron's and the "last
-    // launched" line's text.
+    // label the name would run on into the chevron's and the "... ago"
+    // line's text.
     titleEl.parentElement.setAttribute('aria-label', text);
   }
 
   /**
-   * Keep *group*'s "last launched ... ago" line current. The daemon
-   * stamps every row with the chat's `chat_last_launched` (epoch ms,
-   * from `chat_summaries`); without it (an older daemon, or a chat not
-   * yet summarised) the line follows the newest row loaded so far.
+   * Keep *group*'s "... ago" line current: it counts from the newest
+   * instant known for the chat.  Each row offers its own completion
+   * (`endTs`) or, without one, its launch; the daemon also stamps every
+   * row with the chat's `chat_last_launched` (its newest task's launch,
+   * epoch ms) and `chat_last_finished` (that task's completion, 0 while
+   * it runs), both from `chat_summaries`, so the line is right even
+   * when the newest task is not on the page.  The newest instant wins
+   * and names the tooltip: "Finished <date>" for a completion, "Started
+   * <date>" for the launch of a task still running, and the bare date
+   * for a launch whose outcome this row does not tell (an older
+   * daemon's stamp, a row with no completion time).
    */
   function updateHistoryGroupLaunched(group, session) {
     const line = group.querySelector(
       ':scope > .history-chat-header .history-chat-launched',
     );
     if (!line) return;
-    const stamped = Number(session.chat_last_launched || 0);
-    const rowMs = taskLaunchMs(session);
-    let ms = stamped > 0 && stamped <= MAX_LAUNCH_EPOCH_MS ? stamped : rowMs;
     // Epoch zero is a real launch instant (taskLaunchMs), so "no label
     // yet" is the absence of the attribute, not a zero.
     const known =
       line.dataset.launchTs === undefined ? NaN : Number(line.dataset.launchTs);
-    if (isFinite(known) && (!isFinite(ms) || known > ms)) ms = known;
+    let ms = known;
+    let prefix = '';
+    // Row-level instants first so that, on a tie, the row's more
+    // telling tooltip beats the stamp's bare date.
+    const candidates = [
+      [taskLaunchMs(session), session.is_running ? 'Started ' : ''],
+      [Number(session.endTs || NaN), 'Finished '],
+      [Number(session.chat_last_launched || NaN), ''],
+      [Number(session.chat_last_finished || NaN), 'Finished '],
+    ];
+    for (const [t, p] of candidates) {
+      if (!isFinite(t) || t < 0 || t > MAX_LAUNCH_EPOCH_MS) continue;
+      if (isFinite(ms) && t <= ms) continue;
+      ms = t;
+      prefix = p;
+    }
     if (!isFinite(ms) || ms === known) return;
     line.dataset.launchTs = String(ms);
-    line.replaceChildren(makeLaunchedAgoLabelFor(ms, 'last launched'));
+    const label = makeLaunchedAgoLabelFor(ms);
+    label.title = prefix + new Date(ms).toLocaleString();
+    line.replaceChildren(label);
   }
 
   /**
@@ -23760,7 +23818,9 @@
    * Show the machine chip on the header of a chat that lives only on a
    * remote machine (its rows are folded away by default, so the header
    * is what says where the chat is); a chat with a task on this daemon
-   * carries no chip, as the header opens it here.
+   * carries no chip, as the header opens it here.  The remote-only chat
+   * also loses its rename pencil (see startHistoryGroupRename), as its
+   * rows lose their favourite star.
    */
   function syncHistoryGroupMachine(group) {
     const actions = group.querySelector(
@@ -23768,6 +23828,8 @@
     );
     const chip = actions.querySelector(':scope > .history-chat-machine');
     const remote = group._kissLastLocalSession ? null : group._kissLastSession;
+    const pencil = actions.querySelector(':scope > .history-chat-rename');
+    if (pencil) pencil.style.display = remote ? 'none' : '';
     if (
       chip &&
       (!remote || chip.textContent !== machineLabel(sessionMachine(remote)))
@@ -23812,26 +23874,23 @@
     const left = getTab(activeTabId);
     if (existingChatTab) {
       resumeExistingChatTab(existingChatTab, s.id, s.task_id, machine);
-      retireIdleChat(left, false);
-    } else if (resumable) {
-      // A running task is resumable even before its first event is
-      // persisted: the server reattaches the live chat on replay.
-      openHistoryTaskInNewTab(taskText);
-      api.resumeSession(
-        remoteResume(
-          {id: s.id, taskId: s.task_id, tabId: activeTabId},
-          machine,
-          taskText,
-        ),
-      );
-      retireIdleChat(left, false);
     } else {
-      // Nothing to resume, but the row still knows what the task was, so
-      // show it read-only in the fresh tab.
+      // Nothing to resume still shows the row's task read-only in the
+      // fresh tab.  A running task is resumable even before its first
+      // event is persisted: the server reattaches the live chat on replay.
       openHistoryTaskInNewTab(taskText);
-      retireIdleChat(left, false);
-      inp.focus();
+      if (resumable) {
+        api.resumeSession(
+          remoteResume(
+            {id: s.id, taskId: s.task_id, tabId: activeTabId},
+            machine,
+            taskText,
+          ),
+        );
+      }
     }
+    retireIdleChat(left, false);
+    if (!existingChatTab && !resumable) inp.focus();
   }
 
   /**
@@ -23869,12 +23928,21 @@
    * from then on instead of the computed summary (an empty text brings
    * the computed one back); Escape cancels.  The box swallows the
    * header's own clicks and keys so typing never opens the chat.
+   * A chat with no task on this daemon is not renamed: the summary is
+   * stored here, where its rows (all from another machine) never read it.
    */
   function startHistoryGroupRename(group, chatId) {
     const header = group.querySelector(':scope > .history-chat-header');
     const titleEl =
       header && header.querySelector(':scope > .history-chat-title');
-    if (!titleEl || !chatId || titleEl.querySelector('input')) return;
+    if (
+      !titleEl ||
+      !chatId ||
+      !group._kissLastLocalSession ||
+      titleEl.querySelector('input')
+    ) {
+      return;
+    }
     const original = titleEl.textContent;
     const input = document.createElement('input');
     input.type = 'text';
@@ -23941,6 +24009,15 @@
     // readers can tell the chats apart.
     const titleEl = document.createElement('span');
     titleEl.className = 'history-chat-title';
+    // The second click of a double-click is not a second header click:
+    // it would open (resume) the chat again, on a chat with no tab yet
+    // in a second new tab.  The first click opens the chat once.
+    titleEl.addEventListener('click', e => {
+      if (e.detail > 1) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    });
     titleEl.addEventListener('dblclick', e => {
       e.stopPropagation();
       e.preventDefault();
@@ -25407,9 +25484,6 @@
     // The API Keys / Custom Models subpanels START collapsed on every
     // open; only an explicit click on their header expands them.
     collapseConfigSubpanels();
-    // A note left by an earlier rotation is about a password already
-    // superseded on screen by the configData this open requests.
-    setRemotePasswordNote('', false);
     api.getConfig();
     api.getMyModels();
   }
@@ -25808,19 +25882,17 @@
   }
 
   function setupSecretInput(inputId) {
+    // A plain-text inventory entry (the AWS region) is not a secret:
+    // it stays a visible text box with no reveal toggle.
+    if (PLAIN_TEXT_KEY_IDS.some(k => inputId === 'cfg-key-' + k)) return;
     const inp = document.getElementById(inputId);
     const template = document.getElementById('secret-toggle-template');
     const proto = template && template.content.firstElementChild;
     if (!inp || !proto) return;
-    // The workspace id is an identifier, not a key, and the remote
-    // password is a password; the toggle's accessible name must say
-    // what it actually reveals.
+    // The workspace id is an identifier, not a key; the toggle's
+    // accessible name must say what it actually reveals.
     const noun =
-      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID'
-        ? 'workspace ID'
-        : inputId === 'cfg-remote-password'
-          ? 'password'
-          : 'API key';
+      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID' ? 'workspace ID' : 'API key';
     inp.type = 'password';
     inp.setAttribute('autocomplete', 'off');
     const wrap = document.createElement('div');
@@ -25838,68 +25910,6 @@
     if (eyeOff) eyeOff.style.display = 'none';
     wrap.appendChild(btn);
     setupPasswordToggle(btn.id, inputId, noun);
-  }
-
-  // ---- Settings > Remote password > Rotate ----
-
-  /**
-   * Write the note under the Remote password box (an empty *text* hides
-   * it).
-   *
-   * @param {string} text The note; '' hides it.
-   * @param {boolean} isError True paints it as an error.
-   */
-  function setRemotePasswordNote(text, isError) {
-    const note = document.getElementById('cfg-remote-password-note');
-    if (!note) return;
-    note.textContent = text || '';
-    note.hidden = !text;
-    note.classList.toggle('config-field-note-error', !!isError);
-  }
-
-  /**
-   * The Rotate button: ask first, because every other device signed in
-   * with the current password is signed out by the rotation.
-   */
-  function confirmRemotePasswordRotation() {
-    confirmAction({
-      id: 'rotate-remote-password',
-      message:
-        'Replace the remote access password with a new one? Every other ' +
-        'device signed in with the current one will have to sign in again.',
-      confirmLabel: 'Rotate password',
-      cancelLabel: 'Cancel',
-      danger: true,
-      onConfirm: requestRemotePasswordRotation,
-    });
-  }
-
-  /** Ask the daemon for a new remote password (`rotateRemotePassword`). */
-  function requestRemotePasswordRotation() {
-    setRemotePasswordNote('Rotating…', false);
-    api.rotateRemotePassword();
-  }
-
-  /**
-   * The daemon's `remotePasswordRotated`: put the new password in the
-   * box, reveal it (this page's transport has already adopted it for
-   * its own frames) and say what happened.  The `configData` that
-   * follows repaints the same value.
-   *
-   * @param {string} password The new remote password.
-   */
-  function showRotatedRemotePassword(password) {
-    const inp = document.getElementById('cfg-remote-password');
-    if (inp) {
-      inp.value = password;
-      const toggle = document.getElementById('cfg-remote-password-toggle');
-      if (toggle && inp.type !== 'text') toggle.click();
-    }
-    setRemotePasswordNote(
-      'New password set (shown above). Sign in again with it on your ' +
-        'other devices.',
-      false,
-    );
   }
 
   // ---- Collapsible settings subpanels (API Keys, Custom Models) ----
@@ -26257,7 +26267,18 @@
     'OPENROUTER_API_KEY',
     'ZAI_API_KEY',
     'MOONSHOT_API_KEY',
+    // Amazon Bedrock (bedrock/ Claude models): bearer token OR access
+    // key pair, plus the region.  The daemon stores all five in the
+    // same key store (``API_KEY_ENV_VARS``).
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_REGION',
   ];
+  // Inventory entries that are plain text, not secrets: they get no
+  // password masking or reveal toggle (setupSecretInput).
+  const PLAIN_TEXT_KEY_IDS = ['AWS_REGION'];
 
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
@@ -26304,10 +26325,7 @@
     // ``useWebTools`` override.
     webToolsStateKnown = true;
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
-    // The remote password is shown, never edited here (the box is
-    // read-only), so it is always the daemon's current value.
-    const remotePasswordInp = el('cfg-remote-password');
-    if (remotePasswordInp) remotePasswordInp.value = cfg.remote_password || '';
+    setValue('cfg-remote-password', cfg.remote_password || '');
     // Recorded even while an edit is active (the boxes themselves are
     // skipped below), so cancelling the edit restores the latest
     // authoritative values — see cancelCustomModelEdit.
@@ -26401,6 +26419,13 @@
     }
     if (want('cfg-custom-headers')) {
       cfg.custom_headers = el('cfg-custom-headers').value.trim();
+    }
+    // The remote password is stored as typed; an empty one disables
+    // remote access.  A connection signed in with the old password
+    // adopts the new one from the daemon's remotePasswordChanged
+    // (transport.js) before its next frame.
+    if (want('cfg-remote-password')) {
+      cfg.remote_password = el('cfg-remote-password').value.trim();
     }
     const apiKeys = {};
     FIRST_PARTY_KEY_IDS.forEach(k => {
@@ -26715,8 +26740,8 @@
     finishedSubagentCount: function () {
       return _finishedSubagentTasks.size;
     },
-    // Every open tab, in tab order, with what the multi-surface test
-    // driver (test/multiSurfaceBridge.js) compares across surfaces.  The
+    // Every open tab, in tab order, with what the webapp tests compare
+    // (test/*.test.js, the Playwright suites under tests/webapp).  The
     // tab rows alone will not do: the group strip only shows the group
     // on screen, so a background chat's sub-agents are not rendered.
     openTabs: function () {
@@ -26726,6 +26751,8 @@
         rootId: rootTabOf(t).id,
         isSubagentTab: !!t.isSubagentTab,
         isContentTab: !!t.isContentTab,
+        contentPath: t.contentPath || '',
+        ownerBrowseMachine: t.ownerBrowseMachine || '',
         isDone: !!t.isDone,
         isRunning: !!t.isRunning,
         askPending: t.askPendingQuestion !== null,

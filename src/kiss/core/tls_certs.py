@@ -363,12 +363,12 @@ def _ca_pair_is_usable(ca_cert_path: Path, ca_key_path: Path) -> bool:
     """Return True when the CA cert/key exist, match and are not expiring."""
     if not ca_cert_path.is_file() or not ca_key_path.is_file():
         return False
-    if cert_needs_renewal(ca_cert_path):
-        return False
     try:
         cert = _load_certificate(ca_cert_path)
         key = _load_private_key(ca_key_path)
     except Exception:
+        return False
+    if cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS):
         return False
     return cert.public_key() == key.public_key()
 
@@ -414,13 +414,13 @@ def _current_leaf(cert_path: Path, key_path: Path, ca_cert_path: Path) -> x509.C
     """
     if not cert_path.is_file() or not key_path.is_file():
         return None
-    if cert_needs_renewal(cert_path):
-        return None
     try:
         cert = _load_certificate(cert_path)
         key = _load_private_key(key_path)
         cert.verify_directly_issued_by(_load_certificate(ca_cert_path))
     except Exception:
+        return None
+    if cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS):
         return None
     return cert if cert.public_key() == key.public_key() else None
 
@@ -524,9 +524,9 @@ def ca_label(ca_cert_path: Path) -> str:
     :data:`TRUSTED_CLIENTS_DIR`: readable (``gpu-box-1a2b3c4d``), and
     unique per CA so a regenerated CA enrols as a new file.
     """
-    host = re.sub(r"[^A-Za-z0-9._-]+", "-", _host_label() or "localhost").strip("._-")
+    host = _host_label() or "localhost"
     digest = _load_certificate(ca_cert_path).fingerprint(hashes.SHA256())
-    return f"{host or 'localhost'}-{digest[:4].hex()}"
+    return f"{host}-{digest[:4].hex()}"
 
 
 def ensure_local_tls_pair(

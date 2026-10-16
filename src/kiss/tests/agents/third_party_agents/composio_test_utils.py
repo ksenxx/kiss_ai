@@ -24,7 +24,6 @@ import threading
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -32,7 +31,7 @@ import requests
 
 from kiss.agents.third_party_agents import _composio_google as composio_google
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
-from kiss.tests.agents.third_party_agents.recording_http import serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
 
 API_KEY = "test-composio-key"
 TOKEN = "composio-injected-token"
@@ -119,21 +118,10 @@ class FakeComposioServer(ThreadedHTTPServer):
         self.status_queue[account] = queue
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _Handler(RecordingHandler):
     """Routes the Composio API calls the SDK makes."""
 
     server: FakeComposioServer  # type: ignore[assignment]
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
-
-    def _reply(self, status: int, payload: Any) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
     def _route(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -149,18 +137,18 @@ class _Handler(BaseHTTPRequestHandler):
             return
         api_key = self.headers.get("x-api-key", "")
         if api_key not in server.api_keys:
-            self._reply(401, {"error": {"message": "invalid api key"}})
+            self._json(401, {"error": {"message": "invalid api key"}})
             return
         if path == f"{API}/auth_configs" and self.command == "GET":
             items = server.auth_configs
-            self._reply(
+            self._json(
                 200,
                 {"items": items, "current_page": 1, "total_items": len(items), "total_pages": 1},
             )
         elif path == f"{API}/auth_configs" and self.command == "POST":
             new = {"id": server.next_id("ac"), "created_at": "2026-09-26T00:00:00Z"}
             server.auth_configs.append(new)
-            self._reply(
+            self._json(
                 201,
                 {
                     "auth_config": {
@@ -172,11 +160,11 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
         elif path == f"{API}/connected_accounts" and self.command == "GET":
-            self._reply(200, {"items": [], "current_page": 1, "total_items": 0, "total_pages": 1})
+            self._json(200, {"items": [], "current_page": 1, "total_items": 0, "total_pages": 1})
         elif path == f"{API}/connected_accounts/link" and self.command == "POST":
             account = server.next_account or server.next_id("ca")
             server.accounts.setdefault(account, "INITIATED")
-            self._reply(
+            self._json(
                 201,
                 {
                     "connected_account_id": account,
@@ -189,15 +177,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._account(path.rsplit("/", 1)[1], api_key)
         elif path == f"{API}/tools/execute/proxy" and self.command == "POST":
             if server.proxy_reply is not None:
-                self._reply(200, server.proxy_reply)
+                self._json(200, server.proxy_reply)
             else:
                 self._proxy(body)
         else:
-            self._reply(404, {"error": {"message": f"no route {self.command} {path}"}})
+            self._json(404, {"error": {"message": f"no route {self.command} {path}"}})
 
     def _download(self, index: int) -> None:
         if index >= len(self.server.downloads):
-            self._reply(404, {"error": {"message": "no such download"}})
+            self._json(404, {"error": {"message": "no such download"}})
             return
         content_type, data = self.server.downloads[index]
         self.send_response(200)
@@ -209,32 +197,32 @@ class _Handler(BaseHTTPRequestHandler):
     def _account(self, account: str, api_key: str) -> None:
         server = self.server
         if account not in server.accounts:
-            self._reply(404, {"error": {"message": "connected account not found", "status": 404}})
+            self._json(404, {"error": {"message": "connected account not found", "status": 404}})
         elif self.command == "DELETE":
             if account in server.undeletable:
-                self._reply(404, {"error": {"message": "not found", "status": 404}})
+                self._json(404, {"error": {"message": "not found", "status": 404}})
                 return
             del server.accounts[account]
             server.status_queue.pop(account, None)
             server.deleted.append(account)
-            self._reply(200, {"success": True})
+            self._json(200, {"success": True})
         else:
             hold = server.status_holds.get(api_key)
             if hold is not None:
                 server.status_held[api_key].set()
                 if not hold.wait(timeout=15.0):
                     # An expired hold is a test failure, never a normal answer.
-                    self._reply(503, {"error": {"message": "status poll hold expired"}})
+                    self._json(503, {"error": {"message": "status poll hold expired"}})
                     return
             queue = server.status_queue.get(account)
             status = queue.pop(0) if queue else server.accounts[account]
             server.status_polled[api_key].set()
-            self._reply(200, {"id": account, "status": status})
+            self._json(200, {"id": account, "status": status})
 
     def _proxy(self, body: dict[str, Any]) -> None:
         server = self.server
         if server.accounts.get(body.get("connected_account_id", "")) != "ACTIVE":
-            self._reply(400, {"error": {"message": "connected account is not active"}})
+            self._json(400, {"error": {"message": "connected account is not active"}})
             return
         # Like Composio: a repeated query name in ``parameters`` keeps only
         # its last value (the endpoint URL's own query string is kept whole).
@@ -269,7 +257,7 @@ class _Handler(BaseHTTPRequestHandler):
                 timeout=30,
             )
         except requests.RequestException as e:
-            self._reply(400, {"error": {"message": f"upstream request failed: {e}"}})
+            self._json(400, {"error": {"message": f"upstream request failed: {e}"}})
             return
         content_type = upstream.headers.get("Content-Type", "")
         answer: dict[str, Any] = {
@@ -291,7 +279,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "content_type": content_type,
                 "size": len(upstream.content),
             }
-        self._reply(200, answer)
+        self._json(200, answer)
 
     do_GET = do_POST = do_DELETE = do_PATCH = do_PUT = _route  # noqa: N815
 

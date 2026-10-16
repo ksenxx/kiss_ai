@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import base64
 import json
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+import sys
+from typing import cast
 
 import pytest
 
@@ -35,7 +35,11 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     fake_composio,
     reset_state,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -139,10 +143,10 @@ class TestBodyExtraction:
         assert result[0]["filename"] == "image.png"
 
 
-class _GmailHandler(BaseHTTPRequestHandler):
+class _GmailHandler(RecordingHandler):
     """Answers the profile call for the Composio-injected token, else 401."""
 
-    def _reply(self) -> None:
+    def _handle(self) -> None:
         cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path}
         )
@@ -180,26 +184,23 @@ class _GmailHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         """Reply 401 to GET requests."""
-        self._reply()
+        self._handle()
 
     def do_POST(self) -> None:  # noqa: N802
         """Reply 401 to POST requests."""
-        self._reply()
+        self._handle()
 
     def do_PUT(self) -> None:  # noqa: N802
         """Reply 401 to PUT requests."""
-        self._reply()
+        self._handle()
 
     def do_PATCH(self) -> None:  # noqa: N802
         """Reply 401 to PATCH requests."""
-        self._reply()
+        self._handle()
 
     def do_DELETE(self) -> None:  # noqa: N802
         """Reply 401 to DELETE requests."""
-        self._reply()
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
+        self._handle()
 
 
 @pytest.fixture()
@@ -307,16 +308,9 @@ class TestGmailAgent:
         assert agent._is_authenticated() is False
 
 
-class TestCLIMain:
-    def test_main_missing_task_exits(self) -> None:
-        import sys
-
-        original_argv = sys.argv
-        sys.argv = ["gmail_sea"]
-        try:
-            main()
-            assert False, "Should have raised SystemExit"
-        except SystemExit as e:
-            assert e.code == 1
-        finally:
-            sys.argv = original_argv
+def test_main_missing_task_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI exits 1 when no task is given."""
+    monkeypatch.setattr(sys, "argv", ["gmail_sea"])
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1

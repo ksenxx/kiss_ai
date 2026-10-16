@@ -123,7 +123,6 @@
     }
   }
 
-  // sharesub-coverage:start
   // The shared page's sub-agent tabs.
   //
   // The export (buildShareableHtml in media/main.js) renders every
@@ -526,9 +525,7 @@
       openSubagentTab(orphans[i].getAttribute('data-task-id'));
     }
   })();
-  // sharesub-coverage:end
 
-  // sharetheme-coverage:start
   // Light / dark mode for the shared page.  The page ships dark (the
   // inlined :root palette); the floating #share-theme-btn switches the
   // whole document to the Light Modern palette by toggling the
@@ -605,13 +602,11 @@
       applyShareTheme(next);
     });
   })();
-  // sharetheme-coverage:end
 
   document.addEventListener('click', e => {
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
 
-    // sharesub-coverage:start
     const closeEl = target.closest('.chat-tab-close');
     if (closeEl) {
       e.stopPropagation();
@@ -625,9 +620,7 @@
       activateShareTab(tabEl);
       return;
     }
-    // sharesub-coverage:end
 
-    // resultimages-coverage:start
     // Tool-result images: the chat page installs a per-element
     // click-to-zoom listener (appendResultImages in main.js), which
     // outerHTML serialization cannot carry over — re-wire it here.
@@ -637,7 +630,6 @@
       trImg.classList.toggle('tr-img-full');
       return;
     }
-    // resultimages-coverage:end
 
     const header = target.closest('.collapse-header');
     if (!header) return;
@@ -651,12 +643,10 @@
       panelEl.classList.add('user-pinned');
     }
     collapsePreview(panelEl);
-    // sharesub-coverage:start
     // A fan-out panel's sub-agent tabs follow its collapsed state,
     // exactly like the chat page's syncRunParallelPanel.
     if (panelEl.classList.contains('tc-run-parallel'))
       syncSubagentTabs(panelEl);
-    // sharesub-coverage:end
     if (panelEl.classList.contains('collapsed')) {
       collapseNestedRunParallel(panelEl);
     }

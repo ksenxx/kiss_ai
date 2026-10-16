@@ -177,8 +177,7 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
         cmd: The ``run`` command dict; mutated in place.
         seas: The already-loaded SEAs (:func:`load_layers`), so a run
             executes its files once; ``None`` loads them from the
-            command's ``seaPath``.  An empty list leaves the command
-            untouched.
+            command's ``seaPath``.
 
     Returns:
         The set of setting and prompt wire fields that were overridden
@@ -194,8 +193,6 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     """
     if seas is None:
         seas = load_layers(cmd)
-    if not seas:
-        return set()
     raw_prompt = cmd.get("prompt")
     task = raw_prompt if isinstance(raw_prompt, str) else ""
     parent_task_id = cmd.get("parentTaskId")

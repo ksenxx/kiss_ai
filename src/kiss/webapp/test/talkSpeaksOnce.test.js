@@ -53,14 +53,6 @@ function makePage() {
     this.play = () => Promise.resolve();
   };
 
-  const spoken = [];
-  win.SpeechSynthesisUtterance = function (text) {
-    this.text = text;
-  };
-  win.speechSynthesis = {
-    speak: utter => spoken.push(utter),
-  };
-
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
@@ -69,7 +61,7 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with its tab id');
-  return {win, posted, played, spoken, tabId: ready.tabId};
+  return {win, posted, played, tabId: ready.tabId};
 }
 
 function send(win, data) {
@@ -92,18 +84,17 @@ function test(name, fn) {
 }
 
 test('one stamped copy for an own tab plays exactly once', () => {
-  const {win, played, spoken, tabId} = makePage();
+  const {win, played, tabId} = makePage();
   send(win, {
     type: 'talk', language: 'en-US', text: 'hello there',
     talkId: 't-1', taskId: 7, tabId, audioB64: B64,
   });
   assert.strictEqual(played.length, 1, JSON.stringify(played));
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test('duplicate stamped copies of one talk() call play only once', () => {
-  const {win, played, spoken, tabId} = makePage();
+  const {win, played, tabId} = makePage();
   send(win, {
     type: 'talk', language: 'en-US', text: 'do not repeat me',
     talkId: 't-dup', taskId: 7, tabId, audioB64: B64,
@@ -116,16 +107,14 @@ test('duplicate stamped copies of one talk() call play only once', () => {
     played.length, 1,
     `played ${played.length} times: ${JSON.stringify(played)}`,
   );
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test('copies stamped for two DIFFERENT owned tabs play only once', () => {
-  const {win, posted, played, spoken, tabId} = makePage();
+  const {win, posted, played, tabId} = makePage();
   // "+" keeps a chat that is still new; createNewTab() always opens one.
   win._testApi.createNewTab();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId && newChat.tabId !== tabId);
-  assert.strictEqual(spoken.length, 0, 'no unlock primer any more');
   send(win, {
     type: 'talk', language: 'en-US', text: 'once across tabs',
     talkId: 't-two-tabs', taskId: 7, tabId, audioB64: B64,
@@ -138,11 +127,10 @@ test('copies stamped for two DIFFERENT owned tabs play only once', () => {
     played.length, 1,
     `played ${played.length} times: ${JSON.stringify(played)}`,
   );
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test('a copy for an own BACKGROUND tab still plays', () => {
-  const {win, posted, played, spoken} = makePage();
+  const {win, posted, played} = makePage();
   // Open a second chat without "+": "+" retires the idle chat it
   // leaves, and a closed tab's talk is rightly silent.
   win._testApi.createNewTab();
@@ -156,15 +144,13 @@ test('a copy for an own BACKGROUND tab still plays', () => {
   });
   assert.strictEqual(played.length, 1, JSON.stringify(played));
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test('legacy talk event without talkId or tabId still plays', () => {
-  const {win, played, spoken} = makePage();
+  const {win, played} = makePage();
   send(win, {type: 'talk', language: 'es', text: 'hola', audioB64: B64});
   assert.strictEqual(played.length, 1, JSON.stringify(played));
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test('dedupe memory is bounded (many talk calls keep working)', () => {

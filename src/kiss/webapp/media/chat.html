@@ -512,24 +512,14 @@
         <div class="sidebar-hdr">{{PRODUCT_NAME}} Configuration{{VERSION_SUFFIX}}</div>
         <div id="remote-url"></div>
         <div id="config-form">
-          <!-- remote_password: the random password the first install
-               chose, shown read-only (updates keep it); the eye button
-               reveals it.  Rotate asks the daemon for a new one
-               (rotateRemotePassword: what ``python -m
-               kiss.core.remote_password --rotate`` does on its
-               machine); the daemon answers remotePasswordRotated +
-               configData and main.js reveals the new password and
-               writes the note below. -->
+          <!-- remote_password: the plaintext remote access password
+               (the first install chooses a random one; updates keep
+               it).  Editable: saved with the rest of the form through
+               saveConfig and in force from the daemon's next frame;
+               empty disables remote access. -->
           <label class="config-label">Remote password
-            <div class="config-remote-password-row">
-              <input type="password" id="cfg-remote-password" readonly autocomplete="off" aria-label="Remote password" title="The remote access password: type it in the web app on another device. The first install chooses it and updates keep it; Rotate replaces it.">
-              <button type="button" id="cfg-rotate-password-btn" class="config-update-btn" data-tooltip="Replace the remote access password with a new random one; other devices must sign in again with it">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.63 4.36A9 9 0 0 0 20.49 15"/></svg>
-                <span>Rotate</span>
-              </button>
-            </div>
+            <input type="text" id="cfg-remote-password" autocomplete="off" spellcheck="false" aria-label="Remote password" title="The remote access password: type it in the web app on another device. Edit it to change it; leave it empty to disable remote access.">
           </label>
-          <div id="cfg-remote-password-note" class="config-field-note" role="status" hidden></div>
           <template id="secret-toggle-template">
             <button type="button" class="config-password-toggle" aria-label="Show" aria-pressed="false" title="Show">
               <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -609,6 +599,23 @@
           </label>
           <label class="config-label">Gemini API Key (NOT RECOMMENDED)
             <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
+          </label>
+          <!-- Amazon Bedrock (bedrock/ Claude models): a bearer token
+               OR an access key pair; the region picks the endpoint. -->
+          <label class="config-label">Amazon Bedrock API Key (bearer token)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_BEARER_TOKEN_BEDROCK" placeholder="Enter Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)">
+          </label>
+          <label class="config-label">AWS Access Key ID (Bedrock, if no bearer token)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_ACCESS_KEY_ID" placeholder="AKIA...">
+          </label>
+          <label class="config-label">AWS Secret Access Key (Bedrock)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_SECRET_ACCESS_KEY" placeholder="Enter AWS secret access key">
+          </label>
+          <label class="config-label">AWS Session Token (Bedrock, temporary credentials only)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_SESSION_TOKEN" placeholder="Enter AWS session token">
+          </label>
+          <label class="config-label">AWS Region (Bedrock)
+            <input type="text" autocomplete="off" id="cfg-key-AWS_REGION" placeholder="us-east-1">
           </label>
             </div>
           </div>

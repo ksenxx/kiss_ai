@@ -35,9 +35,8 @@ per call:
   when
   :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available` says
   so — the one gate for every use of Jev, the ``decide`` tool included:
-  the ``classify_with_decisions`` config key (the settings panel's "Use
-  Jev" checkbox, default on) and an ``OPENROUTER_API_KEY`` with the
-  model in the catalog.  When it is off,
+  the ``classify_with_decisions`` config key (default on) and an
+  ``OPENROUTER_API_KEY`` with the model in the catalog.  When it is off,
   unavailable, or its call fails, the LLM classifier below runs
   instead, so a missing key or an OpenRouter outage never changes the
   classification path's behaviour from what it was before.
@@ -349,9 +348,8 @@ def classification_enabled(override: bool | None = None) -> bool:
         ``False`` when the ``KISS_DISABLE_TASK_CLASSIFIER`` environment
         variable is set to ``"1"`` (the test suite's kill switch, which
         wins over everything).  Otherwise *override* when it is not
-        ``None``, else the ``classify_tasks`` config key — persisted in
-        ``~/.kiss/config.json`` and toggleable in the settings panel —
-        defaulting to ``True``.
+        ``None``, else the ``classify_tasks`` config key of
+        ``$KISS_HOME/config.json``, defaulting to ``True``.
     """
     if os.environ.get(_DISABLE_ENV, "") == "1":
         return False
@@ -876,7 +874,7 @@ def classify_task(
     """Classify *task*: with the decisions classifier when it can run, else the LLM.
 
     When :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available`
-    allows it (the "Use Jev" setting is on and Jev can run), one
+    allows it (the ``classify_with_decisions`` config key is on and Jev can run), one
     ``decide`` tool call on :data:`DEFAULT_DECISIONS_MODEL` produces the
     verdict.  If that classifier is off, unavailable (no
     ``OPENROUTER_API_KEY``), or its call fails for any reason, the LLM

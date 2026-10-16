@@ -37,7 +37,11 @@ from pathlib import Path
 from kiss.agents.third_party_agents.signal.signal_sea import _config as _signal_config
 from kiss.agents.third_party_agents.sms.sms_sea import _config as _sms_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
@@ -206,7 +210,6 @@ class TestSMSBackend(unittest.TestCase):
         the finite transport timeout stays as defense in depth.
         """
         import importlib
-        from http.server import BaseHTTPRequestHandler
         from typing import cast
         from urllib.parse import urlsplit, urlunsplit
 
@@ -215,7 +218,7 @@ class TestSMSBackend(unittest.TestCase):
         twilio_rest = importlib.import_module("twilio.rest")
         twilio_http = importlib.import_module("twilio.http.http_client")
 
-        class Handler(BaseHTTPRequestHandler):
+        class Handler(RecordingHandler):
             def do_GET(self) -> None:  # noqa: N802
                 """Answer every request with Twilio's 20003 auth error."""
                 cast(RecordingServer, self.server).requests.append({"path": self.path})
@@ -233,9 +236,6 @@ class TestSMSBackend(unittest.TestCase):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-
-            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-                """Silence request logging."""
 
         class LocalTwilioHttpClient(twilio_http.TwilioHttpClient):  # type: ignore[misc, name-defined]
             """Real Twilio transport re-hosted onto the local emulator."""

@@ -748,12 +748,15 @@
    * down — mic off, the reason on the button — so the user is not
    * shown a "listening" mic that hears nothing.  A later toggle has
    * bumped the generation and torn that pipeline down already: then
-   * there is nothing to do.
+   * there is nothing to do.  A wake's "Listening ..." overlay and
+   * flash come down with the pipeline; the rounds whose audio was
+   * already posted keep their owners, their transcripts still stand.
    */
   function onMicEnded(gen) {
     if (gen !== voiceGen) return;
     ++voiceGen;
     stopBrowserPipeline();
+    flash(null);
     enabled = false;
     persist();
     setUi(

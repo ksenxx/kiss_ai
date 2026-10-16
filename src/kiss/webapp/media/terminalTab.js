@@ -13,6 +13,8 @@
 //     send: msg => api[msg.type](msg),   // terminalOpen / terminalInput /
 //                                        // terminalResize / terminalClose
 //     workDir: '/path/the/shell/starts/in',   // '' = the daemon's work dir
+//     machine: 'box',       // a registered machine the shell runs on,
+//                           // '' (default) = the daemon's own machine
 //   });
 //   view.el                 -> element to mount in the content area
 //   view.setVisible(bool)   -> shown: load xterm, open the shell, fit, focus
@@ -186,13 +188,17 @@
     function openShell() {
       lastSize = {cols: term ? term.cols : 80, rows: term ? term.rows : 24};
       openRequested = true;
-      send({
+      const open = {
         type: 'terminalOpen',
         tab_id: tabId,
         cols: lastSize.cols,
         rows: lastSize.rows,
         workDir: opts.workDir || '',
-      });
+      };
+      // A shell on a registered machine: the daemon forwards the
+      // command there (kiss/server/remote_views.py).
+      if (opts.machine) open.machine = opts.machine;
+      send(open);
     }
 
     function restartShell() {

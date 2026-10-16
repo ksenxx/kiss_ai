@@ -286,7 +286,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def test_autorouter_model_runs_the_task_through_the_autorouter_sea(self) -> None:
         """The wire ``model`` field ``autorouter`` becomes an autorouter SEA run."""
         run = self._run("say hello", model=AUTOROUTER)
-        assert run["model_name"] == orchestrator_model()
+        assert run["model_name"] == autorouter_sea.ROUTER_MODEL
         assert run["model_name"] in MODEL_INFO
         assert run["system_prompt"].startswith("<identity>"), run["system_prompt"][:200]
         assert AUTOROUTER_MARKER in run["system_prompt"]
@@ -353,7 +353,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
             encoding="utf-8",
         )
         run = self._run("say hello", model=AUTOROUTER, sea_path=str(sea))
-        assert run["model_name"] == orchestrator_model()
+        assert run["model_name"] == autorouter_sea.ROUTER_MODEL
         assert run["system_prompt"].startswith("<identity>"), run["system_prompt"][:200]
         assert run["system_prompt"].index(AUTOROUTER_MARKER) < run["system_prompt"].index(
             "PLAIN SEA PROTOCOL"
@@ -384,7 +384,7 @@ class Sea(BaseSea):
             encoding="utf-8",
         )
         run = self._run("say hello", sea_path=str(sea))
-        assert run["model_name"] == orchestrator_model()
+        assert run["model_name"] == autorouter_sea.ROUTER_MODEL
         assert run["system_prompt"].startswith("BLANK MODEL SEA")
 
     def test_agent_script_naming_a_picker_as_its_model_runs_on_a_real_model(self) -> None:

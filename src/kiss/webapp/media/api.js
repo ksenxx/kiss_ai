@@ -67,7 +67,6 @@
     'snoozeUpdate',
     'updateWhenIdle',
     'serverReset',
-    'rotateRemotePassword',
     'voiceTranscribe',
     'tipsOptOut',
     'browserOpen',

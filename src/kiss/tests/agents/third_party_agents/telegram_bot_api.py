@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
 from kiss.agents.third_party_agents.telegram.telegram_sea import TelegramChannelBackend, _config
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 TOKEN = "123456:TEST-telegram-token"
 
@@ -32,7 +35,7 @@ class BotApiServer(RecordingServer):
         self.updates: list[dict[str, Any]] = []
 
 
-class _BotApiHandler(BaseHTTPRequestHandler):
+class _BotApiHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802
         server = cast(BotApiServer, self.server)
         length = int(self.headers.get("Content-Length", 0))
@@ -45,9 +48,6 @@ class _BotApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        pass
 
 
 def serve_bot_api() -> Iterator[BotApiServer]:

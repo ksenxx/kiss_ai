@@ -1959,8 +1959,9 @@ class _CommandsMixin:
         )
 
         cfg = load_config()
-        # ``remote_password`` travels along: the Settings panel shows it
-        # read-only (only install.sh sets it; ``saveConfig`` ignores it).
+        # ``remote_password`` travels along: the Settings panel edits it
+        # (``saveConfig`` stores a new one, in force at once; see
+        # ``_cmd_save_config``).
         cfg["work_dir"] = self.work_dir
         # Only directories that still exist, most recently opened first
         # (the raw stored list may hold deleted or malformed entries).
@@ -1980,12 +1981,17 @@ class _CommandsMixin:
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
 
-        The remote password is not a setting a client may change: only
-        the first ``install.sh`` run sets it and a ``--rotate`` run of
-        ``kiss.core.remote_password`` replaces it, so a
-        ``remote_password`` in the payload is dropped (and
-        ``sanitize_config`` drops the retired hash key of an earlier
-        release).
+        A ``remote_password`` in the payload replaces the stored one
+        (``sanitize_config`` drops the retired hash key of an earlier
+        release).  The daemon reads the stored password on every frame
+        of a password-authenticated browser, so the new one is in force
+        at once, without a restart; an empty one disables remote
+        access.  When it changed, the requesting connection gets a
+        ``remotePasswordChanged`` event carrying the new password
+        BEFORE its ``configData``, so its transport adopts it before it
+        sends another frame.  Every other password-authenticated client
+        is shut out at its next command and asked for the new password;
+        local-token and loopback clients are unaffected.
 
         The ``save_config`` write and the env re-apply are held under a
         dedicated lock so two concurrent ``saveConfig`` commands (two
@@ -2010,8 +2016,8 @@ class _CommandsMixin:
         # refuses (a filesystem root) on disk, where it would shadow the
         # previously persisted directory on the next daemon start.
         new_work_dir = cfg.pop("work_dir", "")
-        cfg.pop("remote_password", None)
         with _CommandsMixin._save_config_lock:
+            prev_password = load_config().get("remote_password", "")
             save_config(cfg)
             apply_config_to_env(load_config())
 
@@ -2049,49 +2055,15 @@ class _CommandsMixin:
         # may still name directories that were deleted since, and the
         # chat header's drop-down shows whatever this reply carries.
         new_cfg["recent_work_dirs"] = recent_work_dirs()
+        new_password = new_cfg.get("remote_password", "")
+        if new_password != prev_password:
+            self._broadcast_to_conn(
+                {"type": "remotePasswordChanged", "password": new_password},
+                conn_id,
+            )
         self._broadcast_to_conn(
             {"type": "configData", "config": new_cfg}, conn_id,
         )
-
-    def _cmd_rotate_remote_password(self, cmd: dict[str, Any]) -> None:
-        """Replace the remote-access password with a fresh random one.
-
-        Services the Settings panel's "Rotate" button next to the
-        Remote password box: the same operation as
-        ``python -m kiss.core.remote_password --rotate`` run on the
-        daemon's machine, done in-process.  The new password is stored
-        in ``config.json`` under ``_save_config_lock`` (the lock a
-        concurrent ``saveConfig`` holds while it merges the file).
-
-        The requesting connection gets a ``remotePasswordRotated``
-        event carrying the new password FIRST, then a fresh
-        ``configData``: the daemon checks the password on every frame of
-        a password-authenticated browser, so the page's transport
-        adopts the new one from that event before it sends anything
-        else, and the Settings panel shows it.  Every other
-        password-authenticated client is shut out at its next command
-        and asked for the new password, which is what a rotation is
-        for; local-token and loopback clients are unaffected.  On
-        failure (``config.json`` unreadable) the requester gets an
-        ``error`` and the stored password is left as it was.
-        """
-        from kiss.core.remote_password import ensure_password
-
-        conn_id = cmd.get("connId", "")
-        try:
-            with _CommandsMixin._save_config_lock:
-                password = ensure_password(rotate=True)
-        except Exception as e:
-            logger.warning("Rotating the remote password failed", exc_info=True)
-            self._broadcast_to_conn({
-                "type": "error", "code": "rotate_remote_password_failed",
-                "text": f"Could not rotate the remote password: {e}",
-            }, conn_id)
-            return
-        self._broadcast_to_conn(
-            {"type": "remotePasswordRotated", "password": password}, conn_id,
-        )
-        self._cmd_get_config(cmd)
 
     def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
         """Send the custom models from ``~/.kiss/MY_MODELS.json``.
@@ -2341,7 +2313,6 @@ class _CommandsMixin:
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
-        "rotateRemotePassword": _cmd_rotate_remote_password,
         "getMyModels": _cmd_get_my_models,
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,

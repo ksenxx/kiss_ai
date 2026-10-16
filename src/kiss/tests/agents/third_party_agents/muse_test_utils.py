@@ -21,6 +21,7 @@ import json
 import socket
 import struct
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,24 @@ def _process_running(pid: int) -> bool:
         stat = Path(f"/proc/{pid}/stat").read_text()
         # The state letter follows the parenthesised command name.
         return stat[stat.rindex(")") + 2] != "Z"
+    return False
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` every 50 ms until it is true or ``timeout`` seconds elapse.
+
+    Args:
+        predicate: Condition to wait for.
+        timeout: Seconds to keep polling.
+
+    Returns:
+        True as soon as the predicate holds, False when the timeout expires first.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
     return False
 
 

@@ -37,6 +37,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {paste} = require('./attachment_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const SHORT_DEADLINE_MS = 300;
@@ -92,15 +93,6 @@ function makePage() {
     ) + '\n//# sourceURL=conc2026-attachment-removed-slot-main.js',
   );
   return {win, decodeCount: () => decodes};
-}
-
-function paste(win, file) {
-  const inp = win.document.getElementById('task-input');
-  const ev = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(ev, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => file}]},
-  });
-  inp.dispatchEvent(ev);
 }
 
 function delay(ms) {

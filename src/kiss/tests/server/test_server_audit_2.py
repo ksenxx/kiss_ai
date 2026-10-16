@@ -79,25 +79,25 @@ class TestActiveFileMatchesLongestFirst(unittest.TestCase):
 
 class TestModelVendorOpenAIClassification(unittest.TestCase):
     """B6 fix: ``model_vendor("openai/gpt-4o")`` now correctly
-    returns ``("OpenAI", 1)``.
+    returns OpenAI (order 2: after Anthropic and Bedrock).
     """
 
     def test_openai_gpt4o_classified_as_openai(self) -> None:
         vendor, order = model_vendor("openai/gpt-4o")
-        assert vendor == "OpenAI" and order == 1, (
+        assert vendor == "OpenAI" and order == 2, (
             f"B6 fix: openai/gpt-4o should be OpenAI, got ({vendor}, {order})"
         )
 
     def test_openai_o1_classified_as_openai(self) -> None:
         vendor, order = model_vendor("openai/o1-preview")
-        assert vendor == "OpenAI" and order == 1, (
+        assert vendor == "OpenAI" and order == 2, (
             f"B6 fix: openai/o1-preview should be OpenAI, got ({vendor}, {order})"
         )
 
     def test_bare_gpt4o_still_classified_correctly(self) -> None:
         """The bare name without ``openai/`` prefix still works."""
         vendor, order = model_vendor("gpt-4o")
-        assert vendor == "OpenAI" and order == 1, (
+        assert vendor == "OpenAI" and order == 2, (
             f"Bare gpt-4o should be OpenAI, got ({vendor}, {order})"
         )
 

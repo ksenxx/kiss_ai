@@ -26,7 +26,6 @@ import json
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -46,7 +45,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _REAL = "real-secret-credential"
 _MS_ACCESS = "graph-access-token"
@@ -84,7 +87,7 @@ _BODY: dict[str, Any] = {
 }
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _Handler(RecordingHandler):
     """Record every request; answer with ``_BODY`` (or a token for the OAuth endpoint)."""
 
     server: Any
@@ -118,9 +121,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _serve  # noqa: N815
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Keep the pytest output clean."""
 
 
 @pytest.fixture()

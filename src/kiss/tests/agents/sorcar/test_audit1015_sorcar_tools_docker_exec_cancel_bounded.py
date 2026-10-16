@@ -39,7 +39,7 @@ from typing import Any, cast
 
 import docker.errors
 
-from kiss.agents.sorcar.docker_manager import _KILL_WAIT_S, DockerManager
+from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, _KILL_WAIT_S, DockerManager
 from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
@@ -113,8 +113,8 @@ class TestExecCancelBounded(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.env.stop_event = None
-        for owner, name in ((self.api, "exec_start"), (self.api, "exec_inspect"),
-                            (self.container, "exec_run")):
+        for owner, name in ((self.api, "exec_create"), (self.api, "exec_start"),
+                            (self.api, "exec_inspect"), (self.container, "exec_run")):
             if name in vars(owner):
                 delattr(owner, name)
 
@@ -177,18 +177,34 @@ class TestExecCancelBounded(unittest.TestCase):
         self.api.exec_start = delayed_exec_start
 
     def _slow_exec_inspect(self, seconds: float, stop: threading.Event | None = None) -> None:
-        """Delay the first ``exec_inspect`` by *seconds*, setting *stop* first when given."""
+        """Delay the first ``exec_inspect`` of the next ``Bash`` exec by *seconds*.
+
+        *stop* is set first when given.  Only the token-tagged exec created
+        after this call (the next ``Bash`` command) is delayed: the reaper of an earlier command
+        keeps polling ``exec_inspect`` and running untagged kill sweeps in
+        the background, and on a loaded machine that poll would otherwise
+        take the delay meant for this test's exit-code fetch.
+        """
+        real_exec_create = self.api.exec_create
         real_exec_inspect = self.api.exec_inspect
         first_call = threading.Event()
+        watched: list[str] = []
 
-        def delayed_exec_inspect(*args: Any, **kwargs: Any) -> Any:
-            if not first_call.is_set():
+        def recording_exec_create(*args: Any, **kwargs: Any) -> Any:
+            resp = real_exec_create(*args, **kwargs)
+            if not watched and _EXEC_TOKEN_VAR in (kwargs.get("environment") or {}):
+                watched.append(resp["Id"])
+            return resp
+
+        def delayed_exec_inspect(exec_id: str, *args: Any, **kwargs: Any) -> Any:
+            if watched and exec_id == watched[0] and not first_call.is_set():
                 first_call.set()
                 if stop is not None:
                     stop.set()
                 time.sleep(seconds)
-            return real_exec_inspect(*args, **kwargs)
+            return real_exec_inspect(exec_id, *args, **kwargs)
 
+        self.api.exec_create = recording_exec_create
         self.api.exec_inspect = delayed_exec_inspect
 
     def _wait_until_exec_finished(self, exec_id: str) -> None:
@@ -292,7 +308,8 @@ class TestExecCancelBounded(unittest.TestCase):
             result = self.env.Bash("echo done", "stopped as it finishes", timeout_seconds=30)
             self.assertIn("Killed: the task was stopped.", result)
             self.assertIn("done", result)
-            del self.api.exec_inspect  # the next round shims the real method again
+            # The next round shims the real methods again.
+            del self.api.exec_create, self.api.exec_inspect
 
     def test_stop_between_two_slices_keeps_the_output_already_queued(self) -> None:
         """(3) Output the worker queued before a Stop landed is part of the result.

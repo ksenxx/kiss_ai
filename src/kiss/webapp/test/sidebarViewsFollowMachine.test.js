@@ -470,21 +470,24 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
   click(win, saveButton(win));
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, undefined);
   assert.strictEqual(msgs(posted, 'saveFile')[0].workDir, '/work/ws');
-  // A reply without a stamp for a chat bound to a machine (a file of a
-  // task that ran there, relayed as is) is the machine's.
+  // A reply without a stamp is this daemon's own file even for a chat
+  // bound (and picked) to a machine: the daemon stamps every reply a
+  // machine answers (sidebar_panels.machine_workspace_reply), and a
+  // transcript link of an earlier local task opens unstamped.  Its
+  // save goes here, not to the machine (audit 2026-10-16, mainjs-1 F1).
   win._testApi.switchToTab(chat);
   pickMachine(win, 'gpu-box');
   send(win, {
     type: 'fileContent', tabId: chat, path: '/srv/proj/out.txt', name: 'out.txt',
     content: 'out\n', version: 'o1',
   });
-  await waitFor(() => editors.length === 3, 'the relayed file opened');
-  const relayed = win._testApi.openTabs().filter(t => t.isContentTab)[2];
-  win._testApi.switchToTab(relayed.id);
+  await waitFor(() => editors.length === 3, 'the local file opened');
+  const local = win._testApi.openTabs().filter(t => t.isContentTab)[2];
+  win._testApi.switchToTab(local.id);
   posted.length = 0;
   editors[2]._type('out 2\n');
   click(win, saveButton(win));
-  assert.strictEqual(msgs(posted, 'saveFile')[0].machine, 'gpu-box');
+  assert.strictEqual(msgs(posted, 'saveFile')[0].machine, undefined);
 }
 
 async function testAnActionKeepsTheMachineItWasPickedOn() {

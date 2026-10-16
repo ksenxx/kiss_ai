@@ -8,10 +8,13 @@
 //
 //  * every task panel in the task-history list shows its classification
 //    tags ("work · coding") right after its "... ago" age label;
-//  * every collapsible chat panel carries a "last launched ... ago" line
-//    under its header, fed by the daemon's `chat_last_launched` stamp
-//    (falling back to the newest row loaded) and kept current by the
-//    same 30 s sweep as the task labels;
+//  * every collapsible chat panel carries a "... ago" line under its
+//    header counting from the chat's newest instant, fed by the daemon's
+//    `chat_last_launched` / `chat_last_finished` stamps (falling back to
+//    the newest row loaded) and kept current by the same 30 s sweep as
+//    the task labels; its tooltip says "Finished <date>" once the newest
+//    task is done, "Started <date>" while it runs, and the bare date
+//    when only a launch stamp is known;
 //  * a thoughts panel shows the USD cost of the model call it holds next
 //    to its time label, from the `llm_call` event, live and on replay.
 
@@ -237,13 +240,19 @@ function testChatLastLaunchedLine() {
     ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
   assert.ok(lineA, 'the chat panel has a launched label in its action strip');
-  assert.strictEqual(lineA.nextElementSibling, null, 'the label ends the action strip');
+  assert.strictEqual(
+    lineA.nextElementSibling,
+    null,
+    'the label ends the action strip',
+  );
   assert.ok(
     lineA.previousElementSibling.classList.contains('history-chat-rename'),
     'the label follows the rename pencil',
   );
   assert.ok(
-    lineA.previousElementSibling.previousElementSibling.classList.contains('history-chat-collapse'),
+    lineA.previousElementSibling.previousElementSibling.classList.contains(
+      'history-chat-collapse',
+    ),
     'the rename pencil follows the Show details chevron',
   );
   assert.strictEqual(
@@ -258,16 +267,20 @@ function testChatLastLaunchedLine() {
     'the header sits directly above the task rows',
   );
   const labelA = lineA.querySelector('.sidebar-item-launched');
-  assert.strictEqual(labelA.textContent, 'last launched 3 hours ago');
-  assert.ok(
-    labelA.title.indexOf('Last launched ') === 0,
-    'tooltip shows the absolute time',
+  assert.strictEqual(labelA.textContent, '3 hours ago');
+  // chat_last_launched is the newest task's LAUNCH; without a
+  // chat_last_finished stamp (an older daemon) the tooltip must not
+  // claim the task finished then: it is the bare date.
+  assert.strictEqual(
+    labelA.title,
+    new Date(stamped).toLocaleString(),
+    'a bare launch stamp gets a neutral tooltip',
   );
   assert.strictEqual(
     byChat['chat-b'].querySelector(
       '.history-chat-launched .sidebar-item-launched',
     ).textContent,
-    'last launched 1 day ago',
+    '1 day ago',
     'without a stamp the newest row loaded decides',
   );
   assert.strictEqual(
@@ -280,10 +293,7 @@ function testChatLastLaunchedLine() {
   );
   assert.ok(labelD, 'an epoch-zero launch instant renders a label');
   assert.strictEqual(labelD.dataset.launchTs, '0');
-  assert.ok(
-    /^last launched \d+ years ago$/.test(labelD.textContent),
-    labelD.textContent,
-  );
+  assert.ok(/^\d+ years ago$/.test(labelD.textContent), labelD.textContent);
 
   // The chat panel is folded: the line stays visible (it is not part
   // of the body the chevron folds).
@@ -310,26 +320,112 @@ function testChatLastLaunchedLine() {
   );
 
   // A refresh with a newer stamp moves the line forward; a stale
-  // page does not move it back.
+  // page does not move it back.  The daemon now also stamps the
+  // newest task's completion: the line counts from it and says so.
   loadHistory(win, [
     session({
       id: 'chat-a',
       task_id: 'task-a3',
-      startTs: now - HOUR_MS,
-      timestamp: Math.floor((now - HOUR_MS) / 1000),
-      chat_last_launched: now - HOUR_MS,
+      startTs: now - 2 * HOUR_MS,
+      endTs: now - HOUR_MS,
+      timestamp: Math.floor((now - 2 * HOUR_MS) / 1000),
+      chat_last_launched: now - 2 * HOUR_MS,
+      chat_last_finished: now - HOUR_MS,
     }),
   ]);
   const lineA2 = groups(win)
     .find(g => g.dataset.chatId === 'chat-a')
     .querySelector('.history-chat-launched .sidebar-item-launched');
-  assert.strictEqual(lineA2.textContent, 'last launched 1 hour ago');
-  assert.strictEqual(lineA2.dataset.launchPrefix, 'last launched');
+  assert.strictEqual(lineA2.textContent, '1 hour ago');
+  assert.strictEqual(
+    lineA2.title,
+    'Finished ' + new Date(now - HOUR_MS).toLocaleString(),
+    'a finished newest task: tooltip says Finished',
+  );
   win.close();
-  console.log('  ok - chat panels show a "last launched ... ago" line');
+  console.log(
+    '  ok - chat panels show a "... ago" line without "last launched"',
+  );
 }
 
-function testRefreshSweepKeepsPrefix() {
+function testChatLineFollowsTheNewestTaskState() {
+  const {win} = makePage();
+  const now = Date.now();
+  loadHistory(win, [
+    // chat-run: its newest task is still running.  The stamps are
+    // from the previous task's finish (the row is recomputed when a
+    // task finishes); the running row's launch is newer and wins with
+    // a "Started" tooltip.
+    session({
+      id: 'chat-run',
+      task_id: 'task-r2',
+      is_running: true,
+      startTs: now - 10 * 60 * 1000,
+      timestamp: Math.floor((now - 10 * 60 * 1000) / 1000),
+      chat_last_launched: now - 3 * HOUR_MS,
+      chat_last_finished: now - 2 * HOUR_MS,
+    }),
+    session({
+      id: 'chat-run',
+      task_id: 'task-r1',
+      startTs: now - 3 * HOUR_MS,
+      endTs: now - 2 * HOUR_MS,
+      timestamp: Math.floor((now - 3 * HOUR_MS) / 1000),
+      chat_last_launched: now - 3 * HOUR_MS,
+      chat_last_finished: now - 2 * HOUR_MS,
+    }),
+    // chat-off: only an old finished task is on the page; the stamps
+    // say the (unloaded) newest task finished later.
+    session({
+      id: 'chat-off',
+      task_id: 'task-o1',
+      startTs: now - 30 * HOUR_MS,
+      endTs: now - 29 * HOUR_MS,
+      timestamp: Math.floor((now - 30 * HOUR_MS) / 1000),
+      chat_last_launched: now - 6 * HOUR_MS,
+      chat_last_finished: now - 5 * HOUR_MS,
+    }),
+    // chat-old: a finished row with a completion time and no stamps
+    // (an older daemon): the row's completion, "Finished".
+    session({
+      id: 'chat-old',
+      task_id: 'task-x1',
+      startTs: now - 9 * HOUR_MS,
+      endTs: now - 8 * HOUR_MS,
+      timestamp: Math.floor((now - 9 * HOUR_MS) / 1000),
+    }),
+  ]);
+  const byChat = {};
+  groups(win).forEach(g => {
+    byChat[g.dataset.chatId] = g;
+  });
+  const label = id =>
+    byChat[id].querySelector('.history-chat-launched .sidebar-item-launched');
+  assert.strictEqual(label('chat-run').textContent, '10 minutes ago');
+  assert.strictEqual(
+    label('chat-run').title,
+    'Started ' + new Date(now - 10 * 60 * 1000).toLocaleString(),
+    'a running newest task: tooltip says Started',
+  );
+  assert.strictEqual(label('chat-off').textContent, '5 hours ago');
+  assert.strictEqual(
+    label('chat-off').title,
+    'Finished ' + new Date(now - 5 * HOUR_MS).toLocaleString(),
+    'the stamped completion beats an older row on the page',
+  );
+  assert.strictEqual(label('chat-old').textContent, '8 hours ago');
+  assert.strictEqual(
+    label('chat-old').title,
+    'Finished ' + new Date(now - 8 * HOUR_MS).toLocaleString(),
+    'without stamps a finished row counts from its completion',
+  );
+  win.close();
+  console.log(
+    '  ok - the chat line says Started while running and Finished once done',
+  );
+}
+
+function testRefreshSweepRepaintsBothLabels() {
   const {win, timers} = makePage();
   const now = Date.now();
   loadHistory(win, [
@@ -357,11 +453,11 @@ function testRefreshSweepKeepsPrefix() {
   ).map(el => el.textContent);
   assert.deepStrictEqual(
     after.sort(),
-    ['7 hours ago', 'last launched 7 hours ago'],
-    "the sweep keeps each label's own leading words (none for a task row)",
+    ['7 hours ago', '7 hours ago'],
+    'the sweep repaints the chat line and the task row alike',
   );
   win.close();
-  console.log("  ok - the 30 s sweep keeps the chat line's prefix");
+  console.log('  ok - the 30 s sweep repaints the chat line and the task row');
 }
 
 async function testThoughtsPanelCostLive() {
@@ -596,7 +692,8 @@ function testFormatCallCost() {
 (async () => {
   testTagsAfterLaunched();
   testChatLastLaunchedLine();
-  testRefreshSweepKeepsPrefix();
+  testChatLineFollowsTheNewestTaskState();
+  testRefreshSweepRepaintsBothLabels();
   await testThoughtsPanelCostLive();
   await testThoughtsPanelCostReplay();
   testFormatCallCost();

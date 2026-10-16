@@ -38,7 +38,9 @@ dependencies = [
     "openai>=2.13.0",
     # >=1.0: the SDK speaks HTTP through httpx2 and kiss.core.models.
     # anthropic_model builds its Timeout / catches its exceptions from httpx2.
-    "anthropic>=1.0.0",
+    # [bedrock] pulls boto3/botocore for the SigV4 signing of
+    # ``bedrock/<model id>`` requests (kiss.core.models.anthropic_model).
+    "anthropic[bedrock]>=1.0.0",
     "rich>=14.2.0",
     # Markdown -> HTML conversion for finish()'s HTML summary guarantee
     # (kiss.core.utils.ensure_html).

@@ -70,23 +70,11 @@ connecting while it runs is told the same ``new_tab``
 from __future__ import annotations
 
 import json
-import logging
 import threading
 from typing import Any
 
-from websockets.exceptions import ConnectionClosed
-from websockets.sync.client import ClientConnection
-
-from kiss.agents.sorcar import local_endpoint
-from kiss.agents.sorcar.machines import (
-    REQUEST_TIMEOUT,
-    Machine,
-    MachineError,
-    link_for,
-    load_machines,
-)
-
-logger = logging.getLogger(__name__)
+from kiss.agents.sorcar.machines import Machine, MachineError, load_machines
+from kiss.server.machine_stream import DROPPED_FIELDS, MachineStream
 
 FORWARDED_COMMANDS = frozenset({
     "submit", "run", "stop", "userAnswer", "appendUserMessage", "interruptTool",
@@ -100,7 +88,7 @@ BINDING_COMMANDS = frozenset({"submit", "run"})
 ROUTED_COMMANDS = FORWARDED_COMMANDS | {"closeTab", "newChat", "resumeSession"}
 """The commands :meth:`RemoteTabs.route` looks at (``ready`` goes to :meth:`replay_to`)."""
 
-_DROPPED_FIELDS = ("connId", "machine", "workDir", "tabScopeWorkDir")
+_DROPPED_FIELDS = DROPPED_FIELDS + ("workDir", "tabScopeWorkDir")
 """Fields of a forwarded command that only mean something on this daemon.
 
 ``workDir`` is a path of this machine: without it the remote daemon
@@ -112,12 +100,11 @@ the machine's configured one).
 _DROPPED_RUN_FIELDS = tuple(f for f in _DROPPED_FIELDS if f != "workDir")
 
 
-class RemoteTab:
+class RemoteTab(MachineStream):
     """One bound tab's stream to the daemon of a remote machine.
 
     Attributes:
         tab_id: The bound (root) tab.
-        machine: The machine the stream talks to.
         tab_ids: The root tab plus the sub-agent tabs this daemon's
             clients opened for its tasks; their frames are relayed.
         task_ids: The ids of the sub-agent tasks the remote announced
@@ -154,8 +141,6 @@ class RemoteTab:
         replay_conn: Per tab, the connection its last replay went to:
             the ``openSubagentTab`` announcements and child transcripts
             a replay goes on with reach that connection alone.
-        retired: Set (under ``lock``) once the owner took the stream
-            out of service; frames still in flight are dropped.
     """
 
     def __init__(
@@ -168,7 +153,6 @@ class RemoteTab:
                 password.
         """
         self.tab_id = tab_id
-        self.machine = machine
         self.tab_ids: set[str] = {tab_id}
         self.task_ids: set[str] = set()
         self.subagent = subagent
@@ -179,67 +163,11 @@ class RemoteTab:
         self.shown_task_id = ""
         self.replay_sinks: dict[str, list[str]] = {}
         self.replay_conn: dict[str, str] = {}
-        self.retired = False
-        self.lock = threading.Lock()
-        self._owner = owner
-        self._closed = False
-        self._ws: ClientConnection = link_for(machine).open_connection()
-        self._thread = threading.Thread(
-            target=self._relay, name=f"remote-tab-{tab_id}", daemon=True,
-        )
-        self._thread.start()
+        super().__init__(machine, owner, f"remote-tab-{tab_id}")
 
-    def send(self, cmd: dict[str, Any]) -> None:
-        """Forward *cmd* to the machine's daemon, without this daemon's own fields.
-
-        Bounded by :data:`~kiss.agents.sorcar.machines.REQUEST_TIMEOUT`:
-        a plain ``ws.send`` has no deadline and holds the connection's
-        write lock, so one stuck on a daemon that stopped reading would
-        block the client's command loop for good and wedge the
-        stream's :meth:`close` (``closeTab``, daemon shutdown) behind
-        it.  A write that misses the deadline closes the socket
-        underneath, which ends the stream as a lost connection.
-
-        Raises:
-            MachineError: When the socket is gone or the daemon did not
-                accept the command in time.
-        """
-        dropped = _DROPPED_RUN_FIELDS if cmd.get("type") == "run" else _DROPPED_FIELDS
-        frame = {k: v for k, v in cmd.items() if k not in dropped}
-        # The machine's daemon checks the password on every frame of a
-        # password-authenticated peer (an SSH machine's stream is
-        # certificate-authenticated and sends none).
-        if self.machine.password:
-            frame["password"] = self.machine.password
-        text = json.dumps(frame)
-        try:
-            local_endpoint.send(self._ws, text, timeout=REQUEST_TIMEOUT)
-        except (ConnectionClosed, OSError) as exc:
-            raise MachineError(f"{self.machine.name}: the connection is lost: {exc}") from exc
-
-    def close(self) -> None:
-        """Close the socket; the relay thread then ends without an error."""
-        self._closed = True
-        try:
-            self._ws.close()
-        except Exception:
-            logger.debug("closing the stream of tab %s failed", self.tab_id, exc_info=True)
-
-    def _relay(self) -> None:
-        """Hand every frame of this tab's tasks to the daemon's clients."""
-        try:
-            for raw in self._ws:
-                text = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
-                try:
-                    msg = json.loads(text)
-                except ValueError:
-                    continue
-                if isinstance(msg, dict):
-                    self._relay_frame(msg, text)
-        except (ConnectionClosed, OSError):
-            pass
-        finally:
-            self._owner.dropped(self, lost=not self._closed)
+    def _dropped_fields(self, cmd: dict[str, Any]) -> tuple[str, ...]:
+        """:data:`_DROPPED_FIELDS`, except that a ``run`` keeps its ``workDir``."""
+        return _DROPPED_RUN_FIELDS if cmd.get("type") == "run" else _DROPPED_FIELDS
 
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
         """Deliver one decoded frame when it belongs to this stream's tabs.

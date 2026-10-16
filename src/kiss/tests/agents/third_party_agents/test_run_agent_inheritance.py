@@ -27,7 +27,9 @@ scans the third-party channel directory to tell channel names from paths.
 
 from __future__ import annotations
 
+import gc
 import uuid
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -383,7 +385,13 @@ class Sea(BaseSea):
         for label, body in broken.items():
             script = scripts / f"{label}_sea.py"
             script.write_text(body)
-            text = run_agent(task="say hi", agent=str(script), timeout="30")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                text = run_agent(task="say hi", agent=str(script), timeout="30")
+                gc.collect()
+            # An ``async def settings`` coroutine is closed, not dropped for
+            # the GC to complain about ("was never awaited").
+            assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], label
             # A file that does not even compile "failed to import";
             # one that runs but misdeclares its settings names the
             # settings() problem.  The diagnostic names the script by

@@ -39,6 +39,8 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
+Claude models can also run through Amazon Bedrock: use the model name `bedrock/<Bedrock model or inference-profile id>` (for example `bedrock/us.anthropic.claude-opus-4-6-v1:0`) and set `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN` for temporary credentials), plus `AWS_REGION` (default `us-east-1`). Such a model is priced as its `claude-*` catalog entry; add it under Settings → Custom Models (name only) to pick it in the web app.
+
 Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
 
 ## Model Namespaces

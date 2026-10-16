@@ -17,6 +17,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
+const pages = [];
 
 function makePage(withMarked) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -31,6 +32,7 @@ function makePage(withMarked) {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  pages.push(win);
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
@@ -782,5 +784,6 @@ test('the floating modal is gone from the markup', () => {
 
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failures.length} failed`);
-  process.exit(failures.length > 0 ? 1 : 0);
+  for (const win of pages) win.close();
+  if (failures.length) process.exitCode = 1;
 });

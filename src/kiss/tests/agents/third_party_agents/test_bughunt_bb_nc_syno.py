@@ -18,7 +18,6 @@ import json
 import sys
 import urllib.request
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -31,7 +30,11 @@ from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalk
 from kiss.agents.third_party_agents.synology import synology_sea as syno_mod
 from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 Responder = Callable[[str, str, dict[str, list[str]], bytes], tuple[int, dict[str, Any]]]
 
@@ -50,7 +53,7 @@ class _ResponderServer(RecordingServer):
         self.responder: Responder = _ok_responder
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _Handler(RecordingHandler):
     def _handle(self) -> None:
         srv = cast(_ResponderServer, self.server)
         parsed = urlsplit(self.path)
@@ -84,9 +87,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         self._handle()
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
 
 
 _BB_MSG_PENDING = {

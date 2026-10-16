@@ -54,22 +54,6 @@ _PRUNE_AFTER_S = 3600.0
 TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
 
 
-def build_prompt(task_id: str) -> str:
-    """Return the ``/ask`` prompt the update run answers for *task_id*.
-
-    What a ``/ask`` typed into the task's chat produces: the
-    :class:`AskSea` ``prompt`` applied to the question, with
-    ``{task_id}`` filled in as the daemon would.
-
-    Args:
-        task_id: The ``task_history`` row id of the task to report on.
-
-    Returns:
-        The prompt text.
-    """
-    return evaluate_sea([AskSea()], UPDATE_QUESTION, task_id).prompt
-
-
 @dataclasses.dataclass
 class TaskUpdate:
     """The task-info panel's update for one task.

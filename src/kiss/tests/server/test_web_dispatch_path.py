@@ -220,8 +220,14 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
         self.install_root.mkdir(parents=True, exist_ok=True)
         marker = self.install_root / "marker.txt"
         script = self.install_root / "install.sh"
+        # The daemon runs the installer from its work dir (``$HOME`` when it
+        # has none), not from the clone: the marker needs an absolute path,
+        # and a stamp touched in the script's cwd shows which dir that was.
+        work_dir = Path(self.tmpdir) / "work"
+        work_dir.mkdir()
+        self.server.work_dir = str(work_dir)
         script.write_text(
-            "#!/bin/bash\necho \"updated $KISS_HOME\" > marker.txt\necho done\n",
+            f"#!/bin/bash\n: > ./cwd-stamp\necho \"updated $KISS_HOME\" > '{marker}'\necho done\n",
         )
         expected = f"updated {kiss_home()}"
         reader, writer = await self._connect()
@@ -242,6 +248,7 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "install.sh did not run")
             self.assertEqual(marker.read_text().strip(), expected)
+            self.assertTrue((work_dir / "cwd-stamp").is_file(), "not run from the work dir")
             log = self.server._update_log_path
             for _ in range(100):
                 if log.is_file() and "done" in log.read_text():

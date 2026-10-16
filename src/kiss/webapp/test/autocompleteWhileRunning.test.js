@@ -17,6 +17,14 @@
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
 
+const pages = [];
+
+function openPage() {
+  const page = makePage({beforeScripts: stubRaf});
+  pages.push(page.win);
+  return page;
+}
+
 function input(win) {
   return win.document.getElementById('task-input');
 }
@@ -83,7 +91,7 @@ const COMPLETIONS = [
 ];
 
 async function testTypingWhileRunningRequestsCompletion() {
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const {win, posted} = openPage();
   const tabId = startRunning(win);
   posted.length = 0;
   typeText(win, 'fix');
@@ -99,7 +107,7 @@ async function testTypingWhileRunningRequestsCompletion() {
 }
 
 function testCompletionsPickerOpensWhileRunning() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const tabId = startRunning(win);
   const inp = typeText(win, 'fix');
   send(win, {
@@ -123,7 +131,7 @@ function testCompletionsPickerOpensWhileRunning() {
 }
 
 function testGhostRendersAndAcceptsWhileRunning() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const tabId = startRunning(win);
   const inp = typeText(win, 'fix');
   send(win, {type: 'ghost', suggestion: ' the bug', query: 'fix', tabId});
@@ -134,7 +142,7 @@ function testGhostRendersAndAcceptsWhileRunning() {
 }
 
 function testAtMentionPickerWhileRunning() {
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const {win, posted} = openPage();
   const tabId = startRunning(win);
   posted.length = 0;
   const inp = typeText(win, 'look at @sr');
@@ -163,7 +171,7 @@ function testAtMentionPickerWhileRunning() {
 async function testCompletionSurvivesRunEndingMidDraft() {
   // The gates used to make the composer's help depend on run state; now
   // the same draft gets the same help whether the run ends or not.
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const {win, posted} = openPage();
   const tabId = startRunning(win);
   posted.length = 0;
   typeText(win, 'fix');
@@ -183,7 +191,7 @@ async function testCompletionSurvivesRunEndingMidDraft() {
 }
 
 function testEmptyCompletionsStillHidePickerWhileRunning() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const tabId = startRunning(win);
   typeText(win, 'fix');
   send(win, {
@@ -206,7 +214,7 @@ function testProgrammaticTabSwitchDropsPickerAndGhost() {
   // the textbox, so the blur handler never gets to drop the picker and
   // ghost text computed for the tab that just left the screen. Tab must
   // not paste tab A's suggestion into tab B's empty composer.
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const api = win._testApi;
   const tabA = api.getActiveTabId();
   api.createNewTab();
@@ -278,14 +286,13 @@ async function main() {
       console.error(err && err.stack ? err.stack : err);
     }
   }
+  for (const win of pages) win.close();
   if (failed) {
     console.error(failed + ' test(s) failed');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log('All ' + tests.length + ' tests passed');
-  // A running tab keeps the elapsed-time ticker alive; do not let it
-  // pin the process open once every assertion has run.
-  process.exit(0);
 }
 
 main();

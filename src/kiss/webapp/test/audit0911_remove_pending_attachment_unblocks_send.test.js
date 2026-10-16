@@ -48,8 +48,7 @@ function removeChip(win, name) {
   throw new Error('no chip found for ' + name);
 }
 
-async function main() {
-  const {win, posted, decodes} = makePage();
+async function checkRemovingPendingAttachmentUnblocksSend({win, posted, decodes}) {
   win._testApi.endLaunch();
   const tabA = win._testApi.getActiveTabId();
   const chips = win.document.getElementById('file-chips');
@@ -135,10 +134,18 @@ async function main() {
   console.log('audit0911_remove_pending_attachment_unblocks_send: OK');
 }
 
-main().then(
-  () => process.exit(0),
-  err => {
-    console.error(err && err.stack ? err.stack : err);
-    process.exit(1);
-  },
-);
+// The page's timers would keep node alive after a failed assertion, so the
+// window is closed on every path.
+async function main() {
+  const page = makePage();
+  try {
+    await checkRemovingPendingAttachmentUnblocksSend(page);
+  } finally {
+    page.win.close();
+  }
+}
+
+main().catch(err => {
+  console.error(err && err.stack ? err.stack : err);
+  process.exitCode = 1;
+});

@@ -27,8 +27,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import yaml
-
 RUN_CONFIG_KEYS = (
     "sea",
     "channel",
@@ -216,28 +214,3 @@ def _short(value: Any) -> str:
     """Return *value* for the ``pinned`` list: ``""`` as ``empty``, long text cut."""
     text = "empty" if value == "" else str(value)
     return text if len(text) <= 40 else text[:37] + "..."
-
-
-def with_run_config(result: str, settings: Mapping[str, Any]) -> str:
-    """Return a sub-agent's YAML *result* with the ``ran:`` line first.
-
-    Args:
-        result: The sub-agent's result text, normally a YAML mapping
-            with ``success`` and ``summary`` keys.
-        settings: Its ``task_settings`` payload.
-
-    Returns:
-        The YAML mapping re-dumped with ``ran`` as its first key; a
-        result that is not a mapping is prefixed with a ``ran:`` line.
-    """
-    line = run_config_line(settings)
-    try:
-        parsed = yaml.safe_load(result)
-    except yaml.YAMLError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        return f"ran: {line}\n{result}"
-    ordered: dict[str, Any] = {"ran": line}
-    ordered.update((key, value) for key, value in parsed.items() if key != "ran")
-    dumped: str = yaml.safe_dump(ordered, sort_keys=False)
-    return dumped

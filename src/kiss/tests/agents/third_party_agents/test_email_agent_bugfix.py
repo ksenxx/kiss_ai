@@ -110,19 +110,22 @@ class TestMissingMessageId:
         to, subject = backend._resolve_outbound("INBOX", normalized["ts"])
         assert (to, subject) == ("alice@example.com", "Hello there")
 
-    def test_send_message_raises_on_invalid_recipient(self) -> None:
-        """send_message raises RuntimeError instead of mailing 'INBOX'."""
-        backend = EmailChannelBackend()
-        backend._cfg = {"email_address": "bot@example.com"}
-        with pytest.raises(RuntimeError, match="INBOX"):
-            backend.send_message("INBOX", "hello", "")
+    @pytest.mark.parametrize(
+        "channel_id,thread_ts,match",
+        [("INBOX", "", "INBOX"), ("Sent Items", "1704110400.0", "no valid recipient")],
+        ids=["mailbox_without_thread", "mailbox_with_uncached_thread"],
+    )
+    def test_send_message_raises_on_mailbox_recipient(
+        self, channel_id: str, thread_ts: str, match: str
+    ) -> None:
+        """send_message raises RuntimeError instead of mailing a mailbox name.
 
-    def test_send_message_raises_for_unknown_thread(self) -> None:
-        """An uncached thread ts still cannot resolve to a mailbox recipient."""
+        Neither a bare mailbox nor an uncached thread ts resolves to a recipient.
+        """
         backend = EmailChannelBackend()
         backend._cfg = {"email_address": "bot@example.com"}
-        with pytest.raises(RuntimeError, match="no valid recipient"):
-            backend.send_message("Sent Items", "hello", "1704110400.0")
+        with pytest.raises(RuntimeError, match=match):
+            backend.send_message(channel_id, "hello", thread_ts)
 
 
 class TestOutboundRfc5322Headers:

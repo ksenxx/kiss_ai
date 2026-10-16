@@ -46,6 +46,7 @@ import atexit
 import contextlib
 import functools
 import os
+import random
 import shutil
 import socket
 import sys
@@ -215,7 +216,24 @@ def is_root() -> bool:
 
 
 def find_free_port() -> int:
-    """Return a TCP port that is free on 127.0.0.1 right now."""
+    """Return a TCP port that is free on 127.0.0.1 right now.
+
+    A random port below every OS's ephemeral range (Linux hands out
+    32768-60999, macOS and Windows 49152-65535) is tried first: a test
+    that closes its listener and binds the same port again (a login
+    session replaced by its successor) would otherwise race the
+    outgoing connections of the parallel runner's other processes,
+    which the kernel assigns from that range, for the port it just
+    gave back.  Port 0 (kernel's pick) is the fallback.
+    """
+    for _ in range(20):
+        port = random.randrange(20000, 32768)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])

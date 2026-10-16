@@ -109,6 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
             server.request_headers.append(
                 {k.lower(): v for k, v in self.headers.items()}
             )
+            server.request_paths.append(self.path)
         body = b"".join(server.chunks)
         self.send_response(server.status)
         self.send_header("Content-Type", server.content_type)
@@ -157,6 +158,7 @@ class ScriptedAnthropicServer:
         self._server.content_type = content_type  # type: ignore[attr-defined]
         self._server.requests = []  # type: ignore[attr-defined]
         self._server.request_headers = []  # type: ignore[attr-defined]
+        self._server.request_paths = []  # type: ignore[attr-defined]
         self._server.lock = threading.Lock()  # type: ignore[attr-defined]
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
@@ -183,6 +185,16 @@ class ScriptedAnthropicServer:
         """
         with self._server.lock:  # type: ignore[attr-defined]
             return list(self._server.request_headers)  # type: ignore[attr-defined]
+
+    @property
+    def request_paths(self) -> list[str]:
+        """Return the URL path of every request so far, in :attr:`requests` order.
+
+        The Bedrock client puts the model id in the path
+        (``/model/<id>/invoke-with-response-stream``), not the body.
+        """
+        with self._server.lock:  # type: ignore[attr-defined]
+            return list(self._server.request_paths)  # type: ignore[attr-defined]
 
     def stop(self) -> None:
         """Shut the server down and join its accept thread."""

@@ -28,99 +28,24 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-const openWindows = [];
-
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  openWindows.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function byId(win, id) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  return node;
-}
-
-function msgs(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
-// Messages are created inside the JSDOM realm, whose Object prototype
-// is not Node's, so structural equality goes through JSON.
-function assertJsonEqual(actual, expected) {
-  assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
-}
-
-const CHOOSE = 'chat-workdir-choose';
-
-function optionLabels(win) {
-  return Array.from(byId(win, 'chat-workdir').options, o => o.textContent);
-}
-
-function currentDir(win) {
-  return byId(win, 'chat-workdir').value;
-}
-
-function pickDir(win, value) {
-  const select = byId(win, 'chat-workdir');
-  const option =
-    value === CHOOSE
-      ? byId(win, CHOOSE)
-      : Array.from(select.options).find(o => o.value === value);
-  assert.ok(option, 'the drop-down lists ' + value);
-  assert.ok(!option.selected, value + ' is not the selected option already');
-  option.selected = true;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
+const {
+  makePage,
+  closeWindows,
+  send,
+  byId,
+  msgs,
+  assertJsonEqual,
+  CHOOSE,
+  optionLabels,
+  currentDir,
+  pick,
+  errorNotifications,
+} = require('./workdir_helpers');
 
 function pickMachine(win, value) {
   const select = byId(win, 'chat-machine');
   select.value = value;
   select.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
-
-function errorNotifications(win) {
-  return Array.from(
-    win.document.querySelectorAll('.kiss-notification-error'),
-    el => el.textContent,
-  );
 }
 
 const NOW = Date.now() / 1000;
@@ -237,7 +162,7 @@ function testAPickOnTheMachineGoesToTheMachine() {
   pickMachine(win, 'gpu-box');
   send(win, BOX_DIRS);
   posted.length = 0;
-  pickDir(win, '/srv/other');
+  pick(win, '/srv/other');
   const listDirs = msgs(posted, 'listDir');
   assert.strictEqual(listDirs.length, 1, 'the pick is checked on the machine');
   assert.strictEqual(listDirs[0].machine, 'gpu-box');
@@ -290,7 +215,7 @@ function testAPickOnTheMachineGoesToTheMachine() {
   // A refused pick is reported; a refused check too.
   pickMachine(win, 'gpu-box');
   posted.length = 0;
-  pickDir(win, '/srv/proj');
+  pick(win, '/srv/proj');
   let token = msgs(posted, 'listDir')[0].token;
   send(win, {
     type: 'dirListing',
@@ -311,7 +236,7 @@ function testAPickOnTheMachineGoesToTheMachine() {
     [true],
   );
   assert.strictEqual(currentDir(win), '/srv/other');
-  pickDir(win, '/srv/proj');
+  pick(win, '/srv/proj');
   token = msgs(posted, 'listDir')[1].token;
   send(win, {
     type: 'dirListing',
@@ -332,7 +257,7 @@ function testChooseOnTheMachineBrowsesItsFolders() {
   pickMachine(win, 'gpu-box');
   send(win, BOX_DIRS);
   posted.length = 0;
-  pickDir(win, CHOOSE);
+  pick(win, CHOOSE);
   const picker = byId(win, 'folder-picker');
   assert.ok(!picker.hidden, 'the in-page picker opened');
   assert.strictEqual(
@@ -369,7 +294,7 @@ function testChooseOnTheMachineBrowsesItsFolders() {
   ]);
   assert.ok(picker.hidden, 'the picker closed on the pick');
   // A typed folder is listed on the machine first, then picked.
-  pickDir(win, CHOOSE);
+  pick(win, CHOOSE);
   const input = picker.querySelector('.folder-picker-input');
   input.value = '/srv/typed';
   picker
@@ -394,7 +319,7 @@ function testChooseOnTheMachineBrowsesItsFolders() {
   // this daemon's folders.
   pickMachine(win, '');
   posted.length = 0;
-  pickDir(win, CHOOSE);
+  pick(win, CHOOSE);
   assert.ok(!picker.hidden);
   assert.strictEqual(
     byId(win, 'folder-picker-title').textContent,
@@ -578,7 +503,7 @@ for (const [name, fn] of tests) {
     console.log('not ok - ' + name);
     console.log(e && e.stack ? e.stack : String(e));
   } finally {
-    while (openWindows.length) openWindows.pop().close();
+    closeWindows();
   }
 }
 console.log(`\n${tests.length - failed} passed, ${failed} failed`);

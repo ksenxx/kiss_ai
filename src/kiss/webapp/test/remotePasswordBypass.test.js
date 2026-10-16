@@ -2141,8 +2141,8 @@ async function run() {
     window.close();
   }
 
-  // Settings > Rotate: the daemon tells the asking page the new password
-  // with ``remotePasswordRotated``.  A password-authenticated page adopts
+  // Settings > Remote password saved: the daemon tells the saving page
+  // the new password with ``remotePasswordChanged``.  A password-authenticated page adopts
   // it for its next frame (the server checks every frame) and stores it
   // for the reconnect; a page admitted without a password (loopback)
   // keeps sending bare frames; a storage that throws is tolerated.
@@ -2163,7 +2163,7 @@ async function run() {
       window.Storage.prototype.setItem = function () {
         throw new Error('SecurityError');
       };
-      sock.fireMessage({type: 'remotePasswordRotated', password: 'new-pw'});
+      sock.fireMessage({type: 'remotePasswordChanged', password: 'new-pw'});
       window.Storage.prototype.setItem = realSetItem;
       await tick();
       window.acquireTransport().postMessage({type: 'runTask', prompt: 'x'});
@@ -2172,7 +2172,7 @@ async function run() {
         'the next frame carries the rotated password even when storage throws');
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), 'old-pw',
         'storage that throws is tolerated');
-      sock.fireMessage({type: 'remotePasswordRotated', password: 'newer-pw'});
+      sock.fireMessage({type: 'remotePasswordChanged', password: 'newer-pw'});
       await tick();
       window.acquireTransport().postMessage({type: 'runTask', prompt: 'y'});
       assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
@@ -2180,15 +2180,25 @@ async function run() {
         'every later frame carries the latest rotated password');
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), 'newer-pw',
         'the rotated password is stored for the reconnect');
-      sock.fireMessage({type: 'remotePasswordRotated'});
+      sock.fireMessage({type: 'remotePasswordChanged'});
       await tick();
       window.acquireTransport().postMessage({type: 'runTask', prompt: 'z'});
       assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
         {password: 'newer-pw', type: 'runTask', prompt: 'z'},
         'a rotation notice without a password changes nothing');
-      ok('a password-authenticated page adopts the rotated password');
+      // Remote access turned off: the stored credential is forgotten at
+      // once and the next frame goes bare.
+      sock.fireMessage({type: 'remotePasswordChanged', password: ''});
+      await tick();
+      window.acquireTransport().postMessage({type: 'runTask', prompt: 'w'});
+      assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
+        {type: 'runTask', prompt: 'w'},
+        'an empty password makes the next frame bare');
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null,
+        'an empty password removes the stored credential');
+      ok('a password-authenticated page adopts the changed password');
     } catch (err) {
-      fail('remotePasswordRotated adoption broken', err);
+      fail('remotePasswordChanged adoption broken', err);
     }
     window.close();
   }
@@ -2204,7 +2214,7 @@ async function run() {
       sock.fireOpen();
       sock.fireMessage({type: 'auth_ok'});
       await tick();
-      sock.fireMessage({type: 'remotePasswordRotated', password: 'new-pw'});
+      sock.fireMessage({type: 'remotePasswordChanged', password: 'new-pw'});
       await tick();
       window.acquireTransport().postMessage({type: 'runTask', prompt: 'x'});
       assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
@@ -2212,9 +2222,9 @@ async function run() {
         'a page admitted without a password keeps sending bare frames');
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null,
         'no password is stored for a loopback page');
-      ok('a loopback page ignores the rotated password');
+      ok('a loopback page ignores the changed password');
     } catch (err) {
-      fail('loopback remotePasswordRotated handling broken', err);
+      fail('loopback remotePasswordChanged handling broken', err);
     }
     window.close();
   }

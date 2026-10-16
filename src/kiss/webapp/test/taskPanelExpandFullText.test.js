@@ -397,7 +397,6 @@ function testChevronPassWorksWithoutButton() {
     task: 'Older task',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Older task'},
       {type: 'tool_call', name: 'Bash', command: 'echo old'},
       {type: 'tool_result', name: 'Bash', content: 'old'},
     ],

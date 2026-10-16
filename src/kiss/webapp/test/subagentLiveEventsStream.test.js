@@ -34,6 +34,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {readShimJs, installFakeWebSocket} = require('./transport_page_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -66,35 +67,6 @@ function loadPageScripts(win) {
 // ---------------------------------------------------------------------------
 // the webapp, running the real media/transport.js
 // ---------------------------------------------------------------------------
-
-function readShimJs() {
-  return fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf8');
-}
-
-function installFakeWebSocket(win, sockets) {
-  function FakeWebSocket(url) {
-    this.url = url;
-    this.readyState = FakeWebSocket.OPEN;
-    this.sent = [];
-    this.onopen = null;
-    this.onmessage = null;
-    this.onclose = null;
-    this.onerror = null;
-    sockets.push(this);
-  }
-  FakeWebSocket.CONNECTING = 0;
-  FakeWebSocket.OPEN = 1;
-  FakeWebSocket.CLOSING = 2;
-  FakeWebSocket.CLOSED = 3;
-  FakeWebSocket.prototype.send = function (data) {
-    this.sent.push(data);
-  };
-  FakeWebSocket.prototype.close = function () {
-    this.readyState = FakeWebSocket.CLOSED;
-    if (typeof this.onclose === 'function') this.onclose();
-  };
-  win.WebSocket = FakeWebSocket;
-}
 
 function makeWebappClient() {
   const win = newDom();

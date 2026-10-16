@@ -170,7 +170,6 @@ function metrics(win) {
 
 function taskEvents(name) {
   return [
-    {type: 'task_start', task: name},
     {type: 'system_output', text: name + ' line one\n'},
   ];
 }
@@ -192,7 +191,6 @@ function setup(opts) {
     task_id: '50',
     task: 'Main task',
     events: [
-      {type: 'task_start', task: 'Main task'},
       {type: 'usage_info', total_tokens: 999, cost: '0.50', total_steps: 3},
       {type: 'system_output', text: 'main line one\n'},
     ],
@@ -869,7 +867,6 @@ function testMetricsDoNotLeakBetweenTabs() {
     task_id: '90',
     task: 'Other task',
     events: [
-      {type: 'task_start', task: 'Other task'},
       {type: 'usage_info', total_tokens: 222, cost: '2.22', total_steps: 22},
     ],
   });
@@ -998,7 +995,6 @@ function testAdjacentReplayLeavesTheLiveStepCountAlone() {
     task: 'Older task',
     task_id: '49',
     events: [
-      {type: 'task_start', task: 'Older task'},
       {type: 'result', success: true, step_count: 77},
     ],
   });
@@ -1094,7 +1090,6 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
     task_id: '80',
     task: 'Hidden task',
     events: [
-      {type: 'task_start', task: 'Hidden task'},
       {type: 'usage_info', total_tokens: 4321, cost: '4.30', total_steps: 43},
       {type: 'system_output', text: 'hidden replay\n'},
     ],
@@ -1132,7 +1127,6 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
     task_id: '60',
     task: 'Parent task',
     events: [
-      {type: 'task_start', task: 'Parent task'},
       {type: 'usage_info', total_tokens: 111, cost: '1.11', total_steps: 11},
     ],
   });
@@ -1181,7 +1175,6 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
     task_id: '60',
     task: 'Parent task',
     events: [
-      {type: 'task_start', task: 'Parent task'},
       {type: 'usage_info', total_tokens: 111, cost: '1.11', total_steps: 11},
       {type: 'tool_call', name: 'run_parallel'},
       {type: 'tool_result', name: 'run_parallel', text: 'done'},

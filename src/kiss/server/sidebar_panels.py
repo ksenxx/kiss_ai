@@ -405,13 +405,14 @@ MACHINE_WORKSPACE_REPLIES: dict[str, str] = {
     "fsAction": "fsResult",
     "openFile": "fileContent",
     "saveFile": "fileSaved",
+    "checkPaths": "pathsExist",
 }
 """The workspace commands a registered machine answers for a tab bound to it, by reply type.
 
-The remote webapp's Explorer, Source Control view, folder picker and
-file editor of a tab whose tasks run on a machine browse that
-machine's working directory: each of these commands, when it carries
-``machine``, is forwarded to the machine's daemon unchanged
+The remote webapp's Explorer, Source Control view, folder picker, file
+editor and transcript file links of a tab whose tasks run on a machine
+browse that machine's working directory: each of these commands, when
+it carries ``machine``, is forwarded to the machine's daemon unchanged
 (:func:`machine_workspace_reply`) instead of being served here.
 """
 

@@ -1,25 +1,27 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **778 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **785 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+
+The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedrock model or inference-profile id>` (`bedrock/us.anthropic.claude-opus-4-6-v1:0`, `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`, with the same `-low`/`-medium`/`-high`/`-max` effort suffixes as the `claude-*` entries) and configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`. The catalog does not list Bedrock ids (they differ per model and region); a `bedrock/` name is priced and sized as the `claude-*` entry behind it, and adding it under Settings → Custom Models (name only, no endpoint) puts it in the model picker from the next daemon start.
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 111 |
 | Anthropic | 76 |
 | Gemini | 21 |
-| Together AI | 103 |
+| Together AI | 104 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 422 |
+| OpenRouter | 428 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **745** generation-capable models
-- **585** function-calling-capable models
+- **750** generation-capable models
+- **588** function-calling-capable models
 - **7** embedding models
-- **19** decision models
+- **21** decision models
 
 Full model list:
 
@@ -250,7 +252,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (103)</strong></summary>
+<summary><strong>Together AI (104)</strong></summary>
 
 - `BAAI/bge-base-en-v1.5`
 - `Qwen/QwQ-32B`
@@ -335,6 +337,7 @@ Full model list:
 - `moonshotai/Kimi-K3-low`
 - `moonshotai/Kimi-K3-max`
 - `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
+- `nvidia/NVIDIA-Nemotron-3.5-Super-VL`
 - `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
 - `nvidia/nemotron-3-ultra-550b-a55b`
 - `openai/gpt-oss-120b`
@@ -389,7 +392,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (422)</strong></summary>
+<summary><strong>OpenRouter (428)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -493,6 +496,7 @@ Full model list:
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
 - `openrouter/liquid/d1`
+- `openrouter/liquid/d1-ultra`
 - `openrouter/liquid/lfm-2.5-24b-a2b`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
@@ -508,6 +512,7 @@ Full model list:
 - `openrouter/meta/muse-spark-1.1`
 - `openrouter/meta/muse-spark-1.2`
 - `openrouter/meta/muse-spark-1.3`
+- `openrouter/meta/muse-spark-open`
 - `openrouter/meta/muse-wonder`
 - `openrouter/microsoft/microsoft-decision-1`
 - `openrouter/microsoft/phi-4`
@@ -532,6 +537,8 @@ Full model list:
 - `openrouter/mistralai/mistral-small-3.2-24b-instruct`
 - `openrouter/mistralai/mixtral-8x22b-instruct`
 - `openrouter/mistralai/voxtral-small-24b-2507`
+- `openrouter/moondream/moondream3-preview`
+- `openrouter/moondream/moondream3.1-9b-a2b`
 - `openrouter/moonshotai/kimi-k2`
 - `openrouter/moonshotai/kimi-k2-0905`
 - `openrouter/moonshotai/kimi-k2-thinking`
@@ -556,6 +563,7 @@ Full model list:
 - `openrouter/nvidia/nemotron-3-ultra-550b-a55b`
 - `openrouter/nvidia/nemotron-3.5-content-safety`
 - `openrouter/nvidia/nemotron-3.5-lightning`
+- `openrouter/nvidia/nemotron-3.5-super-vl`
 - `openrouter/openai/gpt-3.5-turbo`
 - `openrouter/openai/gpt-3.5-turbo-0613`
 - `openrouter/openai/gpt-3.5-turbo-16k`
@@ -706,6 +714,7 @@ Full model list:
 - `openrouter/rekaai/reka-flash-3`
 - `openrouter/relace/relace-apply-3`
 - `openrouter/relace/relace-search`
+- `openrouter/respan/span-02`
 - `openrouter/sakana/fugu-max`
 - `openrouter/sakana/fugu-ultra`
 - `openrouter/sakana/fugu-ultra-v2`

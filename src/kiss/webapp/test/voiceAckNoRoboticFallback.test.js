@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {installSpeech, assertNoSpeech} = require('./speech_helpers');
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 
@@ -45,8 +46,8 @@ function makeWindow(cfg, {withAudio = true} = {}) {
   const record = {
     audioUrls: [],
     audioPlays: 0,
-    spoken: [],
     posts: [],
+    spoken: installSpeech(win),
   };
 
   if (withAudio) {
@@ -60,14 +61,6 @@ function makeWindow(cfg, {withAudio = true} = {}) {
   } else {
     win.Audio = undefined;
   }
-  win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
-    this.text = text;
-  };
-  win.speechSynthesis = {
-    speak: utter => record.spoken.push(utter && utter.text),
-    cancel: () => {},
-    getVoices: () => [],
-  };
   win.addEventListener('kiss-voice-post', event => {
     record.posts.push(event.detail);
   });
@@ -95,11 +88,7 @@ async function main() {
       'the page must try the synthesized ack clip',
     );
     assert.strictEqual(record.audioPlays, 1, 'clip play() must be attempted');
-    assert.deepStrictEqual(
-      record.spoken,
-      [],
-      `rejected play() must degrade to silence, spoke: ${JSON.stringify(record.spoken)}`,
-    );
+    assertNoSpeech(record.spoken, 'rejected play() must degrade to silence');
     assert.deepStrictEqual(
       record.posts,
       [],
@@ -114,11 +103,9 @@ async function main() {
     );
     sendHostMessage(win, {type: 'voiceSpeech', text: 'Ship it', speaker: 3});
     await flush();
-    assert.deepStrictEqual(
-      record.spoken,
-      [],
-      `robotic Web Speech ack must never fire, spoke: ${JSON.stringify(record.spoken)}`,
-    );
+    assertNoSpeech(record.spoken, 'missing Audio API');
+    assert.deepStrictEqual(record.audioUrls, [], 'no Audio constructor to call');
+    assert.deepStrictEqual(record.posts, [], 'nothing is posted for the ack');
   });
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

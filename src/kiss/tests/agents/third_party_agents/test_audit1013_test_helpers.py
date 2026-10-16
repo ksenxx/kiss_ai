@@ -17,8 +17,6 @@
 from __future__ import annotations
 
 import time
-from http.server import BaseHTTPRequestHandler
-from typing import Any
 
 import pytest
 import requests
@@ -31,6 +29,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 )
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     raw_post_status,
     recording_server,
@@ -38,7 +37,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 )
 
 
-class _HeaderRecorder(BaseHTTPRequestHandler):
+class _HeaderRecorder(RecordingHandler):
     """Records the ``X-Probe`` header of every POST and answers 204."""
 
     server: RecordingServer  # type: ignore[assignment]
@@ -47,9 +46,6 @@ class _HeaderRecorder(BaseHTTPRequestHandler):
         self.server.requests.append({"probe": self.headers.get("X-Probe", "")})
         self.send_response(204)
         self.end_headers()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 def test_serving_teardown_does_not_wait_for_the_default_poll() -> None:

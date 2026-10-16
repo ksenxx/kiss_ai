@@ -115,7 +115,6 @@ function setupWithHistoryTask(win, posted) {
     task_id: '42',
     task: 'My old task',
     events: [
-      {type: 'task_start', task: 'My old task'},
       {type: 'system_output', text: 'hello\n'},
     ],
   });
@@ -136,7 +135,6 @@ function loadPrevTask41(win, posted, tabId, O) {
     task: 'Older task',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Older task'},
       {type: 'system_output', text: 'older\n'},
     ],
   });
@@ -188,7 +186,6 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
       task: 'Older task',
       task_id: '41',
       events: [
-        {type: 'task_start', task: 'Older task'},
         {type: 'system_output', text: 'older\n'},
       ],
     });
@@ -340,7 +337,6 @@ function testDetachedLoaderRemovedOnRestore() {
       task: 'Older task',
       task_id: '41',
       events: [
-        {type: 'task_start', task: 'Older task'},
         {type: 'system_output', text: 'older\n'},
       ],
     });

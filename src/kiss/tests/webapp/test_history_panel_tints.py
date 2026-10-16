@@ -160,7 +160,7 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
     """The header row spans the panel on every side it borders (no strip
     of bare sidebar between them), its corners follow the square panel
     (no rounding), its action strip (the "Show details" chevron, then
-    the chat's "last launched" label) sits under the title at the
+    the chat's "... ago" label) sits under the title at the
     title's left edge as on a task panel, and the task rows the chevron
     unfolds are indented behind the nesting guide."""
     context, page = _open_history_page(_browser)
@@ -175,7 +175,8 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         assert probe["radii"] == ["0px"] * 4, probe
         assert probe["chevronBelowTitle"] is True, probe
         assert probe["chevronLeft"] == pytest.approx(0, abs=0.5), probe
-        assert "last launched" in probe["launchedText"], probe
+        assert probe["launchedText"].endswith(" ago"), probe
+        assert "last launched" not in probe["launchedText"], probe
         assert probe["launchedHeight"] > 0, probe
         assert probe["launchedRightOfChevron"] is True, probe
         assert probe["launchedInsideHeader"] is True, probe

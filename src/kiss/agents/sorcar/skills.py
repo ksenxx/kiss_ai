@@ -26,13 +26,12 @@ Discovery paths (low → high precedence; later wins on a name clash):
 * ``~/.claude/skills/<name>/SKILL.md`` (respecting
   ``CLAUDE_CONFIG_DIR``) — Claude Code user skills work unchanged.
 * ``~/.agents/skills/<name>/SKILL.md`` — the cross-client convention.
-* ``~/.kiss/skills/<name>/SKILL.md`` (respecting ``KISS_HOME``) — native
-  user skills.
+* ``$KISS_HOME/skills/<name>/SKILL.md`` — native user skills.
 * ``<work_dir>/.claude/skills/``, ``<work_dir>/.agents/skills/``, and
   ``<work_dir>/.kiss/skills/`` — project skills (override user skills).
 
 Pattern-based permissions control which skills the agent may load.  The
-``skill_permissions`` key in ``~/.kiss/config.json`` maps wildcard
+``skill_permissions`` key in ``$KISS_HOME/config.json`` maps wildcard
 patterns to ``"allow"`` or ``"deny"`` (e.g. ``{"*": "allow",
 "internal-*": "deny"}``).  Rules are evaluated in order with the *last*
 matching rule winning (OpenCode semantics); denied skills are hidden
@@ -178,7 +177,7 @@ def agents_user_skills_dir() -> Path:
 
 
 def user_skills_dir() -> Path:
-    """Return the native user skills directory (``~/.kiss/skills``)."""
+    """Return the native user skills directory (``$KISS_HOME/skills``)."""
     return _default_kiss_dir() / "skills"
 
 
@@ -251,7 +250,7 @@ def _load_bundled_skills(root: Path) -> dict[str, Skill]:
 
 
 def load_permission_rules(key: str) -> dict[str, str]:
-    """Load one wildcard permission mapping from ``~/.kiss/config.json``.
+    """Load one wildcard permission mapping from ``$KISS_HOME/config.json``.
 
     Shared loader for ``skill_permissions`` and ``mcp_permissions``,
     which use identical shapes and normalization.

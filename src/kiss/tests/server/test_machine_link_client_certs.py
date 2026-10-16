@@ -37,6 +37,11 @@ def _der(path: Path) -> bytes:
     )
 
 
+def _load(ctx: ssl.SSLContext, loaded: set[bytes]) -> list[str]:
+    """Read the trusted-clients directory and load its new CAs into *ctx*, as the daemon does."""
+    return ws._load_trusted_client_cas(ctx, loaded, ws._read_trusted_client_cas())
+
+
 def test_client_pair_is_issued_by_the_local_ca_and_renewed_with_it(tmp_path: Path) -> None:
     """The client leaf has ``clientAuth``, no SAN, and follows the CA it chains to."""
     tls_dir = tmp_path / "tls"
@@ -145,22 +150,22 @@ def test_enrolled_cas_are_loaded_into_a_live_context_once_each(
         assert trusted == tmp_path / "tls" / "trusted-clients" and not trusted.exists()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         loaded: set[bytes] = set()
-        assert ws._load_trusted_client_cas(ctx, loaded) == []
+        assert _load(ctx, loaded) == []
         assert trusted.is_dir() and ctx.verify_mode == ssl.CERT_NONE and loaded == set()
         tls_certs.ensure_local_client_pair(tmp_path / "alice")
         tls_certs.ensure_local_client_pair(tmp_path / "bob")
         (trusted / "alice.pem").write_bytes((tmp_path / "alice" / "ca.pem").read_bytes())
         (trusted / "junk.pem").write_text("junk", encoding="utf-8")
         with caplog.at_level(logging.WARNING, logger=ws.__name__):
-            assert ws._load_trusted_client_cas(ctx, loaded) == ["alice"]
-            assert ws._load_trusted_client_cas(ctx, loaded) == []
+            assert _load(ctx, loaded) == ["alice"]
+            assert _load(ctx, loaded) == []
         assert ctx.verify_mode == ssl.CERT_OPTIONAL
         assert [r.getMessage() for r in caplog.records] == [
             f"Ignoring {trusted}/junk.pem: not a PEM certificate",
         ]
         assert len(ctx.get_ca_certs()) == 1
         (trusted / "bob.pem").write_bytes((tmp_path / "bob" / "ca.pem").read_bytes())
-        assert ws._load_trusted_client_cas(ctx, loaded) == ["bob"]
+        assert _load(ctx, loaded) == ["bob"]
         assert len(ctx.get_ca_certs()) == 2 and len(loaded) == 3
         # A connection that is not TLS (or not a connection at all) has no client CA.
         server = ws.RemoteAccessServer.__new__(ws.RemoteAccessServer)

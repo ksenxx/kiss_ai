@@ -575,28 +575,22 @@ def test_crawl_id_is_encoded_as_single_path_segment(backend) -> None:
     assert server.requests[-1]["path"] == "/v2/crawl/a%20b%25c"
 
 
-def test_api_level_error_returns_ok_false(backend) -> None:
-    """A 200 reply with success:false yields ok:false with the API error."""
+@pytest.mark.parametrize(
+    "url,fragment",
+    [
+        ("https://apifalse.example", "denied by policy"),
+        ("https://notjson.example", "non-JSON"),
+        ("https://array.example", "unexpected response shape"),
+        ("https://fail.example", "500"),
+    ],
+    ids=["api_level_error", "non_json_body", "json_array_body", "server_error_500"],
+)
+def test_bad_reply_returns_ok_false(backend, url: str, fragment: str) -> None:
+    """A success:false reply, a non-JSON or JSON-array body and a 500 all yield ok:false."""
     b, _ = backend
-    result = json.loads(b.firecrawl_scrape("https://apifalse.example"))
+    result = json.loads(b.firecrawl_scrape(url))
     assert result["ok"] is False
-    assert "denied by policy" in result["error"]
-
-
-def test_non_json_response_returns_ok_false(backend) -> None:
-    """A non-JSON response body yields ok:false, not an exception."""
-    b, _ = backend
-    result = json.loads(b.firecrawl_scrape("https://notjson.example"))
-    assert result["ok"] is False
-    assert "non-JSON" in result["error"]
-
-
-def test_non_object_json_response_returns_ok_false(backend) -> None:
-    """A JSON-array response body yields ok:false, not an exception."""
-    b, _ = backend
-    result = json.loads(b.firecrawl_scrape("https://array.example"))
-    assert result["ok"] is False
-    assert "unexpected response shape" in result["error"]
+    assert fragment in result["error"]
 
 
 def test_unauthorized_key_returns_ok_false(fc_server) -> None:
@@ -616,14 +610,6 @@ def test_unauthorized_key_returns_ok_false(fc_server) -> None:
         result = json.loads(call())
         assert result["ok"] is False
         assert "401" in result["error"]
-
-
-def test_server_error_returns_ok_false(backend) -> None:
-    """A 500 from the server yields ok:false JSON, not an exception."""
-    b, _ = backend
-    result = json.loads(b.firecrawl_scrape("https://fail.example"))
-    assert result["ok"] is False
-    assert "500" in result["error"]
 
 
 def test_main_prints_usage_without_args() -> None:
