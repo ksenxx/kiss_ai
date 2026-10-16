@@ -84,7 +84,7 @@ def truncate_result(content: str) -> str:
     """Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.
 
     Also strips out base64 binary-attachment payloads emitted by the ``Read``
-    tool so the terminal/webview never has to render kilobytes of base64.
+    tool so the terminal/chat page never has to render kilobytes of base64.
 
     Args:
         content: The string to truncate.

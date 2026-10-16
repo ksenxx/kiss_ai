@@ -11,7 +11,7 @@ compared bare timestamps with strict ``<`` / ``>``, so two tasks in
 the same chat carrying the same ``timestamp`` value (concurrent
 inserts from multiple viewers of one chat, restored/imported
 databases, coarse clock ticks) became mutually unreachable via the
-webview's prev/next scrolling — navigation silently returned ``None``
+chat page's prev/next scrolling — navigation silently returned ``None``
 even though an adjacent task exists and the "latest task" loader can
 see it.
 

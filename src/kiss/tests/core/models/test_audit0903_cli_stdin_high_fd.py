@@ -18,8 +18,7 @@ retry — the CLI agent just answered nothing, or the wrong thing.
 
 The 2026-09-03 follow-up review found that the first fix traded one
 platform limit for another: it replaced ``select.select`` with
-``select.poll``, an API that does not exist on native Windows (which the
-repo supports — ``.github/workflows/windows-test.yml``).  There the
+``select.poll``, an API that does not exist on native Windows.  There the
 writer thread died with ``AttributeError`` *outside* the writer's
 ``except (OSError, ValueError)``, stdin closed after ZERO bytes, and
 every ``cc/*``/``codex/*`` turn silently got an empty prompt — the very

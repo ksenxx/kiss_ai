@@ -4,7 +4,7 @@
 # add your name here
 """The curl bootstrap must heal a checkout whose install.sh is not a file.
 
-The Update buttons (VS Code extension and remote webapp) fall back to
+The webapp's Update button falls back to
 ``scripts/install.sh`` whenever ``findInstallScript()`` returns null —
 which is true not only when ``~/.kiss/kiss_ai`` is absent, but also when
 the checkout EXISTS and its root ``install.sh`` was deleted locally or a
@@ -16,7 +16,7 @@ from git HEAD before handing over.
 These tests run the REAL ``scripts/install.sh`` against a throwaway
 ``$HOME`` whose ``~/.kiss/kiss_ai`` is a clone of a local bare origin (no
 network, no mocks), following
-``test_audit0903_bootstrap_pinned_vsix_unbrick.py``.  The final reclone
+``test_bootstrap_legacy_vsix_unbrick.py``.  The final reclone
 branch (git restore impossible AND ``install.sh`` still not a file) is
 not covered here: it clones the public GitHub repo and therefore cannot
 run without network access.

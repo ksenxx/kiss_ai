@@ -10,7 +10,7 @@ event stamped with an explicit ``tabId``.  ``WebPrinter.broadcast``
 treats every ``tabId``-stamped event as a transient targeted system
 event — sent to connected clients but never recorded or persisted.
 The Result panel therefore shows up live but VANISHES from the task's
-persisted event stream: reloading the webview, loading the task from
+persisted event stream: reloading the chat page, loading the task from
 history, or scrolling to it as an adjacent task shows no Result panel
 at all (observed in ``~/.kiss/history.db``: a user-stopped task's
 stream ends ``tool_call -> task_stopped -> followup_suggestion`` with
@@ -83,7 +83,7 @@ class TestFailedTaskResultEventPersisted:
         """Create a task row and register its agent in the state registry."""
         task_id, _ = th._add_task(task, chat_id="chat-1")
         th._flush_chat_events()
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._last_task_id = task_id
         agent_state.register(AgentState(str(task_id), agent=agent))
         return str(task_id)
@@ -201,10 +201,10 @@ class TestTaskRunnerFailureResultPersistedE2E:
         self.saved = redirect_persistence(self.tmpdir)
         self.work_dir = str(Path(self.tmpdir) / "wd")
         Path(self.work_dir).mkdir()
-        from kiss.server.server import VSCodeServer
+        from kiss.server.server import AgentServer
 
         printer = _CapturingWebPrinter()
-        self.server = VSCodeServer(printer=printer)
+        self.server = AgentServer(printer=printer)
         self.wire = printer.wire
 
     def teardown_method(self):
@@ -230,7 +230,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
         ``_last_task_id``, printer-bridge registration, launcher-tab
         subscription via ``_on_task_id_allocated``) before raising.
         """
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = AgentState(
             f"pre-{tab_id}",
             agent=agent,

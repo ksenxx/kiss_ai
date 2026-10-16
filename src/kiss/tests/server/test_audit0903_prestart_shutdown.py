@@ -265,7 +265,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
         """Swap in a registry that parks *tab_id*'s run publication."""
         registry = _ParkingTabRegistry(self.tmp / "tabs.json", tab_id)
         self.registry = registry
-        self.remote._vscode_server.tab_registry = registry
+        self.remote._agent_server.tab_registry = registry
         return registry
 
     def _send_run(self, tab_id: str, run_token: str) -> None:
@@ -355,7 +355,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
         that will never start.
         """
         tab_id = "prestart-raise-tab"
-        server = self.remote._vscode_server
+        server = self.remote._agent_server
         server.tab_registry = _RaisingTabRegistry(
             self.tmp / "tabs-raise.json", tab_id,
         )

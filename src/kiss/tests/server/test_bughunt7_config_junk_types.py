@@ -28,7 +28,7 @@ still consumed without type validation:
   "one per line" setting) raised ``AttributeError: 'list' object has
   no attribute 'splitlines'`` the same way.
 
-Fix: ``vscode_config.sanitize_config`` coerces every DEFAULTS-keyed
+Fix: ``user_config.sanitize_config`` coerces every DEFAULTS-keyed
 value to its expected type (falling back to the default); applied in
 ``load_config``, ``save_config`` and ``_cmd_save_config``.
 """
@@ -39,10 +39,10 @@ import json
 import unittest
 from typing import Any
 
-from kiss.core import vscode_config
-from kiss.core.vscode_config import load_config
+from kiss.core import user_config
+from kiss.core.user_config import load_config
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _ConfigIsolationMixin(unittest.TestCase):
@@ -55,7 +55,7 @@ class _ConfigIsolationMixin(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self._cfg_path = vscode_config.CONFIG_PATH
+        self._cfg_path = user_config.CONFIG_PATH
         self._saved = (
             self._cfg_path.read_bytes() if self._cfg_path.exists() else None
         )
@@ -72,8 +72,8 @@ class _ConfigIsolationMixin(unittest.TestCase):
         self._cfg_path.parent.mkdir(parents=True, exist_ok=True)
         self._cfg_path.write_text(json.dumps(data))
 
-    def _server(self) -> tuple[VSCodeServer, list[dict[str, Any]]]:
-        server = VSCodeServer()
+    def _server(self) -> tuple[AgentServer, list[dict[str, Any]]]:
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         return server, events
@@ -100,11 +100,18 @@ class TestSaveConfigJunkTypes(_ConfigIsolationMixin):
         self.assertIn("models", [e.get("type") for e in events])
 
     def test_junk_remote_password_not_persisted(self) -> None:
+        """``saveConfig`` never touches the password, junk or not."""
         server, _ = self._server()
         server._handle_command(
-            {"type": "saveConfig", "config": {"remote_password": 123456}},
+            {
+                "type": "saveConfig",
+                "config": {
+                    "remote_password": 123456,
+                },
+            },
         )
-        self.assertEqual(load_config()["remote_password"], "")
+        cfg = load_config()
+        self.assertEqual(cfg["remote_password"], "")
 
 
 class TestHandEditedConfigJunkTypes(_ConfigIsolationMixin):

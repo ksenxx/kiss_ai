@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.core.utils import atomic_write_text
 
 

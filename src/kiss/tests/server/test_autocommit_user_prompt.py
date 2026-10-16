@@ -6,8 +6,8 @@
 
 When the agent auto-commits changes — either inside a worktree at
 task end, via the ``update_settings(auto_commit=True)`` tool call,
-or via the post-task ``_autocommit_changes`` path in the VS Code
-server — the resulting commit message should include the user's
+or via the post-task ``_autocommit_changes`` path in the daemon —
+the resulting commit message should include the user's
 original task prompt so the commit is traceable to the request that
 produced it.
 

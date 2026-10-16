@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression: every tool's return value reaches the console & webview.
+"""Regression: every tool's return value reaches the console & chat page.
 
 Before this fix, only ``Bash``/``Read``/``Edit``/``Write`` (and errors) were
 shown. The return value of ``run_parallel``, ``ask_user_question``,
@@ -38,7 +38,7 @@ def _tool_results(browser: JsonPrinter) -> list[dict]:
 
 
 class TestNonCoreToolResultsAreShown:
-    """Non-core tools must now appear in both the console and the webview."""
+    """Non-core tools must now appear in both the console and the chat page."""
 
     def test_run_parallel_result_broadcast_and_printed(self):
         console, buf, browser = _new_printers()

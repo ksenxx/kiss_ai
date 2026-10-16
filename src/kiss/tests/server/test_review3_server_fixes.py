@@ -21,7 +21,7 @@
    down when ``TabRegistry.republished_since`` reports a newer
    publication.
 
-Real :class:`VSCodeServer`, real :class:`TabRegistry`, real threads;
+Real :class:`AgentServer`, real :class:`TabRegistry`, real threads;
 schedules are driven deterministically (a wrapper parking inside the
 real ``tabs_state`` broadcast; ``sys.settrace`` raising at an exact
 publication line — the same bytecode-boundary class the production
@@ -194,7 +194,6 @@ class TestRemovalGenerationWiring(_Base):
             self.server._tab_chat_views["old"] = "chat-d"
 
         # The stale displacement cleanup resumes — it must stand down.
-        self.server._prune_local_tab("old")
         self.server._drop_tab_state("old", removal_token=removal_token)
 
         self.assertTrue(self.server.tab_registry.has_tab("old"))
@@ -214,14 +213,17 @@ class TestRemovalGenerationWiring(_Base):
 
         parked = threading.Event()
         release = threading.Event()
-        real_prune = self.server._prune_local_tab
+        real_broadcast = self.server._broadcast_tabs_state
 
-        def parking_prune(tab_id: str) -> None:
-            parked.set()
-            release.wait(timeout=30)
-            real_prune(tab_id)
+        def parking_broadcast() -> None:
+            # Park only the close's broadcast; the reopen below
+            # broadcasts from this thread and must run straight through.
+            if not parked.is_set():
+                parked.set()
+                release.wait(timeout=30)
+            real_broadcast()
 
-        self.server._prune_local_tab = parking_prune  # type: ignore[method-assign]
+        self.server._broadcast_tabs_state = parking_broadcast  # type: ignore[method-assign]
         try:
             closer = threading.Thread(
                 target=self.server._close_tab, args=("t",), daemon=True,
@@ -242,7 +244,7 @@ class TestRemovalGenerationWiring(_Base):
             self.assertFalse(closer.is_alive())
         finally:
             release.set()
-            self.server._prune_local_tab = real_prune  # type: ignore[method-assign]
+            self.server._broadcast_tabs_state = real_broadcast  # type: ignore[method-assign]
 
         # Serial outcome of close-then-reopen: tab open on chat-2 with
         # its chat mapping intact.

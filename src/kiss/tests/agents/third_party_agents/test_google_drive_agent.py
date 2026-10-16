@@ -19,17 +19,14 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-import sys
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.gdrive.gdrive_sea as gdrive_mod
 from kiss.agents.third_party_agents.gdrive.gdrive_sea import (
     _SERVICE,
-    GoogleDriveAgent,
     GoogleDriveChannelBackend,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
@@ -81,25 +78,6 @@ _FILES: dict[str, dict[str, Any]] = {
 }
 
 _BIN_CONTENT = b"hello plain content"
-
-_AUTH_TOOL_NAMES = [
-    "check_google_drive_auth",
-    "authenticate_google_drive",
-    "clear_google_drive_auth",
-    "finish_google_drive_auth",
-]
-
-_TOOL_NAMES = {
-    "gdrive_search_files",
-    "gdrive_get_file",
-    "gdrive_read_file",
-    "gdrive_download_file",
-    "gdrive_upload_file",
-    "gdrive_create_folder",
-    "gdrive_share_file",
-    "gdrive_move_file",
-    "gdrive_trash_file",
-}
 
 
 class _DriveRequestHandler(BaseHTTPRequestHandler):
@@ -216,76 +194,6 @@ def backend(drive_server, composio):
 
 def _last(server: RecordingServer) -> dict[str, Any]:
     return server.requests[-1]
-
-
-def test_agent_unauthenticated_exposes_only_auth_tools() -> None:
-    """A fresh agent is unauthenticated and exposes exactly the 4 auth tools."""
-    agent = GoogleDriveAgent()
-    assert agent.name == "Google Drive Agent"
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
-
-
-def test_check_auth_unauthenticated_explains_setup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """check_google_drive_auth explains how to set up credentials."""
-    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
-    agent = GoogleDriveAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    msg = tools["check_google_drive_auth"]()
-    assert "Not authenticated with Google Drive" in msg
-    assert "authenticate_google_drive" in msg
-    assert "No Composio API key" in msg
-
-
-def test_connect_link_flow_authenticates_agent(composio) -> None:
-    """authenticate -> user approves -> finish unlocks the Drive tools."""
-    agent = GoogleDriveAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    started = json.loads(tools["authenticate_google_drive"]())
-    assert started["status"] == "consent_required"
-    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
-    assert json.loads(tools["finish_google_drive_auth"]())["ok"] is True
-    assert agent._is_authenticated() is True
-    names = {t.__name__ for t in agent._get_tools()}
-    assert set(_AUTH_TOOL_NAMES) <= names
-    assert _TOOL_NAMES <= names
-    assert "connect" not in names  # channel protocol method, not an LLM tool
-    tools = {t.__name__: t for t in agent._get_tools()}
-    assert json.loads(tools["check_google_drive_auth"]())["ok"] is True
-
-
-def test_clear_auth_removes_connection_and_relocks_tools(composio) -> None:
-    """clear_google_drive_auth deletes the connection and re-locks backend tools."""
-    account = connect(composio, _SERVICE)
-    agent = GoogleDriveAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    result = tools["clear_google_drive_auth"]()
-    assert "cleared" in result.lower()
-    assert composio.deleted == [account]
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns the auth tool set when locked."""
-    tools = gdrive_mod.GdriveSea().tools([])
-    assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
-    assert all(callable(t) for t in tools)
-
-
-def test_connect_without_token_fails() -> None:
-    """connect() fails cleanly when no token is persisted."""
-    b = GoogleDriveChannelBackend()
-    assert b.connect() is False
-    assert "not connected" in b.connection_info
-
-
-def test_connect_with_composio_connection_succeeds(composio) -> None:
-    """connect() succeeds once a Composio connection is recorded."""
-    connect(composio, _SERVICE)
-    b = GoogleDriveChannelBackend()
-    assert b.connect() is True
-    assert "connected through Composio" in b.connection_info
 
 
 def test_search_files_defaults(backend) -> None:
@@ -636,15 +544,6 @@ def test_request_wraps_non_json_success_body(backend) -> None:
     """A 200 with a non-JSON body is returned as plain text, not an error."""
     b, _ = backend
     assert json.loads(b._request("GET", "/plaintext")) == {"ok": True, "result": "pong"}
-
-
-def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
-    """main() with no CLI arguments prints the usage line and exits 1."""
-    monkeypatch.setattr(sys, "argv", ["kiss-gdrive"])
-    with pytest.raises(SystemExit) as excinfo:
-        gdrive_mod.main()
-    assert excinfo.value.code == 1
-    assert "Usage: kiss-gdrive" in capsys.readouterr().out
 
 
 def test_connection_refused_returns_ok_false(backend, tmp_path, refusing_port: int) -> None:

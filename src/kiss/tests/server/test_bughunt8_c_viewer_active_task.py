@@ -22,7 +22,7 @@ own task.  B's frontend (statuses are stamped with B's own ``tabId``)
 stops its spinner and flips its input box out of "queue follow-up"
 mode while B's agent is still working.
 
-Both tests use the real ``VSCodeServer``, real ``JsonPrinter``
+Both tests use the real ``AgentServer``, real ``JsonPrinter``
 subscription state and real ``kiss.server.agent_state`` registry
 entries; events are captured by replacing ``printer.broadcast`` with a
 recorder (the established pattern of the earlier bug-hunt tests).
@@ -36,7 +36,7 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _EventRecorder:
@@ -69,7 +69,7 @@ class TestSubscribeChatViewersSkipsBusyViewer(unittest.TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.recorder = _EventRecorder()
 
     def tearDown(self) -> None:
@@ -111,7 +111,7 @@ class TestStatusEndSkipsBusyViewer(unittest.TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.recorder = _EventRecorder()
 
     def tearDown(self) -> None:

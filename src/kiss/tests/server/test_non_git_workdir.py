@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests: every VS Code extension command works in a
+"""Integration tests: every daemon command works in a
 non-git working directory without raising and without emitting
 spurious ``error`` events.
 
-The VS Code extension is meant to be usable in any folder — including
+The chat page is meant to be usable in any folder — including
 folders that are not inside a git repository.  Git-specific
 functionality (worktree, commit-message) must fail
 gracefully with informative messages instead of crashing or producing
@@ -31,7 +31,7 @@ from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _is_inside_git_repo(path: str) -> bool:
@@ -69,7 +69,7 @@ class _NonGitHarness(unittest.TestCase):
                 f"tempdir {self.tmpdir} is inside a git repo; "
                 "cannot test non-git behavior here",
             )
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -218,32 +218,12 @@ class TestNonGitWorktreeActions(_NonGitHarness):
         assert evt and evt[-1]["success"] is False
 
     def test_worktree_action_unknown(self) -> None:
-        _register_tab_state("t-wt3", agent=ChatSorcarAgent("Sorcar VS Code"))
+        _register_tab_state("t-wt3", agent=ChatSorcarAgent("Sorcar"))
         self.server._handle_command(
             {"type": "worktreeAction", "action": "frobnicate", "tabId": "t-wt3"},
         )
         evt = self._events_of("worktree_result")
         assert evt and evt[-1]["success"] is False
-
-
-class TestNonGitGenerateCommitMessage(_NonGitHarness):
-    """generateCommitMessage in non-git must broadcast a commitMessage
-    event with an informative error — never crash."""
-
-    def test_generate_commit_message(self) -> None:
-        self.server._handle_command(
-            {"type": "generateCommitMessage", "tabId": "t-gen"},
-        )
-        import time as _t
-        for _ in range(50):
-            if self._events_of("commitMessage"):
-                break
-            _t.sleep(0.02)
-        evt = self._events_of("commitMessage")
-        assert evt, "expected a commitMessage event"
-        last = evt[-1]
-        assert last.get("message") == ""
-        assert last.get("error") == "Not a git repository."
 
 
 class TestNonGitRunTask(_NonGitHarness):
@@ -256,7 +236,7 @@ class TestNonGitRunTask(_NonGitHarness):
         """Register a tab state whose agent.run is a no-op that
         simulates a clean agent invocation creating a single new file."""
         called: dict[str, Any] = {"called": False, "kwargs": None}
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = _register_tab_state(tab_id, agent=agent)
         state.stop_event = threading.Event()
         state.user_answer_queue = queue.Queue()

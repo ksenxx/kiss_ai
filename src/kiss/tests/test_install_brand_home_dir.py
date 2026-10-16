@@ -60,7 +60,7 @@ def _write_brand(path: Path, home_dir: object) -> None:
 
 def test_checkout_brand_json_drives_the_default(tmp_path: Path) -> None:
     """The checkout's media/brand.json names the directory; $KISS_HOME still wins."""
-    media = tmp_path / "src" / "kiss" / "agents" / "vscode" / "media" / "brand.json"
+    media = tmp_path / "src" / "kiss" / "webapp" / "media" / "brand.json"
     _write_brand(media, ".s10s")
     assert _home_dir_name(tmp_path) == (".s10s", "/home/u/.s10s")
     assert _home_dir_name(tmp_path, "/tmp/private") == (".s10s", "/tmp/private")
@@ -69,7 +69,7 @@ def test_checkout_brand_json_drives_the_default(tmp_path: Path) -> None:
 
 def test_brand_overlay_wins_over_the_checkout(tmp_path: Path) -> None:
     """A .brand/brand.json overlay (the VSIX is built with it) decides, not the checkout."""
-    _write_brand(tmp_path / "src" / "kiss" / "agents" / "vscode" / "media" / "brand.json", ".kiss")
+    _write_brand(tmp_path / "src" / "kiss" / "webapp" / "media" / "brand.json", ".kiss")
     _write_brand(tmp_path / ".brand" / "brand.json", ".loop")
     assert _home_dir_name(tmp_path) == (".loop", "/home/u/.loop")
 
@@ -77,7 +77,7 @@ def test_brand_overlay_wins_over_the_checkout(tmp_path: Path) -> None:
 @pytest.mark.parametrize("bad", ["", ".", "..", "a/b", "a\\b", 3])
 def test_anything_but_a_plain_name_falls_back_to_kiss(tmp_path: Path, bad: object) -> None:
     """An empty, relative or nested value, or no file at all, keeps ``.kiss``."""
-    _write_brand(tmp_path / "src" / "kiss" / "agents" / "vscode" / "media" / "brand.json", bad)
+    _write_brand(tmp_path / "src" / "kiss" / "webapp" / "media" / "brand.json", bad)
     assert _home_dir_name(tmp_path) == (".kiss", "/home/u/.kiss")
 
 

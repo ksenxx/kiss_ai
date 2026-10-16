@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestResumeSessionWithTaskId:
@@ -53,7 +53,7 @@ class TestResumeSessionWithTaskId:
             for ev in events_b:
                 th._append_chat_event(ev, task_id=task_b_id)
 
-            server = VSCodeServer()
+            server = AgentServer()
             captured: list[dict[str, object]] = []
             orig_broadcast = server.printer.broadcast
 
@@ -103,7 +103,7 @@ class TestResumeSessionWithTaskId:
                 {"type": "result", "summary": "ok"}, task_id=task_id,
             )
 
-            server = VSCodeServer()
+            server = AgentServer()
             captured: list[dict[str, object]] = []
             orig_broadcast = server.printer.broadcast
 
@@ -150,7 +150,7 @@ class TestResumeSessionWithTaskId:
                 {"type": "result", "summary": "new"}, task_id=task_b_id,
             )
 
-            server = VSCodeServer()
+            server = AgentServer()
             captured: list[dict[str, object]] = []
             orig_broadcast = server.printer.broadcast
 
@@ -187,7 +187,7 @@ class TestResumeSessionWithTaskId:
                 {"type": "result", "summary": "done"}, task_id=task_id,
             )
 
-            server = VSCodeServer()
+            server = AgentServer()
             captured: list[dict[str, object]] = []
             orig_broadcast = server.printer.broadcast
 

@@ -19,7 +19,7 @@ import unittest
 from dataclasses import dataclass
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 
@@ -37,7 +37,7 @@ class TestAskUserBroadcastLifecycle(unittest.TestCase):
 
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
 
     def tearDown(self) -> None:
         with agent_state.STATE_LOCK:

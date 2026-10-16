@@ -8,13 +8,13 @@ Each browser tab running the standalone web client is one webapp
 instance.  The working directory is a single daemon-wide value: a
 ``setWorkDir`` from any instance (the chat-header work-dir drop-down, the
 Explorer's check mark) adopts it for every task of every instance and
-every VS Code window, persists it as ``config.json`` ``work_dir`` and
+every browser window, persists it as ``config.json`` ``work_dir`` and
 is broadcast back as ``workDirChanged``.  Nothing is pinned per tab:
 the WS shim keeps no ``sessionStorage`` copy and replays nothing on
 reconnect, so a reloaded or reconnected instance simply sees the
 global value.
 
-* The shim tests replay the REAL ``_WS_SHIM_JS`` source in Node with a
+* The shim tests replay the REAL ``media/transport.js`` source in Node with a
   fake WebSocket, asserting that ``setWorkDir`` is an ordinary queued
   command (sent after ``auth``, in order) and that no pin is kept or
   replayed.
@@ -38,7 +38,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import (
@@ -103,7 +103,7 @@ console.log(JSON.stringify(out));
 
 
 def _run_shim_harness(scenario_js: str) -> dict[str, Any]:
-    """Run the REAL ``_WS_SHIM_JS`` in Node followed by *scenario_js*.
+    """Run the REAL ``media/transport.js`` in Node followed by *scenario_js*.
 
     The prelude installs fake ``WebSocket`` / ``sessionStorage`` /
     ``localStorage`` / ``setTimeout`` globals; the scenario drives the
@@ -111,7 +111,10 @@ def _run_shim_harness(scenario_js: str) -> dict[str, Any]:
     and records observations into ``out``, which is printed as JSON.
     """
     script = (
-        _SHIM_PRELUDE + web_server._WS_SHIM_JS + scenario_js + _SHIM_EPILOGUE
+        _SHIM_PRELUDE
+        + (web_server.MEDIA_DIR / "transport.js").read_text(encoding="utf-8")
+        + scenario_js
+        + _SHIM_EPILOGUE
     )
     result = subprocess.run(  # the script exceeds Windows' command-line limit: use stdin
         ["node", "-"],
@@ -136,7 +139,7 @@ class TestWsShimNoWorkDirPin(unittest.TestCase):
         it goes out after ``auth`` in the order it was posted, like any
         other command."""
         out = _run_shim_harness("""
-const api = window.acquireVsCodeApi();
+const api = window.acquireTransport();
 const ws0 = FakeWS.instances[0];
 ws0.onopen();
 api.postMessage({type: 'setWorkDir', workDir: '/inst/a'});
@@ -160,7 +163,7 @@ out.sent = ws0.sent.map(s => JSON.parse(s));
 globalThis.location.reload = () => {
   out.reloaded = (out.reloaded || 0) + 1;
 };
-const api = window.acquireVsCodeApi();
+const api = window.acquireTransport();
 const ws0 = FakeWS.instances[0];
 ws0.onopen();
 api.postMessage({type: 'setWorkDir', workDir: '/inst/a'});

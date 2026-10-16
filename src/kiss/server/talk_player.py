@@ -6,15 +6,12 @@
 
 The ``talk`` tool (sorcar_agent.py) broadcasts a
 ``{"type": "talk", "text", "language", "emotion", "talkId",
-"audioB64", "audioMime"}`` event.  Chat-webview clients play the
-synthesized MP3 (``media/main.js`` ``playTalkAudio``) and stay silent
-when the clip is missing or undecodable (the old robotic Web Speech
-fallback is gone for good).  The kiss-web daemon uses
-:func:`shared_player` to play clips natively for LOCAL VS Code
-webview tabs (``web_server.WebPrinter._play_talk_clip_locally``),
-because a webview's ``Audio.play()`` is rejected by Chromium's
-autoplay policy without a recent user gesture and the talk would
-otherwise be silent:
+"audioB64", "audioMime"}`` event.  Browser clients play the synthesized
+MP3 themselves (``media/main.js`` ``playTalkAudio``).  A headless local
+client (a ``sorcar`` CLI or ``daemon_client`` run on the daemon's machine)
+has no player, so the kiss-web daemon uses :func:`shared_player` to play
+the clip on this machine's speakers
+(``web_server.WebPrinter._play_talk_clip_locally``):
 
 * the base64 MP3 is decoded to a temp file and played with the
   machine's audio player (``afplay`` on macOS; ``mpg123`` / ``ffplay``
@@ -22,7 +19,7 @@ otherwise be silent:
 * when there is no clip, the clip is undecodable, or the player fails,
   the text is spoken with the system TTS command (``say`` on macOS;
   ``espeak`` / ``spd-say`` elsewhere);
-* utterances are deduped by ``talkId`` (bounded set, webview parity)
+* utterances are deduped by ``talkId`` (bounded set, as in main.js)
   and serialised on one worker thread so back-to-back ``talk()`` calls
   never speak over each other (``enqueueTalkPlayback`` parity), and
   the agent loop never blocks on playback.
@@ -236,9 +233,9 @@ class TalkPlayer:
 
     Thread-safe; :meth:`play` never blocks — events are queued to a
     single daemon worker thread that plays them strictly one at a
-    time (the webview's talk-queue behaviour).  Playback of the same
+    time (the browser client's talk-queue behaviour).  Playback of the same
     ``talkId`` more than once is suppressed with a bounded set (the
-    webview's ``spokenTalkIds`` behaviour).
+    browser client's ``spokenTalkIds`` behaviour).
     """
 
     def __init__(self) -> None:
@@ -251,7 +248,7 @@ class TalkPlayer:
         """Queue one ``talk`` *event* for playback (non-blocking).
 
         Blank events (no clip and no text) and already-spoken
-        ``talkId`` values are dropped, matching the webview client.
+        ``talkId`` values are dropped, matching the browser client.
 
         Args:
             event: The broadcast ``talk`` event dictionary.
@@ -330,7 +327,7 @@ _shared_player: TalkPlayer | None = None
 def shared_player() -> TalkPlayer:
     """Return the process-wide :class:`TalkPlayer` singleton.
 
-    One player per process mirrors the webview's one-queue-per-device
+    One player per process mirrors the browser client's one-queue-per-device
     semantics: talks from every printer/agent in this process are
     deduped and serialised together, so parallel sub-agents can never
     speak over each other on the same speakers.

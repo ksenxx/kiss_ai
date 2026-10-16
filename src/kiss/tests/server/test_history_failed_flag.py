@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestHistoryFailedFlag(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         th._close_db()
         th._DB_PATH = Path(self._tmp) / "history.db"  # type: ignore[attr-defined]
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self._tmp
         self.events: list[dict[str, Any]] = []
         self._lock = threading.Lock()

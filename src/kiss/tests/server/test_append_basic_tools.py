@@ -40,7 +40,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
@@ -81,11 +81,11 @@ class DaemonRunApiHarness(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
         self._saved_config_override = (
-            vars(vscode_config).get("CONFIG_DIR"),
-            vars(vscode_config).get("CONFIG_PATH"),
+            vars(user_config).get("CONFIG_DIR"),
+            vars(user_config).get("CONFIG_PATH"),
         )
-        vscode_config.CONFIG_DIR = kiss_dir
-        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        user_config.CONFIG_DIR = kiss_dir
+        user_config.CONFIG_PATH = kiss_dir / "config.json"
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
@@ -148,15 +148,15 @@ class DaemonRunApiHarness(unittest.TestCase):
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
-            if "CONFIG_DIR" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_DIR")
+            if "CONFIG_DIR" in vars(user_config):
+                delattr(user_config, "CONFIG_DIR")
         else:
-            vscode_config.CONFIG_DIR = saved_dir
+            user_config.CONFIG_DIR = saved_dir
         if saved_path is None:
-            if "CONFIG_PATH" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_PATH")
+            if "CONFIG_PATH" in vars(user_config):
+                delattr(user_config, "CONFIG_PATH")
         else:
-            vscode_config.CONFIG_PATH = saved_path
+            user_config.CONFIG_PATH = saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _write_py(self, name: str, content: str) -> str:
@@ -629,7 +629,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.
 
-        Every client (the webview ``submit`` path, the Python client)
+        Every client (the chat page's ``submit`` path, the Python client)
         omits the field — their agents must keep the full toolset.
         """
         calls: list[dict[str, Any]] = []

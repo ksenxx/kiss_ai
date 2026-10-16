@@ -9,7 +9,7 @@ task ``709ebce3`` in ``~/.kiss/history.db``, 5 Aug 2026):
 
 * A sub-agent issued an Anthropic request at 04:58:34 that returned
   response headers and then delivered NOTHING for 178 seconds.
-* The user pressed Stop repeatedly.  ``VSCodeServer._stop_task`` set the
+* The user pressed Stop repeatedly.  ``AgentServer._stop_task`` set the
   task's stop event every time, but the flag is only read when the agent
   emits something (``JsonPrinter.print`` / ``token_callback``), and the
   forced ``KeyboardInterrupt`` cannot be delivered to a thread parked in

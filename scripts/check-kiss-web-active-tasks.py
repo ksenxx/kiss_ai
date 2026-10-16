@@ -3,15 +3,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Probe kiss-web's local WSS endpoint for in-flight agent tasks.
+"""Probe kiss-web's local WebSocket endpoint for in-flight agent tasks.
 
-Called by ``scripts/build-extension.sh`` and ``install.sh`` BEFORE they
-SIGTERM the running ``kiss-web`` daemon.  Without this guard, those
-scripts silently kill any in-flight agent task — the bug that turned a
-multi-step task into ``"Task interrupted by server restart/shutdown"``
-on task_history rows 3233/3234 (see also the same regression on
-row 3192 that prompted the matching guard in
-``src/kiss/agents/vscode/src/DependencyInstaller.ts``).
+Called by ``install.sh`` BEFORE it restarts the running ``kiss-web``
+daemon.  Without this guard, the installer silently killed any
+in-flight agent task — the bug that turned a multi-step task into
+``"Task interrupted by server restart/shutdown"`` on task_history rows
+3233/3234.
 
 Wire protocol
 =============
@@ -19,7 +17,7 @@ Wire protocol
 The daemon publishes its URL and a local token in
 ``~/.kiss/sorcar-local.json`` (see ``kiss.agents.sorcar.local_endpoint``).
 The probe connects to that URL, authenticates as a local client and
-speaks the SAME JSON protocol as the VS Code extension:
+speaks the daemon's JSON protocol:
 
 * Request:  ``{"type":"activeTasksQuery"}``
 * Response: ``{"type":"activeTasksResponse","count":<int>,"tabs":[...]}``
@@ -137,7 +135,11 @@ def _probe_active_tasks(
             f"kiss-web probe cannot import websockets ({exc}); refusing to "
             "kill — set KISS_FORCE_RESTART=1 to override."
         )
-    ssl_ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+    # The daemon serves loopback without TLS (``ws://``); ``ssl=`` is
+    # only valid, and only needed, for a ``wss://`` endpoint.
+    ssl_ctx: ssl.SSLContext | None = None
+    if url.startswith("wss://"):
+        ssl_ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
     deadline = time.monotonic() + timeout
     try:
         with connect(

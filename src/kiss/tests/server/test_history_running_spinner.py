@@ -4,7 +4,7 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_history_running_spinner``.
+"""Server-only tests extracted from ``kiss.tests.webapp.test_history_running_spinner``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate
@@ -23,7 +23,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _history_event_from_real_backend(
@@ -37,7 +37,7 @@ def _history_event_from_real_backend(
     :class:`agent_state.AgentState` keyed by the persisted task's row
     id and whose ``task_thread`` is an alive daemon thread
     is registered before the ``getHistory`` call.  This drives the
-    real :meth:`VSCodeServer._get_running_task_ids` to flag the row as
+    real :meth:`AgentServer._get_running_task_ids` to flag the row as
     running — proving the backend → ``is_running`` plumbing works
     against a real DB row instead of fabricating ``is_running`` in
     the browser-side test.
@@ -55,7 +55,7 @@ def _history_event_from_real_backend(
     worker: threading.Thread | None = None
     fake_tab_id = "__test_running_tab__"
     try:
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = tmp
         events: list[dict[str, Any]] = []
         lock = threading.Lock()
@@ -120,7 +120,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
     worker: threading.Thread | None = None
     fake_tab_id = "__alive_thread_test__"
     try:
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = tmp
         task_id, _ = th._add_task("alive thread task")
 

@@ -36,7 +36,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_runner import inject_keyboard_interrupt
 
 
@@ -101,7 +101,7 @@ class TestThreadAliveSites(unittest.TestCase):
     """C-R4: the three server.py liveness sites via thread_alive()."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -170,7 +170,7 @@ class TestSingleFailureResultBroadcast(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-rr-c-r3-")
-        self.server = VSCodeServer(printer=_ExplodingRecordingPrinter())
+        self.server = AgentServer(printer=_ExplodingRecordingPrinter())
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

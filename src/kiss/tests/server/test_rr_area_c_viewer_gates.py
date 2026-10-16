@@ -35,7 +35,7 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _noop() -> None:
@@ -46,7 +46,7 @@ class _ViewerGateTestBase(unittest.TestCase):
     """Shared server + event-recorder setup."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

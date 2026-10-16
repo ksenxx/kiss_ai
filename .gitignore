@@ -16,23 +16,14 @@ dist/
 .cursorrules
 .coverage_per_test
 *.log
-*.vsix
 .coverage*
 .kiss.artifacts
 .kiss-worktrees/
 env.sh
 node_modules/
-src/kiss/agents/vscode/out/
-# Content-hashed icon copies created around `vsce pack` (scripts/hash-icons.js).
-src/kiss/agents/vscode/media/hashed/
-# Scratch module written by secondarySidebarPerWorkspace.test.js while it runs.
-src/kiss/agents/vscode/test/_vscode-stub-*.js
-src/kiss/agents/vscode/README.md
-src/kiss/agents/vscode/LICENSE
-kiss_project/
 tmp/
-# White-label brand overlay applied by install.sh during the extension build
-# (see "Brand overlay" in install.sh); the checked-in brand stays KISS Sorcar.
+# White-label brand overlay copied in by install.sh (see "Brand overlay"
+# there); the checked-in brand stays KISS Sorcar.
 /.brand/
 src/kiss/benchmarks/results/
 !src/kiss/benchmarks/results/.gitkeep

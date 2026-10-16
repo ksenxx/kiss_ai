@@ -80,13 +80,13 @@ class TestIgnoredFileRescueServerPostTask:
     def test_post_task_auto_discard_rescues_ignored_only_output(
         self,
     ) -> None:
-        """End-to-end through VSCodeServer._run_task_inner."""
-        from kiss.server.server import VSCodeServer
+        """End-to-end through AgentServer._run_task_inner."""
+        from kiss.server.server import AgentServer
 
         self._original_run = _stub_parent_run(
             {_IGNORED_REL: _IGNORED_CONTENT},
         )
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(self.repo)
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]

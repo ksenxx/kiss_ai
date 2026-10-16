@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a web/mobile app, a Python API, and a terminal command.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
@@ -161,7 +161,7 @@
 
     .hero-mark, .screenshot { max-width: 960px; margin-left: auto; margin-right: auto; }
     .hero-mark { margin-bottom: 1.5rem; }
-    /* Two transparent-background logos, same pair as the VS Code / remote
+    /* Two transparent-background logos, same pair as the web app's
        welcome page: navy wordmark for the light theme, light wordmark for
        the dark theme. Selected by html[data-theme] (not prefers-color-scheme)
        so the logo follows the site's own theme toggle. */
@@ -350,14 +350,14 @@
     }
     .cta-btn svg { width: 18px; height: 18px; flex: none; }
 
-    /* Primary: Install (VS Code) */
-    .cta-vscode {
+    /* Primary: Install */
+    .cta-install {
       background: var(--primary);
       color: #fff;
       border-color: var(--primary);
       box-shadow: var(--shadow-1);
     }
-    .cta-vscode:hover {
+    .cta-install:hover {
       background: var(--primary-dark);
       border-color: var(--primary-dark);
       color: #fff;
@@ -1475,13 +1475,13 @@
     .cta-btn:hover::after { transform: translateX(110%); }
     .cta-btn > * { position: relative; z-index: 1; }
 
-    .cta-vscode {
+    .cta-install {
       background: linear-gradient(135deg, #2dd4bf, #14b8a6 70%, #a78bfa);
       border-color: transparent;
       color: #051815;
       box-shadow: 0 12px 32px -10px rgba(45,212,191,0.55);
     }
-    .cta-vscode:hover {
+    .cta-install:hover {
       background: linear-gradient(135deg, #38e8d3, #2dd4bf 65%, #c4b0ff);
       color: #051815;
       transform: translateY(-2px);
@@ -1794,13 +1794,13 @@
     }
     html[data-theme="light"] .cta-btn:hover::after { transform: translateX(110%); }
     html[data-theme="light"] .cta-btn > * { position: relative; z-index: 1; }
-    html[data-theme="light"] .cta-vscode {
+    html[data-theme="light"] .cta-install {
       background: linear-gradient(135deg, #1976d2, #00897b 70%, #1976d2);
       border-color: transparent;
       color: #fff;
       box-shadow: 0 10px 24px -10px rgba(25,118,210,0.45);
     }
-    html[data-theme="light"] .cta-vscode:hover {
+    html[data-theme="light"] .cta-install:hover {
       background: linear-gradient(135deg, #2186e8, #00a392 70%, #2186e8);
       color: #fff;
       transform: translateY(-2px);
@@ -1976,8 +1976,8 @@
   <div class="hero" style="padding-top: 0; padding-bottom: 1.5rem;">
     <p class="lead lead--accent">
       <strong>KISS Sorcar</strong> is an open-source general-purpose AI agent for long-horizon tasks and AI discovery.
-      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a VS Code extension
-      and a browser/mobile web app, and offers a Python client API. Your prompts and code are sent directly to
+      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a browser/mobile
+      web app served by a local daemon, and offers a Python client API. Your prompts and code are sent directly to
       the model provider or local endpoint you configure &mdash; <em>not through our servers</em>. It supports
       multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone
       <code>sorcar</code> terminal command can also run a task without the daemon). Complex AI systems/techniques
@@ -2006,16 +2006,17 @@
     </div>
   </div>
 
-  <!-- Hero CTAs: Install (VS Code) · pipx install (click to copy) · Star on GitHub -->
+  <!-- Hero CTAs: Install · pipx install (click to copy) · Star on GitHub -->
   <div class="hero-ctas" role="group" aria-label="Get started with KISS Sorcar">
-    <a class="cta-btn cta-vscode"
-       href="https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
-       target="_blank" rel="noopener"
-       aria-label="Install the KISS Sorcar VS Code extension">
-      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74l3.574 3.26L.326 15.26a1 1 0 0 0 0 1.479l1.32 1.202a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.493 1.493 0 0 0 1.705.29l4.942-2.377A1.5 1.5 0 0 0 24 19.957V3.943a1.5 1.5 0 0 0-.85-1.356zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/>
+    <a class="cta-btn cta-install"
+       href="#install"
+       aria-label="Jump to the installation instructions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
       </svg>
-      Install (VS Code)
+      Install
     </a>
 
     <button class="cta-btn cta-pip" type="button"
@@ -2062,7 +2063,7 @@
           <tbody>
             <tr>
               <th class="cap">Interfaces</th>
-              <td class="kiss">VS Code extension + web/mobile app + Python API</td>
+              <td class="kiss">Web/mobile app + Python API + <code>sorcar</code> CLI</td>
               <td>CLI + mobile app</td>
               <td>Custom VS Code</td>
             </tr>
@@ -2376,7 +2377,7 @@
   <section id="prompts" class="section-card">
     <span class="num">§ 03 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your own tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your own tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -2885,16 +2886,18 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <section id="install" class="section-card">
     <span class="num">§ 08 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
-    <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
+    <p class="sub">Pick the install path that fits you &mdash; the one-line installer, a git checkout, Docker, or the Python package. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card inner-card--preferred" style="--i:0">
-          <h3>Full install from source <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
-          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). Installs or checks every tool needed to run KISS Sorcar and build/install the VS Code extension &mdash; one command, no extra steps.</p>
+          <h3>Full install <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
+          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). The script clones or updates <code>~/.kiss/kiss_ai</code> and runs its <code>install.sh</code>, which builds the Python environment, installs Playwright's Chromium and cloudflared, puts the <code>sorcar</code> CLI in <code>~/.local/bin</code>, registers the <code>kiss-web</code> daemon as your user service and opens the web app at <code>http://127.0.0.1:8787</code> &mdash; one command, no extra steps.</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</span></div>
+            <div class="code-line"><span class="x"># or, from a checkout</span></div>
+            <div class="code-line"><span class="prompt">$</span> <span class="green">git clone https://github.com/ksenxx/kiss_ai.git &amp;&amp; cd kiss_ai &amp;&amp; ./install.sh</span></div>
           </div>
-          <p style="margin-top:0.7rem;">If the Update button in the settings UI fails, run the full installation command again. It will not delete your history.</p>
+          <p style="margin-top:0.7rem;">Updates come from the web app's update toast (<strong>Update</strong> or <strong>Update when idle</strong>). If an update fails, run the one-line command again. It will not delete your history.</p>
         </div>
 
         <div class="inner-card" style="--i:1">
@@ -2919,13 +2922,16 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <div class="code-line"><span class="c">export</span> <span class="f">MOONSHOT_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENROUTER_API_KEY</span>=<span class="s">...</span></div>
           </div>
-          <p style="margin-top:0.7rem;">You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app &mdash; or per task via the Python API&rsquo;s <code>model_config</code> option. You can register your own models (e.g. a local vLLM/Ollama endpoint) in the <strong>Custom Models</strong> section of the Settings panel; entries are stored in <code>~/.kiss/MY_MODELS.json</code> and appear in the model picker alongside the bundled catalog.</p>
+          <p style="margin-top:0.7rem;">You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app &mdash; or per task via the Python API&rsquo;s <code>model_config</code> option. You can register your own models (e.g. a local vLLM/Ollama endpoint) in the <strong>Custom Models</strong> section of the Settings panel; entries are stored in <code>~/.kiss/MY_MODELS.json</code> and appear in the model picker alongside the bundled catalog.</p>
         </div>
 
         <div class="inner-card" style="--i:3">
-          <h3>VS Code Extension</h3>
-          <p>To install only the KISS Sorcar extension, open Visual Studio Code, search for <strong>KISS Sorcar</strong> in the <a href="https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar">extension marketplace</a>, install it, and relaunch VS Code.</p>
-          <p style="margin-top:0.6rem;">Press <kbd style="background:var(--surface);padding:0.05rem 0.4rem;border-radius:4px;border:1px solid var(--border);font-family:'Roboto Mono',monospace;font-size:0.82em;">ESC</kbd> if you do not have a specific API key ready, but configure at least one model backend before running tasks.</p>
+          <h3>Docker</h3>
+          <p style="margin-bottom:0.7rem;">Runs KISS Sorcar in a plain Debian container and serves the web app on port 8787 (host port 8787 by default). The web app password is <code>KISS_WEB_PASSWORD</code> or a generated one printed in <code>docker logs</code>; state persists in the <code>kiss-sorcar-web-home</code> volume.</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">$</span> <span class="green">./sorcar-docker [PORT] [--rebuild]</span></div>
+          </div>
+          <p style="margin-top:0.7rem;">Open <code>https://localhost:PORT</code> on the host; the certificate is self-signed, so accept it once or install <code>/ca.crt</code>.</p>
         </div>
       </div>
     </div>
@@ -2938,7 +2944,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     <span class="num">§ 09 — Python API in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar.run</code> Python API.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
-      The <code>kiss-web</code> daemon serves every client — the VS Code sidebar, the remote web/mobile app, and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
+      The <code>kiss-web</code> daemon serves every client — the web/mobile app and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
     </p>
 
     <div class="section-body">

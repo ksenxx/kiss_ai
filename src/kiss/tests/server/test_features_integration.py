@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for: web browser toggle wiring and API key deletion
-through the VS Code server's saveConfig handler.
+through the daemon's saveConfig handler.
 
 The core-only methods (budget limit, custom endpoint, config persistence,
 key save/overwrite lifecycle) moved to
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.vscode_config import API_KEY_ENV_VARS
+from kiss.core.user_config import API_KEY_ENV_VARS
 from kiss.tests.core.test_features_integration import (  # noqa: F401
     _restore_default_config,
 )
@@ -39,7 +39,7 @@ class TestApiKeySetupAndDeletion:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        import kiss.core.vscode_config as _vc
+        import kiss.core.user_config as _vc
 
         monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
         monkeypatch.setitem(
@@ -55,16 +55,16 @@ class TestApiKeySetupAndDeletion:
     def test_delete_key_by_saving_empty(self) -> None:
         """Saving an empty key via the config panel deletes it everywhere.
 
-        The VSCodeServer saveConfig handler forwards empty values to
+        The AgentServer saveConfig handler forwards empty values to
         ``save_api_key``, which treats them as a delete: the ``export``
         line is removed from the canonical key store and the variable is
         dropped from ``os.environ`` — so the key stays gone across the
         next daemon start too.
         """
-        from kiss.core.vscode_config import api_keys_env_path, load_api_keys
-        from kiss.server.server import VSCodeServer
+        from kiss.core.user_config import api_keys_env_path, load_api_keys
+        from kiss.server.server import AgentServer
 
-        server = VSCodeServer()
+        server = AgentServer()
 
         server._handle_command({
             "type": "saveConfig",

@@ -19,14 +19,14 @@ import unittest
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestUserAnswerNonString(unittest.TestCase):
     """userAnswer must always deliver a str to the waiting agent."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
         def capture(event: dict[str, Any]) -> None:
             pass

@@ -4,7 +4,7 @@
 # add your name here
 """Audit 18: Race-condition integration tests for worktree mode.
 
-The VS Code server coordinates three concurrent actors:
+The daemon coordinates three concurrent actors:
 
 1. A worktree task running on tab A.
 2. Another tab's task operating on the same repository.
@@ -78,7 +78,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +95,7 @@ def _register_wt_state(
     """Register a server-owned worktree AgentState for *tab_id*."""
     state = AgentState(
         f"task-{tab_id}",
-        agent=ChatSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar"),
         tab_id=tab_id,
         server_owned=True,
         is_task_active=is_task_active,
@@ -168,9 +168,9 @@ class _RecordingPrinter:
         self.events.append(event)
 
 
-def _server(repo: Path) -> VSCodeServer:
-    """Construct a VSCodeServer pointed at *repo* with a recording printer."""
-    server = VSCodeServer()
+def _server(repo: Path) -> AgentServer:
+    """Construct a AgentServer pointed at *repo* with a recording printer."""
+    server = AgentServer()
     server.work_dir = str(repo)
     server.printer = cast(Any, _RecordingPrinter())
     return server

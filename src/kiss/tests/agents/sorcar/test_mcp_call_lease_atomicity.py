@@ -171,7 +171,7 @@ class _EvictionGateLock:
                 # the eviction's teardown lands — the exact production
                 # interleaving that stranded the call.
                 manager._loop.call_soon_threadsafe(time.sleep, 0.5)
-                manager._evict_surplus("")
+                manager._evict_surplus(set())
                 conn = manager._connections.get(self._key)
             if (
                 conn is not None
@@ -181,7 +181,7 @@ class _EvictionGateLock:
                 # The lease is held: even an idle-expired connection
                 # must survive a full eviction pass.
                 conn.last_used = time.monotonic() - 1000.0
-                manager._evict_surplus("")
+                manager._evict_surplus(set())
                 survived = manager._connections.get(self._key) is conn
                 self.leased_attack = (survived, conn.in_flight)
         finally:

@@ -31,8 +31,8 @@ import pytest
 from websockets.asyncio.client import connect
 
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.vscode_config import CONFIG_PATH, save_config
-from kiss.server.sorcar import translate_webview_command
+from kiss.core.user_config import CONFIG_PATH, save_config
+from kiss.server.sorcar import translate_client_command
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
@@ -45,7 +45,6 @@ from kiss.server.web_server import (
     _discover_tunnel_url_from_metrics,
     _generate_self_signed_cert,
     _get_local_ips,
-    _parse_version_py,
     _pick_free_local_port,
     _print_url,
     _probe_tunnel_ready,
@@ -56,7 +55,7 @@ from kiss.server.web_server import (
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -78,10 +77,10 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn(f"<title>{PRODUCT_NAME}: {node}</title>", html)
         self.assertNotIn("{{PAGE_TITLE}}", html)
 
-    def test_html_has_no_vscode_csp(self) -> None:
-        """The standalone HTML does not contain VS Code CSP nonce directives."""
+    def test_html_has_no_template_placeholders(self) -> None:
+        """Every ``{{...}}`` placeholder of chat.html is substituted."""
         html = _build_html()
-        self.assertNotIn("acquireVsCodeApi()", html.split("acquireVsCodeApi")[0])
+        self.assertNotIn("{{", html)
         self.assertNotIn("webview.cspSource", html)
 
     def test_body_has_remote_chat_class(self) -> None:
@@ -89,26 +88,23 @@ class TestBuildHtml(unittest.TestCase):
 
         The remote-chat layout centers the input textbox + buttons inside
         ``#welcome``.  The frontend (``main.js`` and ``main.css``)
-        relies on ``body.remote-chat`` to enable that layout only for
-        the remote webview, not the bundled VS Code extension webview.
+        relies on ``body.remote-chat`` to enable that layout.
         """
         html = _build_html()
         self.assertIn('<body class="remote-chat light-theme">', html)
 
-    def test_html_includes_ws_shim(self) -> None:
-        """The generated HTML injects the WebSocket shim before main.js."""
+    def test_html_loads_transport_before_main_js(self) -> None:
+        """The page loads the WebSocket transport before main.js."""
         html = _build_html()
-        self.assertIn("acquireVsCodeApi", html)
-        self.assertIn("WebSocket", html)
-        shim_pos = html.index("acquireVsCodeApi")
+        transport_pos = html.index('src="/media/transport.js?v=')
         main_js_pos = html.index('src="/media/main.js?v=')
-        self.assertLess(shim_pos, main_js_pos)
+        self.assertLess(transport_pos, main_js_pos)
 
     def test_html_includes_media_refs(self) -> None:
         """The HTML references all required media assets."""
         html = _build_html()
         self.assertIn("/media/main.css", html)
-        self.assertIn("/media/highlight-vscode-dark.css", html)
+        self.assertIn("/media/highlight-dark.css", html)
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)
@@ -126,7 +122,7 @@ class TestBuildHtml(unittest.TestCase):
             'src="/media/welcome-logo-dark.png?v=',
             html,
         )
-        media = Path(__file__).resolve().parents[2] / "agents/vscode/media"
+        media = Path(__file__).resolve().parents[2] / "webapp/media"
         for name in ("welcome-logo.png", "welcome-logo-dark.png"):
             self.assertEqual((media / name).read_bytes()[1:4], b"PNG", name)
         self.assertNotIn('id="suggestions"', html)
@@ -134,132 +130,18 @@ class TestBuildHtml(unittest.TestCase):
         self.assertNotIn("{{", html)
 
 
-class TestWebappServerLoadingOverlay(unittest.TestCase):
-    """End-to-end regression for the "KISS Sorcar Server is starting ..."
-    overlay in the remote webapp.
-
-    Bug: the WebSocket shim served by :func:`_build_html` never
-    dispatched a ``daemonStatus`` message, so ``media/main.js``'s
-    overlay toggle (driven by that exact message) kept the
-    ``#kiss-server-loading`` overlay covering ``#app`` forever — the
-    remote webapp showed "KISS Sorcar Server is starting ..." on
-    every load and never recovered.
-
-    The fix synthesises ``daemonStatus`` events from the shim's
-    WebSocket lifecycle:
-      * ``auth_ok``   → ``daemonStatus connected:true``  (reveal #app)
-      * ``onclose``   → ``daemonStatus connected:false`` (re-show overlay)
-
-    These assertions pin the source-level contract.  The companion
-    end-to-end test ``test/webappServerLoadingOverlay.test.js`` runs
-    the shim inside jsdom against a fake WebSocket and verifies the
-    actual DOM toggles.
-    """
-
-
-    def test_shim_dispatches_daemon_status_on_auth_ok(self) -> None:
-        """After ``auth_ok`` the shim must dispatch ``daemonStatus connected:true``.
-
-        Without this the overlay stays up forever — the exact bug the
-        user reported.  We pin the dispatch site to the auth_ok branch
-        of the shim's ``onmessage`` handler.
-        """
-        html = _build_html()
-        marker = "msg.type === 'auth_ok'"
-        self.assertIn(marker, html)
-        after_auth_ok = html.split(marker, 1)[1]
-        normal_path_marker = "_authenticated = true"
-        self.assertIn(normal_path_marker, after_auth_ok)
-        normal_path_onward = after_auth_ok.split(normal_path_marker, 1)[1]
-        auth_ok_branch, _rest = normal_path_onward.split("return;", 1)
-        self.assertIn("daemonStatus", auth_ok_branch)
-        self.assertIn("connected: true", auth_ok_branch)
-        self.assertIn(
-            "_dispatchToApp",
-            auth_ok_branch,
-            "auth_ok must deliver the daemonStatus event to the app "
-            "(via _dispatchToApp, which dispatches on window once the "
-            "document has finished parsing) so media/main.js hides "
-            "the loading overlay",
-        )
-        self._assert_dispatch_to_app_reaches_window(html)
-
-    def _assert_dispatch_to_app_reaches_window(self, html: str) -> None:
-        """The ``_dispatchToApp`` helper must dispatch on ``window``.
-
-        The lifecycle branches now route through this helper (it
-        queues events while the document is still parsing so a
-        dispatch cannot be lost before ``media/main.js`` registers
-        its listener), so the source-level contract is closed by
-        pinning that the helper itself — and its DOMContentLoaded
-        flush — perform the ``window.dispatchEvent`` call.
-        """
-        marker = "function _dispatchToApp(data)"
-        self.assertIn(marker, html)
-        helper_body = html.split(marker, 1)[1].split("function ", 1)[0]
-        self.assertIn("window.dispatchEvent", helper_body)
-        flush_marker = "document.addEventListener('DOMContentLoaded'"
-        self.assertIn(flush_marker, html)
-        flush_body = html.split(flush_marker, 1)[1].split("});", 1)[0]
-        self.assertIn("window.dispatchEvent", flush_body)
-
-    def test_shim_dispatches_daemon_status_on_auth_required(self) -> None:
-        """``auth_required`` must also reveal ``#app``.
-
-        The ``#auth-modal`` element lives INSIDE ``#app`` in the
-        chat.html template (``{{AUTH_MODAL}}`` substitution is right
-        before the closing ``#app`` ``</div>``).  CSS ``display:none``
-        on a parent hides every descendant regardless of the child's
-        ``position: fixed``, so without a ``daemonStatus(connected:
-        true)`` dispatch on auth_required the password prompt is
-        invisible and a password-protected webapp can never be
-        unlocked — the user is stuck on "KISS Sorcar Server is
-        starting ..." even though the server is reachable.
-        """
-        html = _build_html()
-        marker = "msg.type === 'auth_required'"
-        self.assertIn(marker, html)
-        after_required = html.split(marker, 1)[1]
-        required_branch = after_required.split("_showAuthModal()", 1)[0]
-        self.assertIn("daemonStatus", required_branch)
-        self.assertIn("connected: true", required_branch)
-        self.assertIn(
-            "_dispatchToApp",
-            required_branch,
-            "auth_required must deliver daemonStatus(connected:true) "
-            "so #app is revealed and the auth modal becomes visible",
-        )
-        self._assert_dispatch_to_app_reaches_window(html)
-
-    def test_shim_dispatches_daemon_status_on_close(self) -> None:
-        """On WebSocket ``onclose`` the shim must dispatch ``connected:false``.
-
-        Symmetric to the auth_ok dispatch: while the socket is down
-        the user must see the overlay again instead of a frozen #app.
-        """
-        html = _build_html()
-        self.assertIn("_ws.onclose = _onSocketClosed;", html)
-        marker = "function _onSocketClosed()"
-        self.assertIn(marker, html)
-        onclose_branch = html.split(marker, 1)[1].split("\n  }\n", 1)[0]
-        self.assertIn("daemonStatus", onclose_branch)
-        self.assertIn("connected: false", onclose_branch)
-        self.assertIn("_dispatchToApp", onclose_branch)
-        self._assert_dispatch_to_app_reaches_window(html)
-
-
-class TestTranslateWebviewCommand(unittest.TestCase):
-    """Test the command translation from webview format to backend format."""
+class TestTranslateClientCommand(unittest.TestCase):
+    """Test the command translation from chat-page format to backend format."""
 
     def test_user_action_done_passes_through(self) -> None:
         """userActionDone has no producer; it is no longer rewritten."""
-        result = translate_webview_command({"type": "userActionDone"})
+        result = translate_client_command({"type": "userActionDone"})
         self.assertEqual(result["type"], "userActionDone")
         self.assertNotIn("answer", result)
 
     def test_resume_session_id_becomes_chat_id(self) -> None:
         """resumeSession 'id' field is renamed to 'chatId'."""
-        result = translate_webview_command(
+        result = translate_client_command(
             {
                 "type": "resumeSession",
                 "id": 42,
@@ -274,7 +156,7 @@ class TestTranslateWebviewCommand(unittest.TestCase):
     def test_resume_session_with_chat_id_unchanged(self) -> None:
         """resumeSession with chatId already set is not modified."""
         cmd = {"type": "resumeSession", "chatId": 42, "tabId": "t1"}
-        result = translate_webview_command(cmd)
+        result = translate_client_command(cmd)
         self.assertEqual(result["chatId"], 42)
 
     def test_passthrough_commands_unchanged(self) -> None:
@@ -286,7 +168,7 @@ class TestTranslateWebviewCommand(unittest.TestCase):
             {"type": "newChat", "tabId": "t1"},
             {"type": "getHistory", "query": "test"},
         ]:
-            result = translate_webview_command(cmd)
+            result = translate_client_command(cmd)
             self.assertEqual(result, cmd)
 
 
@@ -425,24 +307,19 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         status = await asyncio.get_event_loop().run_in_executor(None, _head)
         self.assertEqual(status, 200)
 
-    async def test_plain_http_rejected(self) -> None:
-        """Plain HTTP connection to the TLS server should fail."""
-        import urllib.error
+    async def test_plain_http_loopback_served(self) -> None:
+        """Plain HTTP on the same port serves the app to a loopback peer."""
         import urllib.request
 
         url = f"http://127.0.0.1:{self.port}/"
 
-        def _fetch() -> int:
-            try:
-                urllib.request.urlopen(url, timeout=5)
-                return 200
-            except urllib.error.URLError:
-                return -1
-            except Exception:
-                return -1
+        def _fetch() -> tuple[int, str]:
+            resp = urllib.request.urlopen(url, timeout=5)
+            return resp.status, resp.read().decode()
 
-        status = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-        self.assertEqual(status, -1)
+        status, body = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        self.assertEqual(status, 200)
+        self.assertIn(f"<title>{PRODUCT_NAME}: ", body)
 
 
 class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
@@ -529,17 +406,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "configData")
             self.assertIn("config", resp)
-
-    async def test_ws_vscode_only_commands_ignored(self) -> None:
-        """VS Code-only commands are silently ignored (no error broadcast)."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({"type": "focusEditor"}))
-            await ws.send(json.dumps({"type": "getModels"}))
-            resp = await _recv_reply(ws)
-            self.assertEqual(resp["type"], "models")
 
     async def test_ws_unknown_command_returns_error(self) -> None:
         """Unknown commands produce an error event."""
@@ -692,7 +558,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertIn("Unknown command: userActionDone", resp.get("text", ""))
 
     async def test_ws_resume_session_translates_id(self) -> None:
-        """resumeSession translates the webview 'id' field to 'chatId'."""
+        """resumeSession translates the chat page's 'id' field to 'chatId'."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -902,7 +768,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     async def test_ws_check_paths_reports_existing_files_only(self) -> None:
         """checkPaths replies pathsExist with true only for real paths.
 
-        End-to-end over WSS: the chat webview served by the remote
+        End-to-end over WSS: the chat page served by the remote
         webapp sends ``checkPaths`` for the file-path-looking strings
         it linkified in event panel contents, and only paths naming an
         existing regular file or directory may become clickable links.
@@ -1372,29 +1238,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 "a reused tab id must not see the closed tab's worktree",
             )
 
-    async def test_ws_generate_commit_message(self) -> None:
-        """generateCommitMessage command does not produce Unknown command error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({"type": "generateCommitMessage"}))
-            await ws.send(json.dumps({"type": "getModels"}))
-            events: list[dict[str, Any]] = []
-            deadline = asyncio.get_event_loop().time() + 5
-            while asyncio.get_event_loop().time() < deadline:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                    ev = json.loads(raw)
-                    events.append(ev)
-                    if ev.get("type") == "models":
-                        break
-                except TimeoutError:
-                    break
-            for ev in events:
-                if ev.get("type") == "error":
-                    self.assertNotIn("Unknown command", ev.get("text", ""))
-
     async def test_ws_user_answer(self) -> None:
         """userAnswer command does not produce an error (drops silently w/o task)."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
@@ -1468,8 +1311,8 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 if ev.get("type") == "error":
                     self.assertNotIn("Unknown command", ev.get("text", ""))
 
-    async def test_ws_all_webview_commands_no_unknown_error(self) -> None:
-        """All FromWebviewMessage types produce no 'Unknown command' error."""
+    async def test_ws_all_client_commands_no_unknown_error(self) -> None:
+        """Every command type the chat page sends produces no 'Unknown command' error."""
         async with _connect_live_task(self.port) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -1498,7 +1341,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "stop", "tabId": "t"},
                 {"type": "complete", "query": "test"},
                 {"type": "recordFileUsage", "path": "/tmp/x"},
-                {"type": "generateCommitMessage"},
                 {"type": "worktreeAction", "action": "discard", "tabId": "t"},
                 # A non-repo workDir keeps the manual Git Commit a
                 # side-effect-free "Not a git repository." refusal.
@@ -1510,10 +1352,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "checkPaths", "paths": ["/tmp/x"]},
-                {"type": "focusEditor"},
-
-                {"type": "webviewFocusChanged", "focused": True},
-                {"type": "resolveDroppedPaths", "uris": []},
             ]
             for cmd in commands:
                 await ws.send(json.dumps(cmd))
@@ -1611,7 +1449,10 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_wrong_password_then_correct(self) -> None:
         """Wrong password prompts auth_required, then correct password works."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
+        ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -1622,7 +1463,10 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_wrong_password_twice_disconnects(self) -> None:
         """Two wrong passwords result in connection close."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
+        ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -1858,7 +1702,7 @@ class TestGenerateSelfSignedCert(unittest.TestCase):
             self.assertTrue(cert_path.is_file())
             self.assertTrue(key_path.is_file())
             self.assertIn(b"BEGIN CERTIFICATE", cert_path.read_bytes())
-            # ECDSA P-256 key in PKCS#8 PEM (kiss.server.tls_certs).
+            # ECDSA P-256 key in PKCS#8 PEM (kiss.core.tls_certs).
             from cryptography.hazmat.primitives import serialization
             from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -1945,14 +1789,14 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertIn(f"<title>{PRODUCT_NAME}: ", body)
 
-    async def test_plain_ws_rejected(self) -> None:
-        """Plain ws:// connection to the TLS server should fail."""
-        with self.assertRaises(Exception):
-            async with connect(
-                f"ws://127.0.0.1:{self.port}/ws",
-            ) as ws:
-                await ws.send(json.dumps({"type": "auth", "password": ""}))
-                await asyncio.wait_for(ws.recv(), timeout=3)
+    async def test_plain_ws_loopback_accepted(self) -> None:
+        """Plain ws:// on the TLS port authenticates a loopback peer."""
+        async with connect(
+            f"ws://127.0.0.1:{self.port}/ws",
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
+            self.assertEqual(resp["type"], "auth_ok")
 
 
 class TestTunnelWatchdog(IsolatedAsyncioTestCase):
@@ -2078,21 +1922,21 @@ class TestUrlFile(unittest.TestCase):
 
     def test_save_url_file_local_only(self) -> None:
         """Saving with local URL only writes valid JSON."""
-        _save_url_file(_URL_FILE, "https://localhost:8787")
+        _save_url_file(_URL_FILE, "http://localhost:8787")
         data = json.loads(_URL_FILE.read_text())
-        self.assertEqual(data["local"], "https://localhost:8787")
+        self.assertEqual(data["local"], "http://localhost:8787")
         self.assertNotIn("tunnel", data)
 
     def test_save_url_file_with_tunnel(self) -> None:
         """Saving with both local and tunnel URLs writes both."""
-        _save_url_file(_URL_FILE, "https://localhost:8787", "https://abc.trycloudflare.com")
+        _save_url_file(_URL_FILE, "http://localhost:8787", "https://abc.trycloudflare.com")
         data = json.loads(_URL_FILE.read_text())
-        self.assertEqual(data["local"], "https://localhost:8787")
+        self.assertEqual(data["local"], "http://localhost:8787")
         self.assertEqual(data["tunnel"], "https://abc.trycloudflare.com")
 
     def test_remove_url_file(self) -> None:
         """Removing the URL file deletes it."""
-        _save_url_file(_URL_FILE, "https://localhost:8787")
+        _save_url_file(_URL_FILE, "http://localhost:8787")
         self.assertTrue(_URL_FILE.is_file())
         _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
@@ -2105,7 +1949,7 @@ class TestUrlFile(unittest.TestCase):
 
     def test_print_url_tunnel(self) -> None:
         """When tunnel URL exists, _print_url prints it."""
-        _save_url_file(_URL_FILE, "https://localhost:8787", "https://abc.trycloudflare.com")
+        _save_url_file(_URL_FILE, "http://localhost:8787", "https://abc.trycloudflare.com")
         import io
         from contextlib import redirect_stdout
 
@@ -2116,14 +1960,14 @@ class TestUrlFile(unittest.TestCase):
 
     def test_print_url_local_only(self) -> None:
         """When no tunnel URL, _print_url prints local URL."""
-        _save_url_file(_URL_FILE, "https://localhost:8787")
+        _save_url_file(_URL_FILE, "http://localhost:8787")
         import io
         from contextlib import redirect_stdout
 
         buf = io.StringIO()
         with redirect_stdout(buf):
             _print_url()
-        self.assertEqual(buf.getvalue().strip(), "https://localhost:8787")
+        self.assertEqual(buf.getvalue().strip(), "http://localhost:8787")
 
     def test_print_url_no_file(self) -> None:
         """When no URL file exists, _print_url exits with code 1."""
@@ -2463,6 +2307,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2476,6 +2321,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2723,7 +2569,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
     async def test_welcome_info_uses_url_file_fallback(self) -> None:
         """When _active_url is None, _send_welcome_info reads URL file."""
         _save_url_file(_URL_FILE,
-            "https://localhost:8787",
+            "http://localhost:8787",
             "https://test.trycloudflare.com",
         )
         self.server._active_url = None
@@ -2748,10 +2594,10 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             self.assertEqual(url_events[0]["url"], "https://test.trycloudflare.com")
 
     async def test_welcome_info_no_url_broadcasts_inactive(self) -> None:
-        """No tunnel URL → remote_url is still broadcast as inactive.
+        """No tunnel URL → remote_url is still broadcast, with an empty url.
 
-        The frontend uses ``tunnelActive: False`` to hide the
-        welcome-page remote-password panel when there is no tunnel.
+        The page shows the welcome-page remote-password panel only
+        when ``url`` is non-empty.
 
         A tunnel-DISABLED server must not fall back to
         ``_discover_tunnel_url_from_metrics``: the machine-wide scan
@@ -2799,10 +2645,9 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertEqual(len(url_events), 1)
             self.assertEqual(url_events[0].get("url"), "")
-            self.assertFalse(url_events[0].get("tunnelActive"))
 
-    async def test_welcome_info_tunnel_active_flag(self) -> None:
-        """When the active URL is a tunnel URL, tunnelActive is True."""
+    async def test_welcome_info_reports_tunnel_url(self) -> None:
+        """When the active URL is a tunnel URL, the welcome reports it."""
         self.server.use_tunnel = True
         self.server._active_url = "https://abc.trycloudflare.com"
         _URL_FILE.unlink(missing_ok=True)
@@ -2824,13 +2669,12 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                     break
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertTrue(len(url_events) >= 1)
-            self.assertTrue(url_events[0].get("tunnelActive"))
             self.assertEqual(
                 url_events[0].get("url"), "https://abc.trycloudflare.com",
             )
 
-    async def test_welcome_info_local_url_inactive(self) -> None:
-        """When the active URL equals the local URL, tunnelActive is False."""
+    async def test_welcome_info_reports_local_url(self) -> None:
+        """When the active URL equals the local URL, the welcome reports it."""
         self.server.use_tunnel = True
         self.server._active_url = self.server._local_url
         _URL_FILE.unlink(missing_ok=True)
@@ -2852,7 +2696,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                     break
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertTrue(len(url_events) >= 1)
-            self.assertFalse(url_events[0].get("tunnelActive"))
+            self.assertEqual(url_events[0].get("url"), self.server._local_url)
 
 
 class TestNamedTunnel(IsolatedAsyncioTestCase):
@@ -4002,34 +3846,6 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
                 del ws_mod._URL_FILE
 
 
-class TestReadVersionException(unittest.TestCase):
-    """Test _read_version when _version.py is unreadable (lines 901-903)."""
-
-    def test_returns_empty_on_missing_version_file(self) -> None:
-        """_read_version returns '' when the bundled version file is missing.
-
-        The installed-extensions scan is redirected at an empty tmpdir so
-        the bundled ``_version.py`` fallback branch is actually exercised
-        (otherwise the scanner would pick up the machine's real installed
-        extension and mask the fallback).
-        """
-        import kiss.server.web_server as ws_mod
-
-        vfile = Path(ws_mod.__file__).parent.parent / "core" / "_version.py"
-        backup = vfile.read_text()
-        vfile.rename(vfile.with_suffix(".py.bak"))
-        saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
-        with tempfile.TemporaryDirectory() as empty_root:
-            ws_mod._INSTALLED_EXTENSIONS_ROOT = Path(empty_root)
-            try:
-                result = _read_version()
-                self.assertEqual(result, "")
-            finally:
-                ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
-                vfile.with_suffix(".py.bak").rename(vfile)
-                vfile.write_text(backup)
-
-
 class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
     """Test _handle_ready with restored tab that has empty chatId (1309)."""
 
@@ -4628,33 +4444,12 @@ class TestDiscoverTunnelFakePgrep(unittest.TestCase):
 
 
 class TestReadVersionNoMatch(unittest.TestCase):
-    """Test _read_version's bundled-``_version.py`` fallback."""
+    """``_read_version`` reports the bundled ``_version.py``."""
 
-    def test_bundled_fallback_and_no_version_line(self) -> None:
-        """With no installed extension the bundled version is reported.
-
-        The installed-extensions scan is redirected at an empty tmpdir so
-        the bundled ``_version.py`` fallback branch is actually exercised
-        (otherwise the scanner would pick up the machine's real installed
-        extension and mask the fallback).  The "no ``__version__`` line"
-        case is checked on a copy in the tmpdir: an earlier version of this
-        test rewrote the real ``src/kiss/core/_version.py`` and restored it,
-        and every CLI subprocess another test spawned in that window died
-        with ``ImportError: cannot import name '__version__'``.
-        """
+    def test_bundled_version(self) -> None:
         import kiss
-        import kiss.server.web_server as ws_mod
 
-        saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
-        with tempfile.TemporaryDirectory() as empty_root:
-            ws_mod._INSTALLED_EXTENSIONS_ROOT = Path(empty_root)
-            try:
-                self.assertEqual(_read_version(), kiss.__version__)
-            finally:
-                ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
-            bad = Path(empty_root) / "_version.py"
-            bad.write_text("# no version here\nfoo = 'bar'\n")
-            self.assertEqual(_parse_version_py(bad), "")
+        self.assertEqual(_read_version(), kiss.__version__)
 
 
 class TestBroadcastLoopNone(unittest.TestCase):
@@ -4923,14 +4718,14 @@ class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         await self.server.start_async()
-        original_handle = self.server._vscode_server._handle_command
+        original_handle = self.server._agent_server._handle_command
 
         def _bad_handle(cmd: dict[str, Any]) -> None:
             if cmd.get("type") == "getModels":
                 raise RuntimeError("Intentional crash for testing")
             original_handle(cmd)
 
-        self.server._vscode_server._handle_command = _bad_handle  # type: ignore[method-assign]
+        self.server._agent_server._handle_command = _bad_handle  # type: ignore[method-assign]
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
@@ -5254,7 +5049,7 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
         try:
             fake_url_file = Path(tmpdir) / "subdir" / "remote-url.json"
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
-            fake_url_file.write_text('{"local":"https://localhost:8787"}')
+            fake_url_file.write_text('{"local":"http://localhost:8787"}')
 
             ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
 

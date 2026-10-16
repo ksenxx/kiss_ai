@@ -15,10 +15,8 @@ scripted model receives come from the real tools.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.review_paper import review_paper_sea
@@ -33,13 +31,11 @@ from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_DISPATCH_TIMEOUT_SECONDS,
     resolve_timeout,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 
@@ -391,28 +387,11 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
         [ReviseAndReviewPaperSea()],
         "Writing: Write for ICLR 2027 at p.tex. Review: for ICLR 2027.",
     )
-    settings = run.settings
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("revise-review-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=5,
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            web_tools=settings["use_web_tools"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=5)
     assert parsed["success"] is True
     assert "strong accept after round 1" in parsed["summary"]
 
-    agentic: list[dict[str, Any]] = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 3, [list(r) for r in requests]
+    assert len(agentic) == 3
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert {

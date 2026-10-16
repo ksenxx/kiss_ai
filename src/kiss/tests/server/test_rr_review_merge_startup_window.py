@@ -17,7 +17,7 @@ The gate must use the same created-but-unstarted-counts-as-alive
 predicate the rest of the server standardized on:
 ``state.is_task_active or state.thread_alive()``.
 
-Real ``VSCodeServer``, real git repo, real registered worktree agent
+Real ``AgentServer``, real git repo, real registered worktree agent
 state, no mocks.  The submitted-but-unstarted worker is a REAL
 ``threading.Thread`` that has not been started (``ident is None``) —
 exactly what ``commands.py`` registers in the window.
@@ -37,7 +37,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo
 
 _TAB = "rr-startup-window-tab"
@@ -60,7 +60,7 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
             ["git", "-C", str(self.repo), "branch", self.branch],
             capture_output=True, check=True,
         )
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 

@@ -4,7 +4,7 @@
 # add your name here
 """The startup orphan sweep must finish before a test closes the DB.
 
-Every :class:`~kiss.server.server.VSCodeServer` constructor starts a
+Every :class:`~kiss.server.server.AgentServer` constructor starts a
 daemon thread named ``orphan-task-sweep`` that rewrites the
 ``"Agent Failed Abruptly"`` sentinel of tasks killed with their owning
 process (``persistence._recover_orphaned_tasks``).  The sweep runs on
@@ -12,7 +12,7 @@ its own per-thread SQLite connection, and ``persistence._get_db()``
 also publishes that connection in the module-global ``_db_conn``.
 
 Roughly 150 test files across ``tests/agents/sorcar`` and
-``tests/agents/vscode`` construct a server in ``setUp`` and then, in
+``tests/webapp`` construct a server in ``setUp`` and then, in
 ``tearDown``, close ``persistence._db_conn`` and delete the temporary
 KISS_HOME.  When the sweep is still inside ``db.execute(...)`` at that
 moment, the C-level ``pysqlite_connection_execute`` call dereferences a
@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 SENTINEL = "Agent Failed Abruptly"
 RECOVERED = "Task terminated unexpectedly (process killed)"
@@ -122,10 +122,10 @@ class TestOrphanSweepJoinedBeforeTearDown(unittest.TestCase):
     ) -> None:
         """The sweep is asynchronous, yet complete by ``tearDown``."""
         with th._rw_lock.write_lock():
-            self.server = VSCodeServer()
+            self.server = AgentServer()
             self.assertTrue(
                 _live_sweep_threads(),
-                "VSCodeServer must sweep orphaned tasks on a background "
+                "AgentServer must sweep orphaned tasks on a background "
                 "thread so startup does not block on the database",
             )
             self.assertEqual(

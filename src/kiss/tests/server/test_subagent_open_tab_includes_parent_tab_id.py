@@ -16,7 +16,7 @@ closes the parent.
 Repro: when a parent task spawns a parallel sub-agent, the
 ``new_tab`` broadcast causes the frontend to allocate a fresh chat
 tab and post ``resumeSession`` for the sub-agent's
-``task_history.id``.  ``VSCodeServer._replay_session`` then sees
+``task_history.id``.  ``AgentServer._replay_session`` then sees
 ``extra.subagent`` and broadcasts ``openSubagentTab`` to flip the
 new tab into sub-agent styling.  This broadcast MUST include
 ``parent_tab_id`` pointing at the parent's frontend tab so the
@@ -32,12 +32,12 @@ import threading
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
     real = JsonPrinter.broadcast

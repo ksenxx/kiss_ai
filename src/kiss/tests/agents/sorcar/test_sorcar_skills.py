@@ -230,7 +230,7 @@ def test_skill_permission_last_rule_wins() -> None:
 
 def test_load_skill_permissions_from_config(isolated_homes: Path) -> None:
     """``skill_permissions`` is read from ``$KISS_HOME/config.json``."""
-    from kiss.core.vscode_config import CONFIG_PATH
+    from kiss.core.user_config import CONFIG_PATH
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     original = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
@@ -249,7 +249,7 @@ def test_load_skill_permissions_from_config(isolated_homes: Path) -> None:
 
 def test_denied_skills_hidden_from_discovery(isolated_homes: Path) -> None:
     """Denied skills are excluded from the catalog entirely."""
-    from kiss.core.vscode_config import CONFIG_PATH
+    from kiss.core.user_config import CONFIG_PATH
 
     project = isolated_homes / "project"
     _write_skill(project / ".kiss" / "skills", "internal-secret", "Hidden")

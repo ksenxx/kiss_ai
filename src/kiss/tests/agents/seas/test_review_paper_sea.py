@@ -24,22 +24,18 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.review_paper.review_paper_sea import ReviewPaperSea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 
@@ -373,32 +369,16 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     run = sea_commands.evaluate_sea(
         [ReviewPaperSea()], f"Review {paper} for ICLR 2027; write to {review}."
     )
-    settings = run.settings
     script = [
         tool_call_body("read_paper", {"paper_path": str(paper)}, prompt_tokens=500),
         tool_call_body("check_review", {"review_path": str(review)}, prompt_tokens=600),
         finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=700),
     ]
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("review-paper-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=5,
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tools_hook=run.tools_hook,
-            web_tools=settings["use_web_tools"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=5)
     assert parsed["success"] is True
     assert "7 gate(s) failed" in parsed["summary"]
 
-    agentic: list[dict[str, Any]] = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 3, [list(r) for r in requests]
+    assert len(agentic) == 3
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         expected = {"read_paper", "check_review", "Bash", "run_parallel", "go_to_url", "finish"}

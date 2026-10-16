@@ -6,7 +6,7 @@
 
 Regression suite for the ``uv run was recursively invoked 101 times``
 bug: the ``sorcar`` REPL CLI was deleted (commit 1a782e0ab) together
-with its ``[project.scripts]`` entry, but the VS Code extension kept
+with its ``[project.scripts]`` entry, but the installer at the time kept
 installing a ``~/.local/bin/sorcar`` wrapper running ``uv run …
 sorcar``.  With no project script named ``sorcar``, uv fell back to
 PATH, found the wrapper itself, and recursed until uv's limit.  The fix

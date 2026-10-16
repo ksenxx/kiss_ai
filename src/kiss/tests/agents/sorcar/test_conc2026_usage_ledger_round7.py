@@ -479,10 +479,13 @@ def test_compaction_maintenance_is_near_linear() -> None:
 
     def flood(events: int) -> float:
         agent = RelentlessAgent(f"scaling-{events}")
-        started = time.monotonic()
+        # CPU time, not wall-clock: the flood is pure computation, and
+        # on a host busy with a parallel test run the wall-clock cost
+        # of the same work is many times higher (15.7 s measured once).
+        started = time.process_time()
         for i in range(events):
             agent._attribute_usage(0.5, 100, 1, key=f"prefill:{i}")
-        elapsed = time.monotonic() - started
+        elapsed = time.process_time() - started
         assert agent.usage_snapshot() == (
             events * 0.5, events * 100, events,
         )

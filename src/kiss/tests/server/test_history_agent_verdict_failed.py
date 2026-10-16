@@ -13,7 +13,7 @@ text, so the panel showed a green tick next to a task the tab strip
 showed as a red cross (seen with ``/machine add ksen@host``, whose
 usage error is reported through ``success=False``).
 
-This test drives the real ``VSCodeServer._run_task`` with an agent
+This test drives the real ``AgentServer._run_task`` with an agent
 whose ``run`` returns the YAML result of such a finish, then asserts
 the ``getHistory`` session carries ``failed: True`` and the ``failed``
 tag; a ``success: true`` run through the same path stays successful.
@@ -33,7 +33,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _SUMMARY = "<p>Expected <code>add &lt;name&gt; &lt;address&gt; [password]</code>.</p>"
 
@@ -46,7 +46,7 @@ class TestHistoryAgentVerdictFailed(unittest.TestCase):
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
         th._close_db()
         th._DB_PATH = Path(self.tmpdir) / "history.db"  # type: ignore[attr-defined]
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:
@@ -71,7 +71,7 @@ class TestHistoryAgentVerdictFailed(unittest.TestCase):
         work_dir = Path(self.tmpdir) / re.sub(r"[^\w.-]", "_", prompt)
         work_dir.mkdir()
         tab_id = f"tab-{prompt}"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = agent_state.AgentState(
             f"state-{prompt}", agent=agent, tab_id=tab_id, server_owned=True,
         )

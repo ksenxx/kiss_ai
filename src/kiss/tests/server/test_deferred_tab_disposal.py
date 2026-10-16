@@ -34,18 +34,18 @@ import threading
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _silent_server() -> VSCodeServer:
-    """``VSCodeServer`` whose printer.broadcast is a no-op (for tests).
+def _silent_server() -> AgentServer:
+    """``AgentServer`` whose printer.broadcast is a no-op (for tests).
 
     Avoids polluting test stdout with JSON event lines while still
     exercising the real registry / ``_subscribers`` / ``cleanup_tab``
     machinery.
     """
-    server = VSCodeServer()
+    server = AgentServer()
     server.printer.broadcast = lambda event: None  # type: ignore[assignment]
     return server
 

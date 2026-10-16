@@ -4,8 +4,8 @@
 # add your name here
 """The kiss-web daemon's local-endpoint file.
 
-Same-machine clients (the VS Code extension, ``run_agent`` /
-``daemon_client.run``, cron prompt jobs, the channel-agent launcher)
+Same-machine clients (``run_agent`` / ``daemon_client.run``, cron
+prompt jobs, the channel-agent launcher)
 talk to the daemon over the same WSS listener browsers use.  What sets
 them apart from a remote browser is a per-daemon-start secret: the
 daemon writes it, with the listener's URL, to
@@ -56,11 +56,12 @@ class LocalEndpoint:
     """Where a local client connects and how it proves it is local.
 
     Attributes:
-        url: The daemon's WebSocket URL (``wss://127.0.0.1:8787/ws``).
+        url: The daemon's WebSocket URL (``ws://127.0.0.1:8787/ws``:
+            plain on loopback; ``wss://`` is honoured too).
         token: The daemon's per-start local secret, sent as the
             ``token`` field of the client's ``auth`` frame.
-        ca: Path of the PEM certificate the client should trust for
-            the TLS handshake (the daemon's local CA, or the custom
+        ca: Path of the PEM certificate the client should trust for a
+            ``wss://`` URL (the daemon's local CA, or the custom
             certificate it was started with); ``None`` means the
             system trust store.
         pid: The daemon's process id (a presence hint for probes).
@@ -160,9 +161,7 @@ def read_endpoint(path: Path | None = None) -> LocalEndpoint | None:
     pid = data.get("pid")
     if not isinstance(url, str) or not isinstance(token, str) or not token:
         return None
-    if not url.startswith("wss://"):
-        # The token travels over this URL: only TLS WebSocket URLs are
-        # ever published, so anything else is not a daemon's endpoint.
+    if not url.startswith(("ws://", "wss://")):
         return None
     if ca is not None and not isinstance(ca, str):
         return None
@@ -197,22 +196,25 @@ def remove_endpoint_if_owned(path: Path, token: str) -> None:
         logger.warning("could not remove endpoint file %s", path, exc_info=True)
 
 
-def client_ssl_context(endpoint: LocalEndpoint) -> ssl.SSLContext:
+def client_ssl_context(endpoint: LocalEndpoint) -> ssl.SSLContext | None:
     """Return the TLS context a local client uses for *endpoint*.
 
-    Trusts exactly the certificate file named by ``endpoint.ca`` (the
-    daemon's local CA, whose private key is 0600 under ``$KISS_HOME``)
-    so a foreign process that grabbed the daemon's port cannot harvest
-    the token; falls back to the system trust store when no ``ca`` is
-    recorded.  Hostname verification stays on: the daemon's
-    certificate covers ``localhost``, ``127.0.0.1`` and ``::1``.
+    ``None`` for a plain ``ws://`` URL (the daemon serves loopback
+    without TLS).  For ``wss://`` it trusts exactly the certificate
+    file named by ``endpoint.ca`` (the daemon's local CA, whose private
+    key is 0600 under ``$KISS_HOME``), falling back to the system
+    trust store when no ``ca`` is recorded; hostname verification
+    stays on (the daemon's certificate covers ``localhost``,
+    ``127.0.0.1`` and ``::1``).
 
     Args:
         endpoint: The endpoint read from the endpoint file.
 
     Returns:
-        A client-side ``ssl.SSLContext``.
+        A client-side ``ssl.SSLContext``, or ``None`` for ``ws://``.
     """
+    if endpoint.url.startswith("ws://"):
+        return None
     if endpoint.ca:
         return ssl.create_default_context(cafile=endpoint.ca)
     return ssl.create_default_context()

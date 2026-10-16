@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for remaining uncovered branches in sorcar/ and vscode/.
+"""Integration tests for remaining uncovered branches in sorcar/ and server/.
 
 Targets:
   persistence.py: lines 125→129, 380→385, 403→404
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.file_index import FileIndex
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_final_branch_coverage import (  # noqa: F401
     _redirect,
     _restore,
@@ -60,8 +60,8 @@ class TestGetHistoryBranches:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _make_server(self) -> tuple[VSCodeServer, list[dict]]:
-        server = VSCodeServer()
+    def _make_server(self) -> tuple[AgentServer, list[dict]]:
+        server = AgentServer()
         events: list[dict] = []
         orig = server.printer.broadcast
 
@@ -109,7 +109,7 @@ class TestActiveFileMatchesEqualLength:
 
     def test_equal_length_candidates(self) -> None:
         """Two equal-length candidates: both returned, alphabetical."""
-        server = VSCodeServer()
+        server = AgentServer()
         content = "method_ab method_cd"
         matches = server._active_file_identifier_matches(
             "x method_", snapshot_content=content

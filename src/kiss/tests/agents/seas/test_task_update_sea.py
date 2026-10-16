@@ -19,24 +19,20 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands, task_digest
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
     _flush_chat_events,
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 
@@ -272,31 +268,13 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
         finish_body(report, prompt_tokens=700),
     ]
     run = sea_commands.evaluate_sea([TaskUpdateSea()], sea.build_prompt(task_id))
-    settings = run.settings
     assert run.prompt == sea.build_prompt(task_id)
     assert run.tools_hook is not None and run.system_prompt_hook is not None
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("task-update-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=4,
-            max_budget=settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            system_prompt_hook=run.system_prompt_hook,
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     assert parsed["success"] is True
     assert parsed["summary"] == report
 
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 2, [list(r) for r in requests]
+    assert len(agentic) == 2
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish", "task_transcript"}, names

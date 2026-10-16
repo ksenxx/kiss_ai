@@ -4,7 +4,7 @@
 # add your name here
 """Audit 2026-10-12 (server-runner): deferred replay racing the task's end.
 
-``VSCodeServer._defer_replay`` (the ``ready``-time attach of a
+``AgentServer._defer_replay`` (the ``ready``-time attach of a
 reconnecting client to a tab whose chat runs a live task) attaches the
 viewer tab under ``_state_lock``, releases the lock, and broadcasts an
 optimistic ``status running=true`` to EVERY client (the tab is a
@@ -19,7 +19,7 @@ The window is made deterministic with ``sys.settrace`` on the deferring
 thread: it parks on the call into ``_broadcast_viewer_running`` (after
 the attach, before the optimistic broadcast) while a real run,
 submitted through the real ``_cmd_run``, ends in its SEA getter.
-Everything else is real: a real :class:`VSCodeServer`, a real worker
+Everything else is real: a real :class:`AgentServer`, a real worker
 thread, the real end-of-run broadcasts, the real
 :class:`~kiss.tests.server._memory_printer.MemoryPrinter` capture.
 """
@@ -39,7 +39,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _BLOCKING_SCRIPT = textwrap.dedent(
@@ -84,7 +84,7 @@ class TestDeferReplayStaleRunning(TestCase):
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
         self.parked = threading.Event()
         self.release_park = threading.Event()

@@ -254,8 +254,8 @@ def _absolutize(file_path: str, work_dir: str | None) -> str:
     ``Path("README.md").resolve()`` uses the *host process's*
     ``os.getcwd()`` — not the agent's ``work_dir``.  When the agent
     is running inside a ``.kiss-worktrees/kiss_wt-*`` worktree but
-    the host process was launched somewhere unrelated (e.g. the VS
-    Code extension's own directory), a relative path emitted by the
+    the host process was launched somewhere unrelated (e.g. the
+    daemon's own home directory), a relative path emitted by the
     LLM would resolve to ``<unrelated>/README.md`` and bypass the
     worktree entirely — re-creating the original "task didn't run
     in worktree / no commit" failure mode.
@@ -532,8 +532,8 @@ def _truncate_output(output: str, max_chars: int) -> str:
 def _clean_env(work_dir: str | None = None) -> dict[str, str]:
     """Return a fresh copy of ``os.environ`` without ``VIRTUAL_ENV``.
 
-    When the agent process runs inside a virtual-env (e.g. the VS Code
-    extension's own ``.venv``), the ``VIRTUAL_ENV`` variable leaks into
+    When the agent process runs inside a virtual-env (e.g. the
+    installed daemon's own ``.venv``), the ``VIRTUAL_ENV`` variable leaks into
     child processes and causes ``uv run`` to emit a spurious warning about
     a mismatched environment. Stripping it lets ``uv`` (and other tools)
     discover the correct project ``.venv`` on their own.
@@ -1551,7 +1551,7 @@ class UsefulTools:
         ``task_id``, so invoking the callback from an internal reader
         thread would silently detach the output from the task (bash
         output vanishing from the tool panel and unattributed
-        "garbage" events reaching every webview client).
+        "garbage" events reaching every chat client).
 
         Args:
             out_queue: Queue fed by the reader thread; ``None`` marks EOF.

@@ -4,11 +4,10 @@
 # add your name here
 """``_cmd_complete`` active-file snapshot semantics (server audit).
 
-The VS Code extension sends ``complete`` commands whose
-``activeFileContent`` is ``completeDoc?.getText()`` — ``undefined``
-whenever the visible editor's document is not among
-``vscode.workspace.textDocuments`` — while ``activeFile`` is still the
-on-disk path.  Two bugs are pinned here:
+A chat page may send ``complete`` commands whose
+``activeFileContent`` is absent (the visible editor's buffer is not
+available to the client) while ``activeFile`` is still the on-disk
+path.  Two bugs are pinned here:
 
 * A connection that reported an ``activeFile`` but never any
   ``activeFileContent`` used to have ``""`` (an "open but EMPTY
@@ -32,7 +31,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestCmdCompleteDiskFallback(unittest.TestCase):
@@ -41,7 +40,7 @@ class TestCmdCompleteDiskFallback(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
@@ -158,7 +157,7 @@ class TestCmdCompleteDiskFallback(unittest.TestCase):
         """``activeFile: ""`` (the browser closed its last file tab) clears it.
 
         An *absent* ``activeFile`` keeps the snapshot (focus inside the
-        webview while the editor stays visible); the explicit empty
+        chat page while the editor stays visible); the explicit empty
         path is the "no file open" signal and must stop completions
         against the closed file's identifiers.
         """

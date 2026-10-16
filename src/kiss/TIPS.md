@@ -49,11 +49,6 @@ repository <rep-name>.  While running a task, {{PRODUCT_NAME}} can quickly looku
 the memory about the repository to perform complex tasks on the repository or to
 quickly answer questions about the repository.
 
-
-# Tip
-
-In VS Code, you can run {{PRODUCT_NAME}} in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar.  You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the {{PRODUCT_NAME}} settings page.
-
 # Tip 
 
 {{PRODUCT_NAME}} now uses a quick task classifier to determine whether the task is complex or simple (a simple task runs on the lite system prompt).  You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected (the default), the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
@@ -141,7 +136,7 @@ Just run:
 sorcar-docker
 ```
 
-It runs {{PRODUCT_NAME}} in a Docker container and exposes a VS Code interface in the host machine's browser.
+It runs {{PRODUCT_NAME}} in a Docker container and serves the web app at `https://localhost:8787` on the host machine (the certificate is self-signed; accept it once or install `/ca.crt`). The web app password is printed in `docker logs`, or set `KISS_WEB_PASSWORD` before running it.
 
 # Tip
 
@@ -196,4 +191,4 @@ Click the burger menu button in the bottom-left corner to see all agents in {{PR
 
 ## Settings
 
-Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
+Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.

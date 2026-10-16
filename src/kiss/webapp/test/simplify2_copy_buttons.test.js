@@ -1,0 +1,113 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+'use strict';
+
+const assert = require('assert');
+const {makePage, send, sleep, waitFor} = require('./simplify2_harness');
+
+const SESSION = {
+  id: 'chatABC',
+  task_id: 42,
+  title: 'my task',
+  timestamp: 1_700_000_000,
+  preview: 'my task preview',
+  has_events: false,
+  failed: false,
+  is_running: false,
+  tokens: 0,
+  cost: 0,
+  steps: 0,
+  is_favorite: false,
+  work_dir: '',
+  startTs: 1_700_000_000_000,
+  endTs: 1_700_000_100_000,
+};
+
+async function run() {
+  const {win} = makePage();
+  const doc = win.document;
+
+  const copied = [];
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText(text) {
+        copied.push(text);
+        return Promise.resolve();
+      },
+    },
+  });
+
+  send(win, {type: 'history', sessions: [SESSION], offset: 0});
+
+  const rowBtn = doc.querySelector('.sidebar-item-copy');
+  assert.ok(rowBtn, 'history row renders a .sidebar-item-copy button');
+  const idleSvg = rowBtn.innerHTML;
+  rowBtn.click();
+  await sleep(0);
+  assert.deepStrictEqual(copied, ['my task preview'], 'row copies preview');
+  assert.ok(rowBtn.classList.contains('copied'), 'row button flashes');
+  assert.notStrictEqual(rowBtn.innerHTML, idleSvg, 'icon swaps to check');
+
+  const chatBtn = doc.querySelector('.ids-copy-btn.ids-copy-chat');
+  const taskBtn = doc.querySelector('.ids-copy-btn.ids-copy-task');
+  assert.ok(chatBtn, 'ids line renders a chat-id copy button');
+  assert.ok(taskBtn, 'ids line renders a task-id copy button');
+  assert.strictEqual(chatBtn.dataset.tooltip, 'Copy chat id');
+  assert.strictEqual(taskBtn.dataset.tooltip, 'Copy task id');
+  chatBtn.click();
+  taskBtn.click();
+  await sleep(0);
+  assert.deepStrictEqual(
+    copied.slice(1),
+    ['chatABC', '42'],
+    'id buttons copy the raw id strings',
+  );
+  assert.ok(chatBtn.classList.contains('copied'), 'chat button flashes');
+  assert.ok(taskBtn.classList.contains('copied'), 'task button flashes');
+
+  await sleep(1_000);
+  rowBtn.click();
+  chatBtn.click();
+  await sleep(0);
+  // The untouched task button's 1.5 s flash timer (wireCopyButton in
+  // main.js) was armed with the row/chat ones; once it has reverted,
+  // the first click's row/chat timers would have fired too.
+  await waitFor(
+    () => !taskBtn.classList.contains('copied'),
+    'untouched task flash never reverted',
+  );
+  // audit0903: every copy button restarts its flash timer on re-click,
+  // so neither second flash is cut short by the first click's timer.
+  assert.ok(
+    rowBtn.classList.contains('copied'),
+    'row second click resets its timer',
+  );
+  assert.ok(
+    chatBtn.classList.contains('copied'),
+    'id second click resets its timer',
+  );
+  assert.ok(
+    !taskBtn.classList.contains('copied'),
+    'untouched task flash reverts',
+  );
+
+  await waitFor(
+    () => !rowBtn.classList.contains('copied'),
+    'reset row timer eventually reverts',
+  );
+  await waitFor(
+    () => !chatBtn.classList.contains('copied'),
+    'reset id timer eventually reverts',
+  );
+  assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
+
+  win.close();
+  console.log('  ok - history copy buttons copy and flash identically');
+}
+
+run().then(() => {
+  console.log('simplify2_copy_buttons.test.js: all tests passed');
+});

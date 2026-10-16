@@ -18,7 +18,7 @@ shared database with a permanent ``sqlite3.OperationalError: disk I/O
 error`` for as long as any old connection keeps the unlinked ``-shm``
 mapped (e.g. the long-lived ``kiss-event-writer`` thread).  This was
 the shared root cause of the order-dependent ``disk I/O error``
-failures across the vscode-server test suites in large parallel runs.
+failures across the server test suites in large parallel runs.
 
 Runs against real SQLite databases and real threads — no mocks,
 patches, fakes, or test doubles.

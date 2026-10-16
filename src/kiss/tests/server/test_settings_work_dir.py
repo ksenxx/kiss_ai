@@ -7,7 +7,7 @@
 Tested against a real ``RemoteAccessServer`` over its local endpoint:
 
 * ``getConfig`` reports the daemon's ONE global work_dir to every
-  connection (= every VS Code window and webapp instance): the last
+  connection (= every browser window and webapp instance): the last
   ``setWorkDir`` from any of them, which also replaces the persisted
   value;
 * a ``saveConfig`` carrying ``config.work_dir`` persists it to
@@ -16,10 +16,10 @@ Tested against a real ``RemoteAccessServer`` over its local endpoint:
   Settings panel sends on every surface, since it has no working
   directory field -- leaves the persisted value alone.
 
-The webview half (the Settings form never carries ``work_dir``; every
-surface picks through the chat header's drop-down) is covered by the real DOM tests in
-``agents/vscode/test/settingsWorkDirField.test.js`` and
-``agents/vscode/test/chatWorkDirSelect.test.js``.
+The chat page half (the Settings form never carries ``work_dir``; every
+client picks through the chat header's drop-down) is covered by the real DOM tests in
+``webapp/test/settingsWorkDirField.test.js`` and
+``webapp/test/chatWorkDirSelect.test.js``.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -160,7 +160,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
 
     async def test_get_config_reports_the_server_machine_name(self) -> None:
         """Every ``configData`` reply carries the server machine's short
-        host name — the webview shows it centered in the status bar so
+        host name — the chat page shows it centered in the status bar so
         the user always sees which machine the agent runs on.  It is the
         name the machine registry gives the local daemon (not
         ``platform.node()``, which carries the domain on cloud hosts), so
@@ -219,7 +219,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
             vc.load_config().get("work_dir"), str(self.dir_b),
         )
         self.assertEqual(
-            self.server._vscode_server.work_dir, str(self.dir_b),
+            self.server._agent_server.work_dir, str(self.dir_b),
         )
 
     async def test_save_config_reply_reports_live_work_dir(self) -> None:
@@ -228,7 +228,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         the raw persisted value, which is empty before anything was
         adopted (the daemon runs in its startup fallback then)."""
         vc.save_config({"work_dir": ""})
-        self.server._vscode_server.work_dir = str(self.dir_b)
+        self.server._agent_server.work_dir = str(self.dir_b)
         reader, writer = await self._connect()
         await self._send(
             writer, {"type": "saveConfig", "config": {"max_budget": 42}},

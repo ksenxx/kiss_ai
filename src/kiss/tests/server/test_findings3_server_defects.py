@@ -61,7 +61,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server
 from kiss.server.server import _safe_start_ms
 from kiss.server.sorcar import ServerApi
@@ -69,7 +69,7 @@ from kiss.server.sorcar import run as sorcar_run
 from kiss.server.task_runner import coerce_budget_override
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import fake_daemon
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
 _PASSWORD = "findings3-auth-test-password"
 
@@ -288,6 +288,7 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
         """Send one wrong non-empty password; return the first reply type."""
         async with await connect(
             f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong-pw"}))
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -335,6 +336,7 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
         # Admit a socket BEFORE the lock engages and keep it waiting.
         admitted = await connect(
             f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         )
         try:
             await asyncio.sleep(random.uniform(0.001, 0.05))
@@ -391,7 +393,7 @@ class TestConcurrentApiKeySave(unittest.TestCase):
 
     def test_all_keys_persist_under_the_lock(self) -> None:
         """Twenty threads saving distinct keys must all persist."""
-        from kiss.core.vscode_config import api_keys_env_path, save_api_key
+        from kiss.core.user_config import api_keys_env_path, save_api_key
         from kiss.server.commands import _CommandsMixin
 
         key_names = [f"KISS_TEST_KEY_{i}" for i in range(20)]

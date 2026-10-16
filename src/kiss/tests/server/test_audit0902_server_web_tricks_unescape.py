@@ -2,21 +2,18 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: Python trick parsing must unescape CommonMark backslashes like the TS twin.
+"""E2E: Python trick parsing must unescape CommonMark backslashes.
 
-``SorcarTab.ts``'s ``readMarkdownSections`` (the VS Code webview's
-source of ``window.__TRICKS__``) strips CommonMark backslash escapes
-from every ``## Trick`` body — ``mdformat`` rewrites ``<<x>>`` as
-``\\<<x>>`` and ``snake_case`` as ``snake\\_case`` — so the webview
-shows the trick the author actually wrote.  The Python parser in
-``kiss.server.tricks`` documents itself as that function's mirror and
-feeds two OTHER surfaces of the same trick list: the remote webapp's
-``window.__TRICKS__`` (``web_server._build_html``) and the daemon's
-ghost-text / picker ``trick`` completions
-(``autocomplete._AutocompleteMixin._complete_many``).  Without the same
-unescaping the three surfaces disagree: the VS Code panel shows
-``<<x>>`` while the remote panel shows ``\\<<x>>`` and accepting the
-ghost suggestion types literal backslashes into the prompt.
+``mdformat`` rewrites ``<<x>>`` as ``\\<<x>>`` and ``snake_case`` as
+``snake\\_case`` in every ``## Trick`` body, so the parser in
+``kiss.server.tricks`` must strip CommonMark backslash escapes to show
+the trick the author actually wrote.  It feeds two consumers of the
+same trick list: the chat page's ``window.__TRICKS__``
+(``web_server._build_html``) and the daemon's ghost-text / picker
+``trick`` completions
+(``autocomplete._AutocompleteMixin._complete_many``).  Without the
+unescaping the trick panel shows ``\\<<x>>`` and accepting the ghost
+suggestion types literal backslashes into the prompt.
 
 Exercised end to end through the real ``INJECTIONS.md`` /
 ``MY_INJECTION.md`` file reads (env overrides pin temp files), the real
@@ -34,15 +31,15 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import tricks
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 # Exactly what mdformat writes for ``Replace <<x>> with snake_case.``
 _ESCAPED_BODY = "Replace \\<<x>> with snake\\_case in a\\*b. Keep \\q as is."
-# Exactly what SorcarTab.ts's ``unescapeMarkdown`` yields for it: every
+# Exactly what the unescaping yields for it: every
 # CommonMark ASCII-punctuation escape is removed, ``\q`` is preserved.
 _UNESCAPED_BODY = "Replace <<x>> with snake_case in a*b. Keep \\q as is."
 
@@ -86,7 +83,7 @@ class _TricksEnv(TestCase):
 
 
 class TestReadTricksUnescapes(_TricksEnv):
-    """``read_tricks`` must return the trick as the VS Code panel shows it."""
+    """``read_tricks`` must return the trick as the author wrote it."""
 
     def test_bundled_trick_is_unescaped(self) -> None:
         self.assertEqual(tricks.read_tricks(), [_UNESCAPED_BODY])
@@ -114,7 +111,7 @@ class TestAutocompleteTrickCompletionUnescaped(_TricksEnv):
 
     def test_completions_and_ghost_are_unescaped(self) -> None:
         printer = _RecordingPrinter()
-        server = VSCodeServer(printer=printer)  # type: ignore[arg-type]
+        server = AgentServer(printer=printer)  # type: ignore[arg-type]
         server._complete("Replace <<x")
         by_type = {e["type"]: e for e in printer.events}
         completions = by_type["completions"]["completions"]

@@ -33,7 +33,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _agent_usage
 from kiss.server import agent_state, commands
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_update import charge_side_channel_usage
 from kiss.tests.local_ws import fake_daemon
 
@@ -57,9 +57,9 @@ def _task(finished: bool, parent: str = "", cost: float = 1.0) -> str:
     return task_id
 
 
-def _server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
+def _server() -> tuple[AgentServer, list[dict[str, Any]]]:
     """A real server whose printer's broadcasts land in a list."""
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -95,7 +95,7 @@ def test_late_usage_of_a_finished_row_names_its_task() -> None:
     """A finished row's late ``usage_info`` carries the row's ``taskId``.
 
     The tab that showed the row may already run a newer task; without
-    the id the webview could not tell the late event apart from that
+    the id the chat page could not tell the late event apart from that
     task's own totals and would repaint its Cost with the old one.
     """
     root = _task(finished=True, cost=5.0)
@@ -331,7 +331,7 @@ def test_running_task_late_spend_is_kept_in_its_replayed_transcript() -> None:
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
     task = _task(finished=False, cost=0.0)
-    server = VSCodeServer()
+    server = AgentServer()
     agent = ChatSorcarAgent("late-usage-transcript")
     agent._last_task_id = task
     agent_state.register(

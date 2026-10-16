@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests: remote webview fits mobile screens horizontally.
+"""Integration tests: the chat page fits mobile screens horizontally.
 
 The viewport meta value is substituted by ``kiss.server.web_server``
 itself (the ``{{VIEWPORT}}`` placeholder), so this test's dependency
-closure is server-only; the file moved here from tests/agents/vscode.
+closure is server-only; the file moved here from tests/webapp.
 """
 
 import re

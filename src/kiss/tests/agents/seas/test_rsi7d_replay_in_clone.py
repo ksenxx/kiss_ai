@@ -15,8 +15,8 @@ the task's base commit (``replay_in_clone``) or this task's directory
 Not covered: the "daemon's installed kiss package predates
 ``agent_dispatch.dispatch_result``" branch (``_legacy_daemon_error``).  It
 is reachable only when the daemon runs an older installed package than
-the checkout whose SEA file it loads (the VS Code extension's bundled
-copy before a release), which a test in this checkout cannot arrange
+the checkout whose SEA file it loads (a development checkout ahead of
+the installed release), which a test in this checkout cannot arrange
 without deleting the attribute from the imported module.
 """
 
@@ -32,8 +32,8 @@ from typing import Any
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
-from kiss.agents.sorcar.persistence import _add_task
-from kiss.core import vscode_config
+from kiss.core import user_config
+from kiss.tests.agents.seas.conftest import persist_task
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -74,7 +74,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         self.requests: list[dict[str, Any]] = []
         self.standin = StandInModelServer(self._respond)
         self.addCleanup(self.standin.stop)
-        vscode_config.CONFIG_PATH.write_text(
+        user_config.CONFIG_PATH.write_text(
             json.dumps({
                 "custom_endpoint": self.standin.url,
                 "custom_api_key": "kiss-test-key",
@@ -122,14 +122,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         (repo / "seed.txt").write_text("seed\nresults\n", encoding="utf-8")
         run_git(repo, "add", "-A")
         run_git(repo, "commit", "-q", "-m", f"docs: add results{USER_PROMPT_HEADING}{task}")
-        now_ms = int(time.time() * 1000)
-        task_id, _chat = _add_task(
-            task,
-            extra={
-                "model": "model-a", "work_dir": str(repo), "sea": "demo_sea",
-                "startTs": now_ms - 60_000, "endTs": now_ms, "cost": 0.5, "steps": 3,
-            },
-        )
+        task_id = persist_task(task, work_dir=str(repo), sea="demo_sea", steps=3)
 
         out = json.loads(
             sea.replay_in_clone(task_id, max_budget=1.0, timeout=120, model=STANDIN_MODEL)
@@ -173,12 +166,9 @@ class ReplayInCloneTest(DaemonLocalHarness):
         # No auto-commit to go back from: the replay starts at the HEAD of the
         # task's start, so the task must have started after the seed commit.
         now_ms = int(time.time() * 1000)
-        task_id, _chat = _add_task(
+        task_id = persist_task(
             f"Leave a mark in {repo}",
-            extra={
-                "model": "model-a", "work_dir": str(repo),
-                "startTs": now_ms + 2_000, "endTs": now_ms + 5_000, "cost": 0.2, "steps": 2,
-            },
+            work_dir=str(repo), startTs=now_ms + 2_000, endTs=now_ms + 5_000, cost=0.2, steps=2,
         )
 
         out = json.loads(
@@ -205,14 +195,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         """No clone: the verbatim task runs in this directory on the SEA's prompt, fresh chat."""
         repo = Path(self.repo)
         task = "Say hello and finish"
-        now_ms = int(time.time() * 1000)
-        task_id, _chat = _add_task(
-            task,
-            extra={
-                "model": "model-a", "work_dir": str(repo), "sea": "demo_sea",
-                "startTs": now_ms - 60_000, "endTs": now_ms, "cost": 0.5, "steps": 3,
-            },
-        )
+        task_id = persist_task(task, work_dir=str(repo), sea="demo_sea", steps=3)
         assert sea.replay_in_place("no-such-task", max_budget=1.0).startswith(
             "Error: unknown task id"
         )

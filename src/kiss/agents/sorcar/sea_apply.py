@@ -64,7 +64,7 @@ from kiss.agents.sorcar.sea_settings import (
     wire_field,
 )
 
-logger = logging.getLogger("kiss-vscode")
+logger = logging.getLogger("kiss-sea-apply")
 
 
 SETTING_FIELDS: dict[str, str] = {

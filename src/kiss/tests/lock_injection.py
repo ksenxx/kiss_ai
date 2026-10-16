@@ -50,20 +50,34 @@ class Hammered(threading.Thread):
     """A thread repeating *call* until stopped, absorbing injected interrupts.
 
     An interrupt landing in the loop itself rather than in *call* ends
-    the thread; the hammer then starts a fresh one.
+    the thread; the hammer then starts a fresh one.  ``in_call`` is
+    true only while *call* runs: the hammer injects nothing while the
+    thread is still in its bootstrap or already on its way out, where
+    ``threading._bootstrap_inner`` and ``Thread._delete`` take
+    ``threading._active_limbo_lock`` with a plain ``with`` (the same
+    gh-74174 check point as every other lock), and an interrupt landing
+    there leaves that lock owned by a dead thread and every later
+    ``Thread.start()``, including the hammer's own restart, blocked
+    for good.  ``Thread.start`` returns once ``_started`` is set, before
+    the bootstrap's ``with``, so a freshly started worker was in exactly
+    that window when the first injection reached it under load.
     """
 
     def __init__(self, call: Callable[[], object]) -> None:
         super().__init__(daemon=True)
         self.call = call
         self.stop = threading.Event()
+        self.in_call = False
 
     def run(self) -> None:
         while not self.stop.is_set():
             try:
+                self.in_call = True
                 self.call()
             except KeyboardInterrupt:
                 pass
+            finally:
+                self.in_call = False
 
 
 class Contender(threading.Thread):
@@ -122,13 +136,20 @@ def hammer(
         contender.start()
     worker = Hammered(call)
     worker.start()
+    attempts = 0
     try:
-        for _ in range(INJECTIONS):
+        # A slice that finds the worker outside *call* (its bootstrap, the
+        # loop, a restart) injects nothing and is not counted against the
+        # interrupts; the attempt cap only bounds a worker that never
+        # reaches *call* at all.
+        while delivered < INJECTIONS and attempts < 10 * INJECTIONS:
+            attempts += 1
             time.sleep(0.0005)
             if not worker.is_alive():
                 worker = Hammered(call)
                 worker.start()
-            delivered += inject(worker)
+            if worker.in_call:
+                delivered += inject(worker)
         worker.stop.set()
         worker.join(5.0)
         if contender is not None:

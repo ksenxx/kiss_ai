@@ -1,22 +1,22 @@
-FROM codercom/code-server:latest
+# KISS Sorcar in a container: the kiss-web daemon and its webapp, nothing
+# else.  scripts/docker-startup.sh (the entrypoint) clones the repository,
+# runs its install.sh and starts kiss-web in the foreground on port 8787.
+FROM debian:bookworm-slim
 
-USER root
-
-# System dependencies
-#
-# python3 + python-is-python3 are required by
-# src/kiss/agents/vscode/copy-kiss.sh (invoked from the extension's
-# `vscode:prepublish` script) — without them `npm run package` silently
-# fails and the container falls back to a stale committed VSIX.
-RUN apt-get update && apt-get install -y \
-    git curl wget build-essential libssl-dev \
-    ca-certificates gnupg sudo \
-    python3 python3-venv python-is-python3 \
+# What install.sh needs on a bare Debian: bash, git and curl for the clone
+# and the uv/cloudflared downloads, perl for its new-session re-exec and
+# update lock, ca-certificates for every https download, sudo so the
+# Playwright step can install Chromium's system libraries, build tools for
+# the few Python packages uv has to compile.  python3 runs
+# src/kiss/scripts/remote_config.py before the app's venv exists.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash git curl ca-certificates perl sudo procps \
+    python3 build-essential libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv (Python package manager).  Same pin as UV_VERSION in
-# src/kiss/agents/vscode/src/DependencyInstaller.ts; releases before 0.11.15
-# carry two file-write/deletion advisories.
+# uv builds the app's Python environment (install.sh would download it
+# itself; baking it in keeps the first start shorter).  Releases before
+# 0.11.15 carry two file-write/deletion advisories.
 ENV UV_VERSION=0.12.19
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
@@ -27,41 +27,20 @@ RUN ARCH=$(uname -m) && \
     curl -fsSL "https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/uv-${TARGET}.tar.gz" \
     | tar xz -C /usr/local/bin --strip-components=1
 
-# Passwordless sudo for coder (needed for playwright install-deps)
-RUN echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/coder
+# The daemon runs as an ordinary user; passwordless sudo is for
+# `playwright install-deps` only.
+RUN useradd --create-home --shell /bin/bash sorcar \
+    && echo "sorcar ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sorcar
 
-# Repo directories owned by coder.  /home/kiss is the primary clone target
-# (for the kiss.git repo); /home/kiss_ai is the fallback target (for the
-# kiss_ai.git repo).  docker-startup.sh decides which one to clone into and
-# passes the chosen path to code-server as the workspace root.
-RUN mkdir -p /home/kiss /home/kiss_ai \
-    && chown coder:coder /home/kiss /home/kiss_ai
-
-# Startup script
 COPY --chmod=755 scripts/docker-startup.sh /usr/local/bin/docker-startup.sh
 
-USER coder
-
+USER sorcar
+WORKDIR /home/sorcar
 RUN git config --global init.defaultBranch main \
-    && git config --global user.email "coder@kiss-sorcar" \
+    && git config --global user.email "sorcar@kiss-sorcar" \
     && git config --global user.name "KISS Sorcar"
 
-WORKDIR /home/kiss
-EXPOSE 8080
-
-# The trailing workspace path in CMD is a placeholder — docker-startup.sh
-# rewrites it to whichever directory the repo was actually cloned into
-# (/home/kiss for kiss.git, /home/kiss_ai for kiss_ai.git).
+# kiss-web: HTTPS and WebSocket on one port.
+EXPOSE 8787
 
 ENTRYPOINT ["/usr/local/bin/docker-startup.sh"]
-# --disable-workspace-trust skips the "Do you trust the authors of the files
-#   in this folder?" dialog that otherwise blocks the extension from
-#   activating on first launch.
-# --enable-proposed-api ksenxx.kiss-sorcar allows the extension to use the
-#   `contribSourceControlInputBoxMenu` proposed API declared in
-#   src/kiss/agents/vscode/package.json — future-proof against code-server
-#   tightening proposed-API gating.
-CMD ["--bind-addr", "0.0.0.0:8080", "--auth", "none", \
-     "--disable-workspace-trust", \
-     "--enable-proposed-api", "ksenxx.kiss-sorcar", \
-     "/home/kiss"]

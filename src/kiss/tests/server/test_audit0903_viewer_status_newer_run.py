@@ -8,7 +8,7 @@
 broadcasts ``status running=true`` (with the OLD task's ``startTs``),
 then — when the source died inside the attach window — an unqualified
 ``status running=false``, both stamped with the viewer's tab id
-(:meth:`VSCodeServer._broadcast_viewer_running`).  The helper used to
+(:meth:`AgentServer._broadcast_viewer_running`).  The helper used to
 re-check only the old *source* object; it never asked whether the
 viewer tab meanwhile started a NEWER run of its own.  A replay delayed
 in transport delivery therefore could:
@@ -39,7 +39,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _BLOCKING_SCRIPT = textwrap.dedent(
@@ -76,7 +76,7 @@ class TestViewerStatusNewerRun(TestCase):
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
 
     def tearDown(self) -> None:
@@ -225,7 +225,7 @@ class TestViewerStatusNewerRun(TestCase):
         self.assertEqual(len(running), 1)
         self.assertEqual(running[0].get("startTs"), 7)
         # A viewer catching up on a run already going is marked so the
-        # webview does not take it for a run starting (showChatForRun).
+        # chat page does not take it for a run starting (showChatForRun).
         self.assertIs(running[0].get("attached"), True)
         self.assertFalse(
             any(e.get("running") is False for e in self._statuses(viewer)),

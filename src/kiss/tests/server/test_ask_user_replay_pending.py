@@ -20,7 +20,7 @@ import time
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 
@@ -66,7 +66,7 @@ class TestAskUserAnswerOrdering(unittest.TestCase):
     def test_slow_initial_broadcast_still_precedes_ask_user_done(self) -> None:
         """A concurrent answer must serialize behind the slow broadcast."""
         printer = _SlowAskPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         state = agent_state.AgentState(
             "task-race",
             chat_id="chat-race",
@@ -136,7 +136,7 @@ class TestAskUserReplayPending(unittest.TestCase):
 
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.stop = threading.Event()
         self.done = threading.Event()
         self.answer: dict[str, str] = {}

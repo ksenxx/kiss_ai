@@ -8,10 +8,10 @@ This module is the single source of truth for the wire API of the
 ``kiss-web`` daemon and hosts both of its Python ends:
 
 **The server API** — :data:`API`, :func:`validate_command`, and
-:class:`ServerApi` define every command a user interface (a VS Code
-window, the remote webapp, or a Python client) may send to the
-daemon.  Local and remote clients speak the same JSON commands over
-the daemon's WSS listener, dispatched on the ``"type"`` field, one
+:class:`ServerApi` define every command a user interface (the
+remote webapp or a Python client) may send to the daemon.  Local and
+remote clients speak the same JSON commands over the daemon's WSS
+listener, dispatched on the ``"type"`` field, one
 object per WebSocket frame.  The daemon routes every command through
 :meth:`ServerApi.dispatch`, which validates it against the catalog
 (answering an invalid one with an ``{"type": "error", "text": ...}``
@@ -19,13 +19,9 @@ event instead of processing it) and invokes the :class:`ServerApi`
 method the command's catalog entry names.  The only exception is a
 WSS connection's pre-dispatch ``auth`` handshake, serviced by
 :meth:`ServerApi.authenticate`.  The user interfaces consume the
-catalog through the ``media/api.js`` facade (chat webview and remote
-webapp), whose methods map 1:1 onto the catalog's command names, and
-the VS Code extension host relays the webview's commands through
-``FORWARDED_COMMANDS`` in ``src/SorcarSidebarView.ts``; the remote webapp's
-bootstrap shim (``_WS_SHIM_JS`` in
-:mod:`kiss.server.web_server`) additionally sends the ``auth``
-handshake, itself a catalog command.
+catalog through the ``media/api.js`` facade, whose methods map 1:1
+onto the catalog's command names; the page's transport additionally
+sends the ``auth`` handshake, itself a catalog command.
 
 **The client API** — :func:`run` lets any process launch a task on an
 already-running daemon and block until it finishes::
@@ -83,14 +79,15 @@ wire.
 
 The function speaks the daemon's JSON protocol over its local WSS
 endpoint, found through ``$KISS_HOME/sorcar-local.json`` (or the file
-``$KISS_SORCAR_LOCAL`` names) — the same channel the VS Code extension
-uses.  The endpoint file's mode 0600 restricts the local token it
+``$KISS_SORCAR_LOCAL`` names).  The endpoint file's mode 0600
+restricts the local token it
 carries to the owning user, so no password is involved.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
@@ -118,17 +115,20 @@ from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
 from kiss.agents.sorcar.machines import local_machine_name
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.config import kiss_home
+from kiss.core.remote_password import password_accepted
+from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
-from kiss.core.vscode_config import load_config
 from kiss.server import sidebar_panels
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.tips import TIPS_OPT_OUT_MARKER
 
 logger = logging.getLogger(__name__)
 
-# In-flight background replies (``appsStatus``, ``machines``): the
-# event loop keeps only weak references to tasks.
+# In-flight background replies (``appsStatus``, ``machines``) and
+# detached commands (``worktreeAction``): the event loop keeps only weak
+# references to tasks.
 _BACKGROUND_REPLIES: set[asyncio.Task[None]] = set()
 
 
@@ -248,10 +248,7 @@ class ApiCommand:
         handler: Name of the :class:`ServerApi` method that services
             the command — the actual code API entry point a client
             command invokes.  ``"forward"`` (the default) routes the
-            command to the backend agent server unchanged; ``"drop"``
-            marks a client message the daemon accepts and discards
-            (consumed by the VS Code extension host or the WSS
-            handshake, never by the daemon).
+            command to the backend agent server unchanged.
     """
 
     name: str
@@ -287,6 +284,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getHistory"),
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
+    ApiCommand("setChatSummary", required=("chatId", "summary")),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),
     ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
@@ -295,6 +293,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("rotateRemotePassword"),
     ApiCommand("getMyModels"),
     ApiCommand("saveMyModel", required=("name",)),
     ApiCommand("deleteMyModel", required=("name",)),
@@ -316,7 +315,10 @@ API: dict[str, ApiCommand] = _catalog(
         handler="terminal_resize",
     ),
     ApiCommand("terminalClose", required=("tab_id",), handler="terminal_close"),
-    ApiCommand("setWorkDir", required=("workDir",)),
+    ApiCommand("setWorkDir", required=("workDir",), handler="set_work_dir"),
+    ApiCommand(
+        "getMachineWorkDirs", required=("machine",), handler="get_machine_work_dirs"
+    ),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
@@ -345,10 +347,9 @@ API: dict[str, ApiCommand] = _catalog(
         "shareChatTasks", required=("chatId",), handler="share_chat_tasks"
     ),
     ApiCommand("complete", required=("query",)),
-    ApiCommand("worktreeAction", required=("action",)),
-    ApiCommand("generateCommitMessage"),
+    ApiCommand("worktreeAction", required=("action",), handler="worktree_action"),
     ApiCommand("autocommitAction"),
-    ApiCommand("auth", required=("password",), handler="drop"),
+    ApiCommand("auth", handler="auth"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("updateModels", handler="update_models"),
     ApiCommand("snoozeUpdate", handler="snooze_update"),
@@ -359,16 +360,6 @@ API: dict[str, ApiCommand] = _catalog(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
     ),
     ApiCommand("tipsOptOut", handler="tips_opt_out"),
-    ApiCommand("voiceToggle", required=("enabled",), handler="drop"),
-    ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
-    ApiCommand("voiceAck", handler="drop"),
-    ApiCommand("voiceDropped", required=("text",), handler="drop"),
-    ApiCommand("focusEditor", handler="drop"),
-    ApiCommand("webviewFocusChanged", handler="drop"),
-    ApiCommand("activeTabChanged", required=("tabId",), handler="drop"),
-    ApiCommand("notificationAction", required=("id",), handler="drop"),
-    ApiCommand("sizeReport", handler="drop"),
-    ApiCommand("resolveDroppedPaths", required=("uris",), handler="drop"),
 )
 """Every command the daemon accepts, keyed by wire name.
 
@@ -379,21 +370,6 @@ table for the server's code API.  ``auth`` is serviced by
 per-connection dispatch loop starts; an ``auth`` frame that leaks
 into an already-authenticated connection's dispatch is accepted and
 discarded.
-"""
-
-DROPPED_COMMANDS: frozenset[str] = frozenset(
-    c.name for c in API.values() if c.handler == "drop"
-)
-"""Client messages the daemon accepts and silently discards.
-
-Derived from the catalog (``handler == "drop"``).  These messages are
-consumed by the VS Code extension host (webview bridge, voice bridge)
-or by the WSS handshake (``auth``, serviced pre-dispatch by
-:meth:`ServerApi.authenticate`), so when one leaks to the daemon
-transport it must be dropped BEFORE catalog validation — validating
-it (e.g. a ``notificationAction`` missing its ``id``) would surface a
-spurious error banner for a message the daemon was never meant to
-handle.
 """
 
 def validate_command(cmd: Any) -> str | None:
@@ -421,10 +397,10 @@ def validate_command(cmd: Any) -> str | None:
     return None
 
 
-def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
-    """Translate a webview wire command into a backend command.
+def translate_client_command(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Translate a chat-page wire command into a backend command.
 
-    The chat webview (``media/main.js``) speaks the wire dialect of
+    The chat page (``media/main.js``) speaks the wire dialect of
     this API; the backend agent server expects slightly different
     field names for one command.  Translation applied:
 
@@ -438,7 +414,7 @@ def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         The (possibly copied and modified) command dictionary ready
-        for the backend agent server (``VSCodeServer._handle_command``).
+        for the backend agent server (``AgentServer._handle_command``).
     """
     cmd_type = cmd.get("type", "")
     if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
@@ -449,23 +425,37 @@ def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
 
 
 def passwords_equal(a: str, b: str) -> bool:
-    """Compare two passwords in constant time to defeat timing attacks.
-
-    Encodes both strings to UTF-8 bytes and delegates to
-    :func:`secrets.compare_digest`.
-
-    Args:
-        a: First password string.
-        b: Second password string.
-
-    Returns:
-        ``True`` when the two strings are equal.
-    """
+    """Compare two secrets (the local token) in constant time."""
     return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
-AuthKind = Literal["local", "remote"]
-"""How a connection authenticated: local token or remote password."""
+def is_loopback_ip(ip: str) -> bool:
+    """Return True when *ip* is an IPv4/IPv6 loopback address.
+
+    A loopback TCP peer on the public port is the local ``cloudflared``
+    tunnel relaying a remote visitor, or a process (a browser, a
+    Python client) on this host.  IPv6-mapped IPv4 loopback
+    (``::ffff:127.0.0.1``) counts too.  A malformed / empty string is
+    not loopback.
+
+    Args:
+        ip: A textual IP address (no port).
+
+    Returns:
+        True when *ip* parses to a loopback address.
+    """
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    if mapped is not None:
+        parsed = mapped
+    return parsed.is_loopback
+
+
+AuthKind = Literal["local", "loopback", "remote"]
+"""How a connection authenticated: local token, loopback browser or remote password."""
 
 
 @dataclass(frozen=True)
@@ -474,6 +464,8 @@ class Auth:
 
     Attributes:
         kind: ``"local"`` for a token-authenticated loopback client,
+            ``"loopback"`` for a browser on this machine itself
+            (admitted without a password, with no local privileges),
             ``"remote"`` for a password-authenticated one.
         link: The peer is another daemon's
             :class:`~kiss.agents.sorcar.machines.MachineLink` request
@@ -491,15 +483,55 @@ def _auth_result(kind: AuthKind, msg: Any) -> Auth:
     """Return the :class:`Auth` of an accepted ``auth`` frame *msg*."""
     return Auth(kind, link=isinstance(msg, dict) and msg.get("link") is True)
 
+
+def _is_legacy_vscode_client(websocket: Any) -> bool:
+    """Whether *websocket* looks like the retired VS Code extension's client.
+
+    The extension's hand-written WebSocket client (``AgentClient.ts``)
+    authenticated with the local token and sent neither a
+    ``User-Agent`` nor an ``Origin`` request header on its upgrade
+    request; a browser sends both and the Python ``websockets`` client
+    sends ``User-Agent: Python/...``.  So a token client whose upgrade
+    request carries neither header is taken for the extension.
+
+    Args:
+        websocket: The server connection (its ``request.headers`` is
+            the HTTP upgrade request's header map).
+
+    Returns:
+        True when the upgrade request has neither header.
+    """
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    return not headers.get("User-Agent") and not headers.get("Origin")
+
+
+def _vscode_retired_notice(loopback_url: str) -> str:
+    """Return the ``notice`` text telling a VS Code extension user to use the web app."""
+    return json.dumps({
+        "type": "notice",
+        "text": (
+            f"VS Code is no longer supported by {PRODUCT_NAME}. "
+            f"Use the web app instead: {loopback_url}"
+        ),
+    })
+
 _NO_PASSWORD_LOG = (
-    "Refusing non-localhost auth handshake from %s: remote_password is empty"
+    "Refusing non-localhost auth handshake from %s: no remote password is set"
 )
 _NO_PASSWORD_REFUSAL: dict[str, Any] = {
     "type": "error",
     "code": "localhost_only",
     "text": "Remote access is turned off: no remote password is set, so "
-            "only this computer may connect. On it, open Settings and "
-            "set a Remote password.",
+            "only this computer may connect. Run install.sh on it to set "
+            "one.",
+}
+_NOT_AUTH_REFUSAL: dict[str, Any] = {
+    "type": "error",
+    "code": "auth_failed",
+    "text": "The first frame must be an auth frame.",
 }
 
 
@@ -530,9 +562,9 @@ class ApiContext:
         conn_state: Per-connection mutable state holding at least the
             connection's unique ``conn_id``.
         is_local: ``True`` when the connection authenticated with the
-            daemon's local token from a loopback address (a VS Code
-            window or a local Python client), ``False`` for a remote
-            browser client that supplied the password.
+            daemon's local token from a loopback address (a local
+            Python client such as a ``daemon_client`` run), ``False``
+            for a remote browser client that supplied the password.
     """
 
     endpoint: Any
@@ -553,7 +585,7 @@ class ServerBackend(Protocol):
     """
 
     _printer: Any
-    _vscode_server: Any
+    _agent_server: Any
     port: int
 
     def _lan_urls(self) -> list[str]: ...
@@ -567,7 +599,7 @@ class ServerBackend(Protocol):
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any, is_local: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
     async def _handle_save_file(
@@ -631,10 +663,7 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_submit(
-        self,
-        cmd: dict[str, Any],
-        endpoint: Any = None,
-        is_local: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any = None,
     ) -> None: ...
 
     async def _send_welcome_info(self) -> None: ...
@@ -653,6 +682,8 @@ class ServerBackend(Protocol):
 
     def _peer_is_loopback(self, connection: Any) -> bool: ...
 
+    def _peer_client_ca(self, connection: Any) -> str: ...
+
     def _auth_lock_remaining(self, ip: str) -> float: ...
 
     def _record_auth_failure(self, ip: str) -> None: ...
@@ -663,16 +694,18 @@ class ServerBackend(Protocol):
     @property
     def local_only(self) -> bool: ...
 
+    @property
+    def _loopback_url(self) -> str: ...
+
 
 class ServerApi:
     """The Sorcar server's code-level API.
 
     The actual code API every client command invokes.  Each catalog
     entry in :data:`API` names (via ``ApiCommand.handler``) the method
-    of this class that services it, so the clients — the chat webview
-    of the VS Code extension and the remote webapp (both through
-    ``media/api.js``), the extension host (``src/SorcarSidebarView.ts``)
-    and the Python clients — call these methods remotely by sending
+    of this class that services it, so the clients — the remote
+    webapp's chat page (through ``media/api.js``) and the Python
+    clients — call these methods remotely by sending
     the catalog's JSON commands.  The transport layer
     (``RemoteAccessServer._dispatch_client_command``) parses the JSON
     and hands every command to :meth:`dispatch`; it never routes a
@@ -709,7 +742,7 @@ class ServerApi:
         self._backend = backend
         self.remote_tabs = RemoteTabs(backend)
         for spec in API.values():
-            if spec.handler != "drop" and not callable(
+            if not callable(
                 getattr(self, spec.handler, None)
             ):
                 raise TypeError(
@@ -722,22 +755,20 @@ class ServerApi:
 
         The single entry point of the code API.  Applies, in order:
 
-        1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed
-           messages) BEFORE validation so they never surface errors.
-        2. Canonicalises a string ``tabId`` (surrounding whitespace
+        1. Canonicalises a string ``tabId`` (surrounding whitespace
            stripped) and writes it back into *cmd*, so the registry,
            the agent-state registry, the printer and the cleanup
            tail all key the tab identically.
-        3. Validates *cmd* against the catalog
+        2. Validates *cmd* against the catalog
            (:func:`validate_command`) and answers an invalid command
            with a direct ``error`` event to the sender only.
-        4. Records the command's ``tabId`` in the connection's
+        3. Records the command's ``tabId`` in the connection's
            bookkeeping (:meth:`_record_tab`).
-        5. Stamps the connection's ``conn_id`` as ``connId`` —
+        4. Stamps the connection's ``conn_id`` as ``connId`` —
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
            autocomplete state.
-        6. Blanks a ``workDir`` naming a filesystem root (``/``,
+        5. Blanks a ``workDir`` naming a filesystem root (``/``,
            ``C:\\`` — see :func:`kiss.core.utils.is_root_dir`) so it is
            treated exactly like an absent one: a client whose cwd
            degenerated to the root can never make the daemon's single
@@ -745,6 +776,13 @@ class ServerApi:
            there.  A command without a ``workDir`` resolves to that
            global directory (``config.json`` ``work_dir``, set from any
            surface's chat-header work-dir drop-down via ``setWorkDir``).
+        6. Sends a task command of a tab bound to a remote machine to
+           that machine (:class:`~kiss.server.remote_tabs.RemoteTabs`),
+           and a workspace command stamped ``machine`` (the Explorer,
+           Source Control view, folder picker and file editor of such
+           a tab: :data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`)
+           to the machine's daemon, answering the sender with its
+           reply.
         7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -753,8 +791,6 @@ class ServerApi:
                 guarantees a dict).
             ctx: The transport context of this call.
         """
-        if cmd.get("type") in DROPPED_COMMANDS:
-            return
         tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str):
             # Canonicalise ONCE, before validation and every handler:
@@ -779,9 +815,9 @@ class ServerApi:
         raw_wd = cmd.get("workDir")
         if isinstance(raw_wd, str) and is_root_dir(raw_wd):
             # A filesystem root is never a real workspace: it arrives
-            # only from a client that inherited the root as its cwd (a
-            # Dock-launched VS Code window with no folder open) or from
-            # a tab whose persisted registry entry was poisoned by one.
+            # only from a client that inherited the root as its cwd or
+            # from a tab whose persisted registry entry was poisoned by
+            # one.
             # Blank it HERE — the one chokepoint every transport
             # shares — so a root can neither become the global working
             # directory via ``setWorkDir`` nor root a task or the
@@ -794,43 +830,38 @@ class ServerApi:
             self.remote_tabs.route, cmd,
         ):
             return
+        # The Explorer, Source Control view, folder picker and file
+        # editor of such a tab browse the machine's working directory:
+        # a workspace command stamped ``machine`` is answered by that
+        # machine's daemon.
+        machine = str(cmd.get("machine") or "")
+        if machine and name in sidebar_panels.MACHINE_WORKSPACE_REPLIES:
+            reply = await asyncio.to_thread(
+                sidebar_panels.machine_workspace_reply, machine, cmd,
+            )
+            await self._backend._reply_direct(ctx.endpoint, reply, name)
+            return
         await getattr(self, handler)(cmd, ctx)
         if name == "ready":
             # The client has the tabs now: replay the ones running on
             # remote machines to it.
-            await asyncio.to_thread(
-                self.remote_tabs.replay_to,
-                cmd["connId"], str(cmd.get("singleTabId", "") or ""),
-            )
+            await asyncio.to_thread(self.remote_tabs.replay_to, cmd["connId"])
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        For local peers, records the connection's INTEREST in the
-        id with the printer's local-tab bookkeeping (talk-playback
-        arbitration).  Interest is recorded before the handler runs
-        and regardless of whether the tab currently exists: the talk
-        fan-out decides "shown" at talk time from the canonical facts
-        (``VSCodeServer._local_tab_shown`` — registry membership plus
-        an attached webview for registry tabs; for every other tab
-        this interest plus either the tab's own non-closed agent
-        state or, for a viewer without a state of its own, its live
-        task subscription), so a stale record for a closed tab is
-        inert and a record made for a ``run_agent`` ``api-…`` tab or
-        a sub-agent viewer is what lets that tab count.  The
-        connection's ``local_tabs`` set is mutated only inside the
-        printer, under its own lock.
+        For local peers, records the connection's interest in the id
+        with the printer's local-tab bookkeeping so task-event copies
+        stamped with other tabs are withheld from the peer
+        (``WebPrinter._local_clients_for_tab``).  The printer owns the
+        per-connection set, under its own lock.
 
         Args:
             tab_id: The non-empty frontend tab identifier.
             ctx: The transport context of the current call.
         """
         if ctx.is_local:
-            self._backend._printer.register_local_tab(
-                ctx.conn_state["conn_id"],
-                tab_id,
-                ctx.conn_state.setdefault("local_tabs", set()),
-            )
+            self._backend._printer.register_local_tab(ctx.conn_state["conn_id"], tab_id)
 
     def _is_local_auth(self, msg: Any, websocket: Any) -> bool:
         """Whether *msg* is an ``auth`` frame carrying this daemon's local token.
@@ -854,6 +885,60 @@ class ServerApi:
             and self._backend._peer_is_loopback(websocket)
             and passwords_equal(self._backend.local_token, token)
         )
+
+    def _is_loopback_browser(self, websocket: Any) -> bool:
+        """Whether *websocket* is a browser page opened at a loopback address.
+
+        True when the raw TCP peer is loopback, the client IP the
+        backend derives for it (:meth:`_client_ip`) is loopback too
+        (the upgrade request carried no forwarded client IP), AND the
+        request's ``Origin`` header names a loopback host -- the page
+        the browser loaded from ``http://127.0.0.1:<port>`` or
+        ``http://localhost:<port>``.  A visitor relayed by the local
+        cloudflared tunnel also arrives from loopback, but with
+        ``Cf-Connecting-Ip`` / ``X-Forwarded-For`` set; a program on
+        this machine (another daemon's machine link, the Python
+        client) sends no ``Origin``; a page relayed by some other
+        proxy carries that proxy's public origin.  None of them is a
+        loopback browser.
+
+        Args:
+            websocket: The connection to classify.
+
+        Returns:
+            True for a browser page served at a loopback address.
+        """
+        backend = self._backend
+        if not backend._peer_is_loopback(websocket):
+            return False
+        if not is_loopback_ip(backend._client_ip(websocket)):
+            return False
+        request = getattr(websocket, "request", None)
+        headers = getattr(request, "headers", None)
+        origin = headers.get("Origin", "") if headers is not None else ""
+        host = urlsplit(origin).hostname or ""
+        return host == "localhost" or is_loopback_ip(host)
+
+    async def _admit_local(self, websocket: Any, msg: dict[str, Any]) -> Auth:
+        """Answer ``auth_ok`` to a local-token client and return its :class:`Auth`.
+
+        A non-link client that looks like the retired VS Code extension
+        (:func:`_is_legacy_vscode_client`) is also sent a ``notice``
+        event pointing it at the web app, which its webview displays.
+
+        Args:
+            websocket: The connection whose ``auth`` frame carried the
+                local token.
+            msg: That ``auth`` frame.
+
+        Returns:
+            The ``"local"`` :class:`Auth` of the client.
+        """
+        await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
+        auth = _auth_result("local", msg)
+        if not auth.link and _is_legacy_vscode_client(websocket):
+            await websocket.send(_vscode_retired_notice(self._backend._loopback_url))
+        return auth
 
     async def _refuse(self, websocket: Any, payload: dict[str, Any]) -> None:
         """Send *payload* and close *websocket*, both best-effort.
@@ -879,28 +964,57 @@ class ServerApi:
 
         Every client's entry point into the API: before a connection
         may issue any catalog command, its very first frames must
-        complete this handshake.  The remote webapp's ``_WS_SHIM_JS``
-        shim sends ``{"type": "auth", "password": ...}`` as soon as
-        the socket opens; local clients (the VS Code extension, Python
-        clients) send ``{"type": "auth", "token": ...}`` with the
+        complete this handshake.  The remote webapp's transport sends
+        ``{"type": "auth", "password": ...}`` as soon as the socket
+        opens; local Python clients send ``{"type": "auth", "token":
+        ...}`` with the
         daemon's per-start local token read from the endpoint file
         (:mod:`kiss.agents.sorcar.local_endpoint`), whose 0600 mode gates the
         token to the owning user.
 
         Protocol serviced here, in order:
 
+        -1. A peer that presented a client certificate issued by an
+           enrolled CA (``tls/trusted-clients/*.pem``, see
+           :meth:`~kiss.server.web_server.RemoteAccessServer._peer_client_ca`)
+           is another daemon's machine link: its first frame must be an
+           ``auth`` frame (its content is irrelevant), answered with
+           ``auth_ok`` (``"local": true``); it returns ``"local"``
+           whatever the password setting or the lockout.
         0. An ``auth`` frame carrying a ``token`` equal to the
            backend's ``local_token`` (constant-time compare) from a
            LOOPBACK peer is answered with ``auth_ok`` (``"local":
            true``) and returns ``"local"``.  A token from a
            non-loopback peer is never honoured, whatever the password
-           setting; a wrong token counts as a wrong guess.
+           setting; a wrong token counts as a wrong guess.  A token
+           client that looks like the retired VS Code extension (no
+           ``User-Agent`` and no ``Origin`` upgrade header, see
+           :func:`_is_legacy_vscode_client`) is then also sent a
+           ``notice`` event pointing it at the web app.
+        0b. On a daemon that is not ``local_only``, an ``auth`` frame
+           without a token from a LOOPBACK BROWSER
+           (:meth:`_is_loopback_browser`: the raw TCP peer is loopback,
+           :meth:`_client_ip` is loopback too, so the upgrade request
+           carried no forwarded client IP, and its ``Origin`` names a
+           loopback host) is answered with ``auth_ok`` (``"local":
+           false``) whatever password it carries and returns
+           ``"loopback"``: the web app opened at ``http://127.0.0.1``
+           on the daemon's own machine needs no password, and no
+           later frame of it is password-checked.  It gets no local
+           privileges.  Visitors relayed by cloudflared also arrive
+           from loopback but carry ``Cf-Connecting-Ip`` /
+           ``X-Forwarded-For``; programs on this machine (machine
+           links, the Python client) send no ``Origin``; both still
+           need their password or token.  Any OTHER reverse proxy on
+           loopback that neither sets a forwarded-IP header nor
+           changes the page's origin would expose the daemon to
+           everyone it relays.
 
         1. A source IP that is still rate-limited after too many
            failed logins is answered with ``auth_locked`` (carrying
            ``retry_after`` seconds) and closed — telling the client
            WHY instead of leaving its loading overlay spinning.
-        2. When the configured ``remote_password`` is empty, a
+        2. When no ``remote_password`` is configured, a
            non-loopback TCP peer is refused (``error`` + close) before
            any credential is examined: with no password set, only
            localhost may connect.  The check runs before the handshake
@@ -930,30 +1044,51 @@ class ServerApi:
         Returns:
             The :class:`Auth` of the admitted client (``kind``
             ``"local"`` for a token-authenticated loopback client,
-            ``"remote"`` for a password-authenticated one; ``link`` when
+            ``"loopback"`` for a direct loopback peer admitted without
+            a password, ``"remote"`` for a password-authenticated one;
+            ``link`` when
             its ``auth`` frame declared it a daemon link), ``None`` when
             authentication failed (the socket is then already closed).
         """
         backend = self._backend
         ip = backend._client_ip(websocket)
+        trusted_ca = backend._peer_client_ca(websocket)
+        if trusted_ca:
+            # Another daemon's machine link, enrolled with its CA: the
+            # client certificate it presented in the TLS handshake is
+            # its credential, whatever the password setting or the
+            # lockout (a 256-bit key, like the local token).
+            try:
+                msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
+            except Exception:
+                logger.debug("Enrolled peer %s sent no usable frame", ip, exc_info=True)
+                await self._refuse(websocket, _NOT_AUTH_REFUSAL)
+                return None
+            if not isinstance(msg, dict) or msg.get("type") != "auth":
+                await self._refuse(websocket, _NOT_AUTH_REFUSAL)
+                return None
+            logger.info("Machine link from %s admitted with a certificate of %s", ip, trusted_ca)
+            await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
+            return _auth_result("local", msg)
         lock_remaining = backend._auth_lock_remaining(ip)
         if lock_remaining > 0.0:
             # The lockout is per IP, and every visitor relayed by the
-            # tunnel shares 127.0.0.1 with the extension and the Python
-            # clients: read one frame so a valid local token still gets
+            # tunnel shares 127.0.0.1 with the Python clients: read one
+            # frame so a valid local token still gets
             # through, then refuse everything else.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
             try:
                 msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
                 if self._is_local_auth(msg, websocket):
-                    await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
-                    return _auth_result("local", msg)
+                    return await self._admit_local(websocket, msg)
             except Exception:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
             await self._refuse(websocket, _auth_locked(lock_remaining))
             return None
-        password = (await asyncio.to_thread(load_config)).get("remote_password", "")
-        if not password and not backend._peer_is_loopback(websocket):
+        stored_password = (await asyncio.to_thread(load_config)).get(
+            "remote_password", "",
+        )
+        if not stored_password and not backend._peer_is_loopback(websocket):
             # Defense in depth for the empty-password localhost-only
             # lockdown (primary gate: the transport's
             # ``_process_request`` refuses non-loopback peers with 403
@@ -972,10 +1107,7 @@ class ServerApi:
                 # the lockout must never shut the machine's own
                 # clients out (see the pre-recv check above).
                 if self._is_local_auth(msg, websocket):
-                    await websocket.send(json.dumps({
-                        "type": "auth_ok", "local": True,
-                    }))
-                    return _auth_result("local", msg)
+                    return await self._admit_local(websocket, msg)
                 if backend.local_only:
                     # The private daemon admits no password at all.
                     await self._refuse(websocket, {
@@ -984,6 +1116,21 @@ class ServerApi:
                         "text": "This daemon accepts local clients only.",
                     })
                     return None
+                token = msg.get("token", "")
+                if not isinstance(token, str):
+                    token = ""
+                if (
+                    msg.get("type") == "auth"
+                    and not token
+                    and self._is_loopback_browser(websocket)
+                ):
+                    # The web app opened at 127.0.0.1 on this machine
+                    # itself: no password needed, whatever its ``auth``
+                    # frame carries.
+                    await websocket.send(json.dumps({
+                        "type": "auth_ok", "local": False,
+                    }))
+                    return _auth_result("loopback", msg)
                 # Re-load the configured password before every compare
                 # so a change made while this connection awaited
                 # credentials takes effect NOW.  Without the reload, a
@@ -991,10 +1138,10 @@ class ServerApi:
                 # accepting the OLD password — and, worse, clearing the
                 # password would not subject an already-admitted
                 # non-loopback peer to the localhost-only rule below.
-                password = (
+                stored_password = (
                     await asyncio.to_thread(load_config)
                 ).get("remote_password", "")
-                if not password and not backend._peer_is_loopback(
+                if not stored_password and not backend._peer_is_loopback(
                     websocket,
                 ):
                     logger.warning(_NO_PASSWORD_LOG, ip)
@@ -1020,11 +1167,8 @@ class ServerApi:
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
                     client_pw = ""
-                token = msg.get("token", "")
-                if not isinstance(token, str):
-                    token = ""
-                if msg.get("type") == "auth" and not token and passwords_equal(
-                    password, client_pw,
+                if msg.get("type") == "auth" and not token and password_accepted(
+                    client_pw, stored_password,
                 ):
                     await websocket.send(json.dumps({
                         "type": "auth_ok", "local": False,
@@ -1076,7 +1220,7 @@ class ServerApi:
         The default handler: commands with no daemon-side special
         casing (``run``, ``stop``, ``getModels``, ``getConfig``,
         ``getHistory``, ``complete``, …) are executed by the backend
-        ``VSCodeServer`` in the thread-pool executor.
+        ``AgentServer`` in the thread-pool executor.
 
         Args:
             cmd: The validated, connection-stamped command.
@@ -1089,96 +1233,90 @@ class ServerApi:
     ) -> None:
         """Resume a chat session in the issuing tab.
 
-        Translates the webview wire field ``id`` to the backend's
-        ``chatId`` (:func:`translate_webview_command`), then forwards.
+        Translates the wire field ``id`` to the backend's
+        ``chatId`` (:func:`translate_client_command`), then forwards.
 
         Args:
             cmd: The ``resumeSession`` command.
             ctx: The transport context of the current call.
         """
-        await self.forward(translate_webview_command(cmd), ctx)
+        await self.forward(translate_client_command(cmd), ctx)
+
+    async def worktree_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Merge, discard or detach a tab's pending worktree in the background.
+
+        The backend's ``worktreeAction`` handler reports through a
+        tab-stamped ``worktree_result`` broadcast and claims the tab's
+        ``is_merging`` flag atomically before it starts, so a second
+        click is refused and a ``run`` on the tab is turned down while
+        it works.  A merge generates its commit message with an LLM
+        call and may run the merge-conflict SEA for minutes, and each
+        connection's commands are dispatched one at a time, so the
+        command runs as a background task: a ``stop`` of another tab's
+        task, a ``submit`` or the transport's ``ping`` sent right after
+        the click is not held up behind the merge.
+
+        Args:
+            cmd: The ``worktreeAction`` command.
+            ctx: The transport context of the current call (unused).
+        """
+        _spawn_reply(self._forward_detached(cmd))
+
+    async def _forward_detached(self, cmd: dict[str, Any]) -> None:
+        """Run *cmd* on the backend; log a failure instead of dying silently.
+
+        Args:
+            cmd: The validated, connection-stamped command.
+        """
+        try:
+            await self._backend._run_cmd(cmd)
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("%s command failed", cmd.get("type", ""), exc_info=True)
 
     async def ready(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Initialize a (re)loaded chat webview.
+        """Initialize a (re)loaded chat page.
 
         Sanitizes the command's ``restoredTabs`` (warnings included)
         and writes the cleaned list back for the backend's ready
-        handler.  For a local connection it then (1) marks the connection as
-        hosting a chat webview — every attached webview mirrors the
-        whole canonical tab registry from ``tabs_state``, so this flag
-        is what makes a registry tab's talk play natively on this
-        machine (webviews cannot autoplay), including for background
-        tabs the client adopts from the snapshot and tabs other clients
-        publish later; and (2) RECONCILES the connection's per-tab
-        interest to exactly the tabs the client announced (its own tab
-        and the restored tabs), which bounds the interest a connection
-        accumulates for tabs closed while it was attached.  No registry
-        snapshot is copied into the bookkeeping: the talk fan-out reads
-        the registry itself at decision time
-        (``VSCodeServer._local_tab_shown``), so there is nothing that
-        a close racing this ``ready`` could leave stale.  The sync
-        updates the connection's ``local_tabs`` set in place, so
-        disconnect cleanup is unchanged.  Finally fans the command out
-        through the backend's ready handler (models / input history /
-        config / session replay).
+        handler, then fans the command out through it (models / input
+        history / config / session replay).
 
         Args:
             cmd: The ``ready`` command.
             ctx: The transport context of the current call.
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
-        if ctx.is_local:
-            conn_id = ctx.conn_state["conn_id"]
-            self._backend._printer.mark_local_webview(conn_id)
-            shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
-            own_tab = cmd.get("tabId")
-            if isinstance(own_tab, str) and own_tab:
-                shown.add(own_tab)
-            self._backend._printer.sync_local_tabs(
-                conn_id,
-                shown,
-                ctx.conn_state.setdefault("local_tabs", set()),
-            )
         await self._backend._handle_ready(cmd, ctx.endpoint)
 
     async def submit(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Start a task from a webview ``submit``.
+        """Start a task from a chat page's ``submit``.
 
-        The one submit path of every surface: the remote webapp sends
-        its webview's ``submit`` over WSS, the VS Code extension host
-        forwards its webview's ``submit`` over the local WSS endpoint,
-        and the backend translates both into a ``run`` (path resolution,
-        follow-up routing) including the path-only shortcut: a prompt
-        that is just the path of an existing file is answered on the
-        submitting connection — the resolved path for a VS Code window
-        to open natively, the ``fileContent`` for a browser — and
-        starts no task.
+        The backend translates the ``submit`` into a ``run`` (path
+        resolution, follow-up routing) including the path-only
+        shortcut: a prompt that is just the path of an existing file is
+        answered on the submitting connection with the file's
+        ``fileContent`` and starts no task.
 
         Args:
             cmd: The ``submit`` command.
             ctx: The transport context of the current call; its
                 endpoint receives a path-only prompt's reply.
         """
-        await self._backend._handle_submit(cmd, ctx.endpoint, ctx.is_local)
+        await self._backend._handle_submit(cmd, ctx.endpoint)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Resolve, and for a browser serve, a clicked file link.
+        """Serve a clicked file link.
 
-        A client clicked a file or directory link in a chat webview.
-        The daemon resolves the path once for every surface (``~``, the
-        tab's work dir, its pending worktree).  A browser has no editor
-        to open the path in, so it gets the file's content (or a
-        plain-text directory listing) for an in-page content tab; a
-        local client (a VS Code window on the token-authenticated
-        loopback WSS endpoint) gets the resolved path as an
-        ``openResolvedFile`` action that its extension host opens in a
-        real editor tab.
+        A client clicked a file or directory link in a chat page.  The
+        daemon resolves the path (``~``, the tab's work dir, its pending
+        worktree) and answers with the file's content (or a plain-text
+        directory listing) for an in-page content tab.
 
         Args:
             cmd: The ``openFile`` command.
             ctx: The transport context of the current call.
         """
-        await self._backend._handle_open_file(cmd, ctx.endpoint, ctx.is_local)
+        await self._backend._handle_open_file(cmd, ctx.endpoint)
 
     async def save_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a remote-web client's edits back to a file on disk.
@@ -1190,9 +1328,7 @@ class ServerApi:
         atomically; the ``version`` stamp taken from the ``fileContent``
         reply lets the daemon refuse to overwrite a file that changed
         on disk since it was opened unless ``force`` is set.  The reply
-        is a ``fileSaved`` event sent to the requester only.  Local
-        clients (VS Code windows) edit files in real editor tabs, so
-        a locally delivered ``saveFile`` is dropped as a defensive no-op.
+        is a ``fileSaved`` event sent to the requester only.
 
         Args:
             cmd: The ``saveFile`` command (``path``, ``content``,
@@ -1200,19 +1336,16 @@ class ServerApi:
                 ``force``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_save_file(cmd, ctx.endpoint)
 
     async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report which file paths exist to the requesting client.
 
-        The chat webview linkifies file-path-looking strings in event
+        The chat page linkifies file-path-looking strings in event
         panel contents lazily: a path only becomes a clickable link
         after this check confirms that clicking it (``openFile``)
-        would actually open something — a file or a directory.  Served
-        to remote browsers and local clients (VS Code windows) alike,
-        with the same resolution ``openFile`` applies.
+        would actually open something — a file or a directory — with
+        the same resolution ``openFile`` applies.
 
         Args:
             cmd: The ``checkPaths`` command.
@@ -1224,10 +1357,8 @@ class ServerApi:
         """Report the ``/ask`` agent's task update to a task-info panel.
 
         The remote webapp's task-info panel (docked on desktop, a
-        drawer on mobile) and the VS Code extension's chat editor
-        panels (editor-tabs mode, whose updates fill the secondary
-        sidebar's Task Info view) poll this command while the visible
-        tab's task runs: the info subpanel shows the
+        drawer on mobile) polls this command while the visible tab's
+        task runs: the info subpanel shows the
         :mod:`~kiss.agents.seas.ask.ask_sea` agent's short answer to
         what that task has done so far and its partial results.  The
         first poll once the task is a minute old runs the agent (as a
@@ -1247,10 +1378,9 @@ class ServerApi:
     async def get_cron_jobs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the scheduled cron jobs for its Schedule subpanel.
 
-        The right sidebar's "Schedule" subpanel (every surface: remote
-        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
-        this command.  The direct reply, to whichever endpoint (local
-        or remote) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
+        The right sidebar's "Schedule" subpanel polls this command.
+        The direct reply, to whichever endpoint (local or remote)
+        asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
         rows of :func:`kiss.server.sidebar_panels.cron_jobs_report`.
 
         Args:
@@ -1389,6 +1519,24 @@ class ServerApi:
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("%s reply failed", command, exc_info=True)
 
+    async def broadcast_machines(self) -> None:
+        """Send a fresh ``machines`` reply (pinged anew) to every connection.
+
+        Called by the backend when ``machines.json`` changed under the
+        daemon (a ``/machine add`` task or the CLI registered or removed
+        a machine), so every surface's MACHINES subpanel refreshes at
+        once -- and unfolds for a new machine -- instead of at its next
+        poll.  The reply's ``action`` is ``""`` as for a poll.
+        """
+        ip, port = await asyncio.to_thread(self._local_machine_address)
+        rows, checked_at = await asyncio.to_thread(
+            sidebar_panels.machines_report, ip, port, True
+        )
+        self._backend._printer.broadcast({
+            "type": "machines", "machines": rows, "checkedAt": checked_at,
+            "action": "", "error": "",
+        })
+
     async def machine_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Add or remove a machine for the MACHINES subpanel and send the fresh list.
 
@@ -1400,22 +1548,72 @@ class ServerApi:
         Args:
             cmd: The ``machineAction`` command (``action``: ``add`` or
                 ``remove``, ``name``, optional ``address`` and
-                ``password`` for ``add``).
+                ``machinePassword`` for ``add``; the machine's own
+                password travels under that name because the frame's
+                ``password`` is this daemon's credential).
             ctx: The transport context of the current call.
         """
         error = await asyncio.to_thread(
             sidebar_panels.machine_action,
             str(cmd["action"]), str(cmd["name"]), str(cmd.get("address") or ""),
-            str(cmd.get("password") or ""),
+            str(cmd.get("machinePassword") or ""),
         )
         await self._reply_machines(ctx.endpoint, True, str(cmd["action"]), error, "machineAction")
+
+    async def get_machine_work_dirs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the working directories of a registered machine.
+
+        The chat header's WORKDIR drop-down of a tab bound to a machine
+        lists that machine's directories: its daemon's working
+        directory and the directories selected there so far.  The
+        direct reply is ``{"type": "machineWorkDirs", "machine":
+        <name>, "workDir": <dir>, "recentWorkDirs": [{"path", "ts"},
+        ...], "error": ""}`` from
+        :func:`kiss.server.sidebar_panels.machine_work_dirs` (an
+        unreachable or unknown machine answers with ``error``).
+
+        Args:
+            cmd: The ``getMachineWorkDirs`` command (``machine``).
+            ctx: The transport context of the current call.
+        """
+        reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, str(cmd["machine"]))
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "machineWorkDirs", **reply}, "getMachineWorkDirs"
+        )
+
+    async def set_work_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Make ``workDir`` the global working directory -- here or on a machine.
+
+        Without ``machine`` the backend adopts the directory
+        (``_cmd_set_work_dir``: persisted, ``workDirChanged``
+        broadcast).  With ``machine`` (the chat header's pick for a tab
+        bound to that machine) the directory is one of the machine's:
+        its daemon adopts it, and the direct reply is the machine's
+        fresh ``machineWorkDirs`` (as for ``getMachineWorkDirs``, with
+        ``set: true``; ``error`` names a machine that could not be
+        reached) -- this daemon's own working directory is untouched.
+
+        Args:
+            cmd: The ``setWorkDir`` command (``workDir``; optional
+                ``machine``).
+            ctx: The transport context of the current call.
+        """
+        machine = str(cmd.get("machine") or "")
+        if not machine:
+            await self.forward(cmd, ctx)
+            return
+        reply = await asyncio.to_thread(
+            sidebar_panels.machine_work_dirs, machine, str(cmd["workDir"]),
+        )
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "machineWorkDirs", **reply, "set": True}, "setWorkDir"
+        )
 
     async def get_spend_report(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the task history's spend for its Spend subpanel.
 
-        The right sidebar's "Spend" subpanel (every surface: remote
-        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
-        this command for its all-time totals, daily cost heatmap and
+        The right sidebar's "Spend" subpanel polls this command for its
+        all-time totals, daily cost heatmap and
         cost-by-model bars.  The direct reply is ``{"type":
         "spendReport", ...}`` carrying the ``total``, ``days``,
         ``totalByModel`` and ``daysByModel`` fields of
@@ -1433,8 +1631,8 @@ class ServerApi:
     async def get_recommendations(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the suggested tasks for its Recommendations subpanel.
 
-        The right sidebar's "Recommendations" subpanel (every surface)
-        polls this command for the five tasks the last
+        The right sidebar's "Recommendations" subpanel polls this
+        command for the five tasks the last
         ``/recommendations`` run suggested.  The direct reply is
         ``{"type": "recommendations", "generatedAt": ms, "tasks":
         [...]}`` from :func:`kiss.server.sidebar_panels.recommendations_report`.
@@ -1451,29 +1649,28 @@ class ServerApi:
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """List a directory for the remote webapp's Explorer view.
 
-        The remote webapp's task-history panel carries a VS Code-like
-        activity bar whose Explorer view browses the workspace: opening
+        The remote webapp's task-history panel carries an activity bar
+        whose Explorer view browses the workspace: opening
         the view lists the work dir, expanding a folder lists that
         folder, and clicking a file goes through ``openFile``.  The
         reply is a ``dirListing`` event sent to the requester only.
-        Local clients (VS Code windows) have a real Explorer, so a
-        locally delivered ``listDir`` is dropped as a defensive no-op,
-        exactly like ``saveFile``.
+
+        With ``machine`` (the Explorer, folder picker and the pick
+        check of the chat header's WORKDIR drop-down of a tab bound to
+        that machine) the listing is the machine's, from its daemon:
+        :meth:`dispatch` forwards it before this handler runs
+        (:data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`).
 
         Args:
             cmd: The ``listDir`` command (optional ``path``,
-                ``workDir``, ``tabId``, ``token``).
+                ``workDir``, ``tabId``, ``token``, ``machine``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_list_dir(cmd, ctx.endpoint)
 
     # The remote webapp's terminal tabs (``kiss.server.terminal_tab``):
     # a shell on the daemon's machine, owned by the connection that
-    # opened it.  VS Code windows have their own integrated terminal,
-    # so a locally delivered terminal command is dropped like
-    # ``listDir``.  The ``tab_id`` is the terminal tab, never a chat.
+    # opened it.  The ``tab_id`` is the terminal tab, never a chat.
 
     async def terminal_open(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Start (or re-attach) the shell of a terminal tab.
@@ -1483,13 +1680,11 @@ class ServerApi:
                 ``cols``, ``rows``, ``workDir``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         # Off the event loop: opening forks the shell (a fork of the
         # whole daemon process), during which nothing else would be
         # served — no fan-out to any connection, no other dispatch.
         await asyncio.to_thread(
-            self._backend._vscode_server.terminals.open,
+            self._backend._agent_server.terminals.open,
             str(cmd["tab_id"]),
             ctx.conn_state["conn_id"],
             self._backend._cmd_work_dir(cmd),
@@ -1504,9 +1699,7 @@ class ServerApi:
             cmd: The ``terminalInput`` command (``tab_id``, ``data``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
-        self._backend._vscode_server.terminals.input(
+        self._backend._agent_server.terminals.input(
             str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["data"],
         )
 
@@ -1518,9 +1711,7 @@ class ServerApi:
                 ``rows``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
-        self._backend._vscode_server.terminals.resize(
+        self._backend._agent_server.terminals.resize(
             str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["cols"], cmd["rows"],
         )
 
@@ -1531,9 +1722,7 @@ class ServerApi:
             cmd: The ``terminalClose`` command (``tab_id``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
-        self._backend._vscode_server.terminals.close(
+        self._backend._agent_server.terminals.close(
             str(cmd["tab_id"]), ctx.conn_state["conn_id"],
         )
 
@@ -1543,16 +1732,13 @@ class ServerApi:
         The activity bar's Source Control view lists the repository's
         staged, unstaged and untracked changes (VS Code's "Changes"
         section) from this command's ``gitStatus`` reply, sent to the
-        requester only.  A locally delivered ``gitStatus`` is dropped as a
-        defensive no-op, exactly like ``saveFile``.
+        requester only.
 
         Args:
             cmd: The ``gitStatus`` command (optional ``workDir``,
                 ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_git_status(cmd, ctx.endpoint)
 
     async def git_log(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1561,16 +1747,13 @@ class ServerApi:
         The activity bar's Source Control view draws a commit graph
         (VS Code's "Graph" section) with each commit's modified files
         from this command's ``gitLog`` reply, sent to the requester
-        only.  A locally delivered ``gitLog`` is dropped as a defensive
-        no-op, exactly like ``saveFile``.
+        only.
 
         Args:
             cmd: The ``gitLog`` command (optional ``workDir``,
                 ``tabId``, ``token``, ``limit``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_git_log(cmd, ctx.endpoint)
 
     async def git_show(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1579,16 +1762,12 @@ class ServerApi:
         The remote Source Control graph's commit context menu ("Open
         Changes", "Open File", "Compare with...") reads its text from
         this command's ``gitShow`` reply, sent to the requester only.
-        A locally delivered ``gitShow`` is dropped as a defensive no-op,
-        exactly like ``gitLog``.
 
         Args:
             cmd: The ``gitShow`` command (``sha``, optional ``path``,
                 ``base``, ``mode``, ``workDir``, ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_git_show(cmd, ctx.endpoint)
 
     async def git_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1597,9 +1776,7 @@ class ServerApi:
         "Checkout (Detached)", "Create Branch...", "Create Tag..." and
         "Cherry Pick" of the remote Source Control graph's commit menu
         each send one ``gitAction``; the outcome comes back as a
-        ``gitActionResult`` to the requester only.  A locally delivered
-        ``gitAction`` is dropped as a defensive no-op (VS Code windows
-        run the real Git extension).
+        ``gitActionResult`` to the requester only.
 
         Args:
             cmd: The ``gitAction`` command (``action``, ``sha``,
@@ -1607,8 +1784,6 @@ class ServerApi:
                 ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_git_action(cmd, ctx.endpoint)
 
     async def fs_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1617,9 +1792,7 @@ class ServerApi:
         New File..., New Folder..., Rename..., Delete, Paste, Find in
         Folder... and Compare Selected of the remote Explorer's context
         menu each send one ``fsAction``; the outcome comes back as an
-        ``fsResult`` to the requester only.  A locally delivered
-        ``fsAction`` is dropped as a defensive no-op (VS Code windows
-        have the real Explorer).
+        ``fsResult`` to the requester only.
 
         Args:
             cmd: The ``fsAction`` command (``action``, ``path``,
@@ -1627,22 +1800,16 @@ class ServerApi:
                 ``workDir``, ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_local:
-            return
         await self._backend._handle_fs_action(cmd, ctx.endpoint)
 
     async def share_chat(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Write a chat webview's transcript as a standalone HTML page.
+        """Write a chat page's transcript as a standalone HTML page.
 
-        The chat webview serialized the highlighted tab's static task
+        The chat page serialized the highlighted tab's static task
         panel and event panels (its ``shareChat`` command carries the
         markup) and asks the daemon to save them as
         ``reports/chat-<title-slug>-<chatId>.html`` under the tab's work
-        dir.  Both
-        transports take this path — the VS Code extension host
-        forwards the webview's ``shareChat``, the remote
-        webapp sends it over WSS — so the page is built in exactly one
-        place.  The reply is a direct ``share_done`` event to the
+        dir.  The reply is a direct ``share_done`` event to the
         requester.
 
         Args:
@@ -1657,11 +1824,11 @@ class ServerApi:
     ) -> None:
         """Send the requester every task of a chat for a share export.
 
-        The chat webview's share button exports the whole chat, but
+        The chat page's share button exports the whole chat, but
         after a reload its DOM holds only one task's transcript — the
         daemon's session replay repaints a single task.  This command
         returns the persisted transcripts of ALL of the chat's tasks
-        (oldest first) as a direct ``share_tasks`` reply; the webview
+        (oldest first) as a direct ``share_tasks`` reply; the page
         replays them into detached containers, splices in the live DOM
         for the on-screen task, and sends the assembled page back via
         ``shareChat``.
@@ -1678,15 +1845,12 @@ class ServerApi:
     async def voice_transcribe(
         self, cmd: dict[str, Any], ctx: ApiContext,
     ) -> None:
-        """Transcribe a remote-web client's post-wake utterance.
+        """Transcribe a browser's post-wake utterance.
 
-        A remote-web (browser mode) client heard the "Hey Sorcar" wake
-        word and captured the utterance that followed in the page (VS
-        Code webviews never send this: their speech is captured and
-        translated by the extension host's local listener).  The audio
-        is translated with the same gpt-audio call the local listener
-        uses and answered with the ``voiceSpeech`` message
-        ``voice.js`` already handles.
+        The chat page heard the "Hey Sorcar" wake word and captured the
+        utterance that followed.  The audio is translated by gpt-audio
+        (:func:`kiss.server.speech.transcribe_pcm`) and answered with
+        the ``voiceSpeech`` message ``voice.js`` handles.
 
         Args:
             cmd: The ``voiceTranscribe`` command carrying the audio.
@@ -1745,10 +1909,10 @@ class ServerApi:
     async def snooze_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Snooze the update notification for 24 hours.
 
-        Services the "Remind me later" action of the update toast in
-        both frontends: records the snooze in the update-check cache
-        shared with the VS Code extension and rebroadcasts the
-        ``update_available`` state so every client's toast disappears.
+        Services the "Remind me later" action of the update toast:
+        records the snooze in the update-check cache and rebroadcasts
+        the ``update_available`` state so every client's toast
+        disappears.
 
         Args:
             cmd: The ``snoozeUpdate`` command; its optional ``latest``
@@ -1764,11 +1928,9 @@ class ServerApi:
     async def tips_opt_out(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Persist, or forget, the "Don't show tips again" choice.
 
-        Services the tips window's checkbox on both surfaces (the VS
-        Code host forwards the webview's ``tipsOptOut`` here).  The
-        choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` that
-        ``tips_data`` reads, so a choice made on one surface holds on
-        every surface.  ``optOut``
+        Services the tips window's checkbox.  The choice is the marker
+        file ``$KISS_HOME/TIPS_DISABLED`` that ``tips_data`` reads, so
+        a choice made in one browser holds in every browser.  ``optOut``
         ``false`` (checkbox unticked again) removes the marker; absent
         or any other value opts out.
 
@@ -1802,8 +1964,8 @@ class ServerApi:
 
         A connection's commands are dispatched one after another, so
         the ``pong`` reaches the sender only once every command it sent
-        before the ``ping`` has been taken.  The remote webapp's
-        WebSocket shim (``kiss.server.web_server._WS_SHIM_JS``) relies
+        before the ``ping`` has been taken.  The chat page's
+        transport (``media/transport.js``) relies
         on that: after a (re)connect it flushes the commands queued
         while the socket was down, sends ``ping`` and keeps the batch
         until ``pong`` arrives, re-sending it on the next connection if
@@ -1821,6 +1983,18 @@ class ServerApi:
         await self._backend._endpoint_send(
             ctx.endpoint, json.dumps({"type": "pong", "machine": local_machine_name()}),
         )
+
+    async def auth(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Discard an ``auth`` frame on an already-authenticated connection.
+
+        The real handshake is :meth:`authenticate`, run before the
+        dispatch loop starts; a repeated frame (a client re-sending its
+        queued batch after a reconnect) carries nothing to act on.
+
+        Args:
+            cmd: The ``auth`` command (unused).
+            ctx: The transport context of the current call (unused).
+        """
 
     async def server_reset(
         self, cmd: dict[str, Any], ctx: ApiContext,

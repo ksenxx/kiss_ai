@@ -176,7 +176,7 @@ class TestF5ConcurrentFlushBroadcastsOnce(_Base):
         """A warning written mid-broadcast must survive to the next flush.
 
         Mirrors the real interleaving: ``_release_worktree`` (or the
-        VS Code ``task_runner``) sets a NEW warning while a starting
+        daemon's ``task_runner``) sets a NEW warning while a starting
         ``run()`` is still broadcasting the previous one.  The old
         code cleared the attribute *after* the broadcast, wiping the
         new warning.
@@ -238,7 +238,7 @@ class TestF6CommitToastIdIsPerInvocation(_Base):
         self.assertEqual(
             generating.get("id"), done.get("id"),
             "'generating' and 'committed' toasts must share one id so "
-            "the webview replaces the sticky toast in place — a "
+            "the chat page replaces the sticky toast in place — a "
             "concurrent auto-commit on the same instance must not be "
             "able to split them",
         )

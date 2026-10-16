@@ -47,16 +47,12 @@ def invalid_auth_server() -> Iterator[RecordingServer]:
 class TestTokenPersistence:
     """Tests for _load_token, _save_token, _clear_token."""
 
-    def test_load_corrupt_json(self) -> None:
+    @pytest.mark.parametrize("content", ["{bad json!!", '"just a string"'])
+    def test_load_unusable_token_file(self, content: str) -> None:
+        """Corrupt or non-object JSON in the token file reads as no token."""
         path = _token_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{bad json!!")
-        assert _load_token() is None
-
-    def test_load_non_dict_json(self) -> None:
-        path = _token_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('"just a string"')
+        path.write_text(content)
         assert _load_token() is None
 
 
@@ -88,22 +84,14 @@ class TestWorkspaceSlackAgent:
         assert _load_token(workspace=ws) is None
         assert _load_token() == "xoxb-keep-default"
 
-    def test_cli_workspace_flag_in_usage(self) -> None:
+    def test_cli_workspace_flag_in_usage(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """main() with no args shows --workspace in usage."""
-        original_argv = sys.argv
-        sys.argv = ["kiss-slack"]
-        import io
-        from contextlib import redirect_stdout
-
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf):
-                main()
-        except SystemExit:
-            pass
-        finally:
-            sys.argv = original_argv
-        assert "--workspace" in buf.getvalue()
+        monkeypatch.setattr(sys, "argv", ["kiss-slack"])
+        with pytest.raises(SystemExit):
+            main()
+        assert "--workspace" in capsys.readouterr().out
 
 
 class TestListWorkspaces:
@@ -150,12 +138,8 @@ class TestListWorkspaces:
         monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
         ws = "test-ws-cli-list"
         _save_token("xoxb-cli-list-test", workspace=ws)
-        original_argv = sys.argv
-        sys.argv = ["kiss-slack", "--list-workspaces"]
-        try:
-            main()
-        finally:
-            sys.argv = original_argv
+        monkeypatch.setattr(sys, "argv", ["kiss-slack", "--list-workspaces"])
+        main()
         out = capsys.readouterr().out
         assert ws in out
         assert {"method": "POST", "path": "/api/auth.test"} in invalid_auth_server.requests
@@ -171,32 +155,27 @@ class TestDeleteWorkspace:
         assert exc_info.value.code == 1
 
     def test_cli_delete_workspace_flag(
-        self, capsys: pytest.CaptureFixture[str], _isolated_slack_dir: Path
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        _isolated_slack_dir: Path,
     ) -> None:
         """main() with --delete-workspace removes the workspace."""
         ws = "test-ws-cli-del"
         _save_token("xoxb-cli-del", workspace=ws)
         assert (_isolated_slack_dir / ws).is_dir()
-        original_argv = sys.argv
-        sys.argv = ["kiss-slack", "--delete-workspace", ws]
-        try:
-            main()
-        finally:
-            sys.argv = original_argv
+        monkeypatch.setattr(sys, "argv", ["kiss-slack", "--delete-workspace", ws])
+        main()
         assert not (_isolated_slack_dir / ws).exists()
         out = capsys.readouterr().out
         assert "deleted" in out.lower()
 
-    def test_cli_delete_workspace_missing_arg(self) -> None:
+    def test_cli_delete_workspace_missing_arg(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """main() with --delete-workspace but no value exits with code 1."""
-        original_argv = sys.argv
-        sys.argv = ["kiss-slack", "--delete-workspace"]
-        try:
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
-        finally:
-            sys.argv = original_argv
+        monkeypatch.setattr(sys, "argv", ["kiss-slack", "--delete-workspace"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
 
 
 _SLACK_TOOL_ERROR_CASES = [

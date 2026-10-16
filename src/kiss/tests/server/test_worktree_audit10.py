@@ -29,7 +29,7 @@ import pytest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 @pytest.fixture(autouse=True)
@@ -402,9 +402,9 @@ class TestBug51DiffFailureSilentDiscard:
 
         (wt_dir / "uncommitted.txt").write_text("wip")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51a-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -430,9 +430,9 @@ class TestBug51DiffFailureSilentDiscard:
         wt_dir, baseline = _create_worktree_branch(repo, branch)
         _add_agent_commit(wt_dir, "agent.txt", "work")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51b-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -450,9 +450,9 @@ class TestBug51DiffFailureSilentDiscard:
         branch = "kiss/wt-bug51c-1"
         wt_dir, baseline = _create_worktree_branch(repo, branch)
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51c-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -483,9 +483,9 @@ class TestBug51DiffFailureSilentDiscard:
         GitWorktreeOps.prune(repo)
 
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51d-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",

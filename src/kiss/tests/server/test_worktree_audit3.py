@@ -77,9 +77,9 @@ def _make_repo(path: Path) -> Path:
 
 
 def _make_server(repo: Path) -> tuple:
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict] = []
 
     def capture(event: dict) -> None:
@@ -109,7 +109,7 @@ class TestBug8Fix:
         """Only agent-modified files appear, not unrelated files from main."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)
@@ -145,7 +145,7 @@ class TestBug8Fix:
         """Sanity check: agent-modified files are still reported correctly."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)
@@ -179,7 +179,7 @@ class TestBug9Fix:
         """_check_merge_conflict must not create any commits."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)
@@ -214,7 +214,7 @@ class TestBug9Fix:
         """_present_pending_worktree must not auto-commit via conflict check."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)
@@ -242,7 +242,7 @@ class TestBug9Fix:
         """Conflict is reported when the same file is changed on both sides."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)
@@ -270,7 +270,7 @@ class TestBug9Fix:
         """No conflict when original and worktree modify different files."""
 
         server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _attach_worktree_state(agent)
 
         _create_worktree(agent, self.repo)

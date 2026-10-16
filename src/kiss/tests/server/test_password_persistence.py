@@ -4,7 +4,7 @@
 # add your name here
 """Integration tests for client-side remote password persistence.
 
-The remote web server embeds a small JavaScript shim (`_WS_SHIM_JS`) in
+The webapp page loads a small JavaScript transport (`media/transport.js`) in
 the HTML body delivered to browser clients.  The shim is responsible
 for:
 
@@ -43,13 +43,15 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
-    _WS_SHIM_JS,
+    MEDIA_DIR,
     RemoteAccessServer,
     _build_html,
 )
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
+
+_TRANSPORT_JS = (MEDIA_DIR / "transport.js").read_text(encoding="utf-8")
 
 
 class TestShimUsesLocalStorageForPassword(unittest.TestCase):
@@ -59,7 +61,7 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
         """The auth on-open path reads the password from localStorage."""
         self.assertIn(
             "localStorage.getItem('sorcar-remote-pwd')",
-            _WS_SHIM_JS,
+            _TRANSPORT_JS,
             "Shim must read the cached remote password from localStorage so "
             "the password survives tab close / browser restart.",
         )
@@ -68,7 +70,7 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
         """The auth_required handler persists the password to localStorage."""
         self.assertIn(
             "localStorage.setItem('sorcar-remote-pwd', pwd)",
-            _WS_SHIM_JS,
+            _TRANSPORT_JS,
             "Shim must write the user-provided password to localStorage so "
             "subsequent visits skip the prompt.",
         )
@@ -77,14 +79,14 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
         """Stale cached password is removed when the server rejects it."""
         self.assertIn(
             "localStorage.removeItem('sorcar-remote-pwd')",
-            _WS_SHIM_JS,
+            _TRANSPORT_JS,
             "Shim must clear the cached password on auth_required so a stale "
             "wrong password does not silently retry forever.",
         )
 
     def test_password_never_uses_session_storage(self) -> None:
         """The password key must not appear in any sessionStorage call."""
-        for line in _WS_SHIM_JS.splitlines():
+        for line in _TRANSPORT_JS.splitlines():
             if "sorcar-remote-pwd" in line:
                 self.assertNotIn(
                     "sessionStorage",
@@ -94,27 +96,26 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
                 )
 
     def test_state_still_uses_session_storage(self) -> None:
-        """Per-tab webview state must stay in sessionStorage."""
+        """Per-tab chat page state must stay in sessionStorage."""
         self.assertIn(
             "sessionStorage.getItem('sorcar-state')",
-            _WS_SHIM_JS,
-            "Webview state should remain per-tab (sessionStorage), not "
+            _TRANSPORT_JS,
+            "Chat page state should remain per-tab (sessionStorage), not "
             "shared across tabs.",
         )
         self.assertIn(
             "sessionStorage.setItem('sorcar-state', JSON.stringify(s))",
-            _WS_SHIM_JS,
+            _TRANSPORT_JS,
         )
 
 
 class TestShimEmbeddedInHtml(unittest.TestCase):
-    """The HTML served to browser clients must embed the updated shim."""
+    """The HTML served to browser clients must load the transport script."""
 
-    def test_html_contains_local_storage_password_read(self) -> None:
-        """_build_html() output includes the localStorage-based shim."""
+    def test_html_loads_transport_script(self) -> None:
+        """_build_html() output references the cache-busted transport.js."""
         html = _build_html()
-        self.assertIn("localStorage.getItem('sorcar-remote-pwd')", html)
-        self.assertIn("localStorage.setItem('sorcar-remote-pwd', pwd)", html)
+        self.assertRegex(html, r'<script src="/media/transport\.js\?v=[0-9a-f]+"></script>')
 
 
 class TestCustomAuthModal(unittest.TestCase):
@@ -144,8 +145,8 @@ class TestCustomAuthModal(unittest.TestCase):
 
     def test_shim_invokes_custom_auth_modal(self) -> None:
         """The auth_required handler must drive ``_showAuthModal``."""
-        self.assertIn("_showAuthModal", _WS_SHIM_JS)
-        self.assertRegex(_WS_SHIM_JS, r"_showAuthModal\(\)\.then\(")
+        self.assertIn("_showAuthModal", _TRANSPORT_JS)
+        self.assertRegex(_TRANSPORT_JS, r"_showAuthModal\(\)\.then\(")
 
     def test_shim_keeps_prompt_only_as_fallback(self) -> None:
         """``prompt()`` remains only as the modal-absent fallback path.
@@ -156,14 +157,14 @@ class TestCustomAuthModal(unittest.TestCase):
         verifying that every occurrence of ``prompt(`` in the shim
         appears after the modal-presence guard.
         """
-        idx_guard = _WS_SHIM_JS.find("if (!modal || !input")
+        idx_guard = _TRANSPORT_JS.find("if (!modal || !input")
         self.assertGreater(
             idx_guard, -1,
             "Shim must contain a modal-presence guard before falling "
             "back to prompt().",
         )
         import re
-        for match in re.finditer(r"""prompt\(['"]""", _WS_SHIM_JS):
+        for match in re.finditer(r"""prompt\(['"]""", _TRANSPORT_JS):
             self.assertGreater(
                 match.start(), idx_guard,
                 "prompt() may only be invoked as the fallback path "
@@ -180,7 +181,9 @@ class TestCachedPasswordReauthenticates(IsolatedAsyncioTestCase):
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": "correct-horse-battery-staple"})
+        save_config(
+            {"remote_password": "correct-horse-battery-staple"},
+        )
 
         self._server = RemoteAccessServer(
             host="127.0.0.1",
@@ -203,6 +206,7 @@ class TestCachedPasswordReauthenticates(IsolatedAsyncioTestCase):
         return await connect(
             f"wss://127.0.0.1:{self._port}/ws",
             ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         )
 
     async def test_cached_password_authenticates_on_revisit(self) -> None:

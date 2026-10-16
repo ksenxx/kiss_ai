@@ -76,10 +76,6 @@ def claude_config_dir() -> Path:
 def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
     """Read *path* and split its YAML frontmatter from the Markdown body.
 
-    Shared parsing pipeline for skill (``SKILL.md``) and custom-command
-    (``*.md``) definition files, so the two discovery paths can never
-    drift.
-
     Args:
         path: The Markdown file to read and split.
 
@@ -268,7 +264,7 @@ def load_permission_rules(key: str) -> dict[str, str]:
         order.  Empty when the config or key is missing/malformed.
     """
     try:
-        from kiss.core.vscode_config import load_config
+        from kiss.core.user_config import load_config
 
         raw = load_config().get(key)
     except Exception:

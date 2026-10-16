@@ -43,9 +43,9 @@ from typing import Any
 import pytest
 
 from kiss.server.file_index import FileIndexRegistry, FileView
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
-_Workspace = tuple[str, VSCodeServer, list[dict[str, Any]]]
+_Workspace = tuple[str, AgentServer, list[dict[str, Any]]]
 
 
 def _wait_for_files_event(
@@ -133,7 +133,7 @@ def workspace(tmp_path: Path) -> Iterator[_Workspace]:
     home = tmp_path / "home"
     home.mkdir()
 
-    server = VSCodeServer()
+    server = AgentServer()
     server.work_dir = str(wd)
     server._file_index.stop()
     server._file_index = FileIndexRegistry(home=str(home), cache_dir=tmp_path / "cache")

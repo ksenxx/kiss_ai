@@ -12,7 +12,7 @@ task, keyed by the sub-agent's own ``task_history`` row id, with
 ``parent_task_id`` set (which makes ``is_subagent`` True) and
 ``chat_id`` mirroring the parent's chat (sub-agents share the
 parent's session).  This makes the sub-agent discoverable to
-:meth:`VSCodeServer._attach_viewer_to_running_chat` via the ``task_id``
+:meth:`AgentServer._attach_viewer_to_running_chat` via the ``task_id``
 disambiguator, so clicking the sub-agent row in the history sidebar
 subscribes the freshly-opened tab to the live event stream without
 stealing the parent's tab.
@@ -30,7 +30,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -46,7 +46,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         agent_state.agent_states.clear()
 
     def test_task_id_disambiguates_sub_from_parent(self) -> None:
-        server = VSCodeServer()
+        server = AgentServer()
         subs: list[tuple[Any, str]] = []
 
         def _stub_subscribe(task_id: Any, tab_id: str) -> None:
@@ -95,7 +95,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         parent's live stream — that would land sub-agent-styled tab
         events into the parent's chat.
         """
-        server = VSCodeServer()
+        server = AgentServer()
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
             lambda task_id, tab_id: subs.append((task_id, tab_id))
@@ -128,7 +128,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         state in the same chat — preserving the existing multi-view
         behavior for chat resumes.
         """
-        server = VSCodeServer()
+        server = AgentServer()
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
             lambda task_id, tab_id: subs.append((task_id, tab_id))
@@ -193,7 +193,7 @@ class TestReplaySessionSubscribesRunningSubagent:
             task_id=sub_id,
         )
 
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         subs: list[tuple[Any, str]] = []

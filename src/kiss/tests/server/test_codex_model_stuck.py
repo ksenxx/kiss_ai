@@ -34,12 +34,12 @@ from kiss.core.models import codex_model as codex_module
 class TestCodexModelStuckBug:
     """Codex model failure must not spin forever in the RelentlessAgent loop."""
 
-    def test_codex_model_does_not_loop_in_vscode_server(self) -> None:
+    def test_codex_model_does_not_loop_in_agent_server(self) -> None:
         """End-to-end: submitting a task with codex/gpt-5.5 when the CLI is
         missing must broadcast a result event promptly, not hang."""
         import kiss.agents.sorcar.persistence as th
         from kiss.server import agent_state
-        from kiss.server.server import VSCodeServer
+        from kiss.server.server import AgentServer
 
         saved_path = os.environ.get("PATH", "")
         saved_candidates = codex_module._UI_CANDIDATE_PATHS
@@ -60,7 +60,7 @@ class TestCodexModelStuckBug:
             th._db_conn = None
 
             os.environ.setdefault("KISS_WORKDIR", tmpdir)
-            server = VSCodeServer()
+            server = AgentServer()
 
             events: list[dict[str, Any]] = []
             lock = threading.Lock()
@@ -108,7 +108,7 @@ class TestCodexModelStuckBug:
                 ]
             assert len(result_events) >= 1, (
                 "Expected at least one result event so the error is visible "
-                "in the chat webview. Events: "
+                "in the chat page. Events: "
                 + str([e.get("type") for e in events])
             )
             last_result = result_events[-1]

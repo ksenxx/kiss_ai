@@ -8,7 +8,7 @@ Persisted chat streams store one ``events`` row per streamed token, so
 a long task accumulates tens of thousands of tiny ``thinking_delta`` /
 ``text_delta`` rows.  The server must coalesce consecutive same-type
 delta events (concatenating their ``text``) before shipping the replay
-payload to the webview — in ``task_events`` (history click / tab
+payload to the chat page — in ``task_events`` (history click / tab
 reattach / persisted sub-agent tabs) and ``adjacent_task_events``
 (prev/next navigation).  Rendering is identical because the frontend
 replay loop simply appends each delta's ``text``.
@@ -32,14 +32,14 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import WebPrinter
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 

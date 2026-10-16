@@ -4,7 +4,7 @@
 # add your name here
 """Integration test: a stop must not zero the task's usage metrics.
 
-The VS Code daemon stops a task by injecting ``KeyboardInterrupt``
+The ``kiss-web`` daemon stops a task by injecting ``KeyboardInterrupt``
 into the agent thread. ``RelentlessAgent.perform_task`` folded the live
 executor session's spend into ``agent.budget_used`` /
 ``agent.total_tokens_used`` / ``agent.total_steps`` on
@@ -14,7 +14,7 @@ executor session's spend into ``agent.budget_used`` /
 ``_subtask_metrics`` then read zeros, and the "Task stopped by user"
 ``result`` event (and the persisted ``task_history`` row) reported
 ``$0.0000`` / 0 tokens for a task that had burned real money — the
-chat webview showed "Cost $0.00".
+chat page showed "Cost $0.00".
 
 This test drives a real :class:`RelentlessAgent` against a real
 ``ThreadingHTTPServer`` speaking the OpenAI chat-completions protocol.

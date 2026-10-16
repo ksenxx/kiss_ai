@@ -7,7 +7,7 @@
 Bug report: "when use_worktree is set true, but autocommit is false, it
 seems that a worktree branch is not getting created."
 
-These tests drive ``VSCodeServer._run_task_inner`` with a real git repo
+These tests drive ``AgentServer._run_task_inner`` with a real git repo
 and a stub agent (replaces the parent class' ``run`` with a deterministic
 implementation that calls the ``create_worktree`` tool like a real task
 would — not a mock).  Each test cleans up its temporary git repo and
@@ -42,7 +42,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, run_git
 
 
@@ -79,7 +79,7 @@ class _WorktreeBranchBase(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict] = []
 

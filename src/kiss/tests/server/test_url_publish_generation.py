@@ -69,7 +69,7 @@ class TestUrlPublishGeneration(_LiveServerCase):
             self.server._republish_urls()
             assert self.server._republish_task is not None
             self.server._active_url = NEW
-            await self.server._broadcast_remote_url(NEW, True)
+            await self.server._broadcast_remote_url(NEW)
             await self.server._republish_task
             urls = await self._remote_urls_within(ws, 1.0)
         self.assertEqual(urls, [NEW])

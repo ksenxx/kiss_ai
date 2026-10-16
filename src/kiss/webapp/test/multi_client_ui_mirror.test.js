@@ -1,0 +1,122 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// Two clients (two browser windows) showing the same
+// chat must show the same blocking UI.  Tab ids are minted per client,
+// so the daemon mirrors every ask-user event: the owner tab gets the
+// original and each other tab gets a copy stamped with ITS OWN tab id
+// plus `mirrorOf`.  These tests feed two independent pages exactly
+// that pair of copies and check both windows open — and close — the UI
+// together.
+
+'use strict';
+
+const assert = require('assert');
+const harness = require('./simplify2_harness');
+
+function makePage() {
+  const {win, posted} = harness.makePage({beforeScripts: harness.stubRaf});
+  return {win, posted, tabId: win._testApi.getActiveTabId()};
+}
+
+// The daemon's JsonPrinter.broadcast_tab_ui: one copy per tab showing
+// the UI, each stamped with that tab's own id.
+function mirror(event, clients) {
+  const owner = clients[0];
+  clients.forEach(client => {
+    const copy = Object.assign({}, event, {tabId: client.tabId});
+    if (client !== owner) copy.mirrorOf = owner.tabId;
+    client.win.dispatchEvent(
+      new client.win.MessageEvent('message', {data: copy}),
+    );
+  });
+}
+
+function actionBarLabel(client) {
+  const bar = client.win.document.querySelector('#input-area .wt-bar');
+  return bar ? bar.querySelector('.wt-label').textContent : '';
+}
+
+// The composer placeholder while the tab on screen has a question; '' when
+// there is none.
+function askText(client) {
+  const body = client.win.document.body;
+  if (!body.classList.contains('ask-answering')) return '';
+  return client.win.document.getElementById('task-input').placeholder;
+}
+
+function withTwoClients(body) {
+  const clients = [makePage(), makePage()];
+  try {
+    body(clients);
+  } finally {
+    clients.forEach(client => client.win.close());
+  }
+}
+
+function testAutocommitDoneAppendsResultOnBothClients() {
+  withTwoClients(clients => {
+    mirror(
+      {
+        type: 'autocommit_done',
+        success: true,
+        committed: true,
+        message: 'Committed: chore',
+      },
+      clients,
+    );
+    clients.forEach((client, i) => {
+      assert.strictEqual(
+        actionBarLabel(client),
+        '',
+        `client ${i} must not show any blocking auto-commit UI`,
+      );
+      const results = client.win.document.querySelectorAll('.wt-result-ok');
+      assert.ok(
+        Array.from(results).some(el =>
+          (el.textContent || '').includes('Committed: chore'),
+        ),
+        `client ${i} must append the auto-commit result`,
+      );
+    });
+  });
+  console.log('  ok - auto-commit result is appended on every client');
+}
+
+function testAskUserOpensAndClosesOnBothClients() {
+  withTwoClients(clients => {
+    mirror({type: 'askUser', question: 'Proceed?'}, clients);
+    clients.forEach((client, i) => {
+      assert.ok(
+        askText(client).includes('answer'),
+        `client ${i} must put the composer into answer mode`,
+      );
+    });
+
+    mirror({type: 'askUserDone'}, clients);
+    clients.forEach((client, i) => {
+      assert.strictEqual(
+        askText(client),
+        '',
+        `client ${i} must leave answer mode once answered`,
+      );
+    });
+  });
+  console.log('  ok - answer mode opens and closes on every client');
+}
+
+function runTests() {
+  testAutocommitDoneAppendsResultOnBothClients();
+  testAskUserOpensAndClosesOnBothClients();
+}
+
+try {
+  runTests();
+  console.log('2 passed, 0 failed');
+} catch (err) {
+  console.error(err && err.stack ? err.stack : String(err));
+  console.error('failed');
+  process.exit(1);
+}

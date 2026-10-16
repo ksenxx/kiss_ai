@@ -23,7 +23,7 @@ unstoppable), and its queued follow-up messages silently discarded.
 The refactored ``_run_task`` resolves its cleanup target by the run's
 own registry key (``cmd["_state_key"]``), so a state registered later
 for the same tab must come through completely untouched.  This test
-drives that scenario with real threads and the real ``VSCodeServer``
+drives that scenario with real threads and the real ``AgentServer``
 task pipeline: the first worker blocks inside its agent ``run``, a
 fresh state for the same tab id is registered and armed for a new
 task, then the stale worker is allowed to finish.  No mocks or patched
@@ -45,7 +45,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
@@ -76,7 +76,7 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bh8c-stale-")
         self.saved = redirect_persistence(self.tmpdir)
         init_repo(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

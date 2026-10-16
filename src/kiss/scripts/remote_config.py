@@ -30,9 +30,12 @@ Usage:
 The password in force afterwards is printed as
 ``SORCAR_PASSWORD=<password>``: the one given, else the one already
 configured, else a fresh random one (the web app only opens a public
-tunnel when a password is set).  It is stdlib-only and self-contained, so
-./sorcar-cloud ships this one file to the machine it configures rather
-than relying on the checkout there being new enough to have it.
+tunnel when a password is set).  It is stored as typed under
+``remote_password`` (the key ``kiss.core.remote_password`` uses; keep
+the two in step), 20 letters and digits when generated here.  It is
+stdlib-only and self-contained, so ./sorcar-cloud ships this one file to
+the machine it configures rather than relying on the checkout there
+being new enough to have it.
 """
 
 from __future__ import annotations
@@ -94,15 +97,15 @@ def _unlock(lock_file: IO[str]) -> None:
         lock_file.seek(0)
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
-PASSWORD_LENGTH = 12
-PASSWORD_ALPHABET = string.ascii_lowercase + string.digits
+PASSWORD_LENGTH = 20
+PASSWORD_ALPHABET = string.ascii_letters + string.digits
 
 
 def new_password() -> str:
     """Return a fresh random password for the web app.
 
     Returns:
-        A lower-case alphanumeric string.
+        A 20-character string of letters and digits.
     """
     return "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(PASSWORD_LENGTH))
 

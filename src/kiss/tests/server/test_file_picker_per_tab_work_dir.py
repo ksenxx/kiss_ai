@@ -4,7 +4,7 @@
 # add your name here
 """Integration test: the ``@``-mention file picker must list files
 relative to the *active chat tab's* ``work_dir``, not the daemon-wide
-``VSCodeServer.work_dir``.
+``AgentServer.work_dir``.
 
 Each chat tab in the extension/webapp UI can be pinned to its own
 working directory (set from background-task events the agent emits
@@ -14,7 +14,7 @@ index to that tab's directory so a user editing in tab A (rooted at
 ``/proj-a``) doesn't see suggestions from the unrelated tab B (rooted
 at ``/proj-b``).
 
-These tests drive ``VSCodeServer._handle_command`` directly with
+These tests drive ``AgentServer._handle_command`` directly with
 ``{"type": "getFiles", "workDir": ...}`` payloads and verify the
 emitted ``files`` event reflects the requested directory regardless
 of the daemon-wide ``work_dir``.  They also verify the
@@ -33,9 +33,9 @@ from typing import Any
 import pytest
 
 from kiss.server.file_index import FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
-_Picker = tuple[str, str, VSCodeServer, list[dict[str, Any]]]
+_Picker = tuple[str, str, AgentServer, list[dict[str, Any]]]
 
 
 def _wait_for_files_event(
@@ -86,7 +86,7 @@ def picker(tmp_path: Path) -> Iterator[_Picker]:
     home = tmp_path / "home"
     home.mkdir()
 
-    server = VSCodeServer()
+    server = AgentServer()
     server.work_dir = str(a)
     server._file_index.stop()
     server._file_index = FileIndexRegistry(home=str(home), cache_dir=tmp_path / "cache")

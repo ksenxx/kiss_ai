@@ -8,7 +8,7 @@ also reopens every persisted sub-agent fanned out by the parent's
 
 Spec
 ----
-1. When :meth:`VSCodeServer._replay_session` loads a PARENT
+1. When :meth:`AgentServer._replay_session` loads a PARENT
    ``task_history`` row (no ``extra.subagent`` blob) by ``task_id``,
    it broadcasts the parent's ``task_events`` (existing behavior) and
    then, for every persisted sub-agent row whose
@@ -38,13 +38,13 @@ import threading
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     thread = server._orphan_sweep_thread
     if thread is not None:
         thread.join(timeout=30)

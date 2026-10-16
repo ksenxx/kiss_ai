@@ -28,7 +28,6 @@ did not happen.
 import asyncio
 import json
 import shutil
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -86,7 +85,7 @@ class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
         endpoint = local_endpoint.read_endpoint(Path(self.server._local_endpoint_file))
         assert endpoint is not None, "daemon endpoint file missing"
         self.endpoint = endpoint
-        self.ssl_ctx: ssl.SSLContext = local_endpoint.client_ssl_context(endpoint)
+        self.ssl_ctx = local_endpoint.client_ssl_context(endpoint)
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()

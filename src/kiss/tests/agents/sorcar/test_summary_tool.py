@@ -8,11 +8,11 @@ Feature: the agent may periodically summarize what it did in the last
 6 steps by calling ``summary(description=...)``, as requested by the
 SYSTEM.md instructions.  The tool lives on the base ``SorcarAgent``
 toolset (so every subclass, including ``ChatSorcarAgent``, exposes
-it).  The tool itself does nothing (the chat webview reacts to the
+it).  The tool itself does nothing (the chat page reacts to the
 ``tool_call`` event by nesting and collapsing the preceding panels —
 covered by the jsdom suite in
-``src/kiss/agents/vscode/test/summaryToolCollapse.test.js``; outside
-a webview the call is a harmless no-op).
+``src/kiss/webapp/test/summaryToolCollapse.test.js``; outside
+the chat page the call is a harmless no-op).
 
 There is deliberately NO mechanical enforcement of the every-5-steps
 cadence: ``ChatSorcarAgent`` installs no ``tool_call_guard`` and no

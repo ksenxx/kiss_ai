@@ -112,14 +112,17 @@ class TestOpenAIGpt56LongContextPricing:
     def test_openrouter_long_context_scales_openrouter_prices(self):
         """OpenRouter passthrough scales its OWN listed prices, not OpenAI's.
 
-        openrouter/openai/gpt-5.6-sol lists $2/$10 per MTok on
-        openrouter.ai (vs $4/$20 direct), so its long-context tier is
-        2x/1.5x of $2/$10 — not the direct-OpenAI $8/$30 dollar rates.
+        The long-context tier is 2x input / 1.5x output / 2x cache of
+        whatever openrouter.ai lists for the model (the catalog refresh
+        of 2026-10-15 moved openrouter/openai/gpt-5.6-sol from $2/$10 to
+        $4/$20 with $0.40/$5 cache prices), never hard-coded OpenAI
+        dollar rates.
         """
         info = MODEL_INFO["openrouter/openai/gpt-5.6-sol"]
-        assert info.input_price_per_1M == pytest.approx(2.0)
+        assert (info.input_price_per_1M, info.output_price_per_1M) == (4.0, 20.0)
+        assert (info.cache_read_price_per_1M, info.cache_write_price_per_1M) == (0.4, 5.0)
         cost = calculate_cost("openrouter/openai/gpt-5.6-sol", 300_000, 10_000, 50_000, 40_000)
-        expected = (300_000 * 4.0 + 10_000 * 15.0 + 50_000 * 0.40 + 40_000 * 5.0) / 1e6
+        expected = (300_000 * 8.0 + 10_000 * 30.0 + 50_000 * 0.80 + 40_000 * 10.0) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt55_long_context_cache_writes_stay_free(self):
@@ -366,6 +369,26 @@ class TestDirectCatalogPricesMatchProviderPages:
         )
         assert calculate_cost("gemini-embedding-2", 1_000_000, 0) == pytest.approx(0.20)
 
+    def test_gemini_4_argon_cache_read_is_five_percent_of_input(self):
+        """ai.google.dev pricing 2026-10-13: Gemini 4 Argon is $2 / $10 with implicit
+        caching discounting cached input by 95% to $0.10 (0.05x), unlike the 0.1x the
+        generic Gemini rule derives; it has no >200K tier.  OpenRouter's
+        ``google/gemini-4-argon`` endpoints publish the same $0.10 read and a
+        $0.1875 cache write.
+        """
+        for name in ("gemini-4-argon", "openrouter/google/gemini-4-argon"):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == pytest.approx(2.0), name
+            assert info.output_price_per_1M == pytest.approx(10.0), name
+            assert info.cache_read_price_per_1M == pytest.approx(0.10), name
+            assert calculate_cost(name, 300_000, 0, 0, 0) == pytest.approx(0.60), name
+        assert calculate_cost("gemini-4-argon", 1_000, 2_000, 500_000, 0) == pytest.approx(
+            (1_000 * 2.0 + 2_000 * 10.0 + 500_000 * 0.10) / 1e6
+        )
+        assert calculate_cost("openrouter/google/gemini-4-argon", 0, 0, 0, 1_000_000) == (
+            pytest.approx(0.1875)
+        )
+
     def test_gpt_audio_mini_audio_tokens_priced_separately(self):
         """developers.openai.com pricing 2026-09: audio $10 / $20, text $0.60 / $2.40."""
         info = MODEL_INFO["gpt-audio-mini"]
@@ -606,16 +629,24 @@ class TestGptProLongContextTier:
 
 class TestGeminiProLatestLongContextTier:
     """OpenRouter's rolling ``~google/gemini-pro-latest`` carries the same
-    200K override as gemini-3.1-pro ($2/$0.20/$12 -> $4/$0.40/$18,
+    200K override as gemini-3.1-pro (2x input, 2x cache read, 1.5x output
+    of the listed $2/$0.10/$10 since the 2026-10-15 catalog refresh,
     https://openrouter.ai/api/v1/models), so the token-priced fallback must
     apply it too."""
 
     def test_uplift_above_200k(self):
         name = "openrouter/~google/gemini-pro-latest"
+        info = MODEL_INFO[name]
+        listed = (info.input_price_per_1M, info.cache_read_price_per_1M, info.output_price_per_1M)
+        assert listed == (
+            2.0,
+            0.1,
+            10.0,
+        )
         short = calculate_cost(name, 200_000, 10_000, 0)
-        assert short == pytest.approx((200_000 * 2.0 + 10_000 * 12.0) / 1e6)
+        assert short == pytest.approx((200_000 * 2.0 + 10_000 * 10.0) / 1e6)
         long = calculate_cost(name, 150_000, 10_000, 60_000)
-        expected = (150_000 * 4.0 + 60_000 * 0.40 + 10_000 * 18.0) / 1e6
+        expected = (150_000 * 4.0 + 60_000 * 0.20 + 10_000 * 15.0) / 1e6
         assert long == pytest.approx(expected)
 
 
@@ -641,13 +672,18 @@ class TestDirectOverrideWithReadPriceOnly:
 class TestTogetherCachedInputPrices:
     """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input``.
 
-    Kimi-K3 was $3.00/$15.00 with $0.30 cached input until 2026-09; Together
-    cut it to $2.70/$13.50/$0.27 (``/v1/models`` on 2026-10-01).
+    Kimi-K3 ran a $2.70/$13.50/$0.27 promo "valid until 10/11/2026";
+    ``/v1/models`` returned the $3.00/$15.00/$0.30 list price again on
+    2026-10-14, and the ``-high``/``-low``/``-max`` thinking aliases must
+    follow the base entry.
     """
 
     def test_together_models_carry_published_cache_read_prices(self):
         expected = {
-            "moonshotai/Kimi-K3": 0.27,
+            "moonshotai/Kimi-K3": 0.30,
+            "moonshotai/Kimi-K3-high": 0.30,
+            "moonshotai/Kimi-K3-low": 0.30,
+            "moonshotai/Kimi-K3-max": 0.30,
             "zai-org/GLM-5.3": 0.26,
             "zai-org/GLM-5.3-Flash": 0.03,
             "deepseek-ai/DeepSeek-V4-Pro-0813": 0.13,
@@ -658,8 +694,14 @@ class TestTogetherCachedInputPrices:
             assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(price), name
 
     def test_together_kimi_k3_cache_hit_is_not_billed_as_input(self):
-        cost = calculate_cost("moonshotai/Kimi-K3", 90, 20, 3_012, 0)
-        assert cost == pytest.approx((90 * 2.7 + 20 * 13.5 + 3_012 * 0.27) / 1e6)
+        for name in (
+            "moonshotai/Kimi-K3",
+            "moonshotai/Kimi-K3-high",
+            "moonshotai/Kimi-K3-low",
+            "moonshotai/Kimi-K3-max",
+        ):
+            cost = calculate_cost(name, 90, 20, 3_012, 0)
+            assert cost == pytest.approx((90 * 3.0 + 20 * 15.0 + 3_012 * 0.30) / 1e6), name
 
     def test_together_models_without_a_published_cache_price_bill_hits_as_input(self):
         info = MODEL_INFO["meta-llama/Llama-3.3-70B-Instruct-Turbo"]

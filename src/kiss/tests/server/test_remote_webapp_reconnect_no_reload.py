@@ -6,8 +6,8 @@
 
 """The remote webapp's WebSocket shim reconnects in place, never by reload.
 
-The Playwright tests drive the production ``_WS_SHIM_JS`` string
-verbatim inside a synthetic page (no vscode media assets) served from a
+The Playwright tests drive the production ``media/transport.js``
+verbatim inside a synthetic page (no other media assets) served from a
 routed origin: an instrumented ``WebSocket`` stub lets the tests take
 the shim through drop-then-reauth cycles and observe, from outside the
 page via Playwright's ``framenavigated`` events, that no reload happens
@@ -27,10 +27,11 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.server.web_server import _WS_SHIM_JS
+from kiss.server.web_server import MEDIA_DIR
 from kiss.tests.conftest import goto_retrying_network_change
 
 PAGE_URL = "https://shim.test/"
+_TRANSPORT_JS = (MEDIA_DIR / "transport.js").read_text(encoding="utf-8")
 
 
 def _build_test_page(offline_shell: bool = False) -> str:
@@ -149,7 +150,7 @@ def _build_test_page(offline_shell: bool = False) -> str:
     }};
   </script>
   <script>
-{_WS_SHIM_JS}
+{_TRANSPORT_JS}
   </script>
 </body>
 </html>
@@ -221,7 +222,7 @@ def test_reconnect_after_drop_resyncs_in_place(_browser):
             "shim must reconnect after onclose"
         )
         page.evaluate(
-            "window.acquireVsCodeApi().postMessage("
+            "window.acquireTransport().postMessage("
             "{type: 'saveConfig', config: {edited: 'during the outage'}})"
         )
         _authenticate_current_socket(page)

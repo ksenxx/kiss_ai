@@ -67,7 +67,7 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
     async def test_event_in_replay_gap_reaches_other_window(self) -> None:
         """A receives the live event emitted during B's scoped replay."""
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         printer = self.server._printer
         task_id, chat_id = th._add_task("Running task")
         th._append_chat_event(
@@ -167,7 +167,7 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
         reopen, i.e. before the commit re-subscribes the tab.
         """
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         printer = self.server._printer
         _, chat_id = th._add_task("Earlier task")
         persisted_id, _ = th._add_task("Running task", chat_id=chat_id)

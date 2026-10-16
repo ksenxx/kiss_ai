@@ -40,7 +40,7 @@ existing lock acquisitions so that the store edit,
 ``_config_lock`` + store-flock section (the former standalone wrapper
 that took those locks itself had no callers and was removed).  That
 locked helper is covered here (via ``load_api_keys``/``save_api_key``)
-and by the pre-existing ``test_vscode_config.py`` suites, which drive
+and by the pre-existing ``test_user_config.py`` suites, which drive
 every store-edit branch through it.
 """
 
@@ -63,13 +63,13 @@ from kiss.tests.conftest import posix_only
 pytestmark = posix_only("legacy shell-RC key migration sources ~/.bashrc via bash")
 
 _MIGRATOR = r"""
-from kiss.core.vscode_config import load_api_keys
+from kiss.core.user_config import load_api_keys
 load_api_keys()
 """
 
 _DELETER = r"""
 import os, sys, time
-from kiss.core.vscode_config import save_api_key
+from kiss.core.user_config import save_api_key
 sentinel = sys.argv[1]
 deadline = time.time() + 20
 while not os.path.exists(sentinel):

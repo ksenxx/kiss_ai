@@ -172,26 +172,20 @@ class TestHasBotReply:
 class TestCLIOneShotMode:
     """Tests for CLI integration of one-shot poll mode."""
 
-    def test_channel_without_token_exits(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_channel_without_token_exits(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--channel without token exits when no token stored.
 
         The _make_backend factory calls sys.exit(1) when no token
         is found, before run_once() is reached.
         """
-        original_argv = sys.argv
-        sys.argv = [
-            "kiss-slack",
-            "--channel",
-            "test-channel",
-            "-m",
-            "test-model",
-        ]
-        try:
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
-        finally:
-            sys.argv = original_argv
+        monkeypatch.setattr(
+            sys, "argv", ["kiss-slack", "--channel", "test-channel", "-m", "test-model"]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
         out = capsys.readouterr().out
         assert "Not authenticated" in out
 

@@ -10,12 +10,15 @@ serve both HTTPS (for the HTML page and static media assets) and
 WSS (for bidirectional command/event communication) on a single port.
 TLS is always enabled; when no explicit certificate is provided a
 machine-local CA and a server certificate signed by it are auto-generated
-in ``~/.kiss/tls/`` (:mod:`kiss.server.tls_certs`).  Trusting the CA once
+in ``~/.kiss/tls/`` (:mod:`kiss.core.tls_certs`).  Trusting the CA once
 (``kiss-web --trust-ca`` on this machine, the ``/ca.crt`` download on a
 phone) removes the browser warning on the Local and LAN URLs.
 
 Authentication uses the ``remote_password`` setting from
-``~/.kiss/config.json``.  While that password is empty, the server is
+``~/.kiss/config.json`` (the password ``install.sh`` printed; every
+frame of a password-authenticated client is checked against it).  A
+browser on this machine itself (a loopback peer with no forwarded
+client IP) is admitted without it.  While no password is set, the server is
 localhost-only: non-loopback peers are refused with 403 (HTTP and the
 WebSocket upgrade alike) and no tunnel is started, so neither the LAN
 nor the internet can reach the app.  An optional ``cloudflared`` tunnel can
@@ -50,9 +53,9 @@ import binascii
 import collections
 import contextlib
 import errno
+import functools
 import hashlib
 import html
-import ipaddress
 import json
 import logging
 import mimetypes
@@ -60,6 +63,7 @@ import os
 import platform
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -72,6 +76,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from asyncio import sslproto
 from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
@@ -94,6 +99,7 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _queue_chat_event,
 )
+from kiss.core import tls_certs
 from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
 from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
@@ -102,17 +108,18 @@ from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import find_bash, suppress_error_dialogs
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
+from kiss.core.remote_password import password_accepted
+from kiss.core.user_config import (
+    apply_config_to_env,
+    load_api_keys,
+    load_config,
+)
 from kiss.core.utils import (
     is_root_dir,
     read_bytes_waiting_for_writer,
     replace_waiting_for_readers,
 )
-from kiss.core.vscode_config import (
-    apply_config_to_env,
-    load_api_keys,
-    load_config,
-)
-from kiss.server import agent_state, tls_certs
+from kiss.server import agent_state
 from kiss.server import sorcar as sorcar_api
 from kiss.server.commands import broadcast_to_conn
 from kiss.server.json_printer import (
@@ -120,12 +127,8 @@ from kiss.server.json_printer import (
     stamp_event_ts,
     with_synthesized_events,
 )
-from kiss.server.server import VSCodeServer
-from kiss.server.stall_watchdog import start_stall_watchdog
-from kiss.server.task_update import TaskUpdateRunner
-from kiss.server.tips import tips_data
-from kiss.server.tricks import read_tricks_data
-from kiss.server.voice_wake import (
+from kiss.server.server import AgentServer
+from kiss.server.speech import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
     SpeakerIdentifier,
@@ -133,6 +136,10 @@ from kiss.server.voice_wake import (
     default_models_dir,
     transcribe_pcm,
 )
+from kiss.server.stall_watchdog import start_stall_watchdog
+from kiss.server.task_update import TaskUpdateRunner
+from kiss.server.tips import tips_data
+from kiss.server.tricks import read_tricks_data
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
@@ -147,7 +154,7 @@ logger = logging.getLogger(__name__)
 # ``JsonPrinter.replay_snapshot`` whose JSON is supplied later.
 Payload = str | ConcurrentFuture[str]
 
-MEDIA_DIR = Path(__file__).resolve().parent.parent / "agents" / "vscode" / "media"
+MEDIA_DIR = Path(__file__).resolve().parent.parent / "webapp" / "media"
 
 VOICE_MODEL_URL = (
     "https://ccoreilly.github.io/vosk-browser/models/"
@@ -262,7 +269,7 @@ def _download_voice_model_to(tmp: Path) -> None:
 
     Writer callback for :func:`_atomic_publish` used by
     :func:`_ensure_voice_model`.  Uses the timeout-bounded
-    :func:`kiss.server.voice_wake._download_url_to_file` rather than
+    :func:`kiss.server.speech._download_url_to_file` rather than
     ``urllib.request.urlretrieve``, which accepts no timeout: a
     black-holed connection blocked forever while the caller held
     ``_voice_model_lock`` on a default-executor thread, and every
@@ -314,6 +321,23 @@ TRAJECTORY_TEMPLATE = (
 )
 
 TUNNEL_CHECK_INTERVAL = 15
+TRUSTED_CLIENTS_POLL = 2.0
+"""Seconds between the daemon's looks at the enrolled machine CAs' directory."""
+MACHINES_REGISTRY_POLL_SECONDS = 2.0
+"""Seconds between the daemon's looks at ``machines.json`` (see ``_machines_registry_watch``)."""
+
+
+def _file_stamp(path: Path) -> tuple[int, int, int] | None:
+    """Return ``(st_mtime_ns, st_size, st_ino)`` of *path*, ``None`` when it is absent.
+
+    Enough to notice a rewrite of a small registry file: an atomic
+    rename-in-place moves the inode, an in-place write the mtime.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 _IP_CHANGE_DEBOUNCE_TICKS = 4
 
@@ -329,10 +353,6 @@ _VERSION_CHECK_INTERVAL: float = 3600
 _IDLE_UPDATE_POLL_S: float = 5.0
 
 _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
-
-_INSTALLED_EXTENSIONS_ROOT: Path | None = None
-
-_EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
 
 _PYPI_FETCH_TIMEOUT = 5.0
 
@@ -412,19 +432,27 @@ _MAX_PROMPT_BYTES = 1_000_000
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 
-# Byte budget for the JSON tasks of one ``share_tasks`` reply.  The
-# reply's smallest receiver is NOT this server's own 64 MiB frame
-# (``_MAX_LINE_BYTES``) but the VS Code extension's local client, which
-# destroys the connection past MAX_LINE_BUFFER_BYTES = 32 MiB
-# (``src/AgentClient.ts``); the 8 MiB headroom under that covers the
-# reply envelope and the frame's UTF-8 / escaping overhead.  Older
-# tasks beyond the budget are dropped and the reply is flagged
-# ``truncated`` (see _handle_share_chat_tasks).
+# Byte budget for the JSON tasks of one ``share_tasks`` reply, kept
+# well under the 64 MiB frame limit (``_MAX_LINE_BYTES``) so the reply
+# envelope and the frame's UTF-8 / escaping overhead never push a
+# browser's share export past it.  Older tasks beyond the budget are
+# dropped and the reply is flagged ``truncated`` (see
+# _handle_share_chat_tasks).
 _SHARE_TASKS_MAX_REPLY_BYTES = 24 * 1024 * 1024
 
 # Echoed identifiers ride in every ``share_tasks`` reply; a client
 # cannot make the reply overflow its frame by inflating them.
 _SHARE_TASKS_MAX_ID_CHARS = 256
+
+
+def _merging_tab_ids() -> list[str]:
+    """Return the tabs whose merge/discard claim is still live (see ``_await_active_merges``)."""
+    with agent_state.STATE_LOCK:
+        return [
+            state.tab_id
+            for state in agent_state.agent_states.values()
+            if state.merge_in_progress()
+        ]
 
 
 def _share_subagent_entries(
@@ -436,10 +464,10 @@ def _share_subagent_entries(
 
     Feeds the ``subagents`` list of one task in a ``share_tasks``
     reply (see :meth:`RemoteAccessServer._handle_share_chat_tasks`):
-    the chat webview's share export renders each sub-agent's
+    the chat page's share export renders each sub-agent's
     transcript into a hidden section of the shared page, which the
     page's tab strip (``media/share.js``) opens and closes exactly
-    like the live webview's sub-agent tabs.
+    like the live chat page's sub-agent tabs.
 
     Walks the ``parent_task_id`` tree breadth-first starting at the
     direct children of *root_task_id*
@@ -533,7 +561,7 @@ def _url_file_path() -> Path:
 
     Assigning ``web_server._URL_FILE`` is a supported test override,
     matching the lazy ``CONFIG_DIR`` / ``CONFIG_PATH`` attributes in
-    :mod:`kiss.core.vscode_config`.  The override must be
+    :mod:`kiss.core.user_config`.  The override must be
     consulted here (rather than only exposed through ``__getattr__``)
     because production consumers such as :class:`RemoteAccessServer`
     call this accessor directly.
@@ -651,31 +679,6 @@ def _bound_loopback(*ws_servers: Any) -> tuple[str, int]:
     return fallback
 
 
-def _is_loopback_ip(ip: str) -> bool:
-    """Return True when *ip* is an IPv4/IPv6 loopback address.
-
-    A loopback TCP peer on the public WSS port is the local
-    ``cloudflared`` tunnel relaying a remote visitor (or another
-    process on this host).  IPv6-mapped IPv4 loopback
-    (``::ffff:127.0.0.1``) counts too.  A malformed / empty string is
-    not loopback.
-
-    Args:
-        ip: A textual IP address (no port).
-
-    Returns:
-        True when *ip* parses to a loopback address.
-    """
-    try:
-        parsed = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    mapped = getattr(parsed, "ipv4_mapped", None)
-    if mapped is not None:
-        parsed = mapped
-    return parsed.is_loopback
-
-
 def _forwarded_client_ip(websocket: ServerConnection) -> str:
     """Return the real client IP forwarded by cloudflared, or ``""``.
 
@@ -741,7 +744,7 @@ def _connection_peer_is_loopback(connection: Any) -> bool:
     """
     addr = getattr(connection, "remote_address", None)
     peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
-    return _is_loopback_ip(peer_ip)
+    return sorcar_api.is_loopback_ip(peer_ip)
 
 
 def _head_health_response(connection: Any) -> bytes:
@@ -777,29 +780,172 @@ def _head_health_response(connection: Any) -> bytes:
 _MAX_HEAD_LINE_BYTES = 8192
 
 
+# Seconds a freshly accepted peer gets to send its first byte (a TLS
+# ClientHello or an HTTP request line) before the socket is dropped.
+_SNIFF_TIMEOUT_SECONDS = 10.0
+
+_PLAIN_HTTP_REFUSAL = (
+    b"HTTP/1.1 400 Bad Request\r\n"
+    b"Content-Type: text/plain; charset=utf-8\r\n"
+    b"Connection: close\r\n"
+    b"Content-Length: 58\r\n\r\n"
+    b"Plain HTTP is served to this computer only; use https://.\n"
+)
+
+
+async def _peek_first_byte(sock: Any) -> bytes:
+    """Return the first byte a peer sent on *sock* without consuming it.
+
+    *sock* is the transport's ``TransportSocket``, whose reading is
+    paused.  A duplicate descriptor shares its open file, so waiting
+    for the duplicate to become readable (the loop refuses a reader on
+    the transport's own descriptor) and ``MSG_PEEK``-ing it leaves the
+    bytes in the kernel buffer for the transport to read afterwards.
+    ``b""`` means the peer closed the connection first.
+    """
+    with sock.dup() as peek_sock:
+        while True:
+            await _wait_readable(peek_sock.fileno())
+            try:
+                return bytes(peek_sock.recv(1, socket.MSG_PEEK))
+            except BlockingIOError:
+                continue
+
+
+async def _wait_readable(fd: int) -> None:
+    """Wait until *fd* is readable.
+
+    Through the loop's reader callbacks where they exist (the selector
+    loops of Linux and macOS); Windows' proactor loop has none, so there
+    a worker thread blocks in ``select`` for at most the sniff timeout.
+    """
+    loop = asyncio.get_running_loop()
+    readable: asyncio.Future[None] = loop.create_future()
+    try:
+        loop.add_reader(fd, _settle, readable)
+    except NotImplementedError:
+        await asyncio.to_thread(select.select, [fd], [], [], _SNIFF_TIMEOUT_SECONDS)
+        return
+    try:
+        await readable
+    finally:
+        loop.remove_reader(fd)
+
+
+def _settle(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
+
+
+def _consume_handshake_result(handshake: asyncio.Future[None]) -> None:
+    """Read a failed TLS handshake's exception (it is logged by the TLS layer)."""
+    if not handshake.cancelled():
+        handshake.exception()
+
+
 class _HeadAwareServerConnection(ServerConnection):
-    """``ServerConnection`` subclass that handles HEAD health checks.
+    """``ServerConnection`` that speaks TLS or plain HTTP as the peer does.
 
-    The ``websockets`` library only accepts GET requests (for WebSocket
-    upgrade handshakes).  Cloudflare tunnels send HEAD requests to check
-    origin health.  Without this handler, those HEAD requests cause
-    parse errors, Cloudflare marks the tunnel as unhealthy, and the
-    tunnel URL stops resolving (NXDOMAIN).
+    One port serves both: the first byte of a connection is peeked at
+    before ``websockets`` sees the transport.  A TLS ClientHello
+    (``0x16``) wraps the transport in TLS with the server's certificate,
+    as every LAN browser, tunnel edge and mTLS machine link sends; any
+    other first byte is plain HTTP, served to peers on this machine's
+    loopback (``http://127.0.0.1:8787``, cloudflared's origin) and
+    refused with 400 from anywhere else, so a password never crosses a
+    network in the clear.
 
-    Intercepts incoming data before the websockets parser sees it.  If
-    the first HTTP request line is ``HEAD …``, responds with 200 OK and
-    closes the connection.  All other requests pass through normally.
+    It also answers the HEAD health checks Cloudflare tunnels send
+    (``websockets`` accepts only GET and would otherwise mark the
+    origin unhealthy): a first request line starting with ``HEAD ``
+    gets a 200 and the connection is closed.
     """
 
     def __init__(
         self,
         protocol: Any,
         server: Any,
+        ssl_context: ssl.SSLContext | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(protocol, server, **kwargs)
+        self._ssl_context = ssl_context
+        self._sniff_task: asyncio.Task[None] | None = None
+        # Whether ``websockets`` has been given the transport (plain
+        # right after the sniff; TLS once the handshake is done).
+        self._attached: bool = False
         self._head_buffer: bytes = b""
         self._head_checked: bool = False
+
+    def connection_made(self, transport: Any) -> None:
+        """Hold a fresh transport back until its first byte says TLS or plain.
+
+        Called twice for a TLS connection: with the raw transport (which
+        is only sniffed) and, once the handshake is done, by the TLS
+        layer with the TLS transport, which ``websockets`` gets.
+        """
+        if self._ssl_context is None or self._attached:
+            self._attach(transport)
+            return
+        transport.pause_reading()
+        self._sniff_task = asyncio.get_running_loop().create_task(self._sniff(transport))
+
+    def _attach(self, transport: Any) -> None:
+        self._attached = True
+        super().connection_made(transport)
+
+    async def _sniff(self, transport: Any) -> None:
+        try:
+            await self._sniff_or_raise(transport)
+        except Exception:
+            # Whatever went wrong, a paused transport must not linger.
+            logger.debug("sniffing a connection failed", exc_info=True)
+            transport.close()
+
+    async def _sniff_or_raise(self, transport: Any) -> None:
+        try:
+            first = await asyncio.wait_for(
+                _peek_first_byte(transport.get_extra_info("socket")),
+                _SNIFF_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, OSError):
+            first = b""
+        if not first:
+            transport.close()
+            return
+        if first == b"\x16" and self._ssl_context is not None:
+            # What ``loop.start_tls`` does, except that the TLS layer
+            # calls ``connection_made`` itself when the handshake
+            # completes: the request a TLS 1.3 client sends right behind
+            # its Finished (and a close_notify after it) then reaches an
+            # attached connection, in order, before the TLS layer acts
+            # on the EOF.  ``start_tls`` would hand the transport back
+            # only later, after those bytes were delivered.
+            self._attached = True
+            loop = asyncio.get_running_loop()
+            handshake: asyncio.Future[None] = loop.create_future()
+            handshake.add_done_callback(_consume_handshake_result)
+            tls = sslproto.SSLProtocol(
+                loop, self, self._ssl_context, handshake, server_side=True,
+            )
+            transport.set_protocol(tls)
+            tls.connection_made(transport)
+            transport.resume_reading()
+            return
+        peer = transport.get_extra_info("peername")
+        if peer and sorcar_api.is_loopback_ip(str(peer[0])):
+            self._attach(transport)
+            transport.resume_reading()
+            return
+        transport.write(_PLAIN_HTTP_REFUSAL)
+        transport.close()
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        """Stop a pending sniff; hand the loss to ``websockets`` once it knows the transport."""
+        if self._sniff_task is not None and not self._sniff_task.done():
+            self._sniff_task.cancel()
+        if hasattr(self, "transport"):
+            super().connection_lost(exc)
 
     def data_received(self, data: bytes) -> None:
         """Intercept HEAD requests before the websockets parser.
@@ -929,14 +1075,13 @@ def _directory_listing_text(directory: Path) -> str:
 
 # The curl installer (scripts/install.sh) clones the public repo into
 # ~/.kiss/kiss_ai; the Update button runs the install.sh of that clone.  Kept
-# literal (not $KISS_HOME-relative) to match the installer and the extension's
-# ``kissAiRoot()`` in ``installerPath.js`` exactly.
+# literal (not $KISS_HOME-relative) to match the installer exactly.
 _KISS_AI_ROOT = Path.home() / ".kiss" / "kiss_ai"
 
 # The public curl bootstrap (README's install one-liner).  When
-# ~/.kiss/kiss_ai/install.sh is missing — the extension was installed from a
-# .vsix or the clone was deleted — the Update button falls back to this
-# script, which clones ~/.kiss/kiss_ai and hands over to its install.sh.
+# ~/.kiss/kiss_ai/install.sh is missing (the clone was deleted) the
+# Update button falls back to this script, which clones ~/.kiss/kiss_ai
+# and hands over to its install.sh.
 _DEFAULT_BOOTSTRAP_INSTALL_URL = (
     "https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh"
 )
@@ -945,10 +1090,9 @@ _DEFAULT_BOOTSTRAP_INSTALL_URL = (
 def _bootstrap_install_url() -> str:
     """Return the URL of the curl bootstrap installer.
 
-    Python twin of ``bootstrapInstallUrl()`` in the extension's
-    ``installerPath.js``: honours ``$KISS_UPDATE_BOOTSTRAP_URL`` (forks,
-    tests — ``curl`` accepts ``file://`` URLs) and otherwise returns the
-    public ``scripts/install.sh`` raw URL from the README.
+    Honours ``$KISS_UPDATE_BOOTSTRAP_URL`` (forks, tests — ``curl``
+    accepts ``file://`` URLs) and otherwise returns the public
+    ``scripts/install.sh`` raw URL from the README.
 
     Returns:
         The bootstrap installer URL.
@@ -961,10 +1105,6 @@ def _bootstrap_install_url() -> str:
 
 def _find_install_script(root: Path) -> Path | None:
     """Return ``install.sh`` inside *root* if it exists, else ``None``.
-
-    Python twin of ``findInstallScript()`` in the extension's
-    ``installerPath.js`` so the remote webapp's Update button probes
-    the exact same location as the VS Code extension.
 
     Args:
         root: Directory expected to contain ``install.sh`` (production
@@ -1116,7 +1256,7 @@ def _cloudflared_launch_prefix(cgroup: str | None = None) -> list[str]:
     """Return an argv prefix that detaches cloudflared from a service cgroup.
 
     When ``kiss-web`` runs as a systemd service (the ``kiss-web.service``
-    user unit installed by the VS Code extension), ``systemctl restart``
+    user unit installed by the installer), ``systemctl restart``
     SIGTERMs **every** process in the service's control group — systemd's
     default ``KillMode=control-group`` — so the ``start_new_session=True``
     cloudflared dies together with the daemon.  ``start_new_session``
@@ -1320,7 +1460,7 @@ def _find_cloudflared_forwarding_to(local_port: int) -> list[tuple[int, int]]:
     changes (a brand switch between ``~/.kiss`` and ``~/.s10s`` keeps a
     separate pidfile per home).  The tunnel itself keeps running — it was
     detached on purpose so its public URL survives restarts — and keeps
-    relaying internet visitors to ``--url https://localhost:<port>``.
+    relaying internet visitors to ``--url http://localhost:<port>``.
     This scan rediscovers such tunnels from the process table so the
     caller can adopt one (preserving its URL) or terminate the rest
     (no unmanaged public URL may reach this server).
@@ -1441,7 +1581,7 @@ def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
         pid = int(data["pid"])
         if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
             logger.warning(
-                "remote_password is empty; terminating the cloudflared "
+                "no remote password is set; terminating the cloudflared "
                 "tunnel (pid=%d) left by a previous kiss-web so its "
                 "public URL stops reaching this server.", pid,
             )
@@ -1483,7 +1623,7 @@ def _try_adopt_existing_cloudflared(
     This is how the daemon preserves a single quick-tunnel URL across
     its own restarts: ``cloudflared`` is spawned in its own process
     group (``start_new_session=True``) so it survives ``kiss-web``'s
-    SIGTERM and the VS Code extension's ``pkill kiss-web``, and — when
+    SIGTERM and the installer's ``pkill kiss-web``, and — when
     ``kiss-web`` runs as a systemd service — in its own transient
     scope unit (see :func:`_cloudflared_launch_prefix`) so it also
     survives ``systemctl restart kiss-web``'s cgroup-wide kill.  The
@@ -1863,12 +2003,12 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
     """Block up to *timeout* seconds for ``remote_password`` to appear.
 
     Polls ``~/.kiss/config.json`` every 500 ms.  This eliminates the
-    boot-time race where ``kiss-web`` is restarted by the VS Code
-    extension *before* the extension's ``ensureRemotePassword`` flow
-    has written the password back to disk: instead of refusing to start
-    the tunnel and exiting (which causes ``launchd`` to respawn the
-    daemon and mint a brand-new ``*.trycloudflare.com`` URL), the
-    daemon waits patiently for the password to arrive.
+    boot-time race where ``kiss-web`` is (re)started *before* the
+    installer or the settings page has written the password to disk:
+    instead of refusing to start the tunnel and exiting (which causes
+    ``launchd`` to respawn the daemon and mint a brand-new
+    ``*.trycloudflare.com`` URL), the daemon waits patiently for the
+    password to arrive.
 
     Args:
         timeout: Maximum seconds to wait for a non-empty password.
@@ -1898,19 +2038,19 @@ def _save_url_file(
     is ``~/.kiss/remote-url.json``, which is read by ``kiss-web --url``
     so users can discover the remote URL without digging through log
     files.  Tests inject a temporary path to avoid touching the live
-    file that the VS Code extension and the ``kiss-web`` daemon watch.
+    file the ``kiss-web`` daemon maintains.
 
     Args:
         url_file: Path to the JSON file to write.
-        local_url: The local ``https://localhost:PORT`` URL.
+        local_url: The local ``http://localhost:PORT`` URL.
         tunnel_url: The Cloudflare tunnel URL, or None.
-        loopback_url: The ``https://127.0.0.1:PORT`` URL, or None.
+        loopback_url: The ``http://127.0.0.1:PORT`` URL, or None.
         lan_urls: ``https://<lan-ip>:PORT`` URLs for the host's
             routable LAN addresses, or None.
         local_ca: True when the daemon serves the auto-generated,
             locally-signed certificate, so the ``/ca.crt`` download and
-            ``kiss-web --trust-ca`` apply (the webview shows the trust
-            hint only then).
+            ``kiss-web --trust-ca`` apply (the chat page shows the
+            trust hint only then).
     """
     data: dict[str, object] = {"local": local_url}
     if tunnel_url:
@@ -2113,7 +2253,7 @@ def _post_url_to_message_board(
         url: The ``https://`` URL to publish.
         base_url: Override the ntfy server URL (used by tests).
     """
-    if not url or url.startswith("https://localhost"):
+    if not url or url.startswith(("https://localhost", "http://localhost")):
         return
     try:
         topic = _get_machine_topic()
@@ -2267,8 +2407,8 @@ def _snapshot_active_tabs() -> list[str]:
     Liveness is :meth:`AgentState.busy`, not ``is_task_active`` alone:
     a worker that ``_cmd_run`` has started but that has not yet raised
     the flag owns a real task, and answering ``count: 0`` for it lets
-    the extension's dependency installer SIGTERM the daemon on top of
-    a just-launched run (F08-2).
+    the installer (``scripts/check-kiss-web-active-tasks.py``) SIGTERM
+    the daemon on top of a just-launched run (F08-2).
     """
     from kiss.server import agent_state
 
@@ -2379,7 +2519,7 @@ def _generate_self_signed_cert(
     (``ca.pem`` / ``ca-key.pem`` in ``cert_path.parent``) and issues a
     server certificate signed by it covering ``localhost``, the
     hostname, ``127.0.0.1`` and ``::1`` (see
-    :mod:`kiss.server.tls_certs`).  Kept under its historical name for
+    :mod:`kiss.core.tls_certs`).  Kept under its historical name for
     the test fixtures that build throwaway servers; the daemon itself
     goes through :func:`_create_ssl_context`, which also adds the LAN IPs.
 
@@ -2403,7 +2543,7 @@ def _tls_lock_path() -> Path:
     interrupted by cancelling its coroutine, and a sibling that wedged
     while holding the lock would otherwise stall startup forever.
     """
-    return _tls_dir() / ".tls.lock"
+    return _tls_dir() / tls_certs.TLS_LOCK_FILE
 
 
 def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
@@ -2533,6 +2673,43 @@ def _create_ssl_context(
     return ctx
 
 
+def _trusted_clients_dir() -> Path:
+    """Return the directory of enrolled machine-link CAs (``<tls dir>/trusted-clients``)."""
+    return _tls_dir() / tls_certs.TRUSTED_CLIENTS_DIR
+
+
+def _load_trusted_client_cas(ctx: ssl.SSLContext, loaded: set[bytes]) -> list[str]:
+    """Load the enrolled client CAs not yet in *loaded* into *ctx*; return their names.
+
+    Every ``*.pem`` of :func:`_trusted_clients_dir` (created when
+    missing: its presence tells an enrolling machine that this daemon
+    understands enrollment) is added to the context's trust store and
+    recorded in *loaded* (by content, so a file re-read on every call
+    is loaded once).  Once any CA is loaded the context requests a
+    client certificate (``CERT_OPTIONAL``: a browser without one still
+    connects, a certificate that chains to no loaded CA fails the
+    handshake).  A CA cannot be unloaded from a live context, so
+    revocation is :func:`tls_certs.enrolled_client_ca`'s re-check
+    against the files on disk at every handshake.  A file that is not
+    a certificate is logged once and skipped.
+    """
+    trusted_dir = _trusted_clients_dir()
+    trusted_dir.mkdir(parents=True, exist_ok=True)
+    added: list[str] = []
+    for name, pem in tls_certs.trusted_client_cas(trusted_dir):
+        if pem in loaded:
+            continue
+        loaded.add(pem)
+        try:
+            ctx.load_verify_locations(cadata=pem.decode("ascii"))
+        except (ssl.SSLError, ValueError, UnicodeDecodeError):
+            logger.warning("Ignoring %s/%s.pem: not a PEM certificate", trusted_dir, name)
+            continue
+        added.append(name)
+        ctx.verify_mode = ssl.CERT_OPTIONAL
+    return added
+
+
 def _local_ca_cert_bytes() -> bytes | None:
     """Return the PEM bytes of the auto-generated CA, or None when absent."""
     ca_path = _tls_dir() / tls_certs.CA_CERT_FILE
@@ -2609,10 +2786,11 @@ class WebPrinter(JsonPrinter):
         super().__init__()
         # Remote peers: password-authenticated browsers on other devices.
         self._remote_clients: set[ServerConnection] = set()
-        # Local peers (token-authenticated loopback connections: VS
-        # Code extension windows, ``daemon_client`` runs) are kept
-        # apart from ``_remote_clients`` because talk arbitration sends
-        # them muted copies when the daemon plays a clip itself.
+        # Local peers (token-authenticated loopback connections:
+        # ``daemon_client`` runs) are kept apart from
+        # ``_remote_clients`` because task-event copies reach only
+        # the local peers interested in the stamped tab (see
+        # ``_local_clients_for_tab``).
         self._local_clients: set[ServerConnection] = set()
         # Daemon-link peers: another daemon's ``MachineLink`` request
         # socket (``"link": true`` in its ``auth`` frame).  Such a peer
@@ -2623,18 +2801,9 @@ class WebPrinter(JsonPrinter):
         # replayed by someone's history click) that ``broadcast`` fans
         # out to every other peer.
         self._link_clients: set[ServerConnection] = set()
-        # Local talk bookkeeping.  This printer owns two facts:
-        # which local connection addressed which tab id (INTEREST: the
-        # per-connection sets, keyed by connection id) and
-        # which local connections host a chat webview (``ready`` seen).
-        # Whether a tab is SHOWN by a local webview is decided at talk
-        # time by the rule installed via ``set_local_tab_visibility``
-        # from those facts plus the canonical ones (tab registry, live
-        # agent state) — never from a copy of registry state kept
-        # here.  See ``shown_local_tabs``.
+        # Which local connection addressed which tab ids (keyed by
+        # connection id); see ``register_local_tab``.
         self._local_tab_sets: dict[str, set[str]] = {}
-        self._local_webview_conns: set[str] = set()
-        self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
         self._conn_endpoints: dict[str, ServerConnection] = {}
         self._ws_lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -2709,8 +2878,7 @@ class WebPrinter(JsonPrinter):
             # A "Do nothing" result (kept: true) leaves the worktree on
             # disk, so the remote client's openFile/checkPaths fallback
             # must survive for transcript file links to keep resolving
-            # into it — mirroring the VS Code host (gpt-5.6-sol review
-            # finding).  A result naming another repository's worktree
+            # into it.  A result naming another repository's worktree
             # (one per repository from commit_and_merge) leaves the
             # recorded one, still pending, alone.
             locked_call(self._lock, self._forget_tab_worktree_dir, tab_id, event.get("worktreeDir"))
@@ -2818,7 +2986,7 @@ class WebPrinter(JsonPrinter):
         Two code paths:
 
         * Events that already carry an explicit ``tabId`` (status,
-          askUser, commitMessage, etc.) are treated as
+          askUser, gitStatus, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted — except the ``TAB_STAMPED_TASK_EVENT_TYPES``
@@ -2840,9 +3008,9 @@ class WebPrinter(JsonPrinter):
           events (``models``, ``history``, ``inputHistory``,
           ``files``, ``ghost``, ``configData``,
           unknown-command ``error``): the stamp is stripped and the
-          event is sent ONLY to the connection (= VS Code window /
-          browser tab) that issued the request, so one window's
-          webview activity can never change another window's UI.
+          event is sent ONLY to the connection (= browser tab) that
+          issued the request, so one tab's activity can never change
+          another tab's UI.
         * Events stamped ``recordOnly`` (the drain hook's durable copy
           of a prompt echo that was already rendered live at queueing
           time — see ``SorcarAgent._drain_pending_user_messages``) are
@@ -2906,8 +3074,8 @@ class WebPrinter(JsonPrinter):
             return
 
         # A ``talk`` event is never replayed (not a display event), and
-        # its playback arbitration takes the agent-state lock and may
-        # start a local player, so it fans out after the lock.
+        # deciding whether this machine plays it takes the agent-state
+        # lock and may start a local player, so it fans out after the lock.
         talk = event.get("type") == "talk"
         # Resolved before ``delivery_lock`` (it takes ``STATE_LOCK`` and
         # the agent's lock); queued under it so the events table keeps
@@ -2922,7 +3090,66 @@ class WebPrinter(JsonPrinter):
             record_only or talk,
         )
         if talk and not record_only:
-            self._fanout_stamped(event)
+            self._fanout_talk(event)
+
+    def _fanout_talk(self, event: dict[str, Any]) -> None:
+        """Fan out a ``talk`` event, playing its clip here for headless clients.
+
+        A browser plays the synthesized clip itself.  A local client that
+        addressed the event's tab (a ``sorcar`` CLI or ``daemon_client``
+        run on this machine) has no player of its own, so the daemon
+        plays the clip once on this machine's speakers
+        (:mod:`kiss.server.talk_player`) before every client receives
+        the event as usual.
+
+        Args:
+            event: The ``talk`` event (no ``tabId`` stamp).
+        """
+        targets = set(self._fanout_targets(event.get("taskId")))
+        if targets and self._local_client_addressed(targets):
+            self._play_talk_clip_locally(event)
+        self._fanout_stamped(event)
+
+    def _local_client_addressed(self, tab_ids: set[str]) -> bool:
+        """Return True when a local client addressed one of *tab_ids*.
+
+        Runs on the task thread of the ``talk`` tool, so the lock goes
+        through ``locked_call`` like every other printer lock a Stop
+        injection can reach.
+        """
+        return locked_call(self._ws_lock, self._local_client_addressed_locked, tab_ids)
+
+    def _local_client_addressed_locked(self, tab_ids: set[str]) -> bool:
+        """``_local_client_addressed`` under ``_ws_lock``."""
+        return any(tabs & tab_ids for tabs in self._local_tab_sets.values())
+
+    @staticmethod
+    def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
+        """Play a talk event's synthesized clip on this machine's speakers.
+
+        Uses the :class:`~kiss.server.talk_player.TalkPlayer` singleton,
+        a real audio-player child process fed from a serialising queue
+        with ``talkId`` dedupe, so playback never blocks the event loop.
+
+        Args:
+            event: The ``talk`` broadcast event.
+
+        Returns:
+            ``True`` when the machine has an audio player and the event
+            carries a clip, so playback was enqueued; ``False`` otherwise.
+        """
+        if not event.get("audioB64"):
+            return False
+        try:
+            from kiss.server import talk_player
+
+            if talk_player.player_command() is None:
+                return False
+            talk_player.shared_player().play(dict(event))
+            return True
+        except Exception:
+            logger.exception("daemon-side talk clip playback failed")
+            return False
 
     def _deliver_tab_stamped(
         self, event: dict[str, Any], kept: tuple[dict[str, Any], str] | None, data: str,
@@ -2981,9 +3208,6 @@ class WebPrinter(JsonPrinter):
         if "tabId" in event:
             event = {k: v for k, v in event.items() if k != "tabId"}
             encoded = ""
-        if event.get("type") == "talk":
-            self._fanout_talk(event, targets)
-            return
         base = (encoded or json.dumps(event))[:-1]
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
@@ -2994,8 +3218,7 @@ class WebPrinter(JsonPrinter):
     def _local_clients_for_tab(self, tab_id: str) -> list[ServerConnection]:
         """Local clients that receive a task event copy stamped *tab_id*.
 
-        Webview connections mirror the whole tab registry and peers
-        that never addressed a tab keep receiving every copy.  A
+        Peers that never addressed a tab keep receiving every copy.  A
         headless peer that addressed only OTHER tabs (a ``run_agent``
         or benchmark client driving its own ``api-…`` tab) is skipped:
         sending every streamed token of every task to dozens of such
@@ -3014,157 +3237,27 @@ class WebPrinter(JsonPrinter):
         """``_local_clients_for_tab`` under ``_ws_lock``."""
         skip: set[Any] = set()
         for conn_id, tabs in self._local_tab_sets.items():
-            if tabs and tab_id not in tabs and conn_id not in self._local_webview_conns:
+            if tabs and tab_id not in tabs:
                 endpoint = self._conn_endpoints.get(conn_id)
                 if endpoint is not None:
                     skip.add(endpoint)
         return [w for w in self._local_clients if w not in skip]
 
-    def set_local_tab_visibility(
-        self, decide: Callable[[str, bool, bool], bool],
-    ) -> None:
-        """Install the daemon's "does a local webview show this tab" rule.
-
-        The daemon's :class:`~kiss.server.server.VSCodeServer` installs
-        :meth:`~kiss.server.server.VSCodeServer._local_tab_shown`.  The
-        talk fan-out consults it at decision time
-        (:meth:`shown_local_tabs`) with the two facts this printer
-        owns — whether some local connection recorded interest in the
-        tab and whether any local webview is attached at all — so the
-        bookkeeping here never has to mirror registry state: a stale
-        or pruned interest entry can neither resurrect a closed tab nor
-        hide a reopened one.  Without a rule (a standalone printer)
-        every interesting tab counts as shown.
-
-        Args:
-            decide: ``decide(tab_id, interested, webview_attached)``
-                returns ``True`` when a local webview shows *tab_id*.
-        """
-        with self._ws_lock:
-            self._local_tab_visibility = decide
-
-    def mark_local_webview(self, conn_id: str) -> None:
-        """Record that local connection *conn_id* hosts a chat webview.
-
-        Called on the connection's ``ready``: a VS Code chat webview
-        announces itself that way, while headless local peers (the
-        ``run_agent`` daemon client, tests) never do.  Every attached
-        webview mirrors the whole canonical tab registry, so this flag
-        — not per-tab interest — is what decides native playback for
-        registry tabs (see :meth:`shown_local_tabs`).  Cleared by
-        :meth:`unregister_local_tabs` on disconnect.
-
-        Args:
-            conn_id: The local connection's id.
-        """
-        with self._ws_lock:
-            self._local_webview_conns.add(conn_id)
-
-    def shown_local_tabs(self, tab_ids: Iterable[str]) -> set[str]:
-        """Return the subset of *tab_ids* a local local webview shows.
-
-        Reads this printer's two facts under its own lock — the
-        interest set and whether a webview is attached — then hands
-        each candidate to the installed visibility rule, which reads
-        the canonical facts (tab registry, live agent state) under
-        their own locks.  Nothing here is a copy of registry state, so
-        no interleaving of a close, a re-registration, a ``ready`` sync
-        or a reopen can leave a stale decision behind; the residual
-        window is the read itself (a disconnect or a republication
-        landing between the two reads can misjudge ONE utterance, and
-        the next decision is correct again).  The rule runs outside
-        ``_ws_lock`` on purpose: it takes the agent-state lock, which
-        several broadcasters already hold while entering this printer.
-
-        Args:
-            tab_ids: Candidate tab ids (a talk event's targets).
-
-        Returns:
-            The ids a local webview currently shows.
-        """
-        interested, webview_attached, decide = locked_call(
-            self._ws_lock, self._local_tab_interest, tab_ids,
-        )
-        if decide is None:
-            return interested
-        return {
-            t for t in tab_ids if decide(t, t in interested, webview_attached)
-        }
-
-    def _local_tab_interest(
-        self, tab_ids: set[str],
-    ) -> tuple[set[str], bool, Callable[[str, bool, bool], bool] | None]:
-        """Under ``_ws_lock``: the addressed ids among *tab_ids*, whether a webview is
-        attached, and the visibility rule."""
-        addressed = set().union(*self._local_tab_sets.values())
-        interested = {t for t in tab_ids if t in addressed}
-        return interested, bool(self._local_webview_conns), self._local_tab_visibility
-
-    def register_local_tab(
-        self, conn_id: str, tab_id: str, local_tabs: set[str]
-    ) -> None:
-        """Record the local local connection *conn_id*'s interest in *tab_id*.
+    def register_local_tab(self, conn_id: str, tab_id: str) -> None:
+        """Record the local connection *conn_id*'s interest in *tab_id*.
 
         Interest is what a local command's ``tabId`` proves: this peer
-        addressed the tab.  It takes part in the native-playback
-        decision only for tabs no attached webview mirrors from the
-        registry (a ``run_agent`` dispatch's ``api-…`` tab, a sub-agent
-        viewer tab, a placeholder the registry refused at its cap, a
-        headless client's own registry tab) — together with the tab's
-        live agent state or task subscription — so a stale entry for a
-        closed registry tab is inert.
+        addressed the tab.  Task-event copies stamped with other tabs
+        are then withheld from the peer (see
+        :meth:`_local_clients_for_tab`).  The per-connection set lives
+        only here, in ``_local_tab_sets``, under the printer lock.
 
         Args:
             conn_id: The local connection's id.
             tab_id: The frontend tab id seen on a local command.
-            local_tabs: The connection's mutable local-tab set (lives
-                in its ``conn_state``).  Membership is checked and
-                updated under the printer lock.
         """
         with self._ws_lock:
-            self._local_tab_sets[conn_id] = local_tabs
-            local_tabs.add(tab_id)
-
-    def sync_local_tabs(
-        self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
-    ) -> None:
-        """Reconcile *conn_id*'s interest set to exactly *tab_ids*.
-
-        The ``ready``-time sync: missing ids are added and stale ones
-        dropped, so a webview reload bounds the interest a connection
-        accumulated.
-
-        Args:
-            conn_id: The local connection's id.
-            tab_ids: The tab ids the client announced in its ``ready``.
-            local_tabs: The connection's mutable local-tab set.
-        """
-        with self._ws_lock:
-            self._local_tab_sets[conn_id] = local_tabs
-            local_tabs.clear()
-            local_tabs.update(tab_ids)
-
-    def prune_local_tab(self, tab_id: str) -> None:
-        """Drop *tab_id* from every local connection's interest set.
-
-        Called when the canonical registry removes a tab (close or
-        displacement).  Bookkeeping hygiene only: the visibility rule
-        decides registry tabs from the registry and the attached
-        webviews, not from interest, so a prune racing a reopen cannot
-        hide the reopened tab.  Tabs outside the registry are never
-        pruned here — interest is part of their decision.
-
-        Args:
-            tab_id: The frontend tab id the registry removed.
-        """
-        # A displacement runs on the task thread (``_registry_update_tab``
-        # at task startup): ``locked_call``, never ``with``.
-        locked_call(self._ws_lock, self._prune_local_tab_locked, tab_id)
-
-    def _prune_local_tab_locked(self, tab_id: str) -> None:
-        """Under ``_ws_lock``: the body of :meth:`prune_local_tab`."""
-        for local_tabs in self._local_tab_sets.values():
-            local_tabs.discard(tab_id)
+            self._local_tab_sets.setdefault(conn_id, set()).add(tab_id)
 
     def unregister_local_tabs(self, conn_id: str) -> None:
         """Drop a disconnected local connection's local-tab registrations.
@@ -3173,94 +3266,13 @@ class WebPrinter(JsonPrinter):
             conn_id: The local connection's id.
         """
         with self._ws_lock:
-            self._local_webview_conns.discard(conn_id)
             self._local_tab_sets.pop(conn_id, None)
-
-    def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
-        """Fan out one ``talk`` event with per-device playback arbitration.
-
-        Local local webview tabs (VS Code chat webviews on the daemon's
-        machine) CANNOT reliably play the synthesized clip themselves:
-        Chromium's autoplay policy rejects ``Audio.play()`` in a
-        webview unless the user interacted with it seconds earlier
-        (microsoft/vscode#197937 / #178642, closed as not actionable),
-        so the talk would stay silent in the webview (whose old
-        robotic Web Speech fallback is gone).  When the event carries
-        a synthesized clip and a local webview tab is subscribed, the
-        DAEMON therefore plays the clip natively on this machine's
-        speakers (:mod:`kiss.server.talk_player`, ``afplay`` on
-        macOS) and stamps every local local webview copy ``muted``.
-
-        Muting is per-ENDPOINT, not per-serialization: the canonical
-        tab registry mirrors the same tab ids to every client, so a
-        remote WSS browser shows the very tab the local webview does.
-        The browser is a different device with its own speakers, so
-        when the daemon owns the utterance only the same-machine local
-        copies are muted while every WSS copy stays playable.
-
-        Otherwise webview subscriber tabs receive the playable copy
-        (each webview plays on its own device; ``talkId`` dedupe and
-        the talk queue keep intra-webview duplicates silent).
-
-        Args:
-            event: The ``talk`` event (no ``tabId`` stamp yet).
-            targets: Subscriber tab ids for the event's task.
-        """
-        local_tabs_shown = self.shown_local_tabs(targets)
-        daemon_plays = bool(local_tabs_shown) and self._play_talk_clip_locally(
-            event
-        )
-        base = json.dumps(event)[:-1]
-        muted_base = json.dumps({**event, "muted": True})[:-1]
-        for tab_id in targets:
-            tab_suffix = f', "tabId": {json.dumps(tab_id)}}}'
-            if daemon_plays and tab_id in local_tabs_shown:
-                self._send_to_remote_clients(base + tab_suffix)
-                self._send_to_local_clients(muted_base + tab_suffix)
-            else:
-                self._send_to_ws_clients(base + tab_suffix)
-
-    @staticmethod
-    def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
-        """Play a talk event's synthesized clip on this machine's speakers.
-
-        Uses the :class:`~kiss.server.talk_player.TalkPlayer`
-        singleton — a real audio-player child process
-        (``afplay`` / ``mpg123`` / ``ffplay`` / ``mpv``, overridable
-        via ``KISS_SORCAR_PLAY_CMD``) fed from a serialising queue
-        with ``talkId`` dedupe, so playback never blocks the event
-        loop and never overlaps another playback of the same
-        utterance.
-
-        Args:
-            event: The unmuted ``talk`` broadcast event.
-
-        Returns:
-            ``True`` when the daemon machine has an audio player and
-            the event carries a clip so local playback was enqueued;
-            ``False`` otherwise (callers then leave the client copies
-            playable so devices can fall back on their own).
-        """
-        if not event.get("audioB64"):
-            return False
-        try:
-            from kiss.server import talk_player
-
-            if talk_player.player_command() is None:
-                return False
-            talk_player.shared_player().play(dict(event))
-            return True
-        except Exception:
-            logger.exception("daemon-side talk clip playback failed")
-            return False
 
     def _send_to_remote_clients(self, data: Payload) -> None:
         """Send a pre-serialised JSON payload to remote clients only.
 
-        Remote peers (password-authenticated browsers) are separate
-        devices from the daemon machine, so talk arbitration sends
-        them the playable copy while the same-machine local peers get
-        the muted one.
+        Remote peers (password-authenticated browsers) receive every
+        copy: each browser tab mirrors the whole tab registry.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
@@ -3272,10 +3284,8 @@ class WebPrinter(JsonPrinter):
     def _send_to_local_clients(self, data: Payload, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to local peers only.
 
-        Local peers (VS Code extension webviews, Python clients that
-        authenticated with the local token) are always on the daemon's
-        machine; talk arbitration sends them muted copies when a local
-        player already owns the utterance.
+        Local peers are Python clients that authenticated with the
+        local token (``daemon_client`` runs).
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
@@ -3359,8 +3369,8 @@ class WebPrinter(JsonPrinter):
 
         Used by :meth:`broadcast` for request/reply events stamped
         with the requesting connection's ``connId``: the reply must
-        reach only the VS Code window (or browser tab) that issued
-        the request, never its sibling windows.
+        reach only the browser tab that issued the request, never its
+        sibling tabs.
 
         Args:
             conn_id: The connection id registered via :meth:`bind_conn`.
@@ -3483,9 +3493,9 @@ class WebPrinter(JsonPrinter):
 
         Args:
             ws: The WebSocket server connection to add.
-            local: ``True`` for a token-authenticated local peer (VS
-                Code extension window, ``daemon_client`` run), which
-                joins ``_local_clients``; ``False`` for a remote,
+            local: ``True`` for a token-authenticated local peer (a
+                ``daemon_client`` run), which joins
+                ``_local_clients``; ``False`` for a remote,
                 password-authenticated browser.
             link: ``True`` for another daemon's ``MachineLink`` request
                 socket, whatever *local* says: it joins
@@ -3585,7 +3595,7 @@ def _media_url(name: str) -> str:
     bytes: the file is stat'ed on every call and re-hashed whenever its
     :func:`_media_fingerprint` differs from the one last hashed.  A
     daemon keeps running across an in-place upgrade of the media files
-    (the VS Code extension replaces them under the same paths), and
+    (the installer replaces them under the same paths), and
     ``chat.html`` is re-read on every request; a hash frozen at first
     use would pair the new page with the OLD ``main.css`` / ``main.js``
     on every browser whose service worker (media/sw.js, cache first
@@ -3614,7 +3624,7 @@ def _media_fingerprint(path: Path) -> tuple[int, int, int, int]:
     return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
 
-_VSCODE_FONT_VARS_CSS = (
+_FONT_VARS_CSS = (
     # VS Code's workbench font (src/vs/base/browser/fonts.ts
     # DEFAULT_FONT_FAMILY) is chosen per platform; the browser cannot
     # know which VS Code build the user runs, so the stack lists the
@@ -3625,235 +3635,233 @@ _VSCODE_FONT_VARS_CSS = (
     # (Cursor 3.23 workbench.glass.main.css: 13px / 18px line height),
     # which main.css builds on; the editor size matches it because an
     # earlier request made the chat text match the task panel, which
-    # sizes itself with --vscode-editor-font-size.
-    "      --vscode-font-size: 13px;\n"
-    "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
+    # sizes itself with --theme-editor-font-size.
+    "      --theme-font-size: 13px;\n"
+    "      --theme-font-family: -apple-system, BlinkMacSystemFont, "
     '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
     "sans-serif;\n"
-    "      --vscode-font-weight: normal;\n"
-    "      --vscode-editor-font-size: 13px;\n"
-    '      --vscode-editor-font-family: Menlo, Monaco, Consolas, '
+    "      --theme-font-weight: normal;\n"
+    "      --theme-editor-font-size: 13px;\n"
+    '      --theme-editor-font-family: Menlo, Monaco, Consolas, '
     '"Droid Sans Mono", "Courier New", monospace;\n'
-    "      --vscode-editor-font-weight: normal;\n"
+    "      --theme-editor-font-weight: normal;\n"
 )
-"""VS Code's default fonts, as the ``--vscode-*`` variables a webview
-receives (``src/vs/workbench/contrib/webview/browser/themeing.ts``)."""
+"""VS Code's default fonts as ``--theme-*`` variables."""
 
-_VSCODE_DARK_MODERN_CSS = (
+_DARK_MODERN_CSS = (
     # extensions/theme-defaults/themes/dark_modern.json, plus the
     # colour-registry defaults it inherits (list.*, terminal.ansi*,
     # widget.shadow, toolbar.hoverBackground, editorWarning.foreground,
     # charts.*: platform/theme/common/colors/chartsColors.ts).
-    "      --vscode-foreground: #cccccc;\n"
-    "      --vscode-descriptionForeground: #9d9d9d;\n"
-    "      --vscode-errorForeground: #f85149;\n"
-    "      --vscode-icon-foreground: #cccccc;\n"
-    "      --vscode-focusBorder: #0078d4;\n"
-    "      --vscode-editor-background: #1f1f1f;\n"
-    "      --vscode-editor-foreground: #cccccc;\n"
-    "      --vscode-editor-selectionBackground: #264f78;\n"
-    "      --vscode-editor-inactiveSelectionBackground: #3a3d41;\n"
-    "      --vscode-editor-selectionHighlightBackground: #add6ff26;\n"
-    "      --vscode-editorLineNumber-foreground: #6e7681;\n"
-    "      --vscode-editorLineNumber-activeForeground: #cccccc;\n"
-    "      --vscode-editorWidget-background: #202020;\n"
-    "      --vscode-editorWarning-foreground: #cca700;\n"
-    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
-    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
-    "      --vscode-editorGutter-modifiedBackground: #0078d4;\n"
-    "      --vscode-sideBar-background: #181818;\n"
-    "      --vscode-sideBar-border: #2b2b2b;\n"
-    "      --vscode-panel-border: #2b2b2b;\n"
-    "      --vscode-widget-border: #313131;\n"
-    "      --vscode-widget-shadow: #0000005c;\n"
-    "      --vscode-editorGroupHeader-tabsBackground: #2b2b2b;\n"
-    "      --vscode-tab-activeBackground: #1f1f1f;\n"
-    "      --vscode-tab-inactiveBackground: #2b2b2b;\n"
-    "      --vscode-tab-activeForeground: #ffffff;\n"
-    "      --vscode-tab-inactiveForeground: #9d9d9d;\n"
-    "      --vscode-tab-activeBorderTop: #0078d4;\n"
-    "      --vscode-activityBar-foreground: #d7d7d7;\n"
-    "      --vscode-activityBar-inactiveForeground: #868686;\n"
-    "      --vscode-activityBar-activeBorder: #0078d4;\n"
-    "      --vscode-list-hoverBackground: #2a2d2e;\n"
-    "      --vscode-list-activeSelectionBackground: #04395e;\n"
-    "      --vscode-list-inactiveSelectionBackground: #37373d;\n"
-    "      --vscode-input-background: #313131;\n"
-    "      --vscode-input-foreground: #cccccc;\n"
-    "      --vscode-input-border: #3c3c3c;\n"
-    "      --vscode-input-placeholderForeground: #989898;\n"
-    "      --vscode-dropdown-background: #313131;\n"
-    "      --vscode-dropdown-border: #3c3c3c;\n"
-    "      --vscode-button-background: #0078d4;\n"
-    "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-button-hoverBackground: #026ec1;\n"
-    "      --vscode-button-border: #ffffff1a;\n"
-    "      --vscode-button-secondaryBackground: #00000000;\n"
-    "      --vscode-button-secondaryForeground: #cccccc;\n"
-    "      --vscode-button-secondaryHoverBackground: #2b2b2b;\n"
-    "      --vscode-badge-background: #616161;\n"
-    "      --vscode-badge-foreground: #f8f8f8;\n"
-    "      --vscode-textLink-foreground: #4daafc;\n"
-    "      --vscode-textLink-activeForeground: #4daafc;\n"
-    "      --vscode-textCodeBlock-background: #2b2b2b;\n"
-    "      --vscode-textBlockQuote-background: #2b2b2b;\n"
-    "      --vscode-textBlockQuote-border: #616161;\n"
-    "      --vscode-textPreformat-foreground: #d0d0d0;\n"
-    "      --vscode-textPreformat-background: #3c3c3c;\n"
-    "      --vscode-menu-background: #1f1f1f;\n"
-    "      --vscode-menu-selectionBackground: #0078d4;\n"
-    "      --vscode-notifications-background: #1f1f1f;\n"
-    "      --vscode-notifications-border: #2b2b2b;\n"
-    "      --vscode-toolbar-hoverBackground: #5a5d5e50;\n"
-    "      --vscode-scrollbarSlider-background: #79797966;\n"
-    "      --vscode-terminal-foreground: #cccccc;\n"
-    "      --vscode-terminal-ansiBlack: #000000;\n"
-    "      --vscode-terminal-ansiRed: #cd3131;\n"
-    "      --vscode-terminal-ansiGreen: #0dbc79;\n"
-    "      --vscode-terminal-ansiYellow: #e5e510;\n"
-    "      --vscode-terminal-ansiBlue: #2472c8;\n"
-    "      --vscode-terminal-ansiMagenta: #bc3fbc;\n"
-    "      --vscode-terminal-ansiCyan: #11a8cd;\n"
-    "      --vscode-terminal-ansiWhite: #e5e5e5;\n"
-    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
-    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
-    "      --vscode-terminal-ansiBrightGreen: #23d18b;\n"
-    "      --vscode-terminal-ansiBrightYellow: #f5f543;\n"
-    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
-    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
-    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
-    "      --vscode-terminal-ansiBrightWhite: #e5e5e5;\n"
-    "      --vscode-charts-green: #89d185;\n"
-    "      --vscode-charts-red: #f14c4c;\n"
-    "      --vscode-charts-yellow: #cca700;\n"
-    "      --vscode-charts-purple: #b180d7;\n"
+    "      --theme-foreground: #cccccc;\n"
+    "      --theme-descriptionForeground: #9d9d9d;\n"
+    "      --theme-errorForeground: #f85149;\n"
+    "      --theme-icon-foreground: #cccccc;\n"
+    "      --theme-focusBorder: #0078d4;\n"
+    "      --theme-editor-background: #1f1f1f;\n"
+    "      --theme-editor-foreground: #cccccc;\n"
+    "      --theme-editor-selectionBackground: #264f78;\n"
+    "      --theme-editor-inactiveSelectionBackground: #3a3d41;\n"
+    "      --theme-editor-selectionHighlightBackground: #add6ff26;\n"
+    "      --theme-editorLineNumber-foreground: #6e7681;\n"
+    "      --theme-editorLineNumber-activeForeground: #cccccc;\n"
+    "      --theme-editorWidget-background: #202020;\n"
+    "      --theme-editorWarning-foreground: #cca700;\n"
+    "      --theme-editorGutter-addedBackground: #2ea043;\n"
+    "      --theme-editorGutter-deletedBackground: #f85149;\n"
+    "      --theme-editorGutter-modifiedBackground: #0078d4;\n"
+    "      --theme-sideBar-background: #181818;\n"
+    "      --theme-sideBar-border: #2b2b2b;\n"
+    "      --theme-panel-border: #2b2b2b;\n"
+    "      --theme-widget-border: #313131;\n"
+    "      --theme-widget-shadow: #0000005c;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #2b2b2b;\n"
+    "      --theme-tab-activeBackground: #1f1f1f;\n"
+    "      --theme-tab-inactiveBackground: #2b2b2b;\n"
+    "      --theme-tab-activeForeground: #ffffff;\n"
+    "      --theme-tab-inactiveForeground: #9d9d9d;\n"
+    "      --theme-tab-activeBorderTop: #0078d4;\n"
+    "      --theme-activityBar-foreground: #d7d7d7;\n"
+    "      --theme-activityBar-inactiveForeground: #868686;\n"
+    "      --theme-activityBar-activeBorder: #0078d4;\n"
+    "      --theme-list-hoverBackground: #2a2d2e;\n"
+    "      --theme-list-activeSelectionBackground: #04395e;\n"
+    "      --theme-list-inactiveSelectionBackground: #37373d;\n"
+    "      --theme-input-background: #313131;\n"
+    "      --theme-input-foreground: #cccccc;\n"
+    "      --theme-input-border: #3c3c3c;\n"
+    "      --theme-input-placeholderForeground: #989898;\n"
+    "      --theme-dropdown-background: #313131;\n"
+    "      --theme-dropdown-border: #3c3c3c;\n"
+    "      --theme-button-background: #0078d4;\n"
+    "      --theme-button-foreground: #ffffff;\n"
+    "      --theme-button-hoverBackground: #026ec1;\n"
+    "      --theme-button-border: #ffffff1a;\n"
+    "      --theme-button-secondaryBackground: #00000000;\n"
+    "      --theme-button-secondaryForeground: #cccccc;\n"
+    "      --theme-button-secondaryHoverBackground: #2b2b2b;\n"
+    "      --theme-badge-background: #616161;\n"
+    "      --theme-badge-foreground: #f8f8f8;\n"
+    "      --theme-textLink-foreground: #4daafc;\n"
+    "      --theme-textLink-activeForeground: #4daafc;\n"
+    "      --theme-textCodeBlock-background: #2b2b2b;\n"
+    "      --theme-textBlockQuote-background: #2b2b2b;\n"
+    "      --theme-textBlockQuote-border: #616161;\n"
+    "      --theme-textPreformat-foreground: #d0d0d0;\n"
+    "      --theme-textPreformat-background: #3c3c3c;\n"
+    "      --theme-menu-background: #1f1f1f;\n"
+    "      --theme-menu-selectionBackground: #0078d4;\n"
+    "      --theme-notifications-background: #1f1f1f;\n"
+    "      --theme-notifications-border: #2b2b2b;\n"
+    "      --theme-toolbar-hoverBackground: #5a5d5e50;\n"
+    "      --theme-scrollbarSlider-background: #79797966;\n"
+    "      --theme-terminal-foreground: #cccccc;\n"
+    "      --theme-terminal-ansiBlack: #000000;\n"
+    "      --theme-terminal-ansiRed: #cd3131;\n"
+    "      --theme-terminal-ansiGreen: #0dbc79;\n"
+    "      --theme-terminal-ansiYellow: #e5e510;\n"
+    "      --theme-terminal-ansiBlue: #2472c8;\n"
+    "      --theme-terminal-ansiMagenta: #bc3fbc;\n"
+    "      --theme-terminal-ansiCyan: #11a8cd;\n"
+    "      --theme-terminal-ansiWhite: #e5e5e5;\n"
+    "      --theme-terminal-ansiBrightBlack: #666666;\n"
+    "      --theme-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --theme-terminal-ansiBrightGreen: #23d18b;\n"
+    "      --theme-terminal-ansiBrightYellow: #f5f543;\n"
+    "      --theme-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --theme-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --theme-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --theme-terminal-ansiBrightWhite: #e5e5e5;\n"
+    "      --theme-charts-green: #89d185;\n"
+    "      --theme-charts-red: #f14c4c;\n"
+    "      --theme-charts-yellow: #cca700;\n"
+    "      --theme-charts-purple: #b180d7;\n"
 )
-"""VS Code's "Dark Modern" theme as ``--vscode-*`` variables."""
+"""VS Code's "Dark Modern" theme as ``--theme-*`` variables."""
 
-_VSCODE_LIGHT_MODERN_CSS = (
+_LIGHT_MODERN_CSS = (
     # extensions/theme-defaults/themes/light_modern.json and the
     # colour-registry light defaults, one line per Dark Modern line.
-    "      --vscode-foreground: #3b3b3b;\n"
-    "      --vscode-descriptionForeground: #3b3b3b;\n"
-    "      --vscode-errorForeground: #f85149;\n"
-    "      --vscode-icon-foreground: #3b3b3b;\n"
-    "      --vscode-focusBorder: #005fb8;\n"
-    "      --vscode-editor-background: #ffffff;\n"
-    "      --vscode-editor-foreground: #3b3b3b;\n"
-    "      --vscode-editor-selectionBackground: #add6ff;\n"
-    "      --vscode-editor-inactiveSelectionBackground: #e5ebf1;\n"
-    "      --vscode-editor-selectionHighlightBackground: #add6ff80;\n"
-    "      --vscode-editorLineNumber-foreground: #6e7681;\n"
-    "      --vscode-editorLineNumber-activeForeground: #171184;\n"
-    "      --vscode-editorWidget-background: #f8f8f8;\n"
-    "      --vscode-editorWarning-foreground: #bf8803;\n"
-    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
-    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
-    "      --vscode-editorGutter-modifiedBackground: #005fb8;\n"
-    "      --vscode-sideBar-background: #f8f8f8;\n"
-    "      --vscode-sideBar-border: #e5e5e5;\n"
-    "      --vscode-panel-border: #e5e5e5;\n"
-    "      --vscode-widget-border: #e5e5e5;\n"
-    "      --vscode-widget-shadow: #00000029;\n"
-    "      --vscode-editorGroupHeader-tabsBackground: #e5e5e5;\n"
-    "      --vscode-tab-activeBackground: #ffffff;\n"
-    "      --vscode-tab-inactiveBackground: #e5e5e5;\n"
-    "      --vscode-tab-activeForeground: #3b3b3b;\n"
-    "      --vscode-tab-inactiveForeground: #616161;\n"
-    "      --vscode-tab-activeBorderTop: #005fb8;\n"
-    "      --vscode-activityBar-foreground: #1f1f1f;\n"
-    "      --vscode-activityBar-inactiveForeground: #616161;\n"
-    "      --vscode-activityBar-activeBorder: #005fb8;\n"
-    "      --vscode-list-hoverBackground: #f2f2f2;\n"
-    "      --vscode-list-activeSelectionBackground: #e8e8e8;\n"
-    "      --vscode-list-inactiveSelectionBackground: #e4e6f1;\n"
-    "      --vscode-input-background: #ffffff;\n"
-    "      --vscode-input-foreground: #3b3b3b;\n"
-    "      --vscode-input-border: #cecece;\n"
-    "      --vscode-input-placeholderForeground: #767676;\n"
-    "      --vscode-dropdown-background: #ffffff;\n"
-    "      --vscode-dropdown-border: #cecece;\n"
-    "      --vscode-button-background: #005fb8;\n"
-    "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-button-hoverBackground: #0258a8;\n"
-    "      --vscode-button-border: #0000001a;\n"
-    "      --vscode-button-secondaryBackground: #e5e5e5;\n"
-    "      --vscode-button-secondaryForeground: #3b3b3b;\n"
-    "      --vscode-button-secondaryHoverBackground: #cccccc;\n"
-    "      --vscode-badge-background: #cccccc;\n"
-    "      --vscode-badge-foreground: #3b3b3b;\n"
-    "      --vscode-textLink-foreground: #005fb8;\n"
-    "      --vscode-textLink-activeForeground: #005fb8;\n"
-    "      --vscode-textCodeBlock-background: #f8f8f8;\n"
-    "      --vscode-textBlockQuote-background: #f8f8f8;\n"
-    "      --vscode-textBlockQuote-border: #e5e5e5;\n"
-    "      --vscode-textPreformat-foreground: #3b3b3b;\n"
-    "      --vscode-textPreformat-background: #0000001f;\n"
-    "      --vscode-menu-background: #ffffff;\n"
-    "      --vscode-menu-selectionBackground: #005fb8;\n"
-    "      --vscode-notifications-background: #ffffff;\n"
-    "      --vscode-notifications-border: #e5e5e5;\n"
-    "      --vscode-toolbar-hoverBackground: #b8b8b850;\n"
-    "      --vscode-scrollbarSlider-background: #64646466;\n"
-    "      --vscode-terminal-foreground: #3b3b3b;\n"
-    "      --vscode-terminal-ansiBlack: #000000;\n"
-    "      --vscode-terminal-ansiRed: #cd3131;\n"
-    "      --vscode-terminal-ansiGreen: #107c10;\n"
-    "      --vscode-terminal-ansiYellow: #949800;\n"
-    "      --vscode-terminal-ansiBlue: #0451a5;\n"
-    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
-    "      --vscode-terminal-ansiCyan: #0598bc;\n"
-    "      --vscode-terminal-ansiWhite: #555555;\n"
-    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
-    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
-    "      --vscode-terminal-ansiBrightGreen: #14ce14;\n"
-    "      --vscode-terminal-ansiBrightYellow: #b5ba00;\n"
-    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
-    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
-    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
-    "      --vscode-terminal-ansiBrightWhite: #a5a5a5;\n"
-    "      --vscode-charts-green: #388a34;\n"
-    "      --vscode-charts-red: #e51400;\n"
-    "      --vscode-charts-yellow: #bf8803;\n"
-    "      --vscode-charts-purple: #652d90;\n"
+    "      --theme-foreground: #3b3b3b;\n"
+    "      --theme-descriptionForeground: #3b3b3b;\n"
+    "      --theme-errorForeground: #f85149;\n"
+    "      --theme-icon-foreground: #3b3b3b;\n"
+    "      --theme-focusBorder: #005fb8;\n"
+    "      --theme-editor-background: #ffffff;\n"
+    "      --theme-editor-foreground: #3b3b3b;\n"
+    "      --theme-editor-selectionBackground: #add6ff;\n"
+    "      --theme-editor-inactiveSelectionBackground: #e5ebf1;\n"
+    "      --theme-editor-selectionHighlightBackground: #add6ff80;\n"
+    "      --theme-editorLineNumber-foreground: #6e7681;\n"
+    "      --theme-editorLineNumber-activeForeground: #171184;\n"
+    "      --theme-editorWidget-background: #f8f8f8;\n"
+    "      --theme-editorWarning-foreground: #bf8803;\n"
+    "      --theme-editorGutter-addedBackground: #2ea043;\n"
+    "      --theme-editorGutter-deletedBackground: #f85149;\n"
+    "      --theme-editorGutter-modifiedBackground: #005fb8;\n"
+    "      --theme-sideBar-background: #f8f8f8;\n"
+    "      --theme-sideBar-border: #e5e5e5;\n"
+    "      --theme-panel-border: #e5e5e5;\n"
+    "      --theme-widget-border: #e5e5e5;\n"
+    "      --theme-widget-shadow: #00000029;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #e5e5e5;\n"
+    "      --theme-tab-activeBackground: #ffffff;\n"
+    "      --theme-tab-inactiveBackground: #e5e5e5;\n"
+    "      --theme-tab-activeForeground: #3b3b3b;\n"
+    "      --theme-tab-inactiveForeground: #616161;\n"
+    "      --theme-tab-activeBorderTop: #005fb8;\n"
+    "      --theme-activityBar-foreground: #1f1f1f;\n"
+    "      --theme-activityBar-inactiveForeground: #616161;\n"
+    "      --theme-activityBar-activeBorder: #005fb8;\n"
+    "      --theme-list-hoverBackground: #f2f2f2;\n"
+    "      --theme-list-activeSelectionBackground: #e8e8e8;\n"
+    "      --theme-list-inactiveSelectionBackground: #e4e6f1;\n"
+    "      --theme-input-background: #ffffff;\n"
+    "      --theme-input-foreground: #3b3b3b;\n"
+    "      --theme-input-border: #cecece;\n"
+    "      --theme-input-placeholderForeground: #767676;\n"
+    "      --theme-dropdown-background: #ffffff;\n"
+    "      --theme-dropdown-border: #cecece;\n"
+    "      --theme-button-background: #005fb8;\n"
+    "      --theme-button-foreground: #ffffff;\n"
+    "      --theme-button-hoverBackground: #0258a8;\n"
+    "      --theme-button-border: #0000001a;\n"
+    "      --theme-button-secondaryBackground: #e5e5e5;\n"
+    "      --theme-button-secondaryForeground: #3b3b3b;\n"
+    "      --theme-button-secondaryHoverBackground: #cccccc;\n"
+    "      --theme-badge-background: #cccccc;\n"
+    "      --theme-badge-foreground: #3b3b3b;\n"
+    "      --theme-textLink-foreground: #005fb8;\n"
+    "      --theme-textLink-activeForeground: #005fb8;\n"
+    "      --theme-textCodeBlock-background: #f8f8f8;\n"
+    "      --theme-textBlockQuote-background: #f8f8f8;\n"
+    "      --theme-textBlockQuote-border: #e5e5e5;\n"
+    "      --theme-textPreformat-foreground: #3b3b3b;\n"
+    "      --theme-textPreformat-background: #0000001f;\n"
+    "      --theme-menu-background: #ffffff;\n"
+    "      --theme-menu-selectionBackground: #005fb8;\n"
+    "      --theme-notifications-background: #ffffff;\n"
+    "      --theme-notifications-border: #e5e5e5;\n"
+    "      --theme-toolbar-hoverBackground: #b8b8b850;\n"
+    "      --theme-scrollbarSlider-background: #64646466;\n"
+    "      --theme-terminal-foreground: #3b3b3b;\n"
+    "      --theme-terminal-ansiBlack: #000000;\n"
+    "      --theme-terminal-ansiRed: #cd3131;\n"
+    "      --theme-terminal-ansiGreen: #107c10;\n"
+    "      --theme-terminal-ansiYellow: #949800;\n"
+    "      --theme-terminal-ansiBlue: #0451a5;\n"
+    "      --theme-terminal-ansiMagenta: #bc05bc;\n"
+    "      --theme-terminal-ansiCyan: #0598bc;\n"
+    "      --theme-terminal-ansiWhite: #555555;\n"
+    "      --theme-terminal-ansiBrightBlack: #666666;\n"
+    "      --theme-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --theme-terminal-ansiBrightGreen: #14ce14;\n"
+    "      --theme-terminal-ansiBrightYellow: #b5ba00;\n"
+    "      --theme-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --theme-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --theme-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --theme-terminal-ansiBrightWhite: #a5a5a5;\n"
+    "      --theme-charts-green: #388a34;\n"
+    "      --theme-charts-red: #e51400;\n"
+    "      --theme-charts-yellow: #bf8803;\n"
+    "      --theme-charts-purple: #652d90;\n"
 )
-"""VS Code's "Light Modern" theme as ``--vscode-*`` variables."""
+"""VS Code's "Light Modern" theme as ``--theme-*`` variables."""
 
-_VSCODE_THEME_VARS_CSS = (
-    ":root {\n" + _VSCODE_FONT_VARS_CSS + _VSCODE_DARK_MODERN_CSS + "    }\n"
+_THEME_VARS_CSS = (
+    ":root {\n" + _FONT_VARS_CSS + _DARK_MODERN_CSS + "    }\n"
 )
-"""The VS Code theme variables main.css derives its palette from.
+"""The theme variables main.css derives its palette from.
 
-The webview gets them from VS Code itself; the remote webapp
-(:func:`_build_html`) and the shared chat pages
-(:func:`_build_share_page`) run in a plain browser, so both inline
-this block — one copy, so the two pages can never disagree on the
-palette.  Dark Modern is the default theme; the light theme swaps in
+The chat page (:func:`_build_html`) and the shared chat pages
+(:func:`_build_share_page`) both inline this block — one copy, so the
+two pages can never disagree on the palette.  Dark Modern is the
+default theme; the light theme swaps in
 :data:`_SHARE_PAGE_LIGHT_VARS_CSS`.
 """
 
 _SHARE_PAGE_LIGHT_VARS_CSS = (
     "html.light-theme,\n"
-    "    body.remote-chat.light-theme {\n" + _VSCODE_LIGHT_MODERN_CSS + "    }\n"
+    "    body.remote-chat.light-theme {\n" + _LIGHT_MODERN_CSS + "    }\n"
 )
 """Light Modern overrides for the light/dark theme toggles.
 
-Both pages inline this block after :data:`_VSCODE_THEME_VARS_CSS`.
+Both pages inline this block after :data:`_THEME_VARS_CSS`.
 ``share.js`` toggles the ``light-theme`` class on ``<html>``, the
 same element the ``:root`` block targets, so ``main.css``'s
 ``:root``-level derived variables (``--bg``, ``--fg``, ...) pick the
 overrides up.  ``main.js`` toggles it on ``<body>`` instead, where
 ``media/remote-codex.css`` re-derives every semantic variable from
-the ``--vscode-*`` names, so the remote page follows too.
+the ``--theme-*`` names, so the remote page follows too.
 """
 
 _SHARE_PAGE_CSS = """\
 /* A shared chat page is a normal scrolling document, not the
-   fixed-height webview app shell that main.css lays out. */
+   fixed-height app shell that main.css lays out. */
 html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
 #output { overflow: visible; }
-/* Chrome that only works inside the live chat webview. */
+/* Chrome that only works inside the live chat page. */
 .panel-copy-btn, .panel-stop-btn { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
    the inlined main.css's #tab-bar / .chat-tab rules). It rides along
@@ -3925,19 +3933,19 @@ def _share_page_filename(title: str, chat_id: str) -> str:
 def _build_share_page(title: str, body_html: str) -> str:
     """Build one standalone, self-contained shared chat page.
 
-    Wraps *body_html* — the chat webview's serialized chat, one
+    Wraps *body_html* — the chat page's serialized chat, one
     ``.share-task`` section (task panel + transcript) per task
     of the chat, plus one hidden ``.share-task.share-subagent``
     section per sub-agent the chat fanned out (see
     ``buildShareableHtml`` in ``media/main.js``) —
     in a complete HTML document that needs no
-    server: ``media/main.css`` (the exact stylesheet the webview
-    uses), both highlight.js themes, the VS Code palette variables
+    server: ``media/main.css`` (the exact stylesheet the chat page
+    uses), both highlight.js themes, the palette variables
     (dark plus the light-mode overrides behind the page's theme
     toggle) and ``media/share.js`` (collapse / expand behaviour for
     the event panels, the task panel, the sub-agent tab strip
     that opens and closes the sub-agent sections like the live
-    webview's tabs, and the light/dark toggle) are all inlined.
+    chat page's tabs, and the light/dark toggle) are all inlined.
 
     Args:
         title: Page title; falls back to "KISS Sorcar chat".
@@ -3950,10 +3958,10 @@ def _build_share_page(title: str, body_html: str) -> str:
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
     brand_css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
-    hljs_dark_css = (MEDIA_DIR / "highlight-vscode-dark.css").read_text(
+    hljs_dark_css = (MEDIA_DIR / "highlight-dark.css").read_text(
         encoding="utf-8",
     )
-    hljs_light_css = (MEDIA_DIR / "highlight-vscode-light.css").read_text(
+    hljs_light_css = (MEDIA_DIR / "highlight-light.css").read_text(
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
@@ -3969,7 +3977,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         '<meta name="viewport" content="width=device-width, '
         'initial-scale=1.0">\n'
         f"<title>{page_title}</title>\n"
-        "<style>\n" + _VSCODE_THEME_VARS_CSS + "</style>\n"
+        "<style>\n" + _THEME_VARS_CSS + "</style>\n"
         "<style>\n" + _SHARE_PAGE_LIGHT_VARS_CSS + "</style>\n"
         '<style id="hljs-style-dark">\n' + hljs_dark_css + "\n</style>\n"
         '<style id="hljs-style-light" media="not all">\n'
@@ -4002,18 +4010,15 @@ def _page_title() -> str:
 
 
 def _build_html() -> str:
-    """Build the standalone HTML page for remote Sorcar access.
+    """Build the webapp's HTML page.
 
-    Loads ``media/chat.html`` — the exact same template the VS Code
-    extension's ``SorcarTab.buildChatHtml`` reads — and substitutes
-    remote-mode values (no CSP, plain ``/media/`` URLs, ``loading...``
-    model name, the auth-modal block, and the WebSocket shim that
-    provides ``acquireVsCodeApi()`` for ``main.js``).
-
-    Sharing the markup with the extension guarantees the two HTML
-    pages cannot drift in script ordering or DOM ids — the bug that
-    previously broke the tab bar, the ``+`` button and the send-task
-    flow on the remote webapp.
+    Fills the ``{{PLACEHOLDER}}`` slots of ``media/chat.html``:
+    cache-busted ``/media/`` URLs of the stylesheets and scripts
+    (``transport.js`` is the WebSocket transport ``main.js`` talks
+    to the daemon through), the inline brand / tricks / tips / voice
+    JSON, the ``loading...`` model name and the auth-modal block.
+    ``media/assetLoadGuard.js`` is inlined as the first script of
+    ``<head>`` so it is installed before any asset can fail to load.
 
     Returns:
         The complete HTML string.
@@ -4026,9 +4031,9 @@ def _build_html() -> str:
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
-        "    body { background: var(--vscode-editor-background, #1f1f1f);\n"
-        "            color: var(--vscode-editor-foreground, #cccccc); }\n"
-        "    " + _VSCODE_THEME_VARS_CSS
+        "    body { background: var(--theme-editor-background, #1f1f1f);\n"
+        "            color: var(--theme-editor-foreground, #cccccc); }\n"
+        "    " + _THEME_VARS_CSS
         + "    " + _SHARE_PAGE_LIGHT_VARS_CSS + "  </style>"
     )
     auth_modal = (
@@ -4048,7 +4053,7 @@ def _build_html() -> str:
         'placeholder="Enter password">\n'
         '        <div id="auth-modal-error" role="alert" '
         'style="min-height:1.2em; margin-top:6px; '
-        'color: var(--vscode-errorForeground, #f14c4c);"></div>\n'
+        'color: var(--theme-errorForeground, #f14c4c);"></div>\n'
         '        <div class="auth-modal-actions">\n'
         '          <button id="auth-modal-cancel" '
         'class="auth-modal-btn auth-modal-cancel"\n'
@@ -4062,8 +4067,11 @@ def _build_html() -> str:
     )
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
-        "CSP_META": "",
-        "HEAD_SCRIPT": f"<script>{_ASSET_LOAD_GUARD_JS}</script>",
+        "HEAD_SCRIPT": (
+            "<script>\n"
+            + (MEDIA_DIR / "assetLoadGuard.js").read_text(encoding="utf-8")
+            + "</script>"
+        ),
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
@@ -4072,7 +4080,7 @@ def _build_html() -> str:
         # rendered with ``light-theme`` (and the light highlight sheet)
         # so the first paint is already light; main.js drops the class
         # again for a client whose saved choice is dark.
-        "HLJS_CSS_HREF": _media_url("highlight-vscode-light.css"),
+        "HLJS_CSS_HREF": _media_url("highlight-light.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat light-theme"',
         "PRODUCT_NAME": html.escape(PRODUCT_NAME),
@@ -4093,7 +4101,6 @@ def _build_html() -> str:
         "MODEL_NAME": "loading...",
         "VERSION_SUFFIX": f" {version}" if version else "",
         "AUTH_MODAL": auth_modal,
-        "NONCE_ATTR": "",
         "HLJS_SRC": _media_url("highlight.min.js"),
         "MARKED_SRC": _media_url("marked.min.js"),
         "API_SRC": _media_url("api.js"),
@@ -4105,21 +4112,17 @@ def _build_html() -> str:
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MOBILE_SWIPE_SRC": _media_url("mobileSwipe.js"),
         "MAIN_SRC": _media_url("main.js"),
-        "SHIM_SCRIPT": (
-            "<script>window.__HLJS_THEME_CSS__ = "
-            + json.dumps({
-                "dark": _media_url("highlight-vscode-dark.css"),
-                "light": _media_url("highlight-vscode-light.css"),
-            })
-            + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
-        ),
+        "HLJS_THEME_CSS": json.dumps({
+            "dark": _media_url("highlight-dark.css"),
+            "light": _media_url("highlight-light.css"),
+        }),
+        "TRANSPORT_SRC": _media_url("transport.js"),
         "TRICKS_JSON": tricks_json,
         "MY_TRICKS_COUNT": str(tricks_data["userCount"]),
         "TIPS_JSON": tips_json,
         "TIPS_SRC": _media_url("tips.js"),
         "VOICE_SRC": _media_url("voice.js"),
         "VOICE_CONFIG": json.dumps({
-            "mode": "browser",
             "voskSrc": _media_url("vosk.js"),
             "modelUrl": "/voice-model.tar.gz",
             "ackAudioUrl": _media_url("working-on-it.mp3"),
@@ -4131,11 +4134,11 @@ def _build_html() -> str:
         space, key = m.group(1), m.group(2)
         if key not in subs:
             return m.group(0)
-        # Attribute-string placeholders carry their own leading space (or
-        # are empty); the template writes them after a separating space
+        # Attribute-string placeholders carry their own leading space;
+        # the template writes them after a separating space
         # (``<body {{BODY_CLASS_ATTR}}>``) only so htmlhint can parse the
         # tag.  Drop that space so the page renders exactly
-        # ``<body class="remote-chat light-theme">`` / ``<script src=...>``.
+        # ``<body class="remote-chat light-theme">``.
         if key in _ATTR_STRING_KEYS:
             return subs[key]
         return space + subs[key]
@@ -4143,7 +4146,7 @@ def _build_html() -> str:
     return re.sub(r"( ?)\{\{([A-Z_]+)\}\}", _fill, tpl)
 
 
-_ATTR_STRING_KEYS = frozenset({"BODY_CLASS_ATTR", "ENTERKEYHINT", "NONCE_ATTR"})
+_ATTR_STRING_KEYS = frozenset({"BODY_CLASS_ATTR", "ENTERKEYHINT"})
 
 
 _MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
@@ -4219,97 +4222,20 @@ def _build_service_worker() -> str:
     return tpl.replace("__KISS_SW_SHELL__", json.dumps(shell))
 
 
-def _parse_version_py(vfile: Path) -> str:
-    """Return the ``__version__`` string from a ``_version.py`` file.
+def _read_version() -> str:
+    """Return the daemon's version, as reported to ``update_available``.
 
-    Returns an empty string when the file is missing, unreadable, or
-    does not define ``__version__``.  A best-effort parser that keeps
-    the daemon booting even if a foreign ``_version.py`` is malformed.
-    Uses the exact same regex as ``readVersionPy`` in the extension's
-    ``UpdateChecker.js`` (its documented twin) so the daemon and the
-    extension can never disagree about what an installed
-    ``_version.py`` says.
+    Read from the bundled ``_version.py`` on every call (never cached):
+    ``install.sh`` replaces the installed package and restarts the
+    service, so the file always names the running code.
     """
+    vfile = Path(__file__).parent.parent / "core" / "_version.py"
     try:
         text = vfile.read_text(encoding="utf-8")
-    except Exception:
+    except OSError:
         return ""
     m = re.search(r"""__version__\s*=\s*["']([^"']+)["']""", text)
     return m.group(1) if m else ""
-
-
-def _scan_installed_extension_versions(root: Path) -> list[str]:
-    """Return every ``__version__`` found under installed KISS extensions.
-
-    Scans direct children of ``root`` for the KISS Sorcar extension
-    naming convention (``ksenxx.kiss-sorcar-<VERSION>``) and reads
-    each ``kiss_project/src/kiss/core/_version.py`` (the canonical
-    location since the version literal moved into ``kiss.core``),
-    falling back to the pre-move ``kiss_project/src/kiss/_version.py``
-    for extensions installed before the move.  Malformed / missing
-    version files are silently skipped so a single broken sibling
-    cannot mask an otherwise-valid newer install.
-    """
-    out: list[str] = []
-    try:
-        entries = list(root.iterdir())
-    except (OSError, ValueError):
-        return out
-    for entry in entries:
-        try:
-            if not entry.is_dir():
-                continue
-        except OSError:
-            continue
-        if not entry.name.startswith(_EXTENSION_DIR_PREFIX):
-            continue
-        kiss_dir = entry / "kiss_project" / "src" / "kiss"
-        v = _parse_version_py(kiss_dir / "core" / "_version.py")
-        if not v:
-            v = _parse_version_py(kiss_dir / "_version.py")
-        if v:
-            out.append(v)
-    return out
-
-
-def _read_version() -> str:
-    r"""Return the version reported to ``update_available`` broadcasts.
-
-    Historically this only read the daemon's own bundled
-    ``_version.py``.  That was correct as long as the running daemon
-    binary and the currently-installed extension matched — but the
-    kiss-web launch agent / systemd unit is only ``launchctl
-    kickstart -k``\ ed by ``install.sh`` during an upgrade, so the
-    supervisor keeps respawning the OLD binary (bundled with the OLD
-    ``_version.py``) after the update finishes.  Reporting the OLD
-    version as "current" against a PyPI ``latest`` equal to the NEW
-    version caused the sticky "update available" toast to re-appear
-    with the same NEW-version text the user just clicked.
-
-    Fix: pick the newest ``__version__`` found under
-    ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/
-    _version.py`` so a freshly-installed extension dominates the answer even when
-    the running daemon is still the stale one.  Falls back to the
-    bundled ``_version.py`` for developer / Docker installs where the
-    extension dir does not exist.
-    """
-    root = _INSTALLED_EXTENSIONS_ROOT
-    if root is None:
-        root = Path.home() / ".vscode" / "extensions"
-    best: tuple[int, ...] | None = None
-    best_str = ""
-    for v in _scan_installed_extension_versions(root):
-        t = _version_tuple(v)
-        if t is None:
-            continue
-        if best is None or t > best:
-            best = t
-            best_str = v
-    if best_str:
-        return best_str
-    return _parse_version_py(
-        Path(__file__).parent.parent / "core" / "_version.py",
-    )
 
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:
@@ -4318,12 +4244,10 @@ def _version_tuple(v: str) -> tuple[int, ...] | None:
     ``kiss-agent-framework`` uses CalVer ``YYYY.M.P``; ``None`` is
     returned for anything that cannot be parsed so a malformed PyPI
     payload never triggers a false "update available" notification.
-    Each dot-separated component must be ASCII digits only (the strict
-    ``/^\\d+$/`` check of ``versionTuple`` in the extension's
-    ``UpdateChecker.js``, this helper's documented twin) — a bare
+    Each dot-separated component must be ASCII digits only — a bare
     ``int()`` also accepts ``"+1"``, ``"1_0"`` and unicode digits,
-    which would let the daemon and the extension disagree on update
-    direction for malformed version strings.
+    which would misjudge the update direction for malformed version
+    strings.
     """
     if not isinstance(v, str):
         return None
@@ -4394,14 +4318,7 @@ _UPDATE_SNOOZE_MS = 24 * 60 * 60 * 1000
 
 
 def _update_check_cache_path() -> Path:
-    """Return the update-check cache path shared with the extension.
-
-    The VS Code extension host's ``UpdateChecker.js`` keeps its fetch
-    cooldown and the "Remind me later" snooze in this file; the daemon
-    reads and writes the SAME file so one snooze silences every update
-    popup — the extension host's native notification, the sidebar
-    webview toast, and the remote webapp toast.
-    """
+    """Return the path of the "Remind me later" update-snooze cache."""
     return kiss_home() / ".update-check.json"
 
 
@@ -4419,8 +4336,7 @@ def _read_update_check_cache() -> dict[str, Any]:
 def _is_update_snoozed(latest: str) -> bool:
     """Return True while a "Remind me later" snooze covers *latest*.
 
-    Mirrors ``isSnoozeActive`` in the extension's ``UpdateChecker.js``:
-    the snooze holds until it expires, but a release NEWER than the
+    The snooze holds until it expires, but a release NEWER than the
     snoozed one breaks through (``_compare_versions`` returns 0 for an
     unparseable ``snoozedLatest``, so a version-less snooze suppresses
     everything until expiry).
@@ -4436,1032 +4352,19 @@ def _is_update_snoozed(latest: str) -> bool:
 
 
 def _record_update_snooze(latest: str) -> None:
-    """Merge a 24h snooze for release *latest* into the shared cache.
+    """Record a 24h snooze for release *latest* in the snooze cache.
 
-    Preserves the extension's ``lastCheckMs``/``lastLatest`` cooldown
-    fields and writes atomically via a unique temp file + rename (the
-    extension host may rewrite the same file concurrently; matching
-    its ``writeCache`` protocol keeps the file parseable).  Twin of
-    ``snoozeUpdateNotification`` in ``UpdateChecker.js``.
+    Written atomically via a unique temp file + rename so a reader
+    never sees a partial file.
     """
-    cache = _read_update_check_cache()
-    last_check = cache.get("lastCheckMs")
-    last_latest = cache.get("lastLatest")
     payload = {
-        "lastCheckMs": last_check if isinstance(last_check, (int, float)) else 0,
-        "lastLatest": last_latest if isinstance(last_latest, str) else "",
         "snoozeUntilMs": int(time.time() * 1000) + _UPDATE_SNOOZE_MS,
-        "snoozedLatest": latest
-        or (last_latest if isinstance(last_latest, str) else ""),
+        "snoozedLatest": latest,
     }
     try:
         _atomic_write_text(_update_check_cache_path(), json.dumps(payload))
     except Exception:
         logger.debug("Failed to record update snooze", exc_info=True)
-
-
-_ASSET_LOAD_GUARD_JS = r"""
-// Reloads the remote webapp when one of its own page assets fails to
-// load.  A page script that never arrives leaves the app half-booted
-// (with api.js missing, main.js throws at ``createSorcarApi`` and the
-// loading overlay covers #app for good while the WebSocket
-// authenticates happily); a stylesheet that never arrives leaves it
-// unstyled for its whole lifetime (without remote-codex.css the
-// docked history panel is main.css's 90vw drawer, open on top of the
-// chat).  Chromium aborts every in-flight request with
-// ERR_NETWORK_CHANGED when the network path changes during the load
-// (a Wi-Fi/cellular hand-over on a phone; on a busy CI host, the
-// veth links of other jobs' containers), so this is a transient a
-// reload fixes.  Load errors do not bubble, but a capture-phase
-// listener on window still sees them.  The reload timestamps in
-// sessionStorage stop a reload loop when an asset is really broken:
-// up to three reloads per 30 s, then the failure stays visible.  (One
-// change can outlast a single reload: in the full-suite run of
-// 2026-10-11 the reloaded page's remote-codex.css was aborted too and
-// a one-reload budget left the chat under the drawer.)  The reload is
-// immediate, from inside the error event: a reload deferred to a
-// timer lets the broken document go on booting (main.js runs, the
-// WebSocket opens) with requests in flight that the reload then
-// aborts, after which Chromium has failed the reloaded page's own
-// assets with ERR_TOO_MANY_RETRIES.
-//
-// This script is the first thing in <head> (the HEAD_SCRIPT
-// placeholder of media/chat.html), before the stylesheet links: a
-// stylesheet's error
-// event is dispatched asynchronously once its fetch fails, so a
-// listener installed by a later script could miss it.
-//
-// Only the page's own assets count: same-origin ``<script src>`` and
-// ``<link rel=stylesheet>`` that fail while the document is still
-// parsing.  Assets main.js adds later on demand (the Monaco editor
-// from its CDN, the voice model, the swapped highlight theme sheet)
-// have their own fallbacks and must not restart the app.
-(function() {
-  // A JSON list of the Date.now() stamps of this tab's recent reloads.
-  var _RELOADS = 'sorcar-asset-reloads';
-  var _WINDOW_MS = 30000;
-  var _MAX_RELOADS = 3;
-  // Set once this document reloads: the other assets of the same
-  // document that fail too (the document lives on until the reload
-  // commits) must not each take a stamp of the budget.
-  var _reloading = false;
-  // The URL of the failed asset ('' for anything else: an inline
-  // script, an image, the window's own error events).  src / href /
-  // rel read as '' when the attribute is missing.
-  function _assetUrl(target) {
-    var tag = target.tagName;
-    if (tag === 'SCRIPT') return target.src;
-    if (tag === 'LINK' && /\bstylesheet\b/.test(target.rel)) return target.href;
-    return '';
-  }
-  function _reloadOnAssetLoadError(ev) {
-    var url = _assetUrl(ev.target);
-    if (!url) return;
-    if (_reloading) return;
-    if (document.readyState !== 'loading') return;
-    if (url.indexOf(window.location.origin + '/') !== 0) return;
-    try {
-      var now = Date.now();
-      var reloads = (JSON.parse(sessionStorage.getItem(_RELOADS)) || []).filter(
-        function(stamp) { return now - stamp < _WINDOW_MS; }
-      );
-      if (reloads.length >= _MAX_RELOADS) return;
-      reloads.push(now);
-      sessionStorage.setItem(_RELOADS, JSON.stringify(reloads));
-    } catch(e) {
-      // No storage means no loop guard: leave the failure visible.
-      return;
-    }
-    _reloading = true;
-    window.location.reload();
-  }
-  window.addEventListener('error', _reloadOnAssetLoadError, true);
-})();
-"""
-
-
-_WS_SHIM_JS = r"""
-// WebSocket shim for the remote webapp: provides acquireVsCodeApi()
-// so the extension's media/main.js + media/api.js run unmodified in a
-// plain browser.  Every frame sent through it is a command of the
-// server API catalog defined in src/kiss/server/sorcar.py (dispatched
-// by kiss.server.sorcar.ServerApi.dispatch); the pre-app ``auth``
-// handshake frames sent below are serviced by
-// kiss.server.sorcar.ServerApi.authenticate before the daemon starts
-// dispatching this connection's commands.
-(function() {
-  var _state = null;
-  try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
-  var _ws = null;
-  var _pending = [];
-  var _authenticated = false;
-  // True once an authenticated session has lost its socket (a server
-  // restart, a network blip, the phone's browser sleeping the tab).
-  // The page is NOT reloaded when the socket comes back: main.js keeps
-  // every tab, transcript and draft in memory, and on the
-  // ``daemonStatus`` ``connected: true`` that follows the re-auth it
-  // sends ``ready`` again, which makes the server push what changed
-  // meanwhile (tab registry, transcript replays, tasks, settings).  A
-  // reload would repaint the whole app from a blank page on every
-  // blip — visible as flicker on a phone that drops the connection
-  // each time the browser is backgrounded.  This flag only picks the
-  // wording of the status surface ("Reconnecting" vs "starting").
-  var _hadAuthThenClosed = false;
-  // Reconnect backoff attempt count — reset to 0 after a successful
-  // ``auth_ok`` so a fresh disconnect tries again almost immediately.
-  var _reconnectAttempt = 0;
-  // Pending reconnect timer id, used so visibilitychange / pageshow /
-  // online wake-ups can short-circuit the scheduled delay.
-  var _reconnectTimer = null;
-
-  /**
-   * Replace the overlay text so the user sees an accurate status.
-   *
-   * On a brand-new tab the message is "KISS Sorcar Server is starting
-   * ..." because the server may legitimately not be up yet.  Once we
-   * have proven the server is reachable (a previous ``auth_ok`` came
-   * through, then the socket later closed) every subsequent display of
-   * the overlay represents a RECONNECT, not a cold start — say so.
-   */
-  function _updateLoadingMsg(reconnecting) {
-    var msg = document.getElementById('kiss-server-loading-msg');
-    if (!msg) return;
-    _setOverlayAction(null, null);
-    msg.textContent = reconnecting
-      ? 'Reconnecting to ' + _productName() + ' Server ...'
-      : _productName() + ' Server is starting ...';
-  }
-
-  function _productName() {
-    return (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
-  }
-
-  // The overlay's single action button ("Retry now" / "Enter
-  // password").  Created on demand next to the message node — the
-  // overlay markup itself lives in media/chat.html — and removed
-  // whenever the overlay text is not about a choice the user can make.
-  var _overlayAction = null;
-
-  /**
-   * Show one button under the overlay message, or remove it.
-   *
-   * ``label`` is the verb on the button and ``handler`` runs on
-   * click; passing ``null`` for either removes the button.  A second
-   * call replaces the previous label/handler, so the button never
-   * accumulates listeners.
-   */
-  function _setOverlayAction(label, handler) {
-    var msg = document.getElementById('kiss-server-loading-msg');
-    if (!msg || !msg.parentNode) return;
-    if (!label || !handler) {
-      if (_overlayAction && _overlayAction.parentNode) {
-        _overlayAction.parentNode.removeChild(_overlayAction);
-      }
-      _overlayAction = null;
-      return;
-    }
-    if (!_overlayAction) {
-      _overlayAction = document.createElement('button');
-      _overlayAction.type = 'button';
-      _overlayAction.id = 'kiss-server-loading-action';
-      _overlayAction.className = 'auth-modal-btn auth-modal-ok';
-      _overlayAction.style.marginTop = '12px';
-    }
-    _overlayAction.textContent = label;
-    _overlayAction.onclick = handler;
-    if (_overlayAction.parentNode !== msg.parentNode) {
-      msg.parentNode.insertBefore(_overlayAction, msg.nextSibling);
-    }
-  }
-
-  // Wall-clock start of the current outage (0 while connected).  Set
-  // by the first ``onclose`` after a connect attempt fails, cleared by
-  // ``auth_ok``.  Drives the overlay escalation below.
-  var _outageSince = 0;
-  // Once-a-second overlay refresh while disconnected: after
-  // OVERLAY_ESCALATE_MS of failed reconnects the message gains the
-  // elapsed time, a plain hint and a "Retry now" button, and during
-  // an auth lockout it counts the wait down.  Cleared on ``auth_ok``.
-  var _overlayTick = null;
-  var OVERLAY_ESCALATE_MS = 8000;
-
-  function _startOverlayTick() {
-    if (_overlayTick) return;
-    _overlayTick = setInterval(_refreshOverlay, 1000);
-  }
-
-  function _stopOverlayTick() {
-    if (!_overlayTick) return;
-    clearInterval(_overlayTick);
-    _overlayTick = null;
-  }
-
-  /**
-   * Re-render the overlay text for the current disconnected state.
-   *
-   * Lockout wins (the server told us exactly how long to wait); then
-   * an outage past OVERLAY_ESCALATE_MS gets the escalated wording
-   * with the elapsed seconds and a "Retry now" button, so the user is
-   * never left with a bare spinner and no idea whether waiting helps.
-   * The tick only runs between ``onclose`` / ``auth_locked`` (which set
-   * ``_outageSince`` / ``_lockedUntil``) and the next ``auth_ok`` /
-   * ``auth_required`` (which clear them and stop it).  A lockout that
-   * has run out with no server answer hands over to the outage (or
-   * cancelled-dialog) wording via ``_endLockout`` instead of counting
-   * "0 s" forever.
-   */
-  function _refreshOverlay() {
-    if (_lockedUntil && Date.now() < _lockedUntil) {
-      _showLockedMsg(Math.ceil((_lockedUntil - Date.now()) / 1000));
-      return;
-    }
-    if (_lockedUntil) _endLockout();
-    if (!_outageSince) return;
-    var elapsed = Date.now() - _outageSince;
-    if (elapsed < OVERLAY_ESCALATE_MS) return;
-    var msg = document.getElementById('kiss-server-loading-msg');
-    if (!msg) return;
-    msg.textContent = 'Still trying to reach the ' + _productName() +
-      ' server (' + Math.floor(elapsed / 1000) + ' s). ' +
-      'Check that it is running on this machine.';
-    _setOverlayAction('Retry now', _retryNow);
-  }
-
-  /**
-   * The lockout deadline passed without a server answer clearing it.
-   *
-   * Only ``auth_ok`` / ``auth_required`` reset ``_lockedUntil``, so an
-   * expired lockout with the socket still down means the reconnect
-   * scheduled for its end is failing (server gone, device offline).
-   * Stop the countdown and hand the overlay to the state that now
-   * applies: the cancelled-dialog explanation ("A password is
-   * needed" + "Enter password"), or the outage wording, whose clock
-   * starts at the lockout's end so "Still trying ..." + "Retry now"
-   * follows OVERLAY_ESCALATE_MS later.  An open socket is about to
-   * be answered by the server, so only the countdown ends.
-   */
-  function _endLockout() {
-    var until = _lockedUntil;
-    _lockedUntil = 0;
-    if (_ws && _ws.readyState === WebSocket.OPEN) return;
-    if (_promptDeclined) {
-      _stopOverlayTick();
-      _showPasswordNeeded();
-      return;
-    }
-    if (_outageSince) return;
-    _outageSince = until;
-    _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
-  }
-
-  /**
-   * "Retry now" on the overlay: drop the backoff and reconnect at once.
-   *
-   * The escalated text and the button stay (the tick keeps the
-   * seconds current); ``auth_ok`` or ``auth_required`` clears them.
-   */
-  function _retryNow() {
-    if (_ws && _ws.readyState === WebSocket.OPEN) return;
-    if (_reconnectTimer) {
-      clearTimeout(_reconnectTimer);
-      _reconnectTimer = null;
-    }
-    _reconnectAttempt = 0;
-    connect();
-  }
-
-  // Non-zero while the server has told us (via an ``auth_locked``
-  // frame) that this source IP is rate-limited after too many failed
-  // logins.  Holds the retry delay in milliseconds; consumed by the
-  // ``onclose`` handler so the follow-up reconnect waits out the
-  // lockout instead of hammering the server on the fast backoff, and
-  // so the overlay keeps showing the lockout explanation rather than
-  // the generic "starting ..." label.
-  var _lockedRetryMs = 0;
-  // Wall-clock end of the lockout (0 when not locked) for the countdown.
-  var _lockedUntil = 0;
-  // True after a pre-auth ``error`` frame was written onto the overlay
-  // (e.g. "remote access is turned off"); the close that follows must
-  // not replace that explanation with the generic "starting" label.
-  var _preAuthErrorShown = false;
-
-  /**
-   * Replace the overlay text with the auth-lockout explanation.
-   *
-   * Shown when the server answers the handshake with ``auth_locked``:
-   * without this the user would stare at a promptless "KISS Sorcar
-   * Server is starting ..." spinner with no hint that the remote
-   * password rate-limit is what is keeping the password modal away.
-   * The lock is per source network (the tunnel collapses every
-   * visitor onto one IP), so the wording does not blame the reader,
-   * and the seconds count down once a second via the overlay tick.
-   */
-  function _showLockedMsg(secs) {
-    var msg = document.getElementById('kiss-server-loading-msg');
-    if (!msg) return;
-    _setOverlayAction(null, null);
-    msg.textContent = 'Too many wrong passwords from this network. ' +
-      'You can try again in ' + secs + ' s.';
-  }
-
-  // A page the service worker answered from its cache because the
-  // server was unreachable carries the ``kiss-offline-shell`` meta
-  // (see media/sw.js).  Its code may be older than what the server
-  // now runs, so the first successful handshake reloads it — the one
-  // reload the shim still performs, and only on a page that was never
-  // live.  The sessionStorage flag survives that reload and stops a
-  // loop when the page fetch keeps timing out (slow link) while the
-  // WebSocket still comes up: the second cached load is kept.  A page
-  // the server itself served clears the flag.
-  //
-  // The worker only holds a copy because the server was reachable
-  // earlier, so a cached page is a reconnect from the user's point of
-  // view and its overlay says so from the start (and keeps saying so
-  // while the connection attempts fail).
-  var _OFFLINE_RELOADED_FLAG = 'sorcar-offline-reloaded';
-  var _offlineShell =
-    !!document.querySelector('meta[name="kiss-offline-shell"]');
-  var _reloadOnFirstAuth = false;
-  if (_offlineShell) _updateLoadingMsg(true);
-  // The commands flushed on a reconnected socket, kept until the
-  // server's ``pong`` confirms it has taken them (see ``auth_ok``).
-  var _inflight = [];
-  try {
-    if (_offlineShell) {
-      _reloadOnFirstAuth =
-        sessionStorage.getItem(_OFFLINE_RELOADED_FLAG) !== '1';
-    } else {
-      sessionStorage.removeItem(_OFFLINE_RELOADED_FLAG);
-    }
-  } catch (e) {}
-
-  // Half-open sockets: when the network path dies silently (Wi-Fi to
-  // cellular hand-over, a NAT entry expiring, the laptop lid closing)
-  // the browser keeps reporting the socket OPEN and no ``onclose``
-  // ever fires, so the app would sit "connected" while every frame
-  // is lost.  The server sends a ``heartbeat`` frame to every client
-  // right after each of its own keep-alive pings (every 15 s, see
-  // ``RemoteAccessServer._ping_one_ws``); a socket that has been
-  // silent for ``_STALE_AFTER_MS`` is therefore dead and is dropped
-  // here so the regular reconnect path (banner, backoff, resync on
-  // re-auth) takes over.  Any frame counts as life, so a slow server
-  // command cannot cause a false alarm.
-  var _STALE_CHECK_MS = 15000;
-  var _STALE_AFTER_MS = 45000;
-  var _lastFrameAt = 0;
-  var _staleTimer = null;
-  // The reconnect backoff is forgiven only once a session has stayed
-  // up this long.  Forgiving it on ``auth_ok`` let a daemon that
-  // accepts the socket and then stalls or drops it during the replay
-  // be retried every half second for as long as it kept failing.
-  var _STABLE_AFTER_MS = 30000;
-  var _stableTimer = null;
-
-  function _stopStaleCheck() {
-    if (_staleTimer !== null) {
-      try { clearTimeout(_staleTimer); } catch (e) {}
-      _staleTimer = null;
-    }
-    if (_stableTimer !== null) {
-      try { clearTimeout(_stableTimer); } catch (e) {}
-      _stableTimer = null;
-    }
-  }
-
-  function _checkStale() {
-    _staleTimer = null;
-    if (!_authenticated || !_ws || _ws.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - _lastFrameAt >= _STALE_AFTER_MS) {
-      _dropSocket(_ws);
-      _onSocketClosed();
-      return;
-    }
-    _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
-  }
-
-  // Neutralise *ws* so none of its late events reach the shim, then
-  // close it.  Shared by connect() (replacing a dead socket on
-  // wake-up) and the stale check.
-  function _dropSocket(ws) {
-    try {
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onclose = null;
-      ws.onerror = null;
-    } catch (e) {}
-    try { ws.close(); } catch (e) {}
-  }
-
-  // Offline app shell: the service worker served at ``/sw.js`` (see
-  // ``_build_service_worker``) caches this page and its ``/media``
-  // assets, so the app still opens — and stays on screen — when the
-  // connection is slow, flaky or gone; a page load is served
-  // network-first.  Best effort: browsers refuse
-  // a worker fetched over a self-signed certificate (the LAN URL),
-  // and the app must keep working without one.
-  if (typeof navigator !== 'undefined' && navigator.serviceWorker &&
-      typeof navigator.serviceWorker.register === 'function') {
-    try {
-      navigator.serviceWorker.register('/sw.js', {updateViaCache: 'none'})
-        .catch(function () {});
-    } catch (e) {}
-  }
-
-  // Deliver a server frame (or a synthesised ``daemonStatus`` post) to
-  // the app as a window ``message`` event.  This shim script runs at
-  // the TOP of the body script list, so the WebSocket regularly
-  // authenticates while the HTML parser is still fetching
-  // ``media/main.js`` — whose ``message`` listener therefore is not
-  // registered yet.  A MessageEvent dispatched in that gap is silently
-  // lost; the observed symptom was the one-shot
-  // ``daemonStatus connected:true`` falling into it, leaving the
-  // "KISS Sorcar Server is starting ..." overlay covering ``#app``
-  // forever.  Queue events while the document is still parsing and
-  // flush once DOMContentLoaded fires: every body script (main.js
-  // included) has run by then, so the listener exists and ordering is
-  // preserved.
-  var _preParseQueue = [];
-  document.addEventListener('DOMContentLoaded', function () {
-    var q = _preParseQueue;
-    _preParseQueue = null;
-    if (!q) return;
-    for (var i = 0; i < q.length; i++) {
-      window.dispatchEvent(new MessageEvent('message', {data: q[i]}));
-    }
-  });
-  function _dispatchToApp(data) {
-    if (_preParseQueue !== null && document.readyState === 'loading') {
-      _preParseQueue.push(data);
-      return;
-    }
-    window.dispatchEvent(new MessageEvent('message', {data: data}));
-  }
-
-  function _scheduleReconnect() {
-    if (_reconnectTimer !== null) return;
-    // Exponential backoff with full jitter: 0.5-1s, 1-2s, 2-4s, ...
-    // capped at 30-60s.  The first attempt is quick so a blip heals
-    // at once (visibilitychange / online reconnect immediately
-    // anyway, see _reconnectNowIfNeeded); the cap is high so a daemon
-    // that is busy or stalled is not hammered every few seconds by
-    // every open browser, and the jitter keeps the browsers that one
-    // outage disconnected together from reconnecting in one burst.
-    var base = Math.min(30000, 500 * Math.pow(2, _reconnectAttempt));
-    var delay = base + Math.floor(Math.random() * base);
-    _reconnectAttempt++;
-    _reconnectTimer = setTimeout(function () {
-      _reconnectTimer = null;
-      connect();
-    }, delay);
-  }
-
-  function _reconnectNowIfNeeded() {
-    // Called from visibilitychange / pageshow / online handlers so a
-    // user who left Safari for another app does not wait the full
-    // backoff after returning.  We treat CONNECTING as "in flight,
-    // don't disturb"; CLOSED / CLOSING / null all warrant an
-    // immediate attempt.
-    if (_ws && (_ws.readyState === WebSocket.OPEN ||
-                _ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
-    if (_reconnectTimer !== null) {
-      try { clearTimeout(_reconnectTimer); } catch (e) {}
-      _reconnectTimer = null;
-    }
-    _reconnectAttempt = 0;
-    connect();
-  }
-
-  // Custom auth modal — replaces the browser-native prompt(), which is
-  // rendered tall with wasted space below its buttons on most desktop
-  // browsers.  Falls back to prompt() when the modal nodes are not in
-  // the DOM (e.g. unit tests that load the shim in isolation).
-  //
-  // The dialog stays open until the server accepts the password
-  // (``auth_ok`` calls ``_hideAuthModal``) or the user cancels: a
-  // wrong password is reported INSIDE the dialog, with the typed
-  // text kept and selected, instead of the dialog vanishing and a
-  // generic spinner taking its place.
-  //
-  // ``_authPrompt`` is the one pending prompt promise.  Every
-  // ``auth_required`` (and every silent reconnect while the dialog is
-  // open — the server drops an idle unauthenticated socket after
-  // 60 s) goes through ``_promptForPassword``, which returns early
-  // while a prompt is pending: no duplicate listeners, no duplicate
-  // ``auth`` frames, and the value the user is typing is never
-  // cleared under them.
-  var _authPrompt = null;
-  // Pending interactive submission, never populated from cached credentials.
-  var _authPassword = '';
-  // Detaches the pending prompt's listeners without resolving it;
-  // set while a prompt is pending, used by ``_hideAuthModal`` so a
-  // dialog hidden from outside (``auth_ok`` won on a reconnect with
-  // a password stored by another tab) never leaves a stale prompt
-  // that would make the next ``_promptForPassword`` a no-op.
-  var _authPromptCancel = null;
-
-  // True after the user cancelled the password dialog: the overlay then
-  // says a password is needed and offers "Enter password", and the
-  // ``auth_required`` of every quiet reconnect underneath (the server
-  // drops idle unauthenticated sockets after 60 s) must NOT pop the
-  // dialog back up.  Cleared by that button and by ``auth_ok``.
-  var _promptDeclined = false;
-
-  function _showAuthModal() {
-    var pending = new Promise(_runAuthModal);
-    // Only a dialog that is waiting for the user is "pending".  The
-    // prompt() fallback resolves inside the executor, so remembering
-    // its promise would make every later ``_promptForPassword`` a
-    // no-op and leave the revealed app without a way to log in
-    // (SECURITY: the frontend gate must always re-prompt or re-gate).
-    if (_authPromptCancel) _authPrompt = pending;
-    return pending;
-  }
-
-  function _runAuthModal(resolve) {
-    var modal  = document.getElementById('auth-modal');
-    var input  = document.getElementById('auth-modal-input');
-    var okBtn  = document.getElementById('auth-modal-ok');
-    var cnclBtn = document.getElementById('auth-modal-cancel');
-    if (!modal || !input || !okBtn || !cnclBtn) {
-      resolve(prompt('Enter remote access password:'));
-      return;
-    }
-    var wasOpen = modal.style.display === 'flex';
-    if (!wasOpen) {
-      input.value = '';
-      _setAuthError('');
-      modal.style.display = 'flex';
-    }
-    setTimeout(function() {
-      try { input.focus(); if (wasOpen) input.select(); } catch(e) {}
-    }, 0);
-
-    function cleanup() {
-      okBtn.removeEventListener('click', onOk);
-      cnclBtn.removeEventListener('click', onCancel);
-      input.removeEventListener('keydown', onKey);
-      _authPrompt = null;
-      _authPromptCancel = null;
-    }
-    function onOk() {
-      var v = input.value;
-      cleanup();
-      resolve(v);
-    }
-    function onCancel() { cleanup(); _hideAuthModal(); resolve(null); }
-    function onKey(e) {
-      if (e.key === 'Enter')        { e.preventDefault(); onOk();     }
-      else if (e.key === 'Escape')  { e.preventDefault(); onCancel(); }
-    }
-    okBtn.addEventListener('click', onOk);
-    cnclBtn.addEventListener('click', onCancel);
-    input.addEventListener('keydown', onKey);
-    _authPromptCancel = cleanup;
-  }
-
-  function _hideAuthModal() {
-    _authPassword = '';
-    if (_authPromptCancel) _authPromptCancel();
-    var input = document.getElementById('auth-modal-input');
-    if (input) input.value = '';
-    var modal = document.getElementById('auth-modal');
-    if (modal) modal.style.display = 'none';
-    _setAuthError('');
-  }
-
-  function _authModalOpen() {
-    var modal = document.getElementById('auth-modal');
-    return !!(modal && modal.style.display === 'flex');
-  }
-
-  /** Write ``text`` into the dialog's ``role="alert"`` line ('' clears). */
-  function _setAuthError(text) {
-    var err = document.getElementById('auth-modal-error');
-    if (err) err.textContent = text;
-  }
-
-  /**
-   * Ask for the password (once) and send it on the current socket.
-   *
-   * Idempotent: while a prompt is pending this is a no-op, so a
-   * repeated ``auth_required`` (reconnect with the dialog open) or a
-   * wrong-password ``error`` re-uses the open dialog.  On Cancel the
-   * app is re-gated behind the overlay, which then explains that a
-   * password is needed and offers "Enter password" to re-open the
-   * dialog — never a spinner that pretends the server is starting.
-   */
-  function _promptForPassword() {
-    if (_authPrompt) return;
-    _showAuthModal().then(_onPasswordEntered);
-  }
-
-  /**
-   * Gate the app behind the overlay after a cancelled password dialog.
-   *
-   * The overlay explains why (never a spinner that pretends the server
-   * is starting) and offers "Enter password" to re-open the dialog.
-   */
-  function _showPasswordNeeded() {
-    _promptDeclined = true;
-    _dispatchToApp({type: 'daemonStatus', connected: false});
-    var msg = document.getElementById('kiss-server-loading-msg');
-    if (msg) msg.textContent = 'A password is needed to use this server.';
-    _setOverlayAction('Enter password', _reopenPasswordPrompt);
-  }
-
-  function _onPasswordEntered(pwd) {
-    if (pwd === null) {
-      _showPasswordNeeded();
-      return;
-    }
-    _authPassword = pwd;
-    try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
-    if (_ws && _ws.readyState === WebSocket.OPEN) {
-      _ws.send(JSON.stringify({type: 'auth', password: pwd}));
-    } else {
-      // The server dropped the idle socket while the user typed; the
-      // stored password goes out in ``onopen`` of the reconnect.
-      _reconnectNowIfNeeded();
-    }
-  }
-
-  /** "Enter password" on the overlay after a Cancel: show the dialog again. */
-  function _reopenPasswordPrompt() {
-    _promptDeclined = false;
-    _setOverlayAction(null, null);
-    _updateLoadingMsg(_hadAuthThenClosed);
-    _dispatchToApp({type: 'daemonStatus', connected: true});
-    _promptForPassword();
-    if (!_ws || _ws.readyState !== WebSocket.OPEN) _reconnectNowIfNeeded();
-  }
-
-  window.acquireVsCodeApi = function() {
-    return {
-      postMessage: function(msg) {
-        var data = JSON.stringify(msg);
-        if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
-          _ws.send(data);
-        } else {
-          _pending.push(data);
-        }
-      },
-      getState: function() { return _state; },
-      setState: function(s) {
-        _state = s;
-        try { sessionStorage.setItem('sorcar-state', JSON.stringify(s)); } catch(e) {}
-      }
-    };
-  };
-
-  // A connection that went away while its ``pong`` was still awaited
-  // proves nothing about the batch flushed on it: the next connection
-  // sends the batch again, ahead of whatever has been queued since.
-  function _requeueUnconfirmed() {
-    if (_inflight.length === 0) return;
-    _pending = _inflight.concat(_pending);
-    _inflight = [];
-  }
-
-  // Shared by the socket's ``onclose`` and the stale-socket check
-  // (``_checkStale``), which drops a half-open socket that will never
-  // fire ``onclose`` on its own.
-  function _onSocketClosed() {
-    // Latch "we had a real session and then lost it": the status
-    // surface below says "Reconnecting" rather than "starting", and
-    // main.js keeps the app on screen under a banner.  Only a socket
-    // that had completed its auth handshake counts — a fresh page
-    // that never authenticated has nothing on screen to keep.
-    if (_authenticated) _hadAuthThenClosed = true;
-    _authenticated = false;
-    _requeueUnconfirmed();
-    _stopStaleCheck();
-    if (_lockedRetryMs > 0) {
-      // This close follows an ``auth_locked`` frame: the server is
-      // rate-limiting this IP after too many failed logins.  Keep
-      // the lockout explanation on the overlay (do NOT overwrite it
-      // with the generic label below) and hold off reconnecting
-      // until the server-provided lockout expiry — the fast backoff
-      // would only harvest more silent refusals.  The wake-up
-      // listeners may still reconnect earlier; the server then just
-      // re-sends ``auth_locked`` with a fresher ``retry_after``.
-      var lockedDelay = _lockedRetryMs;
-      _lockedRetryMs = 0;
-      _dispatchToApp({type: 'daemonStatus', connected: false});
-      try { clearTimeout(_reconnectTimer); } catch (e) {}
-      _reconnectTimer = setTimeout(function () {
-        _reconnectTimer = null;
-        connect();
-      }, lockedDelay);
-      return;
-    }
-    if (_authPrompt || _authModalOpen()) {
-      // The server drops an idle unauthenticated socket after 60 s.
-      // The user is still typing the password: keep the dialog (and
-      // the typed text) exactly as it is, say nothing on the overlay,
-      // and reconnect underneath; the reconnect's ``auth_required``
-      // is a no-op on the open dialog and the Unlock sends on the
-      // new socket.
-      _scheduleReconnect();
-      return;
-    }
-    if (_preAuthErrorShown || _promptDeclined) {
-      // The overlay already explains why the server refused us (or
-      // that a password is needed); a spinner label would hide that.
-      // Keep retrying quietly.
-      _preAuthErrorShown = false;
-      _scheduleReconnect();
-      return;
-    }
-    if (!_outageSince) _outageSince = Date.now();
-    _startOverlayTick();
-    // Switch the overlay text BEFORE re-revealing it: once this page
-    // has had a successful handshake (or came from the worker's cache,
-    // which only exists because the server was reachable before) every
-    // overlay appearance is a reconnect from the user's perspective.
-    // Past OVERLAY_ESCALATE_MS the tick owns the text (elapsed time,
-    // hint, "Retry now"); do not flip it back to the bare label.
-    if (Date.now() - _outageSince < OVERLAY_ESCALATE_MS) {
-      _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
-    }
-    // Tell the app the socket is down.  Symmetric to the ``auth_ok``
-    // dispatch above and to ``SorcarSidebarView.ts``'s disconnect
-    // handler in the VS Code path.  ``reconnecting: true`` — the
-    // app was authenticated and on screen in THIS page — makes
-    // ``main.js`` keep ``#app`` visible under a slim "Reconnecting
-    // ..." banner instead of covering it with the full-screen
-    // overlay: a flaky link must not blank the app every few
-    // seconds.  A page that never authenticated has nothing to show
-    // and keeps the full overlay.  The banner also tells the user
-    // that sending is on hold (``main.js`` holds prompts back while
-    // the daemon is down); on the next ``auth_ok`` main.js sends
-    // ``ready`` again and the server resyncs everything in place.
-    _dispatchToApp({
-      type: 'daemonStatus', connected: false,
-      reconnecting: _hadAuthThenClosed,
-    });
-    _scheduleReconnect();
-  }
-
-  function connect() {
-    // Neutralise the previous socket BEFORE we install a fresh one.
-    // On iOS Safari the OS may kill the underlying WebSocket while
-    // the tab is backgrounded; when JS resumes, the wake-up listeners
-    // (visibilitychange / focus / pageshow) frequently fire BEFORE
-    // the queued ``onclose`` of the dead socket.  If we don't clear
-    // the old handlers, that late ``onclose`` will run against the
-    // module-level ``_ws`` we just replaced -- it would call
-    // ``_scheduleReconnect()`` (overwriting the in-flight new socket
-    // after the backoff fires) and any late ``onopen``/``onmessage``
-    // on the old socket would ``_ws.send(...)`` on the new one.
-    // Nulling the handlers and closing the old socket here makes the
-    // replacement atomic from the rest of the shim's perspective.
-    if (_ws) {
-      // Nulling ``onclose`` below also discards the latch it would
-      // have taken: when the wake-up listeners win the race against
-      // the dead socket's queued ``onclose`` (the common mobile Safari
-      // case), an authenticated session is being replaced right here,
-      // so record the loss now and tell the app, exactly as the
-      // ``onclose`` would have: without the ``connected: false`` the
-      // app never learns the session dropped, so it would not send
-      // ``ready`` again on the replacement's ``auth_ok`` and miss the
-      // resync.  (No reconnect is scheduled here: this IS the
-      // reconnect.)
-      if (_authenticated) {
-        _hadAuthThenClosed = true;
-        _updateLoadingMsg(true);
-        _dispatchToApp({
-          type: 'daemonStatus', connected: false, reconnecting: true,
-        });
-      }
-      _requeueUnconfirmed();
-      _dropSocket(_ws);
-    }
-    _stopStaleCheck();
-    _ws = new WebSocket('wss://' + location.host + '/ws');
-    _authenticated = false;
-
-    _ws.onopen = function() {
-      var pwd = '';
-      try { pwd = localStorage.getItem('sorcar-remote-pwd') || ''; } catch(e) {}
-      if (_authPassword !== pwd) _authPassword = '';
-      _ws.send(JSON.stringify({type: 'auth', password: pwd}));
-    };
-
-    _ws.onmessage = function(event) {
-      var msg = JSON.parse(event.data);
-      _lastFrameAt = Date.now();
-      if (msg.type === 'heartbeat') return;
-      if (msg.type === 'auth_ok') {
-        if (_reloadOnFirstAuth) {
-          // A page the service worker served from its offline cache
-          // may run code older than the server's: reload it once, now
-          // that the server is reachable.  Nothing posted so far
-          // matters — the overlay kept the app off screen, so the
-          // queue holds only the boot commands the fresh page repeats.
-          _reloadOnFirstAuth = false;
-          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
-          try { window.location.reload(); } catch (e) {}
-          return;
-        }
-        // Recover from a server restart / network blip in place: the
-        // page keeps its state and main.js, on the ``daemonStatus``
-        // dispatched below, sends ``ready`` again so the server pushes
-        // what changed while the socket was down.  No reload — that
-        // would repaint the whole app on every blip.
-        _hadAuthThenClosed = false;
-        _authenticated = true;
-        _stopStaleCheck();
-        _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
-        _stableTimer = setTimeout(function () {
-          _stableTimer = null;
-          _reconnectAttempt = 0;
-        }, _STABLE_AFTER_MS);
-        _outageSince = 0;
-        _lockedUntil = 0;
-        _promptDeclined = false;
-        _stopOverlayTick();
-        _setOverlayAction(null, null);
-        // WebSocket auth is invisible to the browser's login heuristics.
-        // Complete an interactive login explicitly; otherwise Terminal's
-        // later xterm fetch looks like its successful form submission and
-        // opens Save Password there. Never re-offer on silent reconnects.
-        if (_authPassword && window.PasswordCredential && navigator.credentials) {
-          try {
-            navigator.credentials.store(new PasswordCredential({
-              id: 'remote', password: _authPassword
-            })).catch(function() {});
-          } catch (e) { /* Password saving must not block authentication. */ }
-        }
-        _hideAuthModal();
-        // Everything the page posted while the connection was down
-        // (a settings save, a model change, a closed tab, ...) goes
-        // out now, on the new connection, in the order it was posted.
-        // The server handles a connection's commands one at a time, so
-        // its ``pong`` proves it has taken every command sent before
-        // the ``ping``; until then the batch stays in ``_inflight`` and
-        // a connection that dies first re-sends it on the next one
-        // (at-least-once: a settings save may be applied twice, never
-        // silently lost).  main.js holds prompts back while the daemon
-        // is down, so a ``runTask`` is never in such a batch.
-        var batch = _pending;
-        _pending = [];
-        for (var i = 0; i < batch.length; i++) _ws.send(batch[i]);
-        if (batch.length > 0) {
-          _inflight = batch;
-          _ws.send(JSON.stringify({type: 'ping'}));
-        }
-        // Hide the "KISS Sorcar Server is starting ..." overlay now
-        // that the WebSocket is authenticated.  The remote webapp has
-        // no equivalent of the VS Code extension host's daemonStatus
-        // posts (the daemon == this WSS server), so we synthesise the
-        // same window ``message`` event ``media/main.js`` listens for.
-        // Without this the overlay covers ``#app`` forever and the
-        // user only ever sees "KISS Sorcar Server is starting ...".
-        // On a reconnect main.js answers this with a fresh ``ready``
-        // (its ``daemonWasDown`` path), which is what resyncs the
-        // page: it goes out after the batch above, so a queued change
-        // is applied before the server replays state to this client.
-        _dispatchToApp({type: 'daemonStatus', connected: true});
-        return;
-      }
-      if (msg.type === 'pong') {
-        // The server has taken the whole batch flushed on this
-        // connection; nothing is owed any more.
-        _inflight = [];
-        return;
-      }
-      if (msg.type === 'auth_required') {
-        _authPassword = '';
-        // Stored password (if any) was rejected; drop it so a refresh
-        // re-prompts instead of silently retrying the bad value.
-        try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
-        // Reveal ``#app`` so the auth modal (which lives INSIDE #app
-        // in the chat.html template — see the ``AUTH_MODAL`` template
-        // placeholder substituted by ``_build_html``) is no longer
-        // hidden by its display:none parent.  Without this
-        // dispatch a password-protected webapp shows the loading
-        // overlay forever and the user can never enter their
-        // password.  Symmetric to the auth_ok dispatch above — both
-        // states prove the server is reachable.
-        //
-        // SECURITY — ``_onPasswordEntered`` re-gates the app
-        // (``connected: false``) when the prompt is cancelled, so the
-        // reveal never exposes the unauthenticated webapp.
-        // The server answered, so any outage is over: stop the
-        // overlay escalation / lockout countdown.
-        _outageSince = 0;
-        _lockedUntil = 0;
-        _stopOverlayTick();
-        if (_promptDeclined) {
-          // The user closed the dialog earlier; the overlay still says
-          // a password is needed and how to enter it.  Do not pop the
-          // dialog back up on every reconnect.
-          _showPasswordNeeded();
-          return;
-        }
-        _setOverlayAction(null, null);
-        _dispatchToApp({type: 'daemonStatus', connected: true});
-        _promptForPassword();
-        return;
-      }
-      if (msg.type === 'error' && !_authenticated) {
-        // Pre-auth errors are the server's last word before it closes
-        // the socket.  A wrong password (``code: 'auth_failed'``) is
-        // reported inside the still-open dialog — the typed text is
-        // kept and selected so the user can retype at once — and the
-        // stored copy is dropped so the reconnect's probe is the
-        // uncounted empty one, not a second wrong guess.  Any other
-        // pre-auth error (e.g. remote access disabled) replaces the
-        // overlay spinner text so the user is told why.
-        var text = (msg.text && String(msg.text)) || 'Something went wrong.';
-        if (msg.code === 'auth_failed') {
-          try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
-          if (_authModalOpen()) {
-            _setAuthError(text);
-            _promptForPassword();
-            return;
-          }
-        }
-        var over = document.getElementById('kiss-server-loading-msg');
-        if (over) over.textContent = text;
-        _preAuthErrorShown = true;
-        _dispatchToApp({type: 'daemonStatus', connected: false});
-        return;
-      }
-      if (msg.type === 'auth_locked') {
-        // The server refused the handshake because this source IP is
-        // rate-limited after too many failed logins (behind the
-        // cloudflared tunnel EVERY visitor shares one loopback IP, so
-        // this can be someone else's guesses).  The server closes the
-        // socket right after this frame.  Explain the wait on the
-        // overlay and remember the retry delay so ``onclose`` waits
-        // out the lockout instead of reconnecting on the fast backoff
-        // — the eventual reconnect gets ``auth_required`` again and
-        // the password modal finally appears.
-        var secs = Math.ceil(Number(msg.retry_after));
-        if (!(secs > 0)) secs = 60;
-        _lockedRetryMs = secs * 1000;
-        _lockedUntil = Date.now() + _lockedRetryMs;
-        _showLockedMsg(secs);
-        _startOverlayTick();
-        // Re-gate the app while we wait (idempotent when the loading
-        // overlay is already up, e.g. on a fresh page load).
-        _dispatchToApp({type: 'daemonStatus', connected: false});
-        return;
-      }
-      // SECURITY — never forward server data frames to the app before
-      // the connection is authenticated.  ``auth_ok`` / ``auth_required``
-      // are handled above; any other frame that arrives while
-      // ``_authenticated`` is false must be dropped so an unauthenticated
-      // client can never act on backend data (defense in depth — the
-      // server does not send data pre-auth, but a bug or a hostile proxy
-      // must not be able to bypass the remote-password gate this way).
-      if (!_authenticated) return;
-      _dispatchToApp(msg);
-    };
-
-    _ws.onclose = _onSocketClosed;
-
-    _ws.onerror = function() {};
-  }
-
-  // Wake-up listeners — mobile Safari pauses JS in backgrounded tabs,
-  // so a scheduled ``setTimeout(connect, ...)`` may not fire until the
-  // user returns.  These events fire AS SOON AS the user comes back,
-  // triggering an immediate reconnect instead of waiting for the
-  // backoff timer.  Without them the user would stare at the loading
-  // overlay for the remainder of the (paused) backoff after every
-  // app-switch round-trip.
-  if (typeof document !== 'undefined' &&
-      typeof document.addEventListener === 'function') {
-    document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') {
-        _reconnectNowIfNeeded();
-      }
-    });
-  }
-  if (typeof window !== 'undefined' &&
-      typeof window.addEventListener === 'function') {
-    // ``pageshow`` covers Safari's bfcache restore, which does not
-    // fire ``visibilitychange``.
-    window.addEventListener('pageshow', function () {
-      _reconnectNowIfNeeded();
-    });
-    window.addEventListener('online', function () {
-      _reconnectNowIfNeeded();
-    });
-    // ``focus`` is the universal fallback for older mobile browsers
-    // that ignore visibilitychange/pageshow under certain conditions.
-    window.addEventListener('focus', function () {
-      _reconnectNowIfNeeded();
-    });
-  }
-
-  connect();
-})();
-"""
 
 
 def _http_response(
@@ -5656,7 +4559,7 @@ def _close_orphaned_listener(bind: asyncio.Future[WebSocketServer]) -> None:
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
-    Serves the Sorcar chat webview over HTTPS and bridges commands/events
+    Serves the Sorcar chat page over HTTPS and bridges commands/events
     over WSS.  TLS is always enabled; a self-signed certificate is
     auto-generated in ``~/.kiss/tls/`` when *certfile*/*keyfile* are not
     provided.  Optionally starts a ``cloudflared`` tunnel so the server
@@ -5734,7 +4637,7 @@ class RemoteAccessServer:
             # degenerate launcher cwd) must never become the instance
             # work dir: it would root every unstamped command — and
             # the @-mention file scan — at the whole disk.  Drop it and
-            # let ``VSCodeServer`` supply its own (also root-guarded)
+            # let ``AgentServer`` supply its own (also root-guarded)
             # fallback.
             work_dir = None
         self.work_dir: str = work_dir or ""
@@ -5747,9 +4650,9 @@ class RemoteAccessServer:
         # Task-update reports for the task-info panel (getTaskUpdate).
         self._task_updates = TaskUpdateRunner()
         self._printer.work_dir = self.work_dir
-        self._vscode_server = VSCodeServer(printer=self._printer)
+        self._agent_server = AgentServer(printer=self._printer)
         if self.work_dir:
-            self._vscode_server.work_dir = self.work_dir
+            self._agent_server.work_dir = self.work_dir
         self._server_api = sorcar_api.ServerApi(self)
 
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -5790,11 +4693,17 @@ class RemoteAccessServer:
         self._local_only: bool = False
         self._watchdog_task: asyncio.Task[None] | None = None
         self._tls_refresh_task: asyncio.Task[None] | None = None
+        self._trusted_clients_task: asyncio.Task[None] | None = None
+        # The enrolled machine-link CAs loaded into ``_ssl_context`` (PEM
+        # bytes) and the mtime of their directory when last scanned.
+        self._trusted_client_cas: set[bytes] = set()
+        self._trusted_clients_mtime: float = -1.0
         self._latest_version: str | None = None
         self._version_check_task: asyncio.Task[None] | None = None
+        self._machines_watch_task: asyncio.Task[None] | None = None
         self._shutdown_initiated = False
         self._shutdown_future: asyncio.Future[None] | None = None
-        self._local_url = f"https://localhost:{self.port}"
+        self._local_url = f"http://localhost:{self.port}"
         self._active_url: str | None = None
         # Stamp of the latest ``remote_url`` publication; see
         # :meth:`_broadcast_remote_url`.
@@ -5870,24 +4779,24 @@ class RemoteAccessServer:
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
-        if not self._peer_is_loopback(connection):
+        if not self._peer_is_loopback(connection) and not self._peer_client_ca(connection):
             cfg = await asyncio.to_thread(load_config)
             if not str(cfg.get("remote_password", "") or ""):
                 addr = getattr(connection, "remote_address", None)
                 logger.warning(
                     "Refusing non-localhost request from %s: "
-                    "remote_password is empty", addr,
+                    "no remote password is set", addr,
                 )
                 return _error_page(
                     403,
                     "This device is not allowed yet",
                     "Remote access to this KISS Sorcar server is turned "
-                    "off. On the computer running KISS Sorcar, open "
-                    "Settings and set a Remote password to allow it; "
-                    "then come back to this page.",
-                    "Only localhost may connect while remote_password is "
-                    f"empty. Set remote_password in ~/{HOME_DIR}/config.json "
-                    "(or in the app's Settings) to allow remote access.",
+                    "off. On the computer running KISS Sorcar, run "
+                    "install.sh to set a remote password; then come "
+                    "back to this page.",
+                    "Only localhost may connect while no remote password "
+                    f"is set (remote_password in ~/{HOME_DIR}/config.json); "
+                    "run install.sh to set one.",
                 )
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
@@ -5982,6 +4891,32 @@ class RemoteAccessServer:
             f"No route matches {path[:200]!r}.",
         )
 
+    def _peer_client_ca(self, connection: Any) -> str:
+        """Return the enrolled CA that issued *connection*'s client certificate, or ''.
+
+        A non-empty name means the peer is another daemon's machine
+        link (:mod:`kiss.agents.sorcar.machines`) enrolled in
+        :func:`_trusted_clients_dir`: the TLS handshake verified its
+        certificate against the loaded CAs and the issuing CA's file is
+        still there (:func:`tls_certs.enrolled_client_ca`).  Such a
+        peer is admitted like a loopback client with the local token,
+        whatever the ``remote_password``.  Empty when the peer sent no
+        certificate (every browser) or the transport is not TLS.
+
+        Args:
+            connection: A WebSocket server connection (its ``transport``
+                is the asyncio TLS transport).
+        """
+        transport = getattr(connection, "transport", None)
+        ssl_object = transport.get_extra_info("ssl_object") if transport is not None else None
+        if ssl_object is None:
+            return ""
+        try:
+            der = ssl_object.getpeercert(binary_form=True)
+        except ValueError:  # the handshake is not complete
+            return ""
+        return tls_certs.enrolled_client_ca(der, _trusted_clients_dir()) if der else ""
+
     def _peer_is_loopback(self, connection: Any) -> bool:
         """Return True when *connection*'s raw TCP peer is loopback.
 
@@ -6026,7 +4961,7 @@ class RemoteAccessServer:
         """
         addr = getattr(websocket, "remote_address", None)
         peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
-        if peer_ip and _is_loopback_ip(peer_ip):
+        if peer_ip and sorcar_api.is_loopback_ip(peer_ip):
             forwarded = _forwarded_client_ip(websocket)
             if forwarded:
                 return forwarded
@@ -6087,17 +5022,17 @@ class RemoteAccessServer:
 
         Returns an :class:`~kiss.server.sorcar.Auth` of kind
         ``"local"`` for a loopback peer that presented this daemon's
-        local token (see :attr:`local_token`), ``"remote"`` for a
-        client that supplied the configured ``remote_password`` (its
-        ``link`` flag set when the peer declared itself a daemon
+        local token (see :attr:`local_token`), ``"loopback"`` for a
+        browser on this machine itself (a loopback peer with no
+        forwarded client IP, admitted without a password), ``"remote"``
+        for a client that supplied the configured ``remote_password``
+        (its ``link`` flag set when the peer declared itself a daemon
         link), and ``None`` (with the socket closed) on failure.
 
         When the configured ``remote_password`` is empty, only
         loopback peers may connect at all (:meth:`_process_request`
         refuses non-loopback peers with 403 before the upgrade, and
-        the handshake re-checks the peer address), and a loopback
-        client is still required to send an empty-password ``auth``
-        message (using a constant-time compare).  See also
+        the handshake re-checks the peer address).  See also
         :meth:`_setup_server` which refuses to advertise the public
         cloudflared tunnel when no password is configured.
 
@@ -6139,21 +5074,24 @@ class RemoteAccessServer:
         """Run a backend command in the thread-pool executor."""
         assert self._loop is not None
         await self._loop.run_in_executor(
-            None, self._vscode_server._handle_command, cmd,
+            None, self._agent_server._handle_command, cmd,
         )
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
         Performs the ``auth`` handshake, then relays messages between
-        the client and the ``VSCodeServer`` command dispatcher.  A
+        the client and the ``AgentServer`` command dispatcher.  A
         *local* client (a loopback peer that presented the local
-        token: the VS Code extension, ``daemon_client`` runs) joins the
-        printer's local-client set — so talk arbitration can send it
-        muted copies — and its commands run with ``is_local`` set,
-        which unlocks the local-only commands (file saves, directory
-        listings, terminals, local-tab registration).  A remote
-        browser joins the plain client set.
+        token: ``daemon_client`` runs) joins the printer's local-client
+        set — so task-event copies reach it only for the tabs it
+        addressed — and its commands run with ``is_local`` set.  A
+        remote browser joins the plain client set.  Another daemon's link
+        (``MachineLink``) is never local, whatever token it presented:
+        it forwards the Explorer, Source Control and file requests of
+        that daemon's browser clients, which want the browser replies
+        (an SSH machine's link authenticates through the tunnel, from
+        loopback, with the local token).
 
         Args:
             websocket: The WebSocket server connection.
@@ -6161,7 +5099,7 @@ class RemoteAccessServer:
         auth = await self._authenticate_ws(websocket)
         if auth is None:
             return
-        is_local = auth.kind == "local"
+        is_local = auth.kind == "local" and not auth.link
 
         self._printer.add_client(websocket, local=is_local, link=auth.link)
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex}
@@ -6174,6 +5112,25 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
+                if not await self._frame_password_accepted(cmd, auth.kind, conn_state):
+                    # Every frame of a password-authenticated client
+                    # must carry the password in force NOW (it is
+                    # re-read from config.json each time, so a
+                    # rotated password shuts the old session out at
+                    # its next command; the one exception is the
+                    # client that asked for the rotation, until it
+                    # speaks the new password).  The close makes the
+                    # browser reconnect and ask for the password again.
+                    logger.warning(
+                        "Frame %r from %s carries a wrong password; closing",
+                        cmd.get("type", ""), websocket.remote_address,
+                    )
+                    await websocket.send(json.dumps({
+                        "type": "error", "code": "auth_failed",
+                        "text": "Wrong password.",
+                    }))
+                    await websocket.close()
+                    break
                 try:
                     await self._dispatch_client_command(
                         cmd, websocket, conn_state, is_local,
@@ -6193,11 +5150,52 @@ class RemoteAccessServer:
         finally:
             if is_local:
                 self._printer.unregister_local_tabs(conn_state["conn_id"])
-            self._vscode_server.drop_connection_state(conn_state["conn_id"])
-            self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
-            self._vscode_server.terminals.viewer_gone(conn_state["conn_id"])
+            self._agent_server.drop_connection_state(conn_state["conn_id"])
+            self._agent_server.browser_tabs.viewer_gone(conn_state["conn_id"])
+            self._agent_server.terminals.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
+
+    @staticmethod
+    async def _frame_password_accepted(
+        cmd: dict[str, Any], kind: sorcar_api.AuthKind, conn_state: dict[str, Any],
+    ) -> bool:
+        """Strip the ``password`` of a frame and, for a ``"remote"`` client, check it.
+
+        The ``password`` key is removed from *cmd* whatever *kind* is,
+        so no handler ever sees it.  Only a password-authenticated
+        (``"remote"``) client is policed: the stored password is
+        re-read from ``config.json`` for every frame, so the one in
+        force is always the one ``install.sh`` set last.  Local-token
+        clients, machine links and loopback browsers (``"local"`` and
+        ``"loopback"``) are always accepted.
+
+        A client that rotates the password itself (Settings > Rotate,
+        the ``rotateRemotePassword`` frame) learns the new one from the
+        ``remotePasswordRotated`` event, but frames it sent before that
+        event reached it (a command in flight, the ping that follows a
+        reconnect's queued batch) still carry the one it was admitted
+        with.  Those are honoured: ``conn_state["rotated_from"]`` keeps
+        that password from the rotate frame until the connection's
+        first frame with the password in force, which ends the
+        allowance.  It is per connection (gone with the socket) and
+        never widens who is admitted: that connection was already in.
+        Every other password-authenticated client is shut out at its
+        next frame, as before.
+        """
+        client_pw = cmd.pop("password", "")
+        if kind != "remote":
+            return True
+        if not isinstance(client_pw, str):
+            client_pw = ""
+        stored = (await asyncio.to_thread(load_config)).get("remote_password", "")
+        if password_accepted(client_pw, stored):
+            conn_state.pop("rotated_from", None)
+            if cmd.get("type") == "rotateRemotePassword":
+                conn_state["rotated_from"] = stored
+            return True
+        rotated_from = conn_state.get("rotated_from", "")
+        return bool(rotated_from) and password_accepted(client_pw, rotated_from)
 
     async def _dispatch_client_command(
         self,
@@ -6224,10 +5222,10 @@ class RemoteAccessServer:
             endpoint: The client's :class:`ServerConnection`, used
                 for direct replies.
             conn_state: Per-connection mutable state holding the
-                connection's unique ``conn_id``.  Each VS Code window
+                connection's unique ``conn_id``.  Each browser tab
                 owns exactly one connection, and the API layer's
                 stamping of ``connId`` is what guarantees the
-                per-window autocomplete isolation invariant.
+                per-tab autocomplete isolation invariant.
             is_local: Whether the connection authenticated with the
                 local token (see :meth:`_authenticate_ws`).
         """
@@ -6254,9 +5252,9 @@ class RemoteAccessServer:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
 
         A non-empty ``conn_id`` makes :meth:`WebPrinter.broadcast`
-        deliver the event ONLY to the requesting connection (the VS
-        Code window / browser tab whose user triggered the command),
-        so siblings do not pop a banner; ``""`` broadcasts to all.
+        deliver the event ONLY to the requesting connection (the
+        browser tab whose user triggered the command), so siblings do
+        not pop a banner; ``""`` broadcasts to all.
         """
         broadcast_to_conn(self._printer, event, conn_id)
 
@@ -6386,9 +5384,9 @@ class RemoteAccessServer:
         a pending-reset flag file is found, and delivered to every
         currently-connected client — the requesting connection
         died with the previous daemon so ``connId`` cannot be
-        preserved across the restart, but every webview that was
+        preserved across the restart, but every page that was
         disconnected by the SIGTERM benefits from the same
-        confirmation.  The stable ``id`` lets the existing webview
+        confirmation.  The stable ``id`` lets the existing page's
         dedup (``data-notification-id`` in ``showNotification``)
         replace any stale "restarting" toast in-place instead of
         stacking a duplicate.
@@ -6426,25 +5424,19 @@ class RemoteAccessServer:
     async def _handle_run_update(self, conn_id: str = "") -> None:
         """Run ``~/.kiss/kiss_ai/install.sh`` to update KISS Sorcar.
 
-        Server-side twin of the VS Code extension's
-        ``SorcarSidebarView.runUpdate()``: the extension locates the
-        installer via ``installerPath.js`` and runs it in an integrated
-        terminal; the web server locates it via
+        The web server locates the installer via
         :func:`_find_install_script` and runs it as a detached
         subprocess (output appended to ``~/.kiss/update.log``) since a
         remote browser has no terminal.  When the clone's
-        ``install.sh`` is missing, both frontends run the curl
-        bootstrap (:func:`_bootstrap_install_url`) instead, which
-        recreates ``~/.kiss/kiss_ai`` and installs from it.  Info
-        wording matches the extension's
-        ``showInformationMessage`` so both frontends behave the same.
+        ``install.sh`` is missing, the curl bootstrap
+        (:func:`_bootstrap_install_url`) runs instead, which recreates
+        ``~/.kiss/kiss_ai`` and installs from it.
 
         The acknowledgement ``notice`` / ``error`` events are stamped
         with the requesting connection's ``connId`` (when non-empty)
-        so they reach ONLY the window whose user clicked "Update" —
-        the extension's twin shows its messages only in the clicking
-        window, and clicking Update in one browser window must not
-        pop a banner in every sibling window.
+        so they reach ONLY the browser tab whose user clicked "Update":
+        clicking Update in one tab must not pop a banner in every
+        sibling tab.
 
         The installer's exit is watched by :meth:`_watch_update_exit`
         so a failure — above all ``install.sh`` losing its
@@ -6486,13 +5478,12 @@ class RemoteAccessServer:
         try:
             if await self._cancel_update_when_idle():
                 await self._broadcast_update_available()
-            # When the clone (or its install.sh) is missing — the
-            # extension was installed from a .vsix, or ~/.kiss/kiss_ai
-            # was deleted — fall back to the public curl bootstrap,
+            # When the clone (or its install.sh) is missing —
+            # ~/.kiss/kiss_ai was deleted — fall back to the public
+            # curl bootstrap,
             # which recreates the clone and hands over to its
             # install.sh, instead of refusing with "install.sh not
-            # found".  The extension's runUpdate() does the same in its
-            # terminal.
+            # found".
             script = await loop.run_in_executor(
                 None, _find_install_script, self._install_root,
             )
@@ -6524,7 +5515,7 @@ class RemoteAccessServer:
     def _set_update_barrier(self, up: bool) -> None:
         """Raise or lower the run-admission barrier of the self-update.
 
-        Writes ``VSCodeServer._update_installing`` under
+        Writes ``AgentServer._update_installing`` under
         :data:`agent_state.STATE_LOCK` — the lock ``_cmd_run`` holds
         while admitting a run — so a submit observes either the barrier
         or its absence, never a torn state.  Cheap enough to call from
@@ -6536,7 +5527,7 @@ class RemoteAccessServer:
                 admit them again.
         """
         with agent_state.STATE_LOCK:
-            self._vscode_server._update_installing = up
+            self._agent_server._update_installing = up
 
     def _arm_update_barrier_if_idle(self) -> bool:
         """Raise the run-admission barrier when no task is in flight.
@@ -6563,7 +5554,7 @@ class RemoteAccessServer:
         with agent_state.STATE_LOCK:
             if not self._update_when_idle_armed or _snapshot_active_tabs():
                 return False
-            self._vscode_server._update_installing = True
+            self._agent_server._update_installing = True
             return True
 
     def _spawn_update_script(
@@ -6614,8 +5605,8 @@ class RemoteAccessServer:
         # when no bash is installed at all).
         bash = find_bash() or "bash"
         # Pin KISS_HOME to the home THIS daemon resolved (the brand's
-        # default unless the environment overrides it), as the extension's
-        # ``runUpdate()`` does: install.sh runs the post-install hooks of,
+        # default unless the environment overrides it): install.sh
+        # runs the post-install hooks of,
         # copies MODEL_INFO.json into and writes the reload marker under
         # $KISS_HOME, and defaults to the stock ``~/.kiss`` otherwise —
         # which a white-label brand's daemon never reads.
@@ -6634,10 +5625,8 @@ class RemoteAccessServer:
                 # cross-process update lock and hands over to the root
                 # install.sh — which itself never touches git, so running
                 # the root script directly would rebuild the stale
-                # checkout as-is.  The extension's ``runUpdate()`` prefers
-                # the bootstrap the same way; ``KISS_NONINTERACTIVE=1`` is
-                # what both installers read in place of
-                # ``--non-interactive``.
+                # checkout as-is.  ``KISS_NONINTERACTIVE=1`` is what
+                # both installers read in place of ``--non-interactive``.
                 argv = [bash, str(bootstrap)]
                 cwd = str(script.parent)
                 env["KISS_NONINTERACTIVE"] = "1"
@@ -6756,9 +5745,8 @@ class RemoteAccessServer:
     async def _handle_update_models(self, conn_id: str = "") -> None:
         """Refresh ``~/.kiss/MODEL_INFO.json`` via ``update_models.py``.
 
-        Services the settings panel's "Update Models" button (both the
-        VS Code webview, which forwards the command to this daemon, and
-        remote browser windows): runs :data:`_update_models_argv` —
+        Services the settings panel's "Update Models" button: runs
+        :data:`_update_models_argv` —
         ``kiss.scripts.update_models --model-info
         $KISS_HOME/MODEL_INFO.json`` in this daemon's interpreter — as a
         detached subprocess whose output is appended to
@@ -6915,19 +5903,17 @@ class RemoteAccessServer:
     ) -> None:
         """Translate a remote-web client's post-wake speech to English.
 
-        Browser-mode voice.js cannot call gpt-audio itself (the API
-        key lives on this machine), so after the in-page wake-word
-        detector hears "Hey Sorcar" it captures the utterance that follows
-        and ships it here as ``{type: 'voiceTranscribe', audio:
-        <base64 16kHz mono s16le PCM>}``.  The audio is translated
-        into English by the same KISS transcription agent
-        (:func:`transcribe_pcm`) the VS Code extension's local
-        listener uses — which also reports the language that was
-        spoken — the speaker is identified locally (best effort), and
-        the client gets back ``{type: 'voiceSpeech', text, speaker,
-        language}`` — the exact message voice.js already consumes in
-        webview mode, so the page inserts and submits the dictated
-        task with no extra client logic.  An empty/undecodable audio
+        voice.js cannot call gpt-audio itself (the API key lives on
+        this machine), so after the in-page wake-word detector hears
+        "Hey Sorcar" it captures the utterance that follows and ships
+        it here as ``{type: 'voiceTranscribe', audio: <base64 16kHz
+        mono s16le PCM>}``.  The audio is translated into English by
+        the KISS transcription agent (:func:`transcribe_pcm`) — which
+        also reports the language that was spoken — the speaker is
+        identified locally (best effort), and the client gets back
+        ``{type: 'voiceSpeech', text, speaker, language}``, which
+        voice.js inserts and submits as the dictated task.  An
+        empty/undecodable audio
         payload or a failed translation replies with an empty ``text``
         so the page can clear its transcribing indicator.
 
@@ -7029,7 +6015,7 @@ class RemoteAccessServer:
         """
         return (
             self._cmd_str(cmd, "workDir")
-            or self._vscode_server.work_dir
+            or self._agent_server.work_dir
             or self.work_dir
         )
 
@@ -7042,10 +6028,9 @@ class RemoteAccessServer:
     ) -> Path | None:
         """Resolve *raw_path* for a tab, trying its pending worktree too.
 
-        The one resolution every surface uses (the VS Code extension
-        host forwards its webview's ``openFile``/``checkPaths``/path-only
-        ``submit`` here instead of resolving locally): the path is
-        resolved against *work_dir* first; when that names no file and the tab
+        The one resolution ``openFile``, ``checkPaths`` and a path-only
+        ``submit`` use: the path is resolved against *work_dir* first;
+        when that names no file and the tab
         has a pending worktree (a finished worktree task whose branch is
         not merged yet), the same relative path is tried inside the
         worktree directory — that is where the task's committed
@@ -7090,33 +6075,17 @@ class RemoteAccessServer:
         return None
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any, is_local: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Resolve the file an ``openFile`` names and reply for its client.
+        """Serve the file an ``openFile`` names to its client.
 
         Handles the ``openFile`` command sent by ``media/main.js`` when
         the user clicks a file link (``span[data-path]``) in a chat
-        webview.  The path is resolved once, here, for every surface
-        (:meth:`_resolve_tab_file`: ``~`` expansion, the command's
-        ``workDir``, then the tab's pending worktree); what the reply
-        carries depends on the client:
-
-        * *local* (a token-authenticated VS Code window, whose
-          extension host opens files in real editor tabs) gets the
-          resolved path as an ``openResolvedFile`` action::
-
-              {"type": "openResolvedFile", "path": <resolved abs path>,
-               "tabId": <echo of cmd tabId>,
-               "line": <echo of cmd line, when a positive int>}
-              {"type": "openResolvedFile", "path": <raw path>,
-               "tabId": ..., "error": <message>}   # nothing to open
-
-        * a remote-web browser (no editor of its own) gets the
-          content, as a single ``fileContent`` JSON object.
-
-        Both are sent directly to the requesting *endpoint* via
-        :meth:`_endpoint_send` — never broadcast.  The ``fileContent``
-        shape::
+        page.  The path is resolved by :meth:`_resolve_tab_file` (``~``
+        expansion, the command's ``workDir``, then the tab's pending
+        worktree) and the content is sent directly to the requesting
+        *endpoint* via :meth:`_endpoint_send` — never broadcast — as a
+        single ``fileContent`` JSON object::
 
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
@@ -7136,8 +6105,7 @@ class RemoteAccessServer:
 
         A ``path:NN`` link's line number arrives as the command's
         ``line`` field; echoing it lets ``media/main.js`` jump the
-        opened content tab to that line, matching the VS Code
-        extension's editor line reveal.  ``version`` stamps the file
+        opened content tab to that line.  ``version`` stamps the file
         as read (:func:`_file_version`); the client's ``saveFile``
         sends it back so :meth:`_handle_save_file` can detect a file
         that changed on disk while it was open (directory listings
@@ -7157,9 +6125,6 @@ class RemoteAccessServer:
             cmd: The parsed ``openFile`` command (``path``, optional
                 ``workDir``, ``tabId``, ``line``).
             endpoint: The requesting connection.
-            is_local: ``True`` for a client that opens the resolved
-                path itself (the VS Code extension host); ``False`` for
-                one that needs the content.
         """
         raw_path = self._cmd_str(cmd, "path")
         if not raw_path:
@@ -7169,26 +6134,6 @@ class RemoteAccessServer:
         line = cmd.get("line")
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             line = 0
-
-        def _resolve_local() -> dict[str, Any]:
-            reply: dict[str, Any] = {
-                "type": "openResolvedFile",
-                "path": raw_path,
-                "tabId": tab_id,
-            }
-            if line:
-                reply["line"] = line
-            path = self._resolve_tab_file(raw_path, work_dir, tab_id)
-            if path is None:
-                reply["error"] = f"File not found: {raw_path}"
-            else:
-                reply["path"] = str(path)
-            return reply
-
-        if is_local:
-            reply = await asyncio.to_thread(_resolve_local)
-            await self._reply_direct(endpoint, reply, "openFile")
-            return
 
         def _read_file() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -7394,15 +6339,12 @@ class RemoteAccessServer:
 
         Handles the ``shareChat`` command sent by ``media/main.js``
         when the user clicks the share button next to the mic button:
-        the webview serialized the highlighted tab's task panel
+        the page serialized the highlighted tab's task panel
         and every event panel of its transcript, and this handler
         wraps them into a self-contained page
         (:func:`_build_share_page`) written to
         ``<workDir>/reports/chat-<title-slug>-<chatId>.html`` (see
-        :func:`_share_page_filename`).  Both clients take
-        this path — the VS Code extension forwards the command over
-        the daemon connection, the remote webapp sends it over WSS — so the page is
-        built in exactly one place.  The reply is a single
+        :func:`_share_page_filename`).  The reply is a single
         ``share_done`` JSON object sent directly to the requesting
         *endpoint* — never broadcast — with the shape::
 
@@ -7465,8 +6407,8 @@ class RemoteAccessServer:
 
         Handles the ``shareChatTasks`` command sent by
         ``media/main.js`` when the user clicks the share button: the
-        webview needs the transcripts of ALL of the chat's tasks —
-        after a webview reload its DOM holds only the one task the
+        page needs the transcripts of ALL of the chat's tasks —
+        after a reload its DOM holds only the one task the
         session replay repainted — so this returns every non-sub-agent
         ``task_history`` row of the chat, oldest first, straight from
         the history database
@@ -7487,21 +6429,20 @@ class RemoteAccessServer:
         every sub-agent the task fanned out (recursively, parents
         before children — see :func:`_share_subagent_entries`), so the
         shared page can open and close them as tabs exactly like the
-        live webview does.
+        live chat page does.
 
         An optional ``taskId`` narrows the reply to that ONE task (and
         its sub-agents): a sub-agent tab's share takes this path — its
         row is deliberately absent from the chat's task list, but its
         own fan-outs must still reach its shared page.
 
-        Every receiver caps one frame — this server at
-        ``_MAX_LINE_BYTES``, the VS Code extension's local client at a
-        smaller 32 MiB — and drops the connection on overflow, so when
-        the tasks do not fit ``_SHARE_TASKS_MAX_REPLY_BYTES`` the
+        A frame is capped at ``_MAX_LINE_BYTES`` and the connection
+        dropped on overflow, so when the tasks do not fit
+        ``_SHARE_TASKS_MAX_REPLY_BYTES`` the
         OLDEST ones are left out and ``truncated`` is set — the newest
         transcripts are the ones the export cannot redraw from its own
         DOM.  An unknown or empty chat id yields an empty task list:
-        the webview then exports just what is on screen.  A history
+        the page then exports just what is on screen.  A history
         database failure yields an ``error`` string in the reply, so
         the share click never silently stalls.
 
@@ -7592,9 +6533,8 @@ class RemoteAccessServer:
         """Tell a client which candidate file paths exist.
 
         Handles the ``checkPaths`` command sent by ``media/main.js``
-        (from a remote browser or, via the VS Code extension host, a
-        local window) after it linkifies file-path-looking
-        strings in event panel contents: a path is rendered as a
+        after it linkifies file-path-looking strings in event panel
+        contents: a path is rendered as a
         clickable link ONLY when this check confirms it names an
         existing regular file or directory, i.e. that a subsequent
         ``openFile`` click would actually open something.
@@ -8121,7 +7061,7 @@ class RemoteAccessServer:
              "tabId": <echo of cmd tabId>, "taskId": <task id>,
              "token": <echo of cmd token>}
 
-        ``token`` is an opaque client request tag the webview matches
+        ``token`` is an opaque client request tag the page matches
         replies by.  ``sig`` fingerprints the update state; a poll whose
         ``knownSig`` matches it is answered with ``unchanged: true`` and
         no ``content``.  A tab attached to no running task, or to a task
@@ -8176,11 +7116,10 @@ class RemoteAccessServer:
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
 
-        Used by the VS Code extension's dependency installer before it
-        considers SIGTERMing the daemon: when any task is still active,
-        the extension must defer the restart so that an in-progress
-        agent run is not interrupted by ``ensureDependencies()`` on a
-        spurious re-activation of the extension.
+        Used by the installer (``scripts/check-kiss-web-active-tasks.py``)
+        before it considers SIGTERMing the daemon: when any task is
+        still active the restart is deferred so an in-progress agent
+        run is not interrupted.
 
         The response is a single JSON object sent directly to the
         requesting *endpoint* — a :class:`ServerConnection`, via
@@ -8205,8 +7144,13 @@ class RemoteAccessServer:
 
     @property
     def _loopback_url(self) -> str:
-        """The ``https://127.0.0.1:PORT`` URL for local-machine access."""
-        return f"https://127.0.0.1:{self.port}"
+        """The ``http://127.0.0.1:PORT`` URL for local-machine access.
+
+        Plain HTTP: loopback traffic never leaves the machine, so the
+        browser needs no certificate trust (LAN and tunnel URLs stay
+        ``https://``).
+        """
+        return f"http://127.0.0.1:{self.port}"
 
     @property
     def _serves_local_ca(self) -> bool:
@@ -8231,7 +7175,7 @@ class RemoteAccessServer:
         window and asks for welcome info — no LAN URLs are advertised
         yet rather than probing on the loop.
         """
-        if self.host == "localhost" or _is_loopback_ip(self.host):
+        if self.host == "localhost" or sorcar_api.is_loopback_ip(self.host):
             return []
         if not str(load_config().get("remote_password", "") or ""):
             return []
@@ -8281,7 +7225,7 @@ class RemoteAccessServer:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, self._write_url_file_logged, tunnel_url)
         self._republish_task = loop.create_task(self._broadcast_remote_url(
-            self._active_url or self._local_url, bool(tunnel_url),
+            self._active_url or self._local_url,
         ))
 
     def _current_tunnel_url(self) -> str | None:
@@ -8290,13 +7234,13 @@ class RemoteAccessServer:
             return self._active_url
         return None
 
-    def _remote_url_message(self, url: str, tunnel_active: bool) -> dict[str, object]:
+    def _remote_url_message(self, url: str) -> dict[str, object]:
         """Build the ``remote_url`` event every connected client receives.
 
         Includes the ``ntfyUrl`` field only when both *url* is
         non-empty and an ntfy topic is configured, matching the
         contract pinned by the welcome-info and tunnel-restart tests.
-        Always carries ``loopbackUrl`` (the ``https://127.0.0.1:PORT``
+        Always carries ``loopbackUrl`` (the ``http://127.0.0.1:PORT``
         address for the local machine) and ``lanUrls`` (the
         ``https://<lan-ip>:PORT`` addresses for other devices on the
         LAN) so the settings panel and the welcome page can show how
@@ -8308,8 +7252,6 @@ class RemoteAccessServer:
 
         Args:
             url: The active URL (``""`` when none is known).
-            tunnel_active: True only when a real Cloudflare tunnel
-                URL is in effect (not the local fallback).
 
         Returns:
             The event dict, ready for :meth:`WebPrinter.broadcast`.
@@ -8318,7 +7260,6 @@ class RemoteAccessServer:
         msg: dict[str, object] = {
             "type": "remote_url",
             "url": url or "",
-            "tunnelActive": tunnel_active,
             "loopbackUrl": self._loopback_url,
             "lanUrls": self._lan_urls(),
             "localCa": self._serves_local_ca,
@@ -8327,9 +7268,7 @@ class RemoteAccessServer:
             msg["ntfyUrl"] = ntfy_url
         return msg
 
-    def _broadcast_remote_url(
-        self, url: str, tunnel_active: bool,
-    ) -> Coroutine[Any, Any, None]:
+    def _broadcast_remote_url(self, url: str) -> Coroutine[Any, Any, None]:
         """Publish a ``remote_url`` event to every connected client.
 
         Synchronous on purpose: it stamps the publication with a fresh
@@ -8343,16 +7282,14 @@ class RemoteAccessServer:
 
         Args:
             url: The active URL (``""`` when none is known).
-            tunnel_active: True only when a real Cloudflare tunnel
-                URL is in effect (not the local fallback).
 
         Returns:
             The coroutine that builds the message and broadcasts it.
         """
         self._url_publish_gen += 1
-        return self._deliver_remote_url(url, tunnel_active, self._url_publish_gen)
+        return self._deliver_remote_url(url, self._url_publish_gen)
 
-    async def _deliver_remote_url(self, url: str, tunnel_active: bool, gen: int) -> None:
+    async def _deliver_remote_url(self, url: str, gen: int) -> None:
         """Build the ``remote_url`` message off-thread and broadcast it.
 
         Dropped when a newer publication (a higher
@@ -8360,7 +7297,7 @@ class RemoteAccessServer:
         being built, so clients never see a superseded URL land after
         its replacement.
         """
-        msg = await asyncio.to_thread(self._remote_url_message, url, tunnel_active)
+        msg = await asyncio.to_thread(self._remote_url_message, url)
         if gen == self._url_publish_gen:
             self._printer.broadcast(msg)
 
@@ -8499,16 +7436,18 @@ class RemoteAccessServer:
     async def _handle_snooze_update(self, latest: str = "") -> None:
         """Record a 24h "Remind me later" snooze and rebroadcast.
 
-        Writes the snooze into the ``.update-check.json`` cache shared
-        with the VS Code extension (file I/O off-thread, M10), then
-        rebroadcasts ``update_available`` with ``snoozed: true`` so
-        every connected client drops its sticky update toast at once.
+        Writes the snooze into the ``.update-check.json`` cache (file
+        I/O off-thread, M10), then rebroadcasts ``update_available``
+        with ``snoozed: true`` so every connected client drops its
+        sticky update toast at once.
 
         Args:
             latest: The release version being snoozed ("" falls back
-                to the cache's last known latest version).
+                to the latest version the daemon last fetched).
         """
-        await asyncio.to_thread(_record_update_snooze, latest)
+        await asyncio.to_thread(
+            _record_update_snooze, latest or self._latest_version or "",
+        )
         await self._broadcast_update_available()
 
     async def _post_url_if_changed(self) -> None:
@@ -8582,10 +7521,7 @@ class RemoteAccessServer:
         # published the current URL, which must not be followed by the
         # obsolete one the file or the scan returned.
         url = self._active_url or url
-        tunnel_active = bool(
-            self.use_tunnel and url and url != self._local_url
-        )
-        await self._broadcast_remote_url(url or "", tunnel_active)
+        await self._broadcast_remote_url(url or "")
         await self._broadcast_update_available()
 
     async def _endpoint_send(
@@ -8687,18 +7623,13 @@ class RemoteAccessServer:
         replayed TO THIS CLIENT (``replayConnId``: the other windows
         have that transcript and must not rebuild it because a new
         panel connected), and every other chat-bound registry tab is
-        deferred (``deferred: true`` → :meth:`VSCodeServer._defer_replay`):
+        deferred (``deferred: true`` → :meth:`AgentServer._defer_replay`):
         the client gets its running state and a ``replay_deferred``
         offer and fetches the transcript when the user opens the tab.
-        A client that mirrors exactly one registry tab (a VS Code
-        editor-tab panel, which names it in ``singleTabId``) receives
-        only that tab's replay: it drops every other tab's events on
-        arrival.  The one exception is a ``ready`` whose legacy
-        ``restoredTabs`` seed an EMPTY registry: those tabs are new to
-        every client, so all of them are replayed to everyone.
-        Tab state is server-canonical — clients never keep a tab set
-        of their own — so the same path serves VS Code webviews (local)
-        and remote web apps (WSS) alike.
+        A ``ready`` whose legacy ``restoredTabs`` seed an EMPTY
+        registry is the exception: those tabs are new to every client,
+        so all of them are replayed to everyone.  Tab state is
+        server-canonical — clients never keep a tab set of their own.
 
         Args:
             cmd: The ``ready`` message from the client (already
@@ -8710,16 +7641,14 @@ class RemoteAccessServer:
         """
         tab_id = self._cmd_str(cmd, "tabId")
         conn_id = cmd.get("connId", "")
-        single_tab_id = self._cmd_str(cmd, "singleTabId")
-        work_dir = cmd.get("workDir", "")
+        # The page's ``ready`` carries no ``workDir`` (``main.js`` sends
+        # ``{tabId, restoredTabs}``): the fan-out resolves the daemon's
+        # configured folder, which ``setWorkDir`` pins before ``ready``.
         for init_cmd in (
             "getModels", "getInputHistory", "getConfig", "getMyModels",
             "getSeaCommands",
         ):
-            init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
-            if work_dir:
-                init["workDir"] = work_dir
-            await self._run_cmd(init)
+            await self._run_cmd({"type": init_cmd, "connId": conn_id})
         try:
             await self._endpoint_send(
                 websocket, json.dumps({"type": "tasks_updated"}),
@@ -8730,12 +7659,11 @@ class RemoteAccessServer:
         # and on none once it closes: the snapshot lets this
         # (re)connecting client add the live ones and drop any it kept
         # from before a disconnect or a daemon restart.
-        self._broadcast_to_conn(self._vscode_server.browser_tabs.snapshot_event(), conn_id)
+        self._broadcast_to_conn(self._agent_server.browser_tabs.snapshot_event(), conn_id)
         await self._send_welcome_info()
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
-        # these events. The remote page also embeds them at load; the
-        # VS Code webview has nothing until they arrive.
+        # these events (the page also embeds them at load).
         for bootstrap in await asyncio.to_thread(self._bootstrap_events):
             self._broadcast_to_conn(bootstrap, conn_id)
         try:
@@ -8747,7 +7675,7 @@ class RemoteAccessServer:
             pass
         try:
             bound, adopted = await asyncio.to_thread(
-                self._vscode_server.ready_tab_sync, cmd["restoredTabs"],
+                self._agent_server.ready_tab_sync, cmd["restoredTabs"],
             )
         except Exception:
             logger.exception("ready tab-registry sync failed")
@@ -8755,27 +7683,23 @@ class RemoteAccessServer:
         # Tabs this ready just seeded the empty registry with (legacy
         # migration) are new to every other client too: those clients
         # adopt them from the ``tabs_state`` snapshot without asking for
-        # their transcripts, so the replays must reach everyone — every
-        # seeded tab's, even when the seeding client shows only one.
+        # their transcripts, so the replays must reach everyone.
         replay_conn_id = "" if adopted else conn_id
-        # Only the tab the client is looking at (``tabId``, or the one
-        # tab an editor panel mirrors) gets its transcript now.  The
-        # other bound tabs are DEFERRED: the client receives their
+        # Only the tab the client is looking at (``tabId``) gets its
+        # transcript now.  The other bound tabs are DEFERRED: the
+        # client receives their
         # running state and a ``replay_deferred`` offer, and asks for
         # a transcript (a ``scoped`` ``resumeSession``) when the user
         # opens the tab.  Replaying every tab used to send a laptop
         # with twenty tabs hundreds of megabytes per reconnect and
         # stalled the daemon while it loaded and serialized them,
         # which in turn made the client reconnect again.
-        focused_tab_id = single_tab_id or tab_id
         for rt_id, rt_chat, rt_task in bound:
-            if single_tab_id and not adopted and rt_id != single_tab_id:
-                continue
             resume: dict[str, Any] = {
                 "type": "resumeSession", "chatId": rt_chat,
                 "tabId": rt_id, "replayConnId": replay_conn_id,
             }
-            if not adopted and rt_id != focused_tab_id:
+            if not adopted and rt_id != tab_id:
                 resume["deferred"] = True
             # A tab pinned to a specific historical task replays THAT
             # task; without the taskId the replay would silently
@@ -8785,19 +7709,17 @@ class RemoteAccessServer:
             await self._run_cmd(resume)
 
     async def _open_path_only_prompt(
-        self, cmd: dict[str, Any], endpoint: Any, is_local: bool,
+        self, cmd: dict[str, Any], endpoint: Any,
     ) -> bool:
         """Open the file a path-only ``submit`` names; ``True`` when it did.
 
-        The one path-only shortcut for every surface: a single-line
-        prompt that is nothing but the path of an existing regular
-        file, typed into a tab that is not running a task, is a request
-        to open that file.  The submitting connection gets
-        ``promptOpened`` (the webview drops the prompt and the task
-        claim it stamped on the tab, see ``main.js`` ``handleEvent``)
-        and then the file, through :meth:`_handle_open_file`: the
-        resolved path (``openResolvedFile``) for a *local* client, the
-        ``fileContent`` for a browser.  No task starts.
+        A single-line prompt that is nothing but the path of an
+        existing regular file, typed into a tab that is not running a
+        task, is a request to open that file.  The submitting
+        connection gets ``promptOpened`` (the page drops the prompt and
+        the task claim it stamped on the tab, see ``main.js``
+        ``handleEvent``) and then the file's ``fileContent`` through
+        :meth:`_handle_open_file`.  No task starts.
 
         A tab whose task is running, or that views a task blocked in
         ``ask_user_question``, is skipped: there the prompt is a
@@ -8808,8 +7730,6 @@ class RemoteAccessServer:
         Args:
             cmd: The ``submit`` message from the client.
             endpoint: The submitting connection.
-            is_local: Whether the client opens the resolved path itself
-                (see :meth:`_handle_open_file`).
 
         Returns:
             ``True`` when the prompt was answered with the file and the
@@ -8826,7 +7746,7 @@ class RemoteAccessServer:
             prev = agent_state.find_by_tab(tab_id)
             if prev is not None and prev.task_thread is not None:
                 return False
-            if self._vscode_server._viewer_awaiting_answer(tab_id) is not None:
+            if self._agent_server._viewer_awaiting_answer(tab_id) is not None:
                 return False
         work_dir = self._cmd_work_dir(cmd)
         # Path stats (and possibly a slow filesystem) stay off the loop.
@@ -8841,22 +7761,15 @@ class RemoteAccessServer:
         await self._handle_open_file(
             {"path": str(path), "workDir": work_dir, "tabId": tab_id},
             endpoint,
-            is_local,
         )
         return True
 
     async def _handle_submit(
-        self,
-        cmd: dict[str, Any],
-        endpoint: Any = None,
-        is_local: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any = None,
     ) -> None:
-        """Translate a webview ``submit`` into a backend ``run``.
+        """Translate a chat page's ``submit`` into a backend ``run``.
 
-        The single submit path of every surface: the VS Code extension
-        host forwards its webview's ``submit`` here over the local WSS
-        endpoint exactly as the remote webapp does.  The
-        translation includes the path-only shortcut: a single-line
+        The translation includes the path-only shortcut: a single-line
         prompt that is nothing but the path of an existing regular file
         (relative to the tab's work dir or its pending worktree) is a
         request to open that file, so it is answered through
@@ -8869,13 +7782,10 @@ class RemoteAccessServer:
             endpoint: The submitting connection, which receives a
                 path-only prompt's ``promptOpened`` and file reply;
                 ``None`` disables the shortcut.
-            is_local: Whether the submitting client opens the resolved
-                path itself (a VS Code window) rather than needing the
-                file's content (a browser).
         """
         tab_id = cmd.get("tabId", "")
         if endpoint is not None and await self._open_path_only_prompt(
-            cmd, endpoint, is_local,
+            cmd, endpoint,
         ):
             return
         if self._shutdown_initiated:
@@ -8883,7 +7793,7 @@ class RemoteAccessServer:
             # the shutdown sweep snapshotted the active workers would
             # be silently killed when the process exits.  A refusal
             # like any other: the composer keeps the draft.
-            self._vscode_server._refuse_run(
+            self._agent_server._refuse_run(
                 tab_id, "Server is shutting down; task not started.",
             )
             return
@@ -8903,7 +7813,7 @@ class RemoteAccessServer:
                     "prompt size %d bytes exceeds cap %d bytes; refusing",
                     prompt_size, _MAX_PROMPT_BYTES,
                 )
-                self._vscode_server._refuse_run(
+                self._agent_server._refuse_run(
                     tab_id,
                     f"This prompt is too long to send: it is "
                     f"{prompt_size / 1_000_000:.1f} MB and the limit is "
@@ -8930,17 +7840,16 @@ class RemoteAccessServer:
             )
             attachments = attachments[:_MAX_ATTACHMENTS]
         # NOTE: no setTaskText here — the common run path (_cmd_run)
-        # broadcasts it for every origin, VS Code and remote alike.
+        # broadcasts it for every origin.
         self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
         run_cmd: dict[str, Any] = {
             "type": "run",
             "prompt": prompt,
             "model": cmd.get("model", ""),
-            "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
+            "workDir": cmd.get("workDir") or self._agent_server.work_dir,
             "tabId": tab_id,
-            # The file tab the user viewed last (the webview's Monaco
-            # editor), named in the run's system prompt like the
-            # visible editor the VS Code host reports.
+            # The file tab the user viewed last (the page's Monaco
+            # editor), named in the run's system prompt.
             "activeFile": cmd.get("activeFile"),
             "attachments": attachments,
             "isParallel": cmd.get("isParallel", True),
@@ -8960,8 +7869,8 @@ class RemoteAccessServer:
             # Carried over from the ``submit`` this run was built from:
             # ``_run_cmd`` bypasses the dispatcher that stamps it, so
             # without this a browser-launched task would record an
-            # empty owning connection while the identical VS Code
-            # ``run`` records the real one (F08-7).
+            # empty owning connection while a dispatched ``run``
+            # records the real one (F08-7).
             "connId": cmd.get("connId", ""),
             "_notice": notice,
         }
@@ -8979,7 +7888,7 @@ class RemoteAccessServer:
         port in :attr:`_tunnel_metrics_port`, and the start time in
         :attr:`_tunnel_started_at`.  The full argv is
         ``cloudflared tunnel --metrics 127.0.0.1:PORT`` followed by
-        *args* (e.g. ``["--url", LOCAL, "--no-tls-verify"]`` for a
+        *args* (e.g. ``["--url", LOCAL]`` for a
         quick tunnel or ``["run", "--token", TOKEN]`` for a named
         tunnel), optionally preceded by the
         :func:`_cloudflared_launch_prefix` ``systemd-run --scope``
@@ -9161,7 +8070,7 @@ class RemoteAccessServer:
             The public ``https://`` URL, or ``None`` on failure.
         """
         self._spawn_cloudflared(
-            ["--url", self._local_url, "--no-tls-verify"],
+            ["--url", self._local_url],
         )
         assert self._tunnel_proc is not None
         rate_limit_flag = [False]
@@ -9311,7 +8220,7 @@ class RemoteAccessServer:
                 # server over loopback, where the empty password
                 # authenticates — so the tunnel itself must go.
                 logger.warning(
-                    "remote_password was cleared; terminating the "
+                    "the remote password was cleared; terminating the "
                     "live cloudflared tunnel so the public URL stops "
                     "reaching this server.",
                 )
@@ -9412,7 +8321,7 @@ class RemoteAccessServer:
         """
         await asyncio.to_thread(self._write_url_file_sync, None)
         self._active_url = self._local_url
-        await self._broadcast_remote_url(self._active_url, False)
+        await self._broadcast_remote_url(self._active_url)
         await self._post_url_if_changed()
 
     async def _restart_tunnel_url(self) -> None:
@@ -9470,7 +8379,7 @@ class RemoteAccessServer:
             self._tunnel_next_retry = time.monotonic() + delay
         await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        await self._broadcast_remote_url(self._active_url, bool(tunnel_url))
+        await self._broadcast_remote_url(self._active_url)
         await self._post_url_if_changed()
 
     def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
@@ -9558,23 +8467,35 @@ class RemoteAccessServer:
         application-level ``{"type": "heartbeat"}`` frame.  The browser
         answers pings inside its network stack, invisible to page
         JavaScript, so this frame is the only regular proof of life
-        the remote webapp's WebSocket shim (``_WS_SHIM_JS``) can
-        observe: a shim that sees no frame at all for 45 s treats its
-        socket as half-open and reconnects.  Any failure closes the
-        connection.
+        the webapp's WebSocket transport (``media/transport.js``) can
+        observe: a page that sees no frame at all for 45 s treats its
+        socket as half-open and reconnects.
+
+        Every step is bounded.  ``Connection.ping`` waits for the
+        transport to drain before it returns the pong waiter, so a
+        peer that stopped reading (full socket buffers behind a
+        half-open connection) held this coroutine, and with it the
+        whole watchdog tick, until some other frame's
+        :meth:`WebPrinter._timed_send` happened to abort the peer —
+        forever on an idle daemon.  The ping frame gets the tolerance
+        every frame gets (:attr:`WebPrinter._send_timeout`), the pong
+        and the heartbeat :data:`_WS_PING_TIMEOUT`.  Any failure
+        aborts the transport, which ends the connection's handler;
+        ``close()`` would wait for the same drain.
         """
         try:
-            pong = await ws.ping()
+            pong = await asyncio.wait_for(
+                ws.ping(), timeout=self._printer._send_timeout,
+            )
             await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
             await asyncio.wait_for(
                 self._endpoint_send(ws, _WS_HEARTBEAT_FRAME),
                 timeout=_WS_PING_TIMEOUT,
             )
         except Exception:
-            try:
-                await ws.close()
-            except Exception:
-                pass
+            transport = getattr(ws, "transport", None)
+            if transport is not None:
+                transport.abort()
 
     async def _check_for_update(self) -> None:
         """Poll PyPI and broadcast an ``update_available`` event.
@@ -9613,6 +8534,33 @@ class RemoteAccessServer:
                 logger.debug("Version check failed", exc_info=True)
             await asyncio.sleep(_VERSION_CHECK_INTERVAL)
 
+    async def _machines_registry_watch(self) -> None:
+        """Push the machine list to every client when the registry file changes.
+
+        ``$KISS_HOME/machines.json`` is written by this daemon's own
+        ``machineAction`` and, from other processes, by a ``/machine
+        add`` task or the CLI.  Its size and mtime are read every
+        :data:`MACHINES_REGISTRY_POLL_SECONDS`; a change after the
+        first look sends a ``machines`` reply (pinged anew) to every
+        connection, so each surface's MACHINES subpanel refreshes and
+        unfolds for a new machine without waiting for its own poll.
+        """
+        from kiss.agents.sorcar.machines import machines_file
+
+        seen = _file_stamp(machines_file())
+        while True:
+            await asyncio.sleep(MACHINES_REGISTRY_POLL_SECONDS)
+            try:
+                stamp = _file_stamp(machines_file())
+                if stamp == seen:
+                    continue
+                seen = stamp
+                await self._server_api.broadcast_machines()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("machines registry watch failed", exc_info=True)
+
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
@@ -9623,8 +8571,8 @@ class RemoteAccessServer:
         2. **URL-file presence** — re-write ``~/.kiss/remote-url.json``
            if it has been removed (e.g. by a developer's pytest run
            that touches the real file, or by an unrelated cleanup).
-           Without this the VS Code settings panel's 10-second poller
-           cannot discover the active URL.
+           Without this ``kiss-web --url`` cannot discover the active
+           URL.
         3. **IP change** — if the host's network addresses changed
            (WiFi switch, DHCP renewal, VPN): in direct-LAN mode
            (``use_tunnel=False``) initiate a graceful shutdown so the
@@ -9683,6 +8631,46 @@ class RemoteAccessServer:
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
 
+    def _reload_trusted_clients(self) -> None:
+        """Load the newly enrolled machine-link CAs into the live SSL context.
+
+        See :func:`_load_trusted_client_cas`; a no-op without a context
+        or when the directory holds nothing new.
+        """
+        if self._ssl_context is None:
+            return
+        for name in _load_trusted_client_cas(self._ssl_context, self._trusted_client_cas):
+            logger.info("Admitting machine links with certificates issued by %s", name)
+
+    async def _watch_trusted_clients(self) -> None:
+        """Reload the enrolled CAs soon after their directory changes.
+
+        A machine enrolling itself (``/machine add user@host`` on the
+        other daemon) writes its CA into :func:`_trusted_clients_dir`
+        over ssh and then waits for its first handshake to succeed, so
+        the directory's mtime is polled every
+        :data:`TRUSTED_CLIENTS_POLL` seconds (one ``stat``), with a
+        full rescan every :data:`TUNNEL_CHECK_INTERVAL` seconds in
+        case a file system's coarse mtime hid a write.  Polling rather
+        than a signal from the enrolling command: a signal sent to a
+        daemon that predates the handler, or to a pid reused since a
+        stale endpoint file was written, would kill it.
+        """
+        elapsed = 0.0
+        while True:
+            try:
+                mtime = _trusted_clients_dir().stat().st_mtime
+            except OSError:
+                mtime = -1.0
+            if mtime != self._trusted_clients_mtime or elapsed >= TUNNEL_CHECK_INTERVAL:
+                self._trusted_clients_mtime, elapsed = mtime, 0.0
+                try:
+                    self._reload_trusted_clients()
+                except Exception:
+                    logger.warning("Could not reload the enrolled machine CAs", exc_info=True)
+            await asyncio.sleep(TRUSTED_CLIENTS_POLL)
+            elapsed += TRUSTED_CLIENTS_POLL
+
     async def _refresh_tls_cert_logged(self) -> None:
         """Run :meth:`_refresh_tls_cert`, logging any failure (watchdog task body)."""
         try:
@@ -9731,9 +8719,9 @@ class RemoteAccessServer:
         """Re-write ``~/.kiss/remote-url.json`` if it went missing.
 
         A developer's pytest run that touches the real file, or an
-        unrelated cleanup, can remove it; without a re-write the VS
-        Code settings panel's 10-second poller cannot discover the
-        active URL.
+        unrelated cleanup, can remove it; without a re-write the
+        installer's ``wait-for-public-url.sh`` and another machine's
+        ``machines.py`` probe cannot discover the active URL.
         """
         if not self._url_file.is_file():
             tunnel_url = (
@@ -9888,8 +8876,8 @@ class RemoteAccessServer:
         state), then clears the backoff counters and active URL.  Does
         not delete ``~/.kiss/remote-url.json`` because a replacement
         daemon may have already overwritten it; removing it would
-        race with the new instance's ``_save_url_file`` and cause the
-        VS Code sidebar to show no URL.
+        race with the new instance's ``_save_url_file`` and leave
+        ``kiss-web --url`` with no URL.
 
         Sets :attr:`_tunnel_stopped` under :attr:`_tunnel_lock` so an
         in-flight executor :meth:`_start_tunnel` (whose watchdog task
@@ -9906,7 +8894,7 @@ class RemoteAccessServer:
 
         Used by :meth:`start`'s shutdown ``finally`` so that a
         ``kiss-web`` exit (SIGTERM / KeyboardInterrupt / launchd
-        restart / VS Code extension's ``pkill kiss-web``) does **not**
+        restart / the installer's ``pkill kiss-web``) does **not**
         take the public Cloudflare tunnel down with it.  The spawned
         ``cloudflared`` was launched with ``start_new_session=True``
         and its pid + metrics port were persisted to
@@ -9941,7 +8929,7 @@ class RemoteAccessServer:
         Like :meth:`_stop_tunnel`, this method does not delete
         ``~/.kiss/remote-url.json``: a sibling kiss-web that has
         already taken over may have overwritten it, and removing it
-        would briefly blank the VS Code sidebar URL.
+        would briefly leave ``kiss-web --url`` with no URL.
         """
         proc = self._tunnel_proc
         if proc is not None and proc.poll() is None:
@@ -10046,7 +9034,7 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
         # No database write may run here: the legacy side-channel stamp
-        # and the orphan sweep live on VSCodeServer's background thread
+        # and the orphan sweep live on AgentServer's background thread
         # so a locked history.db never delays binding the listeners.
         try:
             # Sign-in pages that connectors hand to the user open in the
@@ -10054,7 +9042,7 @@ class RemoteAccessServer:
             # daemon is up (kiss.core.browser_handoff.open_for_user).
             # Inside the rollback scope: a setup that fails or is
             # cancelled unregisters it again in _close_partial_setup.
-            set_browser_tab_opener(self._vscode_server.browser_tabs.open_for_user)
+            set_browser_tab_opener(self._agent_server.browser_tabs.open_for_user)
             await self._bind_listeners()
         except BaseException:
             # Rollback (F4-04): a TLS/WSS/tunnel failure or a
@@ -10071,6 +9059,9 @@ class RemoteAccessServer:
         local_endpoint.remove_endpoint_if_owned(
             self._local_endpoint_file, self._local_token,
         )
+        if self._trusted_clients_task is not None:
+            self._trusted_clients_task.cancel()
+            self._trusted_clients_task = None
         if self._ws_server is not None:
             self._ws_server.close()
             self._ws_server = None
@@ -10097,20 +9088,27 @@ class RemoteAccessServer:
         own: the watchdog pings every connection every
         :data:`TUNNEL_CHECK_INTERVAL` seconds and closes one that does
         not answer within :data:`_WS_PING_TIMEOUT`
-        (:meth:`_ping_one_ws`), then sends the ``heartbeat`` frame the
-        remote page's shim watches.
+        (:meth:`_ping_one_ws`), then sends the ``heartbeat`` frame
+        ``media/transport.js`` watches.
         """
         bind = asyncio.ensure_future(serve(
             self._ws_handler,
             host,
             self.port,
             process_request=self._process_request,
-            ssl=self._ssl_context,
             open_timeout=_OPEN_TIMEOUT_SECONDS,
             ping_interval=None,
             ping_timeout=None,
             max_size=_MAX_LINE_BYTES,
-            create_connection=_HeadAwareServerConnection,
+            # Each connection sniffs its first byte and speaks TLS or
+            # plain HTTP accordingly (``_HeadAwareServerConnection``),
+            # so the listener itself is created without ``ssl``.
+            create_connection=cast(
+                "type[ServerConnection]",
+                functools.partial(
+                    _HeadAwareServerConnection, ssl_context=self._ssl_context,
+                ),
+            ),
         ))
         try:
             return await asyncio.shield(bind)
@@ -10132,7 +9130,7 @@ class RemoteAccessServer:
         """
         if self.host in ("", "0.0.0.0", "::"):
             return sys.platform == "darwin"
-        return self.host != "localhost" and not _is_loopback_ip(self.host)
+        return self.host != "localhost" and not sorcar_api.is_loopback_ip(self.host)
 
     async def _bind_loopback_alias(self) -> bool:
         """Bind ``127.0.0.1:port`` beside the wildcard listener (macOS).
@@ -10142,7 +9140,7 @@ class RemoteAccessServer:
         and loopback connections then go to that more specific socket.
         VS Code's Remote-SSH port forwarding does exactly this when the
         remote machine also runs kiss-web on 8787: the forward binds
-        ``127.0.0.1:8787`` on the laptop and ``https://127.0.0.1:8787``
+        ``127.0.0.1:8787`` on the laptop and ``http://127.0.0.1:8787``
         silently reaches the remote daemon, whose certificate the
         laptop does not trust.  Holding ``127.0.0.1`` ourselves makes
         that bind fail with ``EADDRINUSE``, so VS Code maps the forward
@@ -10162,7 +9160,7 @@ class RemoteAccessServer:
             holders = await asyncio.to_thread(_describe_port_listeners, self.port)
             logger.warning(
                 "127.0.0.1:%d is bound by another process (%s): %s. "
-                "https://127.0.0.1:%d reaches that process, not this "
+                "http://127.0.0.1:%d reaches that process, not this "
                 "server, until it releases the port (a VS Code forwarded "
                 "port: Ports view → Stop Forwarding Port); retrying every "
                 "%ds. Meanwhile use https://%s.local:%d",
@@ -10179,7 +9177,7 @@ class RemoteAccessServer:
             return
         if await self._bind_loopback_alias():
             logger.info(
-                "Reclaimed 127.0.0.1:%d: https://127.0.0.1:%d reaches this "
+                "Reclaimed 127.0.0.1:%d: http://127.0.0.1:%d reaches this "
                 "server again",
                 self.port, self.port,
             )
@@ -10207,7 +9205,7 @@ class RemoteAccessServer:
         local_endpoint.write_endpoint(
             self._local_endpoint_file,
             local_endpoint.LocalEndpoint(
-                url=f"wss://{host}:{port}/ws",
+                url=f"ws://{host}:{port}/ws",
                 token=self._local_token,
                 ca=ca_path,
                 pid=os.getpid(),
@@ -10224,6 +9222,7 @@ class RemoteAccessServer:
                 self._ssl_keyfile,
                 lan_ips,
             )
+            self._reload_trusted_clients()
             # ``_tls_loaded_cert`` stays empty: the first watchdog tick
             # loads the on-disk certificate under the lock
             # (:meth:`_refresh_tls_cert`), which is race-free — reading
@@ -10239,7 +9238,7 @@ class RemoteAccessServer:
                     # one the OS picked so the URL file, the endpoint
                     # file and the loopback alias name the real port.
                     self.port = _bound_loopback(self._ws_server)[1]
-                    self._local_url = f"https://localhost:{self.port}"
+                    self._local_url = f"http://localhost:{self.port}"
                 break
             except OSError as exc:
                 if exc.errno not in _BIND_RETRYABLE_ERRNOS:
@@ -10279,13 +9278,18 @@ class RemoteAccessServer:
             )
             raise SystemExit(2)
         await self._bind_loopback_alias()
-        # Local clients (the VS Code extension, ``run_agent``) may
-        # connect from here on: the endpoint file is written before
+        # Local clients (``run_agent`` and other ``daemon_client``
+        # runs) may connect from here on: the endpoint file is written before
         # the tunnel wait below so they need not wait out the
         # password/tunnel startup.  Written inline (a small file under
         # the endpoint lock) so a cancellation of this startup cannot
         # race a detached writer that publishes after the rollback.
         self._write_local_endpoint_file()
+        # A machine enrolling itself finds the endpoint file from here
+        # on, so its CA must be picked up from here on too, not after
+        # the tunnel wait below (cancelled with the listeners by
+        # _close_partial_setup).
+        self._trusted_clients_task = asyncio.create_task(self._watch_trusted_clients())
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -10329,15 +9333,15 @@ class RemoteAccessServer:
                 logger.warning(
                     "remote_password is not set in ~/%s/config.json; "
                     "refusing to start the cloudflared tunnel and "
-                    "refusing non-localhost connections.  Set a "
-                    "password in the config panel to enable remote "
+                    "refusing non-localhost connections.  Run "
+                    "install.sh to set a password and enable remote "
                     "access.",
                     HOME_DIR,
                 )
                 print(
-                    "Warning: remote_password is empty; cloudflared "
+                    "Warning: no remote password is set; cloudflared "
                     "tunnel disabled and non-localhost connections "
-                    "refused.  Set a password to enable remote access.",
+                    "refused.  Run install.sh to set one.",
                     file=sys.stderr,
                 )
             elif tunnel_url is None:
@@ -10371,6 +9375,9 @@ class RemoteAccessServer:
         self._watchdog_task = asyncio.create_task(self._watchdog())
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
+        )
+        self._machines_watch_task = asyncio.create_task(
+            self._machines_registry_watch(),
         )
 
         self._start_sea_command_watcher()
@@ -10613,9 +9620,9 @@ class RemoteAccessServer:
         # Detach the tunnel FIRST — before any slow cleanup (agent-task
         # joins, merge waits, MCP disconnects).  This spawns the stderr
         # drain shim that keeps the detached cloudflared alive after
-        # this process dies.  The VS Code extension escalates its
-        # SIGTERM to SIGKILL after only a few seconds; when that
-        # SIGKILL landed mid-cleanup the shim was never spawned (the
+        # this process dies.  A supervisor (the installer, launchd)
+        # escalates its SIGTERM to SIGKILL after only a few seconds;
+        # when that SIGKILL landed mid-cleanup the shim was never spawned (the
         # detach used to run only in ``start()``'s ``finally``), the
         # detached cloudflared died of SIGPIPE on its next stderr
         # write, and the next kiss-web found "pidfile points to dead
@@ -10701,41 +9708,40 @@ class RemoteAccessServer:
         Shutdown therefore *waits* for it, bounded by *timeout* so a
         wedged git invocation cannot hang the process forever.
 
+        The wait is on the merge CLAIM (``AgentState.merge_in_progress``,
+        released in the merge's ``finally``), not on the claiming
+        thread: the executor worker that runs a merge is a pooled
+        thread that outlives the merge, so joining it waited the whole
+        grace period after the repository was already merged.
+
         Args:
             timeout: Maximum wall-clock seconds to wait, in aggregate,
                 for all in-flight merges.
         """
-        from kiss.server import agent_state
-
-        with agent_state.STATE_LOCK:
-            threads = [
-                state.merge_thread
-                for state in agent_state.agent_states.values()
-                if state.merge_thread is not None
-                and state.merge_thread.is_alive()
-            ]
-        if not threads:
+        tabs = _merging_tab_ids()
+        if not tabs:
             return
         logger.warning(
             "Shutdown: waiting up to %.0fs for %d interactive merge(s) "
             "to finish rewriting the repository",
-            timeout, len(threads),
+            timeout, len(tabs),
         )
         deadline = time.monotonic() + timeout
-        for thread in threads:
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            if thread.is_alive():
-                logger.error(
-                    "Shutdown: merge thread %s did not finish within the "
-                    "grace period; proceeding without it",
-                    thread.name,
-                )
+        while tabs and time.monotonic() < deadline:
+            time.sleep(0.05)
+            tabs = _merging_tab_ids()
+        if tabs:
+            logger.error(
+                "Shutdown: merge(s) on tab(s) %s did not finish within the "
+                "grace period; proceeding without them",
+                ", ".join(tabs),
+            )
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
 
         Each task runs in a daemon worker thread spawned by
-        :meth:`VSCodeServer._run_task`.  On process exit those daemon
+        :meth:`AgentServer._run_task`.  On process exit those daemon
         threads are killed abruptly, skipping the cleanup ``finally``
         that persists a meaningful ``task_history.result`` and
         broadcasts the outcome.  The row is then left at the
@@ -10779,7 +9785,7 @@ class RemoteAccessServer:
             # ``interrupted_by_shutdown`` below — under this same lock
             # immediately before ``thread.start()``, so no run can
             # start AFTER this sweep (audit0903 F1).
-            self._vscode_server._shutdown_stopping = True
+            self._agent_server._shutdown_stopping = True
             for task_id, state in agent_state.agent_states.items():
                 thread = state.task_thread
                 # Liveness is AgentState.busy(), not is_task_active
@@ -10910,7 +9916,7 @@ class RemoteAccessServer:
         # below it answers from a warm index instead of waiting on a
         # scan (a restart reloads the persisted listings in well under
         # a second).
-        file_index = self._vscode_server._file_index
+        file_index = self._agent_server._file_index
         file_index.ensure(file_index.home)
 
         try:
@@ -10959,10 +9965,10 @@ class RemoteAccessServer:
         self._stop_active_agent_tasks()
         self._await_active_merges()
         self._disconnect_mcp_servers()
-        self._vscode_server.tab_registry.flush()
+        self._agent_server.tab_registry.flush()
         set_browser_tab_opener(None)
-        self._vscode_server.browser_tabs.shutdown()
-        self._vscode_server.terminals.shutdown()
+        self._agent_server.browser_tabs.shutdown()
+        self._agent_server.terminals.shutdown()
         self._server_api.remote_tabs.close_all()
         self._stop_sea_command_watcher()
 
@@ -11046,10 +10052,14 @@ class RemoteAccessServer:
         async with self._lifecycle_lock:
             await _cancel_task(self._watchdog_task)
             self._watchdog_task = None
+            await _cancel_task(self._trusted_clients_task)
+            self._trusted_clients_task = None
             await _cancel_task(self._tls_refresh_task)
             self._tls_refresh_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
+            await _cancel_task(self._machines_watch_task)
+            self._machines_watch_task = None
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
             idle_poller = self._update_when_idle_task

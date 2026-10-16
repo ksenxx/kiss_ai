@@ -6,7 +6,7 @@
 
 When the agent commits changes — inside a worktree via
 ``commit_and_merge``, or via the manual Git Commit
-(``_commit_main_tree``) path in the VS Code server — the resulting
+(``_commit_main_tree``) path in the daemon — the resulting
 commit message should include the user's original task prompt so the
 commit is traceable to the request that produced it.
 

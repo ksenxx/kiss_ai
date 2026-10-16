@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Worktree review flow and manual commit mixin for the VS Code server.
+"""Worktree review flow and manual commit mixin for the backend server.
 
 Owns:
 - Presentation of a worktree a task left pending (it was stopped, or
@@ -171,10 +171,9 @@ class _MergeFlowMixin:
 
         The outcome is a toast ``notification`` — info on success,
         error on failure — plus the ``autocommit_done`` event (flagged
-        ``manual``) that re-arms the Git Commit button; the webview and
-        the VS Code host skip their own chat rendering of a successful
-        manual commit, while a failure also shows its reason in the
-        chat webview.
+        ``manual``) that re-arms the Git Commit button; the page skips
+        its own chat rendering of a successful manual commit, while a
+        failure also shows its reason in the chat.
 
         Args:
             tab_id: Frontend tab identifier.
@@ -189,7 +188,7 @@ class _MergeFlowMixin:
             The event dict.
         """
         # Same stable id as the "Auto-generating commit message…"
-        # toast, so the outcome replaces it in place (the webview
+        # toast, so the outcome replaces it in place (the page
         # dedups toasts by id) instead of stacking a second one.
         self.printer.broadcast({
             "type": "notification",
@@ -683,9 +682,11 @@ class _MergeFlowMixin:
             # This runs in the event loop's default executor, and the
             # task that produced the worktree is long gone, so
             # ``task_thread`` is None and the shutdown sweep of
-            # in-flight tasks cannot see this work.  Publishing the
-            # thread lets shutdown WAIT for the repository to stop
-            # being rewritten instead of returning mid-merge.
+            # in-flight tasks cannot see this work.  Shutdown's
+            # ``_await_active_merges`` instead waits for this claim
+            # (released in the ``finally`` below) so the repository
+            # is never left mid-merge; the thread is recorded so an
+            # orphaned claim can be detected (``merge_in_progress``).
             state.merge_thread = threading.current_thread()
         try:
             # One lock per isolated repository, taken in path order so
@@ -702,7 +703,7 @@ class _MergeFlowMixin:
                     # worktree stays on disk, so transcript file links
                     # into it must keep resolving.  A failed marker
                     # write leaves the worktree pending (fail closed),
-                    # and the failure is ``retryable`` so the webview
+                    # and the failure is ``retryable`` so the page
                     # keeps the bar's buttons.
                     try:
                         msg = wt.leave_as_is()
@@ -741,7 +742,7 @@ class _MergeFlowMixin:
                 # (branch deletion failed) or a deferred one (ignored
                 # output could not be rescued) must not report
                 # success; a deferred discard is retryable so the
-                # webview keeps the bar's buttons.
+                # page keeps the bar's buttons.
                 msg = wt.discard()
                 deferred = "Discard deferred" in msg
                 result: dict[str, Any] = {

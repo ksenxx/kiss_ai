@@ -1,15 +1,15 @@
 """End-to-end tests for Z.AI + Moonshot API key support (and MiniMax removal).
 
-Split out of ``tests/agents/vscode/test_zai_moonshot_keys.py``: these
-methods depend only on ``kiss.core`` (``config``, ``vscode_config``) and
+Split out of ``tests/webapp/test_zai_moonshot_keys.py``: these
+methods depend only on ``kiss.core`` (``config``, ``user_config``) and
 ``kiss.core.models.model_info``, so they belong in ``tests/core`` per the
 placement invariants.  The vendor-display and settings-panel asset tests
-remain in ``tests/agents/vscode``; the provider-routing and catalog tests
+remain in ``tests/webapp``; the provider-routing and catalog tests
 live in ``tests/core/models/test_zai_moonshot_keys.py``.
 
 * ``kiss.core.config.Config`` field names and env-var defaults.
-* The VS Code env-var allowlist and current-key surface in
-  ``kiss.core.vscode_config``.
+* The settings-panel env-var allowlist and current-key surface in
+  ``kiss.core.user_config``.
 * Key-gated model availability in ``kiss.core.models.model_info``.
 
 Run with::
@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from kiss.core import config as config_module
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.core.models import model_info
 
 
@@ -49,9 +49,9 @@ def test_config_defaults_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.MOONSHOT_API_KEY == "moonshot-test-token"
 
 
-def test_vscode_allowlist_replaced() -> None:
-    """The VS Code env-var allowlist swaps MINIMAX for Z.AI + Moonshot."""
-    allow = vscode_config.API_KEY_ENV_VARS
+def test_env_var_allowlist_replaced() -> None:
+    """The settings-panel env-var allowlist swaps MINIMAX for Z.AI + Moonshot."""
+    allow = user_config.API_KEY_ENV_VARS
     assert "ZAI_API_KEY" in allow
     assert "MOONSHOT_API_KEY" in allow
     assert "MINIMAX_API_KEY" not in allow
@@ -63,7 +63,7 @@ def test_get_current_api_keys_includes_new_keys(
     """`get_current_api_keys()` surfaces the new envs."""
     monkeypatch.setenv("ZAI_API_KEY", "z-abc")
     monkeypatch.setenv("MOONSHOT_API_KEY", "m-xyz")
-    current = vscode_config.get_current_api_keys()
+    current = user_config.get_current_api_keys()
     assert current.get("ZAI_API_KEY") == "z-abc"
     assert current.get("MOONSHOT_API_KEY") == "m-xyz"
     assert "MINIMAX_API_KEY" not in current

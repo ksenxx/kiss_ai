@@ -1181,22 +1181,10 @@ def tick(now: float | None = None, wait: bool = True) -> int:
             changed = True
         if changed:
             save_jobs(jobs)
-        # Registered and started while holding _running_lock (and the
-        # store lock): a thread only counts as alive once started, so
-        # no concurrent running_job_ids() call can observe — and prune
-        # — a registered-but-idle entry.  A job that finishes instantly
-        # merely waits for the store lock before recording its outcome.
-        threads = [
-            threading.Thread(
-                target=_execute_job, args=(job,),
-                name=f"kiss-cron-job-{job['id']}", daemon=True,
-            )
-            for job in due
-        ]
+        # Launched while holding the store lock: a job that finishes
+        # instantly merely waits for it before recording its outcome.
         with _running_lock:
-            for job, thread in zip(due, threads, strict=True):
-                _running[job["id"]] = thread
-                thread.start()
+            threads = [_launch(job) for job in due]
     if wait:
         for thread in threads:
             thread.join()
@@ -1499,6 +1487,28 @@ def _release_run(running: dict[str, threading.Thread], job_id: str, me: threadin
         del running[job_id]
 
 
+def _launch(job: dict[str, Any]) -> threading.Thread:
+    """Start *job*'s run thread and register it in :data:`_running` (locked).
+
+    The caller holds :data:`_running_lock`: a thread only counts as
+    alive once started, so a concurrent :func:`running_job_ids` can
+    never observe, and prune, a registered-but-idle entry.
+
+    Args:
+        job: The stored job record to execute.
+
+    Returns:
+        The started daemon thread.
+    """
+    thread = threading.Thread(
+        target=_execute_job, args=(job,),
+        name=f"kiss-cron-job-{job['id']}", daemon=True,
+    )
+    _running[job["id"]] = thread
+    thread.start()
+    return thread
+
+
 def start_job(job: dict[str, Any]) -> str:
     """Run *job* now in its own thread (as a tick does), without waiting.
 
@@ -1516,12 +1526,7 @@ def start_job(job: dict[str, Any]) -> str:
         running = _running.get(job["id"])
         if running is not None and running.is_alive():
             return f"job {job['id']!r} is already running"
-        thread = threading.Thread(
-            target=_execute_job, args=(job,),
-            name=f"kiss-cron-job-{job['id']}", daemon=True,
-        )
-        _running[job["id"]] = thread
-        thread.start()
+        _launch(job)
     return ""
 
 

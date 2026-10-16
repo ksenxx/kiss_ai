@@ -14,11 +14,11 @@ read a fresh, empty database — producing order-dependent failures such
 as ``sqlite3.OperationalError: no such table: task_history`` or rows
 that silently never appear in ``_get_history()``.
 
-This mirrors ``tests/vscode/conftest.py``: many tests relocated here
-from that directory relied on its identical autouse reset, and the
-same order-dependence protection is appropriate for every server test.
+Many tests relocated here from the former ``tests/vscode/`` directory
+relied on its identical autouse reset, and the same order-dependence
+protection is appropriate for every server test.
 
-The orphan-sweep join guard for ``VSCodeServer``'s ``orphan-task-sweep``
+The orphan-sweep join guard for ``AgentServer``'s ``orphan-task-sweep``
 threads lives in the ROOT ``tests/conftest.py`` and protects this
 directory too; see its module docstring for the mechanism.
 
@@ -47,9 +47,15 @@ from kiss.server import agent_state
 from kiss.tests.conftest import find_free_port as find_free_port
 
 if TYPE_CHECKING:
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
 PersistenceState = tuple[Path, Any, Path]
+
+# Upgrade-request headers that make a test client on 127.0.0.1 look like a
+# visitor relayed by the local cloudflared tunnel: the daemon admits a DIRECT
+# loopback peer without a password, so tests of the password handshake pass
+# these as ``additional_headers`` to ``websockets.connect``.
+FORWARDED_VISITOR = {"X-Forwarded-For": "203.0.113.9"}
 
 
 def no_verify_ssl() -> ssl.SSLContext:
@@ -163,11 +169,11 @@ def clear_tab_states(tab_id: str) -> None:
             agent_state.unregister(state.task_id, state)
 
 
-def make_capturing_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """Create a ``VSCodeServer`` whose broadcasts are appended to the returned list."""
-    from kiss.server.server import VSCodeServer
+def make_capturing_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """Create a ``AgentServer`` whose broadcasts are appended to the returned list."""
+    from kiss.server.server import AgentServer
 
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -179,16 +185,16 @@ def make_capturing_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
     return server, events
 
 
-def make_recording_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    """Create a ``VSCodeServer`` whose broadcasts are recorded, persisted and captured.
+def make_recording_server() -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    """Create a ``AgentServer`` whose broadcasts are recorded, persisted and captured.
 
     Every event gets its task id injected, is recorded into the printer's
     replay buffer and written to the history database, and is then
     appended to the returned list under the returned lock.
     """
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
     printer = server.printer

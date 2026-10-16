@@ -15,8 +15,8 @@
 
 - [Overview](overview.md) — What KISS Sorcar is, the name, and how it compares to Claude Code and Cursor
 - [Terminal-Bench 2.0 Benchmark](benchmarks.md) — KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 tasks and seven models (75.6% vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5, the 59 unsampled tasks, caveats, and how to reproduce
-- [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
-- [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
+- [Installation](installation.md) — One-line installer, install from a checkout, Docker, pipx/uv, API-key configuration, updating
+- [Client Interfaces](cli.md) — The `kiss-web` daemon, web/mobile app, Python client API, and the `sorcar` terminal command
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, GitWorktreeOps
 - [Supported Models](models.md) — 695-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
@@ -44,11 +44,11 @@ pipx install kiss-agent-framework
 # Set at least one model API key
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, GEMINI_API_KEY, ...
 
-# Start the daemon that serves the VS Code extension and the web app
+# Start the daemon that serves the web app (the full installer registers it as a user service)
 kiss-web
 ```
 
-Then open the KISS Sorcar sidebar in VS Code, or open the remote web app URL shown in the Settings panel. From Python:
+Then open the web app at <http://127.0.0.1:8787>, or the remote web app URL shown in its Settings panel. From Python:
 
 ```python
 from kiss.server import sorcar
@@ -66,7 +66,7 @@ print(result.text)
 
 > Open-source general-purpose AI agent for long-horizon tasks and AI discovery.
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a browser/mobile web app served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
@@ -81,7 +81,7 @@ print(result.text)
 
 | Capability | KISS Sorcar | Claude Code | Cursor |
 |---|---|---|---|
-| Interfaces | VS Code extension + web/mobile app + Python API | CLI + mobile app | Custom VS Code |
+| Interfaces | Web/mobile app + Python API + `sorcar` CLI | CLI + mobile app | Custom VS Code |
 | AI Discovery | Yes — simply via prompt | No | No |
 | GEPA Prompt Optimization | Yes — simply via prompt | No | No |
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
@@ -235,17 +235,45 @@ HarnessTax puts the harness effect on Terminal-Bench 2.0 within about ±5 points
 
 # Installing KISS Sorcar
 
-> Install KISS Sorcar from source, as a Python package, as a VS Code extension, or in Docker. Requires Python 3.13+.
+> Install KISS Sorcar with the one-line installer, from a checkout, in Docker, or as a Python package. Requires Python 3.13+.
 
-## Full Install from Source
+## Full Install (one-liner)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
+The bootstrap script clones or updates `~/.kiss/kiss_ai`, then runs its `install.sh` from the directory you ran the command in, so the daemon serves that directory.
 
-If the Update button in the settings UI fails, run the full installation command again. It will not delete your history.
+## Full Install from a Checkout
+
+```bash
+git clone https://github.com/ksenxx/kiss_ai.git
+cd kiss_ai
+./install.sh
+```
+
+`install.sh` targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It runs five steps:
+
+1. Copies the project into `~/.kiss/kiss` (the library, the SEAs, the web app frontend).
+2. Builds the Python environment with `uv`.
+3. Byte-compiles the library (SEAs and the few files a runtime reads as scripts stay source).
+4. Installs the `sorcar` CLI and the `rsorcar` and `sorcar-docker` launchers into `~/.local/bin`, Playwright's Chromium and `cloudflared`.
+5. Refreshes `~/.kiss/MODEL_INFO.json`, registers `kiss-web` as your user service (launchd on macOS, a systemd user unit on Linux, a detached process otherwise), restarts it only when no task is running, sets a fresh random remote-access password (printed in a box of `*` at the end; only its hash is stored), and opens the web app at `http://127.0.0.1:8787`. On a remote or SSH machine it prints the cloudflared URL instead.
+
+Options: `KISS_SKIP_LAUNCH=1` skips starting the daemon and opening the browser; `--non-interactive` runs without prompts. The installer logs to `~/.kiss/install.log` and tracks its progress in `~/.kiss/.install-progress`.
+
+## Updating
+
+When a new version is available, the web app shows an update toast with **Update** and **Update when idle**. The daemon then runs `scripts/install.sh` (the bootstrap) in `~/.kiss/kiss_ai`, which runs `install.sh`. If the update fails, run the one-line installer again. It will not delete your history.
+
+## Docker
+
+```bash
+./sorcar-docker [PORT] [--rebuild]
+```
+
+`sorcar-docker` builds a plain Debian image from the `Dockerfile` and runs a container whose entrypoint (`scripts/docker-startup.sh`) clones the repo (the private `kiss.git` when `GH_TOKEN` is set, otherwise the public `kiss_ai.git`), runs `install.sh`, sets the web app password (`KISS_WEB_PASSWORD`, or a generated one printed in `docker logs`) and starts `kiss-web` on port 8787 (host port 8787 by default). State persists in the `kiss-sorcar-web-home` volume. Open `https://localhost:PORT` on the host; the certificate is self-signed, so accept it once or install `/ca.crt`.
 
 ## Python Package Install
 
@@ -273,28 +301,15 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app — useful for local or self-hosted models.
+You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app — useful for local or self-hosted models.
 
 You can register your own models (e.g. a local vLLM/Ollama endpoint or a provider model not in the bundled catalog) in the **Custom Models** section of the Settings panel; entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
-## VS Code Extension
-
-To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
-
-## Docker
-
-To run KISS Sorcar in a Docker container (exposes a VS Code interface in the host machine's browser):
-
-```bash
-~/kiss_ai/sorcar-docker
-```
-
 ## Next Steps
 
-- [Client Interfaces](cli.md) — the `kiss-web` daemon, chat clients, and Python API
+- [Client Interfaces](cli.md) — the `kiss-web` daemon, the web app, and Python API
 - [Supported Models](models.md) — pick a model
 - [Tips](tips.md) — get the highest-quality results
-
 
 ---
 
@@ -302,7 +317,7 @@ To run KISS Sorcar in a Docker container (exposes a VS Code interface in the hos
 
 # KISS Sorcar Client Interfaces
 
-> KISS Sorcar is used through three client interfaces, all served by one local daemon (`kiss-web`): the VS Code extension, the remote web/mobile app, and the Python client API `kiss.server.sorcar.run`. A fourth interface, the `sorcar` terminal command, runs a SorcarAgent directly in the current directory without the daemon.
+> KISS Sorcar is used through two client interfaces, both served by one local daemon (`kiss-web`): the browser/mobile web app and the Python client API `kiss.server.sorcar.run`. A third interface, the `sorcar` terminal command, runs a SorcarAgent directly in the current directory without the daemon.
 
 Paths below written as `$KISS_HOME/...` are under the Sorcar home directory: `~/.kiss` for the stock brand, `~/.s10s` once Seamless Loop is installed, or wherever the `KISS_HOME` environment variable points.
 
@@ -312,10 +327,10 @@ The standalone `sorcar` command runs a task without the daemon: `sorcar -t "Summ
 
 ## The `kiss-web` Daemon
 
-The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
+The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The installer registers it as your user service; you can also manage it yourself:
 
 ```bash
-# Start the daemon (serves the web app and the extension).
+# Start the daemon (serves the web app).
 kiss-web
 
 # Pin the daemon's working directory.
@@ -330,11 +345,11 @@ kiss-web --url
 | `--workdir` | Working directory for the daemon |
 | `--url` | Print the active remote URL and exit |
 
-## VS Code Extension and Web/Mobile App
+## Web/Mobile App
 
-Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and type or speak your task. The chat interface provides:
+Open the web app in a browser (`http://127.0.0.1:8787` locally, or the remote URL from the Settings panel) and type or speak your task. The chat interface provides:
 
-- `@` file/folder mentions with ranked file completion over the working directory (`./path` items) and the rest of your home directory (`~/path` items), served from a persistent file index that is refreshed in the background. In a tab that is neither running a task nor waiting for an answer, a one-line message that is just the path of an existing file opens that file in the editor or a content tab instead of starting a task.
+- `@` file/folder mentions with ranked file completion over the working directory (`./path` items) and the rest of your home directory (`~/path` items), served from a persistent file index that is refreshed in the background. In a tab that is neither running a task nor waiting for an answer, a one-line message that is just the path of an existing file opens that file in a content tab instead of starting a task.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
 - A pre-run **task classifier** that detects whether the task could create or modify any file in the current git repository (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — a hard rule whose only exception is a git-only task (commit, merge, rebase, resolving merge conflicts, ...); tasks that write no files (questions, Internet answers given in the reply) and git-only tasks skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` and "Use Jev (decisions model)" ticked it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Use Jev (decisions model)" (`classify_with_decisions`, on by default). The Jev checkbox is the one switch for the decisions model: ticked, the classifier asks Jev first and every agent gets the `decide` tool; unticked, the LLM classifier answers and no task calls Jev.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
@@ -342,8 +357,8 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `$KISS_HOME/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel or set `KISS_USE_MEMORY=0`; a custom directory goes in the `memory_dir` key of `$KISS_HOME/config.json`. A run whose working directory is inside a git repository also gets that repository's own memory, the sub-directory `$KISS_HOME/memories/<repo>/` named after the repository directory (shared by a main checkout and its linked worktrees; independent clones share it only when their directory names match): its pages are addressed as `<repo>/<page>`, `memory_search` covers every memory unless narrowed with `memory=`, and the protocol tells the agent to keep repository knowledge there and cross-project lessons in the general memory.
 - Wake-word voice chat ("Hey Sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run. Wrapping the message in `<task>…</task>` tags instead queues it as a follow-up task that runs sequentially after the current task finishes.
-- Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory. A sub-agent dispatched with `run_agent` or `run_parallel` opens a nested tab of its own on every client viewing the parent task, which is closed everywhere when the sub-agent finishes; closing it by hand while the sub-agent runs closes it on every surface until you reopen it from its history row or by collapsing and expanding the fan-out panel.
-- In the remote web app, file links in a transcript open in **content tabs**: text files in a Monaco editor, Markdown and HTML with preview and source views, images in the browser's viewer, and PDFs in a bundled pdf.js viewer (fit-to-width pages, pinch or Ctrl/Cmd + wheel zoom, an editable "Page N of M" field, a Download link and keyboard paging) that the VS Code extension also uses for `.pdf` links.
+- Tab mirroring — every web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory. A sub-agent dispatched with `run_agent` or `run_parallel` opens a nested tab of its own on every client viewing the parent task, which is closed everywhere when the sub-agent finishes; closing it by hand while the sub-agent runs closes it on every surface until you reopen it from its history row or by collapsing and expanding the fan-out panel.
+- File links in a transcript open in **content tabs**: text files in a Monaco editor, Markdown and HTML with preview and source views, images in the browser's viewer, and PDFs in a bundled pdf.js viewer (fit-to-width pages, pinch or Ctrl/Cmd + wheel zoom, an editable "Page N of M" field, a Download link and keyboard paging).
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
@@ -370,7 +385,7 @@ Keyword options:
 | `work_dir` | Working directory for the task; the daemon's default when empty |
 | `scope_work_dir` | Workspace-scope directory for the task's tab; the task's working directory when empty |
 | `parent_task_id` | Task-history row id of the calling task; non-empty marks the run as a sub-agent of that task (nested tab and history row) — how the `run_agent` tool dispatches |
-| `parent_tab_id` | Frontend tab id of the calling task's tab, so the webview knows which tab spawned the sub-agent |
+| `parent_tab_id` | Frontend tab id of the calling task's tab, so the web app knows which tab spawned the sub-agent |
 | `model` | Model name; the daemon's selected default when empty |
 | `chat_id` | Existing chat session id to continue; a new chat when empty |
 | `system_prompt` | Replace the default system prompt for the run (and its sub-agents) |
@@ -600,7 +615,7 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the VS Code extension or web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
+Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
 
 ## Model Namespaces
 
@@ -746,7 +761,7 @@ See [Sample Tasks](sample-tasks.md) for more ready-to-use prompts.
 
 ## What a slash command does
 
-Typing this in the chat box of the VS Code extension or the web app:
+Typing this in the chat box of the web app:
 
 ```
 /slack tell #eng that the deploy is done
@@ -806,7 +821,7 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
   you type "/deploy ship v2.3" and press Enter
         |
         v
-  chat client (VS Code extension / web app)
+  chat client (web app)
     - shows a "Commands" popup while you type the command word
     - submits the prompt unchanged
         |
@@ -1189,7 +1204,7 @@ See also [Prompt Tricks](prompt-tricks.md) and [Tips](tips.md).
 
 # Prompt Tricks
 
-> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled [`src/kiss/INJECTIONS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md), read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first. Append one or more to your task prompt.
+> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the web app these appear under the "Tricks" button; they are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled [`src/kiss/INJECTIONS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md), read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first. Append one or more to your task prompt.
 
 ## Multi-Model Quality
 
@@ -1289,10 +1304,6 @@ If the Update button in settings fails, run the full installation command again.
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-## Chat in the Editor or in the Sidebar
-
-In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar. You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the KISS Sorcar settings page.
-
 ## Task Classifier
 
 KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected (the default), the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
@@ -1377,7 +1388,7 @@ Just run:
 sorcar-docker
 ```
 
-It runs KISS Sorcar in a Docker container and exposes a VS Code interface in the host machine's browser.
+It runs KISS Sorcar in a Docker container and serves the web app at `https://localhost:8787` in the host machine's browser (the certificate is self-signed; accept it once or install `/ca.crt`).
 
 ## Run KISS Sorcar on a Server via SSH
 
@@ -1438,7 +1449,7 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 
 ## Settings
 
-Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
+Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
 
 ## Use Optimized Multi-Model Routing to Save Cost or Improve Quality
 

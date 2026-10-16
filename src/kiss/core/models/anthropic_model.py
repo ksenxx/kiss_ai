@@ -978,7 +978,6 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
-        in_thinking = False
         try:
             # `get_final_message()` only drains the already-exhausted
             # iterator and returns the in-memory snapshot, so it is safe
@@ -994,23 +993,20 @@ class AnthropicModel(Model):
                     self._rejected_response = stream.current_message_snapshot
                     if self.token_callback is None:
                         continue
-                    if event.type == "content_block_start":
-                        block = getattr(event, "content_block", None)
-                        if block and getattr(block, "type", "") == "thinking":
-                            in_thinking = True
-                    elif event.type == "content_block_delta":
+                    # A thinking_delta only ever arrives inside a thinking
+                    # block, and the bracket helpers are idempotent on
+                    # _thinking_open, so no per-block flag is needed.
+                    if event.type == "content_block_delta":
                         delta = event.delta
                         delta_type = getattr(delta, "type", "")
                         if delta_type == "thinking_delta":
                             text = getattr(delta, "thinking", "")
                             if text:
-                                if in_thinking:
-                                    self._open_thinking_if_closed()
+                                self._open_thinking_if_closed()
                                 self._invoke_token_callback(text)
                         elif delta_type == "text_delta":
                             self._invoke_token_callback(getattr(delta, "text", ""))
-                    elif event.type == "content_block_stop" and in_thinking:
-                        in_thinking = False
+                    elif event.type == "content_block_stop":
                         self._close_thinking_if_open()
                 self._rejected_response = None
                 return stream.get_final_message()

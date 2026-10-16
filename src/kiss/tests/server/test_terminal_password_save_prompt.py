@@ -1,13 +1,20 @@
 # Author: Koushik Sen (ksen@berkeley.edu)
-"""Real browser regressions with a live, TLS-trusted daemon.
+"""Real browser regressions with a live daemon on its plain-http loopback URL.
 
 WebSocket authentication does not count as an HTML login submission. Previously
 Chrome kept the hidden login password pending, then treated Terminal's xterm
 fetch as a successful login and opened its native Save Password bubble.
 
-Headless/incognito browsers and untrusted certificates can suppress saving, so
-native-prompt tests use headed, persistent Chromium with an isolated NSS trust
-store. chrome://password-manager-internals reports native UI decisions that page
+Headless/incognito browsers can suppress saving, so native-prompt tests use
+headed, persistent Chromium. The page is loaded from the ``http://127.0.0.1``
+loopback URL the daemon reports (a secure context for browsers, so the
+Credential Management API is available without any certificate trust).  A
+browser directly on loopback is admitted without a password, so every
+browser here sends the ``X-Forwarded-For`` header a cloudflared visitor
+carries (``FORWARDED_VISITOR``), which makes the daemon ask for the password.
+The header is stripped again from the xterm.js CDN fetches, whose CORS
+preflight would otherwise refuse it.
+chrome://password-manager-internals reports native UI decisions that page
 screenshots cannot see. No network, browser APIs, or shell behavior are mocked.
 
 The production HTML always has the auth input; the missing-input guard is only
@@ -30,10 +37,11 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import BrowserContext, Page, expect, sync_playwright
+from playwright.sync_api import BrowserContext, Page, Request, Route, expect, sync_playwright
 
-from kiss.core.vscode_config import save_config
-from kiss.server.web_server import RemoteAccessServer, _tls_dir
+from kiss.core.user_config import save_config
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import FORWARDED_VISITOR
 
 _PASSWORD = "terminal-regression-secret"
 _CM_SAVE = "CM API save a credential:"
@@ -61,7 +69,9 @@ def _run_server(
 @pytest.fixture
 def password_server(tmp_path: Path) -> Iterator[RemoteAccessServer]:
     """Run the production server with a password and isolated test persistence."""
-    save_config({"remote_password": _PASSWORD, "work_dir": str(tmp_path)})
+    save_config({
+        "remote_password": _PASSWORD, "work_dir": str(tmp_path),
+    })
     server = RemoteAccessServer(host="127.0.0.1", port=0, work_dir=str(tmp_path))
     ready, stopped = threading.Event(), threading.Event()
     thread = threading.Thread(target=_run_server, args=(server, ready, stopped))
@@ -75,9 +85,24 @@ def password_server(tmp_path: Path) -> Iterator[RemoteAccessServer]:
         assert not thread.is_alive(), "test daemon failed to stop"
 
 
+def _without_forwarded_header(route: Route, request: Request) -> None:
+    """Continue a CDN fetch without the forwarded-IP header meant for the daemon."""
+    route.continue_(headers={
+        k: v for k, v in request.headers.items() if k.lower() != "x-forwarded-for"
+    })
+
+
+def _as_forwarded_visitor(context: BrowserContext) -> None:
+    """Make every page of *context* reach the daemon as a cloudflared visitor would."""
+    context.set_extra_http_headers(FORWARDED_VISITOR)
+    context.route("https://cdn.jsdelivr.net/**", _without_forwarded_header)
+
+
 def _url(server: RemoteAccessServer) -> str:
-    port = server._ws_server.sockets[0].getsockname()[1]
-    return f"https://127.0.0.1:{port}"
+    """The ``http://127.0.0.1:PORT`` URL the daemon itself reports."""
+    url = server._loopback_url
+    assert url.startswith("http://127.0.0.1:"), url
+    return url
 
 
 @pytest.fixture
@@ -85,18 +110,10 @@ def password_browser(
     password_server: RemoteAccessServer, tmp_path: Path,
 ) -> Iterator[BrowserContext]:
     """Launch a persistent browser with native password saving enabled."""
-    if not shutil.which("Xvfb") or not shutil.which("certutil"):
-        pytest.skip("native password-manager test needs Xvfb and certutil")
+    if not shutil.which("Xvfb"):
+        pytest.skip("native password-manager test needs Xvfb")
     browser_home = tmp_path / "browser-home"
-    nss = browser_home / ".pki" / "nssdb"
-    nss.mkdir(parents=True)
-    subprocess.run(
-        ["certutil", "-N", "-d", f"sql:{nss}", "--empty-password"], check=True,
-    )
-    subprocess.run(
-        ["certutil", "-A", "-d", f"sql:{nss}", "-n", "Test daemon CA",
-         "-t", "C,,", "-i", str(_tls_dir() / "ca.pem")], check=True,
-    )
+    browser_home.mkdir(parents=True)
     read_fd, write_fd = os.pipe()
     with subprocess.Popen(
         ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1440x1000x24", "-ac"],
@@ -112,6 +129,7 @@ def password_browser(
                     ignore_default_args=["--enable-automation"],
                     env={**os.environ, "HOME": str(browser_home), "DISPLAY": display_name},
                 )
+                _as_forwarded_visitor(context)
                 try:
                     yield context
                 finally:
@@ -271,7 +289,9 @@ def test_firefox_authenticates_without_password_credential_api(
             pytest.skip("install Playwright Firefox for the unsupported-API test")
         browser = p.firefox.launch()
         try:
-            page = browser.new_page(ignore_https_errors=True)
+            context = browser.new_context()
+            _as_forwarded_visitor(context)
+            page = context.new_page()
             page.goto(_url(password_server))
             assert page.evaluate("typeof PasswordCredential") == "undefined"
             _unlock(page)

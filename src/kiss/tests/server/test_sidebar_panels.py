@@ -371,8 +371,8 @@ class TestAppsStatus(_StoreTestCase):
 class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
     """``getCronJobs`` / ``getAppsStatus`` get direct replies over a local connection.
 
-    The VS Code extension's webviews reach the daemon through the host's
-    local connection (FORWARDED_COMMANDS in SorcarSidebarView.ts).
+    Same-machine clients (the ``sorcar`` CLI, ``run_agent`` sub-agents)
+    reach the daemon through its local connection.
     """
 
     def setUp(self) -> None:

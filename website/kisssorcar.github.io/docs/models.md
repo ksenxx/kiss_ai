@@ -39,7 +39,7 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the VS Code extension or web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
+Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
 
 ## Model Namespaces
 

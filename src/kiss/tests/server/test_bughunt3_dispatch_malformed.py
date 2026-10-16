@@ -4,10 +4,10 @@
 # add your name here
 """Bug-hunt 3: dispatcher / numeric-field robustness (BUG-A, BUG-B).
 
-BUG-A: ``VSCodeServer._handle_command`` used the raw ``type`` field as
+BUG-A: ``AgentServer._handle_command`` used the raw ``type`` field as
 a dict key, so an unhashable value (``{"type": []}``) raised TypeError.
 The websocket/UDS handlers wrap the whole receive loop in one try, so
-the exception killed the ENTIRE client connection (whole VS Code
+the exception killed the ENTIRE client connection (the whole browser
 window).
 
 BUG-B: several handlers called ``int()`` on frontend-supplied fields
@@ -22,14 +22,14 @@ import unittest
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestDispatchMalformed(unittest.TestCase):
     """Malformed payloads must never raise out of ``_handle_command``."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:

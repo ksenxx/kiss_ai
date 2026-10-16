@@ -23,32 +23,24 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 from urllib.parse import urlsplit
 
 import pytest
 import requests
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 
-class _SendHandler(BaseHTTPRequestHandler):
+class _SendHandler(RecordingHandler):
     """Records requests; 200 for channel OK, 500 for channel ERR."""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        pass
-
-    def _respond(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b""
         path = urlsplit(self.path).path
@@ -61,9 +53,9 @@ class _SendHandler(BaseHTTPRequestHandler):
             }
         )
         if path == "/channels/ERR/messages":
-            self._respond(500, {"message": "Internal Server Error", "code": 0})
+            self._json(500, {"message": "Internal Server Error", "code": 0})
         else:
-            self._respond(200, {"id": "M1", "channel_id": path.split("/")[2]})
+            self._json(200, {"id": "M1", "channel_id": path.split("/")[2]})
 
 
 @pytest.fixture(scope="module")

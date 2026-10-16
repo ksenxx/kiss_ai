@@ -483,7 +483,7 @@ def _current_db_path() -> str:
     """Return the active database path as a string.
 
     Used by asynchronous producers (the background event writer's
-    enqueue path, the VS Code server's fire-and-forget follow-up
+    enqueue path, the daemon's fire-and-forget follow-up
     thread) to stamp each pending write with the database it was
     produced against, so a late write can never land in a *different*
     database after ``_DB_PATH`` has been reassigned (test fixtures,
@@ -528,7 +528,7 @@ def _process_owner_token() -> str:
     """Return this process's owner token, publishing its liveness marker.
 
     The database is shared by every Sorcar process on the machine (the
-    ``kiss-web`` daemon, a ``kiss`` CLI run, a VS Code reload), so
+    ``kiss-web`` daemon, a ``kiss`` CLI run, a daemon restart), so
     "is the task that wrote this row still running?" cannot be answered
     from Python memory.  Each process therefore creates
     ``<KISS_HOME>/task-owners/<token>.lock`` and holds an exclusive
@@ -1120,7 +1120,7 @@ def _close_thread_db() -> None:
     Unlike :func:`_close_db`, the global generation counter is left
     untouched so every other thread's cached connection stays valid.
     Used by short-lived background threads (e.g. the startup
-    orphan-task sweep in ``VSCodeServer.__init__``) to release their
+    orphan-task sweep in ``AgentServer.__init__``) to release their
     per-thread SQLite connection when they finish, instead of leaking
     an open connection for the life of the process.
     """
@@ -1291,7 +1291,7 @@ def _is_failed_result(result: str, success: object = None) -> bool:
       written by ``_save_task_result`` for ``task_error`` events.
     * ``Agent Failed Abruptly`` — the sentinel inserted by
       ``_add_task`` that survives only when the host process was
-      SIGKILL'd / OOM-killed / VS Code-reloaded mid-task before any
+      SIGKILL'd / OOM-killed mid-task before any
       Python ``finally`` could run.
     * ``Task terminated unexpectedly (process killed)`` — the rewrite
       that ``_recover_orphaned_tasks`` applies to surviving sentinel
@@ -1486,10 +1486,13 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did and the launch instant (epoch ms) of its latest task.
         -- Maintained by _save_task_extra when a task finishes.
+        -- user_summary is the title the user typed over it in the
+        -- CHATS panel ('' = none); it survives every recompute.
         CREATE TABLE IF NOT EXISTS chat_summaries (
             chat_id TEXT PRIMARY KEY,
             summary TEXT DEFAULT '',
-            last_launched INTEGER DEFAULT 0
+            last_launched INTEGER DEFAULT 0,
+            user_summary TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1579,6 +1582,16 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
             )
         except sqlite3.OperationalError:  # pragma: no cover — lost the race
             logger.debug("%s column already present", name, exc_info=True)
+    summary_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(chat_summaries)").fetchall()
+    }
+    if "user_summary" not in summary_cols:
+        try:
+            conn.execute(
+                "ALTER TABLE chat_summaries ADD COLUMN user_summary TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:  # pragma: no cover — lost the race
+            logger.debug("user_summary column already present", exc_info=True)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -2256,11 +2269,17 @@ def _tag_filter_sql(tag: str) -> tuple[str, tuple[str, ...]]:
     return "AND (',' || COALESCE(tags, '') || ',') LIKE ? ", (f"%,{tag},%",)
 
 
+# The instant (epoch seconds) the Chats panel sorts, dates and filters a
+# task by: its completion ``end_ts`` (epoch ms); a row without one (still
+# running, or a legacy row) falls back to its launch ``timestamp``.
+_HISTORY_DONE_SQL = "CASE WHEN end_ts > 0 THEN end_ts / 1000.0 ELSE timestamp END"
+
+
 def _history_order_sql(running_task_ids: set[str] | None) -> tuple[str, tuple[str, ...]]:
-    """Order running tasks first, then newest first within each section."""
+    """Order running tasks first, then the most recently completed first."""
     ids = tuple(sorted(running_task_ids or ()))
     priority = f"id IN ({','.join('?' for _ in ids)}) DESC, " if ids else ""
-    return priority + "timestamp DESC, rowid DESC", ids
+    return priority + f"{_HISTORY_DONE_SQL} DESC, rowid DESC", ids
 
 
 def _load_history(
@@ -2360,12 +2379,13 @@ def _chat_first_tasks(chat_ids: list[str]) -> dict[str, str]:
 
 
 def _history_date_range() -> tuple[float | None, float | None]:
-    """Return the first and last task timestamps in the history.
+    """Return the first and last task completion times in the history.
 
-    Computes ``(MIN(timestamp), MAX(timestamp))`` over the same row
+    Computes the min and max of each task's completion time (launch
+    time when it has none, see ``_HISTORY_DONE_SQL``) over the same row
     set the History sidebar lists (i.e. excluding sub-agent rows) so
     the sidebar's From/To date inputs can be pre-filled with the
-    first and last task dates.  Thread-safe.
+    first and last task dates the date filter compares.  Thread-safe.
 
     Returns:
         ``(min_ts, max_ts)`` in epoch seconds, or ``(None, None)``
@@ -2374,7 +2394,7 @@ def _history_date_range() -> tuple[float | None, float | None]:
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
-            "SELECT MIN(timestamp) AS mn, MAX(timestamp) AS mx "
+            f"SELECT MIN({_HISTORY_DONE_SQL}) AS mn, MAX({_HISTORY_DONE_SQL}) AS mx "
             f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT}"
         ).fetchone()
     if row is None or row["mn"] is None or row["mx"] is None:
@@ -2733,7 +2753,7 @@ def _log_orphaned_task_forensics(
     before it rewrites the sentinel rows, so the startup log captures
     exactly which tasks were interrupted and their last recorded
     state.  This is the primary forensic evidence when a kill
-    (SIGKILL / OOM / VS Code reload) prevents the normal
+    (SIGKILL / OOM) prevents the normal
     ``_save_task_result`` → ``_append_chat_event`` finally block from
     running.
 
@@ -2982,13 +3002,13 @@ def _recover_orphaned_tasks(
     time and is supposed to be overwritten by
     :func:`_save_task_result` from ``_TaskRunnerMixin._run_task_inner``'s
     cleanup ``finally``.  When the host process is killed externally
-    (SIGKILL, VS Code extension reload, OOM) mid-task the Python
+    (SIGKILL, OOM) mid-task the Python
     ``finally`` never runs and the sentinel survives in the history
     sidebar verbatim as "Agent Failed Abruptly".  Catching the
     in-process ``BaseException`` variants in the task runner cannot
     cover this case because no Python code runs to catch anything.
 
-    The remedy is a startup-time sweep: on every fresh ``VSCodeServer``
+    The remedy is a startup-time sweep: on every fresh ``AgentServer``
     instantiation (one per Python process) we scan ``task_history``
     for any row that still carries the sentinel AND whose id is not
     in *active_task_ids* (the currently-running tasks in THIS
@@ -3008,11 +3028,11 @@ def _recover_orphaned_tasks(
     every row records the ``owner`` token of the process that created
     it (see :func:`_process_owner_token`), and a row whose owner still
     holds its liveness marker is skipped.  Without that check a second
-    Sorcar process — a ``kiss`` CLI run, a VS Code extension reload, a
-    restarted daemon — rewrote the rows of tasks that were still
-    RUNNING in the first process, painting a red failure dot on a live
-    task; and because the sentinel was gone, neither the shutdown
-    safety net nor a later sweep could ever record the real outcome.
+    Sorcar process — a ``kiss`` CLI run, a restarted daemon — rewrote the
+    rows of tasks that were still RUNNING in the first process, painting
+    a red failure dot on a live task; and because the sentinel was gone,
+    neither the shutdown safety net nor a later sweep could ever record
+    the real outcome.
 
     Args:
         active_task_ids: Row ids that are still being processed in
@@ -3022,7 +3042,7 @@ def _recover_orphaned_tasks(
             live or dead.
         created_before: Optional epoch-seconds cut-off.  When given,
             only sentinel rows whose ``timestamp`` column is strictly
-            older are rewritten.  ``VSCodeServer`` passes its boot
+            older are rewritten.  ``AgentServer`` passes its boot
             timestamp here because its sweep runs on a BACKGROUND
             thread: a task legitimately started after boot (inserting
             a fresh sentinel row) must never be mistaken for an
@@ -3539,7 +3559,9 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
 
     Returns:
         Mapping of chat id to ``{"summary": str, "last_launched": int}``
-        (``last_launched`` in epoch ms).  Chats without a row are absent.
+        (``last_launched`` in epoch ms); ``summary`` is the title the
+        user typed in the CHATS panel when there is one, else the
+        computed one.  Chats without a row are absent.
     """
     ids = sorted({c for c in chat_ids if c})
     if not ids:
@@ -3548,17 +3570,44 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
         db = _get_db()
         placeholders = ",".join("?" * len(ids))
         rows = db.execute(
-            "SELECT chat_id, summary, last_launched FROM chat_summaries "
+            "SELECT chat_id, summary, last_launched, user_summary FROM chat_summaries "
             f"WHERE chat_id IN ({placeholders})",
             ids,
         ).fetchall()
     return {
         _safe_str(r["chat_id"]): {
-            "summary": _safe_str(r["summary"]),
+            "summary": _safe_str(r["user_summary"]) or _safe_str(r["summary"]),
             "last_launched": _safe_int(r["last_launched"], 0),
         }
         for r in rows
     }
+
+
+def _set_chat_summary(chat_id: str, summary: str) -> bool:
+    """Store *summary* as the title the user gave chat *chat_id*.
+
+    The text replaces the computed summary in the CHATS panel from now
+    on, whatever tasks the chat runs later; an empty *summary* drops the
+    user's title and the computed one shows again.  A chat that has no
+    ``chat_summaries`` row yet (no finished task) gets one.
+
+    Args:
+        chat_id: The chat session id.
+        summary: The user's title, whitespace-trimmed by the caller.
+
+    Returns:
+        True when a row was written, False for an empty *chat_id*.
+    """
+    if not chat_id:
+        return False
+    db = _get_db()
+    with _rw_lock.write_lock():
+        db.execute(
+            "INSERT INTO chat_summaries (chat_id, user_summary) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET user_summary = excluded.user_summary",
+            (chat_id, summary),
+        )
+    return True
 
 
 _event_queue: queue.Queue = queue.Queue()
@@ -3877,8 +3926,8 @@ def _journal_file_lock(sidecar: str) -> Iterator[None]:
     """Hold an inter-process lock on *sidecar* for the whole block.
 
     The database and its journal are shared by every Sorcar process on
-    the machine (the ``kiss-web`` daemon, a ``kiss`` CLI run, a VS Code
-    reload), so the module-level :data:`_journal_lock` — a plain
+    the machine (the ``kiss-web`` daemon, a ``kiss`` CLI run, a daemon
+    restart), so the module-level :data:`_journal_lock` — a plain
     thread lock — cannot order an append in one process against a
     replay in another.  Without that ordering a replayer deletes
     batches a peer appended after the replayer read the file, and two
@@ -4289,7 +4338,11 @@ def _write_event_batch_retrying(
 ) -> None:
     """Write *batch*, retrying once after a cross-process seq collision.
 
-    The caller holds the write lock and ``_caches_lock``.
+    The caller holds the write lock and ``_caches_lock``.  The
+    transaction itself is rolled back by :func:`_immediate_txn` on
+    ANY exception — including the runner's Stop, which lands on the
+    task thread when the batch is a journal replay run by
+    ``_flush_chat_events`` — so this only drops the caches.
     """
     try:
         _write_event_batch_locked(db, batch, task_ids, replay_marker)
@@ -4300,19 +4353,19 @@ def _write_event_batch_retrying(
         # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
         # from the database and retry ONCE; a second refusal is a
         # real error and propagates like any other failure.
-        _rollback_event_batch(db, task_ids)
+        _drop_event_caches(task_ids)
         try:
             _write_event_batch_locked(db, batch, task_ids, replay_marker)
-        except Exception:
-            _rollback_event_batch(db, task_ids)
+        except BaseException:
+            _drop_event_caches(task_ids)
             raise
-    except Exception:
-        _rollback_event_batch(db, task_ids)
+    except BaseException:
+        _drop_event_caches(task_ids)
         raise
 
 
-def _rollback_event_batch(db: sqlite3.Connection, task_ids: set[str]) -> None:
-    """Roll back a failed event-batch transaction and drop its caches.
+def _drop_event_caches(task_ids: set[str]) -> None:
+    """Drop the seq/has_events cache entries of a rolled-back batch.
 
     The seq cache may have advanced past rows that were rolled back,
     and another process may have moved the on-disk ``MAX(seq)`` in
@@ -4320,13 +4373,8 @@ def _rollback_event_batch(db: sqlite3.Connection, task_ids: set[str]) -> None:
     recompute them from the database.
 
     Args:
-        db: The connection whose open transaction failed.
         task_ids: Tasks whose cache entries must be invalidated.
     """
-    try:
-        db.execute("ROLLBACK")
-    except sqlite3.Error:
-        pass
     for tid in task_ids:
         _next_seq_cache.pop(tid, None)
         _marked_has_events.discard(tid)
@@ -4341,66 +4389,67 @@ def _write_event_batch_locked(
     """Insert *batch* inside one explicit transaction.
 
     Caller holds ``_rw_lock.write_lock()`` and ``_caches_lock`` and
-    rolls back + invalidates the seq caches on any failure, so a
-    mid-batch error can never diverge the cache from the database.
+    invalidates the seq caches on any failure; the transaction is
+    :func:`_immediate_txn`, which rolls back on any exception
+    (including an injected Stop), so a mid-batch error can never
+    diverge the cache from the database or leave SQLite's write lock
+    held on this thread's connection.
 
     When *replay_marker* is given and already present in
     ``replayed_journals``, a previous replayer committed this very
     snapshot and died before removing its file: nothing is inserted,
     so the transcript never gets duplicate events.
     """
-    db.execute("BEGIN IMMEDIATE")
-    if replay_marker is not None:
-        seen = db.execute(
-            "SELECT 1 FROM replayed_journals WHERE snapshot = ?",
-            (replay_marker,),
-        ).fetchone()
-        if seen is not None:
-            db.execute("COMMIT")
-            return
-        db.execute(
-            "INSERT INTO replayed_journals (snapshot, timestamp) "
-            "VALUES (?, ?)",
-            (replay_marker, time.time()),
-        )
-    for tid in task_ids:
-        if tid not in _next_seq_cache:
-            exists = db.execute(
-                "SELECT 1 FROM task_history WHERE id = ?", (tid,),
+    with _immediate_txn(db):
+        if replay_marker is not None:
+            seen = db.execute(
+                "SELECT 1 FROM replayed_journals WHERE snapshot = ?",
+                (replay_marker,),
             ).fetchone()
-            if exists is None:
+            if seen is not None:
+                return
+            db.execute(
+                "INSERT INTO replayed_journals (snapshot, timestamp) "
+                "VALUES (?, ?)",
+                (replay_marker, time.time()),
+            )
+        for tid in task_ids:
+            if tid not in _next_seq_cache:
+                exists = db.execute(
+                    "SELECT 1 FROM task_history WHERE id = ?", (tid,),
+                ).fetchone()
+                if exists is None:
+                    continue
+                row = db.execute(
+                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+                    "FROM events WHERE task_id = ?",
+                    (tid,),
+                ).fetchone()
+                _next_seq_cache[tid] = row["next_seq"] if row else 0
+        rows: list[tuple[str, int, str, float]] = []
+        for tid, ev_json, ts, _op in batch:
+            seq = _next_seq_cache.get(tid)
+            if seq is None:
                 continue
-            row = db.execute(
-                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-                "FROM events WHERE task_id = ?",
-                (tid,),
-            ).fetchone()
-            _next_seq_cache[tid] = row["next_seq"] if row else 0
-    rows: list[tuple[str, int, str, float]] = []
-    for tid, ev_json, ts, _op in batch:
-        seq = _next_seq_cache.get(tid)
-        if seq is None:
-            continue
-        _next_seq_cache[tid] = seq + 1
-        rows.append((tid, seq, ev_json, ts))
-    db.executemany(
-        "INSERT INTO events (task_id, seq, event_json, timestamp) "
-        "VALUES (?, ?, ?, ?)",
-        rows,
-    )
-    to_mark = [
-        tid for tid in task_ids
-        if tid in _next_seq_cache and tid not in _marked_has_events
-    ]
-    if to_mark:
-        placeholders = ",".join("?" * len(to_mark))
-        db.execute(
-            f"UPDATE task_history SET has_events = 1 "
-            f"WHERE id IN ({placeholders})",
-            to_mark,
+            _next_seq_cache[tid] = seq + 1
+            rows.append((tid, seq, ev_json, ts))
+        db.executemany(
+            "INSERT INTO events (task_id, seq, event_json, timestamp) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
         )
-        _marked_has_events.update(to_mark)
-    db.execute("COMMIT")
+        to_mark = [
+            tid for tid in task_ids
+            if tid in _next_seq_cache and tid not in _marked_has_events
+        ]
+        if to_mark:
+            placeholders = ",".join("?" * len(to_mark))
+            db.execute(
+                f"UPDATE task_history SET has_events = 1 "
+                f"WHERE id IN ({placeholders})",
+                to_mark,
+            )
+            _marked_has_events.update(to_mark)
 
 
 def _queue_chat_event(
@@ -4657,7 +4706,7 @@ def _task_has_transcript_events(task_id: str) -> bool:
     persisted) BEFORE the agent produces any output, is ignored.  Used
     by :meth:`ChatSorcarAgent._persist_replay_events_if_missing` to
     decide whether it must synthesize a minimal replayable event stream
-    (prompt + result) for a run that happened outside a chat webview —
+    (prompt + result) for a run that happened outside a chat page —
     without a recording printer that would have persisted the live
     event stream; a run that failed right after allocation must still
     get its synthesized events even though the metadata event already
@@ -4886,8 +4935,7 @@ def _load_latest_chat_events_by_chat_id(
     Sub-agent rows (``extra.subagent`` present, identified by a
     non-NULL ``parent_task_id`` column) share the parent's ``chat_id``
     and are persisted AFTER the parent row, so a chat-id-only lookup
-    (e.g. the
-    webview's post-restart ``resumeSession``) must skip them —
+    (e.g. the chat page's post-restart ``resumeSession``) must skip them —
     otherwise a restored parent tab would replay the last sub-agent's
     events and be styled as a sub-agent tab.  Sub-agent rows are only
     ever loaded explicitly by task id
@@ -4940,18 +4988,18 @@ def _load_all_chat_events_by_chat_id(
 ) -> tuple[list[dict[str, object]], bool]:
     """Load every task of a chat session and its events, oldest first.
 
-    Powers the daemon's ``shareChatTasks`` command: the chat webview
+    Powers the daemon's ``shareChatTasks`` command: the chat page
     exports a chat as one standalone HTML page and needs the
     transcripts of ALL of the chat's tasks, not just the latest one
     (:func:`_load_latest_chat_events_by_chat_id`) — earlier tasks are
-    no longer in the webview's DOM after a reload, because a session
+    no longer in the page's DOM after a reload, because a session
     replay repaints only one task.  Sub-agent rows are skipped exactly
     like the latest-task lookup skips them: they replay inside their
     parent's transcript, not as chat tasks of their own.
 
     The rows are walked newest first so a *max_json_bytes* budget can
     stop BEFORE decoding an oversized chat's older transcripts — the
-    newest ones are the ones the webview cannot redraw from its own
+    newest ones are the ones the page cannot redraw from its own
     DOM — instead of materializing every event and discarding the
     surplus afterwards.
 
@@ -5004,7 +5052,7 @@ def _load_subagent_rows_by_parent_task_id(
 ) -> list[dict[str, object]]:
     """Return persisted sub-agent rows whose parent is *parent_task_id*.
 
-    Used by :meth:`VSCodeServer._replay_session` when the user clicks
+    Used by :meth:`AgentServer._replay_session` when the user clicks
     a parent task in the history sidebar: every sub-agent fanned out
     by the parent's ``run_parallel`` tool call is reopened in its own
     sub-agent tab so the loaded view mirrors the live execution
@@ -5249,7 +5297,7 @@ def _load_last_model() -> str:
     in the SQLite ``model_usage`` table, which now tracks only per-model
     usage counts.
     """
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     return str(load_config().get("last_model", "") or "")
 
@@ -5269,7 +5317,7 @@ def _save_last_model(model: str) -> None:
     Args:
         model: The model name to save as the last-selected model.
     """
-    from kiss.core.vscode_config import save_config
+    from kiss.core.user_config import save_config
 
     save_config({"last_model": model})
 

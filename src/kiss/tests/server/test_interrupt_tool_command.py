@@ -10,7 +10,7 @@ task (own state or viewer subscription), interrupts ONLY the tool call
 that task's thread is running, and answers with ``tool_interrupt_ack``.
 The task itself keeps running.
 
-Real ``VSCodeServer``, real agent-state registry, real task thread
+Real ``AgentServer``, real agent-state registry, real task thread
 through ``_run_task`` with a scripted ``agent.run`` that performs a
 registered tool call exactly the way ``KISSAgent._execute_tool`` does.
 """
@@ -40,9 +40,9 @@ from kiss.server.sorcar import API
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _capture(server: Any) -> tuple[list[dict[str, Any]], threading.Lock]:
@@ -87,7 +87,7 @@ def _start_task(
     shows up as the task FINISHING with the interrupt message, not as a
     stopped task.
     """
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = agent_state.AgentState(
         task_id,
         agent=agent,
@@ -261,7 +261,7 @@ class TestInterruptToolCommand(unittest.TestCase):
         server = _make_server()
         events, lock = _capture(server)
         release = threading.Event()
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = agent_state.AgentState(
             "it-task-5", agent=agent, tab_id="it-tab-5", server_owned=True,
             stop_event=threading.Event(),

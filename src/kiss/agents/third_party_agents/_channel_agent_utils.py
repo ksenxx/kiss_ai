@@ -1491,8 +1491,8 @@ class ChannelRunner:
 
         The agent is launched as a kiss-web registered agent via
         :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
-        live-visible and interactable from any connected remote
-        webview while it runs.  The channel tools come from the
+        live-visible and interactable from any connected chat
+        page while it runs.  The channel tools come from the
         runner's SEA (the agent module's SEA ``tools()``,
         passed as the ``kiss.server.sorcar.run`` ``sea_path``); after the
         run the task summary is posted to the message's thread unless
@@ -1891,7 +1891,7 @@ def channel_main(
         _build_run_kwargs,
         _print_run_stats,
     )
-    from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+    from kiss.core.user_config import load_api_keys, load_api_keys_readonly
 
     # Import the canonical key store before any backend or connector
     # code runs: a direct CLI invocation does not inherit the kiss-web

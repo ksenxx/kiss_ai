@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from kiss.core import config as config_module
-from kiss.core.vscode_config import (
+from kiss.core.user_config import (
     DEFAULTS,
     apply_config_to_env,
     save_api_key,
@@ -64,7 +64,7 @@ class TestSaveApiKeyNameValidation:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> Generator[Path]:
         """Point ``HOME``/``SHELL``/key store at a scratch dir."""
-        import kiss.core.vscode_config as _vc
+        import kiss.core.user_config as _vc
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("SHELL", "/bin/bash")
@@ -110,7 +110,7 @@ class TestSaveApiKeyNameValidation:
         self, fake_home: Path,
     ) -> None:
         """The legitimate save path keeps working after the fix."""
-        from kiss.core.vscode_config import api_keys_env_path
+        from kiss.core.user_config import api_keys_env_path
 
         save_api_key("OPENAI_API_KEY", "sk-valid")
         store = api_keys_env_path()

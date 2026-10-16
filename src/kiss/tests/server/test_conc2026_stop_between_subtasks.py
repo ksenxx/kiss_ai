@@ -90,9 +90,9 @@ class TestStopBetweenSubtasks(TestCase):
 
     def test_stop_in_between_subtask_bookkeeping_is_acknowledged(self) -> None:
         remote = _make_remote_server()
-        vscode = remote._vscode_server
+        daemon = remote._agent_server
         tab_id = "between-subtasks-1"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = AgentState(
             f"pre-{tab_id}",
             agent=agent,
@@ -137,7 +137,7 @@ class TestStopBetweenSubtasks(TestCase):
 
         agent.run = fake_run  # type: ignore[method-assign, assignment]
         worker = threading.Thread(
-            target=vscode._run_task,
+            target=daemon._run_task,
             args=({
                 "type": "run",
                 "prompt": "<task>first part</task><task>second part</task>",
@@ -166,7 +166,7 @@ class TestStopBetweenSubtasks(TestCase):
                 # inside the intermediate persist on the held lock.
                 time.sleep(0.4)
                 t0 = time.monotonic()
-                vscode._stop_task(tab_id)
+                daemon._stop_task(tab_id)
                 # Watchdog injects the first KeyboardInterrupt at
                 # t0 + 1 s; it pends inside the blocked C-level SQLite
                 # wait and fires between the subtasks once the lock is

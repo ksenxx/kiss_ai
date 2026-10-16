@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
+import kiss.core.user_config as user_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import model as model_factory
@@ -71,16 +71,16 @@ def _bootstrap_live_model(agent: Any, model_name: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Path) -> Any:
-    """Redirect vscode_config writes to a temp directory."""
-    orig_dir = vscode_config.CONFIG_DIR
-    orig_path = vscode_config.CONFIG_PATH
+    """Redirect user_config writes to a temp directory."""
+    orig_dir = user_config.CONFIG_DIR
+    orig_path = user_config.CONFIG_PATH
     test_dir = tmp_path / ".kiss"
     test_dir.mkdir()
-    vscode_config.CONFIG_DIR = test_dir
-    vscode_config.CONFIG_PATH = test_dir / "config.json"
+    user_config.CONFIG_DIR = test_dir
+    user_config.CONFIG_PATH = test_dir / "config.json"
     yield
-    vscode_config.CONFIG_DIR = orig_dir
-    vscode_config.CONFIG_PATH = orig_path
+    user_config.CONFIG_DIR = orig_dir
+    user_config.CONFIG_PATH = orig_path
 
 
 @pytest.fixture(autouse=True)

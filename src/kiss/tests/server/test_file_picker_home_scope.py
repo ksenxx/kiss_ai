@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server.file_index import HOME_SLOTS, FileIndex, FileIndexRegistry, Picker
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import touch
 
 
@@ -250,7 +250,7 @@ class TestPickerSearch:
 class TestServerReplies:
     def test_get_files_reply_carries_prefixed_mentions(self, tmp_path: Path) -> None:
         home, reg = _home(tmp_path)
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(home / "proj")
         server._file_index.stop()
         server._file_index = reg

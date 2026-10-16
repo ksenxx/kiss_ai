@@ -4,10 +4,10 @@
 # add your name here
 """End-to-end tests for the fast-complete picker backend.
 
-The chat webview's input textbox now shows ALL fast-complete options
+The chat page's input textbox now shows ALL fast-complete options
 as a dropdown picker — the same UI the ``@``-mention file picker
 uses — instead of only the single inline ghost-text suggestion.  The
-:class:`kiss.server.server.VSCodeServer` therefore broadcasts a
+:class:`kiss.server.server.AgentServer` therefore broadcasts a
 new ``completions`` event alongside the legacy ``ghost`` event:
 
     {"type": "completions",
@@ -18,7 +18,7 @@ new ``completions`` event alongside the legacy ``ghost`` event:
 
 These tests drive the production server directly (with the persistence
 DB and INJECTIONS.md pinned to a tmpdir) and assert on the event the
-real ``Printer.broadcast`` call would deliver to the webview.
+real ``Printer.broadcast`` call would deliver to the chat page.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _TRICK_REPRO = (
     "Reproduce the issue by writing end-to-end test. Then fix the issue."
@@ -48,7 +48,7 @@ _FAKE_INJECTIONS = (
 
 
 class TestFastCompletePickerBackend:
-    """Drive ``VSCodeServer._complete`` end-to-end and inspect events."""
+    """Drive ``AgentServer._complete`` end-to-end and inspect events."""
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
@@ -82,7 +82,7 @@ class TestFastCompletePickerBackend:
 
     def _run(
         self,
-        server: VSCodeServer,
+        server: AgentServer,
         query: str,
         *,
         snapshot_content: str | None = "",
@@ -104,7 +104,7 @@ class TestFastCompletePickerBackend:
 
     def test_completions_event_emitted_with_query_echo(self) -> None:
         """Every ``_complete`` call broadcasts exactly one completions event."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(server, "Reproduce")
         assert len(comps) == 1
         ev = comps[0]
@@ -114,26 +114,26 @@ class TestFastCompletePickerBackend:
 
     def test_completions_event_carries_conn_id_when_set(self) -> None:
         """``connId`` is stamped on the event when the request has one."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(server, "Reproduce", conn_id="win-7")
         assert comps[0]["connId"] == "win-7"
 
     def test_completions_event_omits_conn_id_for_direct_callers(self) -> None:
         """Empty connId is NOT stamped (matches ``_emit_ghost``)."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(server, "Reproduce")
         assert "connId" not in comps[0]
 
     def test_tricks_appear_in_completions(self) -> None:
         """Tricks are returned as full sentence lines (head + trick)."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(server, "Reproduce")
         texts = [c["text"] for c in comps[0]["completions"]]
         assert _TRICK_REPRO in texts
 
     def test_trick_completion_marked_trick(self) -> None:
         """Trick items carry ``type == 'trick'``."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(server, "Reproduce")
         items = comps[0]["completions"]
         trick = next(c for c in items if c["text"] == _TRICK_REPRO)
@@ -141,7 +141,7 @@ class TestFastCompletePickerBackend:
 
     def test_trick_emitted_as_raw_body_after_sentence_boundary(self) -> None:
         """A trick after a sentence boundary is emitted as the raw body — no head."""
-        server = VSCodeServer()
+        server = AgentServer()
         query = "Some preamble. Reproduce"
         _, comps = self._run(server, query)
         texts = [c["text"] for c in comps[0]["completions"]]
@@ -150,7 +150,7 @@ class TestFastCompletePickerBackend:
 
     def test_history_tasks_appear_in_completions(self) -> None:
         """Prior task history feeds the completions list."""
-        server = VSCodeServer()
+        server = AgentServer()
         th._add_task("fix the parser bug now")
         th._add_task("fix the parser then commit")
         _, comps = self._run(server, "fix the")
@@ -164,7 +164,7 @@ class TestFastCompletePickerBackend:
 
     def test_completions_dedupe(self) -> None:
         """A duplicate task text appears at most once."""
-        server = VSCodeServer()
+        server = AgentServer()
         th._add_task("fix the parser bug now")
         th._add_task("fix the parser bug now")
         _, comps = self._run(server, "fix")
@@ -173,7 +173,7 @@ class TestFastCompletePickerBackend:
 
     def test_identifier_completions_from_active_file(self) -> None:
         """Identifiers from the active editor are listed as completions."""
-        server = VSCodeServer()
+        server = AgentServer()
         content = (
             "zebraq_marker_alpha = 1\n"
             "zebraq_marker_beta = 2\n"
@@ -192,7 +192,7 @@ class TestFastCompletePickerBackend:
 
     def test_ghost_event_still_emitted(self) -> None:
         """The legacy ghost event is still broadcast alongside completions."""
-        server = VSCodeServer()
+        server = AgentServer()
         ghosts, _ = self._run(server, "Reproduce")
         assert len(ghosts) == 1
         completed = "Reproduce" + ghosts[0]["suggestion"]
@@ -200,21 +200,21 @@ class TestFastCompletePickerBackend:
 
     def test_short_query_emits_empty_completions(self) -> None:
         """A query under 2 chars yields empty completions (and empty ghost)."""
-        server = VSCodeServer()
+        server = AgentServer()
         ghosts, comps = self._run(server, "R")
         assert comps[0]["completions"] == []
         assert ghosts[0]["suggestion"] == ""
 
     def test_empty_query_emits_empty_completions(self) -> None:
         """An empty query yields empty completions."""
-        server = VSCodeServer()
+        server = AgentServer()
         ghosts, comps = self._run(server, "")
         assert comps[0]["completions"] == []
         assert ghosts[0]["suggestion"] == ""
 
     def test_stale_request_emits_nothing(self) -> None:
         """A request whose seq is no longer latest emits no events."""
-        server = VSCodeServer()
+        server = AgentServer()
         server._complete_seq_latest["c"] = 5
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -223,7 +223,7 @@ class TestFastCompletePickerBackend:
 
     def test_tasks_appear_before_tricks(self) -> None:
         """Task history wins the auto-selected first slot."""
-        server = VSCodeServer()
+        server = AgentServer()
         th._add_task("Reproduce-history-only-task entry")
         _, comps = self._run(server, "Reproduce")
         items = comps[0]["completions"]
@@ -232,7 +232,7 @@ class TestFastCompletePickerBackend:
     def test_completions_limit_respected(self) -> None:
         """No more than _COMPLETIONS_LIMIT items are emitted."""
         from kiss.server.autocomplete import _COMPLETIONS_LIMIT
-        server = VSCodeServer()
+        server = AgentServer()
         for i in range(_COMPLETIONS_LIMIT + 10):
             th._add_task(f"fix the parser bug variant {i:03d}")
         _, comps = self._run(server, "fix the parser bug")
@@ -240,7 +240,7 @@ class TestFastCompletePickerBackend:
 
     def test_non_stale_request_broadcasts_events(self) -> None:
         """The negative leg of the staleness guard still broadcasts."""
-        server = VSCodeServer()
+        server = AgentServer()
         server._complete_seq_latest["c"] = 7
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -250,7 +250,7 @@ class TestFastCompletePickerBackend:
 
     def test_trailing_whitespace_skips_identifier_branch(self) -> None:
         """A query ending in whitespace yields no ``identifier`` items."""
-        server = VSCodeServer()
+        server = AgentServer()
         content = "zebraq_marker_alpha = 1\n"
         _, comps = self._run(
             server, "fix the ", snapshot_content=content,
@@ -260,7 +260,7 @@ class TestFastCompletePickerBackend:
 
     def test_identifier_branch_skipped_for_short_partial(self) -> None:
         """A single-char trailing partial skips the identifier branch."""
-        server = VSCodeServer()
+        server = AgentServer()
         content = "alpha_one = 1\nalpha_two = 2\n"
         _, comps = self._run(server, "x = a", snapshot_content=content)
         types = {c["type"] for c in comps[0]["completions"]}
@@ -268,7 +268,7 @@ class TestFastCompletePickerBackend:
 
     def test_identifier_ordering_longest_first(self) -> None:
         """The longest matching identifier is offered first."""
-        server = VSCodeServer()
+        server = AgentServer()
         content = (
             "alpha_short = 1\n"
             "alpha_much_longer_identifier = 2\n"
@@ -288,7 +288,7 @@ class TestFastCompletePickerBackend:
         EMPTY snapshot (``""``, an open empty document) must NOT fall
         back to the stale on-disk content (fixer-5 F5-01).
         """
-        server = VSCodeServer()
+        server = AgentServer()
         p = Path(self._tmpdir) / "src.py"
         p.write_text(
             "betaq_marker_one = 1\nbetaq_marker_two = 2\n",
@@ -307,7 +307,7 @@ class TestFastCompletePickerBackend:
 
     def test_active_file_oserror_yields_no_identifiers(self) -> None:
         """An unreadable snapshot_file path must not raise."""
-        server = VSCodeServer()
+        server = AgentServer()
         _, comps = self._run(
             server,
             "x = no_such_token_",
@@ -322,13 +322,13 @@ class TestFastCompletePickerBackend:
 
     def test_active_file_no_content_no_chat_returns_empty(self) -> None:
         """No content + no chat text → empty identifier list."""
-        server = VSCodeServer()
+        server = AgentServer()
         ms = server._active_file_identifier_matches("x = token_")
         assert ms == []
 
     def test_active_file_no_regex_match_returns_empty(self) -> None:
         """No trailing word token → empty identifier list."""
-        server = VSCodeServer()
+        server = AgentServer()
         ms = server._active_file_identifier_matches(
             "!!! ", snapshot_content="alpha = 1\n",
         )
@@ -336,6 +336,6 @@ class TestFastCompletePickerBackend:
 
     def test_self_match_text_equals_query_filtered(self) -> None:
         """A candidate equal to the query is filtered out by ``_add``."""
-        server = VSCodeServer()
+        server = AgentServer()
         result = server._complete_many("nothing_matches_here_xx_zz_aa")
         assert all(c["text"] != "nothing_matches_here_xx_zz_aa" for c in result)

@@ -4,11 +4,11 @@
 # add your name here
 """Integration regression: model picker refresh re-reads persisted last_model.
 
-A long-running ``kiss-web`` daemon can outlive a VS Code window.  If the
+A long-running ``kiss-web`` daemon can outlive a browser window.  If the
 persisted ``last_model`` preference in ``~/.kiss/config.json`` changes while
-that daemon is alive, a fresh VS Code activation asks the daemon for the model
+that daemon is alive, a freshly loaded chat page asks the daemon for the model
 list via ``getModels``.  The reply must select the persisted last model rather
-than the daemon's stale in-memory default, otherwise reopening VS Code shows an
+than the daemon's stale in-memory default, otherwise reloading the page shows an
 older default such as ``gpt-5.5`` even though the user previously selected a
 Claude model.
 """
@@ -27,8 +27,8 @@ import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
 from kiss.core import config as config_module
-from kiss.core.vscode_config import load_config, save_config
-from kiss.server.server import VSCodeServer
+from kiss.core.user_config import load_config, save_config
+from kiss.server.server import AgentServer
 
 _API_KEY_NAMES = (
     "ANTHROPIC_API_KEY",
@@ -45,7 +45,7 @@ _API_KEY_NAMES = (
 def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Redirect config/database state and restore API-key environment."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.core.vscode_config as vc
+    import kiss.core.user_config as vc
 
     saved_env = {name: os.environ.get(name) for name in _API_KEY_NAMES}
     saved_default_config = config_module.DEFAULT_CONFIG
@@ -83,7 +83,7 @@ class TestModelPickerLastModelPersistence:
         config_module.DEFAULT_CONFIG = config_module.Config()
 
         save_config({"last_model": "gpt-5.5"})
-        server = VSCodeServer()
+        server = AgentServer()
         assert server._default_model == "gpt-5.5"
 
         save_config({"last_model": "claude-opus-4-8"})
@@ -131,7 +131,7 @@ class TestModelPickerLastModelPersistence:
                 "last_model": "stale-unavailable-model",
             })
 
-            server = VSCodeServer()
+            server = AgentServer()
             assert server._default_model == "stale-unavailable-model"
 
             events: list[dict] = []
@@ -184,7 +184,7 @@ class TestModelPickerLastModelPersistence:
         config_module.DEFAULT_CONFIG = config_module.Config()
 
         save_config({"last_model": "gpt-5.5"})
-        server = VSCodeServer()
+        server = AgentServer()
         assert server._default_model == "gpt-5.5"
 
         events: list[dict] = []
@@ -281,7 +281,7 @@ class TestModelPickerLastModelPersistence:
         config_module.DEFAULT_CONFIG = config_module.Config()
 
         save_config({"last_model": "gpt-5.5"})
-        server = VSCodeServer()
+        server = AgentServer()
 
         save_started = threading.Event()
         proceed_save = threading.Event()

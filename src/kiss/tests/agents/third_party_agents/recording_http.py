@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlsplit
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 
 
-def raw_post_status(port: int, headers: str, path: str = "/") -> int:
+def raw_post_status(port: int, headers: str, path: str = "/", body: bytes = b"") -> int:
     """Send a raw HTTP POST with custom headers and return the status code.
 
     Bypasses ``requests`` so malformed headers (a negative or non-numeric
@@ -45,6 +45,8 @@ def raw_post_status(port: int, headers: str, path: str = "/") -> int:
         port: Loopback port of the server under test.
         headers: Extra header lines, each terminated by ``\\r\\n``.
         path: Request path.
+        body: Raw bytes sent after the headers (no ``Content-Length`` is
+            added for them: the test writes whatever header it wants).
 
     Returns:
         The HTTP status code of the response's status line.
@@ -53,7 +55,7 @@ def raw_post_status(port: int, headers: str, path: str = "/") -> int:
         request = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n"
         # latin-1, as ``http.server`` decodes header lines: a non-ASCII
         # header value reaches the server as the one character written.
-        sock.sendall(request.encode("latin-1"))
+        sock.sendall(request.encode("latin-1") + body)
         sock.settimeout(10)
         data = b""
         while b"\r\n" not in data:
@@ -181,7 +183,41 @@ class JsonWebhookServer(RecordingServer):
         self.response_body: dict[str, Any] = {"errcode": 0, "errmsg": "ok"}
 
 
-class JsonWebhookHandler(BaseHTTPRequestHandler):
+class RecordingHandler(BaseHTTPRequestHandler):
+    """Base for fake-service handlers: silent logging plus reply/body helpers.
+
+    A test module's handler subclasses this and implements ``do_GET`` /
+    ``do_POST`` with :meth:`_reply`, :meth:`_json` and :meth:`_read_body`
+    instead of carrying its own copies of them.
+    """
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        """Silence request logging."""
+
+    def _reply(self, status: int, body: str, content_type: str = "application/json") -> None:
+        """Send *body* (UTF-8) with *status* and a ``Content-Length``."""
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _json(self, status: int, body: Any) -> None:
+        """Send *body* as a JSON response."""
+        self._reply(status, json.dumps(body))
+
+    def _read_body(self) -> Any:
+        """Return the request's JSON body: ``{}`` when empty, ``None`` when malformed."""
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            return None
+
+
+class JsonWebhookHandler(RecordingHandler):
     """Handler for :class:`JsonWebhookServer`."""
 
     def do_POST(self) -> None:  # noqa: N802
@@ -196,15 +232,7 @@ class JsonWebhookHandler(BaseHTTPRequestHandler):
                 "json": json.loads(self.rfile.read(length).decode("utf-8")),
             }
         )
-        payload = json.dumps(server.response_body).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+        self._json(200, server.response_body)
 
 
 def serve_json_webhook() -> Iterator[JsonWebhookServer]:

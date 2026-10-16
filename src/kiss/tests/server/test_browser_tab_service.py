@@ -4,14 +4,13 @@
 # add your name here
 """E2E: the browser-tab service and default-browser resolution.
 
-The multi-surface behaviour lives in ``test_browser_tab_all_surfaces``;
-this module exercises the daemon-side pieces that test does not reach:
-address-bar normalisation, resolving the machine's default browser
-from real ``.desktop`` files and ``$BROWSER``/``$KISS_BROWSER``, the
-``browser*`` daemon commands driving a real browser through
-:class:`VSCodeServer`, the error paths (unreachable URL, a "browser"
-that exits at once), wheel/paste input, hiding a viewer, a viewer
-disconnecting, and shutdown with pages still open.
+This module exercises the daemon-side pieces: address-bar normalisation,
+resolving the machine's default browser from real ``.desktop`` files and
+``$BROWSER``/``$KISS_BROWSER``, the ``browser*`` daemon commands driving
+a real browser through :class:`AgentServer`, the error paths
+(unreachable URL, a "browser" that exits at once), wheel/paste input,
+hiding a viewer, a viewer disconnecting, and shutdown with pages still
+open.
 
 The macOS (``NSWorkspace``) and Windows (registry) probes cannot run on
 a Linux CI host; they are exercised only through their shared helpers.
@@ -43,7 +42,7 @@ from kiss.server.browser_tab import (
     home_url,
     normalize_url,
 )
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
@@ -304,7 +303,7 @@ def page_server() -> Any:
 @pytest.fixture
 def daemon(tmp_path: Path) -> Any:
     printer = ConnPrinter()
-    server = VSCodeServer(printer)
+    server = AgentServer(printer)
     server.browser_tabs = BrowserTabService(printer, tmp_path / "profile")
     yield server, printer
     server.browser_tabs.shutdown()
@@ -501,7 +500,7 @@ def test_headless_environment_runs_a_headed_browser_on_xvfb(
     assert web_stealth.virtual_display() is not None, "the browser runs on the shared Xvfb"
 
 
-def _click_other_options(server: VSCodeServer, tab_id: str) -> None:
+def _click_other_options(server: AgentServer, tab_id: str) -> None:
     """Click the (100..300, 100..150) button through the streamed tab's input path."""
     for action in ("mousePressed", "mouseReleased"):
         server._handle_command(

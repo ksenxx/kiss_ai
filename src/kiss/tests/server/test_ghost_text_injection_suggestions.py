@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _LONG_TRICK = (
     "Use claude-opus-4-7 model for all tasks including coding, "
@@ -84,7 +84,7 @@ class TestGhostTextInjectionSuggestions:
             os.environ["KISS_INJECTIONS_PATH"] = self._saved_kiss_injections
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
 
-    def _ghost_for(self, server: VSCodeServer, query: str) -> str:
+    def _ghost_for(self, server: AgentServer, query: str) -> str:
         """Run ``_complete(query)`` and return the broadcast ghost suggestion."""
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -99,7 +99,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_suggested_at_start_of_input(self) -> None:
         """Typing the start of a trick at position 0 produces the rest."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "Reproduce")
         assert suggestion, (
             "Expected a ghost suggestion when typing the start of an "
@@ -116,7 +116,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_suggested_after_period_space(self) -> None:
         """A trick is offered after a sentence-ending period + space."""
-        server = VSCodeServer()
+        server = AgentServer()
         query = "Some preamble text. Reproduce"
         suggestion = self._ghost_for(server, query)
         assert suggestion, (
@@ -131,7 +131,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_suggested_after_question_mark_space(self) -> None:
         """A trick is offered after a question mark + space."""
-        server = VSCodeServer()
+        server = AgentServer()
         query = "What is it? Use internet"
         suggestion = self._ghost_for(server, query)
         assert suggestion, (
@@ -145,7 +145,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_no_trick_suggested_mid_sentence(self) -> None:
         """No trick is offered when the partial sits mid-sentence."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "please Reproduce")
         assert suggestion == "", (
             f"Expected NO trick suggestion when the matching partial "
@@ -154,7 +154,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_no_trick_suggested_when_no_partial_prefix_match(self) -> None:
         """No suggestion when the current sentence doesn't prefix any trick."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "Hello world this")
         assert suggestion == "", (
             f"Expected no suggestion for unrelated text, got {suggestion!r}"
@@ -162,7 +162,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_multi_word_partial_at_sentence_start(self) -> None:
         """A multi-word partial at a sentence start still resolves."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "Reproduce the issue by")
         assert suggestion, "Expected suggestion for multi-word partial"
         completed = "Reproduce the issue by" + suggestion
@@ -172,7 +172,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_suggested_at_start_after_leading_whitespace(self) -> None:
         """Leading whitespace before the partial doesn't block matching."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "  Reproduce")
         assert suggestion, (
             "Leading whitespace in the input shouldn't suppress the "
@@ -181,7 +181,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_suggested_after_newline(self) -> None:
         """A newline counts as a sentence boundary."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "Done.\nReproduce")
         assert suggestion, (
             "Expected suggestion after '.\\n' — newline is whitespace."
@@ -189,7 +189,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_no_trick_when_partial_too_short(self) -> None:
         """A single-character partial is below the 2-char ghost threshold."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "R")
         assert suggestion == "", (
             "A single character partial should not trigger a trick "
@@ -198,7 +198,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_case_sensitive_match(self) -> None:
         """Matching is case-sensitive (mirrors _prefix_match_task)."""
-        server = VSCodeServer()
+        server = AgentServer()
         suggestion = self._ghost_for(server, "reproduce")
         assert suggestion == "", (
             f"Expected case-sensitive matching to reject lowercase "
@@ -207,7 +207,7 @@ class TestGhostTextInjectionSuggestions:
 
     def test_trick_not_offered_when_already_complete(self) -> None:
         """When the user has typed a full trick, no further suggestion."""
-        server = VSCodeServer()
+        server = AgentServer()
         full = (
             "Reproduce the issue by writing end-to-end test. "
             "Then fix the issue."

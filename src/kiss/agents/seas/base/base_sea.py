@@ -55,7 +55,7 @@ A class may define further helper methods; only the ones below are
 part of the contract.
 
 :class:`BaseSea` is itself the root layer of EVERY run made from the
-chat (webapp or VS Code extension): a plain prompt runs the bare
+chat page: a plain prompt runs the bare
 ``BaseSea``, a ``/xxx`` command or a model-picker tab runs its SEA on
 top of it, and the sub-agents of ``run_agent`` / ``run_parallel`` go
 through it the same way.  So editing the methods of this file

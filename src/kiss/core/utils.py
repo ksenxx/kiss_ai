@@ -138,7 +138,7 @@ def atomic_write_text(
     ``os.replace``-d into position, which is atomic on every supported
     platform.  A plain ``open(path, "w")`` truncates immediately and
     then fills the file incrementally, so a concurrent reader — the
-    trajectory visualizer, another daemon, the VS Code extension — can
+    trajectory visualizer, another daemon — can
     observe an empty or half-written document.
 
     Permission semantics, in priority order:
@@ -268,6 +268,17 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
     guarantee the atomic write exists to give.  On POSIX ``open`` never
     fails that way and the first attempt is the only one.
 
+    Windows's replace (``MoveFileEx``) is not atomic for a concurrent
+    opener either: it unlinks the old name before the staged file takes
+    it, and under load that gap is wide enough for ``open`` to fail with
+    ``FileNotFoundError`` (seen on a loaded 80-vCPU Windows Server 2022
+    VM, where a hot reader of a file four threads kept rewriting got
+    "no such file" on most of its reads).  A missing *path* is retried
+    only while a staged ``.<name>-*`` sibling (the file
+    :func:`atomic_write_text` is about to publish) exists or *path* has
+    reappeared since the failed open, so a file that is genuinely absent
+    still raises at once.
+
     Args:
         path: The file to read.
 
@@ -278,6 +289,8 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
         PermissionError: If *path* is a directory, or stays unopenable
             for :data:`SHARING_RETRY_SECONDS` (a real permission
             problem, not a replace in progress).
+        FileNotFoundError: If *path* does not exist and no write is in
+            flight (or one stays in flight for the whole budget).
         OSError: Any other read failure, unchanged.
     """
     deadline = time.monotonic() + SHARING_RETRY_SECONDS
@@ -287,7 +300,34 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
         except PermissionError:
             if not _sharing_violation_may_clear(path, deadline):
                 raise
-            time.sleep(_SHARING_RETRY_INTERVAL)
+        except FileNotFoundError:
+            if not _sharing_violation_may_clear(path, deadline) or not (
+                path.exists() or _publish_in_flight(path)
+            ):
+                raise
+        time.sleep(_SHARING_RETRY_INTERVAL)
+
+
+def _publish_in_flight(path: Path) -> bool:
+    """Whether a staged ``.<name>-*`` file sits next to *path*.
+
+    :func:`atomic_write_text` stages under that name and publishes with
+    ``os.replace``; the sibling exists exactly while a write is between
+    the two.  A literal prefix comparison, not a glob: ``[`` and ``*``
+    are legal in file names.
+
+    Args:
+        path: The file a write may be about to publish.
+
+    Returns:
+        ``True`` when such a sibling exists (``False`` when the directory
+        itself cannot be listed).
+    """
+    prefix = f".{path.name}-"
+    try:
+        return any(name.startswith(prefix) for name in os.listdir(path.parent))
+    except OSError:
+        return False
 
 
 def read_text_waiting_for_writer(path: Path, errors: str = "strict") -> str:
@@ -402,12 +442,10 @@ def is_root_dir(path: str) -> bool:
     ``C:\\`` / ``C:/`` (including a bare drive ``C:``), and bare
     backslashes — are never legitimate workspace folders: they reach
     the daemon only when a GUI-launched process inherited the root as
-    its cwd (a Dock/Finder-launched VS Code window with no folder
-    open).  Rooting a task or the ``@``-mention file scan there would
-    span the whole disk, so callers treat a root exactly like "no work
-    dir" and fall back to a properly configured folder.  Mirrors the
-    VS Code extension's ``path.parse(cwd).root === cwd`` guard in
-    ``SorcarSidebarView._getWorkDir``.
+    its cwd (a Dock/Finder-launched process with no folder open).
+    Rooting a task or the ``@``-mention file scan there would span the
+    whole disk, so callers treat a root exactly like "no work dir" and
+    fall back to a properly configured folder.
 
     Root-equivalent spellings (``/./``, ``/..``, ``C:\\.\\``) are
     normalized before the check so they cannot slip past a literal
@@ -426,8 +464,8 @@ def is_root_dir(path: str) -> bool:
     if p in ("/", "//"):
         return True
     # A bare or slash-terminated drive ('C:', 'C:\', 'C:/') from a
-    # Windows-side client.  ASCII letters only: Node's path.win32 (the
-    # extension-side mirror of this guard) recognizes no other drives.
+    # Windows-side client.  ASCII letters only, as Windows itself
+    # recognizes no other drive letters.
     return len(p) == 2 and p[1] == ":" and p[0] in string.ascii_letters
 
 

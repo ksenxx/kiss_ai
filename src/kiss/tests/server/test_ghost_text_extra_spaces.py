@@ -25,7 +25,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.helpers import clip_autocomplete_suggestion
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestGhostTextNoExtraSpaces:
@@ -66,7 +66,7 @@ class TestGhostTextNoExtraSpaces:
 
         The broadcast ghost suggestion must not start with whitespace.
         """
-        server = VSCodeServer()
+        server = AgentServer()
         th._add_task("fix  the bug now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -158,7 +158,7 @@ class TestGhostTextNoExtraSpaces:
         The broadcast ghost suggestion must not start with two or more
         whitespace characters — exactly one separator space is allowed.
         """
-        server = VSCodeServer()
+        server = AgentServer()
         th._add_task("parse  arguments now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]

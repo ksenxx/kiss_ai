@@ -1,0 +1,626 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end tests for the cross-process update lock in the ROOT ``install.sh``.
+
+``scripts/install.sh`` (the curl bootstrap) holds the update lock for its
+lifetime and exports ``KISS_UPDATE_LOCK_HELD=1`` before handing over to the
+root ``install.sh``.  But the kiss-web daemon's Update button runs the ROOT
+script directly (``Popen(["bash", install.sh, "--non-interactive"])``),
+outside any lock, and so does a user in a terminal.  So the root script
+takes the very same lock itself, skipping it when ``KISS_UPDATE_LOCK_HELD=1``
+says an ancestor already holds it.
+
+The lock is a kernel advisory lock (``flock(2)`` through perl, present on
+macOS and Linux) on ``$HOME/.kiss/.update.lock`` held by bash's fd 9 for
+the whole process lifetime; the kernel releases it on any exit, so there is
+no stale state.  Because the root script re-execs itself into a new session
+through perl (the ``kiss-new-session-reexec`` block), the lock is taken by
+the re-exec'd child that does the work, and the pid recorded is that
+child's.  Every long-lived process the script launches (the kiss-web daemon,
+the browser) gets fd 9 closed so it cannot keep the lock alive.
+
+Every test runs the REAL root ``install.sh --non-interactive`` -- exactly
+the daemon's invocation -- from a throwaway checkout (the script plus a
+two-file ``src/kiss``) against a throwaway ``$HOME``, with a whitelist
+``PATH`` that contains only bash, perl, the coreutils the script needs and
+these stubs:
+
+* ``git``: the first git call of the install body (``git rev-parse`` in
+  ``list_app_files``) records that it started and blocks until the test
+  creates a release file; that is how the first run is held while
+  contenders are launched.  It then fails, so the file list falls back to
+  ``find``.
+* ``curl``: blocks on a second release file, then fails.  With no ``uv``
+  on the PATH the script reaches ``ensure_uv``, whose download fails, and
+  exits 1 at "[2/5] Building the Python environment" -- before any step
+  that could reach the network or a package manager.
+
+The launched-children test instead runs the whole script to completion
+with stub ``uv``/``cloudflared``/``xdg-open`` binaries (``uname`` reports
+Linux so no macOS ``open -a`` path is taken; no ``systemctl`` on the PATH
+takes the detached-process branch of the daemon restart) and a ready-made
+``remote-url.json`` so the closing webapp step does not wait: the kiss-web
+daemon and the browser opened on the webapp each leave a background
+``sleep`` behind, standing in for the processes a real install leaves
+running.
+
+So no test can install anything, modify this repository or touch the real
+``~/.kiss``.
+"""
+
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+import pytest
+
+# The whole module drives the real bash install.sh and holds its flock.
+fcntl = pytest.importorskip("fcntl", reason="POSIX-only: bash install.sh and flock")
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+SCRIPT = REPO_ROOT / "install.sh"
+ACTIVE_TASKS_SCRIPT = REPO_ROOT / "scripts" / "check-kiss-web-active-tasks.py"
+
+# Everything the root install.sh (and the stubs below) executes from PATH
+# before it reaches the uv stage.  bash and perl are needed by the
+# new-session re-exec (``/usr/bin/env perl`` and ``exec {"bash"}``), sh
+# by the ``curl … | sh`` uv download.
+WHITELISTED_TOOLS = (
+    "bash",
+    "sh",
+    "perl",
+    "uname",
+    "dirname",
+    "grep",
+    "sed",
+    "head",
+    "mkdir",
+    "date",
+    "tee",
+    "cat",
+    "rm",
+    "sleep",
+    "tr",
+    "tar",
+    "find",
+    "wc",
+)
+
+STUB_GIT = """#!/bin/bash
+# Stand-in for git: the first call (``git rev-parse`` while listing the
+# app files) is the hold point; every call fails so ``find`` lists them.
+echo "$$" >> "$KISS_TEST_MARK_DIR/started"
+while [ ! -e "$KISS_TEST_RELEASE" ]; do sleep 0.05; done
+exit 1
+"""
+
+STUB_CURL = """#!/bin/bash
+# Stand-in for curl (reached by ensure_uv): hold, then fail offline.
+echo "$$" >> "$KISS_TEST_MARK_DIR/curl-started"
+while [ ! -e "$KISS_TEST_RELEASE2" ]; do sleep 0.05; done
+exit 22
+"""
+
+# On Darwin the real uname sends install.sh through ensure_homebrew before
+# the git stage these tests hold at.  A brew on PATH short-circuits both
+# the top-level `brew shellenv` eval (which would prepend real host
+# directories to the stub PATH) and ensure_homebrew's curl-driven
+# bootstrap (which would corrupt the curl-started mark).
+STUB_BREW = """#!/bin/bash
+echo "Homebrew 4.0.0 (test stub)"
+exit 0
+"""
+
+# Full-run stubs.  Each long-lived leftover records its pid in the
+# ``daemon`` mark so the test can prove it is alive and clean it up.
+#
+# ``uv sync`` builds a fake venv: ``python`` answers the one import the
+# script asks it (the runtime's home) and otherwise runs the real
+# interpreter (byte-compiling, the fingerprint, the idle check);
+# ``kiss-web`` is the daemon stub.  ``uv run`` (Playwright) succeeds.
+STUB_UV = """#!/bin/bash
+case "$1" in
+    --version) echo "uv 0.9.0 (test stub)" ;;
+    sync)
+        app="$3"
+        mkdir -p "$app/.venv/bin"
+        cat > "$app/.venv/bin/python" <<EOF
+#!/bin/bash
+case "\\$2" in
+    "from kiss.core.config import kiss_home; print(kiss_home())") echo "\\$HOME/.kiss" ;;
+    *) exec "$KISS_TEST_PYTHON" "\\$@" ;;
+esac
+EOF
+        cat > "$app/.venv/bin/kiss-web" <<'EOF'
+#!/bin/bash
+echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
+exec sleep 60
+EOF
+        chmod 755 "$app/.venv/bin/python" "$app/.venv/bin/kiss-web"
+        ;;
+esac
+exit 0
+"""
+
+STUB_UNAME = """#!/bin/bash
+case "$1" in
+    -m) echo "x86_64" ;;
+    *) echo "Linux" ;;
+esac
+"""
+
+STUB_CLOUDFLARED = """#!/bin/bash
+exit 0
+"""
+
+STUB_XDG_OPEN = """#!/bin/bash
+echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
+exec sleep 60
+"""
+
+REFUSED = "another KISS update is already running (pid "
+UV_EXIT = "ERROR: uv is not available and could not be installed"
+
+
+def _parent_pid(pid: int) -> int:
+    out = subprocess.run(
+        ["ps", "-o", "ppid=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return int(out.stdout.strip() or "-1")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _lock_is_free(lock_file: Path) -> bool:
+    """Probe the installer lock with a real non-blocking flock(2) attempt."""
+    fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def _seed_project(project: Path) -> None:
+    """Lay out a minimal checkout at *project*: install.sh and a tiny src/kiss."""
+    (project / "src" / "kiss" / "webapp" / "media").mkdir(parents=True)
+    (project / "scripts").mkdir()
+    shutil.copy(SCRIPT, project / "install.sh")
+    shutil.copy(ACTIVE_TASKS_SCRIPT, project / "scripts" / ACTIVE_TASKS_SCRIPT.name)
+    (project / "pyproject.toml").write_text('[project]\nname = "kiss-test"\nversion = "0"\n')
+    (project / "src" / "kiss" / "__init__.py").write_text("")
+    (project / "src" / "kiss" / "webapp" / "media" / "index.html").write_text("<html></html>\n")
+
+
+class RootInstallLockTest(unittest.TestCase):
+    """The root installer takes the same exclusive, crash-safe lock as the bootstrap."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-root-install-lock-"))
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.marks = self.tmp / "marks"
+        self.marks.mkdir()
+        self.release = self.tmp / "release"
+        self.release2 = self.tmp / "release2"
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        for name in WHITELISTED_TOOLS:
+            real = shutil.which(name)
+            self.assertIsNotNone(real, f"{name} is required by this test")
+            assert real is not None
+            os.symlink(real, tools / name)
+        self.stubs = self.tmp / "stubs"
+        self.stubs.mkdir()
+        for name, body in (
+            ("git", STUB_GIT),
+            ("curl", STUB_CURL),
+            ("brew", STUB_BREW),
+        ):
+            self._write_stub(name, body)
+        self.project = self.tmp / "project"
+        _seed_project(self.project)
+        self.script = self.project / "install.sh"
+        self.env = {
+            "PATH": f"{self.stubs}:{tools}",
+            "HOME": str(self.home),
+            "KISS_TEST_MARK_DIR": str(self.marks),
+            "KISS_TEST_RELEASE": str(self.release),
+            "KISS_TEST_RELEASE2": str(self.release2),
+            "LANG": "C",
+        }
+        self.lock_file = self.home / ".kiss" / ".update.lock"
+        self._procs: list[subprocess.Popen[str]] = []
+
+    def tearDown(self) -> None:
+        self._release_all()
+        for proc in self._procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        daemon = self.marks / "daemon"
+        if daemon.exists():
+            for pid in daemon.read_text().split():
+                if _alive(int(pid)):
+                    os.kill(int(pid), signal.SIGKILL)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_stub(self, name: str, body: str) -> None:
+        (self.stubs / name).write_text(body)
+        (self.stubs / name).chmod(0o755)
+
+    def _start(
+        self,
+        extra_env: dict[str, str] | None = None,
+        gate: Path | None = None,
+    ) -> subprocess.Popen[str]:
+        # With a gate, the contender reports itself ready and then blocks in
+        # open(2) on the FIFO until the test opens it, which releases every
+        # waiting reader at once (a reader arriving later passes straight
+        # through: the test keeps the FIFO open).
+        argv = ["bash", str(self.script), "--non-interactive"]
+        if gate is not None:
+            argv = [
+                "bash", "-c",
+                f'echo $$ >> "{self.marks}/ready"; exec 8<"{gate}"; exec 8<&-; '
+                f'exec bash "{self.script}" --non-interactive',
+            ]
+        proc = subprocess.Popen(
+            argv,
+            cwd=self.tmp,
+            env={**self.env, **(extra_env or {})},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self._procs.append(proc)
+        return proc
+
+    def _run(self, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(self.script), "--non-interactive"],
+            cwd=self.tmp,
+            env={**self.env, **(extra_env or {})},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def _wait_for(self, pred, what: str, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not pred():
+            self.assertLess(time.monotonic(), deadline, f"timed out waiting for {what}")
+            time.sleep(0.02)
+
+    def _count(self, mark: str) -> int:
+        path = self.marks / mark
+        return len(path.read_text().split()) if path.exists() else 0
+
+    def _lock_pid(self) -> int:
+        return int(self.lock_file.read_text().strip())
+
+    def _release_all(self) -> None:
+        self.release.write_text("")
+        self.release2.write_text("")
+
+    def test_second_concurrent_run_is_refused_and_lock_is_released(self) -> None:
+        first = self._start()
+        self._wait_for(lambda: self._count("started") == 1, "first installer")
+        self.assertFalse(_lock_is_free(self.lock_file), "lock not held while installing")
+        holder = self._lock_pid()
+        self.assertTrue(_alive(holder), "the lock names a dead pid")
+        # The lock is owned by the re-exec'd (setsid) bash that does the
+        # work: its parent is the perl supervisor we spawned.
+        self.assertEqual(_parent_pid(holder), first.pid)
+
+        second = self._run()
+        self.assertEqual(second.returncode, 1, second.stdout + second.stderr)
+        self.assertIn(f"{REFUSED}{holder}); exiting.", second.stdout + second.stderr)
+        self.assertEqual(self._count("started"), 1, "second run reached the install body")
+        self.assertFalse(_lock_is_free(self.lock_file), "the loser released the winner's lock")
+        self.assertEqual(self._lock_pid(), holder)
+
+        self._release_all()
+        out, _ = first.communicate(timeout=30)
+        # The whitelist PATH has no uv and curl fails: the script stops at
+        # the venv stage, i.e. a failure exit under ``set -e`` must release
+        # the lock.
+        self.assertEqual(first.returncode, 1, out)
+        self.assertIn(UV_EXIT, out)
+        self.assertEqual(self._count("curl-started"), 1, out)
+        self.assertTrue(_lock_is_free(self.lock_file), "lock survived a failure exit")
+
+        # With the lock free, the next run proceeds.
+        third = self._run()
+        self.assertNotIn(REFUSED, third.stdout + third.stderr)
+        self.assertIn(UV_EXIT, third.stdout)
+        self.assertEqual(self._count("started"), 2)
+        self.assertTrue(_lock_is_free(self.lock_file))
+
+    def _dead_pid(self) -> int:
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def test_refusal_names_the_live_holder_not_the_previous_runs_pid(self) -> None:
+        # A finished run leaves its pid in the lock file: the kernel released
+        # its flock on exit but nothing rewrites the file.  A contender that
+        # loses the lock before the new holder has written its own pid must
+        # keep polling instead of reporting that dead pid.  Here the holder is
+        # this test process, which writes its pid 0.2 s after the contender
+        # starts -- long after a bash re-exec reaches acquire_update_lock.
+        self.lock_file.parent.mkdir(parents=True)
+        self.lock_file.write_text(f"{self._dead_pid()}\n")
+        fd = os.open(self.lock_file, os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            loser = self._start()
+            time.sleep(0.2)
+            self.lock_file.write_text(f"{os.getpid()}\n")
+            lost, _ = loser.communicate(timeout=30)
+        finally:
+            os.close(fd)
+        self.assertEqual(loser.returncode, 1, lost)
+        self.assertIn(f"{REFUSED}{os.getpid()}); exiting.", lost)
+        self.assertEqual(self._count("started"), 0)
+
+    def test_eight_simultaneous_contenders_admit_exactly_one_installer(self) -> None:
+        # A previous run's pid in the lock file (every trial after the first
+        # leaves one behind too) must never be quoted by a refused contender.
+        self.lock_file.parent.mkdir(parents=True)
+        self.lock_file.write_text(f"{self._dead_pid()}\n")
+        for trial in range(5):
+            gate = self.tmp / f"gate{trial}"
+            os.mkfifo(gate)
+            contenders = [self._start(gate=gate) for _ in range(8)]
+            self._wait_for(
+                lambda: self._count("ready") == 8 * (trial + 1),
+                f"trial {trial}: eight contenders at the gate",
+            )
+            # Opening the FIFO (O_RDWR never blocks) releases every reader.
+            gate_fd = os.open(gate, os.O_RDWR)
+            self._wait_for(
+                lambda: self._count("started") >= trial + 1,
+                f"trial {trial}: the winner",
+            )
+            self._wait_for(
+                lambda: sum(p.poll() is not None for p in contenders) == 7,
+                f"trial {trial}: seven losers",
+            )
+            self.assertEqual(
+                self._count("started"), trial + 1,
+                f"trial {trial}: more than one install body entered",
+            )
+            winners = [p for p in contenders if p.poll() is None]
+            self.assertEqual(len(winners), 1)
+            winner = winners[0]
+            holder = self._lock_pid()
+            self.assertEqual(_parent_pid(holder), winner.pid)
+            self._release_all()
+            out, _ = winner.communicate(timeout=30)
+            self.assertIn(UV_EXIT, out)
+            for loser in contenders:
+                if loser is winner:
+                    continue
+                lost, _ = loser.communicate(timeout=30)
+                self.assertEqual(loser.returncode, 1, lost)
+                self.assertIn(f"{REFUSED}{holder}); exiting.", lost)
+            self.assertEqual(self._count("started"), trial + 1)
+            self.assertTrue(_lock_is_free(self.lock_file))
+            os.close(gate_fd)
+            self.release.unlink()
+            self.release2.unlink()
+            self._procs.clear()
+
+    def test_same_home_different_kiss_home_contenders_exclude_each_other(self) -> None:
+        # The checkout follows $HOME, so the lock must too -- a KISS_HOME
+        # override must not pick another.
+        kiss_home = self.tmp / "custom-kiss-home"
+        first = self._start({"KISS_HOME": str(kiss_home)})
+        self._wait_for(lambda: self._count("started") == 1, "first installer")
+        self.assertFalse(_lock_is_free(self.lock_file), "lock must live under $HOME/.kiss")
+        self.assertFalse((kiss_home / ".update.lock").exists(), "lock followed KISS_HOME")
+        holder = self._lock_pid()
+        second = self._run()
+        self.assertEqual(second.returncode, 1, second.stdout + second.stderr)
+        self.assertIn(f"{REFUSED}{holder}); exiting.", second.stdout + second.stderr)
+        self.assertEqual(self._count("started"), 1, "both contenders entered the install body")
+        self._release_all()
+        first.communicate(timeout=30)
+        self.assertTrue(_lock_is_free(self.lock_file))
+
+    def test_sigterm_releases_the_lock(self) -> None:
+        first = self._start()
+        self._wait_for(lambda: self._count("started") == 1, "first installer")
+        holder = self._lock_pid()
+        # The perl supervisor (first.pid) ignores TERM by design; the signal
+        # has to reach the detached bash that owns the lock.  Its
+        # ``handle_interrupt`` trap ignores ONE signal and honours a second
+        # one within 3 s; bash runs a trap only after the foreground command
+        # (the blocked stub) returns, so each signal is followed by a release.
+        os.kill(holder, signal.SIGTERM)
+        self.release.write_text("")
+        self._wait_for(lambda: self._count("curl-started") == 1, "curl stage")
+        self.assertFalse(_lock_is_free(self.lock_file), "lock dropped on the first, ignored TERM")
+        os.kill(holder, signal.SIGTERM)
+        self.release2.write_text("")
+        out, _ = first.communicate(timeout=30)
+        self.assertEqual(first.returncode, 130, out)
+        self.assertIn("Second interrupt received", out)
+        self.assertNotIn(UV_EXIT, out)
+        self.assertTrue(_lock_is_free(self.lock_file), "lock survived SIGTERM")
+
+    def test_dirty_checkout_is_left_untouched_and_exit_releases_lock(self) -> None:
+        # install.sh must never touch the git checkout it runs from: no
+        # pull, no stash, no reset (converging with origin is owned by the
+        # callers -- the Update button's preflight and scripts/install.sh).
+        # Commit the throwaway checkout with the real git, dirty it, and
+        # hold the run at the curl stub instead of the git stub.  The dirty
+        # file must survive the whole run untouched, and the lock must be
+        # released on exit.
+        real_git = shutil.which("git")
+        assert real_git is not None
+        git_env = {
+            **self.env,
+            "PATH": f"{self.env['PATH']}:{Path(real_git).parent}",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        (self.stubs / "git").unlink()
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "seed"]):
+            subprocess.run(
+                [real_git, *args], cwd=self.project, env=git_env, check=True, capture_output=True,
+            )
+        dirty = self.project / "local-edit.txt"
+        dirty.write_text("uncommitted\n")
+        head_before = subprocess.run(
+            [real_git, "rev-parse", "HEAD"],
+            cwd=self.project, env=git_env, check=True, capture_output=True, text=True,
+        ).stdout
+
+        first = subprocess.Popen(
+            ["bash", str(self.script), "--non-interactive"],
+            cwd=self.tmp,
+            env=git_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self._procs.append(first)
+        self._wait_for(lambda: self._count("curl-started") == 1, "curl stage")
+        self.assertFalse(_lock_is_free(self.lock_file), "lock not held while installing")
+        self.assertTrue(dirty.exists(), "install.sh stashed or removed the dirty file")
+        self.release2.write_text("")
+        out, _ = first.communicate(timeout=30)
+        self.assertEqual(first.returncode, 1, out)
+        self.assertIn(UV_EXIT, out)
+        self.assertNotIn("stash", out)
+        self.assertEqual(dirty.read_text(), "uncommitted\n", "the dirty file was modified")
+        head_after = subprocess.run(
+            [real_git, "rev-parse", "HEAD"],
+            cwd=self.project, env=git_env, check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(head_before, head_after, "install.sh moved HEAD")
+        # The tracked files reached the app directory through git ls-files.
+        app = self.home / ".kiss" / "kiss"
+        self.assertTrue((app / "src" / "kiss" / "__init__.py").exists(), "app files not copied")
+        self.assertFalse((app / "local-edit.txt").exists(), "an untracked file was installed")
+        self.assertTrue(_lock_is_free(self.lock_file), "lock survived the exit")
+
+    def test_nested_run_under_a_held_lock_neither_blocks_nor_releases(self) -> None:
+        # scripts/install.sh exports KISS_UPDATE_LOCK_HELD=1 before handing
+        # over to this script; the nested run must not deadlock on its
+        # ancestor's lock, nor release it on exit.  This process plays the
+        # ancestor: it holds the real lock for the whole test.
+        self.lock_file.parent.mkdir(parents=True)
+        holder = os.open(self.lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.write(holder, f"{os.getpid()}\n".encode())
+            self._release_all()
+            result = self._run({"KISS_UPDATE_LOCK_HELD": "1"})
+            self.assertNotIn(REFUSED, result.stdout + result.stderr)
+            self.assertIn(UV_EXIT, result.stdout)
+            self.assertEqual(self._count("started"), 1)
+            self.assertFalse(
+                _lock_is_free(self.lock_file), "nested run released its ancestor's lock",
+            )
+            self.assertEqual(self._lock_pid(), os.getpid())
+            # Without the marker the same held lock refuses the run.
+            refused = self._run()
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn(f"{REFUSED}{os.getpid()}); exiting.", refused.stdout + refused.stderr)
+            self.assertEqual(self._count("started"), 1)
+        finally:
+            os.close(holder)
+        self.assertTrue(_lock_is_free(self.lock_file))
+
+    def test_launched_background_children_do_not_keep_the_lock(self) -> None:
+        # A complete run: the kiss-web daemon (started as a detached process
+        # when there is no systemd) and the browser opened on the webapp
+        # each leave a process behind.  Neither may inherit fd 9, or the
+        # lock would stay held until they exit; nor fd 3 (the terminal the
+        # installer saves for the password box), or this installer's
+        # stdout would stay open until they exit and ``communicate``
+        # below would hang.
+        python = shutil.which("python3")
+        assert python is not None
+        for name, body in (
+            ("uv", STUB_UV),
+            ("uname", STUB_UNAME),
+            ("cloudflared", STUB_CLOUDFLARED),
+            ("xdg-open", STUB_XDG_OPEN),
+        ):
+            self._write_stub(name, body)
+        tools = self.tmp / "tools"
+        for name in ("nohup", "chmod", "id", "cp", "env"):
+            real = shutil.which(name)
+            assert real is not None
+            os.symlink(real, tools / name)
+        # The daemon's URL file is already there, so the webapp step does
+        # not wait.  DISPLAY makes this a local desktop, the branch that
+        # launches the browser.  KISS_WEB_START_TIMEOUT=0: the stub daemon
+        # never opens the port, so the start wait must not run its 90 s.
+        (self.home / ".kiss").mkdir()
+        (self.home / ".kiss" / "remote-url.json").write_text(
+            '{\n  "loopback": "http://127.0.0.1:8443",\n'
+            '  "tunnel": "https://example.trycloudflare.com"\n}\n'
+        )
+        self._release_all()
+
+        first = self._start({
+            "DISPLAY": ":0",
+            "KISS_TEST_PYTHON": python,
+            "KISS_WEB_START_TIMEOUT": "0",
+        })
+        self._wait_for(lambda: self._count("started") == 1, "first installer")
+        self.assertFalse(_lock_is_free(self.lock_file), "lock not held while installing")
+        out, _ = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 0, out)
+        self.assertIn("=== App install complete ===", out)
+        self.assertIn("Starting kiss-web as a detached background process", out)
+        self.assertIn("Opening the webapp at http://127.0.0.1:8443", out)
+
+        # xdg-open is detached (nohup, in a subshell), so its pid can land
+        # in the mark just after the installer has exited: the daemon and
+        # the browser.
+        self._wait_for(lambda: self._count("daemon") == 2, "the daemon and browser stubs")
+        daemons = [int(pid) for pid in (self.marks / "daemon").read_text().split()]
+        for pid in daemons:
+            self.assertTrue(_alive(pid), f"leftover {pid} should still be running")
+        self.assertTrue(
+            _lock_is_free(self.lock_file),
+            "a still-running launched child kept the update lock",
+        )
+        # And a new update may start right away.
+        again = self._run()
+        self.assertNotIn(REFUSED, again.stdout + again.stderr)
+        self.assertEqual(self._count("started"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -702,7 +702,10 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
                     "UPDATE task_history SET task = ?, timestamp = ?, start_ts = ? WHERE id = ?",
                     (text, timestamp, start_ts, task_id),
                 )
-            con.execute("INSERT INTO chat_summaries VALUES ('shared', 'stale', 1)")
+            con.execute(
+                "INSERT INTO chat_summaries (chat_id, summary, last_launched) "
+                "VALUES ('shared', 'stale', 1)"
+            )
             con.commit()
             con.close()
 

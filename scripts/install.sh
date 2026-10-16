@@ -44,9 +44,8 @@ fi
 # END: kiss-service-cgroup-escape
 set -e
 
-# Capture the user's shell PWD *before* any ``cd`` so VS Code can later open
-# this directory as its workspace root.  Agents launched inside VS Code use
-# this as their PWD (see ``kiss.server.server``).
+# Capture the user's shell PWD *before* any ``cd``: ./install.sh at the end
+# runs from it, so the kiss-web daemon it starts serves this directory.
 USER_PWD="$PWD"
 
 # Returns 0 only if git is actually runnable. On macOS, /usr/bin/git is a stub
@@ -119,12 +118,12 @@ install_git() {
 # ---------------------------------------------------------------------------
 # Cross-process update lock.
 #
-# Two installers on one ~/.kiss/kiss_ai tree -- the Update button in two
-# VS Code windows, or a window and the kiss-web daemon's update endpoint --
-# race each other's git reset, uv sync and daemon restart.  The lock is a
-# kernel advisory lock (flock(2)) on $HOME/.kiss/.update.lock: the tree it
-# protects (~/.kiss/kiss_ai, the global extension install) follows $HOME,
-# so the lock does too, deliberately NOT $KISS_HOME.
+# Two installers on one ~/.kiss/kiss_ai tree -- the daemon's Update button
+# and a terminal run of this script, say -- race each other's git reset,
+# uv sync and daemon restart.  The lock is a kernel advisory lock
+# (flock(2)) on $HOME/.kiss/.update.lock: the tree it protects
+# (~/.kiss/kiss_ai) follows $HOME, so the lock does too, deliberately NOT
+# $KISS_HOME.
 #
 # Bash keeps the lock file open on fd 9 for its whole lifetime, including
 # the ./install.sh it hands over to at the end; perl (a hard dependency of
@@ -135,7 +134,7 @@ install_git() {
 # pid in the file is informational (for the refusal message).
 #
 # fd 9 must not leak into long-lived children (the daemon ./install.sh
-# restarts, VS Code): every launch line closes it with ``9>&-``, and the
+# restarts): every launch line closes it with ``9>&-``, and the
 # handover to ./install.sh below does too -- KISS_UPDATE_LOCK_HELD=1 tells
 # that nested run an ancestor already holds the lock, so it neither locks
 # again nor is refused.
@@ -161,8 +160,8 @@ acquire_update_lock() {
   echo "$$" > "$KISS_UPDATE_LOCK_FILE"
   # A stray INT/TERM/HUP must not drop the lock while ./install.sh is
   # still running underneath: bash runs the trap (and exits) only once
-  # its foreground child has returned.  HUP matters most: VS Code
-  # disposing the Update terminal delivers SIGHUP to this bash while the
+  # its foreground child has returned.  HUP matters most: closing the
+  # terminal this runs in delivers SIGHUP to this bash while the
   # detached installer (the root install.sh's new-session re-exec, whose
   # perl parent waits for it) keeps running — without the trap the lock
   # died with this process and a second updater could start mid-install.
@@ -192,19 +191,19 @@ if [ -d ~/.kiss/kiss_ai ]; then
     # build running on a pristine tree.
     if ! git pull --ff-only; then
       echo "git pull --ff-only failed; attempting to reset to upstream..."
-      # A stale rebuilt kiss-sorcar.vsix must never enter the stash: the
-      # release ships that path tracked, so popping the stash back over a
-      # new release's copy conflicts and leaves unmerged stages that brick
-      # later updates.  Restoring HEAD's copy is lossless — ./install.sh
-      # rebuilds it anyway.  Clear any skip-worktree pin FIRST (mirrors
-      # guard_vsix_tracking in the root install.sh): a pin left by an old
-      # installer makes the checkout fail with "pathspec did not match",
-      # hides the stale bytes from the ``git status`` stash decision, and
-      # then fails ``git reset --hard @{upstream}`` with "Entry ... not
-      # uptodate" — the exact bricked clones this fresh curl-fetched
-      # bootstrap exists to recover.
+      # Clones made while releases still shipped the VS Code extension
+      # track src/kiss/agents/vscode/kiss-sorcar.vsix, and old installers left
+      # it rebuilt (stale bytes), skip-worktree pinned, or with unmerged
+      # stages.  Any of those bricks the recovery: the pin hides the dirt
+      # from ``git status`` (nothing is stashed) and then fails ``git
+      # reset --hard`` with "Entry ... not uptodate"; a stale copy in the
+      # stash conflicts on pop.  Clear the pin and restore HEAD's bytes
+      # first; once HEAD is at a release without the vsix, drop whatever
+      # index entry (stale or unmerged) still names it instead -- the
+      # ignored file on disk is then harmless.  All no-ops on a clean clone.
       git update-index --no-skip-worktree -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
-      git checkout HEAD -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
+      git checkout HEAD -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null \
+        || git rm -q -f --cached --ignore-unmatch -- src/kiss/agents/vscode/kiss-sorcar.vsix 2>/dev/null || true
       _kiss_stashed=
       _kiss_stash_failed=
       if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
@@ -290,7 +289,13 @@ if [ ! -f install.sh ]; then
   fi
 fi
 _kiss_install_rc=0
-./install.sh 9>&- || _kiss_install_rc=$?
+# Hand over from the directory the user ran the one-liner in (not the
+# checkout): ./install.sh starts the kiss-web daemon serving its cwd.
+# ``exec 9>&-`` on its own, not ``exec bash ... 9>&-``: bash 3.2 (macOS)
+# leaks its undo copy of fd 9 into the exec'd program, which then holds
+# the lock -- and so would every daemon it leaves behind.
+_kiss_install_sh="$PWD/install.sh"
+(cd "$USER_PWD" 2>/dev/null || cd "$HOME"; exec 9>&-; exec bash "$_kiss_install_sh") || _kiss_install_rc=$?
 # Restore the local edits stashed by the diverged-pull recovery above,
 # now that the install ran on a pristine tree.  A conflicted pop keeps the
 # stash, so nothing is ever lost — the user resolves at leisure.

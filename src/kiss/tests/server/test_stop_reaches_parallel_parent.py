@@ -11,7 +11,7 @@ stop from a discarded one.  ``_stop_task`` now answers every click
 with a ``stop_ack`` event, accepted or not.
 
 Real threads, the real agent-state registry and the production
-``VSCodeServer._stop_task``.
+``AgentServer._stop_task``.
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ import threading
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestStopIsAlwaysAcknowledged:
     """No Stop click may vanish without a word."""
 
-    def _server_with_capture(self) -> tuple[VSCodeServer, list[dict[str, Any]]]:
-        server = VSCodeServer()
+    def _server_with_capture(self) -> tuple[AgentServer, list[dict[str, Any]]]:
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         return server, events

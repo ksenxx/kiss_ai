@@ -33,7 +33,7 @@ produced, and the undo goes through the new atomic
 by anyone else (the resume) carries a NEWER token, so the stale undo
 no-ops.
 
-Real :class:`VSCodeServer`, real tab registry, real threads, real
+Real :class:`AgentServer`, real tab registry, real threads, real
 ``_cmd_run`` / ``_close_tab`` / ``_replay_session``; only the agent's
 LLM run is replaced by a deterministic function (no mocks).  The
 deterministic schedules park threads at two natural seams — inside the
@@ -54,7 +54,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _Base(unittest.TestCase):
@@ -73,7 +73,7 @@ class _Base(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.use_private_tab_registry(Path(self.tmpdir) / "tabs.json")
         self.work_dir = str(Path(self.tmpdir) / "work")
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)

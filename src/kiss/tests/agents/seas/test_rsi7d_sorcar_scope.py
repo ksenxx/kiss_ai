@@ -18,22 +18,26 @@ task history are test-local).
 from __future__ import annotations
 
 import json
-import shutil
-import threading
 import time
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.seas import agents_md
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.persistence import _add_task, _flush_chat_events, _save_task_result
 from kiss.server import agent_state
-from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve, tool_call_body
+from kiss.tests.agents.seas.conftest import (
+    commit,
+    fake_checkout,
+    persist_task,
+    registered,
+    run_sea,
+)
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.server.conftest import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
@@ -63,19 +67,15 @@ _PERMIT = "You may modify KISS Sorcar itself (SYSTEM.md, AGENTS.md and the code)
 @pytest.fixture
 def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake KISS checkout (a git repository) resolved through the cwd; returns its root."""
-    pkg = tmp_path / "src" / "kiss"
-    seas = pkg / "agents" / "seas"
-    (seas / "rsi7d").mkdir(parents=True)
-    (seas / "demo").mkdir()
-    shutil.copy(_SEA_PATH, seas / "rsi7d" / "rsi7d_sea.py")
-    (seas / "demo" / "demo_sea.py").write_text(_DEMO_SEA, encoding="utf-8")
+    pkg = fake_checkout(
+        tmp_path, {"rsi7d": _SEA_PATH.read_text(encoding="utf-8"), "demo": _DEMO_SEA}
+    ).parents[1]
     (pkg / "SYSTEM.md").write_text(_SYSTEM_MD, encoding="utf-8")
     (pkg / "SYSTEM_LITE.md").write_text("{{IDENTITY}}\n\nBe brief.\n", encoding="utf-8")
     (pkg / "greet.py").write_text(_CODE, encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'fake'\n", encoding="utf-8")
     init_repo(tmp_path)
-    run_git(tmp_path, "add", "-A")
-    run_git(tmp_path, "commit", "-q", "-m", "fake checkout")
+    commit(tmp_path, "fake checkout")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -91,38 +91,19 @@ def _fresh_permission_state() -> Any:
 
 
 def _persist(prompt: str, **extra: object) -> str:
-    """Persist a finished task row with the given columns; return its id."""
-    now_ms = int(time.time() * 1000)
-    payload: dict[str, object] = {
-        "model": "model-a", "work_dir": "/work/dir", "startTs": now_ms - 60_000,
-        "endTs": now_ms, "cost": 0.5, "steps": 5, "tokens": 10_000,
-    }
-    payload.update(extra)
-    task_id, _chat = _add_task(prompt, extra=payload)
-    _flush_chat_events(task_id)
-    _save_task_result("success: true\nsummary: done", task_id=task_id)
-    return task_id
+    """Persist a successful task row with the given columns; return its id."""
+    return persist_task(prompt, (), "success: true\nsummary: done", **extra)
 
 
-class _Registered:
-    """Register a real agent as the running task of the calling thread."""
-
-    def __init__(self, task: str, ask: Any = None, work_dir: str = "") -> None:
-        self.agent = ChatSorcarAgent("rsi7d-sorcar-scope")
-        self.agent.task_description = task
-        self.agent.work_dir = work_dir
-        self.agent._ask_user_question_callback = ask
-        self.state = agent_state.AgentState(
-            "rsi7d-scope-task", agent=self.agent, tab_id="scope_tab",
-            task_thread=threading.current_thread(),
-        )
-
-    def __enter__(self) -> ChatSorcarAgent:
-        agent_state.register(self.state)
-        return self.agent
-
-    def __exit__(self, *exc: object) -> None:
-        agent_state.unregister(self.state.task_id, self.state)
+def _registered(
+    task: str, ask: Any = None, work_dir: str = ""
+) -> AbstractContextManager[agent_state.AgentState]:
+    """Register a real agent running *task* (*ask* answers its questions) as this thread's task."""
+    agent = ChatSorcarAgent("rsi7d-sorcar-scope")
+    agent.task_description = task
+    agent.work_dir = work_dir
+    agent._ask_user_question_callback = ask
+    return registered(agent, "rsi7d-scope-task", tab_id="scope_tab")
 
 
 def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path) -> None:
@@ -164,7 +145,7 @@ def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Pat
     assert row["prompt_constant"] == "" and row["prompt_chars"] == len(_SYSTEM_MD)
     assert row["targets"] == ["SYSTEM.md", "SYSTEM_LITE.md", "AGENTS.md", "src/kiss/**/*.py"]
     assert row["permission"].startswith("required") and row["granted"] == []
-    with _Registered("Sweep. Additional instructions: " + _PERMIT):
+    with _registered("Sweep. Additional instructions: " + _PERMIT):
         sea.request_sorcar_permission("SYSTEM.md", "evidence", prompt_quote=_PERMIT)
     rows = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}
     assert rows[sea.SORCAR]["granted"] == [str(checkout / "src" / "kiss" / "SYSTEM.md")]
@@ -223,7 +204,7 @@ def test_permission_from_the_task_text_needs_a_whole_permitting_sentence(
         "sentence, verbatim)"
     )
     forbids = "the quote forbids or conditions the change instead of permitting it"
-    with _Registered(task):
+    with _registered(task):
         assert sea.request_sorcar_permission("SYSTEM.md", "why", prompt_quote=_PERMIT) == (
             f"Permission granted for SYSTEM.md by the user's task text: {_PERMIT!r}."
         )
@@ -294,7 +275,7 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
         questions.append(question)
         return next(answers)
 
-    with _Registered("Improve every SEA.\n\nAdditional instructions: all", ask=ask):
+    with _registered("Improve every SEA.\n\nAdditional instructions: all", ask=ask):
         assert sea.request_sorcar_permission(
             "SYSTEM.md", "bullets X and Y (task abc, entry 4)"
         ) == "Permission granted for SYSTEM.md by the user's answer 'Yes, go ahead.'."
@@ -327,14 +308,14 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
         "Be brief.\n"
     )
     # An unattended (cron) sweep never asks: the callback is not even called.
-    with _Registered(cron_agent.PROMPT_PREAMBLE + "Run /rsi7d all", ask=ask):
+    with _registered(cron_agent.PROMPT_PREAMBLE + "Run /rsi7d all", ask=ask):
         assert sea.request_sorcar_permission("SYSTEM_LITE.md", "z") == (
             "Denied: this sweep runs unattended (scheduled automation) and nobody can grant "
             "permission. Do not ask again; report the change as a recommendation."
         )
     assert len(questions) == 6
     # A task with nobody to answer (no callback) is denied too.
-    with _Registered("Improve every SEA."):
+    with _registered("Improve every SEA."):
         assert sea.request_sorcar_permission("SYSTEM_LITE.md", "z") == (
             "Denied: the user cannot be asked from here; report the change as a recommendation."
         )
@@ -349,7 +330,7 @@ def test_patch_sorcar_edits_granted_prompt_code_and_agents_md_targets(checkout: 
     assert sea.patch_sorcar("pyproject.toml", "", "x") == (
         f"Error: 'pyproject.toml' is not a file of {pkg.resolve()}"
     )
-    with _Registered("Sweep. Additional instructions: " + _PERMIT, work_dir=str(checkout)):
+    with _registered("Sweep. Additional instructions: " + _PERMIT, work_dir=str(checkout)):
         sea.request_sorcar_permission(
             "SYSTEM.md\nsrc/kiss/greet.py\nAGENTS.md", "why", prompt_quote=_PERMIT
         )
@@ -441,32 +422,12 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         finish_body("<p>Patched SYSTEM.md.</p>", prompt_tokens=800),
     ]
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("rsi7d-sorcar-scope-run")
-        state = agent_state.AgentState(
-            "rsi7d-scope-run", agent=agent, tab_id="scope_run_tab",
-            task_thread=threading.current_thread(),
+    agent = ChatSorcarAgent("rsi7d-sorcar-scope-run")
+    with registered(agent, "rsi7d-scope-run", tab_id="scope_run_tab"):
+        parsed, agentic = run_sea(
+            run, script, checkout, agent=agent, max_steps=6, is_parallel=False,
+            ask_user_question_callback=ask,
         )
-        agent_state.register(state)
-        try:
-            result = agent.run(
-                prompt_template=run.prompt,
-                model_name=MODEL,
-                work_dir=str(checkout),
-                max_steps=6,
-                max_budget=run.settings["max_budget"],
-                model_config={"base_url": url, "api_key": "local"},
-                system_prompt_hook=run.system_prompt_hook,
-                tools_hook=run.tools_hook,
-                web_tools=run.settings["use_web_tools"],
-                use_memory=False,
-                is_parallel=False,
-                verbose=False,
-                ask_user_question_callback=ask,
-            )
-        finally:
-            agent_state.unregister(state.task_id, state)
-    parsed = yaml.safe_load(result)
     assert parsed["success"] is True
     assert questions == [
         "rsi7d asks permission to change KISS Sorcar itself.\nFiles: SYSTEM.md\n"
@@ -474,8 +435,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         "Answer yes to allow exactly these changes; anything else (no, or what you allow "
         "instead) denies them."
     ]
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 4, [list(r) for r in requests]
+    assert len(agentic) == 4
     tool_results = [
         str([m for m in r["messages"] if m["role"] == "tool"][-1]["content"]) for r in agentic[1:]
     ]

@@ -10,7 +10,7 @@ lookup and the spawn) and only then start ``install.sh``, which
 restarts the daemon.  A ``run`` submitted in that window started a
 task the restart killed mid-flight.
 
-The fix is a run-admission barrier (``VSCodeServer._update_installing``):
+The fix is a run-admission barrier (``AgentServer._update_installing``):
 the idle poller raises it in the SAME ``STATE_LOCK`` critical section
 as its idle verdict (:meth:`RemoteAccessServer._arm_update_barrier_if_idle`),
 a direct Update click raises it before spawning, and ``_cmd_run``
@@ -73,7 +73,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         self._install_stub(
             HELD_INSTALL_SH.format(release=self.release, tmpdir=self.tmpdir),
         )
-        self.vscode = self.server._vscode_server
+        self.agent_server = self.server._agent_server
         self._writers: list[LocalWriter] = []
         self._threads: list[threading.Thread] = []
         self._hold = threading.Event()
@@ -131,7 +131,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
 
     def _barrier_up(self) -> bool:
         with agent_state.STATE_LOCK:
-            return bool(self.vscode._update_installing)
+            return bool(self.agent_server._update_installing)
 
     async def _client(self) -> tuple[LocalReader, LocalWriter]:
         reader, writer = await self._connect_local()
@@ -314,7 +314,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         )
         self.assertTrue(self._barrier_up())
         with agent_state.STATE_LOCK:
-            self.vscode._update_installing = False
+            self.agent_server._update_installing = False
         self.server._update_when_idle_armed = False
 
     async def test_cmd_run_refuses_under_barrier_without_state_or_thread(self) -> None:
@@ -340,7 +340,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         self.server._update_when_idle_armed = True
         for i in range(25):
             with agent_state.STATE_LOCK:
-                self.vscode._update_installing = False
+                self.agent_server._update_installing = False
             self._clear_tab()
             start = threading.Barrier(2)
             outcome: dict[str, Any] = {}
@@ -351,13 +351,13 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
 
             def submit() -> None:
                 start.wait()
-                self.vscode._cmd_run(self._run_cmd(f"race {i}"))
+                self.agent_server._cmd_run(self._run_cmd(f"race {i}"))
                 with agent_state.STATE_LOCK:
                     st = agent_state.find_by_tab(TAB)
                     outcome["live_under_barrier"] = (
                         st is not None
                         and st.task_thread is not None
-                        and bool(self.vscode._update_installing)
+                        and bool(self.agent_server._update_installing)
                     )
 
             t1 = threading.Thread(target=arm)
@@ -370,6 +370,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
                 violations += 1
             await self._wait_tab_idle()
         with agent_state.STATE_LOCK:
-            self.vscode._update_installing = False
+            self.agent_server._update_installing = False
         self.server._update_when_idle_armed = False
         self.assertEqual(violations, 0)

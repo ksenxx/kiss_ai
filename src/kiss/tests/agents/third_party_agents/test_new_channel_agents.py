@@ -396,21 +396,13 @@ def test_config_roundtrip(info: dict) -> None:
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_main_exits_with_no_args(info: dict) -> None:
+def test_main_exits_with_no_args(info: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """main() exits when called with no arguments."""
     mod, _, _ = _load(info)
     main_fn = getattr(mod, "main", None)
     if main_fn is None:
         pytest.skip(f"No main() in {info['module']}")
 
-    original_argv = sys.argv
-    sys.argv = ["test_agent"]
-    try:
+    monkeypatch.setattr(sys, "argv", ["test_agent"])
+    with pytest.raises(SystemExit):
         main_fn()
-        pytest.fail("main() should have raised SystemExit")
-    except SystemExit:
-        pass
-    finally:
-        sys.argv = original_argv
-
-

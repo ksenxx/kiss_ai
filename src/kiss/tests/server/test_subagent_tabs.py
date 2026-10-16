@@ -7,7 +7,7 @@
 ``run_parallel`` is N ``run_agent`` calls: every sub-task is submitted
 to the kiss-web daemon (:mod:`kiss.agents.sorcar.agent_dispatch`), so
 these tests run a real daemon on a private loopback endpoint
-(:class:`DaemonLocalHarness`) and watch it through a webview-like
+(:class:`DaemonLocalHarness`) and watch it through a chat-page-like
 viewer connection.  They verify that, for a task calling
 ``run_parallel``:
 
@@ -134,7 +134,7 @@ class TestSubagentTabEvents(DaemonLocalHarness):
         )
 
         # One subagentDone per viewer sub-agent tab: the signal the
-        # webview closes the tab on.
+        # chat page closes the tab on.
         viewer_sub_tabs = {f"{PARENT_TAB_ID}__sub_{t}" for t in sub_task_ids}
         self._wait_for(
             lambda: viewer_sub_tabs <= {

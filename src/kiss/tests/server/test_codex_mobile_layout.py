@@ -4,7 +4,7 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_codex_mobile_layout``.
+"""Server-only tests extracted from ``kiss.tests.webapp.test_codex_mobile_layout``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate

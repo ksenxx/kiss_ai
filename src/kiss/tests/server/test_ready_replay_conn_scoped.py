@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests: a client's ``ready`` replays transcripts to it alone.
 
-Every (re)connecting chat webview sends ``ready``; the daemon answers
+Every (re)connecting chat page sends ``ready``; the daemon answers
 by resuming the tab the client shows (``tabId``) so it can rebuild that
 transcript, and DEFERS every other chat-bound registry tab: the client
 gets the tab's running state and a ``replay_deferred`` offer, and asks
@@ -25,8 +25,6 @@ These tests drive a real :class:`RemoteAccessServer` over real
   tabs are answered with ``replay_deferred`` (plus their status), and
   a ``scoped`` ``resumeSession`` fetches one of them for that
   connection alone;
-* a ``ready`` naming ``singleTabId`` (an editor-tab panel mirroring one
-  registry tab) receives that tab's transcript and no other;
 * a user's history click (``resumeSession`` without ``replayConnId``)
   still reaches every client — pinned by
   ``test_resume_binds_titles_and_mirrors_transcript`` in the mirroring
@@ -146,43 +144,6 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             f"{leaked!r}",
         )
 
-    async def test_single_tab_ready_replays_only_the_mirrored_tab(
-        self,
-    ) -> None:
-        """An editor-tab panel (``singleTabId``) gets its tab, nothing else."""
-        _t1, chat_1 = self._seed_chat("First chat", [
-            {"type": "prompt", "text": "first prompt"},
-        ])
-        _t2, chat_2 = self._seed_chat("Second chat", [
-            {"type": "prompt", "text": "second prompt"},
-        ])
-        ws_a = await self._connect_ok()
-        await self._ready(ws_a)
-        await self._bind_tab(ws_a, "tab-1", chat_1)
-        await self._bind_tab(ws_a, "tab-2", chat_2)
-
-        ws_panel = await self._connect_ok()
-        await self._send(ws_panel, {
-            "type": "ready", "tabId": "tab-2", "singleTabId": "tab-2",
-            "restoredTabs": [],
-        })
-        replay = await self._wait_for_event(
-            ws_panel, "task_events",
-        )
-        self.assertIsNotNone(replay, "the panel never got its own transcript")
-        assert replay is not None
-        self.assertEqual(replay.get("tabId"), "tab-2")
-        texts = [e.get("text") for e in replay.get("events", [])]
-        self.assertIn("second prompt", texts)
-        foreign = await self._wait_for_event(
-            ws_panel, "task_events", timeout=1.5,
-        )
-        self.assertIsNone(
-            foreign,
-            f"a single-tab panel received another tab's transcript: "
-            f"{foreign!r}",
-        )
-
     async def test_ready_defers_every_tab_but_the_one_on_screen(
         self,
     ) -> None:
@@ -215,7 +176,7 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         self.assertEqual(deferred[0].get("taskId"), "")
         self.assertNotIn("connId", deferred[0])
         # The deferred tab's state is settled for the client: it is
-        # idle, so the webview's statusKnown rule may retire it.
+        # idle, so the page's statusKnown rule may retire it.
         statuses = [
             ev for ev in got
             if ev.get("type") == "status" and ev.get("tabId") == "tab-1"
@@ -462,40 +423,3 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         assert replay_a is not None
         texts = [e.get("text") for e in replay_a.get("events", [])]
         self.assertIn("legacy prompt", texts)
-
-    async def test_legacy_seeding_by_single_tab_panel_replays_every_tab(
-        self,
-    ) -> None:
-        """A seeding editor panel's ``singleTabId`` must not hide the others."""
-        _t1, chat_1 = self._seed_chat("Legacy one", [
-            {"type": "prompt", "text": "legacy one"},
-        ])
-        _t2, chat_2 = self._seed_chat("Legacy two", [
-            {"type": "prompt", "text": "legacy two"},
-        ])
-        ws_a = await self._connect_ok()
-        await self._ready(ws_a)
-        # A's ready must finish its registry sync before the panel
-        # seeds the registry: two concurrent readies legitimately
-        # replay the seeded tabs to A twice (A's own conn-scoped sync
-        # plus the panel's broadcast), which is not what this test
-        # measures.  The empty snapshot is the sync's last step.
-        self.assertIsNotNone(await self._wait_for_snapshot_with(ws_a))
-
-        ws_panel = await self._connect_ok()
-        await self._send(ws_panel, {
-            "type": "ready", "tabId": "tab-2", "singleTabId": "tab-2",
-            "restoredTabs": [
-                {"tabId": "tab-1", "chatId": chat_1, "title": "Legacy one"},
-                {"tabId": "tab-2", "chatId": chat_2, "title": "Legacy two"},
-            ],
-        })
-        self.assertIsNotNone(await self._wait_for_snapshot_with(
-            ws_a, present={"tab-1", "tab-2"},
-        ))
-        got_a = await self._collect(ws_a, {"task_events"}, timeout=3.0)
-        self.assertEqual(
-            sorted(str(ev.get("tabId")) for ev in got_a),
-            ["tab-1", "tab-2"],
-            "every tab the panel seeded must be replayed to the other client",
-        )

@@ -33,7 +33,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.merge_flow import _capture_untracked
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
 
 # With ``core.quotepath=false`` (which the project sets) git C-quotes only
@@ -94,7 +94,7 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", "initial")
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]

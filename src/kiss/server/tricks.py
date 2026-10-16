@@ -20,7 +20,7 @@ returned by :func:`read_tricks`, built from two sources:
 
 2. The bundled ``src/kiss/INJECTIONS.md`` shipped with the package.
    Read **directly from the package**; no copy is ever written into
-   ``~/.kiss/``.  This way every extension upgrade automatically
+   ``~/.kiss/``.  This way every package upgrade automatically
    delivers the latest bundled tricks without clobbering the user's
    curated list.
 
@@ -56,7 +56,7 @@ _MARKDOWN_ESCAPABLE_BACKSLASH = re.compile(
     r"\\(?=[\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])"
 )
 # Serialises the read-check-append of the Add button: the daemon runs
-# client commands on a thread pool, so two windows adding at once must
+# client commands on a thread pool, so two browser tabs adding at once must
 # not both pass the duplicate check.
 _APPEND_LOCK = threading.Lock()
 

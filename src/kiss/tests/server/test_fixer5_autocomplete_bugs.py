@@ -31,16 +31,16 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.file_index import FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _AutocompleteHarness(unittest.TestCase):
-    """Shared VSCodeServer + broadcast-capture setup."""
+    """Shared AgentServer + broadcast-capture setup."""
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 

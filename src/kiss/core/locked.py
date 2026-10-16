@@ -26,9 +26,17 @@ from typing import Any
 
 
 def locked_call[T](
-    lock: threading.RLock | threading.Condition, fn: Callable[..., T], *args: Any,
+    lock: threading.RLock | threading.Condition,
+    fn: Callable[..., T],
+    /,
+    *args: Any,
+    **kwargs: Any,
 ) -> T:
-    """Call ``fn(*args)`` holding *lock*; the lock is released on every exit.
+    """Call ``fn(*args, **kwargs)`` holding *lock*; the lock is released on every exit.
+
+    ``lock`` and ``fn`` are positional-only so ``fn``'s own keyword
+    arguments named ``lock`` or ``fn`` (forwarded by :func:`locked`'s
+    wrapper) reach ``fn`` instead of colliding with them.
 
     For code that runs on a task thread, where the runner's Stop
     injects ``KeyboardInterrupt`` at any check point of the bytecode,
@@ -53,13 +61,14 @@ def locked_call[T](
         lock: The shared reentrant lock, or a condition over one.
         fn: The critical section.
         *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
 
     Returns:
         ``fn``'s return value.
     """
     try:
         lock.acquire()
-        return fn(*args)
+        return fn(*args, **kwargs)
     finally:
         try:
             lock.release()
@@ -86,14 +95,7 @@ def locked[**P, T](
     def decorate(fn: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(fn)
         def call_locked(*args: P.args, **kwargs: P.kwargs) -> T:
-            try:
-                lock.acquire()
-                return fn(*args, **kwargs)
-            finally:
-                try:
-                    lock.release()
-                except RuntimeError:
-                    pass  # the interrupt landed before the acquisition took effect
+            return locked_call(lock, fn, *args, **kwargs)
 
         return call_locked
 

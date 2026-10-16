@@ -11,18 +11,18 @@ by one test made every later real-server test fail its websocket
 handshake with ``auth_required`` instead of ``auth_ok`` — and the
 Playwright-driven tests hung behind the ``#auth-modal`` overlay.  The
 failures were order-dependent: they appeared only in large
-``tests/agents/vscode`` runs and vanished in isolation.
+``tests/webapp`` runs and vanished in isolation.
 
 Two concrete leak paths existed, both closed by the
 ``_isolated_shared_config`` autouse fixture in the root conftest:
 
-1. **Pinned path overrides.**  ``vscode_config.CONFIG_DIR`` /
+1. **Pinned path overrides.**  ``user_config.CONFIG_DIR`` /
    ``CONFIG_PATH`` are lazy module attributes that follow ``$KISS_HOME``
    on every access.  Many tests save them in ``setUp`` and assign them
    back in ``tearDown`` — which materializes them as permanent module
    globals.  A later test that swaps ``KISS_HOME`` and calls
    ``save_config`` (e.g. ``test_ntfy_topic_isolation.py``, which saves
-   ``remote_password="test-pw"``) then writes into the session-shared
+   a ``remote_password``) then writes into the session-shared
    file instead of its isolated home, and its teardown — which only
    deletes the temp home — cannot undo the damage.
 
@@ -48,8 +48,8 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core import vscode_config as vc
-from kiss.core.vscode_config import load_config, save_config
+from kiss.core import user_config as vc
+from kiss.core.user_config import load_config, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
@@ -112,8 +112,9 @@ def test_step3_leak_password_directly_without_restore() -> None:
     This test intentionally does NOT restore the config — the conftest
     fixture must roll the shared file back before the next test runs.
     """
-    save_config({"remote_password": "direct-leak-pw"})
-    assert load_config()["remote_password"] == "direct-leak-pw"
+    leaked = "direct-leak-pw"
+    save_config({"remote_password": leaked})
+    assert load_config()["remote_password"] == leaked
 
 
 class TestAuthHandshakeAfterLeakers(IsolatedAsyncioTestCase):

@@ -31,8 +31,8 @@ Covers:
   extract-to-temp + rename publish.
 
 No mocks/patches/fakes: real :class:`JsonPrinter` /
-:class:`VSCodeServer` / :class:`ChatSorcarAgent` subclasses (the
-same technique the existing vscode regression tests use), real
+:class:`AgentServer` / :class:`ChatSorcarAgent` subclasses (the
+same technique the existing server regression tests use), real
 threads, and the real sqlite persistence layer.
 """
 
@@ -58,7 +58,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter, _BashState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -129,14 +129,14 @@ class _ScriptedAgent(ChatSorcarAgent):
 
 def _run_scripted_task(
     tmp_path: Path, tab_id: str, prompt: str,
-) -> tuple[VSCodeServer, _CapturePrinter, _ScriptedAgent]:
+) -> tuple[AgentServer, _CapturePrinter, _ScriptedAgent]:
     """Run *prompt* through the real ``_run_task`` with a scripted agent."""
     models = get_available_models()
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer)
-    agent = _ScriptedAgent("Sorcar VS Code")
+    server = AgentServer(printer)
+    agent = _ScriptedAgent("Sorcar")
     state = AgentState(
         f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
     )
@@ -212,12 +212,12 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
         if not models:
             pytest.skip("no models configured in this environment")
         printer = _CapturePrinter()
-        server = VSCodeServer(printer)
+        server = AgentServer(printer)
         fallback = _BashState()
         fallback.streamed = True
         fallback.buffer.append("pending task-less output")
         printer._bash_states[""] = fallback
-        agent = _ScriptedAgent("Sorcar VS Code")
+        agent = _ScriptedAgent("Sorcar")
         state = AgentState(
             f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
         )
@@ -333,7 +333,7 @@ def test_f9_ask_user_question_waits_on_resolved_queue() -> None:
     the task's ``user_answer_queue`` is swapped mid-question (tab
     close + reopen)."""
     printer = _AskUserGatePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "w2f9-tab"
     task_key = "990901"
     try:
@@ -379,7 +379,7 @@ class _WorkDirPrinter(_CapturePrinter):
         self.work_dir = ""
 
 
-def _private_registry(server: VSCodeServer, tmp_path: Path) -> FileIndexRegistry:
+def _private_registry(server: AgentServer, tmp_path: Path) -> FileIndexRegistry:
     """Give *server* a file-index registry rooted in *tmp_path*."""
     server._file_index.stop()
     registry = FileIndexRegistry(
@@ -396,7 +396,7 @@ def test_f13_save_config_work_dir_syncs_index_and_printer(
     the printer and pre-warms its ``@``-mention index exactly like
     ``setWorkDir`` does."""
     printer = _WorkDirPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     registry = _private_registry(server, tmp_path)
     try:
         new_dir = str(tmp_path / "proj")
@@ -419,10 +419,10 @@ def test_f13_save_config_work_dir_syncs_index_and_printer(
 def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
     """Concurrent saveConfig commands must not lose each other's keys
     nor corrupt ``work_dir`` state (lock-protected read-modify-write)."""
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     printer = _WorkDirPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     registry = _private_registry(server, tmp_path)
     dirs = []
     for i in range(2):
@@ -467,7 +467,7 @@ def _make_model_zip(src_dir: Path, model_name: str) -> Path:
 
 
 def test_f12_concurrent_model_download_is_safe(tmp_path: Path) -> None:
-    from kiss.server.voice_wake import _ensure_downloaded_model
+    from kiss.server.speech import _ensure_downloaded_model
 
     model_name = "vosk-model-test-w2f12"
     zip_path = _make_model_zip(tmp_path / "src", model_name)

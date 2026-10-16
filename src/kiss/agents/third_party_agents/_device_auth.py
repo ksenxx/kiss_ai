@@ -644,7 +644,7 @@ def consent_instructions(
         return (
             f"Connect {label} the way the Muse app does: the USER signs in and "
             "approves; you only tell them what to do. The sign-in page is already "
-            "open in the Browser tab that every KISS surface (web app and VS Code) "
+            "open in the Browser tab that the web app "
             "has just switched to, so the user is looking at it now: do NOT ask "
             "them to open a URL and do NOT give them the URL to open; do NOT open "
             f"this URL or any {label} sign-in page in your built-in browser, and "

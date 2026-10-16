@@ -210,34 +210,6 @@ def clean_build_artifacts() -> None:
         print(f"\n✅ Cleaned {removed_count} items")
 
 
-def _sync_extension_version() -> None:
-    """Sync VS Code extension version from _version.py into package.json.
-
-    Reads the canonical version from ``src/kiss/core/_version.py`` (the
-    single source of the version literal) and updates the ``version``
-    field in the extension's ``package.json`` if they differ.
-    """
-    import json
-
-    version_file = PROJECT_ROOT / "src" / "kiss" / "core" / "_version.py"
-    package_json = PROJECT_ROOT / "src" / "kiss" / "agents" / "vscode" / "package.json"
-
-    if not version_file.exists() or not package_json.exists():
-        return
-
-    namespace: dict[str, str] = {}
-    exec(version_file.read_text(encoding="utf-8"), namespace)  # noqa: S102
-    version = namespace.get("__version__", "")
-    if not version:
-        return
-
-    data = json.loads(package_json.read_text(encoding="utf-8"))
-    if data.get("version") != version:
-        data["version"] = version
-        package_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print(f"Synced extension version to {version}")
-
-
 def main() -> int:
     """Run all code quality checks.
 
@@ -271,8 +243,6 @@ def main() -> int:
         if args.clean_only:
             return 0
 
-    _sync_extension_version()
-
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),
         (["uv", "run", "generate-api-docs"], "Generate API docs"),
@@ -285,19 +255,10 @@ def main() -> int:
 
     if args.full:
         checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
-        vscode_dir = PROJECT_ROOT / "src" / "kiss" / "agents" / "vscode"
-        if (vscode_dir / "node_modules").is_dir() and shutil.which("npm"):
+        webapp_dir = PROJECT_ROOT / "src" / "kiss" / "webapp"
+        if (webapp_dir / "node_modules").is_dir() and shutil.which("npm"):
             checks.append(
-                (
-                    ["npm", "--prefix", str(vscode_dir), "run", "typecheck"],
-                    "VS Code extension typecheck",
-                )
-            )
-            checks.append(
-                (
-                    ["npm", "--prefix", str(vscode_dir), "run", "lint"],
-                    "VS Code extension lint",
-                )
+                (["npm", "--prefix", str(webapp_dir), "run", "lint"], "Webapp lint")
             )
 
     print("\n🔍 Running all code quality checks...\n")

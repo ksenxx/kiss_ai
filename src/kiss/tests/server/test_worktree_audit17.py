@@ -4,7 +4,7 @@
 # add your name here
 """Audit 17: Integration tests for race conditions in worktree mode.
 
-BUG-71: ``VSCodeServer._new_chat`` does not check whether a worktree
+BUG-71: ``AgentServer._new_chat`` does not check whether a worktree
     task is currently running on the same tab.  When the user triggers
     "new chat" while the agent is actively writing files into the
     worktree directory, the server calls ``tab.agent.new_chat()``
@@ -17,7 +17,7 @@ BUG-71: ``VSCodeServer._new_chat`` does not check whether a worktree
     *non-worktree* tasks (via the since-removed ``_any_non_wt_running``);
     they did not protect the tab's own running worktree task.
 
-BUG-72: ``VSCodeServer._handle_worktree_action("merge"/"discard")``
+BUG-72: ``AgentServer._handle_worktree_action("merge"/"discard")``
     only guarded against concurrent non-worktree tasks via the
     since-removed ``_any_non_wt_running``, and did NOT check whether the tab's own
     worktree task is still running.  A misbehaving client (or a race
@@ -43,7 +43,7 @@ from typing import Any, cast
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _register_state(
@@ -132,13 +132,13 @@ class TestNewChatSimpleBroadcast:
         must be preserved."""
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug71-ok"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = None
         state = _register_state("task-bug71-ok", tab_id, agent)
         try:
@@ -161,13 +161,13 @@ class TestBug72WorktreeActionDuringRunningTask:
     def test_merge_refused_while_task_active(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-merge"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         wt = _create_wt(repo, "kiss/wt-bug72m-1", agent)
 
         state = _register_state(
@@ -203,13 +203,13 @@ class TestBug72WorktreeActionDuringRunningTask:
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-discard"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         wt = _create_wt(repo, "kiss/wt-bug72d-1", agent)
 
         state = _register_state(

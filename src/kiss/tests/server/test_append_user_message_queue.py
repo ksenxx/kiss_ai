@@ -39,13 +39,13 @@ from typing import Any
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """Spin up a real :class:`VSCodeServer` whose broadcasts land in a list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """Spin up a real :class:`AgentServer` whose broadcasts land in a list."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -132,7 +132,7 @@ class TestAppendUserMessageHandler:
         ]
         echoes = [e for e in events if e.get("type") == "prompt"]
         # ``steer`` marks the echo as a message typed into a running
-        # task, which the chat webview shows like the task panel.
+        # task, which the chat page shows like the task panel.
         assert echoes == [
             {"type": "prompt", "text": "follow up A", "tabId": "tab-1", "steer": True},
             {"type": "prompt", "text": "follow up B", "tabId": "tab-1", "steer": True},
@@ -639,9 +639,9 @@ class TestPendingMessagesClearedOnTaskFinish:
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
-        server = VSCodeServer()
+        server = AgentServer()
         tab_id = "tab-clear-after-run"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         st = AgentState(
             "task-clear-after-run",
             agent=agent,

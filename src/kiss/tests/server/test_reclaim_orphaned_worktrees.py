@@ -41,7 +41,7 @@ from kiss.tests.agents.sorcar.test_reclaim_orphaned_worktrees import (  # noqa: 
     _redirect_db,
     _restore_db,
 )
-from kiss.tests.agents.sorcar.test_worktree_extension_workflow import (
+from kiss.tests.agents.sorcar.test_worktree_chat_workflow import (
     _patch_super_run,
     _unpatch_super_run,
 )

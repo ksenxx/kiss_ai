@@ -310,7 +310,7 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             local_endpoint.write_endpoint(
                 stale_file,
                 local_endpoint.LocalEndpoint(
-                    url=f"wss://127.0.0.1:{free_port}/ws", token="stale",
+                    url=f"ws://127.0.0.1:{free_port}/ws", token="stale",
                     ca=None, pid=os.getpid(),
                 ),
             )

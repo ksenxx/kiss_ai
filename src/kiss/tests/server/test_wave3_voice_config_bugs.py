@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end regression tests for Wave3-Fixer-4 findings (D1/D2/D3/D5).
+"""End-to-end regression tests for Wave3-Fixer-4 findings (D1/D2/D3).
 
 Covers, over REAL objects (no mocks, patches, or fakes):
 
-* D1: ``voice_wake._ensure_downloaded_model`` used
+* D1: ``speech._ensure_downloaded_model`` used
   ``urllib.request.urlretrieve`` with NO network timeout while holding
   the exclusive cross-process ``flock`` — a stalled download wedged the
   FIFO translation worker forever and blocked every other process on
@@ -15,23 +15,18 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   within the (env-overridden) timeout, leave no temp files behind, and
   release the flock.  A companion test downloads a real zip from a
   local server to prove the chunked-copy replacement still works.
-* D2: the ``vscode_config`` RC-key migration gated the env dump on the RC
+* D2: the ``user_config`` RC-key migration gated the env dump on the RC
   file's exit status in the bash/zsh branch (``source rc && { env… }``)
   — an RC whose LAST command exits nonzero (e.g. a failing ``which`` or
   a false ``[ -f x ] && …`` test) silently imported ZERO keys, while
   the fish branch dumped unconditionally.  Exercised with a real
   ``/bin/bash`` and a temp ``$HOME`` whose ``.bashrc`` exports a key
   and then ends with ``false``.
-* D3: ``vscode_config.save_config`` and the secure RC-file writer
+* D3: ``user_config.save_config`` and the secure RC-file writer
   leaked their ``mkstemp`` staging files (``.kiss-config-*`` in
   ``~/.kiss/``, ``.kiss-rc-*`` in ``$HOME``) whenever the write or the
   ``os.replace`` raised.  Exercised by making the destination a
   directory so the real ``os.replace`` fails.
-* D5: ``SpeakerIdentifier`` loaded a second full copy of the ~40MB
-  Vosk wake model although ``WakeDetector`` in the same process
-  already held one.  Exercised with the real offline Vosk models:
-  after constructing both, the process must hold exactly ONE shared
-  acoustic ``Model`` instance, and both recognizers must still work.
 """
 
 from __future__ import annotations
@@ -46,7 +41,7 @@ from typing import Any, cast
 
 import pytest
 
-import kiss.server.voice_wake as voice_wake
+import kiss.server.speech as speech
 from kiss.core.file_lock import lock_exclusive, unlock
 
 _STALL_WINDOW_SECONDS = 30.0
@@ -111,7 +106,7 @@ class TestD1DownloadTimeout:
             models_dir = tmp_path / "models"
             start = time.monotonic()
             with pytest.raises(OSError):
-                voice_wake._ensure_downloaded_model(
+                speech._ensure_downloaded_model(
                     models_dir, "stall-model", url,
                 )
             elapsed = time.monotonic() - start
@@ -140,7 +135,7 @@ class TestD1DownloadTimeout:
         try:
             url = f"http://127.0.0.1:{httpd.server_address[1]}/ok.zip"
             models_dir = tmp_path / "models"
-            model_dir = voice_wake._ensure_downloaded_model(
+            model_dir = speech._ensure_downloaded_model(
                 models_dir, "ok-model", url,
             )
             assert model_dir == models_dir / "ok-model"
@@ -155,36 +150,6 @@ class TestD1DownloadTimeout:
 
 
 
-
-
-_WAKE_DIR = voice_wake.default_models_dir() / voice_wake.MODEL_NAME
-_SPK_DIR = voice_wake.default_models_dir() / voice_wake.SPK_MODEL_NAME
-
-
-@pytest.mark.skipif(
-    not (_WAKE_DIR.is_dir() and _SPK_DIR.is_dir()),
-    reason="offline Vosk models not present under ~/.kiss/models",
-)
-class TestD5SharedVoskModel:
-    def test_detector_and_identifier_share_one_acoustic_model(self) -> None:
-        """Both recognizers must reuse ONE ``vosk.Model`` instance."""
-        pytest.importorskip("vosk")
-        voice_wake._VOSK_MODEL_CACHE.clear()
-
-        detector = voice_wake.WakeDetector(_WAKE_DIR)
-        assert len(voice_wake._VOSK_MODEL_CACHE) == 1
-        shared = voice_wake.load_shared_vosk_model(_WAKE_DIR)
-
-        identifier = voice_wake.SpeakerIdentifier(
-            voice_wake.default_models_dir()
-        )
-        assert len(voice_wake._VOSK_MODEL_CACHE) == 1
-        assert voice_wake.load_shared_vosk_model(_WAKE_DIR) is shared
-
-        silence = b"\x00\x00" * voice_wake.BLOCK_SIZE
-        assert detector.feed(silence) is False
-        result = identifier.speaker_of(silence * 8)
-        assert result is None or isinstance(result, int)
 
 
 if __name__ == "__main__":

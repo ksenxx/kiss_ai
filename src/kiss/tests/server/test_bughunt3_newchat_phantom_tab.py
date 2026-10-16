@@ -20,9 +20,9 @@ import unittest
 from typing import Any
 
 import kiss.agents.sorcar.persistence as _pm
-import kiss.core.vscode_config as _vc
+import kiss.core.user_config as _vc
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestEmptyTabIdPhantom(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
         _vc.CONFIG_DIR = type(_vc.CONFIG_DIR)(self._tmpdir)
         _vc.CONFIG_PATH = type(_vc.CONFIG_PATH)(self._tmpdir) / "config.json"
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:

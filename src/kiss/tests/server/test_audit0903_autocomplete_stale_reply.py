@@ -21,7 +21,7 @@ that the captured token is still the connection's current request,
 emits while it is, and removes the token only after the emission.
 
 The superseded interleaving is made deterministic with a real
-:class:`VSCodeServer` subclass whose ``_emit_files`` parks the OLD
+:class:`AgentServer` subclass whose ``_emit_files`` parks the OLD
 workspace's populated reply on its way out (park-then-delegate, the
 same production-boundary technique as the parking printers); the newer
 request runs on its own thread through the production ``_get_files``.
@@ -48,14 +48,14 @@ from unittest import TestCase
 
 from kiss.server import agent_state
 from kiss.server.file_index import FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _CONN = "conn-stale"
 _PREFIX = "marker"
 
 
-class _ParkingEmitServer(VSCodeServer):
+class _ParkingEmitServer(AgentServer):
     """Real server whose ``_emit_files`` parks one designated reply."""
 
     def __init__(self, printer: MemoryPrinter) -> None:

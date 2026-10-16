@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Install the local CA (:mod:`kiss.server.tls_certs`) into this user's trust stores.
+"""Install the local CA (:mod:`kiss.core.tls_certs`) into this user's trust stores.
 
 ``kiss-web --trust-ca`` calls :func:`trust_local_ca`.  Browsers keep their
 own trust databases, so the CA is added to every one that exists for the
@@ -33,7 +33,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kiss.server.tls_certs import ca_common_name, ca_fingerprint
+from kiss.core.tls_certs import ca_common_name, ca_fingerprint
 
 _CMD_TIMEOUT_S = 120.0
 

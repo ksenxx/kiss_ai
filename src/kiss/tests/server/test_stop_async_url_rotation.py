@@ -43,7 +43,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._ntfy_emulator import unroutable_base_url

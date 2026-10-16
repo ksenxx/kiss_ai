@@ -6,7 +6,7 @@
 """$KISS_HOME must be resolved lazily by every consumer.
 
 ``$KISS_HOME``-or-``~/.kiss`` used to be resolved independently five
-times across the codebase, and two of the copies (``vscode_config``,
+times across the codebase, and two of the copies (``user_config``,
 ``web_server``) froze the answer at import time — so a ``KISS_HOME``
 exported *after* those modules were imported (exactly what the test
 conftest does) was silently ignored.  All five sites now route through
@@ -22,8 +22,7 @@ import pytest
 
 import kiss.agents.sorcar.local_endpoint as local_endpoint
 import kiss.agents.sorcar.persistence as persistence
-import kiss.core.vscode_config as vscode_config
-import kiss.server.user_assets as user_assets
+import kiss.core.user_config as user_config
 import kiss.server.web_server as web_server
 from kiss.core.config import kiss_home
 
@@ -33,12 +32,12 @@ def fresh_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point KISS_HOME at a new temp dir *after* all modules are imported.
 
     Also clears any ``CONFIG_DIR``/``CONFIG_PATH`` pins that an earlier
-    test in the same process may have left in ``vscode_config``'s
+    test in the same process may have left in ``user_config``'s
     module dict, and any web_server override slots.
     """
     for name in ("CONFIG_DIR", "CONFIG_PATH"):
-        if name in vars(vscode_config):
-            monkeypatch.delattr(vscode_config, name, raising=False)
+        if name in vars(user_config):
+            monkeypatch.delattr(user_config, name, raising=False)
     monkeypatch.setattr(web_server, "_TLS_DIR", None)
     monkeypatch.setattr(web_server, "_CLOUDFLARED_PIDFILE", None)
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
@@ -50,40 +49,36 @@ def test_canonical_resolver_is_lazy(fresh_home: Path) -> None:
     assert kiss_home() == fresh_home
 
 
-def test_user_assets_resolves_lazily(fresh_home: Path) -> None:
-    assert user_assets.kiss_home_dir() == fresh_home
-
-
 def test_persistence_resolves_lazily(fresh_home: Path) -> None:
     assert persistence._default_kiss_dir() == fresh_home
 
 
-def test_vscode_config_resolves_lazily(fresh_home: Path) -> None:
+def test_user_config_resolves_lazily(fresh_home: Path) -> None:
     """CONFIG_DIR/CONFIG_PATH attributes and accessors track KISS_HOME."""
-    assert vscode_config.CONFIG_DIR == fresh_home
-    assert vscode_config.CONFIG_PATH == fresh_home / "config.json"
-    assert vscode_config._config_dir() == fresh_home
-    assert vscode_config._config_path() == fresh_home / "config.json"
+    assert user_config.CONFIG_DIR == fresh_home
+    assert user_config.CONFIG_PATH == fresh_home / "config.json"
+    assert user_config._config_dir() == fresh_home
+    assert user_config._config_path() == fresh_home / "config.json"
 
 
-def test_vscode_config_save_load_roundtrip(fresh_home: Path) -> None:
+def test_user_config_save_load_roundtrip(fresh_home: Path) -> None:
     """save_config writes into the post-import KISS_HOME and load reads it."""
-    vscode_config.save_config({"max_budget": 42})
+    user_config.save_config({"max_budget": 42})
     on_disk = json.loads((fresh_home / "config.json").read_text())
     assert on_disk["max_budget"] == 42
-    assert vscode_config.load_config()["max_budget"] == 42
+    assert user_config.load_config()["max_budget"] == 42
 
 
-def test_vscode_config_test_override_pin_wins(fresh_home: Path) -> None:
+def test_user_config_test_override_pin_wins(fresh_home: Path) -> None:
     """An explicit CONFIG_DIR/CONFIG_PATH assignment shadows lazy lookup."""
     pin = fresh_home / "pinned"
-    vscode_config.CONFIG_DIR = pin
+    user_config.CONFIG_DIR = pin
     try:
-        assert vscode_config._config_dir() == pin
-        assert vscode_config._config_path() == pin / "config.json"
+        assert user_config._config_dir() == pin
+        assert user_config._config_path() == pin / "config.json"
     finally:
-        del vscode_config.CONFIG_DIR
-    assert vscode_config._config_dir() == fresh_home
+        del user_config.CONFIG_DIR
+    assert user_config._config_dir() == fresh_home
 
 
 def test_web_server_paths_resolve_lazily(fresh_home: Path) -> None:

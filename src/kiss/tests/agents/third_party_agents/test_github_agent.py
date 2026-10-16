@@ -25,7 +25,6 @@ import base64
 import json
 import subprocess
 import sys
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -38,7 +37,11 @@ from kiss.agents.third_party_agents.github.github_sea import (
     GitHubChannelBackend,
     _config,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _TOKEN = "test-gh-token"
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
@@ -129,19 +132,11 @@ _DIFF_7 = "diff --git a/x.py b/x.py\n+print(1)\n"
 _DIFF_99 = "d" * 9000
 
 
-class _GHRequestHandler(BaseHTTPRequestHandler):
+class _GHRequestHandler(RecordingHandler):
     """Emulates the GitHub REST API and records requests."""
 
     def _authorized(self) -> bool:
         return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _reply(self, status: int, body: str, content_type: str = "application/json") -> None:
-        payload = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def _record(self, body: dict[str, Any] | None) -> None:
         cast(RecordingServer, self.server).requests.append(
@@ -257,14 +252,6 @@ class _GHRequestHandler(BaseHTTPRequestHandler):
         else:
             self._reply(404, json.dumps({"message": "Not Found"}))
 
-    def _read_body(self) -> dict[str, Any] | None:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
-        try:
-            return json.loads(raw.decode("utf-8")) if raw else {}
-        except ValueError:
-            return None
-
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         self._route(None)
 
@@ -276,9 +263,6 @@ class _GHRequestHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         self._route(self._read_body())
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
 
 
 @pytest.fixture()

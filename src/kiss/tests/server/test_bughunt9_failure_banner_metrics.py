@@ -21,7 +21,7 @@ disagreeing with the (correct, delta-based) metrics persisted into the
 same task's ``task_history.extra`` row and rendered in the history
 sidebar.
 
-This test drives the real ``VSCodeServer._run_task`` end-to-end with a
+This test drives the real ``AgentServer._run_task`` end-to-end with a
 real ``ChatSorcarAgent`` whose counters start non-zero (simulating
 the preserved-agent reuse) and whose ``run`` consumes a small known
 delta before failing.  The broadcast ``result`` event must carry the
@@ -39,7 +39,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
@@ -47,7 +47,7 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt9-metrics-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:
@@ -73,7 +73,7 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
         # Simulate the preserved-agent reuse: the tab's previous task
         # ended with a pending worktree, so its agent (and cumulative
         # counters) carry over into the next run's state.
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = agent_state.AgentState(
             "task-metrics-tab",
             agent=agent,

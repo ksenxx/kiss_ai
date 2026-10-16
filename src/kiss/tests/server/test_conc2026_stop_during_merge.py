@@ -35,7 +35,7 @@ import time
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_runner import _state_owns_thread
 from kiss.tests.server._memory_printer import MemoryPrinter
 
@@ -117,7 +117,7 @@ def test_stop_does_not_interrupt_the_post_task_merge(
 ) -> None:
     """Stop during the task thread's own merge: awaited, not injected."""
     printer = MemoryPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "TAB-M-C2-MERGE"
     # The "merge" outlives both watchdog injection points (1 s and
     # 1 s + 5 s), so a regression that injects at either point is
@@ -149,7 +149,7 @@ def test_foreign_merge_claim_does_not_strand_the_stop(
 ) -> None:
     """A claim held by ANOTHER thread must not block stopping the task."""
     printer = MemoryPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "TAB-M-C2-FOREIGN"
     worker = _Worker(lifetime=60.0)
     state = _register("m-c2-foreign", tab_id, worker)

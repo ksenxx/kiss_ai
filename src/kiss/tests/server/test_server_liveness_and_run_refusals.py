@@ -11,8 +11,7 @@ persistence redirected to a scratch sqlite database, and speaks the
 real newline-delimited JSON wire protocol over a real client socket.
 Nothing is mocked, patched or doubled: the agent states the handlers
 consult are the real :mod:`kiss.server.agent_state` objects, the
-worker threads are real threads, and the git commands are real git
-processes.
+worker threads are real threads.
 
 Findings covered (audit ``08-server-web.md`` / ``09-server-rest.md``):
 
@@ -24,35 +23,28 @@ Findings covered (audit ``08-server-web.md`` / ``09-server-rest.md``):
   on ``is_task_active`` alone, although a worker that has started but
   not yet raised the flag is a real, live task
   (:meth:`AgentState.thread_alive`).
-* **F08-5** — ``VSCodeServer.__init__`` cleared the *process-global*
+* **F08-5** — ``AgentServer.__init__`` cleared the *process-global*
   agent-state registry, so merely constructing a second server
   detached the first server's live tasks.
-* **F08-6** — ``VSCodeServer._tab_opened_task_ids`` was a mutable
+* **F08-6** — ``AgentServer._tab_opened_task_ids`` was a mutable
   **class** attribute shadowed by an instance attribute: dead, and a
   latent cross-instance shared-state hazard.
 * **F08-7** — ``_handle_submit`` rebuilt the ``run`` command without
-  ``connId``, so a task launched from the browser recorded ``""``
-  while the identical task launched from VS Code recorded the real
+  ``connId``, so a task launched through ``submit`` recorded ``""``
+  while the identical task launched through ``run`` recorded the real
   connection id.
-* **R09-8** — ``generateCommitMessage`` spawned an unbounded thread
-  per click with no in-flight dedup, so N clicks ran N generations
-  (N billed LLM calls) racing to stamp the same tab.
 
 No test makes a paid LLM call: runs are submitted with a model name
 that is not in ``get_available_models()``, which makes the real worker
 return at ``task_runner``'s "No model available" guard before any
-agent work, and the commit-message tests block inside real ``git`` so
-the diff comes back empty (the "no staged changes" branch) instead of
-reaching the model.
+agent work.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -66,7 +58,7 @@ from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -86,17 +78,6 @@ _UNAVAILABLE_MODEL = "kiss-test-no-such-model"
 Makes the real worker thread hit ``task_runner``'s "No model
 available." guard and return before contacting any provider.
 """
-
-
-def _git(cwd: Path, *args: str) -> None:
-    """Run a git command in *cwd*, raising on failure."""
-    subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
 
 
 class _ServerHarness(IsolatedAsyncioTestCase):
@@ -183,12 +164,12 @@ class _ServerHarness(IsolatedAsyncioTestCase):
     ) -> None:
         """Block until every command sent so far has been dispatched.
 
-        The daemon dispatches this connection's commands
-        sequentially, so the reply to a trailing ``activeTasksQuery``
-        cannot be produced until the preceding commands' handlers have
-        returned.  (It says nothing about *broadcast* delivery, which
-        is scheduled onto the loop from the executor thread — use
-        :meth:`_collect_frames` for that.)
+        The daemon dispatches this connection's commands sequentially, so
+        the reply to a trailing ``activeTasksQuery`` cannot be produced
+        until the preceding commands' handlers have returned.  (It says
+        nothing about *broadcast* delivery, which is scheduled onto the
+        loop from the executor thread; use :meth:`_collect_frames` for
+        that.)
         """
         await self._send(writer, {"type": "activeTasksQuery"})
         await self._drain_until(
@@ -343,7 +324,7 @@ class TestRunRefusedDuringMergeClearsStatus(_ServerHarness):
         self.assertTrue(state.is_merging, "the merge claim was destroyed")
 
     async def test_run_during_merge_emits_status_false(self) -> None:
-        """The VS Code ``run`` dialect goes through the same guard."""
+        """The ``run`` command dialect goes through the same guard."""
         tab_id = "tab-merge-run"
         self._claim_merge(tab_id)
         reader, writer = await self._connect()
@@ -371,7 +352,7 @@ class TestRunRefusedDuringMergeClearsStatus(_ServerHarness):
                 and f.get("running") is False
                 and f.get("tabId") == tab_id
             ],
-            "BUG F08-1: the VS Code host raised running:true before "
+            "BUG F08-1: the chat page raised running:true before "
             "sending run, and the refusal never cleared it",
         )
 
@@ -398,7 +379,7 @@ class TestStartupWindowIsLive(_ServerHarness):
     async def test_active_tasks_query_reports_starting_task(self) -> None:
         """``activeTasksQuery`` must not answer 0 during the window.
 
-        The VS Code dependency installer restarts the daemon when the
+        ``install.sh`` restarts the daemon when the
         reply says ``count: 0``; answering 0 for a task whose worker
         has just been started kills it.
         """
@@ -413,7 +394,7 @@ class TestStartupWindowIsLive(_ServerHarness):
             resp.get("count"), 1,
             "BUG F08-2: a task whose worker started but has not yet "
             "raised is_task_active was reported as idle, so the "
-            "extension would restart the daemon on top of it",
+            "installer would restart the daemon on top of it",
         )
         self.assertIn("tab-window(task=task-window)", resp.get("tabs", []))
 
@@ -466,7 +447,7 @@ class TestStartupWindowIsLive(_ServerHarness):
             "tab-restore", "task-restore", chat_id="chat-restore",
         )
         # What _cmd_run does synchronously before starting the worker:
-        self.server._vscode_server._registry_update_tab(
+        self.server._agent_server._registry_update_tab(
             "tab-restore",
             chat_id="chat-restore",
             title="starting task",
@@ -567,13 +548,13 @@ class TestNoSharedClassLevelTabMap(unittest.TestCase):
     def test_tab_opened_task_ids_is_instance_only(self) -> None:
         """Two servers must never share one tab→task dict."""
         self.assertNotIn(
-            "_tab_opened_task_ids", vars(VSCodeServer),
+            "_tab_opened_task_ids", vars(AgentServer),
             "BUG F08-6: the dead mutable class attribute is back; any "
             "read before __init__ finishes would silently share one "
             "dict across every server in the process",
         )
-        first = VSCodeServer()
-        second = VSCodeServer()
+        first = AgentServer()
+        second = AgentServer()
         first._tab_opened_task_ids["tab-a"] = "task-a"
         self.assertEqual(second._tab_opened_task_ids, {})
         self.assertEqual(first._tab_opened_task_ids, {"tab-a": "task-a"})
@@ -624,139 +605,9 @@ class TestSubmitRecordsConnId(_ServerHarness):
         self.assertEqual(
             via_submit.conn_id, via_run.conn_id,
             "BUG F08-7: _handle_submit rebuilt the run command without "
-            "connId, so a browser-launched task records \"\" while an "
-            "identical VS Code-launched task records the real id",
+            "connId, so a submit-launched task records \"\" while an "
+            "identical run-launched task records the real id",
         )
-
-
-class TestCommitMessageGenerationDedup(_ServerHarness):
-    """R09-8: concurrent clicks must not run concurrent generations."""
-
-    async def asyncSetUp(self) -> None:
-        await super().asyncSetUp()
-        self.calls_log = Path(self.tmpdir) / "diff-calls.log"
-        self.release_file = Path(self.tmpdir) / "diff-release"
-        blocker = Path(self.tmpdir) / "blocking-diff.sh"
-        # POSIX paths and LF endings: Git for Windows runs the script
-        # with its bundled sh, which neither tolerates CRLF nor keeps
-        # the backslashes of a Windows path.
-        blocker.write_text(
-            "#!/bin/sh\n"
-            f'echo call >> "{self.calls_log.as_posix()}"\n'
-            f'while [ ! -f "{self.release_file.as_posix()}" ]; do sleep 0.02; done\n'
-            "exit 0\n",
-            newline="\n",
-        )
-        blocker.chmod(0o755)
-        _git(self.work_dir, "init", "-q")
-        _git(self.work_dir, "config", "user.email", "h@example.com")
-        _git(self.work_dir, "config", "user.name", "Kiss Test")
-        _git(self.work_dir, "config", "diff.external", blocker.as_posix())
-        (self.work_dir / "file.txt").write_text("one\n")
-        _git(self.work_dir, "add", "file.txt")
-        _git(self.work_dir, "-c", "diff.external=", "commit", "-q", "-m", "init")
-        (self.work_dir / "file.txt").write_text("two\n")
-        _git(self.work_dir, "add", "file.txt")
-
-    async def asyncTearDown(self) -> None:
-        self.release_file.touch()
-        await super().asyncTearDown()
-
-    def _call_count(self) -> int:
-        """Number of real ``git`` external-diff invocations so far."""
-        try:
-            return len(self.calls_log.read_text().splitlines())
-        except FileNotFoundError:
-            return 0
-
-    async def _wait_for_calls(self, want: int, timeout: float) -> int:
-        """Poll the invocation log until *want* calls or *timeout*."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            count = self._call_count()
-            if count >= want:
-                return count
-            await asyncio.sleep(0.02)
-        return self._call_count()
-
-    async def test_burst_of_clicks_runs_one_generation(self) -> None:
-        """Five clicks must produce one generation, then re-arm."""
-        tab_id = "tab-commit"
-        reader, writer = await self._connect()
-        for _ in range(5):
-            await self._send(writer, {
-                "type": "generateCommitMessage",
-                "tabId": tab_id,
-                "workDir": str(self.work_dir),
-            })
-        # Barrier: the connection is served sequentially, so once the
-        # probe is answered all five clicks have been handled (and,
-        # before the fix, all five worker threads spawned).
-        await self._await_dispatch(reader, writer)
-
-        self.assertGreaterEqual(
-            await self._wait_for_calls(1, timeout=15), 1,
-            "the first generation never reached git",
-        )
-        self.assertEqual(
-            await self._wait_for_calls(2, timeout=2.0), 1,
-            "BUG R09-8: duplicate clicks spawned concurrent commit "
-            "message generations — each one bills an LLM call and "
-            "races to stamp the same tab",
-        )
-
-        self.release_file.touch()
-        first = await self._drain_until(
-            reader,
-            lambda m: m.get("type") == "commitMessage"
-            and m.get("tabId") == tab_id,
-        )
-        self.assertIn("No staged changes", str(first.get("error", "")))
-
-        # The in-flight guard must be released once the generation
-        # finishes, so a later click still works.
-        os.remove(self.release_file)
-        self.calls_log.unlink(missing_ok=True)
-        await self._send(writer, {
-            "type": "generateCommitMessage",
-            "tabId": tab_id,
-            "workDir": str(self.work_dir),
-        })
-        self.assertEqual(
-            await self._wait_for_calls(1, timeout=15), 1,
-            "the in-flight guard was never cleared, so the tab can "
-            "never generate a commit message again",
-        )
-        self.release_file.touch()
-        await self._drain_until(
-            reader,
-            lambda m: m.get("type") == "commitMessage"
-            and m.get("tabId") == tab_id,
-        )
-
-    async def test_other_tab_is_not_blocked(self) -> None:
-        """The guard is per tab, not global."""
-        reader, writer = await self._connect()
-        for tab_id in ("tab-one", "tab-two"):
-            await self._send(writer, {
-                "type": "generateCommitMessage",
-                "tabId": tab_id,
-                "workDir": str(self.work_dir),
-            })
-        await self._await_dispatch(reader, writer)
-        self.assertEqual(
-            await self._wait_for_calls(2, timeout=15), 2,
-            "a generation on one tab must not block another tab",
-        )
-        self.release_file.touch()
-        seen: set[str] = set()
-
-        def _collect(msg: dict[str, Any]) -> bool:
-            if msg.get("type") == "commitMessage":
-                seen.add(str(msg.get("tabId", "")))
-            return {"tab-one", "tab-two"} <= seen
-
-        await self._drain_until(reader, _collect)
 
 
 if __name__ == "__main__":

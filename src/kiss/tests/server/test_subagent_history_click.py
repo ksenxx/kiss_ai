@@ -15,12 +15,12 @@ Spec
    — into their own ``task_history`` row.  Presence of the
    ``subagent`` key implies the row is a sub-agent.
 
-2. ``VSCodeServer._get_history`` filters sub-agent rows out of the
+2. ``AgentServer._get_history`` filters sub-agent rows out of the
    listing entirely — they are an internal implementation detail of
    the parent's ``run_parallel`` tool call and the user-facing
    history tab should only show parent tasks.
 
-3. ``VSCodeServer._replay_session``, when the loaded row carries an
+3. ``AgentServer._replay_session``, when the loaded row carries an
    ``extra.subagent`` blob:
 
    a. Broadcasts ``openSubagentTab`` for the freshly allocated tab
@@ -46,13 +46,13 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 
@@ -220,7 +220,7 @@ class TestReplaySessionOpensSubagentTab:
         )
         server, _events = _make_server()
 
-        parent_agent = ChatSorcarAgent("Sorcar VS Code")
+        parent_agent = ChatSorcarAgent("Sorcar")
         parent_agent._chat_id = chat_id
         parent_state = agent_state.AgentState(
             str(parent_id),

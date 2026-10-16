@@ -4,8 +4,8 @@
 # add your name here
 """Integration tests: request/reply events are per-window.
 
-Invariant: any agent or UI activity in the chat webview of one VS Code
-window must not affect the behavior or UI of the chat webview in
+Invariant: any agent or UI activity in the chat page of one browser
+window must not affect the behavior or UI of the chat page in
 another window.  Each window owns exactly one local connection to the
 shared daemon; historically the daemon *broadcast* every request/reply
 event (``files``, ``ghost``, ``models``, ``history``, ``inputHistory``,
@@ -23,10 +23,10 @@ request (stripping the stamp from the wire payload).
 These tests start a daemon with a temporary endpoint file (not the
 production ``~/.kiss/sorcar-local.json``) and open two real local
 client connections that simulate two windows.  The same
-``ServerApi.dispatch`` body serves both local clients (VS Code
-windows) and remote browser windows, so the
-invariant proven here holds identically for two browser windows and
-for a browser window next to a VS Code window:
+``ServerApi.dispatch`` body serves both local clients and remote
+browser windows, so the invariant proven here holds identically for
+two remote browser windows and for a remote browser window next to a
+local one:
 
 * the ``ready`` handshake of a (re)connecting window fans out
   ``getModels`` / ``getInputHistory`` / ``getConfig`` stamped with the
@@ -77,7 +77,7 @@ def _has_type(reply_type: str) -> Callable[[dict[str, Any]], bool]:
 
 
 class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
-    """Two local connections (= two VS Code windows) sharing one daemon."""
+    """Two local connections (= two chat clients) sharing one daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -116,7 +116,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
     async def _connect(
         self,
     ) -> tuple[Any, Any]:
-        """Open one local connection (simulates one VS Code window)."""
+        """Open one local connection (simulates one chat client)."""
         reader, writer = await open_local_connection(
             self.server, limit=16 * 1024 * 1024,
         )
@@ -178,7 +178,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
     async def test_files_picker_reply_only_to_requesting_window(self) -> None:
         """Typing ``@`` in window A must not pop window B's file picker.
 
-        ``getFiles`` replies (the ``files`` events that the webview's
+        ``getFiles`` replies (the ``files`` events that the chat page's
         ``renderAutocomplete`` turns into the dropdown) must reach only
         the requesting connection.
         """
@@ -370,8 +370,8 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
 
         Browser window A's ``ready`` handshake replies (``models``,
         ``inputHistory``, ``configData``, ``focusInput``) must reach
-        only window A — never browser window B, and never a VS Code
-        window (local connection) sharing the same daemon.  Global
+        only window A — never browser window B, and never a local
+        client (local connection) sharing the same daemon.  Global
         system events (``remote_url``, ``update_available``) remain
         broadcast to everyone.
         """

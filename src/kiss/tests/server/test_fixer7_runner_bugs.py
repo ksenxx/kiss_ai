@@ -14,30 +14,20 @@ Covers:
 - F4: the ``bash_stream`` inline flush broadcast stale text after a
   concurrent ``reset()`` without the generation re-check that
   ``_flush_bash`` performs.
-- F10: a junk ``KISS_VOICE_MIC_BLOCK_SIZE`` env value crashed the voice
-  listener instead of falling back to the default block size.
-- F11: a wake-word match suppressed during cooldown never reset the
-  recognizer, so a phantom WAKE fired from stale audio after the
-  cooldown expired.
 - F16: a ``KeyboardInterrupt`` (Stop during pre-task setup) escaped
   ``_run_task``'s ``except Exception`` so the task vanished silently
   with no ``result`` event.
 
 No mocks/patches/fakes: real :class:`JsonPrinter` subclasses (the same
-technique the existing vscode regression tests use) capture or steer
-broadcasts, real :class:`VSCodeServer` / :class:`AgentState` /
-:class:`ChatSorcarAgent` objects are exercised, and the wake-word
-test streams real synthesized speech through the real Vosk recognizer.
+technique the existing server regression tests use) capture or steer
+broadcasts, real :class:`AgentServer` / :class:`AgentState` /
+:class:`ChatSorcarAgent` objects are exercised.
 """
 
 from __future__ import annotations
 
-import os
 import queue
-import shutil
-import subprocess
 import threading
-import wave
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +37,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -81,7 +71,7 @@ class _FailingClearPrinter(_CapturePrinter):
 
 def test_f1_failed_clear_broadcast_does_not_wedge_tab() -> None:
     printer = _FailingClearPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "f1-tab"
     cmd = {"type": "run", "tabId": tab_id, "prompt": "do something"}
     try:
@@ -106,7 +96,7 @@ def test_f1_failed_clear_broadcast_does_not_wedge_tab() -> None:
 
 def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     viewer, owner = "f3-viewer", "f3-owner"
     try:
         printer.subscribe_tab(100, viewer)
@@ -114,7 +104,7 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
         owner_state = AgentState("200", tab_id=owner, server_owned=True)
         owner_state.user_answer_queue = queue.Queue(maxsize=1)
         owner_state.is_task_active = True
-        owner_state.agent = ChatSorcarAgent("Sorcar VS Code")
+        owner_state.agent = ChatSorcarAgent("Sorcar")
         owner_state.agent._last_task_id = "200"
         agent_state.register(owner_state)
         printer.subscribe_tab(200, owner)
@@ -185,130 +175,6 @@ def test_f4_inline_bash_flush_not_emitted_after_reset() -> None:
 
 
 
-def test_f10_mic_block_size_falls_back_on_junk_env() -> None:
-    from kiss.server.voice_wake import BLOCK_SIZE, mic_block_size
-
-    saved = os.environ.pop("KISS_VOICE_MIC_BLOCK_SIZE", None)
-    try:
-        assert mic_block_size() == BLOCK_SIZE
-        for junk in ("abc", "", "4000.5", "-1", "0", " "):
-            os.environ["KISS_VOICE_MIC_BLOCK_SIZE"] = junk
-            assert mic_block_size() == BLOCK_SIZE, junk
-        os.environ["KISS_VOICE_MIC_BLOCK_SIZE"] = "2048"
-        assert mic_block_size() == 2048
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_VOICE_MIC_BLOCK_SIZE", None)
-        else:
-            os.environ["KISS_VOICE_MIC_BLOCK_SIZE"] = saved
-
-
-HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
-
-
-def _have_vosk() -> bool:
-    try:
-        import vosk  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-def _say_sorcar_pcm(directory: Path) -> bytes:
-    """Synthesize one spoken "Hey Sorcar" as raw 16kHz mono s16le PCM.
-
-    The wake phrase is "Hey Sorcar"; a bare "Sorcar" never wakes.
-    """
-    aiff = directory / "sorcar.aiff"
-    wav = directory / "sorcar.wav"
-    subprocess.run(["say", "Hey Sorcar", "-o", str(aiff)], check=True)
-    subprocess.run(
-        ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
-         str(aiff), str(wav)],
-        check=True,
-    )
-    with wave.open(str(wav), "rb") as wf:
-        return wf.readframes(wf.getnframes())
-
-
-@pytest.mark.skipif(
-    not HAVE_MAC_TTS, reason="requires macOS `say` and `afconvert`",
-)
-@pytest.mark.skipif(not _have_vosk(), reason="requires vosk")
-def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
-    """The suppressed-match path (now calling ``Reset()``) end to end.
-
-    A second "Hey Sorcar" spoken inside the cooldown must (a) be
-    suppressed, (b) leave no stale recognizer state that fires a
-    phantom WAKE out of the following silence once the cooldown
-    expires, and (c) not deafen the detector — a third "Hey Sorcar"
-    spoken well after the cooldown must still fire.
-
-    Note: with the alias grammar in this environment Vosk emits empty
-    *partial* results (matches arrive only as endpointed FINAL
-    results), so the exact pre-fix phantom (a leftover partial
-    re-matching every silent block) is not synthetically reproducible
-    here; this test locks in the observable contract around the fixed
-    code path instead.
-    """
-    from kiss.server.voice_wake import (
-        BLOCK_SIZE,
-        COOLDOWN_SECONDS,
-        SAMPLE_RATE,
-        WakeDetector,
-        default_models_dir,
-        ensure_model,
-    )
-
-    model_dir = ensure_model(default_models_dir())
-    detector = WakeDetector(model_dir)
-    wakes: list[float] = []
-    silence_block = b"\x00" * (BLOCK_SIZE * 2)
-
-    def feed_pcm(pcm: bytes) -> None:
-        step = BLOCK_SIZE * 2
-        for i in range(0, len(pcm), step):
-            if detector.feed(pcm[i : i + step]):
-                wakes.append(detector._audio_seconds)
-
-    def feed_silence(seconds: float) -> None:
-        for _ in range(int(seconds * SAMPLE_RATE / BLOCK_SIZE)):
-            if detector.feed(silence_block):
-                wakes.append(detector._audio_seconds)
-
-    def feed_silence_until_wake(max_seconds: float) -> None:
-        before = len(wakes)
-        for _ in range(int(max_seconds * SAMPLE_RATE / BLOCK_SIZE)):
-            if detector.feed(silence_block):
-                wakes.append(detector._audio_seconds)
-                return
-        assert len(wakes) > before, "expected a wake within the window"
-
-    pcm = _say_sorcar_pcm(tmp_path)
-    utterance_seconds = len(pcm) / 2 / SAMPLE_RATE
-    if utterance_seconds > COOLDOWN_SECONDS - 1.0:
-        pytest.skip("TTS utterance too long to land inside the cooldown")
-
-    feed_pcm(pcm)
-    feed_silence_until_wake(2.0)
-    wake1 = wakes[0]
-
-    feed_pcm(pcm)
-    feed_silence(4.0)
-    if len(wakes) > 1 and wakes[1] - wake1 >= COOLDOWN_SECONDS - 0.05:
-        pytest.skip(
-            "second utterance endpointed after the cooldown expired; "
-            "cannot arrange suppression with this TTS timing"
-        )
-    assert wakes == [wake1], f"unexpected wake(s) after suppression: {wakes}"
-
-    feed_pcm(pcm)
-    feed_silence_until_wake(2.0)
-    assert len(wakes) == 2
-    assert wakes[1] - wake1 >= COOLDOWN_SECONDS
-
-
-
 class _StopDuringSetupPrinter(_CapturePrinter):
     """Injects a real ``KeyboardInterrupt`` into the task setup path.
 
@@ -338,7 +204,7 @@ def test_f16_keyboard_interrupt_during_setup_broadcasts_result(
     tmp_path: Path,
 ) -> None:
     printer = _StopDuringSetupPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "f16-tab"
     try:
         server._run_task({

@@ -4,8 +4,8 @@
 # add your name here
 """Integration tests for the daemon's local channel on RemoteAccessServer.
 
-``RemoteAccessServer`` serves same-machine clients (the VS Code
-extension, the ``sorcar`` CLI, ``run_agent`` sub-agents) over the same
+``RemoteAccessServer`` serves same-machine clients (the ``sorcar``
+CLI, ``run_agent`` sub-agents) over the same
 WSS listener browsers use.  It publishes an endpoint file (mode 0o600)
 carrying its URL, CA certificate path and a per-start token; a loopback
 client that presents the token in its ``auth`` frame is admitted as a
@@ -110,7 +110,8 @@ class TestLocalListener(IsolatedAsyncioTestCase):
         assert endpoint is not None
         self.assertEqual(endpoint.token, self.server.local_token)
         self.assertEqual(endpoint.pid, os.getpid())
-        self.assertEqual(endpoint.url, f"wss://127.0.0.1:{self.server.port}/ws")
+        self.assertEqual(endpoint.url, f"ws://127.0.0.1:{self.server.port}/ws")
+        self.assertIsNone(local_endpoint.client_ssl_context(endpoint))
         assert endpoint.ca is not None
         self.assertTrue(Path(endpoint.ca).is_file())
 
@@ -238,9 +239,8 @@ class TestLocalListener(IsolatedAsyncioTestCase):
     async def test_active_tasks_query_idle_daemon_returns_zero(self) -> None:
         """``activeTasksQuery`` returns count=0 when no agent is running.
 
-        Locks in the wire format the VS Code extension's dependency
-        installer relies on to decide whether to SIGTERM the daemon
-        before the ``ensureDependencies`` post-install step.  An idle
+        Locks in the wire format ``install.sh`` relies on to decide
+        whether to SIGTERM the daemon after an install.  An idle
         daemon must return ``{type: "activeTasksResponse", count: 0,
         tabs: []}`` so the installer is allowed to restart it on a
         fingerprint change.
@@ -269,7 +269,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
         ``AgentState`` in the registry and verifying the local query
         returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
         descriptor — the same shape the SIGTERM log line prints.  This
-        is the signal the extension uses to defer the restart.
+        is the signal the installer uses to defer the restart.
         """
         from kiss.server import agent_state
         from kiss.server.agent_state import AgentState

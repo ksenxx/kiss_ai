@@ -4,12 +4,12 @@
 # add your name here
 """Bug-hunt 4: ``save_config`` must be safe across *processes*.
 
-``vscode_config.save_config`` serialises its read-merge-replace of
+``user_config.save_config`` serialises its read-merge-replace of
 ``~/.kiss/config.json`` with ``_config_lock`` — a ``threading.Lock``,
 which only protects callers inside ONE process.  In production two
-daemons routinely write the same config concurrently (the ``kiss-web``
-daemon persisting ``remote_password``/``tunnel`` state while a VS Code
-window's service daemon persists ``last_model`` or a settings toggle).
+processes routinely write the same config concurrently (the ``kiss-web``
+daemon persisting ``remote_password``/``tunnel`` state while a second
+daemon or the CLI persists ``last_model`` or a settings toggle).
 Two processes that each read the same old file, overlay only their own
 key, and ``os.replace`` it back drop one another's update.
 
@@ -43,7 +43,7 @@ while not os.path.exists(start_file):
     if time.time() > deadline:
         sys.exit(2)
     time.sleep(0.001)
-from kiss.core.vscode_config import load_config, save_config
+from kiss.core.user_config import load_config, save_config
 for i in range(n):
     value = f"{key}-{i}"
     save_config({key: value})

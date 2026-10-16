@@ -4,16 +4,14 @@
 # add your name here
 """E2E tests: a filesystem-root ``workDir`` is treated as absent.
 
-A Dock/Finder-launched VS Code window with no folder open runs its
-extension host with cwd ``/``.  Pre-fix extensions announced that root
-via ``setWorkDir`` and stamped it on commands, which (a) pinned the
-connection to ``/``, (b) poisoned the daemon-global fallback
-``VSCodeServer.work_dir``, (c) persisted ``workDir: "/"`` into the tab
-registry (``tabs.json``), and (d) rooted tasks and the ``@``-mention
-file scan at the whole disk.  The extension-side guard
-(``SorcarSidebarView._getWorkDir``) stops NEW roots at the source, but
-old clients and already-poisoned registry entries still deliver roots
-to the daemon.
+A client that inherited cwd ``/`` (a Dock/Finder-launched process
+with no folder open) used to announce that root via ``setWorkDir``
+and stamp it on commands, which (a) pinned the connection to ``/``,
+(b) poisoned the daemon-global fallback ``AgentServer.work_dir``,
+(c) persisted ``workDir: "/"`` into the tab registry (``tabs.json``),
+and (d) rooted tasks and the ``@``-mention file scan at the whole
+disk.  Old clients and already-poisoned registry entries still deliver
+roots to the daemon.
 
 These tests verify the daemon-side guard at every layer:
 
@@ -40,7 +38,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.core.utils import is_root_dir
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import RemoteAccessServer
@@ -230,7 +228,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
     async def _connect(
         self,
     ) -> tuple[LocalReader, LocalWriter]:
-        """Open one local connection (simulates one VS Code window)."""
+        """Open one local connection (simulates one client)."""
         reader, writer = await open_local_connection(
             self.server, limit=16 * 1024 * 1024,
         )
@@ -291,9 +289,9 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
 
     async def test_root_set_work_dir_does_not_poison_global(self) -> None:
         """``setWorkDir('/')`` must leave the daemon-global fallback
-        (``VSCodeServer.work_dir``) untouched — pre-guard it was
+        (``AgentServer.work_dir``) untouched — pre-guard it was
         adopted verbatim by ``_apply_new_work_dir``."""
-        backend = self.server._vscode_server
+        backend = self.server._agent_server
         before = backend.work_dir
         reader, writer = await self._connect()
         await self._send(writer, {"type": "setWorkDir", "workDir": "/"})
@@ -309,7 +307,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
 
     async def test_explicit_root_work_dir_falls_back_to_pin(self) -> None:
         """A command stamped ``workDir: "/"`` (a poisoned tab in an
-        old webview) must scan the connection's folder, not the whole
+        old chat page) must scan the connection's folder, not the whole
         disk."""
         reader, writer = await self._connect()
         await self._send(
@@ -348,7 +346,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         """``saveConfig`` carries ``work_dir`` NESTED in its config
         object — invisible to dispatch's top-level normalization — so
         ``_apply_new_work_dir`` itself must refuse the root."""
-        backend = self.server._vscode_server
+        backend = self.server._agent_server
         reader, writer = await self._connect()
         await self._send(
             writer,
@@ -371,19 +369,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         self.assertEqual(backend.work_dir, str(self.dir_a))
         # The refused root never reaches config.json either: the
         # persisted directory is still ``dir_a`` (a daemon restart keeps
-        # it, and a VS Code window's ``ifUnset`` seed stays a no-op).
-        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
-        dir_b = Path(self.tmpdir) / "ws_b"
-        dir_b.mkdir()
-        await self._send(
-            writer,
-            {"type": "setWorkDir", "workDir": str(dir_b), "ifUnset": True},
-        )
-        await self._send(writer, {"type": "getConfig"})
-        await self._drain_until(
-            reader, lambda m: m.get("type") == "configData",
-        )
-        self.assertEqual(backend.work_dir, str(self.dir_a))
+        # it).
         self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
 
 
@@ -428,7 +414,7 @@ class TestStartupRootFallback(IsolatedAsyncioTestCase):
 
     async def test_root_kiss_workdir_degrades_to_home(self) -> None:
         """``KISS_WORKDIR=/`` must not root the daemon fallback."""
-        backend = self.server._vscode_server
+        backend = self.server._agent_server
         self.assertNotEqual(backend.work_dir, "/")
         self.assertEqual(backend.work_dir, os.path.expanduser("~"))
 

@@ -42,16 +42,20 @@ if sys.platform == "win32":
 class SshServer:
     """Handle of an ``sshd`` started by :func:`start_sshd`."""
 
-    def __init__(self, process: subprocess.Popen[bytes], port: int, config: Path) -> None:
+    def __init__(
+        self, process: subprocess.Popen[bytes], port: int, config: Path, host: str = "127.0.0.1",
+    ) -> None:
         self.process = process
         self.port = port
         self.config = config
         """Client config file (``-F``) with the key and known-hosts file to use."""
+        self.host = host
+        """The address :attr:`login` names (the listen address, or any address on ``0.0.0.0``)."""
 
     @property
     def login(self) -> str:
-        """``<user>@127.0.0.1:<port>``, the address to register the machine with."""
-        return f"{getpass.getuser()}@127.0.0.1:{self.port}"
+        """``<user>@<host>:<port>``, the address to register the machine with."""
+        return f"{getpass.getuser()}@{self.host}:{self.port}"
 
     def stop(self) -> None:
         """Kill the server and wait for it."""
@@ -62,6 +66,7 @@ class SshServer:
 
 def start_sshd(
     workdir: Path, remote_home: Path | None, home: Path | None = None, timeout: float = 30.0,
+    host: str = "127.0.0.1",
 ) -> SshServer:
     """Start an ``sshd`` under *workdir* whose sessions see ``KISS_HOME=remote_home``.
 
@@ -73,6 +78,8 @@ def start_sshd(
         home: The sessions' ``HOME``; default *remote_home* (one of the
             two must be given).
         timeout: Seconds to wait for the port to open.
+        host: The address to listen on and to log in at (a LAN address
+            makes the machine a non-loopback peer of a daemon).
 
     Raises:
         RuntimeError: When ``sshd`` exits or the port stays closed.
@@ -97,7 +104,7 @@ def start_sshd(
     port = find_free_port()
     process = subprocess.Popen([
         SSHD, "-D", "-e", "-f", "/dev/null", "-p", str(port), "-h", str(host_key),
-        "-o", "ListenAddress=127.0.0.1", "-o", "PidFile=none",
+        "-o", f"ListenAddress={host}", "-o", "PidFile=none",
         "-o", f"AuthorizedKeysFile={authorized}", "-o", "StrictModes=no",
         "-o", "PasswordAuthentication=no", "-o", "UsePAM=no",
         "-o", f"SetEnv=KISS_HOME={remote_home or ''} HOME={home or remote_home}",
@@ -108,8 +115,8 @@ def start_sshd(
         if process.poll() is not None:
             raise RuntimeError(f"sshd exited with {process.returncode}")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                return SshServer(process, port, config)
+            with socket.create_connection((host, port), timeout=1.0):
+                return SshServer(process, port, config, host)
         except OSError:
             time.sleep(0.2)
     process.kill()

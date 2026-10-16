@@ -4,7 +4,7 @@
 # add your name here
 """A worktree a run left unmerged is parked, never published, by the next run.
 
-Reproduced end to end with a **real** :class:`~kiss.server.server.VSCodeServer`,
+Reproduced end to end with a **real** :class:`~kiss.server.server.AgentServer`,
 a **real** :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`,
 a **real** temporary git repository and a **real** local OpenAI-compatible
 SSE endpoint that the agent genuinely talks to.  No mock, patch, fake or
@@ -38,7 +38,7 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -148,7 +148,7 @@ class _WorktreeRunnerHarness(unittest.TestCase):
         self._calls_lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:

@@ -39,7 +39,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_workflow_bugs import (  # noqa: F401
     _make_repo,
 )
@@ -73,9 +73,9 @@ def _make_wt_with_commit(
     return wt
 
 
-def _server(repo: Path) -> tuple[VSCodeServer, list[dict[str, Any]]]:
+def _server(repo: Path) -> tuple[AgentServer, list[dict[str, Any]]]:
     """Real server whose printer broadcasts are captured into a list."""
-    server = VSCodeServer()
+    server = AgentServer()
     server.work_dir = str(repo)
     events: list[dict[str, Any]] = []
 
@@ -177,7 +177,7 @@ class TestBug4CloseTabOrphansWorktree:
         """Closing a tab commits the work to its branch, never to main."""
         server, events = _server(self.repo)
         tab_id = "tab-close-test"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = _register_tab_state(tab_id, agent)
 
         branch = "kiss/wt-close-test"
@@ -232,7 +232,7 @@ class TestBug4CloseTabOrphansWorktree:
         """Closing a tab with a no-change worktree invents no work."""
         server, _events = _server(self.repo)
         tab_id = "tab-close-empty"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = _register_tab_state(tab_id, agent)
 
         branch = "kiss/wt-close-empty"
@@ -273,7 +273,7 @@ class TestBug4CloseTabOrphansWorktree:
         """Closing a tab with an active task must NOT clean up worktree."""
         server, _events = _server(self.repo)
         tab_id = "tab-active"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = _register_tab_state(tab_id, agent)
         state.is_task_active = True
 

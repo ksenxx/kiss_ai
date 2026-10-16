@@ -33,7 +33,7 @@ again).  The permanent tests below reproduce the race two ways — a
 deterministic schedule that parks the run inside its publication
 broadcast, and a brute-force concurrency sweep of the whole window —
 and assert the open/closed convergence invariant.  Real
-:class:`VSCodeServer`, real threads, real tab registry; only the
+:class:`AgentServer`, real threads, real tab registry; only the
 agent's LLM run is replaced by a deterministic function (no mocks).
 """
 
@@ -50,7 +50,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _Base(unittest.TestCase):
@@ -69,7 +69,7 @@ class _Base(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.use_private_tab_registry(Path(self.tmpdir) / "tabs.json")
         self.work_dir = str(Path(self.tmpdir) / "work")
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)

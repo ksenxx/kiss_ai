@@ -22,7 +22,7 @@ signals arrival and then sleeps in small interruptible increments,
 and the test injects the KeyboardInterrupt exactly there via
 ``PyThreadState_SetAsyncExc`` (what the stop watchdog does).
 
-No mocks: a real ``VSCodeServer``, a real SEA file, a real
+No mocks: a real ``AgentServer``, a real SEA file, a real
 worker thread, real KI injection.
 """
 
@@ -39,7 +39,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
@@ -52,7 +52,7 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-rr-c-rc2-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

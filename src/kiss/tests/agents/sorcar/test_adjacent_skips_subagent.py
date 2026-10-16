@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Adjacent-task navigation in the chat webview MUST skip sub-agent rows.
+"""Adjacent-task navigation on the chat page MUST skip sub-agent rows.
 
 Sub-agent rows are an internal implementation detail of the parent's
 ``run_parallel`` tool call; they should never appear in the main chat

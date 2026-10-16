@@ -23,12 +23,12 @@ BUG-64: ``ChatSorcarAgent.run()`` silently drops
     have set ``_merge_conflict_warning`` just before calling
     ``run()``, and that warning is lost too.
 
-BUG-65: ``VSCodeServer._new_chat`` does not block when a merge
+BUG-65: ``AgentServer._new_chat`` does not block when a merge
     review is in progress.  ``_run_task_inner`` refuses new tasks
     while ``tab.is_merging`` is True, but ``_new_chat`` calls
     ``tab.agent.new_chat()`` which triggers ``_release_worktree``
     that auto-commits + squash-merges — destroying the user's
-    hunk-picking intent and leaving the VS Code merge view stale.
+    hunk-picking intent and leaving the merge view stale.
     Symmetric with the ``_run_task_inner`` guard.
 
 RED-8: ``GitWorktreeOps.manual_merge_branch`` and
@@ -220,8 +220,7 @@ class TestRed8ManualMergeBranchDeadCode:
 
         The symbols live in ``kiss.agents.sorcar.git_worktree``, so
         production callers could only be its sorcar siblings.  Test
-        files (including the kiss_project snapshot bundled under the
-        VS Code extension) are not production code.
+        files are not production code.
         """
         import re
 

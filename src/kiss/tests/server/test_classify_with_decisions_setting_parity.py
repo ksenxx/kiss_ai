@@ -2,20 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Parity tests for the settings panel's "Use Jev (decisions model)" checkbox.
+"""Parity tests for the ``classify_with_decisions`` config key.
 
-The checkbox (``#cfg-classify-with-decisions`` in ``media/chat.html``)
-is bound by ``media/main.js`` to the ``classify_with_decisions`` config
-key, which :func:`kiss.agents.sorcar.decide_tool.decisions_tool_available`
+The key, which :func:`kiss.agents.sorcar.decide_tool.decisions_tool_available`
 reads to decide whether the pre-run classifier asks OpenRouter's
 ``~typesafe/jev-latest`` decisions model first or goes straight to the
-LLM classifier, and whether the agent is offered the ``decide`` tool.
-These tests pin the whole loop the checkbox rides on, end to end and
+LLM classifier, and whether the agent is offered the ``decide`` tool,
+is saved through the same ``saveConfig`` command the Settings panel
+uses for its remaining toggles (the "Use Jev (decisions model)" and
+"Classify tasks before running" boxes themselves left the panel).
+These tests pin the whole loop the key rides on, end to end and
 without test doubles:
 
-* the exact ``saveConfig`` payload ``main.js`` posts when the box is
-  unticked and the panel closes (``{"classify_with_decisions": false}``,
-  a merge-style partial payload) travels over a real client connection
+* a merge-style partial ``saveConfig`` payload
+  (``{"classify_with_decisions": false}``) travels over a real client connection
   to a real :class:`~kiss.server.web_server.RemoteAccessServer`, through
   the shared command dispatch into the isolated ``config.json``, and
   flips ``decisions_tool_available()`` — the daemon-side effect the
@@ -31,12 +31,12 @@ without test doubles:
   connection;
 * a partial save touches only that key (``classify_tasks`` and the rest
   stay as stored);
-* the JSDOM test ``agents/vscode/test/configToggleInit.test.js`` — which
+* the JSDOM test ``webapp/test/configToggleInit.test.js`` — which
   drives the real ``chat.html`` + ``main.js`` through the checkbox's
   init / poll / save paths — passes under ``node``.
 
-The browser webapp speaks the same JSON frames over WSS that the VS
-Code extension speaks over the local endpoint used here; both go through
+The browser chat page speaks the same JSON frames over WSS that a
+client speaks over the local endpoint used here; both go through
 ``RemoteAccessServer._dispatch_client_command`` verbatim.
 """
 
@@ -59,9 +59,9 @@ from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _KISS_ROOT = Path(__file__).resolve().parents[2]
-_VSCODE_DIR = _KISS_ROOT / "agents" / "vscode"
-_TOGGLE_TEST_JS = _VSCODE_DIR / "test" / "configToggleInit.test.js"
-_JSDOM_PKG = _VSCODE_DIR / "node_modules" / "jsdom" / "package.json"
+_WEBAPP_DIR = _KISS_ROOT / "webapp"
+_TOGGLE_TEST_JS = _WEBAPP_DIR / "test" / "configToggleInit.test.js"
+_JSDOM_PKG = _WEBAPP_DIR / "node_modules" / "jsdom" / "package.json"
 
 # What main.js's collectConfigForm posts for the unticked / ticked box.
 _UNTICKED_SAVE = {"type": "saveConfig", "config": {"classify_with_decisions": False}}
@@ -207,18 +207,18 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertFalse(decisions_tool_available())
 
     async def test_jsdom_toggle_test_passes(self) -> None:
-        """The checkbox's init / poll / save behaviour holds in the real webview."""
+        """The real chat page no longer shows the classify boxes; the other toggles still work."""
         if shutil.which("node") is None:
             self.skipTest("node is not available on PATH")
         if not _JSDOM_PKG.is_file():
             self.skipTest(
-                f"jsdom is not installed under {_VSCODE_DIR / 'node_modules'}"
+                f"jsdom is not installed under {_WEBAPP_DIR / 'node_modules'}"
                 " — run `npm ci` there"
             )
         proc = await asyncio.to_thread(
             subprocess.run,
             ["node", str(_TOGGLE_TEST_JS)],
-            cwd=str(_VSCODE_DIR),
+            cwd=str(_WEBAPP_DIR),
             capture_output=True,
             text=True,
             timeout=300,
@@ -228,5 +228,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
             0,
             f"configToggleInit.test.js failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
         )
-        self.assertIn("Classify-with-Jev edit alone is flushed", proc.stdout)
+        self.assertIn("the classify toggles are not in the Settings UI", proc.stdout)
+        self.assertIn("the memory edit alone is flushed before configData", proc.stdout)
         self.assertIn("all tests passed", proc.stdout)

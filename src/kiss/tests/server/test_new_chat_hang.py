@@ -5,11 +5,10 @@
 """Test: running a task after newChat should not hang.
 
 Root cause: task_done was broadcast from inside the try block of _run_task,
-before the finally block that sends status:running:false.  The webview
-received task_done and enabled input, but the TypeScript extension's
-_isRunning stayed True (only updated by 'status' events).  When the user
-sent a new task, the extension's submit handler silently dropped it because
-_isRunning was True.
+before the finally block that sends status:running:false.  The chat page
+received task_done and enabled input, but its _isRunning flag stayed True
+(only updated by 'status' events).  When the user sent a new task, the
+page's submit handler silently dropped it because _isRunning was True.
 
 Fix: Move task_done/task_stopped/task_error broadcasts to the end of the
 finally block, right before status:running:false, so both arrive together
@@ -26,7 +25,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
@@ -35,8 +34,8 @@ def _tab_task_thread(tab_id: str) -> threading.Thread | None:
     return state.task_thread if state is not None else None
 
 
-def _make_server(tmpdir: str) -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    server = VSCodeServer()
+def _make_server(tmpdir: str) -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -181,7 +180,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
         init_repo(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         import io
         import sys
         self._real_stdout = sys.stdout

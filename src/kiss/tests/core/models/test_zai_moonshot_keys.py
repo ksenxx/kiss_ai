@@ -5,7 +5,7 @@ Moonshot AI (and *not* MiniMax) across every surface that previously
 referenced MiniMax:
 
 * ``kiss.core.config.Config`` field names and env-var defaults.
-* The VS Code settings panel allowlist + HTML inputs + JS env mapping.
+* The chat page's settings panel allowlist + HTML inputs + JS env mapping.
 * Provider-routing functions in ``kiss.core.models.model_info``.
 * The provider/vendor display used by the model picker.
 * The ``MODEL_INFO.json`` catalog (at least one glm-* and one moonshot/kimi

@@ -64,10 +64,10 @@ def _make_remote_server() -> Any:
 
 
 def _start_blocked_worker(
-    vscode: Any, tab_id: str, work_dir: str,
+    agent_server: Any, tab_id: str, work_dir: str,
 ) -> tuple[threading.Thread, AgentState, str]:
     """Start a real ``_run_task`` worker blocked inside ``agent.run``."""
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = AgentState(
         f"pre-{tab_id}",
         agent=agent,
@@ -105,7 +105,7 @@ def _start_blocked_worker(
 
     agent.run = blocked_run  # type: ignore[method-assign, assignment]
     worker = threading.Thread(
-        target=vscode._run_task,
+        target=agent_server._run_task,
         args=({
             "type": "run",
             "prompt": f"stop-once-{tab_id}",
@@ -154,9 +154,9 @@ class TestStopInjectsOnce(TestCase):
 
     def test_slow_cleanup_is_not_reinterrupted(self) -> None:
         remote = _make_remote_server()
-        vscode = remote._vscode_server
+        agent_server = remote._agent_server
         worker, state, task_id = _start_blocked_worker(
-            vscode, "stop-once-1", self.work_dir,
+            agent_server, "stop-once-1", self.work_dir,
         )
         # Make sure the runner's connection exists before the lock is
         # taken, so the row update below waits on the busy handler
@@ -168,7 +168,7 @@ class TestStopInjectsOnce(TestCase):
         try:
             with self.assertLogs("kiss.server.task_runner", level="DEBUG") as logs:
                 t0 = time.monotonic()
-                vscode._stop_task("stop-once-1")
+                agent_server._stop_task("stop-once-1")
                 # Just before the watchdog's retry moment the worker must
                 # be in its (lock-blocked) cleanup: the first interrupt
                 # was handled and the stop acknowledged.
@@ -213,8 +213,8 @@ class TestStopInjectsOnce(TestCase):
         must still happen and the run must end as stopped.
         """
         remote = _make_remote_server()
-        vscode = remote._vscode_server
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent_server = remote._agent_server
+        agent = ChatSorcarAgent("Sorcar")
         state = AgentState(
             "pre-stop-swallow", agent=agent, tab_id="stop-swallow",
             server_owned=True, stop_event=threading.Event(),
@@ -244,7 +244,7 @@ class TestStopInjectsOnce(TestCase):
 
         agent.run = swallowing_run  # type: ignore[method-assign, assignment]
         worker = threading.Thread(
-            target=vscode._run_task,
+            target=agent_server._run_task,
             args=({
                 "type": "run", "prompt": "stop-swallow", "tabId": "stop-swallow",
                 "workDir": self.work_dir, "isParallel": False,
@@ -256,7 +256,7 @@ class TestStopInjectsOnce(TestCase):
         state.task_thread = worker
         worker.start()
         self.assertTrue(entered.wait(timeout=10))
-        vscode._stop_task("stop-swallow")
+        agent_server._stop_task("stop-swallow")
         self.assertTrue(swallowed.wait(timeout=10), "first injection not delivered")
         self.assertFalse(state.stop_acknowledged)
         with agent_state.STATE_LOCK:

@@ -25,7 +25,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
@@ -110,7 +110,7 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
     async def test_open_file_falls_back_to_server_work_dir(self) -> None:
         # Backend work dir cleared: the third fallback arm (this
         # server's own work_dir) must still resolve relative paths.
-        self.server._vscode_server.work_dir = ""
+        self.server._agent_server.work_dir = ""
         reply = await self._roundtrip(
             [{"type": "openFile", "path": "hello.txt", "tabId": "t"}],
             "fileContent",

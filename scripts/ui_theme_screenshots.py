@@ -7,11 +7,7 @@
 
 Surfaces:
 
-* ``vscode`` - the chat webview (``media/chat.html`` + ``main.css``) as the
-  VS Code sidebar shows it, in Dark+, Light+ and Dark High Contrast.  The
-  ``--vscode-*`` variables are the defaults of those built-in themes
-  (microsoft/vscode ``theme-defaults`` JSON and colour registry).
-* ``remote`` - the remote webapp page built by
+* ``remote`` - the chat page built by
   ``kiss.server.web_server._build_html`` (``main.css`` +
   ``remote-codex.css``), desktop and phone widths, dark and light.
 * ``share`` - the self-contained shared-chat page
@@ -46,112 +42,9 @@ from kiss.viz_trajectory import server as viz_server
 
 MEDIA_DIR = Path(web_server.MEDIA_DIR)
 
-FONT_VARS = {
-    "font-family": (
-        '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", '
-        'system-ui, Ubuntu, "Droid Sans", sans-serif'
-    ),
-    "font-size": "13px",
-    "editor-font-family": 'Menlo, Monaco, "Courier New", monospace',
-    "editor-font-size": "12px",
-}
-
-# Built-in theme defaults for every --vscode-* variable the CSS reads.
-# A missing key means the theme leaves that colour unset (VS Code emits
-# no variable), so the stylesheet's own fallback applies.
-THEMES: dict[str, tuple[str, dict[str, str]]] = {
-    "dark-plus": ("vscode-dark", {
-        "editor-background": "#1e1e1e", "editor-foreground": "#d4d4d4",
-        "foreground": "#cccccc", "descriptionForeground": "#ccccccb3",
-        "errorForeground": "#f48771", "focusBorder": "#007fd4",
-        "icon-foreground": "#c5c5c5", "input-background": "#3c3c3c",
-        "input-foreground": "#cccccc", "input-placeholderForeground": "#a6a6a6",
-        "button-background": "#0e639c", "button-foreground": "#ffffff",
-        "button-hoverBackground": "#1177bb",
-        "list-hoverBackground": "#2a2d2e",
-        "list-inactiveSelectionBackground": "#37373d",
-        "menu-background": "#252526", "menu-foreground": "#cccccc",
-        "menu-selectionBackground": "#0078d4", "panel-border": "#80808059",
-        "scrollbarSlider-background": "#79797966",
-        "sideBar-background": "#252526", "tab-activeForeground": "#ffffff",
-        "tab-inactiveForeground": "#a6a6a6",
-        "textCodeBlock-background": "#0a0a0a66",
-        "textLink-foreground": "#3794ff", "textLink-activeForeground": "#3794ff",
-        "toolbar-hoverBackground": "#5a5d5e50", "widget-border": "#303031",
-        "widget-shadow": "#0000005c", "editorWidget-background": "#252526",
-        "editorWarning-foreground": "#cca700",
-        "editorGroupHeader-tabsBackground": "#252526",
-        "activityBar-foreground": "#ffffff",
-        "activityBar-inactiveForeground": "#ffffff66",
-        "activityBar-activeBorder": "#ffffff",
-        "terminal-ansiRed": "#cd3131", "terminal-ansiGreen": "#0dbc79",
-        "terminal-ansiYellow": "#e5e510", "terminal-ansiMagenta": "#bc3fbc",
-        "terminal-ansiCyan": "#11a8cd",
-        "charts-green": "#89d185", "charts-red": "#f14c4c",
-        "charts-yellow": "#cca700", "charts-purple": "#b180d7",
-    }),
-    "light-plus": ("vscode-light", {
-        "editor-background": "#ffffff", "editor-foreground": "#000000",
-        "foreground": "#616161", "descriptionForeground": "#717171",
-        "errorForeground": "#a1260d", "focusBorder": "#0090f1",
-        "icon-foreground": "#424242", "input-background": "#ffffff",
-        "input-foreground": "#616161", "input-placeholderForeground": "#767676",
-        "button-background": "#007acc", "button-foreground": "#ffffff",
-        "button-hoverBackground": "#0062a3",
-        "list-hoverBackground": "#e8e8e8",
-        "list-inactiveSelectionBackground": "#e4e6f1",
-        "menu-background": "#ffffff", "menu-foreground": "#616161",
-        "menu-selectionBackground": "#0060c0", "panel-border": "#80808059",
-        "scrollbarSlider-background": "#64646466",
-        "sideBar-background": "#f3f3f3", "tab-activeForeground": "#333333",
-        "tab-inactiveForeground": "#616161",
-        "textCodeBlock-background": "#dcdcdc66",
-        "textLink-foreground": "#006ab1", "textLink-activeForeground": "#006ab1",
-        "toolbar-hoverBackground": "#b8b8b850", "widget-border": "#d4d4d4",
-        "widget-shadow": "#00000029", "editorWidget-background": "#f3f3f3",
-        "editorWarning-foreground": "#bf8803",
-        "editorGroupHeader-tabsBackground": "#f3f3f3",
-        "activityBar-foreground": "#ffffff",
-        "activityBar-inactiveForeground": "#ffffff66",
-        "activityBar-activeBorder": "#ffffff",
-        "terminal-ansiRed": "#cd3131", "terminal-ansiGreen": "#107c10",
-        "terminal-ansiYellow": "#949800", "terminal-ansiMagenta": "#bc05bc",
-        "terminal-ansiCyan": "#0598bc",
-        "charts-green": "#388a34", "charts-red": "#e51400",
-        "charts-yellow": "#bf8803", "charts-purple": "#652d90",
-    }),
-    "high-contrast": ("vscode-high-contrast", {
-        "editor-background": "#000000", "editor-foreground": "#ffffff",
-        "foreground": "#ffffff", "descriptionForeground": "#ffffffb3",
-        "errorForeground": "#f48771", "focusBorder": "#f38518",
-        "contrastBorder": "#6fc3df", "contrastActiveBorder": "#f38518",
-        "icon-foreground": "#ffffff", "input-background": "#000000",
-        "input-foreground": "#ffffff", "input-border": "#6fc3df",
-        "input-placeholderForeground": "#ffffffb3",
-        "button-background": "#000000", "button-foreground": "#ffffff",
-        "button-border": "#6fc3df", "list-hoverBackground": "#ffffff1a",
-        "menu-background": "#000000", "menu-foreground": "#ffffff",
-        "panel-border": "#6fc3df", "scrollbarSlider-background": "#6fc3df99",
-        "sideBar-background": "#000000", "sideBar-border": "#6fc3df",
-        "tab-activeForeground": "#ffffff", "tab-inactiveForeground": "#ffffff",
-        "textCodeBlock-background": "#000000",
-        "textLink-foreground": "#21a6ff", "textLink-activeForeground": "#21a6ff",
-        "widget-border": "#6fc3df", "editorWidget-background": "#0c141f",
-        "editorWarning-foreground": "#ffd370",
-        "activityBar-foreground": "#ffffff",
-        "activityBar-inactiveForeground": "#ffffff",
-        "activityBar-activeBorder": "#6fc3df",
-        "terminal-ansiRed": "#cd0000", "terminal-ansiGreen": "#00cd00",
-        "terminal-ansiYellow": "#cdcd00", "terminal-ansiMagenta": "#cd00cd",
-        "terminal-ansiCyan": "#00cdcd",
-        "charts-green": "#89d185", "charts-red": "#f48771",
-        "charts-yellow": "#ffd370", "charts-purple": "#b180d7",
-    }),
-}
-
 STUB_API_JS = """
 window.__posted = [];
-window.acquireVsCodeApi = function () {
+window.acquireTransport = function () {
   return {
     postMessage: function (m) { window.__posted.push(m); },
     setState: function () {},
@@ -239,92 +132,26 @@ def start_media_server() -> tuple[http.server.ThreadingHTTPServer, str]:
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
-def theme_vars_css(values: dict[str, str]) -> str:
-    """Render a ``:root`` block defining the given ``--vscode-*`` values."""
-    lines = [f"  --vscode-{k}: {v};" for k, v in {**FONT_VARS, **values}.items()]
-    return ":root {\n" + "\n".join(lines) + "\n}\n"
-
-
-def vscode_page_html(theme: str) -> str:
-    """Fill ``chat.html`` the way ``SorcarTab.buildChatHtml`` does.
-
-    Args:
-        theme: Key of :data:`THEMES`.
-
-    Returns:
-        HTML for the webview with the theme's variables and body class.
-    """
-    body_class, values = THEMES[theme]
-    media = "/media/"
-    subs = {
-        "VIEWPORT": "width=device-width, initial-scale=1.0",
-        "CSP_META": "",
-        "STYLE_HREF": media + "main.css",
-        "BRAND_STYLE_HREF": media + "brand.css",
-        "WELCOME_LOGO_SRC": media + "welcome-logo.png",
-        "WELCOME_LOGO_DARK_SRC": media + "welcome-logo-dark.png",
-        # The dark sheet, as SorcarTab.ts serves it; main.js swaps in
-        # the light one from __HLJS_THEME_CSS__ when the body class
-        # says the editor theme is light.
-        "HLJS_CSS_HREF": media + "highlight-vscode-dark.css",
-        "HEAD_STYLE": "<style>" + theme_vars_css(values) + "</style>",
-        "BODY_CLASS_ATTR": f' class="{body_class}"',
-        "PRODUCT_NAME": "KISS Sorcar",
-        "TAGLINE": "Keep it simple, stupid",
-        "BRAND_JSON": '{"productName": "KISS Sorcar", "shortName": "Sorcar"}',
-        "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
-        "ENTERKEYHINT": "",
-        "MODEL_NAME": "claude-opus-5-5",
-        "VERSION_SUFFIX": "",
-        "AUTH_MODAL": "",
-        "NONCE_ATTR": "",
-        "HLJS_SRC": media + "highlight.min.js",
-        "MARKED_SRC": media + "marked.min.js",
-        "API_SRC": media + "api.js",
-        "PANEL_COPY_SRC": media + "panelCopy.js",
-        "CTX_MENU_SRC": media + "contentContextMenu.js",
-        "TREE_MENU_SRC": media + "treeContextMenu.js",
-        "MAIN_SRC": media + "main.js",
-        "SHIM_SCRIPT": (
-            "<script>window.__HLJS_THEME_CSS__ = {"
-            f'"dark": "{media}highlight-vscode-dark.css", '
-            f'"light": "{media}highlight-vscode-light.css"'
-            "};</script><script>" + STUB_API_JS + "</script>"
-        ),
-        "TRICKS_JSON": "[]",
-        "TIPS_JSON": '{"tips": [], "show": false}',
-        "TIPS_SRC": media + "tips.js",
-        "VOICE_SRC": media + "voice.js",
-        "VOICE_CONFIG": '{"mode": "off"}',
-    }
-    tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    return re.sub(
-        r"( ?)\{\{([A-Z_]+)\}\}",
-        functools.partial(_fill_placeholder, subs),
-        tpl,
-    )
-
-
-def _fill_placeholder(subs: dict[str, str], m: re.Match[str]) -> str:
-    """Replace one ``{{KEY}}`` placeholder (see ``web_server._build_html``)."""
-    space, key = m.group(1), m.group(2)
-    if key not in subs:
-        return m.group(0)
-    if key in {"BODY_CLASS_ATTR", "ENTERKEYHINT", "NONCE_ATTR"}:
-        return subs[key]
-    return space + subs[key]
-
-
 def remote_page_html() -> str:
-    """Return the real remote page with the WebSocket shim stubbed out."""
+    """Return the real chat page with its WebSocket transport stubbed out."""
     page = web_server._build_html()
-    shim = f"<script>{web_server._WS_SHIM_JS}</script>"
-    assert shim in page, "remote page no longer inlines the WebSocket shim"
-    return page.replace(shim, "<script>" + STUB_API_JS + "</script>")
+    stubbed, n = re.subn(
+        r'<script src="[^"]*transport\.js[^"]*"></script>',
+        "<script>" + STUB_API_JS + "</script>",
+        page,
+    )
+    assert n == 1, "the chat page no longer loads media/transport.js"
+    return stubbed
 
 
 def open_page(page: Page, base: str, html: str, name: str) -> None:
-    """Load ``html`` at a URL on the media server's origin."""
+    """Load ``html`` at a URL on the media server's origin.
+
+    The tips window would otherwise auto-open over every scene (the page
+    is served with ``show: true``), so the browser opts out of it the way
+    the user's "Don't show tips automatically" choice does (``tips.js``).
+    """
+    page.add_init_script("try { localStorage.setItem('kissTipsOptOut', '1'); } catch {}")
     page.route(
         f"{base}/__page__/{name}",
         functools.partial(_fulfil_html, html),
@@ -412,8 +239,7 @@ def capture(out: Path) -> None:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                transcript = capture_vscode(browser, base, out)
-                capture_remote(browser, base, out)
+                transcript = capture_remote(browser, base, out)
                 capture_share(browser, transcript, out)
                 capture_viz(browser, out)
             finally:
@@ -422,44 +248,32 @@ def capture(out: Path) -> None:
         server.shutdown()
 
 
-def capture_vscode(browser, base: str, out: Path) -> str:  # noqa: ANN001
-    """Capture the chat webview in every VS Code theme.
+def capture_remote(browser, base: str, out: Path) -> str:  # noqa: ANN001
+    """Capture the chat page at desktop and phone widths, dark and light.
 
     Returns:
         The rendered transcript markup (reused for the share page).
     """
     transcript = ""
-    for theme in THEMES:
-        ctx = browser.new_context(viewport={"width": 460, "height": 900})
-        try:
-            page = ctx.new_page()
-            open_page(page, base, vscode_page_html(theme), f"vscode-{theme}")
-            transcript = chat_scenes(page, out, f"vscode-{theme}")
-        finally:
-            ctx.close()
-    return transcript
-
-
-def capture_remote(browser, base: str, out: Path) -> None:  # noqa: ANN001
-    """Capture the remote webapp at desktop and phone widths, dark and light."""
     for width, height, label in ((1280, 800, "desktop"), (390, 844, "phone")):
-        for light in (False, True):
+        for theme in ("light", "dark"):
             ctx = browser.new_context(viewport={"width": width, "height": height})
             try:
                 page = ctx.new_page()
+                # The page applies the theme saved under this key on load
+                # (applyRemoteTheme in main.js), highlight.js sheet included.
+                page.add_init_script(
+                    f"try {{ localStorage.setItem('kissRemoteTheme', '{theme}'); }} catch {{}}"
+                )
                 open_page(page, base, remote_page_html(), f"remote-{label}")
-                if light:
-                    # The page's own toggle (applyRemoteTheme in main.js)
-                    # also swaps the highlight.js sheet and the menu label.
-                    page.evaluate("() => document.getElementById('theme-btn').click()")
-                    page.wait_for_function(
-                        "() => document.body.classList.contains('light-theme')"
-                    )
-                    page.wait_for_timeout(300)
-                theme = "light" if light else "dark"
-                chat_scenes(page, out, f"remote-{label}-{theme}")
+                page.wait_for_function(
+                    "light => document.body.classList.contains('light-theme') === light",
+                    arg=theme == "light",
+                )
+                transcript = chat_scenes(page, out, f"remote-{label}-{theme}")
             finally:
                 ctx.close()
+    return transcript
 
 
 def capture_share(browser, transcript: str, out: Path) -> None:  # noqa: ANN001

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for 100% branch coverage of sorcar/ and vscode/ modules.
+"""Integration tests for 100% branch coverage of sorcar/ modules.
 
 No mocks, patches, fakes, or test doubles. All tests use real objects.
 """

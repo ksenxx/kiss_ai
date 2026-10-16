@@ -19,7 +19,7 @@ the legacy squash-merge path and the baseline cherry-pick path.
 
 Bug 2 (inconsistency): the worktree claim must be released whenever
 the user explicitly merges or discards,
-but only the VS Code mixin released it — calling the public
+but only the server's worktree mixin released it — calling the public
 :meth:`ChatSorcarAgent.merge` / :meth:`~ChatSorcarAgent.discard`
 API directly left the stopped-task flag stale on the agent.
 """

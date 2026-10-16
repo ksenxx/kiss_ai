@@ -5,10 +5,10 @@
 """Integration tests for update_models.py write-target resolution.
 
 The script must write to the *source repository* ``MODEL_INFO.json``, not
-to a bundled copy (e.g. the VS Code extension's kiss_project directory).
+to a bundled copy (e.g. an installed copy of the project).
 The root cause of the original bug was that ``PROJECT_ROOT`` was computed
-from ``__file__``, which resolves to the extension copy when Sorcar runs
-the script from the extension's working directory.
+from ``__file__``, which resolves to the bundled copy when Sorcar runs
+the script from the installed copy's working directory.
 
 These tests verify that ``_find_project_root()`` correctly resolves to the
 source repo via ``KISS_WORKDIR``, ``.git`` detection, or ``__file__`` fallback,
@@ -36,12 +36,12 @@ def test_find_project_root_prefers_kiss_workdir_over_file(
 ) -> None:
     """KISS_WORKDIR should take priority over __file__-based resolution."""
     source_repo = tmp_path / "source_repo"
-    extension_copy = tmp_path / "extension_copy"
+    bundled_copy = tmp_path / "bundled_copy"
     _make_fake_project(source_repo)
-    _make_fake_project(extension_copy)
+    _make_fake_project(bundled_copy)
 
     monkeypatch.setenv("KISS_WORKDIR", str(source_repo))
-    monkeypatch.chdir(extension_copy)
+    monkeypatch.chdir(bundled_copy)
 
     import kiss.scripts.update_models as mod
 
@@ -61,8 +61,8 @@ def test_find_project_root_uses_git_dir_when_no_workdir(
     _make_fake_project(source_repo)
     (source_repo / ".git").mkdir()
 
-    extension_copy = tmp_path / "extension_copy"
-    _make_fake_project(extension_copy)
+    bundled_copy = tmp_path / "bundled_copy"
+    _make_fake_project(bundled_copy)
 
     monkeypatch.delenv("KISS_WORKDIR", raising=False)
     monkeypatch.chdir(source_repo)
@@ -90,15 +90,15 @@ def test_find_project_root_falls_back_to_file(
     )
 
 
-def test_apply_updates_writes_to_workdir_not_extension(
+def test_apply_updates_writes_to_workdir_not_bundled_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end: apply_updates_to_file must write to the KISS_WORKDIR target.
 
-    Simulates the bug scenario: script ``__file__`` is in an extension copy,
+    Simulates the bug scenario: script ``__file__`` is in a bundled copy,
     but ``KISS_WORKDIR`` points to the source repo. The write must go to the
-    source repo, not the extension copy.
+    source repo, not the bundled copy.
     """
     source_repo = tmp_path / "source_repo"
     _make_fake_project(source_repo)
@@ -125,10 +125,10 @@ def test_apply_updates_writes_to_workdir_not_extension(
     source_model_info = source_repo / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
     source_model_info.write_text(json.dumps(initial, indent=2) + "\n")
 
-    extension_copy = tmp_path / "extension_copy"
-    _make_fake_project(extension_copy)
-    ext_model_info = extension_copy / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
-    ext_model_info.write_text(json.dumps(initial, indent=2) + "\n")
+    bundled_copy = tmp_path / "bundled_copy"
+    _make_fake_project(bundled_copy)
+    bundled_model_info = bundled_copy / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+    bundled_model_info.write_text(json.dumps(initial, indent=2) + "\n")
 
     monkeypatch.setenv("KISS_WORKDIR", str(source_repo))
 
@@ -153,9 +153,9 @@ def test_apply_updates_writes_to_workdir_not_extension(
         "Source repo MODEL_INFO.json was not updated"
     )
 
-    ext_content = json.loads(ext_model_info.read_text())
-    assert ext_content["test-model-a"]["input_price_per_1M"] == 1.00, (
-        "Extension copy was incorrectly modified"
+    bundled_content = json.loads(bundled_model_info.read_text())
+    assert bundled_content["test-model-a"]["input_price_per_1M"] == 1.00, (
+        "Bundled copy was incorrectly modified"
     )
 
 

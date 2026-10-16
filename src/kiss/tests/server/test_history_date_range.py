@@ -13,12 +13,12 @@ The backend side of that feature is:
    lists (i.e. excluding sub-agent rows), or ``(None, None)`` when
    the table has no listable rows.
 
-2. ``VSCodeServer._get_history`` — stamps that pair onto every
+2. ``AgentServer._get_history`` — stamps that pair onto every
    ``history`` event as ``dateRange: {"min": ..., "max": ...}`` so
-   the webview can fill the inputs.
+   the chat page can fill the inputs.
 
 These tests drive the real persistence layer against a temp sqlite
-DB and the real ``VSCodeServer`` broadcast path — no mocks of
+DB and the real ``AgentServer`` broadcast path — no mocks of
 project code (only the printer broadcast is captured in-memory,
 exactly like ``test_subagent_history_click.py``).
 """
@@ -30,7 +30,7 @@ import tempfile
 import threading
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_history_date_range import (  # noqa: F401
     _redirect,
     _restore,
@@ -38,9 +38,9 @@ from kiss.tests.agents.sorcar.test_history_date_range import (  # noqa: F401
 )
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 

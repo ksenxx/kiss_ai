@@ -192,25 +192,23 @@ def _get_tools(agent: Any) -> dict[str, Any]:
     return {t.__name__: t for t in agent._get_auth_tools()}
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> None:
-    """authenticate_*() returns error when required params are empty strings."""
+_CREDENTIAL_AGENTS = [a for a in _AUTH_AGENTS if a["required_params"]]
+
+
+@pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "whitespace"])
+@pytest.mark.parametrize("info", _CREDENTIAL_AGENTS, ids=[a["class"] for a in _CREDENTIAL_AGENTS])
+def test_authenticate_rejects_blank_required_params(info: dict[str, Any], blank: str) -> None:
+    """authenticate_*() returns an error for every empty or whitespace-only required param."""
     if info.get("macos_only") and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
-    if not info["required_params"]:
-        pytest.skip("No required params for this agent")
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    auth_fn = tools[info["auth"]]
+    auth_fn = _get_tools(_get_agent(info))[info["auth"]]
     sig = inspect.signature(auth_fn)
 
-    for param_name in info["required_params"]:
-        if param_name not in sig.parameters:
-            continue
+    for blank_param in info["required_params"]:
         kwargs: dict[str, Any] = {}
         for p_name, p in sig.parameters.items():
-            if p_name == param_name:
-                kwargs[p_name] = ""
+            if p_name == blank_param:
+                kwargs[p_name] = blank
             elif p.annotation in (int, "int"):
                 kwargs[p_name] = 1
             elif p.annotation in (bool, "bool"):
@@ -219,41 +217,9 @@ def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> Non
                 kwargs[p_name] = "test_value"
         result = auth_fn(**kwargs)
         lower = result.lower()
-        assert "empty" in lower or "required" in lower or "cannot be empty" in lower, (
-            f"authenticate should reject empty '{param_name}', got: {result[:300]}"
+        assert "empty" in lower or "required" in lower, (
+            f"authenticate should reject {blank!r} for '{blank_param}', got: {result[:300]}"
         )
-
-
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_authenticate_rejects_whitespace_params(info: dict[str, Any]) -> None:
-    """authenticate_*() rejects whitespace-only strings for required params."""
-    if info.get("macos_only") and sys.platform != "darwin":
-        pytest.skip("macOS-only agent")
-    if not info["required_params"]:
-        pytest.skip("No required params for this agent")
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    auth_fn = tools[info["auth"]]
-    sig = inspect.signature(auth_fn)
-
-    first_param = info["required_params"][0]
-    if first_param not in sig.parameters:
-        pytest.skip(f"Param {first_param} not in signature")
-    kwargs: dict[str, Any] = {}
-    for p_name, p in sig.parameters.items():
-        if p_name == first_param:
-            kwargs[p_name] = "   "
-        elif p.annotation in (int, "int"):
-            kwargs[p_name] = 1
-        elif p.annotation in (bool, "bool"):
-            kwargs[p_name] = False
-        else:
-            kwargs[p_name] = "test_value"
-    result = auth_fn(**kwargs)
-    lower = result.lower()
-    assert "empty" in lower or "required" in lower or "cannot be empty" in lower, (
-        f"authenticate should reject whitespace '{first_param}', got: {result[:300]}"
-    )
 
 
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
@@ -267,8 +233,7 @@ def test_auth_function_has_expected_params(info: dict[str, Any]) -> None:
     actual_params = list(sig.parameters.keys())
     for expected in info["required_params"]:
         assert expected in actual_params, (
-            f"Expected param '{expected}' in {info['auth']} signature, "
-            f"got: {actual_params}"
+            f"Expected param '{expected}' in {info['auth']} signature, got: {actual_params}"
         )
 
 
@@ -322,5 +287,3 @@ class TestPlatformSpecificAuth:
         )
         data = json.loads(result)
         assert data.get("ok") is False
-
-

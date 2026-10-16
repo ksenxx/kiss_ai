@@ -13,11 +13,8 @@ Covers two behavior changes:
    "prompt_refused"`` naming the size and the limit) so the composer
    keeps the draft instead of the agent running on a cut prompt.
 
-2. ``_version_tuple`` is now strict digits-only per component
-   (``/^\\d+$/`` like the extension's ``UpdateChecker.js`` twin), so
-   ``"+1"`` / ``"1_0"`` / unicode digits no longer parse, and
-   ``_parse_version_py`` uses the exact JS regex (accepting indented
-   assignments, rejecting unquoted values).
+2. ``_version_tuple`` is strict digits-only per component, so
+   ``"+1"`` / ``"1_0"`` / unicode digits no longer parse.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from kiss.server.web_server import (
     _MAX_PROMPT_BYTES,
     RemoteAccessServer,
     _compare_versions,
-    _parse_version_py,
     _version_tuple,
 )
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
@@ -269,26 +265,6 @@ class TestVersionHelpersStrict(unittest.TestCase):
         self.assertEqual(_compare_versions("1_0", "0.1"), 0)
         self.assertEqual(_compare_versions("2026.7", "2026.6.9"), 1)
         self.assertEqual(_compare_versions("2026.6", "2026.6.0"), 0)
-
-    def test_parse_version_py_matches_js_regex(self) -> None:
-        """Indented assignments parse; unquoted values do not."""
-        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-fixer-version-"))
-        try:
-            indented = tmpdir / "indented_version.py"
-            indented.write_text(
-                'if True:\n    __version__ = "1.2.3"\n', encoding="utf-8",
-            )
-            self.assertEqual(_parse_version_py(indented), "1.2.3")
-
-            unquoted = tmpdir / "unquoted_version.py"
-            unquoted.write_text("__version__ = 1.2\n", encoding="utf-8")
-            self.assertEqual(_parse_version_py(unquoted), "")
-
-            self.assertEqual(
-                _parse_version_py(tmpdir / "missing.py"), "",
-            )
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

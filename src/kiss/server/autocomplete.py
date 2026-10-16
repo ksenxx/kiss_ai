@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Autocomplete mixin for the VS Code server.
+"""Autocomplete mixin for the backend server.
 
 Implements the ghost-text autocomplete pipeline and the file-path
 autocomplete feature.  Split out of ``server.py`` for organisation.
@@ -137,7 +137,7 @@ def identifier_prefix_matches(content: str, partial: str) -> list[str]:
     Harvests single-word identifiers and dot-chained identifiers
     (e.g. ``self.method``, ``os.path.join``) from *content* and keeps
     those that case-sensitively start with *partial* and are longer
-    than it.  Used by the VS Code daemon's ghost-text completion.
+    than it.  Used by the daemon's ghost-text completion.
 
     Args:
         content: Text to harvest identifiers from.
@@ -178,7 +178,7 @@ def ranked_function_calling_models() -> list[str]:
     Candidates are the currently-runnable models (a provider credential
     is configured) that support function calling, sorted by
     :func:`model_picker_sort_key` — the single business rule behind
-    the VS Code model picker.
+    the model picker.
 
     Returns:
         Model names, best-vendor-first, most expensive first per vendor.
@@ -293,9 +293,9 @@ class _AutocompleteMixin:
         stale requests via the per-connection sequence check before
         doing any real work.  The loop must NOT blindly collapse the
         queue to its newest item: requests from *different*
-        connections (VS Code windows) are interleaved on this one
+        connections (browser tabs) are interleaved on this one
         queue, and discarding everything but the newest would let one
-        window's keystroke swallow another window's still-fresh
+        tab's keystroke swallow another tab's still-fresh
         request.
         """
         assert self._complete_queue is not None
@@ -338,10 +338,10 @@ class _AutocompleteMixin:
                 chat contribute identifier candidates.
             conn_id: Connection id the request arrived on (``""`` for
                 direct callers).  Staleness is judged per connection so
-                concurrent typing in another VS Code window never
+                concurrent typing in another browser tab never
                 cancels this request.
             tab_id: Chat tab the request came from (``""`` for direct
-                callers).  Echoed on both replies so the webview can
+                callers).  Echoed on both replies so the page can
                 tell whether the suggestion still belongs to the
                 conversation on screen.
         """
@@ -459,9 +459,9 @@ class _AutocompleteMixin:
         """Emit one ``completions`` event for the fast-complete picker.
 
         Mirrors :meth:`_emit_ghost`'s connection scoping (the
-        suggestion is delivered only to the typing VS Code window
-        when ``conn_id`` is non-empty) and echoes ``query`` so the
-        webview can drop stale replies for an input the user has
+        suggestion is delivered only to the typing connection when
+        ``conn_id`` is non-empty) and echoes ``query`` so the page
+        can drop stale replies for an input the user has
         since edited.
 
         Args:
@@ -487,10 +487,10 @@ class _AutocompleteMixin:
         """Emit one ``ghost`` autocomplete event.
 
         Stamped with the requesting connection's ``conn_id`` (when
-        non-empty) so the suggestion is delivered only to the VS Code
-        window that is typing — never to a sibling window whose input
-        happens to hold the same text.  ``tab_id`` narrows that one
-        window down to the chat tab that typed: the webview keeps a
+        non-empty) so the suggestion is delivered only to the browser
+        tab that is typing — never to a sibling whose input happens
+        to hold the same text.  ``tab_id`` narrows that one connection
+        down to the chat tab that typed: the page keeps a
         single ghost overlay and a single picker, so a reply with no
         tab of its own would render over whichever conversation the
         user has since switched to.
@@ -579,7 +579,7 @@ class _AutocompleteMixin:
 
         No ``files`` event is broadcast: an unsolicited reply stamped
         ``conn_id="", prefix=""`` would be accepted by every client
-        whose picker shows a bare ``@`` — including windows whose tab
+        whose picker shows a bare ``@`` — including pages whose tab
         roots at a DIFFERENT work_dir — overwriting their picker with
         files from this task's workspace (fixer-5 F5-03/R5-03).
 
@@ -599,8 +599,8 @@ class _AutocompleteMixin:
         """Emit one ``files`` event for the ``@``-mention picker.
 
         Stamped with the requesting connection's ``conn_id`` (when
-        non-empty) so the file list pops the picker only in the VS
-        Code window that typed ``@`` — never in a sibling window.
+        non-empty) so the file list pops the picker only on the
+        connection that typed ``@`` — never on a sibling connection.
 
         Every event also echoes the ``prefix`` it was ranked for —
         the picker's analogue of the ``ghost`` event's echoed
@@ -618,7 +618,7 @@ class _AutocompleteMixin:
                 background directory scan is still running.
             prefix: The ``@``-mention query this reply was ranked for.
             tab_id: Requesting chat tab (``""`` for direct callers).  A
-                window can show several chat tabs over one connection,
+                page can show several chat tabs over one connection,
                 and they share a single picker element, so the tab is
                 what actually identifies the owner of the reply.
         """
@@ -643,7 +643,7 @@ class _AutocompleteMixin:
         """Send file list for the ``@``-mention picker, scoped to *work_dir*.
 
         ``work_dir`` selects the directory the picker is rooted at.  An
-        empty value falls back to ``self.work_dir``: the chat webview
+        empty value falls back to ``self.work_dir``: the chat page
         stamps the active tab's ``workDir`` on the ``getFiles`` command
         so tabs with different working directories see their own files,
         independent of the daemon-wide default.  Each item's ``text`` is

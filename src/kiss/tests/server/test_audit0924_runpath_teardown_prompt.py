@@ -20,7 +20,7 @@ agent loop is over (``followup_queue_closed``) is queued WITHOUT the
 steering echo because the re-dispatched run echoes it as its own prompt.
 
 Harness (same as ``test_queued_followup_tasks.py``): a real
-``VSCodeServer`` + ``JsonPrinter`` subclass, a real
+``AgentServer`` + ``JsonPrinter`` subclass, a real
 ``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result, and the first run started through the REAL
 ``_cmd_run`` so ``task_thread`` is installed exactly as in production.
@@ -51,7 +51,7 @@ from kiss.core.utils import finish
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _UNKNOWN_MODEL = "audit0924-runpath-no-such-model"
 _WAIT_S = 60.0
@@ -80,9 +80,9 @@ class _TeardownAgent(ChatSorcarAgent):
     """
 
     def __init__(self) -> None:
-        super().__init__("Sorcar VS Code")
+        super().__init__("Sorcar")
         self.prompts: list[str] = []
-        self.server: VSCodeServer | None = None
+        self.server: AgentServer | None = None
         self.tab: str = ""
         self.late_prompt: str = ""
         self.via_run_command: bool = False
@@ -131,7 +131,7 @@ class _CapturePrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[dict[str, Any]] = []
-        self.server: VSCodeServer | None = None
+        self.server: AgentServer | None = None
         self.tab: str = ""
         self.inject_on_done: str = ""
         self._injected = False
@@ -187,13 +187,13 @@ def _start_run(
     via_run_command: bool = False,
     stop_first: bool = False,
     inject_on_done: str = "",
-) -> tuple[_TeardownAgent, _CapturePrinter, VSCodeServer]:
+) -> tuple[_TeardownAgent, _CapturePrinter, AgentServer]:
     """Start *prompt* on *tab_id* through the real ``_cmd_run`` and wait for idle."""
     models = get_available_models()
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     printer.server = server
     printer.tab = tab_id
     printer.inject_on_done = inject_on_done

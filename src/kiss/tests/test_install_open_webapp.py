@@ -5,11 +5,11 @@
 """End-to-end tests: ``install.sh`` MUST end by opening the webapp.
 
 The ``kiss-open-webapp`` block of ``install.sh`` waits for the kiss-web
-daemon (started by the extension inside VS Code), runs
-``kiss-web --trust-ca`` and then opens the Local URL
-(``https://127.0.0.1:PORT``) in the default browser, or prints the
-cloudflared URL when the machine is remote (an SSH session, or Linux
-without a display).
+daemon (started by step [5/5]) and then opens the Local URL
+(``http://127.0.0.1:PORT``, plain HTTP on loopback) in the default
+browser, or prints the cloudflared URL when the machine is remote (an
+SSH session, or Linux without a display).  ``kiss-web`` itself is only
+located (for the hint printed on timeout), never run.
 
 The block (together with the ``kiss-browser-helpers`` block it relies
 on) is extracted verbatim and run under ``bash -euo pipefail`` against a
@@ -31,7 +31,7 @@ _REPO = Path(__file__).resolve().parents[3]
 
 pytestmark = posix_only("runs the open-webapp block of install.sh under bash")
 
-_LOOPBACK = "https://127.0.0.1:8787"
+_LOOPBACK = "http://127.0.0.1:8787"
 _TUNNEL = "https://example-tunnel.trycloudflare.com"
 
 
@@ -49,10 +49,10 @@ def _open_webapp_block() -> str:
     return install_sh_block("kiss-browser-helpers") + "\n" + install_sh_block("kiss-open-webapp")
 
 
-def _write_stub(path: Path, log: Path, exit_code: int = 0) -> None:
+def _write_stub(path: Path, log: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{log}"\nexit {exit_code}\n',
+        f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{log}"\n',
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -77,6 +77,7 @@ class _Sandbox:
         self.home = tmp_path / "home"
         self.kiss_home = self.home / ".kiss"
         self.kiss_home.mkdir(parents=True)
+        self.app_dir = self.kiss_home / "kiss"
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.tools = tmp_path / "tools"
@@ -89,8 +90,8 @@ class _Sandbox:
         self.browser_log = tmp_path / "browser.log"
         self.url_file = self.kiss_home / "remote-url.json"
 
-    def stub_kiss_web(self, exit_code: int = 0, where: Path | None = None) -> None:
-        _write_stub(where or self.bin / "kiss-web", self.kiss_web_log, exit_code)
+    def stub_kiss_web(self, where: Path | None = None) -> None:
+        _write_stub(where or self.bin / "kiss-web", self.kiss_web_log)
 
     def stub_browser(self, name: str) -> None:
         _write_stub(self.bin / name, self.browser_log)
@@ -120,7 +121,7 @@ class _Sandbox:
         prelude: str = "",
     ) -> subprocess.CompletedProcess[str]:
         script = (
-            f'OS="{os_name}"\nPROJECT_DIR="{self.home}/no-project"\n'
+            f'OS="{os_name}"\nPROJECT_DIR="{self.home}/no-project"\nAPP_DIR="{self.app_dir}"\n'
             f"{prelude}\n{_open_webapp_block()}\n"
         )
         run_env = {
@@ -139,17 +140,17 @@ class _Sandbox:
         )
 
 
-def test_local_linux_trusts_ca_then_opens_loopback_url(tmp_path: Path) -> None:
-    """Local Linux desktop: ``kiss-web --trust-ca`` then xdg-open 127.0.0.1."""
+def test_local_linux_opens_loopback_url(tmp_path: Path) -> None:
+    """Local Linux desktop: xdg-open the plain-HTTP 127.0.0.1 URL."""
     sb = _Sandbox(tmp_path)
     sb.stub_kiss_web()
     sb.stub_browser("xdg-open")
     sb.url_file.write_text(_url_json(
-        local="https://localhost:8787", tunnel=_TUNNEL, loopback=_LOOPBACK,
+        local="http://localhost:8787", tunnel=_TUNNEL, loopback=_LOOPBACK,
     ))
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
-    assert sb.kiss_web_calls() == ["--trust-ca"]
+    assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == [_LOOPBACK]
     assert f"Opening the webapp at {_LOOPBACK}" in proc.stdout
     assert _TUNNEL not in proc.stdout
@@ -163,7 +164,7 @@ def test_macos_uses_open(tmp_path: Path) -> None:
     sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
     proc = sb.run(os_name="Darwin")
     assert proc.returncode == 0, proc.stderr
-    assert sb.kiss_web_calls() == ["--trust-ca"]
+    assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == [_LOOPBACK]
 
 
@@ -175,7 +176,7 @@ def test_ssh_session_prints_tunnel_url_and_opens_no_browser(tmp_path: Path) -> N
     sb.url_file.write_text(_url_json(loopback=_LOOPBACK, tunnel=_TUNNEL))
     proc = sb.run(env={"DISPLAY": ":0", "SSH_CONNECTION": "1.2.3.4 1 5.6.7.8 22"})
     assert proc.returncode == 0, proc.stderr
-    assert sb.kiss_web_calls() == ["--trust-ca"]
+    assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == []
     assert "This machine is remote" in proc.stdout
     assert _TUNNEL in proc.stdout
@@ -205,7 +206,8 @@ def test_remote_waits_for_tunnel_url_then_gives_hint_on_timeout(tmp_path: Path) 
     assert "did not come up within 5s" in proc.stdout
     # The hint names the binary that was found, since it is rarely on PATH.
     kiss_web = sb.bin / "kiss-web"
-    assert f"'{kiss_web}' --trust-ca && '{kiss_web}' --url" in proc.stdout
+    assert f"'{kiss_web}' --url" in proc.stdout
+    assert "--trust-ca" not in proc.stdout
 
 
 def test_waits_for_daemon_that_comes_up_late(tmp_path: Path) -> None:
@@ -219,7 +221,7 @@ def test_waits_for_daemon_that_comes_up_late(tmp_path: Path) -> None:
     proc = sb.run(env={"DISPLAY": ":0"}, wait_secs=60, prelude=prelude)
     assert proc.returncode == 0, proc.stderr
     assert "Waiting for the kiss-web daemon" in proc.stdout
-    assert sb.kiss_web_calls() == ["--trust-ca"]
+    assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == [_LOOPBACK]
 
 
@@ -231,35 +233,20 @@ def test_missing_kiss_web_binary_times_out(tmp_path: Path) -> None:
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
     assert "did not come up within 0s" in proc.stdout
-    assert "'kiss-web' --trust-ca && 'kiss-web' --url" in proc.stdout
+    assert "'kiss-web' --url" in proc.stdout
+    assert "--trust-ca" not in proc.stdout
     assert sb.browser_calls() == []
 
 
-def test_kiss_web_found_in_installed_extension_venv(tmp_path: Path) -> None:
-    """Off PATH, kiss-web is located in the extension's kiss_project venv."""
+def test_kiss_web_found_in_the_app_venv(tmp_path: Path) -> None:
+    """Off PATH, kiss-web is located in the installed app's venv ($APP_DIR)."""
     sb = _Sandbox(tmp_path)
-    ext_bin = (
-        sb.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.9.25"
-        / "kiss_project" / ".venv" / "bin" / "kiss-web"
-    )
-    sb.stub_kiss_web(where=ext_bin)
+    sb.stub_kiss_web(where=sb.app_dir / ".venv" / "bin" / "kiss-web")
     sb.stub_browser("xdg-open")
     sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
-    assert sb.kiss_web_calls() == ["--trust-ca"]
-    assert sb.browser_calls() == [_LOOPBACK]
-
-
-def test_trust_ca_failure_warns_but_still_opens(tmp_path: Path) -> None:
-    """A failing ``--trust-ca`` (no certutil, say) is not fatal."""
-    sb = _Sandbox(tmp_path)
-    sb.stub_kiss_web(exit_code=3)
-    sb.stub_browser("xdg-open")
-    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
-    proc = sb.run(env={"DISPLAY": ":0"})
-    assert proc.returncode == 0, proc.stderr
-    assert "WARNING: 'kiss-web --trust-ca' failed" in proc.stdout
+    assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == [_LOOPBACK]
 
 
@@ -268,10 +255,10 @@ def test_old_url_file_without_loopback_falls_back_to_127_0_0_1(tmp_path: Path) -
     sb = _Sandbox(tmp_path)
     sb.stub_kiss_web()
     sb.stub_browser("xdg-open")
-    sb.url_file.write_text(_url_json(local="https://localhost:9999"))
+    sb.url_file.write_text(_url_json(local="http://localhost:9999"))
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
-    assert sb.browser_calls() == ["https://127.0.0.1:9999"]
+    assert sb.browser_calls() == ["http://127.0.0.1:9999"]
 
 
 def test_no_browser_opener_prints_url_for_the_user(tmp_path: Path) -> None:

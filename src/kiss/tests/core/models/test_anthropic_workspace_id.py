@@ -251,7 +251,7 @@ def test_workspace_id_settings_store_roundtrip(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kiss"))
     monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
     from kiss.core.config import DEFAULT_CONFIG
-    from kiss.core.vscode_config import (
+    from kiss.core.user_config import (
         api_keys_env_path,
         load_api_keys,
         save_api_key,
