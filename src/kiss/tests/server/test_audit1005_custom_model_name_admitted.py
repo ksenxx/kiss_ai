@@ -1,6 +1,6 @@
 """A settings-panel custom model with its own endpoint runs under any name.
 
-``VSCodeServer._get_models`` lists every ``~/.kiss/MY_MODELS.json`` entry
+``AgentServer._get_models`` lists every ``~/.kiss/MY_MODELS.json`` entry
 that carries an endpoint, so a user can pick ``my-local-llama`` served
 by a local OpenAI-compatible server.  ``_run_task_inner`` then admitted
 the run only when the model was in ``get_available_models()`` — the
@@ -34,7 +34,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     IsolatedKissHome,
@@ -124,7 +124,7 @@ def test_custom_named_model_with_endpoint_runs(home: IsolatedKissHome) -> None:
         assert model_info.calculate_cost(_MODEL, 1000, 1000) == 0.0
         assert _MODEL not in model_info.get_available_models()
         printer = _CapturePrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server._cmd_run({
             "type": "run",
             "tabId": _TAB,
@@ -160,7 +160,7 @@ def test_unpriced_name_with_explicit_endpoint_is_still_refused(home: IsolatedKis
     endpoint = _Endpoint()
     try:
         printer = _CapturePrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server._cmd_run({
             "type": "run",
             "tabId": _TAB,

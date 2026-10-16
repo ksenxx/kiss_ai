@@ -25,9 +25,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -46,6 +46,7 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     _write_qr_html,
     main,
 )
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.whatsapp_bridge import BridgeServer, bridge_server
 
@@ -150,46 +151,21 @@ _BRIDGE_LOG_WITH_QR = (
 )
 
 
-def _backup_and_clear() -> str | None:
-    """Back up existing config file and remove it."""
-    path = _config.path
-    backup = None
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-    return backup
-
-
-def _restore(backup: str | None) -> None:
-    """Restore a previously backed-up config file."""
-    path = _config.path
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
-
-
-class _ChannelState:
-    """Backs up and cleans the channel dir state files between tests."""
-
-    def __init__(self) -> None:
-        self._cfg = _backup_and_clear()
-        for p in (_bridge_log_path(), _bridge_pid_path(), _qr_html_path()):
-            p.unlink(missing_ok=True)
-
-    def restore(self) -> None:
-        _restore(self._cfg)
-        for p in (_bridge_log_path(), _bridge_pid_path(), _qr_html_path()):
-            p.unlink(missing_ok=True)
+def _remove_bridge_state_files() -> None:
+    """Delete the bridge log, PID file and QR page if present."""
+    for p in (_bridge_log_path(), _bridge_pid_path(), _qr_html_path()):
+        p.unlink(missing_ok=True)
 
 
 @pytest.fixture()
-def channel_state() -> Any:
+def channel_state() -> Iterator[None]:
     """Isolate config/log/pid/QR files for a test."""
-    state = _ChannelState()
-    yield state
-    state.restore()
+    with config_backup(_config.path):
+        _remove_bridge_state_files()
+        try:
+            yield
+        finally:
+            _remove_bridge_state_files()
 
 
 @pytest.fixture()
@@ -246,7 +222,7 @@ class TestQRExtraction:
     def test_extract_from_empty_log(self) -> None:
         assert _extract_last_qr("") == ""
 
-    def test_write_qr_html_renders_black_on_white_glyphs(self, channel_state: Any) -> None:
+    def test_write_qr_html_renders_black_on_white_glyphs(self, channel_state: None) -> None:
         page = _write_qr_html(_QR_BLOCK)
         html = page.read_text(encoding="utf-8")
         assert _QR_BLOCK in html
@@ -465,13 +441,13 @@ class TestChannelProtocol:
         with pytest.raises(RuntimeError, match="start_whatsapp_bridge"):
             backend.send_message("14155550001", "hello")
 
-    def test_connect_unpaired(self, channel_state: Any, tmp_path: Path) -> None:
+    def test_connect_unpaired(self, channel_state: None, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "1"})
         backend = WhatsAppChannelBackend()
         assert backend.connect() is False
         assert "not paired" in backend.connection_info
 
-    def test_connect_paired_but_bridge_down(self, channel_state: Any, tmp_path: Path) -> None:
+    def test_connect_paired_but_bridge_down(self, channel_state: None, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
@@ -479,7 +455,7 @@ class TestChannelProtocol:
         assert backend.connect() is False
         assert "not running" in backend.connection_info
 
-    def test_connect_paired_and_running(self, channel_state: Any, tmp_path: Path) -> None:
+    def test_connect_paired_and_running(self, channel_state: None, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
         with bridge_server({"success": True, "message": ""}) as server:
@@ -488,7 +464,7 @@ class TestChannelProtocol:
             assert backend.connect() is True
             assert "connected" in backend.connection_info
 
-    def test_connect_ignores_invalid_port_config(self, channel_state: Any, tmp_path: Path) -> None:
+    def test_connect_ignores_invalid_port_config(self, channel_state: None, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "abc"})
         backend = WhatsAppChannelBackend()
         assert backend.connect() is False  # unpaired; invalid port only logs
@@ -606,13 +582,8 @@ _AUTH_TOOL_NAMES = [
 ]
 
 
+@pytest.mark.usefixtures("channel_state")
 class TestAgentAndAuthTools:
-    def setup_method(self) -> None:
-        self._state = _ChannelState()
-
-    def teardown_method(self) -> None:
-        self._state.restore()
-
     def test_unauthenticated_agent_exposes_only_auth_tools(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere")})
         agent = WhatsAppAgent()
@@ -870,16 +841,10 @@ class TestAgentAndAuthTools:
         result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=5))
         assert result["ok"] is False and "no longer running" in result["error"]
 
-    def test_main_without_args_exits(self) -> None:
-        import sys
-
-        old_argv = sys.argv
-        sys.argv = ["kiss-whatsapp"]
-        try:
-            with pytest.raises(SystemExit):
-                main()
-        finally:
-            sys.argv = old_argv
+    def test_main_without_args_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["kiss-whatsapp"])
+        with pytest.raises(SystemExit):
+            main()
 
     def test_channel_system_prompt_mentions_pairing_flow(self) -> None:
         prompt = WhatsAppAgent.channel_system_prompt

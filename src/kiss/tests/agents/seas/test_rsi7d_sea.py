@@ -21,7 +21,6 @@ import ast
 import json
 import os
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -33,18 +32,18 @@ from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
-from kiss.agents.sorcar.persistence import (
-    _add_task,
-    _append_chat_event,
-    _flush_chat_events,
-    _save_task_result,
-)
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
-from kiss.server import agent_state
-from kiss.tests.agents.seas.conftest import git, run_sea
+from kiss.tests.agents.seas.conftest import (
+    commit,
+    fake_checkout,
+    git,
+    persist_task,
+    registered,
+    run_sea,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.server.conftest import init_repo
@@ -136,45 +135,14 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: Non
     The mining tools list every run of the shared session history, so
     the test starts with none (``empty_history``).
     """
-    seas = tmp_path / "src" / "kiss" / "agents" / "seas"
-    for name in ("rsi7d", "autorouter", "demo", "fdemo", "tdemo", "noprompt"):
-        (seas / name).mkdir(parents=True)
-    shutil.copy(_SEA_PATH, seas / "rsi7d" / "rsi7d_sea.py")
-    autorouter = _SEAS_DIR / "autorouter" / "autorouter_sea.py"
-    shutil.copy(autorouter, seas / "autorouter" / "autorouter_sea.py")
-    (seas / "demo" / "demo_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
-    (seas / "fdemo" / "fdemo_sea.py").write_text(_FSTRING_SEA, encoding="utf-8")
-    (seas / "tdemo" / "tdemo_sea.py").write_text(_TEMPLATE_SEA, encoding="utf-8")
-    (seas / "noprompt" / "noprompt_sea.py").write_text(_NOPROMPT_SEA, encoding="utf-8")
+    seas = fake_checkout(tmp_path, {
+        "rsi7d": _SEA_PATH.read_text(encoding="utf-8"),
+        "autorouter": Path(autorouter_sea.__file__).read_text(encoding="utf-8"),
+        "demo": _PLAIN_SEA, "fdemo": _FSTRING_SEA, "tdemo": _TEMPLATE_SEA,
+        "noprompt": _NOPROMPT_SEA,
+    })
     monkeypatch.chdir(tmp_path)
     return seas
-
-
-def _persist(
-    prompt: str,
-    events: list[dict[str, Any]],
-    result: str = "",
-    **extra: object,
-) -> str:
-    """Persist a finished task row with *events*, *result* and the given columns; return its id."""
-    now_ms = int(time.time() * 1000)
-    payload: dict[str, object] = {
-        "model": "model-a",
-        "work_dir": "/work/dir",
-        "startTs": now_ms - 60_000,
-        "endTs": now_ms,
-        "cost": 0.5,
-        "steps": 5,
-        "tokens": 10_000,
-    }
-    payload.update(extra)
-    task_id, _chat = _add_task(prompt, extra=payload)
-    for ev in events:
-        _append_chat_event(ev, task_id=task_id)
-    _flush_chat_events(task_id)
-    if result:
-        _save_task_result(result, task_id=task_id)
-    return task_id
 
 
 def _result_event(success: bool) -> dict[str, Any]:
@@ -329,7 +297,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     system prompt starts with ``fdemo``'s prompt is matched by signature.
     """
     sea_path = str(checkout / "demo" / "demo_sea.py")
-    parent = _persist(
+    parent = persist_task(
         "/demo do the thing",
         [
             _dispatch(sea_path, "do the thing"),
@@ -345,7 +313,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
         cost=3.0,
         steps=12,
     )
-    child = _persist(
+    child = persist_task(
         "do the thing",
         [_result_event(True)],
         result="<p>done</p>",
@@ -354,11 +322,13 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
         steps=4,
         model="model-b",
     )
-    _persist("plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5)
+    persist_task(
+        "plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5,
+    )
     fdemo = checkout / "fdemo" / "fdemo_sea.py"
     fdemo_prompt = _prompt_of(fdemo, "DEFAULT PROMPT")
     assert fdemo_prompt.startswith("DEFAULT PROMPT\n\n# Demo f-string agent")
-    side = _persist(
+    side = persist_task(
         "What have the task done so far?",
         [
             {"type": "system_prompt", "text": fdemo_prompt},
@@ -452,7 +422,7 @@ def test_run_findings_flags_each_signal_kind_and_unknown_ids() -> None:
         {"type": "followup_suggestion", "text": "Now remove things"},
         _result_event(False),
     ]
-    task_id = _persist("Find things", events, result="<p>gave up</p>")
+    task_id = persist_task("Find things", events, result="<p>gave up</p>")
     found = json.loads(sea.run_findings(task_id))
     assert found["status"] == "unsuccessful" and found["entries"] > 20
     assert found["tool_calls"]["Read"] == 11 and found["tool_calls"]["Bash"] == 2
@@ -485,11 +455,11 @@ def test_sea_findings_aggregates_signals_over_a_seas_runs(checkout: Path) -> Non
     signature) so the shared session history cannot add runs.
     """
     sea_path = str(checkout / "noprompt" / "noprompt_sea.py")
-    parent = _persist(
+    parent = persist_task(
         "/noprompt twice", [_dispatch(sea_path, "run 1"), _dispatch(sea_path, "run 2")]
     )
     for task, ok in (("run 1", True), ("run 2", False)):
-        _persist(
+        persist_task(
             task,
             [
                 {"type": "tool_call", "name": "Bash", "callId": 1, "command": "pytest"},
@@ -519,7 +489,7 @@ def test_sea_findings_aggregates_signals_over_a_seas_runs(checkout: Path) -> Non
 
 def test_model_scorecard_reports_roles_costs_reliability_and_error_reasons() -> None:
     """Per-model aggregates: roles, own cost, per-step medians, tool and task errors."""
-    top = _persist(
+    top = persist_task(
         "Build it",
         [
             {"type": "tool_call", "name": "Bash", "callId": 1, "command": "make"},
@@ -532,7 +502,7 @@ def test_model_scorecard_reports_roles_costs_reliability_and_error_reasons() -> 
         steps=10,
         tokens=50_000,
     )
-    _persist(
+    persist_task(
         "Verify the listed changes: build",
         [
             {"type": "tool_call", "name": "Read", "callId": 1, "path": "x"},
@@ -548,7 +518,7 @@ def test_model_scorecard_reports_roles_costs_reliability_and_error_reasons() -> 
         steps=5,
         tokens=10_000,
     )
-    _persist(
+    persist_task(
         "Explode",
         [],
         model="score-b",
@@ -558,7 +528,7 @@ def test_model_scorecard_reports_roles_costs_reliability_and_error_reasons() -> 
         "consecutive "
         "errors. Last error: You have no credits remaining.</p>",
     )
-    _persist(
+    persist_task(
         "Explode again",
         [],
         model="score-b",
@@ -567,7 +537,7 @@ def test_model_scorecard_reports_roles_costs_reliability_and_error_reasons() -> 
         result="<h3>Partial result: KISS Error: Agent Task update Session-0 budget exceeded.</h3>"
         "<p>The sub-agent spent $1.58 of its $1.00 budget in 3 steps.</p>",
     )
-    _persist("Still running", [], model="score-b", endTs=0)
+    persist_task("Still running", [], model="score-b", endTs=0)
     cards = {c["model"]: c for c in json.loads(sea.model_scorecard(days=1))["models"]}
     a = cards["score-a"]
     assert a["tasks"] == 2 and a["roles"] == {"top": 1, "reviewer": 1}
@@ -966,15 +936,9 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
     is how the SEA's tools find their task text through ``current_agent``.
     """
     agent = ChatSorcarAgent("rsi7d-sea-test")
-    state = agent_state.AgentState(
-        "rsi7d-sea-test", agent=agent, task_thread=threading.current_thread(), is_task_active=True
-    )
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], task)
-    agent_state.register(state)
-    try:
+    with registered(agent, "rsi7d-sea-test", is_task_active=True):
         return run_sea(run, script, work_dir, agent=agent, use_memory=False, is_parallel=False)
-    finally:
-        agent_state.unregister(state.task_id, state)
 
 
 def _tool_results(agentic: list[Any]) -> list[str]:
@@ -1042,12 +1006,12 @@ def test_agent_run_with_seas_dir_edits_only_that_folder(checkout: Path, tmp_path
     (folder / "alpha").mkdir(parents=True)
     alpha = folder / "alpha" / "alpha_sea.py"
     alpha.write_text(_PLAIN_SEA, encoding="utf-8")
-    parent = _persist(
+    parent = persist_task(
         "/alpha go",
         [_dispatch(str(alpha), "go"), _dispatch(str(checkout / "demo" / "demo_sea.py"), "do")],
     )
-    _persist("go", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
-    _persist("do", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
+    persist_task("go", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
+    persist_task("do", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
     section = "## Lessons from recent runs (rsi7d)\n- Cite the run id."
     script = [
         tool_call_body("indexed_seas", {}, prompt_tokens=500),
@@ -1080,7 +1044,7 @@ def test_agent_run_with_an_unusable_seas_dir_lists_mines_and_edits_nothing(
     checkout: Path, tmp_path: Path
 ) -> None:
     """A ``--seas-dir`` that is not a directory is an error every tool reports, not a sweep."""
-    _persist("/demo go", [_dispatch(str(checkout / "demo" / "demo_sea.py"), "go")])
+    persist_task("/demo go", [_dispatch(str(checkout / "demo" / "demo_sea.py"), "go")])
     script = [
         tool_call_body("indexed_seas", {}, prompt_tokens=500),
         tool_call_body("sea_runs", {}, prompt_tokens=520),
@@ -1103,20 +1067,6 @@ def test_agent_run_with_an_unusable_seas_dir_lists_mines_and_edits_nothing(
     assert findings == patched == f"Error: {error}"
 
 
-def _commit(
-    repo: Path, message: str, files: dict[str, str] | None = None, when: int = 0
-) -> str:
-    """Write *files* into *repo*, commit them with *message* (committed at *when*, a unix
-    time, when given) and return the commit sha."""
-    for name, text in (files or {}).items():
-        (repo / name).parent.mkdir(parents=True, exist_ok=True)
-        (repo / name).write_text(text, encoding="utf-8")
-    git(repo, "add", "-A")
-    env = {"GIT_COMMITTER_DATE": f"@{when} +0000"} if when else None
-    git(repo, "commit", "-q", "--allow-empty", "-m", message, env=env)
-    return git(repo, "rev-parse", "HEAD")
-
-
 def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     checkout: Path, tmp_path: Path
 ) -> None:
@@ -1133,18 +1083,18 @@ def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     repo = tmp_path  # the clone under tmp/rsi7d/replays is inside the repository
     init_repo(repo)
     worktree = repo / ".kiss-worktrees" / "kiss_wt-gone"
-    _commit(repo, "seed paper", {"docs/paper.tex": "v1\n"})
+    commit(repo, "seed paper", {"docs/paper.tex": "v1\n"})
     task = f"Update the paper at {worktree}/docs/paper.tex  with the results\nin {repo}/results.md"
     start_s = int(time.time()) - 60
-    _commit(repo, f"same task, earlier{USER_PROMPT_HEADING}{task}", when=start_s - 30)
-    _commit(repo, f"other task{USER_PROMPT_HEADING}{task} and publish it")
-    broader = _commit(repo, f"other task{USER_PROMPT_HEADING}{task} Result: provide a table")
-    auto = _commit(
+    commit(repo, f"same task, earlier{USER_PROMPT_HEADING}{task}", when=start_s - 30)
+    commit(repo, f"other task{USER_PROMPT_HEADING}{task} and publish it")
+    broader = commit(repo, f"other task{USER_PROMPT_HEADING}{task} Result: provide a table")
+    auto = commit(
         repo,
         f"docs: update the paper{USER_PROMPT_HEADING}{task}\n\nResult:\nUpdated.",
         {"docs/paper.tex": "v2\n"},
     )
-    task_id = _persist(task, [], work_dir=str(worktree / "docs"), sea="demo_sea")
+    task_id = persist_task(task, [], work_dir=str(worktree / "docs"), sea="demo_sea")
 
     prepared = sea.prepare_replay_clone(task_id)
     assert isinstance(prepared, dict), prepared
@@ -1203,22 +1153,24 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     """Without an auto-commit the repository HEAD at the task's start is used; bad runs error."""
     repo = tmp_path / "repo"
     init_repo(repo)
-    head = _commit(repo, "second", {"notes.md": "n\n"})
+    head = commit(repo, "second", {"notes.md": "n\n"})
     future = int(time.time() * 1000) + 10_000
-    task_id = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=future)
+    task_id = persist_task(
+        "Summarize the repo", work_dir=str(repo), sea="demo_sea", startTs=future,
+    )
     prepared = sea.prepare_replay_clone(task_id)
     assert isinstance(prepared, dict), prepared
     assert prepared["commit"] == head
     assert prepared["commit_source"] == "HEAD of the repository when the task started"
     assert prepared["task"] == "Summarize the repo" and prepared["work_dir"] == prepared["clone"]
 
-    legacy = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=0)
+    legacy = persist_task("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=0)
     prepared = sea.prepare_replay_clone(legacy)  # start falls back to the insertion time
     assert isinstance(prepared, dict) and prepared["commit"] == head
 
     # The history records a worktree run's work dir as the repository; the task text
     # still names the worktree, which is rewritten to the clone as well.
-    stripped = _persist(
+    stripped = persist_task(
         f"Edit {repo}/.kiss-worktrees/kiss_wt-old/docs/paper.tex and {repo}/notes.md",
         [], work_dir=str(repo), sea="demo_sea", startTs=future,
     )
@@ -1233,7 +1185,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     (repo / "docs").mkdir()
     link = tmp_path / "link"
     link.symlink_to(repo, target_is_directory=True)
-    linked = _persist(
+    linked = persist_task(
         f"Edit {link}/docs/paper.tex, {link}/notes.md and "
         f"{link}/.kiss-worktrees/kiss_wt-old/notes.md",
         [], work_dir=str(link / "docs"), sea="demo_sea", startTs=future,
@@ -1251,7 +1203,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     # link's parent is not part of the checkout and stays as it is.
     docs_link = tmp_path / "docs-link"
     docs_link.symlink_to(repo / "docs", target_is_directory=True)
-    into = _persist(
+    into = persist_task(
         f"Edit {docs_link}/paper.tex; see {tmp_path}/reference.md",
         [], work_dir=str(docs_link), sea="demo_sea", startTs=future,
     )
@@ -1266,17 +1218,17 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     git(rooted, "init", "-q")
     git(rooted, "config", "user.email", "kiss-test@example.com")
     git(rooted, "config", "user.name", "Kiss Test")
-    root = _commit(rooted, f"first{USER_PROMPT_HEADING}Start the notes", {"notes.md": "n\n"})
-    first = _persist("Start the notes", [], work_dir=str(rooted), sea="demo_sea")
+    root = commit(rooted, f"first{USER_PROMPT_HEADING}Start the notes", {"notes.md": "n\n"})
+    first = persist_task("Start the notes", [], work_dir=str(rooted), sea="demo_sea")
     prepared = sea.prepare_replay_clone(first)  # a root auto-commit has no parent to go back to
     assert isinstance(prepared, dict) and prepared["commit"] == root, prepared
 
-    early = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=1_000)
+    early = persist_task("Summarize the repo", work_dir=str(repo), sea="demo_sea", startTs=1_000)
     assert sea.prepare_replay_clone(early) == (
         f"Error: {repo.resolve()} has no commit from before the task started"
     )
     assert sea.prepare_replay_clone("nope") == "Error: unknown task id 'nope'"
-    no_sea = _persist("Plain sub-agent task", [], work_dir=str(repo))
+    no_sea = persist_task("Plain sub-agent task", [], work_dir=str(repo))
     # A run without a SEA is a plain KISS Sorcar run; the fake checkout is
     # not a git repository, so there is no SYSTEM.md to replay it with.
     assert sea.prepare_replay_clone(no_sea) == (
@@ -1289,7 +1241,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     )
     (tmp_path / "plain").mkdir()
     for work_dir in (str(tmp_path / "plain"), str(tmp_path / "missing"), ""):
-        no_git = _persist("Plain task", [], work_dir=work_dir, sea="demo_sea")
+        no_git = persist_task("Plain task", [], work_dir=work_dir, sea="demo_sea")
         assert sea.prepare_replay_clone(no_git) == (
             f"Error: the run's work dir {work_dir!r} is not inside a git repository, so there "
             "is nothing to clone; mark the run not replay-verified"
@@ -1305,7 +1257,7 @@ def test_prepare_replay_clone_reports_a_failed_git_command(
     """A git failure while making the clone is reported, not raised."""
     repo = tmp_path / "repo"
     init_repo(repo)
-    task_id = _persist(
+    task_id = persist_task(
         "Describe the seed", [], work_dir=str(repo), sea="demo_sea",
         startTs=int(time.time() * 1000) + 10_000,
     )

@@ -8,7 +8,7 @@ keep the worktree protected from a same-daemon reclaim.
 ``ChatSorcarAgent._keep_for_review`` fails closed — when the
 preserve marker cannot be written (a file sits where its directory goes)
 the agent keeps ``self._wt`` — but the tab-teardown paths in
-:class:`VSCodeServer` (``_drop_tab_state`` / ``_dispose_if_closed``)
+:class:`AgentServer` (``_drop_tab_state`` / ``_dispose_if_closed``)
 used to unregister the :class:`AgentState` BEFORE running that
 preserve step.  ``JsonPrinter.live_worktree_branches`` derives the
 reclaim exclusion set from registered states only, and
@@ -38,7 +38,7 @@ import pytest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome, OfflineFastModel
 
 
@@ -58,7 +58,7 @@ class _Env:
         # The commit-message generator must not leave the machine.
         self.offline = OfflineFastModel()
         self.offline.__enter__()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
         self.server.printer.broadcast = self._capture  # type: ignore[assignment]

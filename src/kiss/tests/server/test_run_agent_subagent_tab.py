@@ -40,7 +40,7 @@ from typing import Any, cast
 from kiss.agents.sorcar import daemon_client
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import make_test_tls, open_local_connection
 from kiss.tests.server.conftest import init_repo
@@ -49,12 +49,12 @@ PARENT_TAB_ID = "webtab-parent-1"
 
 
 def _viewer_sub_tab_id(child_task_id: str) -> str:
-    """The tab id every webview gives the child (``subagentTabIdFor``)."""
+    """The tab id every chat client gives the child (``subagentTabIdFor``)."""
     return f"{PARENT_TAB_ID}__sub_{child_task_id}"
 
 
 class DaemonLocalHarness(unittest.TestCase):
-    """A real daemon on a loopback WSS endpoint plus a webview-like viewer.
+    """A real daemon on a loopback WSS endpoint plus a chat-page-like viewer.
 
     Shared by the sub-agent tab suites: ``setUp`` isolates persistence
     and config under a temp ``.kiss`` dir, serves a
@@ -81,11 +81,11 @@ class DaemonLocalHarness(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
         self._saved_config_override = (
-            vars(vscode_config).get("CONFIG_DIR"),
-            vars(vscode_config).get("CONFIG_PATH"),
+            vars(user_config).get("CONFIG_DIR"),
+            vars(user_config).get("CONFIG_PATH"),
         )
-        vscode_config.CONFIG_DIR = kiss_dir
-        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        user_config.CONFIG_DIR = kiss_dir
+        user_config.CONFIG_PATH = kiss_dir / "config.json"
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
@@ -146,19 +146,19 @@ class DaemonLocalHarness(unittest.TestCase):
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
-            if "CONFIG_DIR" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_DIR")
+            if "CONFIG_DIR" in vars(user_config):
+                delattr(user_config, "CONFIG_DIR")
         else:
-            vscode_config.CONFIG_DIR = saved_dir
+            user_config.CONFIG_DIR = saved_dir
         if saved_path is None:
-            if "CONFIG_PATH" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_PATH")
+            if "CONFIG_PATH" in vars(user_config):
+                delattr(user_config, "CONFIG_PATH")
         else:
-            vscode_config.CONFIG_PATH = saved_path
+            user_config.CONFIG_PATH = saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _open_viewer(self) -> list[dict[str, Any]]:
-        """Open a webview-like local connection and drain its events."""
+        """Open a chat-page-like local connection and drain its events."""
 
         async def _open() -> tuple[Any, Any]:
             return await open_local_connection(
@@ -228,7 +228,7 @@ class DaemonLocalHarness(unittest.TestCase):
                 registry_during_child["tabs"] = [
                     dict(entry)
                     for entry in
-                    self.server._vscode_server.tab_registry.snapshot()
+                    self.server._agent_server.tab_registry.snapshot()
                 ]
                 # What a NESTED spawn (the child calling run_parallel
                 # or run_agent itself) would use as its parent tab —
@@ -379,7 +379,7 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         )
 
         # 4b. A nested spawn made by the child must be parented under
-        #     the tab every webview gave the child — never the hidden
+        #     the tab every chat client gave the child — never the hidden
         #     api-… dispatch id — and that holds BEFORE any viewer has
         #     subscribed (a child fanning out right away) exactly as
         #     after: the id is derived, not looked up.
@@ -388,7 +388,7 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             == registry_during_child["nested_parent_after"]
             == viewer_sub_tab_id
         ), (
-            "nested spawns must be parented under the child's webview "
+            "nested spawns must be parented under the child's chat-page "
             f"tab {viewer_sub_tab_id!r}, got "
             f"{registry_during_child['nested_parent_before']!r} before / "
             f"{registry_during_child['nested_parent_after']!r} after the "
@@ -413,9 +413,9 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         )
         assert parent.task_id in top_level_ids
 
-        # 6. A parent replay (every webview ``ready`` triggers one per
+        # 6. A parent replay (every client ``ready`` triggers one per
         #    bound tab) re-announces the finished child with its row's
-        #    start stamp: the webview attributes the child to the
+        #    start stamp: the chat page attributes the child to the
         #    fan-out tool call that was running at that time, and only
         #    an owning, collapsed panel keeps the finished child's tab
         #    from reopening on every reconnect.

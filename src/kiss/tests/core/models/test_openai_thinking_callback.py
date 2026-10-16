@@ -7,7 +7,7 @@
 gpt-5.5 (and other OpenAI reasoning models) send ``reasoning_content``
 in streaming deltas.  The ``thinking_callback`` must be invoked with
 ``True`` at the start of the reasoning block and ``False`` at the end
-so that the webview renders thought tokens inside a thinking panel.
+so that the chat page renders thought tokens inside a thinking panel.
 
 Uses a real ThreadingHTTPServer that returns SSE chunks with
 ``reasoning_content`` fields — no mocks, patches, or fakes.
@@ -214,7 +214,7 @@ class TestOpenAIThinkingCallback:
 
         assert True in thinking_events, (
             "thinking_callback(True) was never called — "
-            "thought tokens won't appear in the webview"
+            "thought tokens won't appear in the chat page"
         )
         assert False in thinking_events, (
             "thinking_callback(False) was never called — "

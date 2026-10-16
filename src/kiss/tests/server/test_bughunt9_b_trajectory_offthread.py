@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer

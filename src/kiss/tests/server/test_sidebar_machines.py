@@ -34,7 +34,11 @@ from unittest import IsolatedAsyncioTestCase
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import machines as mach
 from kiss.server import sidebar_panels
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import (
+    MACHINES_REGISTRY_POLL_SECONDS,
+    RemoteAccessServer,
+    _generate_self_signed_cert,
+)
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
@@ -94,6 +98,23 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
     async def _machines(self, **fields: Any) -> dict[str, Any]:
         return await self._ask({"type": "getMachines", **fields}, "machines")
 
+    async def _registry_pushes_settled(self) -> None:
+        """Read the pushes the test's own writes to ``machines.json`` trigger.
+
+        The daemon polls the registry every ``MACHINES_REGISTRY_POLL_SECONDS``
+        and pushes a ``machines`` list, shaped like a ``getMachines``
+        reply, at every change it sees; a push computed between two of
+        the test's writes would otherwise be read as the reply to the
+        listing asked right after them.  Waits for the push that lists
+        every registered machine: it follows the last write, and no
+        other can come until the registry changes again.
+        """
+        names = [socket.gethostname().split(".")[0], *(m.name for m in mach.load_machines())]
+        while True:
+            pushed = await self._next_pushed("machines", MACHINES_REGISTRY_POLL_SECONDS + 15.0)
+            if [row["name"] for row in pushed["machines"]] == names:
+                return
+
     async def test_get_machines_lists_local_then_registered_with_status(self) -> None:
         """The local row leads; a live remote is reachable, dead addresses are not."""
         await asyncio.to_thread(mach.add_machine, "box", self.remote.url, "pw-remote")
@@ -103,6 +124,7 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             mach.Machine(name="dead", url=f"https://127.0.0.1:{dead_port}"),
             mach.Machine(name="sshbox", ssh=f"nobody@127.0.0.1:{dead_port}"),
         ])
+        await self._registry_pushes_settled()
         reply = await self._machines()
         self.assertEqual((reply["action"], reply["error"]), ("", ""))
         rows = {row["name"]: row for row in reply["machines"]}
@@ -144,6 +166,40 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             ["reachable", "reachable", "unreachable", "unreachable"],
         )
 
+    async def _next_pushed(self, reply_type: str, timeout: float) -> dict[str, Any]:
+        """Return the next *reply_type* message the daemon sends unasked."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = await asyncio.wait_for(
+                self.reader.readline(), timeout=max(0.1, deadline - time.monotonic()),
+            )
+            assert line, "local connection closed"
+            msg: dict[str, Any] = json.loads(line.decode("utf-8"))
+            if msg.get("type") == reply_type:
+                return msg
+        raise AssertionError(f"no {reply_type} pushed within {timeout}s")
+
+    async def test_a_registry_written_behind_the_daemon_is_pushed_to_every_client(self) -> None:
+        """A machine added by another process (a /machine add task, the CLI) is pushed unasked."""
+        reply = await self._machines()
+        self.assertEqual(len(reply["machines"]), 1, "only the local row to begin with")
+        # Another process registers a machine: the daemon notices the
+        # rewritten machines.json and sends the fresh list without a
+        # getMachines, so each surface's MACHINES subpanel refreshes
+        # and unfolds for the newcomer.
+        await asyncio.to_thread(mach.add_machine, "box", self.remote.url, "pw-remote")
+        pushed = await self._next_pushed("machines", 15.0)
+        self.assertEqual((pushed["action"], pushed["error"]), ("", ""))
+        self.assertEqual([row["name"] for row in pushed["machines"]][1:], ["box"])
+        self.assertEqual(pushed["machines"][1]["status"], "reachable")
+        # Removal is pushed too.
+        await asyncio.to_thread(mach.remove_machine, "box")
+        gone = await self._next_pushed("machines", 15.0)
+        self.assertEqual([row["name"] for row in gone["machines"]][1:], [])
+        # An unchanged registry pushes nothing more.
+        with self.assertRaises((AssertionError, asyncio.TimeoutError)):
+            await self._next_pushed("machines", 5.0)
+
     async def test_an_address_named_machine_is_labelled_by_its_host_name(self) -> None:
         """An address-registered machine reads as its daemon's host name; a chosen name stays."""
         await asyncio.to_thread(mach.add_machine, "", self.remote.url, "pw-remote")
@@ -152,6 +208,7 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             *mach.load_machines(),
             mach.Machine(name="dead", url=f"https://127.0.0.1:{find_free_port()}"),
         ])
+        await self._registry_pushes_settled()
         host = socket.gethostname().split(".")[0]
         reply = await self._machines()
         self.assertEqual(
@@ -180,7 +237,7 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         refused = await self._ask(
             {
                 "type": "machineAction", "action": "add", "name": "box",
-                "address": self.remote.url, "password": "wrong",
+                "address": self.remote.url, "machinePassword": "wrong",
             },
             "machines",
         )
@@ -190,7 +247,7 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         added = await self._ask(
             {
                 "type": "machineAction", "action": "add", "name": "",
-                "address": self.remote.url, "password": "pw-remote",
+                "address": self.remote.url, "machinePassword": "pw-remote",
             },
             "machines",
         )
@@ -218,7 +275,7 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         malformed = await self._ask(
             {
                 "type": "machineAction", "action": "add", "name": "bad",
-                "address": "https://127.0.0.1:abc", "password": "x",
+                "address": "https://127.0.0.1:abc", "machinePassword": "x",
             },
             "machines",
         )

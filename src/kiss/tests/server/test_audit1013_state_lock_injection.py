@@ -12,7 +12,7 @@ watchdog delivers ``KeyboardInterrupt`` to the task thread with
 ``PyThreadState_SetAsyncExc``; an interrupt raised at the check point
 right after a plain ``with STATE_LOCK:``'s ``__enter__`` returned skips
 ``__exit__`` (CPython gh-74174) and leaks the lock for the daemon's
-life: every later task, ``VSCodeServer()`` and every timer flush then
+life: every later task, ``AgentServer()`` and every timer flush then
 hang on it.  Every ``STATE_LOCK`` site a task thread can reach therefore
 goes through :func:`~kiss.agents.sorcar._concurrency.locked_call`.
 
@@ -33,7 +33,7 @@ from kiss.agents.sorcar._concurrency import locked_call
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_runner import _stop_interrupt_wrapped, _TaskRunnerMixin
 from kiss.server.web_server import WebPrinter
 from kiss.tests.lock_injection import hammer
@@ -114,11 +114,11 @@ _DRIVERS: dict[str, type] = {
 
 
 class _Server:
-    """A real ``VSCodeServer`` over the daemon's ``WebPrinter``, its boot threads joined."""
+    """A real ``AgentServer`` over the daemon's ``WebPrinter``, its boot threads joined."""
 
     def __init__(self) -> None:
         self.printer = WebPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
         if self.server._orphan_sweep_thread is not None:
             self.server._orphan_sweep_thread.join(20)
         for thread in threading.enumerate():
@@ -149,9 +149,9 @@ class _ViewerSubscriber(_Server):
 class _TabDisplacer(_Server):
     """A task's tab taking over a chat another tab shows: the displaced tab's drop.
 
-    ``_registry_update_tab`` prunes the displaced tab's local interest
-    (``WebPrinter.prune_local_tab``, ``_ws_lock``) and drops its state
-    (``_drop_tab_state`` and the teardown tail, ``STATE_LOCK``).
+    ``_registry_update_tab`` drops the displaced tab's state
+    (``_drop_tab_state`` and the teardown tail, ``STATE_LOCK``) and
+    broadcasts the registry snapshot (``WebPrinter``, ``_ws_lock``).
     """
 
     def __init__(self) -> None:
@@ -175,32 +175,18 @@ class _ClosedTabDisposer(_Server):
         agent_state.unregister("audit1013-closed", state)
 
 
-class _TalkBroadcaster(_Server):
-    """A ``talk`` event's per-device arbitration: ``_local_tab_shown`` on the task thread."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.printer.register_local_tab("local-peer", "tab-headless", set())
-        self.printer.subscribe_tab("audit1013-talk", "tab-headless")
-
-    def __call__(self) -> None:
-        self.printer._thread_local.task_id = "audit1013-talk"
-        self.printer.broadcast({"type": "talk", "text": "t", "taskId": "audit1013-talk"})
-
-
 _SERVER_DRIVERS: dict[str, tuple[type, str]] = {
     "subscribe_viewers": (_ViewerSubscriber, "STATE_LOCK"),
     "displace_tab": (_TabDisplacer, "STATE_LOCK"),
     "displace_tab_ws": (_TabDisplacer, "printer._ws_lock"),
     "dispose_closed": (_ClosedTabDisposer, "STATE_LOCK"),
-    "talk": (_TalkBroadcaster, "STATE_LOCK"),
 }
 
 
 def run_hammer(name: str) -> None:
     """Child-process body: hammer the path *name* and check ``STATE_LOCK`` stays free.
 
-    The ``_SERVER_DRIVERS`` paths run over a real ``VSCodeServer`` with
+    The ``_SERVER_DRIVERS`` paths run over a real ``AgentServer`` with
     the lock they are named for kept contended, so the worker's
     ``acquire()`` blocks and the interrupt lands on its return.
     """
@@ -233,6 +219,6 @@ def test_state_lock_paths(name: str) -> None:
 @pytest.mark.parametrize("name", sorted(_SERVER_DRIVERS))
 def test_server_task_thread_paths(name: str) -> None:
     """The server's task-thread paths (viewer subscription, tab displacement,
-    deferred disposal, talk arbitration) leak neither ``STATE_LOCK`` nor
-    the printer's ``_ws_lock`` under injection on a blocking acquire."""
+    deferred disposal) leak neither ``STATE_LOCK`` nor the printer's
+    ``_ws_lock`` under injection on a blocking acquire."""
     _hammer_isolated(name)

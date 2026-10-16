@@ -35,7 +35,7 @@ LOG_FILE="$WORK/home/.kiss/kiss-web-stderr.log"
 echo "the web app's last words" > "$LOG_FILE"
 TUNNEL=https://fresh-quick-tunnel.trycloudflare.com
 
-# curl stub.  LOCAL_CODE: what https://127.0.0.1:<port>/ answers.  For the
+# curl stub.  LOCAL_CODE: what http://127.0.0.1:<port>/ answers.  For the
 # tunnel URL, the n-th call takes the n-th word of TUNNEL_PLAN (the last word
 # repeats): "200" answers 200, "6" fails to resolve (exit 6, prints 000),
 # "530" answers 530.  Every call is logged.
@@ -44,7 +44,7 @@ cat > "$WORK/bin/curl" <<'EOF'
 url="${@: -1}"
 echo "curl $url" >> "$FIX/calls.log"
 case "$url" in
-    https://127.0.0.1:*) printf '%s' "${LOCAL_CODE:-200}"; exit 0 ;;
+    http://127.0.0.1:*) printf '%s' "${LOCAL_CODE:-200}"; exit 0 ;;
 esac
 n=$(grep -c '^curl https://fresh' "$FIX/calls.log")
 set -- $TUNNEL_PLAN
@@ -67,7 +67,7 @@ chmod +x "$WORK/bin/"*
 run() {
     : > "$WORK/calls.log"
     rm -f "$URL_FILE"
-    [ "${3:-1}" = 1 ] && printf '{"local": "https://localhost:8787", "tunnel": "%s"}\n' "$TUNNEL" > "$URL_FILE"
+    [ "${3:-1}" = 1 ] && printf '{"local": "http://localhost:8787", "tunnel": "%s"}\n' "$TUNNEL" > "$URL_FILE"
     FIX="$WORK" LOCAL_CODE="$1" TUNNEL_PLAN="$2" HOME="$WORK/home" PATH="$WORK/bin:$PATH" \
     WAIT_LOCAL_TRIES=2 WAIT_TUNNEL_TRIES=3 \
         bash "$SCRIPT" 8787 "$URL_FILE" "$LOG_FILE" 2>&1
@@ -75,14 +75,14 @@ run() {
 
 # --- 1. kiss-web never answers locally ---------------------------------------------
 if OUT="$(run 000 200)"; then fail "a dead local endpoint passed: $OUT"; fi
-echo "$OUT" | grep -q "ERROR: kiss-web did not answer on https://127.0.0.1:8787" || fail "no local error: $OUT"
+echo "$OUT" | grep -q "ERROR: kiss-web did not answer on http://127.0.0.1:8787" || fail "no local error: $OUT"
 echo "$OUT" | grep -q "the web app's last words" || fail "the log tail is not shown: $OUT"
 grep -q "curl https://fresh" "$WORK/calls.log" && fail "the tunnel was polled although kiss-web is down"
 pass "a web app that does not come up fails the wait, with its log"
 
 # --- 2. the URL answers -------------------------------------------------------------------
 OUT="$(run 200 200)" || fail "a live tunnel failed: $OUT"
-echo "$OUT" | grep -q "kiss-web answers on https://127.0.0.1:8787" || fail "the local answer is not reported: $OUT"
+echo "$OUT" | grep -q "kiss-web answers on http://127.0.0.1:8787" || fail "the local answer is not reported: $OUT"
 echo "$OUT" | grep -q "Public tunnel is live: $TUNNEL" || fail "the live tunnel is not reported: $OUT"
 [ "$(echo "$OUT" | tail -1)" = "SORCAR_PUBLIC_URL=$TUNNEL" ] || fail "the last line is not the URL line: $OUT"
 grep -q "sudo" "$WORK/calls.log" && fail "the cache was flushed although the name resolved"

@@ -12,7 +12,7 @@ a routine restart ``SIGTERM``.  The signal handler raised
 
 The agent ran in a **daemon worker thread**, which the interpreter kills
 abruptly on process exit.  That thread therefore never ran the cleanup
-``finally`` in :meth:`VSCodeServer._run_task` that persists a real
+``finally`` in :meth:`AgentServer._run_task` that persists a real
 ``task_history.result`` and broadcasts the outcome.  The row was left at
 the ``"Agent Failed Abruptly"`` sentinel and the next startup's orphan
 sweep rewrote it to ``"Task terminated unexpectedly (process killed)"`` —
@@ -58,10 +58,10 @@ def _make_remote_server() -> Any:
     """Build a :class:`RemoteAccessServer` with no tunnel / sockets bound.
 
     Constructing the remote server also constructs its owned
-    :class:`VSCodeServer`, whose ``__init__`` *clears* the process-global
+    :class:`AgentServer`, whose ``__init__`` *clears* the process-global
     ``kiss.server.agent_state`` registry.  Tests must therefore build
     the remote server FIRST and then run their task through
-    ``remote._vscode_server`` so the worker registers into the same
+    ``remote._agent_server`` so the worker registers into the same
     registry the shutdown helper later scans — exactly as in production
     where a single server owns both.
     """
@@ -87,8 +87,8 @@ class TestShutdownStopsActiveTask(TestCase):
         """
         tab_id = "shutdown-active-1"
         remote = _make_remote_server()
-        vscode = remote._vscode_server
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        daemon = remote._agent_server
+        agent = ChatSorcarAgent("Sorcar")
         state = AgentState(
             f"pre-{tab_id}",
             agent=agent,
@@ -129,7 +129,7 @@ class TestShutdownStopsActiveTask(TestCase):
         agent.run = fake_run  # type: ignore[assignment]
 
         worker = threading.Thread(
-            target=vscode._run_task,
+            target=daemon._run_task,
             args=({
                 "type": "run",
                 "prompt": "shutdown-while-running",

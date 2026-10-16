@@ -21,7 +21,7 @@ in ``kiss.server.agent_state``, so a stale subscription to a finished
 task resolves to nothing and the stop lands on the task the viewer is
 actually watching.
 
-The test uses the real ``VSCodeServer``, real ``JsonPrinter``
+The test uses the real ``AgentServer``, real ``JsonPrinter``
 subscription state, real ``agent_state`` registry entries, real
 threads and real ``threading.Event`` objects — no mocks or patches.
 """
@@ -32,7 +32,7 @@ import threading
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestViewerStopCrossTaskHijack(unittest.TestCase):
@@ -40,7 +40,7 @@ class TestViewerStopCrossTaskHijack(unittest.TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()

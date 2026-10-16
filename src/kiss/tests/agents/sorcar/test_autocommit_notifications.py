@@ -5,7 +5,7 @@
 """End-to-end tests for the auto-commit lifecycle notifications.
 
 When the agent's ``commit_and_merge`` tool commits the worktree, the
-chat webview should receive two ``notification`` toasts:
+chat page should receive two ``notification`` toasts:
 
 * ``"Generating commit message"`` immediately before the (typically
   slow) LLM call that generates the commit message — so the user
@@ -126,8 +126,8 @@ class _LLMUnavailable:
 class _RecordingPrinter:
     """Minimal printer stub that records every ``broadcast`` event.
 
-    The webview consumes ``broadcast`` events via the VS Code
-    extension host; for tests we only need a ``broadcast`` method
+    The chat page consumes ``broadcast`` events over the daemon's
+    WebSocket; for tests we only need a ``broadcast`` method
     that captures the event payload alongside the HEAD SHA observed
     at broadcast time (so we can prove ordering relative to the
     commit).
@@ -346,7 +346,7 @@ class TestAutoCommitChangesNotifyFn:
 class TestWorktreeCommitBroadcasts:
     """``ChatSorcarAgent._commit_worktree`` routes the two
     life-cycle notifications through ``self.printer.broadcast`` with
-    the chat-webview-expected payload shape.
+    the payload shape the chat page expects.
     """
 
     def test_worktree_emits_generating_then_committed_with_tab_id(
@@ -391,7 +391,7 @@ class TestWorktreeCommitBroadcasts:
     def test_worktree_no_commit_emits_no_notifications(self) -> None:
         """Bug 1 (gpt-5.5 review): worktree path must NOT emit the
         misleading "Generating commit message" toast when there are no
-        staged changes to commit.  Otherwise the webview shows a toast
+        staged changes to commit.  Otherwise the chat page shows a toast
         that never resolves to a "Committed" message.
         """
         with tempfile.TemporaryDirectory() as tmp_str:

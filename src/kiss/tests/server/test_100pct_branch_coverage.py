@@ -28,7 +28,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (
     _redirect_db,
     _restore_db,
@@ -39,7 +39,7 @@ def _register_worktree_state(tab_id: str) -> AgentState:
     """Register a server-owned worktree state for *tab_id* and return it."""
     state = AgentState(
         f"task-{tab_id}",
-        agent=ChatSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar"),
         tab_id=tab_id,
         server_owned=True,
     )
@@ -76,12 +76,12 @@ class TestFormatToolCallBranches:
         assert ev["new_string"] == "new"
         assert "extras" in ev
 
-class TestVSCodeServerUncoveredBranches:
-    """Cover remaining uncovered branches in VSCodeServer."""
+class TestAgentServerUncoveredBranches:
+    """Cover remaining uncovered branches in AgentServer."""
 
     def test_check_merge_conflict_no_branches(self) -> None:
         """_check_merge_conflict returns False when no wt_branch."""
-        server = VSCodeServer()
+        server = AgentServer()
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
@@ -92,7 +92,7 @@ class TestVSCodeServerUncoveredBranches:
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
         """_get_worktree_changed_files returns [] when no branches."""
-        server = VSCodeServer()
+        server = AgentServer()
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
@@ -139,7 +139,7 @@ class TestVSCodeServerUncoveredBranches:
                 ["git", "commit", "-m", "wt mod"], cwd=wt_dir, capture_output=True,
             )
 
-            server = VSCodeServer()
+            server = AgentServer()
             state = _register_worktree_state("0")
             assert state.agent is not None
             state.agent._wt = GitWorktree(
@@ -164,12 +164,12 @@ class TestVSCodeServerUncoveredBranches:
         finally:
             _restore_db(saved)
 
-class TestVSCodeServerExtractResultSummary:
+class TestAgentServerExtractResultSummary:
     """Cover _extract_result_summary."""
 
     def test_extract_result_summary_with_result_event(self) -> None:
         """_extract_result_summary finds the result event."""
-        server = VSCodeServer()
+        server = AgentServer()
         server.printer._thread_local.task_id = "t1"
         server.printer.start_recording()
         server.printer.broadcast({"type": "text_delta", "text": "hello"})

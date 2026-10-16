@@ -28,9 +28,6 @@ echo "top secret" > secrets/key.txt
 echo "another secret" > secrets/deep.txt
 echo "private notes" > private_notes.md
 echo "readme" > README.md
-# Same rule as the real repo's .gitignore: the built extension is never
-# tracked in origin, only injected into the public snapshot.
-echo "*.vsix" > .gitignore
 cat > scripts/exclude.json <<'EOF'
 [
     "scripts/exclude.json",
@@ -43,17 +40,6 @@ git commit -q -m "initial"
 
 # Source release.sh functions without running main (BASH_SOURCE guard).
 source "$RELEASE_SH"
-
-# The real repo must ignore the vsix too, or "git add -A" in the release would
-# commit it to origin.
-git -C "$REPO_ROOT" check-ignore -q "$VSIX_FILE" ||
-    fail "$VSIX_FILE is not gitignored in the real repo (would be committed to origin)"
-pass "real repo gitignores $VSIX_FILE"
-
-# A stand-in for the packaged extension that build_vscode_extension produces.
-mkdir -p "$(dirname "$VSIX_FILE")"
-printf 'PK\003\004 fake vsix v1' > "$VSIX_FILE"
-[[ -z "$(git status --porcelain -- "$VSIX_FILE")" ]] || fail "vsix shows up as untracked (not ignored)"
 
 # --- Test 1: filtered_tree removes excluded paths, keeps the rest ---
 TREE=$(filtered_tree HEAD)
@@ -71,12 +57,12 @@ git diff --quiet && git diff --cached --quiet || fail "working tree/index modifi
 pass "real index and working tree untouched"
 
 # --- Test 3: create_public_commit + verify + push; clone has history, no secrets ---
-create_public_commit "$(git rev-parse HEAD)" "1.2.3"
+create_public_commit "$(git rev-parse HEAD)"
 verify_no_excluded_paths "$PUBLIC_COMMIT" || fail "verify_no_excluded_paths rejected clean commit"
 verify_no_excluded_paths_in_history "$PUBLIC_COMMIT" ||
     fail "verify_no_excluded_paths_in_history rejected clean history"
-[[ "$(git rev-parse "$PUBLIC_COMMIT^")" == "$FILTERED_HEAD" ]] ||
-    fail "release tip not parented on the filtered history"
+[[ "$PUBLIC_COMMIT" == "$FILTERED_HEAD" ]] || fail "public commit is not the filtered history tip"
+[[ "$PUBLIC_COMMIT" != "$(git rev-parse HEAD)" ]] || fail "public commit is origin's own commit"
 git remote add public "$WORK/public.git"
 git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
 git clone -q "$WORK/public.git" "$WORK/clone"
@@ -86,16 +72,9 @@ git clone -q "$WORK/public.git" "$WORK/clone"
 [[ -e "$WORK/clone/scripts/exclude.json" ]] && fail "exclude.json present in public clone"
 git -C "$WORK/clone" log --format='%s' | grep -qx "initial" ||
     fail "development commit 'initial' missing from public history"
+git diff --quiet && git diff --cached --quiet || fail "create_public_commit touched the real index"
+[[ -z "$(git status --porcelain)" ]] || fail "create_public_commit left the working tree dirty"
 pass "public clone carries the filtered development history and no excluded paths"
-
-# --- Test 3b: the vsix is in the public clone but in no commit of origin ---
-cmp -s "$VSIX_FILE" "$WORK/clone/$VSIX_FILE" || fail "vsix missing or different in public clone"
-[[ "$(git ls-tree -r "$PUBLIC_COMMIT" -- "$VSIX_FILE" | cut -d' ' -f1)" == "100644" ]] ||
-    fail "vsix not stored as a regular file in the public commit"
-git ls-tree -r --name-only HEAD | grep -qxF "$VSIX_FILE" && fail "vsix committed to origin HEAD"
-git diff --quiet && git diff --cached --quiet || fail "tree_with_vsix touched the real index"
-[[ -z "$(git status --porcelain)" ]] || fail "tree_with_vsix left the working tree dirty"
-pass "vsix is part of the public snapshot and never added or committed to origin"
 
 # --- Test 4: excluded blobs are not even reachable in the public object db ---
 SECRET_BLOB=$(git rev-parse HEAD:secrets/key.txt)
@@ -111,60 +90,32 @@ git add -A
 git commit -q -m "secrets only"
 echo "v2" >> keep/app.py
 echo "new secret" > secrets/key2.txt
-printf 'PK\003\004 fake vsix v2' > "$VSIX_FILE"   # rebuilt extension
 git add -A
 git commit -q -m "second"
-create_public_commit "$(git rev-parse HEAD)" "1.2.4"
+create_public_commit "$(git rev-parse HEAD)"
 verify_no_excluded_paths "$PUBLIC_COMMIT" || fail "verify rejected second commit"
 verify_no_excluded_paths_in_history "$PUBLIC_COMMIT" || fail "verify rejected second history"
 git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
-[[ "$(git rev-parse "$PUBLIC_COMMIT^")" == "$FILTERED_HEAD" ]] ||
-    fail "second release tip not parented on the filtered history"
-# initial + second survive; "secrets only" (excluded content only) is pruned;
-# the old "Release 1.2.3" tip is replaced rather than kept in main's ancestry.
-[[ "$(git -C "$WORK/public.git" rev-list --count main)" == "3" ]] ||
-    fail "public main should hold 2 dev commits + 1 release tip, got $(git -C "$WORK/public.git" rev-list --count main)"
+[[ "$PUBLIC_COMMIT" == "$FILTERED_HEAD" ]] || fail "second public commit is not the filtered tip"
+# initial + second survive; "secrets only" (excluded content only) is pruned.
+[[ "$(git -C "$WORK/public.git" rev-list --count main)" == "2" ]] ||
+    fail "public main should hold 2 dev commits, got $(git -C "$WORK/public.git" rev-list --count main)"
 for subject in "initial" "second"; do
     git -C "$WORK/public.git" log --format='%s' main | grep -qx "$subject" ||
         fail "development commit '$subject' missing from public history"
 done
 git -C "$WORK/public.git" log --format='%s' main | grep -qx "secrets only" &&
     fail "commit whose only content was excluded paths survived in public history"
-git -C "$WORK/public.git" log --format='%s' main | grep -qx "Release 1.2.3" &&
-    fail "previous release tip still reachable from public main"
 for c in $(git -C "$WORK/public.git" rev-list main); do
     git -C "$WORK/public.git" ls-tree -r --name-only "$c" | grep -q "secrets" && fail "secrets in public history commit $c"
 done
 pass "second release republishes the filtered history with no secrets anywhere"
 
-# --- Test 5b: the release tip carries the vsix, dev commits and origin none ---
-[[ "$(git -C "$WORK/public.git" show "main:$VSIX_FILE")" == "$(cat "$VSIX_FILE")" ]] ||
-    fail "public main does not carry the rebuilt vsix"
-git -C "$WORK/public.git" ls-tree -r --name-only "main^" | grep -qxF "$VSIX_FILE" &&
-    fail "vsix leaked into a rewritten development commit"
-for c in $(git rev-list HEAD); do
-    git ls-tree -r --name-only "$c" | grep -qxF "$VSIX_FILE" && fail "vsix in origin commit $c"
-done
-pass "the release tip ships the vsix while development and origin commits carry none"
-
-# --- Test 6: sync check equivalence — filtered tree of HEAD == public tree sans vsix ---
+# --- Test 6: sync check equivalence — filtered tree of HEAD == public tree ---
 PUB_TREE=$(git -C "$WORK/public.git" rev-parse 'main^{tree}')
-[[ "$(filtered_tree HEAD)" != "$PUB_TREE" ]] || fail "public tree unexpectedly lacks the vsix"
-[[ "$(filtered_tree HEAD)" == "$(tree_without_vsix "$PUB_TREE")" ]] ||
-    fail "filtered tree of HEAD != public tree minus vsix (sync check would misfire)"
-pass "in-sync detection: filtered tree matches public tree minus vsix after release"
-
-# --- Test 6b: tree_without_vsix is the identity on a tree with no vsix ---
-[[ "$(tree_without_vsix "$(filtered_tree HEAD)")" == "$(filtered_tree HEAD)" ]] ||
-    fail "tree_without_vsix changed a tree that had no vsix"
-pass "tree_without_vsix leaves vsix-free trees unchanged"
-
-# --- Test 6d: a locally rebuilt vsix that differs from the published one must
-# not break stripping (git rm --cached without -f refuses such an index entry) ---
-printf 'PK\003\004 fake vsix v3 local only' > "$VSIX_FILE"
-STRIPPED=$(tree_without_vsix "$PUB_TREE") || fail "tree_without_vsix failed with a differing local vsix"
-[[ "$STRIPPED" == "$(filtered_tree HEAD)" ]] || fail "stripped tree wrong with a differing local vsix"
-pass "tree_without_vsix works when the local vsix differs from the published blob"
+[[ "$(filtered_tree HEAD)" == "$PUB_TREE" ]] ||
+    fail "filtered tree of HEAD != public tree (sync check would misfire)"
+pass "in-sync detection: filtered tree matches the public tree after release"
 
 # --- Test 6e: release_needed drives the step-3 decision ---
 PUBLIC_MAIN=$(git -C "$WORK/public.git" rev-parse main)
@@ -172,16 +123,20 @@ PUBLIC_MAIN=$(git -C "$WORK/public.git" rev-parse main)
 # rewrite), or the in-sync check below could never hold across releases.
 build_filtered_history "$(git rev-parse HEAD)" > /dev/null
 if release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN" >/dev/null; then
-    fail "release_needed wants a release although kiss_ai already has this history and a vsix"
+    fail "release_needed wants a release although kiss_ai already has this history"
 fi
-pass "release_needed: in sync (same history, vsix published) -> nothing to release"
+pass "release_needed: in sync (same history published) -> nothing to release"
 
-# A snapshot published before the vsix was bundled: same source, no vsix.
-LEGACY=$(git commit-tree "$(filtered_tree HEAD)" -m "legacy snapshot without vsix")
+# The tip shape of earlier releases: a "Release X.Y.Z" commit (it used to add
+# the packaged VS Code extension) on top of the very same filtered history.
+# The source is current, but the tip is not the rewritten head: re-release so
+# the extra commit disappears from public main.
+LEGACY=$(git commit-tree "$(filtered_tree HEAD)" -p "$FILTERED_HEAD" -m "Release 1.2.4")
 OUT=$(release_needed "$FILTERED_HEAD" "$LEGACY") ||
-    fail "release_needed skipped a public snapshot that lacks the vsix"
-echo "$OUT" | grep -q "has no $VSIX_FILE yet" || fail "missing-vsix reason not reported: $OUT"
-pass "release_needed: same source but no vsix in kiss_ai -> release"
+    fail "release_needed skipped a public main topped by an old-style release commit"
+echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
+    fail "old-style tip reason not reported: $OUT"
+pass "release_needed: same source under an old-style release tip -> release"
 
 # History-only changes leave origin's tree identical but must still be
 # published: a change plus its revert, and an intentionally empty commit
@@ -195,9 +150,9 @@ git commit -q --allow-empty -m "empty note"
 build_filtered_history "$(git rev-parse HEAD)" > /dev/null
 OUT=$(release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN") ||
     fail "release_needed skipped history-only commits (tree unchanged)"
-echo "$OUT" | grep -q "lacks the filtered development history" ||
+echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
     fail "history-only reason not reported: $OUT"
-create_public_commit "$(git rev-parse HEAD)" "1.2.5" > /dev/null
+create_public_commit "$(git rev-parse HEAD)" > /dev/null
 git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
 for subject in "tempchange" 'Revert "tempchange"' "empty note"; do
     git -C "$WORK/public.git" log --format='%s' main | grep -qFx "$subject" ||
@@ -217,51 +172,25 @@ OUT=$(release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN") ||
 echo "$OUT" | grep -q "Origin differs" || fail "source-change reason not reported: $OUT"
 pass "release_needed: source changed -> release"
 
-# A squashed snapshot (the pre-history-publication release shape): current tree
-# and a vsix, but parented on another snapshot instead of the rewritten
+# A squashed snapshot (the pre-history-publication release shape): current
+# tree, but parented on another snapshot instead of being the rewritten
 # development history. It must be re-released so the history gets published.
-OLD_SNAP=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD^)")" -m "Release 0.0.1")
-SQUASHED=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD)")" -p "$OLD_SNAP" -m "Release 0.0.2")
+OLD_SNAP=$(git commit-tree "$(filtered_tree HEAD^)" -m "Release 0.0.1")
+SQUASHED=$(git commit-tree "$(filtered_tree HEAD)" -p "$OLD_SNAP" -m "Release 0.0.2")
 OUT=$(release_needed "$FILTERED_HEAD" "$SQUASHED") ||
     fail "release_needed kept a squashed-snapshot main"
-echo "$OUT" | grep -q "lacks the filtered development history" ||
+echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
     fail "squashed-snapshot reason not reported: $OUT"
 pass "release_needed: squashed snapshot main -> release (history gets published)"
 
-# A merge tip or a parentless tip is never what a release pushes.
-DEV=$(git commit-tree "$(filtered_tree HEAD)" -m "dev tip")
-MERGE=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD)")" -p "$DEV" -p "$OLD_SNAP" -m "merge")
-OUT=$(release_needed "$FILTERED_HEAD" "$MERGE") || fail "release_needed kept a merge tip"
-echo "$OUT" | grep -q "is a merge" || fail "merge reason not reported: $OUT"
-ROOT=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD)")" -m "Release root")
-OUT=$(release_needed "$FILTERED_HEAD" "$ROOT") || fail "release_needed kept a parentless tip"
-echo "$OUT" | grep -q "no development history" || fail "parentless reason not reported: $OUT"
-pass "release_needed: merge or parentless tips are re-released"
+# A public tip that cannot be inspected (a sha this repo does not have) is
+# released rather than skipped.
+OUT=$(release_needed "$FILTERED_HEAD" "0000000000000000000000000000000000000000") ||
+    fail "release_needed kept an uninspectable public tip"
+echo "$OUT" | grep -q "cannot be inspected" || fail "uninspectable reason not reported: $OUT"
+pass "release_needed: uninspectable public tip -> release"
 
-# Not covered: release_needed's "tree_without_vsix failed -> release" fallback.
-# It needs a commit whose vsix entry resolves but whose tree cannot be read,
-# which only a corrupt object store or a failing mktemp can produce.
 git reset -q --hard HEAD^
-printf 'PK\003\004 fake vsix v2' > "$VSIX_FILE"
-
-# --- Test 6c: tree_with_vsix / tree_without_vsix fail loudly on bad input ---
-mv "$VSIX_FILE" "$WORK/vsix.bak"
-if OUT=$(tree_with_vsix "$(filtered_tree HEAD)" 2>&1); then
-    fail "tree_with_vsix succeeded without a built vsix"
-fi
-echo "$OUT" | grep -q "VSIX not found" || fail "missing-vsix error not reported: $OUT"
-if OUT=$(bash -c 'set -e; source "'"$RELEASE_SH"'"; create_public_commit HEAD 9.9.9; echo REACHED' 2>&1); then
-    fail "create_public_commit succeeded without a built vsix"
-fi
-echo "$OUT" | grep -q "REACHED" && fail "create_public_commit continued past a missing vsix"
-mv "$WORK/vsix.bak" "$VSIX_FILE"
-if tree_with_vsix "0000000000000000000000000000000000000000" >/dev/null 2>&1; then
-    fail "tree_with_vsix accepted a nonexistent tree"
-fi
-if tree_without_vsix "0000000000000000000000000000000000000000" >/dev/null 2>&1; then
-    fail "tree_without_vsix accepted a nonexistent tree"
-fi
-pass "tree_with_vsix requires a built vsix; both helpers reject nonexistent trees"
 
 # --- Test 7: tagging the filtered commit works ---
 git tag -a "v1.2.4-test" -m "Release 1.2.4" "$PUBLIC_COMMIT"
@@ -273,13 +202,13 @@ pass "tag points at filtered commit and pushes to public"
 # filtered development history in one leased, atomic, non-fast-forward push ---
 PUBLIC_REPO_URL="$WORK/public.git"
 PUBLIC_REPO_SSH="$WORK/public.git"
-OLD_SNAP2=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD^)")" -m "Release 0.1.0")
-SQUASHED2=$(git commit-tree "$(tree_with_vsix "$(filtered_tree HEAD)")" -p "$OLD_SNAP2" -m "Release 0.2.0")
+OLD_SNAP2=$(git commit-tree "$(filtered_tree HEAD^)" -m "Release 0.1.0")
+SQUASHED2=$(git commit-tree "$(filtered_tree HEAD)" -p "$OLD_SNAP2" -m "Release 0.2.0")
 git push -q public "+$SQUASHED2:refs/heads/main"
 build_filtered_history "$(git rev-parse HEAD)" > /dev/null
 release_needed "$FILTERED_HEAD" "$SQUASHED2" >/dev/null ||
     fail "release_needed skipped the migration off squashed snapshots"
-create_public_commit "$(git rev-parse HEAD)" "2.0.0" > /dev/null
+create_public_commit "$(git rev-parse HEAD)" > /dev/null
 git tag -a "v2.0.0-mig" -m "Release 2.0.0" "$PUBLIC_COMMIT"
 push_public_snapshot "$PUBLIC_COMMIT" "v2.0.0-mig" "$SQUASHED2" > /dev/null ||
     fail "migration push (non-fast-forward, leased) failed"

@@ -5,7 +5,7 @@
 """Audit 2026-09-24 (core): ``file_lock.exclusive_file_lock`` is the one
 cross-process lock helper.
 
-``vscode_config`` used to inline the open / ``lock_exclusive`` / ``try:
+``user_config`` used to inline the open / ``lock_exclusive`` / ``try:
 ... finally: unlock`` dance three times (``save_config``,
 ``_api_keys_store_flock`` and the RC-file lock in ``save_api_key``)
 while the identical helper ``exclusive_file_lock`` sat unused in

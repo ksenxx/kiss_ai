@@ -31,7 +31,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
 )
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_worktree_audit9 import (  # noqa: F401
     _make_repo,
 )
@@ -60,9 +60,9 @@ class TestInc6Fix:
         (repo / "init.txt").write_text("user staged change")
         subprocess.run(["git", "add", "init.txt"], cwd=repo, capture_output=True)
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,

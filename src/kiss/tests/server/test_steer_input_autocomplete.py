@@ -29,12 +29,12 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """A real :class:`VSCodeServer` whose broadcasts land in a list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """A real :class:`AgentServer` whose broadcasts land in a list."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 

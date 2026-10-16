@@ -1,25 +1,25 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **778 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 111 |
 | Anthropic | 76 |
-| Gemini | 20 |
+| Gemini | 21 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 421 |
+| OpenRouter | 422 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **744** generation-capable models
-- **584** function-calling-capable models
+- **745** generation-capable models
+- **585** function-calling-capable models
 - **7** embedding models
-- **18** decision models
+- **19** decision models
 
 Full model list:
 
@@ -223,7 +223,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (20)</strong></summary>
+<summary><strong>Gemini (21)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -242,6 +242,7 @@ Full model list:
 - `gemini-3.6-flash`
 - `gemini-3.7-flash`
 - `gemini-3.8-flash`
+- `gemini-4-argon`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -388,7 +389,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (421)</strong></summary>
+<summary><strong>OpenRouter (422)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -414,7 +415,6 @@ Full model list:
 - `openrouter/anthropic/claude-opus-4.8`
 - `openrouter/anthropic/claude-opus-5`
 - `openrouter/anthropic/claude-opus-5.5`
-- `openrouter/anthropic/claude-sonnet-4`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
@@ -471,6 +471,7 @@ Full model list:
 - `openrouter/google/gemini-3.6-flash`
 - `openrouter/google/gemini-3.7-flash`
 - `openrouter/google/gemini-3.8-flash`
+- `openrouter/google/gemini-4-argon`
 - `openrouter/google/gemma-2-27b-it`
 - `openrouter/google/gemma-3-12b-it`
 - `openrouter/google/gemma-3-27b-it`
@@ -486,13 +487,13 @@ Full model list:
 - `openrouter/inception/mercury-2.5`
 - `openrouter/inception/mercury-decide`
 - `openrouter/inclusionai/ling-3.0-flash`
-- `openrouter/inclusionai/ling-3.0-flash-fin`
-- `openrouter/inclusionai/ling-3.0-flash-sante`
 - `openrouter/inclusionai/ling-3.0-flash-vl`
+- `openrouter/inclusionai/ling-3.1-flash`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
 - `openrouter/liquid/d1`
+- `openrouter/liquid/lfm-2.5-24b-a2b`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
@@ -730,8 +731,8 @@ Full model list:
 - `openrouter/thinkingmachines/inkling-small`
 - `openrouter/togethercomputer/tev1-4b-experimental`
 - `openrouter/typesafe/jev-1.13`
-- `openrouter/unbiased/pareto`
-- `openrouter/unbiased/pareto-26.10-preview`
+- `openrouter/typesafe/jev-1.14`
+- `openrouter/unbiased/pareto-26.9`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
 - `openrouter/upstage/solar-decide-flash`
@@ -806,8 +807,9 @@ Full model list:
 - `openrouter/~openai/gpt-terra-latest-low`
 - `openrouter/~openai/gpt-terra-latest-medium`
 - `openrouter/~openai/gpt-terra-latest-xhigh`
-- `openrouter/~perplexity/pplx-decider-27b-latest`
+- `openrouter/~perplexity/pplx-decider-latest`
 - `openrouter/~typesafe/jev-latest`
+- `openrouter/~unbiased/pareto-latest`
 - `openrouter/~x-ai/grok-latest`
 - `openrouter/~z-ai/glm-flash-latest`
 - `openrouter/~z-ai/glm-latest`

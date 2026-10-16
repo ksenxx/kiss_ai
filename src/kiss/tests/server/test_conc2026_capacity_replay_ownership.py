@@ -27,7 +27,7 @@ capacity replay keeps the legacy behaviour — the tab works as a
 non-registry tab, INCLUDING the viewer fan-out subscription the old
 zero-generation path used to skip.
 
-Real :class:`VSCodeServer`, real :class:`TabRegistry`, real printer
+Real :class:`AgentServer`, real :class:`TabRegistry`, real printer
 subscriptions; the deterministic schedule parks the close at the same
 seam the review reproduction used (a wrapper delegating to the real
 ``_registry_update_tab``).  No mocks.

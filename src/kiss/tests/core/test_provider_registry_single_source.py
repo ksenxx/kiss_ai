@@ -20,7 +20,7 @@ Two findings from ``tmp/audit/01-core-models-a.md``:
   ``get_model_provider`` each restated the same prefix → credential
   mapping by hand.  A vendor added
   to the registry therefore executed correctly yet stayed invisible and
-  unselectable in the VS Code / web model picker, with no error anywhere.
+  unselectable in the chat page's model picker, with no error anywhere.
 
 No mocks, patches or test doubles: the tests register a real provider in
 the real registry and a real entry in the real catalog, set a real API

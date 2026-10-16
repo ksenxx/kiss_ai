@@ -1,0 +1,264 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// JSDOM integration test: a chat panel that shows an image (a tool
+// result's embedded screenshot / chart) is never collapsed or hidden by
+// the page's automatic passes, on any surface:
+//
+//   * collapseOlderPanels  -- while a task streams, older panels fold as
+//     new ones arrive; an image panel must stay open.
+//   * collapseAllExceptResult -- a replayed transcript folds everything
+//     but the result; an image panel must stay open.
+//   * applyChevronState -- a finished task's plain tool panels are
+//     folded; an image panel must stay open.
+//
+// Only the user's own click on the chevron folds such a panel.
+
+'use strict';
+
+const assert = require('assert');
+const path = require('path');
+const {makePage, send, stubRaf} = require('./simplify2_harness');
+
+// A real, valid 1x1 transparent PNG.
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
+  'YGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==';
+
+function startTask(wv, chatId) {
+  const ready = wv.posted.find(m => m.type === 'ready');
+  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
+  send(wv.win, {type: 'clear', chat_id: chatId, tabId: ready.tabId});
+  send(wv.win, {
+    type: 'status',
+    running: true,
+    tabId: ready.tabId,
+    startTs: Date.now(),
+  });
+  return ready.tabId;
+}
+
+/** The task's tool panels: on the transcript while it runs, inside its
+ * Trajectory panel once it has ended. */
+function toolPanels(win) {
+  return Array.from(
+    win.document.querySelectorAll(
+      '#output > .ev.tc, #output > .trajectory > .trajectory-sub > .ev.tc',
+    ),
+  );
+}
+
+const IMAGE = {path: '/w/shot.png', mime: 'image/png', b64: PNG_B64};
+
+function testLiveStreamKeepsImagePanelOpen() {
+  const wv = makePage({beforeScripts: stubRaf});
+  const win = wv.win;
+  const TAB = startTask(wv, 'chat-imgpanel-1');
+
+  // Panel 1: a plain Read.  Panel 2: a screenshot with an image.
+  send(win, {type: 'tool_call', name: 'Read', path: 'a.txt', tabId: TAB});
+  send(win, {
+    type: 'tool_result',
+    content: 'aaa',
+    is_error: false,
+    tool_name: 'Read',
+    tabId: TAB,
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'screenshot',
+    path: 'shot.png',
+    tabId: TAB,
+  });
+  send(win, {
+    type: 'tool_result',
+    content: 'saved',
+    is_error: false,
+    tool_name: 'screenshot',
+    images: [IMAGE],
+    tabId: TAB,
+  });
+  // Panel 3 arrives: the automatic pass folds older panels.
+  send(win, {type: 'tool_call', name: 'Read', path: 'b.txt', tabId: TAB});
+  send(win, {
+    type: 'tool_result',
+    content: 'bbb',
+    is_error: false,
+    tool_name: 'Read',
+    tabId: TAB,
+  });
+  // Panels 4 and 5 arrive too: the stream keeps its newest two panels
+  // open, so panel 3 (no image) is now folded as well.
+  send(win, {type: 'tool_call', name: 'Read', path: 'c.txt', tabId: TAB});
+  send(win, {
+    type: 'tool_result',
+    content: 'ccc',
+    is_error: false,
+    tool_name: 'Read',
+    tabId: TAB,
+  });
+  send(win, {type: 'tool_call', name: 'Read', path: 'd.txt', tabId: TAB});
+
+  const panels = toolPanels(win);
+  assert.strictEqual(panels.length, 5, 'five tool panels must render');
+  assert.ok(panels[1].querySelector('img.tr-img'), 'panel 2 shows the image');
+  assert.ok(
+    panels[0].classList.contains('collapsed'),
+    'a plain older panel is folded as the stream moves on',
+  );
+  assert.ok(
+    panels[2].classList.contains('collapsed'),
+    'a plain older panel is folded as the stream moves on',
+  );
+  assert.ok(
+    !panels[1].classList.contains('collapsed'),
+    'BUG: the panel showing an image was auto-collapsed while streaming',
+  );
+
+  // The task finishes: the image panel stays open.
+  send(win, {
+    type: 'result',
+    text: 'done',
+    summary: 'done',
+    success: true,
+    tabId: TAB,
+  });
+  send(win, {type: 'status', running: false, tabId: TAB});
+  assert.ok(
+    !panels[1].classList.contains('collapsed'),
+    'the image panel stays open after the task finishes',
+  );
+
+  // Only the user's own chevron click folds it.
+  const chevron = panels[1].querySelector(':scope > .collapse-header');
+  assert.ok(chevron, 'the panel has a clickable header');
+  chevron.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    panels[1].classList.contains('collapsed'),
+    'the user can still fold an image panel by hand',
+  );
+  console.log('ok: a streaming image panel is never auto-collapsed');
+}
+
+function testReplayKeepsImagePanelOpenAndVisible() {
+  const wv = makePage({beforeScripts: stubRaf});
+  const win = wv.win;
+  const events = [{type: 'prompt', text: 'replayed task'}];
+  for (let i = 0; i < 3; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push({type: 'tool_call', name: 'screenshot', path: 'shot.png'});
+  events.push({
+    type: 'tool_result',
+    tool_name: 'screenshot',
+    content: 'saved',
+    images: [IMAGE],
+  });
+  events.push({type: 'tool_call', name: 'Read', path: '/tmp/last'});
+  events.push({type: 'tool_result', name: 'Read', content: 'last'});
+  events.push({type: 'result', text: 'done', summary: 'done', success: true});
+  send(win, {type: 'task_events', task: 'replayed task', task_id: 7, events});
+
+  const panels = toolPanels(win);
+  assert.strictEqual(panels.length, 5, 'five tool panels replay');
+  // The finished task's replay folds them all into the Trajectory panel.
+  const traj = win.document.querySelector('#output > .trajectory');
+  assert.ok(
+    traj && panels.every(p => traj.contains(p)),
+    'the replayed panels sit inside the Trajectory',
+  );
+  const imagePanel = panels[3];
+  assert.ok(
+    imagePanel.querySelector('img.tr-img'),
+    'the screenshot panel shows its image',
+  );
+  const plain = [panels[0], panels[1], panels[2], panels[4]];
+  assert.ok(
+    plain.every(p => p.classList.contains('collapsed')),
+    'plain replayed tool panels are folded',
+  );
+  assert.ok(
+    !imagePanel.classList.contains('collapsed'),
+    'BUG: the replayed panel showing an image was auto-collapsed',
+  );
+  console.log('ok: a replayed image panel stays open and on screen');
+}
+
+// A `summary` folds ordinary panels and leaves image panels expanded
+// after it, outside the collapsed digest.
+function testSummaryAdoptionKeepsImageVisible() {
+  const wv = makePage({beforeScripts: stubRaf});
+  const win = wv.win;
+  const TAB = startTask(wv, 'chat-imgpanel-3');
+  send(win, {
+    type: 'tool_call',
+    name: 'screenshot',
+    path: 'shot.png',
+    tabId: TAB,
+  });
+  send(win, {
+    type: 'tool_result',
+    content: 'saved',
+    is_error: false,
+    tool_name: 'screenshot',
+    images: [IMAGE],
+    tabId: TAB,
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'summary',
+    description: 'so far',
+    tabId: TAB,
+  });
+  const summary = win.document.querySelector('#output .tc-summary');
+  assert.ok(summary, 'the summary panel renders');
+  assert.ok(
+    !summary.querySelector('.summary-sub img.tr-img'),
+    'the summary must not adopt the image panel',
+  );
+  const imagePanel = summary.nextElementSibling;
+  assert.ok(imagePanel.querySelector('img.tr-img'), 'the image follows the summary');
+  assert.ok(!imagePanel.classList.contains('collapsed'), 'the image remains expanded');
+  assert.ok(summary.classList.contains('collapsed'), 'the summary folds normally');
+  // Without an image the digest folds as before.
+  send(win, {type: 'tool_call', name: 'Read', path: 'x.txt', tabId: TAB});
+  send(win, {
+    type: 'tool_result',
+    content: 'x',
+    is_error: false,
+    tool_name: 'Read',
+    tabId: TAB,
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'summary',
+    description: 'later',
+    tabId: TAB,
+  });
+  const summaries = win.document.querySelectorAll('#output .tc-summary');
+  assert.strictEqual(summaries.length, 2);
+  assert.ok(
+    summaries[1].classList.contains('collapsed'),
+    'a summary adopting only text panels still folds',
+  );
+  console.log('ok: a summary folds with its image panel visible after it');
+}
+
+function main() {
+  testLiveStreamKeepsImagePanelOpen();
+  testReplayKeepsImagePanelOpenAndVisible();
+  testSummaryAdoptionKeepsImageVisible();
+  console.log('All tests passed');
+  // The page keeps ticking panel-time intervals; exit explicitly.
+  process.exit(0);
+}
+
+try {
+  main();
+} catch (err) {
+  console.error('FAIL:', err && err.stack ? err.stack : err);
+  process.exit(1);
+}

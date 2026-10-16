@@ -6,12 +6,11 @@
 """``ready`` answers with the tips and Inject-promptlet bootstrap.
 
 The daemon owns ``MY_INJECTION.md``, the bundled promptlets, ``TIPS.md``
-and the tips opt-out marker.  Both surfaces (the VS Code webview over
-UDS and the remote webapp over WSS) paint from the ``tricksData`` and
-``tipsData`` events that :meth:`RemoteAccessServer._handle_ready` sends
-to the (re)connecting client, so the extension parses none of those
-files itself.  A real :class:`RemoteAccessServer` is constructed and
-driven directly.
+and the tips opt-out marker.  Every chat page (over UDS or WSS)
+paints from the ``tricksData`` and ``tipsData`` events that
+:meth:`RemoteAccessServer._handle_ready` sends to the (re)connecting
+client, so the page parses none of those files itself.  A real
+:class:`RemoteAccessServer` is constructed and driven directly.
 """
 
 from __future__ import annotations
@@ -89,13 +88,12 @@ class TestReadyBootstrapEvents(_ServerTestBase):
 
 
 class TestSubmitForwardsEditorContext(_ServerTestBase):
-    """The browser ``submit`` carries the webview's editor context into ``run``."""
+    """The browser ``submit`` carries the page's editor context into ``run``."""
 
     async def test_active_file_reaches_the_run_command(self) -> None:
         """``activeFile`` (the file tab the user viewed last, sent by
-        main.js on both surfaces) lands on the ``run`` the daemon
-        builds, so the task's system prompt names it exactly as for a
-        VS Code run; a submit without one carries ``None``."""
+        main.js) lands on the ``run`` the daemon builds, so the task's
+        system prompt names it; a submit without one carries ``None``."""
         await self.server._handle_submit(
             {"tabId": "t1", "prompt": "explain", "activeFile": "/ws/notes.md"},
         )

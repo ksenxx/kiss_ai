@@ -74,13 +74,13 @@ class RemoteDaemon:
 def start_remote_daemon(
     home: Path, *, password: str = "", seed: list[dict[str, Any]] | None = None,
     certfile: Path | None = None, keyfile: Path | None = None, timeout: float = 60.0,
-    config: dict[str, Any] | None = None, port: int = 0,
+    config: dict[str, Any] | None = None, port: int = 0, host: str = "127.0.0.1",
 ) -> RemoteDaemon:
     """Start a daemon under *home* on an OS-picked port and wait until it is bound.
 
     Args:
         home: The child's ``KISS_HOME`` (created when missing).
-        password: Its ``remote_password``; empty means loopback-only.
+        password: Its remote password (stored hashed); empty means loopback-only.
         seed: Rows for its ``task_history``: dicts with ``chat_id``,
             ``task`` and optionally ``task_id`` (forced), ``timestamp``
             (forced) and ``result``.
@@ -91,6 +91,8 @@ def start_remote_daemon(
             endpoint for a daemon that runs tasks).
         port: Bind this port instead of an OS-picked one (to restart a
             daemon where an earlier one listened).
+        host: The address to bind (``0.0.0.0`` makes the daemon
+            reachable at the host's LAN address, as a non-loopback peer).
 
     Returns:
         The running daemon's handle.
@@ -108,7 +110,7 @@ def start_remote_daemon(
     cmd = [
         sys.executable, "-m", "kiss.tests.remote_daemon",
         "--password", password, "--seed-file", str(seed_file),
-        "--config", json.dumps(config or {}), "--port", str(port),
+        "--config", json.dumps(config or {}), "--port", str(port), "--host", host,
     ]
     if certfile is not None and keyfile is not None:
         cmd += ["--certfile", str(certfile), "--keyfile", str(keyfile)]
@@ -143,6 +145,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--password", default="")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--seed-file", default=None)
     parser.add_argument("--config", default="{}")
     parser.add_argument("--certfile", default=None)
@@ -151,7 +154,7 @@ def main() -> None:
 
     from kiss.agents.sorcar import persistence as th
     from kiss.core.config import kiss_home
-    from kiss.core.vscode_config import save_config
+    from kiss.core.user_config import save_config
     from kiss.server.web_server import RemoteAccessServer
 
     home = kiss_home()
@@ -177,7 +180,7 @@ def main() -> None:
         task_ids[f"{chat_id}/{row['task']}"] = task_id
     print(json.dumps({"tasks": task_ids, "pid": os.getpid()}), flush=True)
     server = RemoteAccessServer(
-        host="127.0.0.1", port=args.port, certfile=args.certfile, keyfile=args.keyfile,
+        host=args.host, port=args.port, certfile=args.certfile, keyfile=args.keyfile,
         url_file=home / "remote-url.json",
         local_endpoint_file=home / local_endpoint.LOCAL_ENDPOINT_FILE,
     )

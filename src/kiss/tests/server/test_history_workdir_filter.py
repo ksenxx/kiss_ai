@@ -23,7 +23,7 @@ import tempfile
 import time
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import web_server
 from kiss.tests.server.conftest import (
     make_capturing_server,

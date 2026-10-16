@@ -1,12 +1,12 @@
 # KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.
 
-> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a VS Code extension, a web/mobile app, and a Python API.
+> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a web/mobile app, a Python API, and a terminal command.
 
 This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-readable entry points: [/llms.txt](https://kisssorcar.github.io/llms.txt) and [/llms-full.txt](https://kisssorcar.github.io/llms-full.txt).
 
 ## What Is KISS Sorcar
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a browser/mobile web app served by a local daemon (`kiss-web`), and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt.
 
 - **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
 - **695 models** across 9 provider categories (OpenAI, Anthropic, Gemini, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
@@ -22,11 +22,11 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 # Or Python package only (Python 3.13+)
 pipx install kiss-agent-framework
 
-# Start the daemon that serves the VS Code extension and the web app
+# Start the daemon that serves the web app (the full installer registers it as a user service)
 kiss-web
 ```
 
-Then open the KISS Sorcar sidebar in VS Code, or the remote web app URL from the Settings panel. From Python: `kiss.server.sorcar.run("What is 2435*234?")`.
+Then open the web app at <http://127.0.0.1:8787>, or the remote web app URL from its Settings panel. From Python: `kiss.server.sorcar.run("What is 2435*234?")`.
 
 ## Documentation
 

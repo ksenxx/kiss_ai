@@ -15,7 +15,7 @@ frontend handler unconditionally renders the "Merge or Discard?" bar.
 There is nothing to merge in that scenario, so the prompt is
 meaningless noise.
 
-These tests run the real :class:`VSCodeServer` against a fresh git
+These tests run the real :class:`AgentServer` against a fresh git
 repo with an isolated persistence DB; only the LLM-backed parent
 ``run`` is replaced by a stub that creates the worktree like the real
 agent's tool call would.  They verify that:
@@ -39,7 +39,7 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, run_git
 
 
@@ -73,7 +73,7 @@ class TestNoWorktreePromptWhenEmpty(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]

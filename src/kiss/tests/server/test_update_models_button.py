@@ -5,17 +5,16 @@
 """End-to-end tests for the ``updateModels`` daemon command.
 
 The settings panel's "Update Models" button (5th button next to Tips /
-Git Commit / Update / Reset Server) sends ``{type: 'updateModels'}``: the
-VS Code webview forwards it to the daemon (``FORWARDED_COMMANDS`` in
-``SorcarSidebarView.ts``) and remote browser windows send it directly.
-The daemon runs ``kiss.scripts.update_models --model-info
-$KISS_HOME/MODEL_INFO.json`` as a detached subprocess logging to
+Git Commit / Update / Reset Server) sends ``{type: 'updateModels'}``
+straight to the daemon over the WebSocket.  The daemon runs
+``kiss.scripts.update_models --model-info $KISS_HOME/MODEL_INFO.json``
+as a detached subprocess logging to
 ``~/.kiss/update_models.log``, guards against concurrent runs, and
 reports the exit to the clicking window only.
 
 Every test drives the REAL :class:`RemoteAccessServer` over its local
 WSS channel (same harness as
-``test_audit0902_fix2_vscode_update_exit_report``) with the updater argv
+``test_audit0902_fix2_update_exit_report``) with the updater argv
 pointed at real stub scripts — no mocks or doubles.
 """
 

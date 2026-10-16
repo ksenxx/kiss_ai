@@ -4,7 +4,7 @@
 # add your name here
 """Two-tab cross-interference tests with real LLM calls.
 
-Drives two :class:`VSCodeServer` ``_cmd_run`` invocations concurrently
+Drives two :class:`AgentServer` ``_cmd_run`` invocations concurrently
 against a real local HTTP server that speaks the OpenAI chat-completion
 protocol (so :class:`ChatSorcarAgent` runs unmodified — same printer,
 broadcast, recording, persistence, and subscriber routing as in
@@ -52,9 +52,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
@@ -274,7 +274,7 @@ def _git_init(repo: Path) -> None:
     )
 
 
-def _restore_persistence(server: VSCodeServer, saved: tuple) -> None:
+def _restore_persistence(server: AgentServer, saved: tuple) -> None:
     """Stop every live task of *server*, close the redirected DB, restore state.
 
     A task a failed assertion left behind (one still waiting for an
@@ -297,7 +297,7 @@ def _restore_persistence(server: VSCodeServer, saved: tuple) -> None:
 
 
 def _redirect_config(tmpdir: str) -> tuple:
-    """Point ``vscode_config`` at a tmpdir and seed a minimal config."""
+    """Point ``user_config`` at a tmpdir and seed a minimal config."""
     saved = (vc.CONFIG_DIR, vc.CONFIG_PATH)
     cfg_dir = Path(tmpdir) / ".kiss-cfg"
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -331,10 +331,10 @@ class _TwoTabFixture(unittest.TestCase):
     * a fake OpenAI HTTP server,
     * a redirected persistence DB (so the test does not write to the
       user's real ``~/.kiss/history.db``),
-    * a redirected vscode_config (so the fake endpoint and disabled
+    * a redirected user_config (so the fake endpoint and disabled
       auto-commit only apply to this test process),
     * two git-initialised work directories,
-    * a :class:`VSCodeServer` with a capturing :class:`WebPrinter`.
+    * a :class:`AgentServer` with a capturing :class:`WebPrinter`.
 
     Sets ``OPENAI_API_KEY`` so ``get_available_models()`` reports
     ``gpt-4o-mini`` as available.
@@ -366,7 +366,7 @@ class _TwoTabFixture(unittest.TestCase):
         })
 
         self.printer = _CapturingWebPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
 
     def tearDown(self) -> None:
         _restore_persistence(self.server, self.saved_persistence)
@@ -525,7 +525,7 @@ class TestTwoTabRealLLMTaskDoneRoutedToOwningTab(_TwoTabFixture):
         with its own ``tabId``, and never with the peer's.
 
         The frontend uses ``task_done`` to flip the "Running …" header
-        of the chat webview to "Done (Xm Ys)".  Mis-routing would
+        of the chat page to "Done (Xm Ys)".  Mis-routing would
         either leave a running task labelled "Running …" forever or
         flip the wrong tab's label.
         """
@@ -626,7 +626,7 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
             "use_web_browser": False,
         })
         self.printer = _CapturingWebPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
 
     def tearDown(self) -> None:
         _restore_persistence(self.server, self.saved_persistence)

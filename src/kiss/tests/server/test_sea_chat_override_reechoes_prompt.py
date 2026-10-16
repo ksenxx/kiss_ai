@@ -5,7 +5,7 @@
 """A SEA ``chat_id`` override re-echoes the run's prompt before its ``clear``.
 
 Every ``run`` is announced to the clients as ``setTaskText`` (the
-prompt echo) followed by ``clear``; the chat webview opens the new
+prompt echo) followed by ``clear``; the chat page opens the new
 transcript with the text of the echo that precedes the ``clear``.  A
 SEA whose settings pin ``chat_id`` makes ``_run_task`` broadcast a
 SECOND ``clear`` for the same run (the overridden chat id), from the
@@ -13,10 +13,10 @@ worker thread, after a setup window in which the user may have
 submitted a follow-up — which ``_cmd_run`` echoes as ``setTaskText``
 too (it is queued as steering, no new run starts).  Without a fresh
 echo of the run's own prompt right before the override ``clear``, the
-webview would open the re-cleared transcript with the follow-up's
+page would open the re-cleared transcript with the follow-up's
 text.
 
-No mocks: a real ``VSCodeServer``, a real agent-script file, a real
+No mocks: a real ``AgentServer``, a real agent-script file, a real
 worker thread; only the LLM-driven ``run`` of the agent is stubbed.
 """
 
@@ -31,7 +31,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestSeaChatOverrideReechoesPrompt(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestSeaChatOverrideReechoesPrompt(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-sea-chat-echo-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

@@ -13,7 +13,7 @@ identically to a tab that loads the task: typed input must always
 reach the daemon and trigger an injection (during running) or a new
 ``run`` (after finish).
 
-Approach: drive the REAL :class:`VSCodeServer` with a stubbed
+Approach: drive the REAL :class:`AgentServer` with a stubbed
 ``_run_task_inner`` that blocks on a release event so the test holds
 the lifecycle in each phase deterministically.  No mocks of routing /
 state machinery.  Then verify EVERY layer the bug touches:
@@ -37,14 +37,14 @@ import time
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestReopenRunningTabFullLifecycle(unittest.TestCase):
     """End-to-end lifecycle: start → close+reopen → input → end → run again."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict] = []
         self._evt_lock = threading.Lock()
 
@@ -122,7 +122,7 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
         ]
         assert running_events, (
             "BUG: resume of the started tab's OWN running chat must "
-            "broadcast status running:true so the re-opened webview "
+            "broadcast status running:true so the re-opened chat page "
             f"re-learns the task state.  Got events: "
             f"{[e.get('type') for e in self.events]}"
         )
@@ -143,7 +143,7 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             for e in self._events_of("prompt", tab_id)
             if e.get("text") == "also update the docs"
         ]
-        assert prompt_echoes, "queued prompt must be echoed to the webview"
+        assert prompt_echoes, "queued prompt must be echoed to the chat page"
 
         with self._evt_lock:
             self.events.clear()

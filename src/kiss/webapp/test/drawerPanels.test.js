@@ -1,0 +1,808 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// End-to-end tests for the composer drawer in the remote web app.
+//
+// The composer opens reachable, and its textbox folds away only on a
+// phone while a task is running, where the transcript needs the room.
+// Collapsing never hides the button bar (#input-footer) below the textbox.
+// (The task's text is no longer a fixed drawer above the transcript: it
+// opens the transcript as a regular event panel, see
+// taskPanelExpandFullText.test.js.)
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+
+let persistedState;
+
+function makePage(opts) {
+  const {
+    stripDrawerButtons = false,
+    userAgent,
+    userAgentData,
+    maxTouchPoints,
+  } = opts || {};
+  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
+  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
+  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  html = html.replace('<body', '<body class="remote-chat"');
+  if (stripDrawerButtons) {
+    html = html.replace(/<button id="input-drawer-btn"[\s\S]*?<\/button>/, '');
+  }
+
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    url: 'https://localhost/',
+  });
+  const win = dom.window;
+  win.Element.prototype.scrollIntoView = function () {};
+  win.Element.prototype.scrollTo = function () {};
+  win.HTMLElement.prototype.scrollTo = function () {};
+  if (userAgent) {
+    Object.defineProperty(win.navigator, 'userAgent', {
+      value: userAgent,
+      configurable: true,
+    });
+  }
+  if (userAgentData !== undefined) {
+    Object.defineProperty(win.navigator, 'userAgentData', {
+      value: userAgentData,
+      configurable: true,
+    });
+  }
+  if (maxTouchPoints !== undefined) {
+    Object.defineProperty(win.navigator, 'maxTouchPoints', {
+      value: maxTouchPoints,
+      configurable: true,
+    });
+  }
+
+  const style = win.document.createElement('style');
+  style.textContent = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
+  win.document.head.appendChild(style);
+  const remoteStyle = win.document.createElement('style');
+  remoteStyle.textContent = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
+  );
+  win.document.head.appendChild(remoteStyle);
+
+  const posted = [];
+  win.acquireTransport = function () {
+    return {
+      postMessage: msg => posted.push(msg),
+      getState: () => persistedState,
+      setState: s => {
+        persistedState = s;
+      },
+    };
+  };
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+      '\n//# sourceURL=drawer-main.js',
+  );
+  return {win, posted};
+}
+
+function send(win, data) {
+  win.dispatchEvent(new win.MessageEvent('message', {data}));
+}
+
+function click(win, id, el) {
+  const target = el || win.document.getElementById(id);
+  assert.ok(target, `element #${id} must exist`);
+  target.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+}
+
+function cs(win, id) {
+  return win.getComputedStyle(win.document.getElementById(id));
+}
+
+function readyTabId(posted) {
+  const ready = posted.find(m => m.type === 'ready');
+  assert.ok(ready, 'main.js must post a ready message');
+  return ready.tabId;
+}
+
+function showTaskPanel(win, posted) {
+  send(win, {
+    type: 'task_events',
+    events: [],
+    task: 'refactor the parser and keep the CLI flags backward compatible',
+    tabId: readyTabId(posted),
+    chat_id: 'chat-drawer',
+  });
+  assert.ok(
+    win.document.querySelector('#output .task-panel'),
+    'the transcript must open with the task panel after a task replay',
+  );
+}
+
+function setRunning(win, posted, running) {
+  send(win, {
+    type: 'status',
+    running: running,
+    tabId: readyTabId(posted),
+    startTs: running ? Date.now() : 0,
+  });
+}
+
+function assertBtnState(win, id, expanded) {
+  const btn = win.document.getElementById(id);
+  assert.strictEqual(
+    btn.getAttribute('aria-expanded'),
+    expanded ? 'true' : 'false',
+    `#${id} aria-expanded must be ${expanded}`,
+  );
+  const label = btn.getAttribute('aria-label') || '';
+  const want = expanded ? /^Collapse / : /^Expand /;
+  assert.ok(
+    want.test(label),
+    `#${id} aria-label must start with "${expanded ? 'Collapse' : 'Expand'}" (got "${label}")`,
+  );
+}
+
+function assertInputDrawer(win, collapsed, why) {
+  assert.strictEqual(
+    win.document
+      .getElementById('input-area')
+      .classList.contains('drawer-collapsed'),
+    collapsed,
+    `input drawer must ${collapsed ? '' : 'NOT '}be collapsed: ${why}`,
+  );
+  assertBtnState(win, 'input-drawer-btn', !collapsed);
+  // Collapsing folds away the text area but never the button bar
+  // (#input-footer) below it.
+  const wrapDisplay = cs(win, 'input-wrap').display;
+  if (collapsed) {
+    assert.strictEqual(
+      wrapDisplay,
+      'none',
+      `the text area must be hidden: ${why}`,
+    );
+  } else {
+    assert.notStrictEqual(
+      wrapDisplay,
+      'none',
+      `the text area must be visible: ${why}`,
+    );
+  }
+  assert.notStrictEqual(
+    cs(win, 'input-container').display,
+    'none',
+    `the composer container must stay visible: ${why}`,
+  );
+  assert.notStrictEqual(
+    cs(win, 'input-footer').display,
+    'none',
+    `the button bar below the text area must stay visible: ${why}`,
+  );
+}
+
+// The shipped defaults: task panel folded into its slim header, composer
+// reachable.
+function testDefaults() {
+  persistedState = undefined;
+  const {win, posted} = makePage();
+  showTaskPanel(win, posted);
+  const d = win.document;
+
+  const inputBtn = d.getElementById('input-drawer-btn');
+  assert.ok(inputBtn, '#input-drawer-btn must exist');
+  assert.ok(
+    d.getElementById('input-area').contains(inputBtn),
+    'input drawer toggle must live inside #input-area',
+  );
+  assert.strictEqual(
+    inputBtn.getAttribute('aria-controls'),
+    'input-container',
+    'input drawer toggle must declare its controlled region',
+  );
+  assert.strictEqual(
+    d.getElementById('task-panel'),
+    null,
+    'no fixed task panel (and no task drawer) sits above the transcript',
+  );
+
+  assertInputDrawer(win, false, 'the composer opens reachable');
+  assert.strictEqual(
+    cs(win, 'output').flexGrow,
+    '1',
+    '#output must be the flex:1 child that absorbs freed drawer space',
+  );
+  win.close();
+}
+
+function testInputDrawerToggle() {
+  persistedState = undefined;
+  const {win} = makePage();
+  const d = win.document;
+  const area = d.getElementById('input-area');
+
+  d.getElementById('autocomplete').style.display = 'block';
+  const bar = d.createElement('div');
+  bar.id = 'fake-merge-bar';
+  bar.style.display = 'flex';
+  area.insertBefore(bar, area.firstChild);
+
+  click(win, 'input-drawer-btn');
+  assertInputDrawer(win, true, 'clicking the handle collapses the composer');
+  assert.strictEqual(
+    cs(win, 'autocomplete').display,
+    'none',
+    'collapsed input drawer must hide the autocomplete popover ' +
+      'even with an inline display:block',
+  );
+  assert.strictEqual(
+    cs(win, 'fake-merge-bar').display,
+    'none',
+    'collapsed input drawer must hide action bars inserted into ' +
+      '#input-area even with inline display styles',
+  );
+  assert.notStrictEqual(
+    cs(win, 'input-drawer-btn').display,
+    'none',
+    'the drawer handle itself must stay visible to re-open the drawer',
+  );
+  assert.strictEqual(
+    cs(win, 'output').flexGrow,
+    '1',
+    '#output must keep flex:1 so it absorbs the freed space',
+  );
+
+  click(win, 'input-drawer-btn');
+  assertInputDrawer(win, false, 'clicking the handle again expands it');
+  assert.strictEqual(
+    cs(win, 'fake-merge-bar').display,
+    'flex',
+    'expanding must restore inline-styled action bars',
+  );
+  win.close();
+}
+
+function testPersistenceAcrossReopen() {
+  persistedState = undefined;
+  const wv1 = makePage();
+  showTaskPanel(wv1.win, wv1.posted);
+  click(wv1.win, 'input-drawer-btn');
+  assert.ok(persistedState, 'toggling the drawer must persist state');
+  wv1.win.close();
+
+  const wv2 = makePage();
+  showTaskPanel(wv2.win, wv2.posted);
+  assertInputDrawer(
+    wv2.win,
+    true,
+    'a re-opened page restores the composer the user collapsed',
+  );
+
+  click(wv2.win, 'input-drawer-btn');
+  wv2.win.close();
+
+  const wv3 = makePage();
+  assertInputDrawer(
+    wv3.win,
+    false,
+    'a re-opened page restores the re-expanded composer',
+  );
+  wv3.win.close();
+}
+
+function testRemoteWebApp() {
+  persistedState = undefined;
+  const {win, posted} = makePage();
+  showTaskPanel(win, posted);
+
+  click(win, 'input-drawer-btn');
+  assertInputDrawer(win, true, 'remote: the composer collapses on click');
+  assert.strictEqual(
+    cs(win, 'output').flexGrow,
+    '1',
+    'remote: #output must keep flex:1 to absorb the freed space',
+  );
+
+  click(win, 'input-drawer-btn');
+  assertInputDrawer(win, false, 'remote: the composer comes back');
+  win.close();
+}
+
+function testDrawerStateSurvivesTaskChurn() {
+  persistedState = undefined;
+  const {win, posted} = makePage();
+  showTaskPanel(win, posted);
+
+  click(win, 'input-drawer-btn');
+  setRunning(win, posted, true);
+  send(win, {
+    type: 'task_events',
+    events: [],
+    task: 'a brand new task text arriving mid-flight',
+    tabId: readyTabId(posted),
+    chat_id: 'chat-drawer',
+  });
+  setRunning(win, posted, false);
+
+  assertInputDrawer(
+    win,
+    true,
+    'status/task churn must not re-open the composer the user closed',
+  );
+  win.close();
+}
+
+function testDrawerButtonsBigEnough() {
+  persistedState = undefined;
+  const {win} = makePage();
+  const inputBtn = cs(win, 'input-drawer-btn');
+  assert.ok(
+    parseFloat(inputBtn.width) >= 24 && parseFloat(inputBtn.height) >= 24,
+    'input drawer handle must be at least 24x24px ' +
+      `(got ${inputBtn.width} x ${inputBtn.height})`,
+  );
+  win.close();
+}
+
+function testDrawerButtonsLoseFocusAfterClick() {
+  persistedState = undefined;
+  const {win} = makePage();
+  for (const id of ['input-drawer-btn']) {
+    const el = win.document.getElementById(id);
+    el.focus();
+    assert.strictEqual(
+      win.document.activeElement,
+      el,
+      `#${id} must be focusable (test setup)`,
+    );
+    // A pointer click (detail 1); a keyboard-originated click (detail
+    // 0) keeps focus by design, see ui_antipattern_keyboard.test.js.
+    el.dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
+    );
+    assert.notStrictEqual(
+      win.document.activeElement,
+      el,
+      `#${id} must not keep focus after being clicked (same ` +
+        'blur-after-click contract as every other chat control)',
+    );
+  }
+  win.close();
+}
+
+function testRemoteCollapsedPadding() {
+  persistedState = undefined;
+  const {win, posted} = makePage();
+  showTaskPanel(win, posted);
+  click(win, 'input-drawer-btn');
+  assert.strictEqual(
+    cs(win, 'input-area').paddingTop,
+    '10px',
+    'remote: collapsed input drawer must get the slim remote padding',
+  );
+  win.close();
+}
+
+function testMissingDrawerButtonsGracefulBoot() {
+  persistedState = undefined;
+  const {win, posted} = makePage({stripDrawerButtons: true});
+  assert.strictEqual(
+    win.document.getElementById('input-drawer-btn'),
+    null,
+    'harness sanity: the drawer button was stripped',
+  );
+  assert.ok(
+    posted.some(m => m.type === 'ready'),
+    'main.js must boot (post ready) even without the drawer button',
+  );
+  win.close();
+}
+
+const UA_IPHONE =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 ' +
+  'Mobile/15E148 Safari/604.1';
+const UA_ANDROID =
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36';
+const UA_IPAD_MASQUERADE =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+const UA_DESKTOP =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+
+// The whole point of requirement 3: a phone with nothing running shows the
+// textbox and the buttons.
+function testMobileRemoteIdleShowsComposer() {
+  for (const [name, ua] of [
+    ['iPhone Safari', UA_IPHONE],
+    ['Android Chrome', UA_ANDROID],
+  ]) {
+    persistedState = undefined;
+    const {win, posted} = makePage({userAgent: ua});
+    showTaskPanel(win, posted);
+    const d = win.document;
+    assertInputDrawer(win, false, `${name}: nothing is running, so type away`);
+    const container = d.getElementById('input-container');
+    assert.ok(
+      container.contains(d.getElementById('task-input')),
+      'the input textbox must live inside the composer',
+    );
+    assert.ok(
+      container.contains(d.getElementById('input-footer')),
+      'the buttons panel must live inside the composer',
+    );
+    assert.notStrictEqual(
+      cs(win, 'task-input').display,
+      'none',
+      `${name}: the input textbox itself must be visible`,
+    );
+    assert.notStrictEqual(
+      cs(win, 'input-footer').display,
+      'none',
+      `${name}: the buttons must be visible`,
+    );
+    assert.strictEqual(
+      cs(win, 'output').flexGrow,
+      '1',
+      `${name}: #output must absorb the freed space`,
+    );
+    win.close();
+  }
+}
+
+// While a task runs the phone gives the transcript the screen, and hands the
+// composer back the moment the task ends.
+function testMobileRemoteFollowsRunningState() {
+  persistedState = undefined;
+  const {win, posted} = makePage({userAgent: UA_IPHONE});
+  showTaskPanel(win, posted);
+  assertInputDrawer(win, false, 'idle phone shows the composer');
+
+  setRunning(win, posted, true);
+  assertInputDrawer(win, true, 'a running task folds the phone composer');
+
+  setRunning(win, posted, false);
+  assertInputDrawer(win, false, 'the finished task hands the composer back');
+  win.close();
+}
+
+// A running task restored by the launch replay counts too: the registry
+// snapshot opens the tab and the replayed `status` reports it running.
+function testMobileRemoteRunningSnapshotFoldsComposer() {
+  persistedState = undefined;
+  const {win} = makePage({userAgent: UA_ANDROID});
+  assertInputDrawer(win, false, 'nothing running yet');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'tab-live', chatId: 'chat-live', title: 'live', workDir: ''},
+    ],
+  });
+  send(win, {type: 'status', running: true, tabId: 'tab-live', startTs: 1000});
+  assertInputDrawer(win, true, 'the launch replay says a task is running');
+  win.close();
+}
+
+function testDesktopRemoteDefaults() {
+  persistedState = undefined;
+  const {win, posted} = makePage({userAgent: UA_DESKTOP});
+  showTaskPanel(win, posted);
+  assertInputDrawer(win, false, 'desktop remote: the composer is reachable');
+  setRunning(win, posted, true);
+  assertInputDrawer(
+    win,
+    false,
+    'a desktop screen fits both, so a running task keeps the composer',
+  );
+  win.close();
+}
+
+function testUserAgentDataMobileRemote() {
+  persistedState = undefined;
+  const wvMobile = makePage({
+    userAgent: UA_DESKTOP,
+    userAgentData: {mobile: true},
+  });
+  setRunning(wvMobile.win, wvMobile.posted, true);
+  assertInputDrawer(
+    wvMobile.win,
+    true,
+    'userAgentData.mobile=true is a phone: fold the running composer',
+  );
+  wvMobile.win.close();
+
+  persistedState = undefined;
+  const wvDesktop = makePage({
+    userAgent: UA_DESKTOP,
+    userAgentData: {mobile: false},
+  });
+  setRunning(wvDesktop.win, wvDesktop.posted, true);
+  assertInputDrawer(
+    wvDesktop.win,
+    false,
+    'userAgentData.mobile=false keeps the composer while running',
+  );
+  wvDesktop.win.close();
+}
+
+function testIpadMasqueradeRemote() {
+  persistedState = undefined;
+  const wvIpad = makePage({
+    userAgent: UA_IPAD_MASQUERADE,
+    maxTouchPoints: 5,
+  });
+  setRunning(wvIpad.win, wvIpad.posted, true);
+  assertInputDrawer(
+    wvIpad.win,
+    true,
+    'Macintosh UA with a multi-touch screen is an iPad',
+  );
+  wvIpad.win.close();
+
+  persistedState = undefined;
+  const wvMac = makePage({
+    userAgent: UA_IPAD_MASQUERADE,
+    maxTouchPoints: 0,
+  });
+  setRunning(wvMac.win, wvMac.posted, true);
+  assertInputDrawer(
+    wvMac.win,
+    false,
+    'Macintosh UA without touch is a real Mac',
+  );
+  wvMac.win.close();
+}
+
+function testMobileUserChoicePersists() {
+  persistedState = undefined;
+  const wv1 = makePage({userAgent: UA_IPHONE});
+  showTaskPanel(wv1.win, wv1.posted);
+  click(wv1.win, 'input-drawer-btn');
+  assertInputDrawer(wv1.win, true, 'the user folded the composer away');
+  setRunning(wv1.win, wv1.posted, false);
+  assertInputDrawer(
+    wv1.win,
+    true,
+    'an idle phone must not undo the fold the user asked for',
+  );
+  wv1.win.close();
+
+  const wv2 = makePage({userAgent: UA_IPHONE});
+  showTaskPanel(wv2.win, wv2.posted);
+  assertInputDrawer(wv2.win, true, 'a reload restores the user-folded drawer');
+  click(wv2.win, 'input-drawer-btn');
+  setRunning(wv2.win, wv2.posted, true);
+  assertInputDrawer(
+    wv2.win,
+    false,
+    'a running task must not fold a composer the user opened by hand',
+  );
+  wv2.win.close();
+}
+
+// A blob from an older build has no `*UserSet` flags, so it cannot prove the
+// user ever clicked anything: the defaults win.
+function testLegacyStateDoesNotResurrectFoldedComposer() {
+  for (const ua of [UA_IPHONE, UA_DESKTOP]) {
+    persistedState = {
+      tabs: [{title: 'old chat', chatId: 'tab-1'}],
+      activeTabIndex: 0,
+      chatId: 'tab-1',
+      inputDrawerCollapsed: true,
+    };
+    const wv = makePage({userAgent: ua});
+    assertInputDrawer(
+      wv.win,
+      false,
+      'a legacy blob must not resurrect a folded composer',
+    );
+    wv.win.close();
+
+    persistedState = {
+      tabs: [{title: 'old chat', chatId: 'tab-1'}],
+      activeTabIndex: 0,
+      chatId: 'tab-1',
+      inputDrawerCollapsed: true,
+      drawersVersion: 2,
+    };
+    const wvV2 = makePage({userAgent: ua});
+    assertInputDrawer(wvV2.win, false, 'a v2 blob cannot fold the composer');
+    wvV2.win.close();
+  }
+
+  persistedState = {
+    tabs: [{title: 'old chat', chatId: 'tab-1'}],
+    activeTabIndex: 0,
+    chatId: 'tab-1',
+    inputDrawerCollapsed: true,
+    inputDrawerUserSet: true,
+    drawersVersion: 3,
+  };
+  const wvNew = makePage({userAgent: UA_IPHONE});
+  assertInputDrawer(
+    wvNew.win,
+    true,
+    'a current blob that records the click restores the folded composer',
+  );
+  wvNew.win.close();
+}
+
+function testMalformedStateGracefulBoot() {
+  for (const bad of ['garbage', 42, true]) {
+    persistedState = bad;
+    const {win, posted} = makePage({userAgent: UA_IPHONE});
+    assert.ok(
+      posted.some(m => m.type === 'ready'),
+      `main.js must boot with a ${typeof bad} persisted state`,
+    );
+    assertInputDrawer(
+      win,
+      false,
+      `a malformed (${typeof bad}) blob falls back to a reachable composer`,
+    );
+    win.close();
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// On a phone a code-driven focus of the composer raises the software
+// keyboard over whatever the user was looking at. Touching a tab, closing
+// one, opening a new chat, the server's `focusInput` nudge (sent on every
+// reconnect) and a task finishing must all leave the focus alone there,
+// including the composer's deferred 100/300 ms re-focus timers. On a
+// desktop the same actions focus the composer as before.
+async function testMobileRemoteNeverFocusesComposerByCode() {
+  for (const [name, opts, focuses] of [
+    ['iPhone remote', {userAgent: UA_IPHONE}, false],
+    ['Android remote', {userAgent: UA_ANDROID}, false],
+    ['desktop remote', {userAgent: UA_DESKTOP}, true],
+  ]) {
+    persistedState = undefined;
+    const {win, posted} = makePage(opts);
+    const d = win.document;
+    const inp = d.getElementById('task-input');
+    let focusCalls = 0;
+    inp.addEventListener('focus', () => {
+      focusCalls++;
+    });
+    const bootTab = readyTabId(posted);
+    send(win, {
+      type: 'tabs_state',
+      tabs: [
+        {tabId: bootTab, chatId: 'chat-a', title: 'a', workDir: ''},
+        {tabId: 'tab-b', chatId: 'chat-b', title: 'b', workDir: ''},
+        {tabId: 'tab-c', chatId: 'chat-c', title: 'c', workDir: ''},
+      ],
+    });
+    // Chats have no tab row of their own: a chat is shown through the
+    // Chats-panel pick (switchToTab) and a lone chat is closed from
+    // another surface, which the daemon mirrors as a snapshot without it.
+    const snapshot = ids =>
+      send(win, {
+        type: 'tabs_state',
+        tabs: ids.map(id => ({
+          tabId: id,
+          chatId: id === bootTab ? 'chat-a' : `chat-${id.slice(-1)}`,
+          title: id.slice(-1),
+          workDir: '',
+        })),
+      });
+    const steps = [
+      ['touching a tab', () => win._testApi.switchToTab('tab-b')],
+      ['closing the active tab', () => snapshot([bootTab, 'tab-c'])],
+      // A background tab whose agent is asking a question: touching it
+      // (and landing on it after closing its neighbour) puts the
+      // composer in answer mode, which is another focus path.
+      [
+        'touching a tab with a pending question',
+        () => {
+          send(win, {type: 'askUser', tabId: 'tab-c', question: 'Which one?'});
+          win._testApi.switchToTab('tab-c');
+        },
+      ],
+      [
+        'closing a tab next to an asking tab',
+        () => {
+          win._testApi.switchToTab(bootTab);
+          snapshot(['tab-c']);
+          assert.strictEqual(
+            win._testApi.getActiveTabId(),
+            'tab-c',
+            `${name}: the asking tab takes over after the close`,
+          );
+        },
+      ],
+      ['opening a new chat', () => click(win, 'new-chat-btn')],
+      ['the server focusInput nudge', () => send(win, {type: 'focusInput'})],
+      [
+        'a task finishing',
+        () =>
+          send(win, {
+            type: 'task_done',
+            tabId: win._testApi.getActiveTabId(),
+            startTs: 1000,
+            endTs: 2000,
+          }),
+      ],
+    ];
+    for (const [what, act] of steps) {
+      inp.blur();
+      focusCalls = 0;
+      act();
+      await sleep(350);
+      if (focuses) {
+        assert.ok(focusCalls > 0, `${name}: ${what} must focus the composer`);
+      } else {
+        assert.strictEqual(
+          focusCalls,
+          0,
+          `${name}: ${what} must not focus the composer (keyboard pops up)`,
+        );
+        assert.notStrictEqual(
+          d.activeElement,
+          inp,
+          `${name}: ${what} left the focus on the composer`,
+        );
+      }
+    }
+    win.close();
+  }
+}
+
+async function runTests() {
+  const tests = [
+    testDefaults,
+    testInputDrawerToggle,
+    testPersistenceAcrossReopen,
+    testRemoteWebApp,
+    testDrawerStateSurvivesTaskChurn,
+    testDrawerButtonsBigEnough,
+    testDrawerButtonsLoseFocusAfterClick,
+    testRemoteCollapsedPadding,
+    testMissingDrawerButtonsGracefulBoot,
+    testMobileRemoteIdleShowsComposer,
+    testMobileRemoteFollowsRunningState,
+    testMobileRemoteRunningSnapshotFoldsComposer,
+    testDesktopRemoteDefaults,
+    testUserAgentDataMobileRemote,
+    testIpadMasqueradeRemote,
+    testMobileUserChoicePersists,
+    testLegacyStateDoesNotResurrectFoldedComposer,
+    testMalformedStateGracefulBoot,
+    testMobileRemoteNeverFocusesComposerByCode,
+  ];
+  for (const t of tests) {
+    await t();
+    console.log('PASS', t.name);
+  }
+}
+
+runTests().then(
+  () => {
+    console.log('\nAll tests passed');
+    process.exit(0);
+  },
+  err => {
+    console.error('FAIL:', err && err.message ? err.message : err);
+    process.exit(1);
+  },
+);

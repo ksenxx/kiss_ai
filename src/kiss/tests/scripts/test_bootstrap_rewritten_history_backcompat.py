@@ -25,7 +25,7 @@ install mirror of the public repo, so re-pointing its local tags is
 always correct.  These tests run the REAL ``scripts/install.sh``
 against a throwaway ``$HOME`` whose ``~/.kiss/kiss_ai`` is a clone of a
 local bare origin (no network, no mocks), following
-``test_audit0903_bootstrap_pinned_vsix_unbrick.py``.
+``test_bootstrap_legacy_vsix_unbrick.py``.
 """
 
 import os

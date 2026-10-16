@@ -27,7 +27,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   worker threads (cooperative stop + join) exactly like the blocking
   ``start()`` shutdown path does, so embedders' tasks are not
   abandoned with the "Agent Failed Abruptly" sentinel.
-* F13: constructing a second ``VSCodeServer`` in the same process
+* F13: constructing a second ``AgentServer`` in the same process
   must NOT mark task rows of still-running worker threads as
   "Task terminated unexpectedly (process killed)" — only rows with
   no live owner may be swept.
@@ -64,7 +64,7 @@ import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -208,7 +208,7 @@ class TestF3VoiceModelCrossProcessRace(unittest.TestCase):
 
 
 class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
-    """F13: second ``VSCodeServer.__init__`` must not orphan live tasks."""
+    """F13: second ``AgentServer.__init__`` must not orphan live tasks."""
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
@@ -248,7 +248,7 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
         )
         agent_state.register(state)
         try:
-            server = VSCodeServer()
+            server = AgentServer()
             sweep = server._orphan_sweep_thread
             assert sweep is not None
             sweep.join(timeout=30)

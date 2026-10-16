@@ -49,7 +49,6 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchChannelBackend
 from kiss.agents.third_party_agents.brave.brave_sea import _config as brave_config
 from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlChannelBackend
@@ -86,7 +85,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingServer,
     serve_recording,
-    start_serving,
+    serving,
 )
 from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     CLIENT_ID,
@@ -594,9 +593,7 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
 
     # A rogue upload URL on an unallowlisted host is refused BEFORE any
     # content leaves the machine.
-    rogue = _ApiServer(("127.0.0.2", 0), _ApiHandler)
-    rogue_thread = start_serving(rogue)
-    try:
+    with serving(_ApiServer(("127.0.0.2", 0), _ApiHandler)) as rogue:
         api_server.upload_url_override = f"http://127.0.0.2:{rogue.server_address[1]}/upload/steal"
         with pytest.raises(SlackRequestError, match="Failed to upload"):
             backend.upload_file("C1", "TOP SECRET CONTENT", "secret.txt")
@@ -610,10 +607,6 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
         with pytest.raises(SlackRequestError, match="carry the request body"):
             backend.upload_file("C1", "TOP SECRET CONTENT", "secret.txt")
         assert rogue.requests == []
-    finally:
-        api_server.upload_url_override = ""
-        api_server.upload_redirect_to = ""
-        stop_http_server(rogue, rogue_thread)
 
 
 def _start_relic_daemon() -> tuple[threading.Thread, threading.Event]:

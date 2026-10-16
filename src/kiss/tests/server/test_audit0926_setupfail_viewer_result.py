@@ -16,7 +16,7 @@ recording.  The normal end-of-run result is fanned out to every
 subscribed tab, so the setup-failure result must be too — delivered
 live exactly once per watching tab, and recorded exactly once.
 
-Everything is real: a real ``VSCodeServer``, a run submitted through
+Everything is real: a real ``AgentServer``, a run submitted through
 ``_cmd_run`` whose SEA ``settings()`` parks on a file
 and then raises (a real setup failure, no LLM call), and a real
 history-click attach through ``_replay_session``.
@@ -33,7 +33,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _BLOCKING_SCRIPT = textwrap.dedent(
@@ -72,7 +72,7 @@ class TestSetupFailureResultReachesViewer(TestCase):
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
 
     def tearDown(self) -> None:

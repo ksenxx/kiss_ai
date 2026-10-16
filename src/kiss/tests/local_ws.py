@@ -241,7 +241,7 @@ async def open_remote_connection(
     """
     endpoint = local_endpoint.read_endpoint(Path(server._local_endpoint_file))
     assert endpoint is not None, "daemon endpoint file missing"
-    ssl_ctx: ssl.SSLContext = local_endpoint.client_ssl_context(endpoint)
+    ssl_ctx = local_endpoint.client_ssl_context(endpoint)
     ws = await connect(
         endpoint.url, ssl=ssl_ctx, compression=None, max_size=max_size,
         close_timeout=2.0,

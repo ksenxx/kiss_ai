@@ -117,7 +117,18 @@ class PromptCacheKeepAlive:
         )
 
     def __enter__(self) -> PromptCacheKeepAlive:
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            # A task-thread Stop (``KeyboardInterrupt`` injected with
+            # ``PyThreadState_SetAsyncExc``) lands at the next check
+            # point, which can be inside ``start()`` after the thread
+            # is already running: ``__exit__`` never runs for an
+            # ``__enter__`` that raised, so the thread would keep
+            # pinging — and billing — for up to ``max_pings`` intervals
+            # after the task ended.  Stop it on the way out.
+            self._stop.set()
+            raise
         return self
 
     def __exit__(self, *exc_info: object) -> None:

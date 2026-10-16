@@ -20,7 +20,7 @@ without the user having decided anything about it:
 Neither may merge the work into the user's branch behind their back,
 destroy it, present a live task's half-written tree, or leave a stale
 ownership claim on the tab.  Every test drives the real
-:class:`VSCodeServer` command handlers against a real git repository;
+:class:`AgentServer` command handlers against a real git repository;
 only the LLM call is replaced by a deterministic stub that creates the
 worktree exactly as the real agent's tool call would.
 """
@@ -39,7 +39,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, kiss_wt_branches, run_git
 
 #: Events of the removed hunk-by-hunk diff/merge UI; must never reappear.
@@ -77,7 +77,7 @@ class _Base(unittest.TestCase):
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict[str, Any]] = []
         printer = self.server.printer
@@ -767,8 +767,8 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
     """One pending worktree, two history clicks, exactly one owner.
 
     Remote commands are dispatched on a thread pool, so two clicks on
-    the same history row — or one from the VS Code sidebar and one from
-    the webapp — reach :meth:`_emit_pending_worktree` concurrently.  The
+    the same history row — or one from each of two browser windows —
+    reach :meth:`_emit_pending_worktree` concurrently.  The
     decision that a worktree is free and the claim on it must therefore
     happen in one atomic step; deciding first and claiming later lets
     both callers believe they own the branch.

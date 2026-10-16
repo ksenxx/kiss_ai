@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Regression test: ``run_parallel`` must NOT cause phantom sub-agent
-tabs to appear in webviews bound to a different chat.
+tabs to appear in chat clients bound to a different chat.
 
 Background
 ----------
@@ -18,14 +18,14 @@ Root cause
 1. Each sub-agent (in ``ChatSorcarAgent.run``) emits a ``new_tab``
    broadcast with ``taskId=""`` so the ``WebPrinter.broadcast`` treats
    it as a "global system event" and forwards it verbatim to every
-   connected WS / UDS client (including webviews open against a
+   connected WS / UDS client (including chat pages open against a
    different chat).
 2. The ``openSubagentTab`` broadcasts emitted by
-   ``VSCodeServer._replay_session`` and ``_open_persisted_subagent_tabs``
+   ``AgentServer._replay_session`` and ``_open_persisted_subagent_tabs``
    likewise carry no routing ``tabId`` key and broadcast globally.
 3. The frontend handlers (``case 'new_tab':`` and
    ``case 'openSubagentTab':`` in ``media/main.js``) unconditionally
-   materialise the tab, regardless of whether the receiving webview
+   materialise the tab, regardless of whether the receiving client
    actually owns the parent tab id.
 
 Fix
@@ -34,7 +34,7 @@ Fix
   ``parent_tab_id`` so the frontend can route correctly.
 - Both the ``case 'new_tab':`` and ``case 'openSubagentTab':``
   handlers must short-circuit when ``ev.parent_tab_id`` is set AND no
-  local tab carries that id — i.e. this webview does not own the
+  local tab carries that id — i.e. this client does not own the
   parent tab and must not materialise the child.
 """
 
@@ -54,7 +54,7 @@ class TestSubagentNewTabBroadcastIncludesParentTabId:
     """The sub-agent's ``new_tab`` broadcast (emitted in
     ``ChatSorcarAgent.run`` when ``_subagent_info`` is set) must
     include ``parent_tab_id`` so the frontend guard above can decide
-    whether this webview owns the parent."""
+    whether this client owns the parent."""
 
     def test_broadcast_payload_includes_parent_tab_id_field(self) -> None:
         src = CHAT_AGENT_PY.read_text()
@@ -64,5 +64,5 @@ class TestSubagentNewTabBroadcastIncludesParentTabId:
         assert '"parent_tab_id"' in block, (
             "Sub-agent new_tab broadcast must include parent_tab_id so "
             "the frontend can route the new tab + resumeSession to the "
-            "owning webview only.  Block was:\n" + block
+            "owning client only.  Block was:\n" + block
         )

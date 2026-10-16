@@ -11,7 +11,7 @@ reads ``ev.success === false`` from that event, so nothing on the
 terminal event said the task had failed.  Now the parsed verdict rides
 on the event; an unparsable result adds nothing.
 
-Runs the real ``VSCodeServer._run_task`` with a scripted agent and a
+Runs the real ``AgentServer._run_task`` with a scripted agent and a
 real ``JsonPrinter`` subclass; no mocks.
 """
 
@@ -29,7 +29,7 @@ from kiss.core.utils import finish
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -75,8 +75,8 @@ def _task_done_event(tmp_path: Path, tab_id: str, prompt: str) -> dict[str, Any]
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
-    agent = _ScriptedAgent("Sorcar VS Code")
+    server = AgentServer(printer=printer)
+    agent = _ScriptedAgent("Sorcar")
     state = AgentState(f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True)
     agent_state.register(state)
     try:

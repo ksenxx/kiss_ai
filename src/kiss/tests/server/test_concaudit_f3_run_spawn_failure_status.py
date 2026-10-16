@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     nproc_limit_lowered_to_one,
     thread_start_can_be_starved,
@@ -47,7 +47,7 @@ class TestRunSpawnFailureEndsRun(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.use_private_tab_registry(Path(tmp.name) / "tabs.json")
         tab_id = "TAB-F3-SPAWN"
         cmd = {

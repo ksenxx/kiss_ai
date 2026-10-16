@@ -43,19 +43,16 @@ from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     query_tokens,
 )
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.tool_verdict import ALLOW
-from kiss.tests.agents.seas.conftest import git
+from kiss.tests.agents.seas.conftest import git, run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 from kiss.tests.conftest import IS_WINDOWS, posix_only
@@ -114,10 +111,15 @@ def _make_repo(root: Path, name: str = "ledger") -> Path:
     return repo
 
 
+def _forget(slug: str) -> None:
+    """Drop the memory of repository *slug*: it is keyed by name, so earlier tests share it."""
+    shutil.rmtree(kiss_home() / "memories" / slug, ignore_errors=True)
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A fresh ``ledger`` repository whose memory (shared by slug) starts empty."""
-    shutil.rmtree(kiss_home() / "memories" / "ledger", ignore_errors=True)
+    _forget("ledger")
     return _make_repo(tmp_path)
 
 
@@ -352,7 +354,7 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
 @posix_only("tab and control bytes in file names")
 def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     """Branch-only commits, merge resolutions, spaces, non-ASCII, tabs and control bytes."""
-    shutil.rmtree(kiss_home() / "memories" / "odd", ignore_errors=True)
+    _forget("odd")
     repo = _init(tmp_path, "odd")
     (repo / "rules.txt").write_text("base\n")
     (repo / "space name.txt").write_text("SPACEFACT\n")
@@ -452,7 +454,7 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
 
 def test_unshallowed_history_is_indexed_on_the_next_run(tmp_path: Path) -> None:
     """Commits that become reachable later (fetch --unshallow) are indexed then."""
-    shutil.rmtree(kiss_home() / "memories" / "shallow", ignore_errors=True)
+    _forget("shallow")
     origin = _make_repo(tmp_path, "origin")
     shallow = tmp_path / "shallow"
     git(tmp_path, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
@@ -483,7 +485,7 @@ def test_revealed_history_does_not_age_a_file_s_last_commit(tmp_path: Path) -> N
     newest of the NEW commits, an ancestor here, and the recreation commit
     gave way to the deletion commit.  The per-file lookup decides instead.
     """
-    shutil.rmtree(kiss_home() / "memories" / "recreated", ignore_errors=True)
+    _forget("recreated")
     origin = _init(tmp_path, "origin-recreated")
     (origin / "f.txt").write_text("first\n")
     git(origin, "add", "-A")
@@ -519,7 +521,7 @@ def test_unshallowing_keeps_the_head_commit_of_a_file_the_boundary_changed(
     so f.txt is re-indexed too — with the HEAD lookup, not with that older
     commit as its "last commit".
     """
-    shutil.rmtree(kiss_home() / "memories" / "thrice", ignore_errors=True)
+    _forget("thrice")
     origin = _init(tmp_path, "origin-thrice")
     for i in range(3):
         (origin / "f.txt").write_text(f"version {i}\n")
@@ -541,7 +543,7 @@ def test_lookups_beyond_the_budget_are_drained_by_the_next_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Touched files past MAX_LAST_TOUCH_LOOKUPS wait in ``pending_touch`` for the next runs."""
-    shutil.rmtree(kiss_home() / "memories" / "budget", ignore_errors=True)
+    _forget("budget")
     repo = _init(tmp_path, "budget")
     for i in range(3):
         (repo / f"f{i}.txt").write_text(f"file {i}\n")
@@ -591,7 +593,7 @@ def test_index_errors_for_bad_specs_and_empty_repositories(tmp_path: Path) -> No
 
 def test_url_specs_are_cloned_under_kiss_home_and_kept_in_sync(tmp_path: Path) -> None:
     """A clone URL is cloned once, then fetched and reset to the remote's default branch."""
-    shutil.rmtree(kiss_home() / "memories" / "ledger-remote", ignore_errors=True)
+    _forget("ledger-remote")
     origin = _make_repo(tmp_path, "origin-ledger")
     bare = tmp_path / "ledger-remote.git"
     git(tmp_path, "clone", "-q", "--bare", str(origin), str(bare))
@@ -866,7 +868,7 @@ def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
 
 def test_lookup_page_commands_run_for_paths_with_spaces(tmp_path: Path) -> None:
     """The quoted shell commands on the lookup page work as written."""
-    shutil.rmtree(kiss_home() / "memories" / "space-repo", ignore_errors=True)
+    _forget("space-repo")
     repo = _make_repo(tmp_path, "space repo")
     sea.index_repo(str(repo))
     page = MemoryDir(_memory_dir(repo)).read(sea.LOOKUP_PAGE).body
@@ -1064,27 +1066,9 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
         finish_body("<h3>Memory built</h3>", prompt_tokens=800),
     ]
     run = sea_commands.evaluate_sea([GitExtractKnowledgeSea()], str(repo))
-    settings = run.settings
     assert run.prompt == str(repo)
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("git-knowledge-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=6,
-            max_budget=5.0,
-            model_config={"base_url": url, "api_key": "local"},
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            system_prompt_hook=run.system_prompt_hook,
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=6)
     assert parsed["success"] is True and parsed["summary"] == "<h3>Memory built</h3>"
-    agentic = [r for r in requests if r.get("tools")]
     assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
     expected = {"index_repo", "write_knowledge_page", "knowledge_search", "Bash", "Read", "finish"}
@@ -1145,7 +1129,7 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     """SHA-256 object names, diff.noprefix/log.showRoot config, mode-only renames of quoted
     names, a file literally named ``f:2``, non-UTF-8 names, control bytes in a tag message
     at a ref tip, a NEL byte inside a line, and clock skew between parent and child."""
-    shutil.rmtree(kiss_home() / "memories" / "s256", ignore_errors=True)
+    _forget("s256")
     repo = tmp_path / "s256"
     repo.mkdir()
     git(tmp_path, "init", "-q", "-b", "main", "--object-format=sha256", str(repo))
@@ -1216,7 +1200,7 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
 def test_store_is_replaced_when_another_repository_takes_the_slug(tmp_path: Path) -> None:
     """Two unrelated checkouts named alike share a slug; the newcomer replaces the blocks
     but keeps the agent's notes, and the cron job is deduplicated by its exact prompt."""
-    shutil.rmtree(kiss_home() / "memories" / "twin", ignore_errors=True)
+    _forget("twin")
     first = _make_repo(tmp_path / "a", "twin")
     sea.index_repo(str(first))
     sea.write_knowledge_page(str(first), "overview", "# Overview\n\nKeep me.", "Overview", "x")
@@ -1256,7 +1240,7 @@ def test_blocks_are_written_children_first() -> None:
 def test_first_build_attributes_files_to_head_history_only(tmp_path: Path) -> None:
     """A newer commit on an unmerged branch must not become the last commit of a file
     whose checked-out content comes from HEAD; names that look like pathspecs stay literal."""
-    shutil.rmtree(kiss_home() / "memories" / "diverge", ignore_errors=True)
+    _forget("diverge")
     repo = _init(tmp_path, "diverge")
     (repo / "rules.txt").write_text("MAINFACT\n")
     (repo / "x.txt").write_text("x\n")
@@ -1288,7 +1272,7 @@ def test_first_build_attributes_files_to_head_history_only(tmp_path: Path) -> No
 def test_interrupted_run_is_repaired_and_shallowing_keeps_the_store(tmp_path: Path) -> None:
     """A file or commit whose marker block is missing (the previous run died before writing
     it) is indexed again; a shallow clone of an indexed history is the same repository."""
-    shutil.rmtree(kiss_home() / "memories" / "again", ignore_errors=True)
+    _forget("again")
     origin = _make_repo(tmp_path, "again")
     store = _store(origin)
     index.index_repo(origin, store)
@@ -1317,7 +1301,7 @@ def test_interrupted_run_is_repaired_and_shallowing_keeps_the_store(tmp_path: Pa
 
 def test_giant_files_and_diffs_are_flagged_not_dropped(tmp_path: Path) -> None:
     """Content above the 64 MB limits is left out, and the blocks say so explicitly."""
-    shutil.rmtree(kiss_home() / "memories" / "giant", ignore_errors=True)
+    _forget("giant")
     repo = _init(tmp_path, "giant")
     line = b"0123456789abcdef" * 4 + b"\n"  # 65 bytes
     (repo / "dump.txt").write_bytes(line * (index.MAX_RECORD_BYTES // len(line) + 1000))

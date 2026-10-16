@@ -39,7 +39,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome, OfflineFastModel
 
 _TAB = "huge-merge-tab"
@@ -56,7 +56,7 @@ class _Env:
         self.repo: Path = self.isolated.repo
         self.offline = OfflineFastModel()
         self.offline.__enter__()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = str(self.repo)
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
@@ -81,7 +81,7 @@ class _Env:
                 "".join(f"file {i} line {j} " + "x" * 40 + "\n" for j in range(_LINES_PER_FILE)),
                 encoding="utf-8",
             )
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=self.repo, branch=branch, original_branch=original, wt_dir=wt_dir,
         )

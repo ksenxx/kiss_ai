@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for remaining uncovered branches in sorcar/ and vscode/ modules.
+"""Integration tests for remaining uncovered branches in sorcar/ and server/ modules.
 
 No mocks, patches, fakes, or test doubles. All tests use real objects.
 """
@@ -22,7 +22,7 @@ from kiss.server.helpers import (
     clip_autocomplete_suggestion,
 )
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _git(tmpdir: str, *args: str) -> None:
@@ -31,7 +31,7 @@ def _git(tmpdir: str, *args: str) -> None:
 
 
 def _file_suffix(
-    server: VSCodeServer,
+    server: AgentServer,
     query: str,
     snapshot_file: str = "",
     snapshot_content: str | None = None,
@@ -69,7 +69,7 @@ class TestHelpersBranches:
         assert result == "hello world"
 
 
-class TestVSCodeServerBranches:
+class TestAgentServerBranches:
     """Cover remaining branches in server.py."""
 
     def setup_method(self) -> None:
@@ -92,7 +92,7 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_unknown(self) -> None:
         """Unknown command type broadcasts error."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
         orig = server.printer.broadcast
         def cap(ev: dict) -> None:
@@ -104,7 +104,7 @@ class TestVSCodeServerBranches:
 
     def test_complete_short_query(self) -> None:
         """_complete with short query broadcasts empty suggestion."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
         orig = server.printer.broadcast
         def cap(ev: dict) -> None:
@@ -118,19 +118,19 @@ class TestVSCodeServerBranches:
 
     def test_file_suffix_trailing_whitespace(self) -> None:
         """_file_suffix returns empty when query ends with space."""
-        server = VSCodeServer()
+        server = AgentServer()
         result = _file_suffix(server, "hello ", "", "some content")
         assert result == ""
 
     def test_file_suffix_no_partial_match(self) -> None:
         """_file_suffix returns empty when regex finds nothing."""
-        server = VSCodeServer()
+        server = AgentServer()
         result = _file_suffix(server, "!@#$", "", "some content")
         assert result == ""
 
     def test_file_suffix_short_partial(self) -> None:
         """_file_suffix returns empty when partial < 2 chars."""
-        server = VSCodeServer()
+        server = AgentServer()
         result = _file_suffix(server, "a", "", "apple banana")
         assert result == ""
 
@@ -141,7 +141,7 @@ class TestVSCodeServerBranches:
             f.flush()
             path = f.name
         try:
-            server = VSCodeServer()
+            server = AgentServer()
             result = _file_suffix(server, "calc", path, None)
             assert result == "ulate_total"
         finally:
@@ -149,7 +149,7 @@ class TestVSCodeServerBranches:
 
     def test_file_suffix_file_not_found(self) -> None:
         """_file_suffix returns empty for nonexistent file."""
-        server = VSCodeServer()
+        server = AgentServer()
         result = _file_suffix(server, "test", "/nonexistent/file.py", "")
         assert result == ""
 
@@ -159,7 +159,7 @@ class TestVSCodeServerBranches:
         th._save_task_result(
             "the result mentions parse_xml_payload again", task_id=task_id,
         )
-        server = VSCodeServer()
+        server = AgentServer()
         assert _file_suffix(server,
             "calc", "", "", chat_id,
         ) == "ulate_total_amount"
@@ -171,7 +171,7 @@ class TestVSCodeServerBranches:
     def test_file_suffix_combines_file_and_chat(self) -> None:
         """File content and chat history both contribute candidates."""
         _task_id, chat_id = th._add_task("chat had wonderful_widget_factory in it")
-        server = VSCodeServer()
+        server = AgentServer()
         file_content = "class HelperUtil:\n    pass\n"
         assert _file_suffix(server,
             "Help", "", file_content, chat_id,
@@ -184,7 +184,7 @@ class TestVSCodeServerBranches:
         """Chat-context text is cached between keystrokes in the same chat."""
         task_id, chat_id = th._add_task("first wonderful_alpha_token here")
         th._save_task_result("nothing useful", task_id=task_id)
-        server = VSCodeServer()
+        server = AgentServer()
 
         assert _file_suffix(server,
             "wonderful_a", "", "", chat_id,
@@ -222,7 +222,7 @@ class TestVSCodeServerBranches:
 
     def test_fast_complete_history_match(self) -> None:
         """_complete returns history match via broadcast."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []  # type: ignore[type-arg]
         def cap(ev: dict) -> None:  # type: ignore[type-arg]
             events.append(ev)
@@ -235,14 +235,14 @@ class TestVSCodeServerBranches:
 
     def test_record_file_usage_command(self) -> None:
         """recordFileUsage command records the path."""
-        server = VSCodeServer()
+        server = AgentServer()
         server._handle_command({"type": "recordFileUsage", "path": "/test/file.py"})
         usage = th._load_file_usage()
         assert "/test/file.py" in usage
 
     def test_get_input_history(self) -> None:
         """getInputHistory command returns deduplicated tasks."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
         orig = server.printer.broadcast
         def cap(ev: dict) -> None:
@@ -256,7 +256,7 @@ class TestVSCodeServerBranches:
 
     def test_get_input_history_deduplicates_across_full_history(self) -> None:
         """Deduplication should keep the newest copy even when duplicates span >100 rows."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
 
         def cap(ev: dict) -> None:
@@ -322,6 +322,6 @@ class TestServerCompleteEmptyQuery:
 
     def test_complete_command_empty_query(self) -> None:
         """Sending complete command with empty query doesn't start thread."""
-        server = VSCodeServer()
+        server = AgentServer()
         server._handle_command({"type": "complete", "query": ""})
         assert server._complete_seq_latest.get("", -1) >= 0

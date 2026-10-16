@@ -6,7 +6,7 @@
 """Per-thread stop signal, visible to blocking call sites below the agent.
 
 A task (or a parallel sub-agent) runs on exactly one thread, and
-``VSCodeServer._stop_task`` sets that thread's :class:`threading.Event`
+``AgentServer._stop_task`` sets that thread's :class:`threading.Event`
 when the user presses Stop.  The cooperative reader,
 ``JsonPrinter._check_stop``, only looks at the flag when the agent
 *emits* something — a print or a streamed token.  A model request that

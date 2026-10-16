@@ -46,7 +46,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     make_recording_server,
@@ -81,7 +81,7 @@ class _PromptCapture:
         return f"success: true\nsummary: {summary}\n"
 
 
-def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
+def _run_and_wait(server: AgentServer, tab_id: str, prompt: str,
                   work_dir: str) -> None:
     server._handle_command({
         "type": "run", "prompt": prompt,

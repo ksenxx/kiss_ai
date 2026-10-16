@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, run_git
 
 
@@ -41,7 +41,7 @@ class TestManualCommitAfterWorktreeCleanup(unittest.TestCase):
             Path(self.repo) / ".kiss-worktrees" / "kiss_wt-1781574606-49147541",
         )
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict[str, Any]] = []
 

@@ -31,7 +31,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -97,7 +97,7 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
             check=True,
         )
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
 
         wt_agent = ChatSorcarAgent("wt_agent")

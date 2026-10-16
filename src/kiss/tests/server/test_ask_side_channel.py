@@ -6,7 +6,7 @@
 
 The user's task description names one specific interaction: while a
 task is running in a tab, the user types ``/ask <question>`` in the
-same chat webview.  The framework MUST NOT hand the message to the
+same chat page.  The framework MUST NOT hand the message to the
 outer agent's ``pending_user_messages`` queue (which is drained only
 at the top of the next model step, so a blocked outer tool call would
 delay the answer indefinitely).  Instead the daemon MUST dispatch
@@ -54,7 +54,7 @@ from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
 
 # ---------------------------------------------------------------------------
@@ -74,9 +74,9 @@ class _AgentStub:
         self.last_task_id = task_id
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """Real :class:`VSCodeServer` whose broadcasts land in a list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """Real :class:`AgentServer` whose broadcasts land in a list."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -159,7 +159,7 @@ def test_split_ask_command_rejects_non_matches(prompt: str) -> None:
 
 
 def _install_dispatch_capture(
-    server: VSCodeServer,
+    server: AgentServer,
 ) -> list[dict[str, Any]]:
     """Replace ``_dispatch_ask_side_channel`` with a recorder.
 

@@ -21,7 +21,7 @@ until the next keystroke.
 Making the race deterministic
 -----------------------------
 
-Nothing here is mocked: a real ``VSCodeServer``, a real work_dir on
+Nothing here is mocked: a real ``AgentServer``, a real work_dir on
 disk and the real scan thread are used.  The one arrangement is that
 the server is given a printer whose delivery of the *placeholder* is
 slow — a real subscriber that is momentarily busy, expressed as a
@@ -47,7 +47,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 #: How long the placeholder's delivery is held up.  Only an upper
@@ -88,7 +88,7 @@ class TestGetFilesLoadingPlaceholderOrdering(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-getfiles-order-")
         self.printer = SlowPlaceholderPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
         self.server.work_dir = self.tmpdir
 
     def tearDown(self) -> None:

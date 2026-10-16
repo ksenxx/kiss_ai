@@ -20,20 +20,16 @@ import json
 import time
 from pathlib import Path
 
-import yaml
-
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.good_morning import good_morning_sea as sea
 from kiss.agents.seas.good_morning.good_morning_sea import GoodMorningSea
 from kiss.agents.seas.recommendations import recommendations_sea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 
@@ -117,33 +113,15 @@ def test_agent_greets_with_the_stored_suggestions(tmp_path: Path) -> None:
         finish_body(greeting, prompt_tokens=400),
     ]
     run = sea_commands.evaluate_sea([GoodMorningSea()], "now")
-    settings = run.settings
     assert run.prompt == sea.PROMPT
     assert run.tools_hook is not None and run.system_prompt_hook is not None
     try:
-        with serve(script) as (url, requests):
-            agent = ChatSorcarAgent("good-morning-sea-test")
-            result = agent.run(
-                prompt_template=run.prompt,
-                model_name=MODEL,
-                work_dir=str(tmp_path),
-                max_steps=4,
-                max_budget=settings["max_budget"],
-                model_config={"base_url": url, "api_key": "local"},
-                tools_hook=run.tools_hook,
-                tool_profile=settings["tool_profile"],
-                system_prompt_hook=run.system_prompt_hook,
-                web_tools=settings["use_web_tools"],
-                use_memory=settings["use_memory"],
-                verbose=False,
-            )
+        parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     finally:
         path.unlink(missing_ok=True)
-    parsed = yaml.safe_load(result)
     assert parsed["success"] is True
     assert parsed["summary"] == greeting
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 2, [list(r) for r in requests]
+    assert len(agentic) == 2
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"finish", "stored_recommendations"}, names

@@ -37,7 +37,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _USAGE: dict[str, tuple[int, float, int]] = {
     "a0902 first": (300, 0.30, 6),
@@ -120,12 +120,12 @@ def _fetch_rows(tasks: list[str]) -> dict[str, tuple[int, float, int]]:
 @pytest.fixture
 def server_and_printer(
     tmp_path: Path,
-) -> Iterator[tuple[VSCodeServer, _CapturePrinter, str]]:
+) -> Iterator[tuple[AgentServer, _CapturePrinter, str]]:
     models = get_available_models()
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer)
+    server = AgentServer(printer)
     yield server, printer, models[0]
     with agent_state.STATE_LOCK:
         for st in list(agent_state.agent_states.values()):
@@ -134,9 +134,9 @@ def server_and_printer(
 
 
 def _run(
-    server: VSCodeServer, model: str, tmp_path: Path, tab_id: str, prompt: str,
+    server: AgentServer, model: str, tmp_path: Path, tab_id: str, prompt: str,
 ) -> _ResettingAgent:
-    agent = _ResettingAgent("Sorcar VS Code")
+    agent = _ResettingAgent("Sorcar")
     # A previous task on the tab left the agent (and thus its counters)
     # behind, exactly like a pending worktree carry-over does.
     agent.total_tokens_used = 5000
@@ -160,7 +160,7 @@ def _run(
 
 
 def test_each_subtask_row_records_its_own_usage(
-    server_and_printer: tuple[VSCodeServer, _CapturePrinter, str],
+    server_and_printer: tuple[AgentServer, _CapturePrinter, str],
     tmp_path: Path,
 ) -> None:
     server, _printer, model = server_and_printer
@@ -182,7 +182,7 @@ def test_each_subtask_row_records_its_own_usage(
 
 
 def test_failure_banner_reports_the_failed_subtasks_own_usage(
-    server_and_printer: tuple[VSCodeServer, _CapturePrinter, str],
+    server_and_printer: tuple[AgentServer, _CapturePrinter, str],
     tmp_path: Path,
 ) -> None:
     server, printer, model = server_and_printer

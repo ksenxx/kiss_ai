@@ -6,7 +6,7 @@ model (``_run_task``) before the daemon-wide default would apply.  The
 run's provenance record must say so: ``model`` is then neither in
 ``defaulted`` nor, when a SEA pins it, missing from ``pinned``.
 
-Harness: a real ``VSCodeServer`` in a private ``KISS_HOME`` and its
+Harness: a real ``AgentServer`` in a private ``KISS_HOME`` and its
 ``_apply_sea`` step on a ``run`` command, exactly as ``_run_task`` calls
 it; no daemon thread is started.
 """
@@ -21,7 +21,7 @@ import pytest
 
 from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _TAB_MODEL = "openai/gpt-4o"
@@ -50,11 +50,11 @@ class Sea(BaseSea):
 
 
 @pytest.fixture
-def server() -> Iterator[VSCodeServer]:
+def server() -> Iterator[AgentServer]:
     """A server in a throwaway home whose daemon default differs from the tab's model."""
     home = IsolatedKissHome("kiss-tab-model-provenance-")
     try:
-        srv = VSCodeServer(printer=JsonPrinter())
+        srv = AgentServer(printer=JsonPrinter())
         srv._default_model = "daemon/default-model"
         yield srv
     finally:
@@ -71,7 +71,7 @@ def _run(tmp_path: Path, sea_body: str) -> dict[str, Any]:
 
 
 def test_remembered_tab_model_is_the_tabs_value_not_a_default(
-    server: VSCodeServer, tmp_path: Path,
+    server: AgentServer, tmp_path: Path,
 ) -> None:
     """A tab that picked a model runs on it, and the record does not call it defaulted."""
     server._tab_models["t"] = _TAB_MODEL
@@ -84,7 +84,7 @@ def test_remembered_tab_model_is_the_tabs_value_not_a_default(
 
 
 def test_sea_model_beats_the_tabs_and_the_record_shows_what_it_replaced(
-    server: VSCodeServer, tmp_path: Path,
+    server: AgentServer, tmp_path: Path,
 ) -> None:
     """The SEA's model wins over the tab's remembered one; ``pinned`` names both."""
     server._tab_models["t"] = _TAB_MODEL
@@ -97,7 +97,7 @@ def test_sea_model_beats_the_tabs_and_the_record_shows_what_it_replaced(
 
 
 def test_a_tab_without_a_remembered_model_is_defaulted(
-    server: VSCodeServer, tmp_path: Path,
+    server: AgentServer, tmp_path: Path,
 ) -> None:
     """With nothing remembered the command keeps no model and the record says defaulted."""
     server._tab_models.pop("t", None)

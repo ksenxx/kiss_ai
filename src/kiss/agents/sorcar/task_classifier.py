@@ -357,7 +357,7 @@ def classification_enabled(override: bool | None = None) -> bool:
         return False
     if override is not None:
         return override
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     try:
         return bool(load_config().get("classify_tasks", True))

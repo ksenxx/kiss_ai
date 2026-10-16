@@ -41,7 +41,7 @@ from websockets.asyncio.server import ServerConnection
 
 import kiss.agents.sorcar.machines as mach
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 import kiss.server.web_server as web_server
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import find_free_port

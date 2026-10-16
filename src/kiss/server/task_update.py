@@ -4,7 +4,7 @@
 # add your name here
 """Periodic task updates for the task-info panel.
 
-While a chat webview shows a running task, its task-info panel asks the
+While a chat page shows a running task, its task-info panel asks the
 daemon (``getTaskUpdate``) for a short progress update.  The update is
 the answer of the ``/ask`` agent
 (:mod:`~kiss.agents.seas.ask.ask_sea`) to :data:`UPDATE_QUESTION`, the
@@ -269,7 +269,7 @@ def _charge_locked(
     for row_id, row_tokens, row_cost, row_steps in updated:
         # ``taskId``: the tab that showed this row may already run a
         # newer task, whose cost this late event must not overwrite
-        # (the webview drops usage events of another task).
+        # (the chat page drops usage events of another task).
         event: dict[str, Any] = {
             "type": "usage_info",
             "text": "",
@@ -349,7 +349,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     )
 
     printer = getattr(parent_agent, "printer", None)
-    # The tab the webviews show the parent under — for a sub-agent
+    # The tab the chat pages show the parent under — for a sub-agent
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
@@ -404,6 +404,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         if printer is not None:
             _notify_subagent_done(
                 printer, _persisted_task_id(agent), sub_tab_id, model_name,
+                parent_tab_id,
             )
     return _extract_result_summary(result), budget
 

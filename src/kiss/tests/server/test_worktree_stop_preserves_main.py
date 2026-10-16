@@ -28,7 +28,7 @@ Fix:
     later, and the main branch is untouched.
 
 This is an end-to-end test: a real ``run`` command goes through
-``VSCodeServer._handle_command`` against a real on-disk git repo, the
+``AgentServer._handle_command`` against a real on-disk git repo, the
 model is a local stand-in endpoint whose script calls the agent's own
 ``create_worktree`` tool, writes partial pptx bytes with a real Bash
 call and then stops the task through the server's ``_stop_task`` (the
@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -107,7 +107,7 @@ class _WorktreeStopBase(unittest.TestCase):
         self.offline.__enter__()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = self.repo
         self.tab_id = "tab-stop-test"
         self.model_calls = 0

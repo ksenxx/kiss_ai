@@ -12,12 +12,12 @@ FIRST, and dozens of async server test files close the connection
 inside ``asyncTearDown``.  A sweep still inside ``db.execute(...)`` at
 that moment dereferences a freed connection and kills the whole pytest
 process with SIGSEGV (observed order-dependently in large
-``tests/agents/vscode`` runs, e.g. ``test_per_window_reply_isolation``
+``tests/webapp`` runs, e.g. ``test_per_window_reply_isolation``
 tearing down while ``_recover_orphaned_tasks`` was mid-SQL).
 
 These tests drive the real race in a pytest subprocess.  The scenario
 seeds enough genuine orphan sentinel rows that the real sweep spawned
-by ``VSCodeServer.__init__`` demonstrably outlives the test body, then
+by ``AgentServer.__init__`` demonstrably outlives the test body, then
 tears down exactly like the production fixtures do:
 
 * run WITH the root conftest guard loaded — the sweep must already be
@@ -26,7 +26,7 @@ tears down exactly like the production fixtures do:
   still alive (or the interpreter dies outright), proving the scenario
   reproduces the pre-fix crash window and the guard is what closes it.
 
-No mocks: the subprocess uses the real ``VSCodeServer``, the real
+No mocks: the subprocess uses the real ``AgentServer``, the real
 sweep thread, and the real SQLite database.
 """
 
@@ -51,7 +51,7 @@ import uuid
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 # Enough sentinel rows that the sweep (per-row liveness probe, per-row
 # forensic queries and log lines, then one bulk UPDATE) runs for around
@@ -89,7 +89,7 @@ class SweepTeardownRace(unittest.IsolatedAsyncioTestCase):
                 rows,
             )
         # Spawns the real "orphan-task-sweep" daemon thread.
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     async def test_teardown_races_the_sweep(self) -> None:
         """Finish immediately, while the sweep is still walking rows."""

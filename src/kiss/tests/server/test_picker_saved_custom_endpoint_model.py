@@ -6,7 +6,7 @@
 
 ``MY_MODELS.json`` may override a bundled catalog name (say ``gpt-6-astra``)
 with the user's own endpoint and credentials, with no vendor API key
-configured.  ``VSCodeServer._get_models`` lists such entries through the
+configured.  ``AgentServer._get_models`` lists such entries through the
 custom-model merge, which skips names the catalog already reported.  The
 "keep the saved model visible" step must therefore not pre-list the name as
 an unavailable catalog entry ("configure the vendor's API key"), or the
@@ -68,7 +68,7 @@ def test_saved_custom_endpoint_model_is_listed_as_the_custom_entry(
     monkeypatch.setattr(server_module, "_save_last_model", lambda *_a, **_k: None, raising=False)
     monkeypatch.setenv("KISS_WORKDIR", "/tmp")
 
-    server = server_module.VSCodeServer()
+    server = server_module.AgentServer()
     server._default_model = name
     events: list[dict[str, Any]] = []
     lock = threading.Lock()

@@ -152,7 +152,7 @@ def normalize_url(text: str) -> str:
 class BrowserTabService:
     """Launch the machine's browser and mirror its pages as KISS tabs.
 
-    One instance lives on the daemon's :class:`VSCodeServer`.  Nothing
+    One instance lives on the daemon's :class:`AgentServer`.  Nothing
     starts until :meth:`open` is first called; :meth:`shutdown` stops
     the browser and the private event loop.
     """

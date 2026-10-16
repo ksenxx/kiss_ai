@@ -4,7 +4,7 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_content_tab_file_links``.
+"""Server-only tests extracted from ``kiss.tests.webapp.test_content_tab_file_links``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate
@@ -28,7 +28,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 

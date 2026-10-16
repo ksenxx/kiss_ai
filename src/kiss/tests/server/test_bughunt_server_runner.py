@@ -30,7 +30,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _BugHuntBase(unittest.TestCase):
@@ -38,7 +38,7 @@ class _BugHuntBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:

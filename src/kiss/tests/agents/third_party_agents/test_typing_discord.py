@@ -22,23 +22,23 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 from urllib.parse import urlsplit
 
 import pytest
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 
-class _TypingHandler(BaseHTTPRequestHandler):
+class _TypingHandler(RecordingHandler):
     """Records requests; 204 for typing endpoints, 500 for channel ERR."""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        pass
-
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         cast(RecordingServer, self.server).requests.append(
             {

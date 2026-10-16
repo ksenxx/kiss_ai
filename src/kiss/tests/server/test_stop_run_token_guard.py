@@ -24,7 +24,7 @@ import tempfile
 import threading
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -34,7 +34,7 @@ class TestStopRunTokenGuard:
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._saved = redirect_persistence(self._tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def teardown_method(self) -> None:
         restore_persistence(self._saved)

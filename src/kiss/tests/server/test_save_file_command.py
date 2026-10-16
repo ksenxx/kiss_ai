@@ -11,7 +11,7 @@ An editable content tab sends ``saveFile`` (the Monaco editor's full
 text) and :meth:`RemoteAccessServer._handle_save_file` writes it back
 to the file the tab was opened from, replying ``fileSaved``.  These
 tests drive a REAL :class:`RemoteAccessServer` over real ``wss://``
-(and the real local channel for the drop gate) — no mocks.
+— no mocks.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from websockets.asyncio.client import connect
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import _file_version
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_content_tab_file_links import (
     _PY_SOURCE,
@@ -430,50 +429,3 @@ class TestSaveFile:
         })
         assert reply["ok"] is False and reply["conflict"] is True
         assert target.read_text() == "g\n"
-
-
-class TestLocalDropGate:
-    """A VS Code window (local connection) edits files in real editors:
-    its ``saveFile`` is dropped and never touches the disk."""
-
-    def test_local_delivered_save_is_dropped(self, harness) -> None:
-        target = harness.work_dir / "local_guard.txt"
-        target.write_text("untouched\n")
-
-        async def _probe() -> list[dict]:
-            reader, writer = await open_local_connection(harness.server)
-            try:
-                for cmd in (
-                    {
-                        "type": "saveFile",
-                        "path": str(target),
-                        "content": "smuggled\n",
-                        "tabId": "u-1",
-                    },
-                    # Positive control, sent LAST: getInputHistory IS
-                    # answered over the local channel.  Its reply arriving proves the
-                    # saveFile before it was processed — and dropped.
-                    {"type": "getInputHistory", "tabId": "u-1"},
-                ):
-                    writer.write((json.dumps(cmd) + "\n").encode())
-                await writer.drain()
-                got: list[dict] = []
-                deadline = asyncio.get_event_loop().time() + 15
-                while asyncio.get_event_loop().time() < deadline:
-                    line = await asyncio.wait_for(reader.readline(), 15)
-                    if not line:
-                        break
-                    ev = json.loads(line)
-                    got.append(ev)
-                    if ev.get("type") == "inputHistory":
-                        break
-                return got
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        events = harness.run(_probe())
-        types = [e.get("type") for e in events]
-        assert "inputHistory" in types, events
-        assert "fileSaved" not in types, events
-        assert target.read_text() == "untouched\n"

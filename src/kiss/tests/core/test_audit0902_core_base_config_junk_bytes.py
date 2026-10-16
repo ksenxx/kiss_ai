@@ -25,20 +25,20 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core import vscode_config
-from kiss.core.vscode_config import DEFAULTS, load_config, save_config
+from kiss.core import user_config
+from kiss.core.user_config import DEFAULTS, load_config, save_config
 
 _JUNK = b'{"max_budget": 42, "work_dir": "/tmp/caf\xe9"}'  # Latin-1 é: not UTF-8
 
 
 @pytest.fixture
 def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point ``vscode_config`` at a temporary ``$KISS_HOME`` for the test."""
+    """Point ``user_config`` at a temporary ``$KISS_HOME`` for the test."""
     home = tmp_path / "kiss_home"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
     for name in ("CONFIG_DIR", "CONFIG_PATH"):
-        monkeypatch.delitem(vars(vscode_config), name, raising=False)
+        monkeypatch.delitem(vars(user_config), name, raising=False)
     return home / "config.json"
 
 

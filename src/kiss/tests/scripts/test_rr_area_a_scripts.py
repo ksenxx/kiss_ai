@@ -86,7 +86,8 @@ class RemoteConfigConcurrentWritersTest(unittest.TestCase):
             self.assertEqual(saved["round"], round_no)
             self.assertEqual(saved["work_dir"], "/home/ubuntu/kiss")
             # Exactly one writer's password won, and it is one of ours.
-            self.assertIn(saved["remote_password"], passwords)
+            winners = [p for p in passwords if p == saved["remote_password"]]
+            self.assertEqual(len(winners), 1, winners)
             # No staging file survived any of the six runs.
             self.assertEqual(list(self.tmp.glob("config.json.sorcar-new*")), [])
             # And nothing was "kept as unreadable": no writer ever saw

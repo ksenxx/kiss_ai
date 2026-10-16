@@ -38,7 +38,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.test_worktree_audit18 import _make_repo, _server
 
@@ -60,9 +60,9 @@ class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
             url_file=self.tmp_dir / "remote-url.json",
             local_endpoint_file=self.tmp_dir / "sorcar-local.json",
         )
-        self.server: VSCodeServer = _server(self.repo)
+        self.server: AgentServer = _server(self.repo)
         self.state = AgentState(
-            "task-a", agent=ChatSorcarAgent("Sorcar VS Code"),
+            "task-a", agent=ChatSorcarAgent("Sorcar"),
             tab_id="a", server_owned=True,
         )
         agent_state.register(self.state)

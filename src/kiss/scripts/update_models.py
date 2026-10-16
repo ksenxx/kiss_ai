@@ -73,9 +73,9 @@ def _find_project_root() -> Path:
        expected source structure
     3. __file__-based resolution (fallback for direct invocation)
 
-    This avoids a bug where running from the VS Code extension's bundled
-    copy of the project would write to the extension directory instead of
-    the actual source repository.
+    This avoids a bug where running from the installed copy of the
+    project would write to the install directory instead of the actual
+    source repository.
     """
     workdir = os.environ.get("KISS_WORKDIR", "")
     if workdir:

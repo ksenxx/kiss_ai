@@ -30,7 +30,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestFilesEventCarriesPrefix(unittest.TestCase):
@@ -42,7 +42,7 @@ class TestFilesEventCarriesPrefix(unittest.TestCase):
         (root / "src").mkdir()
         (root / "src" / "util.py").write_text("x = 1\n")
         (root / "src" / "helpers.py").write_text("y = 2\n")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 

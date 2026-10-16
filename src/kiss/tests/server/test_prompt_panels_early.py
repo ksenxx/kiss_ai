@@ -6,10 +6,10 @@
 
 Issue reproduced here
 ---------------------
-When a task is submitted to the chat webview, the authoritative
+When a task is submitted from the chat page, the authoritative
 ``prompt`` / ``system_prompt`` events are emitted deep inside
 ``KISSAgent.run`` — AFTER the git pre-snapshot, chat-context loading
-and model/tool setup — so the webview shows an empty tab for the first
+and model/tool setup — so the chat page shows an empty tab for the first
 seconds after submit.
 
 The fix (``_TaskRunnerMixin._broadcast_early_prompts``) broadcasts
@@ -42,7 +42,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     redirect_persistence,
@@ -54,14 +54,14 @@ _SLOW_SETUP_S = 1.5
 _EARLY_DEADLINE_S = 1.0
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    """Create a ``VSCodeServer`` whose broadcasts mirror ``WebPrinter``.
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    """Create a ``AgentServer`` whose broadcasts mirror ``WebPrinter``.
 
     Events with an explicit ``tabId`` are captured verbatim; events
     with a (thread-local) task id are recorded, persisted, and fanned
     out once per subscribed tab with the viewer's ``tabId`` stamped.
     """
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
     printer = server.printer

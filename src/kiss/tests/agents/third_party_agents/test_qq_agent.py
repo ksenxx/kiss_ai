@@ -8,17 +8,16 @@ No mocks or test doubles: a real in-process HTTP server emulates the
 QQ open-platform API (token + group/C2C message endpoints), and the
 backend's embedded webhook server is exercised with real HTTP requests
 signed with the same Ed25519 key the backend derives from the secret.
-Config state is isolated by the session-wide temp ``KISS_HOME`` set in
-``src/kiss/tests/conftest.py``.
+Config state is isolated per test by ``isolated_kiss_home``.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
+import pytest
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -30,12 +29,15 @@ from kiss.agents.third_party_agents.qq.qq_sea import (
     _derive_signing_key,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     raw_post_status,
     recording_server,
 )
 
 _SECRET = "kiss-qq-test-secret"
+
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _connect_on_ephemeral_port(backend: QQChannelBackend) -> int:
@@ -77,7 +79,7 @@ def _signed_headers(ts: str, raw: bytes) -> dict[str, str]:
 _TOKEN_PATH = "/getAppAccessToken"
 
 
-class _QQApiHandler(BaseHTTPRequestHandler):
+class _QQApiHandler(RecordingHandler):
     """Emulates the QQ open-platform token and message endpoints.
 
     Every request is recorded on the :class:`RecordingServer` as
@@ -98,17 +100,6 @@ class _QQApiHandler(BaseHTTPRequestHandler):
         assert self.headers.get("Authorization") == "QQBot QQTOKEN"
         self._json(200, {"id": "msg1", "timestamp": 1712345678})
 
-    def _json(self, status: int, body: dict[str, Any]) -> None:
-        """Send a JSON response."""
-        data = json.dumps(body).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
-
 
 def _token_hits(api: RecordingServer) -> int:
     """Count the token-endpoint requests the emulated API received."""
@@ -124,7 +115,6 @@ def _sent(api: RecordingServer) -> list[tuple[str, str, dict[str, Any]]]:
 
 def _authenticated_agent(api_base: str = "", token_url: str = "", port: str = "") -> QQAgent:
     """Authenticate a fresh agent against the given endpoints."""
-    _config.clear()
     agent = QQAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools["authenticate_qq"](
@@ -140,7 +130,6 @@ def _authenticated_agent(api_base: str = "", token_url: str = "", port: str = ""
 
 def test_unauthenticated_state() -> None:
     """Fresh agent exposes only the auth trio and reports unconfigured."""
-    _config.clear()
     agent = QQAgent()
     assert agent.name == "QQ Agent"
     assert agent._is_authenticated() is False
@@ -152,7 +141,6 @@ def test_unauthenticated_state() -> None:
 
 def test_auth_trio_persistence() -> None:
     """authenticate persists 0600 config; check reports it; clear removes it."""
-    _config.clear()
     agent = _authenticated_agent(api_base="http://127.0.0.1:1/")
     assert _config.path.exists()
     if sys.platform != "win32":
@@ -173,7 +161,6 @@ def test_auth_trio_persistence() -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
-    _config.clear()
     assert len(QqSea().tools([])) >= 3
 
 
@@ -189,7 +176,6 @@ def test_send_messages_with_cached_token() -> None:
             ("/v2/groups/G1/messages", "QQBot QQTOKEN", {"content": "hi group", "msg_type": 0}),
             ("/v2/users/U1/messages", "QQBot QQTOKEN", {"content": "hi user", "msg_type": 0}),
         ]
-    _config.clear()
 
 
 def test_webhook_validation_challenge() -> None:
@@ -219,7 +205,6 @@ def test_webhook_validation_challenge() -> None:
         assert unsigned.status_code == 401
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_webhook_signed_events_and_bad_signature() -> None:
@@ -313,7 +298,6 @@ def test_webhook_signed_events_and_bad_signature() -> None:
         assert "G42" in backend._group_ids
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_webhook_bad_content_length() -> None:
@@ -330,12 +314,10 @@ def test_webhook_bad_content_length() -> None:
         assert messages == []
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_authenticate_rejects_invalid_port() -> None:
     """authenticate_qq rejects non-numeric and out-of-range ports."""
-    _config.clear()
     agent = QQAgent()
     authenticate = {t.__name__: t for t in agent._get_tools()}["authenticate_qq"]
     for bad_port in ("abc", "0", "-1", "65536", "1.5", "1e3"):
@@ -343,7 +325,6 @@ def test_authenticate_rejects_invalid_port() -> None:
         assert "invalid port" in result.lower(), bad_port
         assert not _config.path.exists()
     assert json.loads(authenticate(appid="qq_app", secret=_SECRET, port="18086"))["ok"]
-    _config.clear()
 
 
 def test_send_message_routes_group_vs_c2c() -> None:
@@ -358,12 +339,10 @@ def test_send_message_routes_group_vs_c2c() -> None:
             "/v2/groups/G42/messages",
             "/v2/users/U9/messages",
         ]
-    _config.clear()
 
 
 def test_connect_unconfigured_fails() -> None:
     """connect() fails cleanly when no config is stored."""
-    _config.clear()
     backend = QQChannelBackend()
     assert backend.connect() is False
     assert "no qq config" in backend.connection_info.lower()

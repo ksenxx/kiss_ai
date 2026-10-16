@@ -28,7 +28,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
     _make_repo,
     _redirect_db,
@@ -68,7 +68,7 @@ class TestBug22ConflictMissesStaged:
         (repo / "shared.txt").write_text("user version\n")
         _git("add", "shared.txt", cwd=repo)
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         state = agent_state.AgentState(
             "task-t22", agent=agent, tab_id="t22", server_owned=True,
@@ -110,7 +110,7 @@ class TestBug24SilentDiscardOnGitFailure:
             (wt.wt_dir / "important.txt").write_text("agent work\n")
             GitWorktreeOps.commit_all(wt.wt_dir, "important agent changes")
 
-            server = VSCodeServer()
+            server = AgentServer()
             server.work_dir = str(repo)
             state = agent_state.AgentState(
                 "task-t24", agent=agent, tab_id="t24", server_owned=True,

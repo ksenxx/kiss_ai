@@ -68,9 +68,9 @@ class _CooperativeWorker:
     """
 
     def __init__(
-        self, vscode: Any, state: AgentState, cleanup_seconds: float,
+        self, daemon: Any, state: AgentState, cleanup_seconds: float,
     ) -> None:
-        self.vscode = vscode
+        self.daemon = daemon
         self.state = state
         self.cleanup_seconds = cleanup_seconds
         self.interrupted = threading.Event()
@@ -82,7 +82,7 @@ class _CooperativeWorker:
             stop = self.state.stop_event
             assert stop is not None
             stop.wait(30)
-            self.vscode._cancel_outcome(self.state)  # acknowledges the stop
+            self.daemon._cancel_outcome(self.state)  # acknowledges the stop
             deadline = time.monotonic() + self.cleanup_seconds
             while time.monotonic() < deadline:
                 time.sleep(0.005)
@@ -130,9 +130,9 @@ def test_sweep_does_not_reinterrupt_acknowledged_cleanup(
 ) -> None:
     """A cooperatively stopped worker's slow cleanup runs to completion."""
     remote = _make_remote_server()
-    vscode = remote._vscode_server
+    daemon = remote._agent_server
     state = _register("sweep-acked", "TAB-SWEEP-ACKED", threading.Thread())
-    worker = _CooperativeWorker(vscode, state, cleanup_seconds=3.0)
+    worker = _CooperativeWorker(daemon, state, cleanup_seconds=3.0)
     state.task_thread = worker.thread
     worker.thread.start()
 

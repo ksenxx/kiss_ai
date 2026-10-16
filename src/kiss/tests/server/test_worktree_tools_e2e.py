@@ -1,6 +1,6 @@
 """End-to-end tests of the ``create_worktree`` / ``commit_and_merge`` tools.
 
-A real ``VSCodeServer`` run on a scripted stand-in model endpoint
+A real ``AgentServer`` run on a scripted stand-in model endpoint
 exercises the whole protocol: the tool-call guard refuses a ``Write``
 of a tracked file until ``create_worktree`` ran, lets a git-ignored
 path through, refuses the first ``finish`` while the worktree is
@@ -37,7 +37,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     resolve_tool_profile,
 )
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -77,7 +77,7 @@ class _ScriptedRun(unittest.TestCase):
         self._lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:

@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for BaseChannelAgent and channel_main().
+"""Structural contract of the channel-agent classes and modules.
 
-Verifies that:
-1. All 23 channel agents inherit from BaseChannelAgent
-2. BaseChannelAgent._get_tools() properly delegates to _get_auth_tools()
-   and conditionally includes backend tools based on _is_authenticated()
-3. channel_main() handles CLI parsing for interactive and poll modes
+Verifies that every one of the 23 agents listed below overrides
+_is_authenticated() and _get_auth_tools() while inheriting _get_tools(),
+and that each module exposes main() and (for poll-capable channels)
+_make_backend().  That every agent inherits BaseChannelAgent is asserted
+over the full agent list in test_channel_agents_no_chat_session.py.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from __future__ import annotations
 import importlib
 
 import pytest
-
-from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 ALL_AGENTS = [
     ("BlueBubblesAgent", "kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea"),
@@ -50,17 +48,6 @@ def _get_agent_class(module_path: str, class_name: str) -> type:
     mod = importlib.import_module(module_path)
     cls: type = getattr(mod, class_name)
     return cls
-
-
-@pytest.mark.parametrize(
-    "class_name,module_path", ALL_AGENTS, ids=[a[0] for a in ALL_AGENTS]
-)
-def test_all_agents_inherit_base_channel_agent(
-    class_name: str, module_path: str
-) -> None:
-    """Every channel agent class inherits from BaseChannelAgent."""
-    cls = _get_agent_class(module_path, class_name)
-    assert issubclass(cls, BaseChannelAgent)
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,7 @@
 
 Since the diff/merge review was removed, ``_run_task_inner``
 auto-commits a dirty working tree when a non-worktree task ends.  A
-``VSCodeServer`` whose ``work_dir`` was never overridden used to fall
+``AgentServer`` whose ``work_dir`` was never overridden used to fall
 back to ``os.getcwd()`` — the developer repository when pytest runs
 from the repo root — so any test driving ``_run_task`` on such a
 server could commit the developer's in-progress work (this actually
@@ -17,7 +17,7 @@ guards against that; this test pins the guard.
 
 from pathlib import Path
 
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _repo_root() -> Path:
@@ -30,8 +30,8 @@ def _repo_root() -> Path:
 
 
 def test_default_server_workdir_is_not_the_developer_repo() -> None:
-    """A defaulted ``VSCodeServer.work_dir`` must not be this repo."""
-    server = VSCodeServer()
+    """A defaulted ``AgentServer.work_dir`` must not be this repo."""
+    server = AgentServer()
     work_dir = Path(server.work_dir).resolve()
     repo = _repo_root()
     assert work_dir != repo

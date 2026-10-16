@@ -87,8 +87,7 @@ USER_MY_MODELS_PATH = config_module.kiss_home() / "MY_MODELS.json"
 def user_model_info_path() -> Path:
     """Return the user-local catalog path ``$KISS_HOME/MODEL_INFO.json``.
 
-    ``KISS_HOME`` defaults to the brand's home (``~/.kiss``).  The installer (both
-    ``install.sh`` and the VS Code extension's ``DependencyInstaller``)
+    ``KISS_HOME`` defaults to the brand's home (``~/.kiss``).  ``install.sh``
     seeds this file from the bundled catalog on every install/update, and
     the settings panel's "Update Models" button refreshes it in place via
     ``kiss.scripts.update_models --model-info``.  An *installed* KISS
@@ -102,8 +101,8 @@ def user_model_info_path() -> Path:
 def _is_installed_package(package_file: Path | None = None) -> bool:
     """Return True when this package runs from an installed (non-git) copy.
 
-    "Installed" means the packaged VS Code extension bundle
-    (``.../kiss_project/src/kiss/...``), which ships without a ``.git``
+    "Installed" means the app directory ``install.sh`` builds
+    (``$KISS_HOME/kiss/src/kiss/...``), which ships without a ``.git``
     marker at its project root.  A development checkout — including the
     ``~/.kiss/kiss_ai`` clone the installer builds from — has ``.git``
     (a directory, or a file in a git worktree) at the root and keeps
@@ -273,7 +272,7 @@ def _my_models_flock() -> Iterator[None]:
     model.  The sidecar is flocked rather than the registry itself
     because the registry is atomically ``os.replace``-d: a lock on the
     old inode would not exclude a writer that opens the new one.  Same
-    technique as ``vscode_config._api_keys_store_flock``.
+    technique as ``user_config._api_keys_store_flock``.
 
     Callers must already hold :data:`_MY_MODELS_EDIT_LOCK`.
     """
@@ -508,7 +507,7 @@ def custom_model_config(model_name: str) -> dict[str, Any] | None:
         The ``model_config`` dict, or ``None`` when the name has no
         entry or the entry has no endpoint.
     """
-    from kiss.core.vscode_config import _parse_custom_headers
+    from kiss.core.user_config import _parse_custom_headers
 
     entry = _read_my_models().get(model_name)
     if entry is None:

@@ -20,7 +20,7 @@ Root cause traced through the codebase:
 2. :meth:`_TaskRunnerMixin._run_task_inner`'s cleanup ``finally``
    normally overwrites that sentinel with a meaningful result via
    :func:`_save_task_result`.
-3. When the host process is shut down (SIGTERM / VS Code reload / IP
+3. When the daemon is shut down (SIGTERM / install restart / IP
    change in :meth:`RemoteAccessServer._watchdog`),
    :meth:`RemoteAccessServer._stop_active_agent_tasks` signals each
    worker thread to stop and joins it with a bounded *timeout*.
@@ -30,7 +30,7 @@ Root cause traced through the codebase:
    cleanup ``finally`` never runs.  The sentinel survives in the DB.
 5. On the next process startup,
    :func:`_persistence._recover_orphaned_tasks` (invoked from
-   :meth:`VSCodeServer.__init__`) rewrites every surviving sentinel
+   :meth:`AgentServer.__init__`) rewrites every surviving sentinel
    row to ``"Task terminated unexpectedly (process killed)"`` —
    silently, several seconds after the fact, after the user has
    already reopened the browser.
@@ -74,7 +74,7 @@ def _make_remote_server() -> Any:
     """Build a :class:`RemoteAccessServer` with no tunnel / sockets bound.
 
     Constructing the remote server also constructs its owned
-    :class:`VSCodeServer`, whose ``__init__`` sweeps the process-global
+    :class:`AgentServer`, whose ``__init__`` sweeps the process-global
     ``agent_state.agent_states`` registry.  Tests must therefore build
     the remote server FIRST and then mutate the registry — so the
     shutdown helper scans the same registry the test populated.

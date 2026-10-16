@@ -15,7 +15,7 @@ Spec
 2. The user changes their GLOBAL settings — typically by clicking the
    parallel toggle in the toolbar or picking another model — to a new
    configuration (``is_parallel=False``, etc.).  The toggle state
-   in the webview is the source of truth for the next task's
+   in the chat page is the source of truth for the next task's
    ``isParallel`` flag.
 
 3. The user clicks the history row for T1.  The frontend issues
@@ -34,7 +34,7 @@ Spec
 
 5. FIXED BEHAVIOR: the backend strips the global-setting keys
    from the broadcast ``extra`` (see ``_extra_for_replay`` in
-   ``kiss/server/server.py``).  The webview's live toggles
+   ``kiss/server/server.py``).  The chat page's live toggles
    stay at the user's current global settings, and the follow-up
    ``submit`` in tab Y carries those settings to the next run.  The
    server's per-tab model pick (``_tab_models``) is likewise never
@@ -54,7 +54,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     make_recording_server,
@@ -87,7 +87,7 @@ class _RunCapture:
 
 
 def _run_and_wait(
-    server: VSCodeServer,
+    server: AgentServer,
     *,
     tab_id: str,
     prompt: str,

@@ -1,6 +1,6 @@
 # Prompt Tricks
 
-> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled [`src/kiss/INJECTIONS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md), read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first. Append one or more to your task prompt.
+> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the web app these appear under the "Tricks" button; they are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled [`src/kiss/INJECTIONS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md), read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first. Append one or more to your task prompt.
 
 ## Multi-Model Quality
 

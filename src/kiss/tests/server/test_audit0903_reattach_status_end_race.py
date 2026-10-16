@@ -23,7 +23,7 @@ subscription — the interleaving in which the task's terminal fan-out
 could not see the viewer yet.  The attach now resolves the live task
 and subscribes the viewer in one ``_state_lock`` section, so the run's
 end is serialized after the subscription (audit 2026-09-26).  Everything else is real: a real
-``VSCodeServer``, a run submitted through the real ``_cmd_run``, a
+``AgentServer``, a run submitted through the real ``_cmd_run``, a
 real worker thread parked in a real SEA getter, the real
 end-of-run broadcasts.  Releasing the getter makes it raise, so the
 task ends in setup and no LLM is ever invoked.
@@ -43,7 +43,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _BLOCKING_SCRIPT = textwrap.dedent(
@@ -102,7 +102,7 @@ class _ParkingPrinter(MemoryPrinter):
 
 
 def _replay_parked_before_finalize(
-    server: VSCodeServer, chat_id: str, tab_id: str,
+    server: AgentServer, chat_id: str, tab_id: str,
 ) -> None:
     """Replay *chat_id* into *tab_id*, parking before the finalize step.
 
@@ -142,7 +142,7 @@ class TestReattachStatusEndRace(TestCase):
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
         self.printer = _ParkingPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
 
     def tearDown(self) -> None:
@@ -411,7 +411,7 @@ class TestReattachStatusEndRace(TestCase):
 
     def test_replaying_unknown_idle_chat_reports_idle(self) -> None:
         """No history row and no live task: nothing to attach, so the
-        tab is told once that it is idle (the webview holds a registry
+        tab is told once that it is idle (the chat page holds a registry
         chat open until its state is known) and never flipped again."""
         from uuid import uuid4
 

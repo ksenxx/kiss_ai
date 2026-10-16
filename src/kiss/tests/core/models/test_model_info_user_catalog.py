@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for the user-local ``~/.kiss/MODEL_INFO.json`` catalog.
 
-An *installed* KISS Sorcar (the packaged VS Code extension bundle, whose
-project root carries no ``.git`` marker) reads its model catalog from
+An *installed* KISS Sorcar (the packaged bundle, whose project root
+carries no ``.git`` marker) reads its model catalog from
 ``$KISS_HOME/MODEL_INFO.json`` — seeded by the installer and refreshed by
 the settings panel's "Update Models" button.  A development checkout
 keeps reading the bundled ``src/kiss/core/models/MODEL_INFO.json``, so a

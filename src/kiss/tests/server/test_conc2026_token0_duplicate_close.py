@@ -18,7 +18,7 @@ order of the two commands.
 
 The fix orders the duplicate close on the registry's publication
 clock: a token-0 close reads :meth:`TabRegistry.clock` and the cleanup
-tail's guards (``VSCodeServer._tab_reopened_since``) stand down when a
+tail's guards (``AgentServer._tab_reopened_since``) stand down when a
 publication newer than the reading stamped the tab OR the tab is
 simply PRESENT in the registry — presence after an absent-close is
 always a later republication, which covers the gap between the
@@ -27,7 +27,7 @@ additionally publishes the reopen BEFORE clearing ``frontend_closed``,
 so a drop that raced ahead of the publication has its stale flag mark
 overwritten by the reopen's clear instead of the other way round.
 
-Real :class:`VSCodeServer`, real :class:`TabRegistry`, real
+Real :class:`AgentServer`, real :class:`TabRegistry`, real
 :class:`JsonPrinter`; the racing interleavings are forced through
 seams on the server/registry objects (a wrapper that runs the racing
 step inside the window), never through mocks of the code under test —
@@ -72,7 +72,7 @@ class _ReopenAfterAbsentClose:
 class _ReopenBeforeTheDrop:
     """Seam: run the reopen between the close's clock read and its drop.
 
-    Wraps ``VSCodeServer._drop_tab_state`` — the reopen republishes
+    Wraps ``AgentServer._drop_tab_state`` — the reopen republishes
     the tab AFTER the duplicate close's clock observation, so the
     ``republished_since`` clause of ``_tab_reopened_since`` stands the
     drop down.
@@ -94,7 +94,7 @@ class _ReopenBeforeTheDrop:
 class _CloseInsidePublication:
     """Seam: run the duplicate close just before the reopen publishes.
 
-    Wraps ``VSCodeServer._registry_update_tab`` — the first publication
+    Wraps ``AgentServer._registry_update_tab`` — the first publication
     for *tab_id* runs the racing duplicate close first, which is
     exactly the interleaving "the duplicate close runs entirely inside
     the reopen, before its registry publication lands".

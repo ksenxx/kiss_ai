@@ -24,7 +24,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestReplayPhantomState(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestReplayPhantomState(unittest.TestCase):
         th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

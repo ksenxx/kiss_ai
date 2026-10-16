@@ -1,0 +1,723 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""E2E tests: the remote webapp is restyled like the Codex mobile app.
+
+The remote webapp (served by ``RemoteAccessServer`` via
+``_build_html()``) must adopt the OpenAI Codex / ChatGPT mobile visual
+language — near-black ``#0d0d0d`` page, an elevated rounded ``#212121``
+composer card with circular controls, pill-shaped chips, and rounded
+drawer panels — WITHOUT changing any control: every DOM id present in
+``media/chat.html`` must survive, and the event panels styled by
+``main.css`` must be completely unaffected.  The restyle therefore
+lives in a separate stylesheet ``media/remote-codex.css`` whose every
+rule is scoped under ``body.remote-chat`` — the class the server's
+``BODY_CLASS_ATTR`` substitution adds.
+
+Coverage (the ``_build_html()`` link/order/substitution checks moved
+to ``kiss.tests.server.test_codex_mobile_layout``):
+
+* ``RemoteAccessServer._process_request`` serves the new stylesheet
+  over HTTP with a CSS content type (real server, real socket).
+* Control parity — the full inventory of element ids from
+  ``chat.html`` is still present in the built page.
+* Every top-level selector in ``remote-codex.css`` is scoped under
+  ``body.remote-chat`` (including selectors inside ``@media`` blocks).
+* The Codex design tokens are actually in the stylesheet: page
+  ``#0d0d0d``, composer surface ``#212121`` at 28px radius with
+  circular 36px controls, white circular send button, pill tab chips.
+* The restyle stops at the chrome: the EVENT PANELS (including the
+  inline ``.task-panel`` that heads each task's thread) are NOT
+  touched, so they keep main.css's look (see
+  ``test_remote_panels.py``).
+* ``chat.html`` itself does not hardcode the new stylesheet (only the
+  server's HEAD_STYLE substitution injects it).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import ssl
+import threading
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from kiss.tests.server.test_codex_mobile_layout import _build_html
+from kiss.tests.webapp.design_tokens import inline_design_tokens
+
+MEDIA_DIR = (
+    Path(__file__).resolve().parents[2] / "webapp" / "media"
+)
+CODEX_CSS = MEDIA_DIR / "remote-codex.css"
+CHAT_HTML = MEDIA_DIR / "chat.html"
+
+CONTROL_IDS = [
+    "kiss-server-loading",
+    "app",
+    "tab-bar",
+    "tab-list",
+    "tab-status-bar",
+    "status-text",
+    "status-tokens",
+    "status-budget",
+    "status-steps",
+    "output",
+    "welcome",
+    "welcome-logo",
+    "welcome-logo-dark",
+    "input-area",
+    "autocomplete",
+    "input-container",
+    "file-chips",
+    "input-wrap",
+    "input-text-wrap",
+    "ghost-overlay",
+    "listening-overlay",
+    "task-input",
+    "input-clear-btn",
+    "input-footer",
+    "model-picker",
+    "menu-btn",
+    "model-btn",
+    "model-name",
+    "upload-btn",
+    "tricks-btn",
+    "voice-btn",
+    "model-dropdown",
+    "model-search",
+    "model-search-clear",
+    "model-list",
+    "input-actions",
+    "wait-spinner",
+    "send-btn",
+    "stop-btn",
+    "sidebar",
+    "sidebar-close",
+    "sidebar-resizer",
+    "sidebar-tab-history-panel",
+    "history-search",
+    "history-search-clear",
+    "hf-running",
+    "hf-errors",
+    "hf-completed",
+    "hf-favorite",
+    "hf-from",
+    "hf-from-btn",
+    "hf-to",
+    "hf-to-btn",
+    "hf-tag",
+    "history-list",
+    "sidebar-overlay",
+    "tricks-panel",
+    "tricks-panel-close",
+    "tricks-list",
+    "tricks-overlay",
+    "settings-panel",
+    "settings-panel-close",
+    "remote-url",
+    "config-form",
+    "cfg-remote-password",
+    "secret-toggle-template",
+    "cfg-max-budget",
+    "cfg-voice-sensitivity",
+    "cfg-voice-sensitivity-value",
+    "tips-btn",
+    "autocommit-btn",
+    "cfg-update-btn",
+    "cfg-server-reset-btn",
+    "cfg-key-ANTHROPIC_API_KEY",
+    "cfg-key-OPENAI_API_KEY",
+    "cfg-key-ZAI_API_KEY",
+    "cfg-key-MOONSHOT_API_KEY",
+    "cfg-key-OPENROUTER_API_KEY",
+    "cfg-key-TOGETHER_API_KEY",
+    "cfg-key-GEMINI_API_KEY",
+    "cfg-custom-endpoint",
+    "cfg-custom-api-key",
+    "cfg-custom-headers",
+    "server-reset-confirm-modal",
+    "server-reset-confirm-cancel",
+    "server-reset-confirm-ok",
+    "settings-overlay",
+    "auth-modal",
+    "auth-modal-input",
+    "auth-modal-cancel",
+    "auth-modal-ok",
+]
+
+
+def _read_codex_css() -> str:
+    assert CODEX_CSS.is_file(), "media/remote-codex.css must exist"
+    return CODEX_CSS.read_text(encoding="utf-8")
+
+
+def test_all_control_ids_still_present() -> None:
+    """Every existing control/template id survives unchanged.
+
+    The explicit inventory protects all known interactive controls,
+    while the template-derived set catches non-interactive wiring ids
+    added in the future (labels, live regions, modal descriptions, etc.).
+    """
+    html = _build_html()
+    built_ids = set(re.findall(r'\bid="([^"]+)"', html))
+    template = CHAT_HTML.read_text(encoding="utf-8")
+    template_ids = set(re.findall(r'\bid="([^"]+)"', template))
+    expected = set(CONTROL_IDS) | template_ids
+    missing = sorted(expected - built_ids)
+    assert not missing, f"controls lost from remote page: {missing}"
+
+
+def test_chat_html_template_does_not_hardcode_codex_css() -> None:
+    """chat.html must not reference remote-codex.css directly (only
+    the server's HEAD_STYLE substitution may inject it)."""
+    tpl = CHAT_HTML.read_text(encoding="utf-8")
+    assert "remote-codex" not in tpl
+
+
+def test_main_css_not_polluted_with_codex_tokens() -> None:
+    """main.css must not gain the Codex page-background token; the
+    restyle lives only in remote-codex.css."""
+    main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+    assert "#0d0d0d" not in main_css
+
+
+def _iter_top_level_selectors(css: str) -> list[str]:
+    """Return every top-level selector in *css*, descending into
+    at-rule blocks (@media/@supports/@container) one level."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    selectors: list[str] = []
+
+    def scan(text: str) -> None:
+        i = 0
+        n = len(text)
+        while i < n:
+            brace = text.find("{", i)
+            if brace == -1:
+                break
+            header = text[i:brace].strip()
+            depth = 1
+            j = brace + 1
+            while j < n and depth:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            body = text[brace + 1 : j - 1]
+            if header.startswith("@"):
+                if header.split("(")[0].split()[0] in (
+                    "@media",
+                    "@supports",
+                    "@container",
+                ):
+                    scan(body)
+            else:
+                selectors.extend(
+                    s.strip() for s in header.split(",") if s.strip()
+                )
+            i = j
+        return
+
+    scan(css)
+    return selectors
+
+
+def test_every_codex_rule_scoped_under_remote_chat() -> None:
+    """EVERY selector in remote-codex.css must be scoped under
+    body.remote-chat."""
+    selectors = _iter_top_level_selectors(_read_codex_css())
+    assert selectors, "remote-codex.css must contain rules"
+    bad = [
+        s
+        for s in selectors
+        if not (
+            s.startswith("body.remote-chat")
+            or s.startswith("html:has(body.remote-chat)")
+        )
+    ]
+    assert not bad, f"unscoped selectors in remote-codex.css: {bad}"
+
+
+def test_codex_page_palette() -> None:
+    """The page background and primary text are VS Code's editor
+    colours, taken from the injected --theme-* variables with the
+    Dark Modern values as fallbacks."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--bg:\s*var\(--theme-editor-background,\s*#1f1f1f\)", dark
+    ), "page background must be editor.background (Dark Modern #1f1f1f)"
+    assert re.search(
+        r"--fg:\s*var\(--theme-editor-foreground,\s*#ccc\)", dark
+    ), "primary text must be editor.foreground (Dark Modern #cccccc)"
+
+
+def _dark_palette_block() -> str:
+    """The ``body.remote-chat { ... }`` dark-theme palette block."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    m = re.search(r"body\.remote-chat\s*\{([^}]*)\}", css)
+    assert m, "body.remote-chat dark palette block missing"
+    return m.group(1)
+
+
+def test_codex_composer_card() -> None:
+    """Composer = --surface2 (VS Code's input.background) card at 28px
+    radius with an inset edge drawn via --ring (input.border)."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--surface2:\s*var\(--theme-input-background,\s*#313131\)", dark
+    ), "composer surface --surface2 must be input.background"
+    assert re.search(
+        r"--ring:\s*var\(--theme-input-border,\s*#3c3c3c\)", dark
+    ), "--ring must be input.border"
+    css = inline_design_tokens(_read_codex_css())
+    m = re.search(
+        r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
+    )
+    assert m, "composer #input-container rule missing"
+    composer = m.group(1)
+    assert "background: var(--surface2)" in composer, (
+        "composer surface must be themed via var(--surface2)"
+    )
+    assert "border-radius: 28px" in composer, (
+        "28px composer radius missing"
+    )
+    assert "inset 0 0 1px var(--ring)" in composer, (
+        "inset edge shadow must be themed via var(--ring)"
+    )
+
+
+def test_codex_circular_composer_controls() -> None:
+    """Composer controls are 36px circles; send is a --send-bg circle
+    in VS Code's button colours (button.background / foreground)."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--send-bg:\s*var\(--theme-button-background,\s*#0078d4\)", dark
+    ), "--send-bg must be button.background"
+    assert re.search(
+        r"--send-fg:\s*var\(--theme-button-foreground,\s*#fff\)", dark
+    ), "--send-fg must be button.foreground"
+    css = inline_design_tokens(_read_codex_css())
+    m = re.search(r"body\.remote-chat #send-btn[^{]*\{([^}]*)\}", css)
+    assert m, "#send-btn rule missing"
+    send = m.group(1)
+    assert "background: var(--send-bg)" in send, (
+        "send button must be themed via var(--send-bg)"
+    )
+    assert "border-radius: 50%" in send
+    assert "width: 36px" in send and "height: 36px" in send, (
+        "36px circular send button size missing"
+    )
+
+
+def test_codex_pill_tabs_and_status() -> None:
+    """Tab chips and the status row become rounded pills."""
+    css = inline_design_tokens(_read_codex_css())
+    assert re.search(
+        r"body\.remote-chat #tab-bar .chat-tab[^{]*\{[^}]*"
+        r"border-radius:\s*(999px|9999px)",
+        css,
+    ), "tab chips must be pills"
+    assert "body.remote-chat #tab-status-bar" in css
+
+
+def test_task_panel_not_restyled_on_remote() -> None:
+    """The inline task panel (``.ev.task-panel``, the first event of
+    every task's thread) must keep main.css's full-width accent-tinted
+    look, so remote-codex.css must not target it at all."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert "task-panel" not in css
+
+
+def test_codex_rounded_panels() -> None:
+    """Sidebar / settings / modals get the dark rounded treatment."""
+    css = _read_codex_css()
+    assert "body.remote-chat #sidebar" in css
+    assert "body.remote-chat #settings-panel" in css
+    assert re.search(
+        r"--surface:\s*var\(--theme-sideBar-background,\s*#181818\)",
+        _dark_palette_block(),
+    ), "drawer surface must be sideBar.background (Dark Modern #181818)"
+
+
+def test_desktop_media_query_docks_sidebar() -> None:
+    """A min-width:900px block docks the OPEN history sidebar on the
+    left (transform:none, --sidebar-w column, overlay hidden) and clears
+    #app only while the sidebar is open, so the burger really hides it.
+    """
+    css = _read_codex_css()
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m, "@media (min-width: 900px) desktop block missing"
+    block = m.group(1)
+    sidebar = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\.open\s*\{([^}]*)\}",
+        block,
+    )
+    assert sidebar, "docked #sidebar.open rule missing from desktop block"
+    assert "transform: none" in sidebar.group(1)
+    assert "width: var(--sidebar-w," in sidebar.group(1), (
+        "sidebar width must be driven by the --sidebar-w variable"
+    )
+    assert not re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\s*\{", block
+    ), "the docked rules must require #sidebar.open, else the burger cannot hide it"
+    # The rule may group further overlays (e.g. #meta-overlay) into
+    # the same declaration block.
+    overlay = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar-overlay"
+        r"[^{}]*\{([^}]*)\}",
+        block,
+    )
+    assert overlay and "display: none" in overlay.group(1), (
+        "the dark overlay must be hidden while docked"
+    )
+    hidden_app = re.search(
+        r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
+    )
+    assert hidden_app and "margin-left: 0" in hidden_app.group(1), (
+        "#app must reclaim the full width once the sidebar is hidden"
+    )
+    app = re.search(
+        r"body\.remote-chat\.remote-desktop:has\(#sidebar\.open\) #app"
+        r"\s*\{([^}]*)\}",
+        block,
+    )
+    assert app and "margin-left: var(--sidebar-w," in app.group(1), (
+        "#app must clear the docked sidebar via the SAME width variable"
+    )
+
+
+def test_no_decorative_color_tokens_in_codex_css() -> None:
+    """remote-codex.css must stay neutral: main.css's decorative color
+    variables may not COLOR anything.  They may appear only on the
+    right-hand side of a custom-property definition (the light-theme
+    palette derives --orange from --yellow/--red), never as the value
+    of a normal CSS property (red stays in main.css for errors and is
+    intentionally NOT overridden here)."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    tokens = (
+        "var(--orange)",
+        "var(--purple)",
+        "var(--green)",
+        "var(--yellow)",
+        "var(--cyan)",
+        "var(--accent)",
+    )
+    for prop, value in re.findall(r"([\w-]+)\s*:\s*([^;{}]*)", css):
+        if prop.startswith("--"):
+            continue  # palette definitions may reference each other
+        for token in tokens:
+            assert token not in value, (
+                f"decorative token {token} colors '{prop}'"
+            )
+
+
+def test_error_panels_keep_red() -> None:
+    """Error affordances stay red for usability: remote-codex.css must
+    NOT override .tr.err / .tr .rl.fail / .wt-result-err (comments are
+    stripped before scanning for selectors)."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert ".tr.err" not in css
+    assert ".rl.fail" not in css
+    assert ".wt-result-err" not in css
+
+
+def test_muted_label_color_tokens_present() -> None:
+    """Muted labels use VS Code's dim foregrounds: tab.inactiveForeground
+    for --dim and input.placeholderForeground for --faint."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--dim:\s*var\(--theme-tab-inactiveForeground,\s*#9d9d9d\)", dark
+    )
+    assert re.search(
+        r"--faint:\s*var\(--theme-input-placeholderForeground,\s*#989898\)",
+        dark,
+    )
+
+
+def test_main_js_remote_desktop_wiring() -> None:
+    """main.js wires the desktop dock unconditionally (the remote webapp
+    is the only surface): the MobileSwipe install and a typeof-guarded
+    matchMedia('(min-width: 900px)') listener that adds/removes the
+    remote-desktop body class, with no remote-chat gate in front."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "typeof window.matchMedia === 'function'" in js
+    mm = js.find("window.matchMedia('(min-width: 900px)')")
+    assert mm != -1
+    block = js[mm : mm + 2500]
+    assert "document.body.classList.add('remote-desktop')" in block
+    assert "document.body.classList.remove('remote-desktop')" in block
+    assert re.search(r"addEventListener\('change',\s*applyRemoteDesktop\)", block)
+    assert "window.MobileSwipe.install(document, onMobileSwipe" in js
+    assert "classList.contains('remote-chat')" not in js, (
+        "the desktop dock and swipe wiring must not be gated on remote-chat"
+    )
+
+
+def test_sidebar_resizer_in_chat_html() -> None:
+    """chat.html ships an accessible resize handle inside #sidebar."""
+    html = CHAT_HTML.read_text(encoding="utf-8")
+    m = re.search(r"<div id=\"sidebar-resizer\"[^>]*>", html)
+    assert m, "#sidebar-resizer handle missing from chat.html"
+    tag = m.group(0)
+    assert 'role="separator"' in tag
+    assert 'aria-orientation="vertical"' in tag
+    assert 'tabindex="0"' in tag
+
+
+def test_sidebar_resizer_css() -> None:
+    """The handle is hidden by default and becomes a col-resize strip
+    on the docked desktop sidebar; drags disable text selection."""
+    css = _read_codex_css()
+    hidden = re.search(
+        r"body\.remote-chat #sidebar-resizer\s*\{([^}]*)\}", css
+    )
+    assert hidden and "display: none" in hidden.group(1), (
+        "resizer must be hidden outside the desktop dock"
+    )
+    resizing = re.search(
+        r"body\.remote-chat\.sidebar-resizing\s*\{([^}]*)\}", css
+    )
+    assert resizing and "user-select: none" in resizing.group(1), (
+        "text selection must be disabled while dragging"
+    )
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m
+    desktop = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\.open #sidebar-resizer"
+        r"\s*\{([^}]*)\}",
+        m.group(1),
+    )
+    assert desktop, "desktop resizer rule missing from the media block"
+    rule = desktop.group(1)
+    assert "display: block" in rule
+    assert "cursor: col-resize" in rule
+    assert "touch-action: none" in rule
+
+
+def test_main_js_sidebar_resize_wiring() -> None:
+    """main.js wires the resizer: pointer capture drag, persistence,
+    pointercancel handling, all driven through --sidebar-w."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "sidebar-resizer" in js
+    assert "kiss-sidebar-w" in js
+    assert "--sidebar-w" in js
+    assert "setPointerCapture" in js
+    assert "pointercancel" in js
+
+
+def test_sidebar_default_width_is_one_fifth_of_the_window() -> None:
+    """The docked sidebar (and #app's margin) share one width fallback,
+    whose default is one fifth of the browser window (20vw)."""
+    css = _read_codex_css()
+    variables = re.search(r"body\.remote-chat\s*\{([^}]*)\}", css)
+    assert variables, "body.remote-chat variable block missing"
+    assert "--sidebar-min-w: 10px" in variables.group(1), (
+        "a drag must still be able to collapse the panel to a sliver"
+    )
+    assert "--chat-min-w:" in variables.group(1), (
+        "a chat-width floor is needed so a wide panel cannot crush the chat"
+    )
+    assert re.search(
+        r"--sidebar-default-w:\s*20vw",
+        variables.group(1),
+    ), "the default width must be one fifth of the browser window (20vw)"
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m, "@media (min-width: 900px) desktop block missing"
+    block = m.group(1)
+    fallback = "var(--sidebar-w, var(--sidebar-default-w))"
+    sidebar = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\.open\s*\{([^}]*)\}",
+        block,
+    )
+    assert sidebar and f"width: {fallback}" in sidebar.group(1), (
+        "the docked sidebar must size itself from --sidebar-default-w"
+    )
+    app = re.search(
+        r"body\.remote-chat\.remote-desktop:has\(#sidebar\.open\) #app"
+        r"\s*\{([^}]*)\}",
+        block,
+    )
+    assert app and f"margin-left: {fallback}" in app.group(1), (
+        "#app must clear the sidebar via the SAME width fallback"
+    )
+
+
+def test_chat_column_spans_full_width() -> None:
+    """Chat panels (the inline task panel among them) keep main.css's
+    full-width layout (remote-codex.css must not cap or realign
+    #output children), and the composer (input textbox + buttons)
+    spans the FULL chat page width with no max-width cap at all."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert "#output" not in css, (
+        "remote-codex.css must not restyle #output or its children; "
+        "the chat thread layout comes from main.css"
+    )
+    assert "task-panel" not in css, (
+        "remote-codex.css must not restyle the inline task panel"
+    )
+    composer = re.search(
+        r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
+    )
+    assert composer, "remote composer rule missing"
+    assert "max-width" not in composer.group(1), (
+        "the composer must have NO width cap so the panel with the "
+        "input textbox and buttons is as wide as the chat page"
+    )
+    assert "margin: 0 auto" not in composer.group(1), (
+        "the composer must not be a centered narrow column"
+    )
+    assert "768px" not in composer.group(1)
+
+
+def test_main_js_reads_its_bounds_from_the_stylesheet() -> None:
+    """main.js seeds the resize default from one fifth of the window
+    width and takes its bounds from remote-codex.css, so each bound
+    lives in exactly one place."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "window.innerWidth * 0.2" in js, (
+        "the resize default must be one fifth of the window width"
+    )
+    for name in ("--sidebar-min-w", "--chat-min-w"):
+        assert f"cssPxVar('{name}'" in js, (
+            f"{name} must be read from the stylesheet, not duplicated"
+        )
+
+
+@pytest.mark.timeout(120)
+def test_server_serves_codex_stylesheet_over_http(
+    tmp_path: Path,
+) -> None:
+    """The real ``RemoteAccessServer`` must serve the linked stylesheet.
+
+    This starts production ``RemoteAccessServer.start_async`` with a real
+    TLS listener on an ephemeral port, requests both ``/`` and the exact
+    cache-busted URL emitted by the page, and shuts the server down through
+    its production lifecycle.  Thus the test covers the actual
+    ``_process_request`` route rather than a look-alike test server.
+    """
+    from kiss.server.web_server import MEDIA_DIR as SRV_MEDIA
+    from kiss.server.web_server import (
+        RemoteAccessServer,
+        _generate_self_signed_cert,
+    )
+
+    certfile = tmp_path / "cert.pem"
+    keyfile = tmp_path / "key.pem"
+    _generate_self_signed_cert(certfile, keyfile)
+    ready = threading.Event()
+    done = threading.Event()
+    state: dict[str, object] = {}
+
+    def run_server() -> None:
+        async def scenario() -> None:
+            server = RemoteAccessServer(
+                host="127.0.0.1",
+                port=0,
+                work_dir=str(tmp_path),
+                certfile=str(certfile),
+                keyfile=str(keyfile),
+                url_file=tmp_path / "remote-url.json",
+                local_endpoint_file=tmp_path / "sorcar-local.json",
+            )
+            started = False
+            try:
+                await server.start_async()
+                started = True
+                assert server._ws_server is not None
+                state["port"] = next(
+                    iter(server._ws_server.sockets)
+                ).getsockname()[1]
+                ready.set()
+                while not done.is_set():
+                    await asyncio.sleep(0.02)
+            except BaseException as exc:
+                state["error"] = exc
+                ready.set()
+            finally:
+                if started:
+                    await server.stop_async()
+
+        asyncio.run(scenario())
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+    assert ready.wait(30), "RemoteAccessServer failed to start"
+    startup_error = state.get("error")
+    if isinstance(startup_error, BaseException):
+        raise AssertionError(
+            "RemoteAccessServer startup failed"
+        ) from startup_error
+    port = state["port"]
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    def fetch(url: str) -> tuple[int, str, bytes]:
+        with urllib.request.urlopen(
+            url, timeout=10, context=context
+        ) as response:
+            return (
+                response.status,
+                response.headers.get("Content-Type", ""),
+                response.read(),
+            )
+
+    try:
+        status, content_type, page_bytes = fetch(
+            f"https://127.0.0.1:{port}/"
+        )
+        assert status == 200
+        assert "text/html" in content_type
+        page = page_bytes.decode("utf-8")
+        m = re.search(
+            r'href="(/media/remote-codex\.css\?v=[0-9a-f]{16})"', page
+        )
+        assert m, "served page must link remote-codex.css"
+
+        status, content_type, body = fetch(
+            f"https://127.0.0.1:{port}{m.group(1)}"
+        )
+        assert status == 200
+        assert "text/css" in content_type
+        assert body == (SRV_MEDIA / "remote-codex.css").read_bytes()
+    finally:
+        done.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive(), "RemoteAccessServer failed to stop"
+    thread_error = state.get("error")
+    if isinstance(thread_error, BaseException):
+        raise AssertionError(
+            "RemoteAccessServer thread failed"
+        ) from thread_error
+
+
+def test_media_url_cache_busts_codex_css() -> None:
+    """_media_url must hash remote-codex.css for cache busting."""
+    import hashlib
+
+    from kiss.server.web_server import (
+        _MEDIA_VERSION_CACHE,
+        _media_url,
+    )
+
+    _MEDIA_VERSION_CACHE.pop("remote-codex.css", None)
+    url = _media_url("remote-codex.css")
+    expected = hashlib.sha256(CODEX_CSS.read_bytes()).hexdigest()[:16]
+    assert url == f"/media/remote-codex.css?v={expected}"
+    assert _media_url("remote-codex.css") == url

@@ -17,8 +17,7 @@ although the user had already been told the click landed.
 Reproduced for real: a registered task whose worker thread ignores the
 stop event, and ``RLIMIT_NPROC`` lowered to 1 around the ``_stop_task``
 call so the watchdog's ``Thread.start`` genuinely fails (threads count
-against the limit for a non-root uid; the technique of
-``test_concaudit_w6_commit_msg_claim.py``).  With the fix the stop is
+against the limit for a non-root uid).  With the fix the stop is
 enforced inline: the worker receives the interrupt and exits.
 """
 
@@ -31,7 +30,7 @@ import pytest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     nproc_limit_lowered_to_one,
     thread_start_can_be_starved,
@@ -69,7 +68,7 @@ def test_stop_is_enforced_inline_when_watchdog_thread_cannot_start(
     if not thread_start_can_be_starved():
         pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
     printer = MemoryPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "TAB-F2-STOP"
     worker = _StubbornWorker()
     state = AgentState(
@@ -102,7 +101,7 @@ def test_stop_uses_the_watchdog_thread_when_it_can_start(
 ) -> None:
     """The ordinary path still enforces the stop asynchronously."""
     printer = MemoryPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     tab_id = "TAB-F2-STOP-OK"
     worker = _StubbornWorker()
     state = AgentState(

@@ -6,7 +6,7 @@
 
 ``autorouter`` and ``bestrouter`` are not models.  The daemon lists every
 SEA whose ``register_as_model()`` returns ``True`` in the picker
-(``VSCodeServer._get_models`` through ``sea_commands.model_seas``) and,
+(``AgentServer._get_models`` through ``sea_commands.model_seas``) and,
 when a run's model resolves to such an entry, ``_resolve_sea_model`` in
 the task runner rewrites the run into an SEA run of the SEA on
 the model its ``settings()["model"]`` names (else the default model), with the
@@ -48,7 +48,7 @@ from kiss.core.models.model_info import (
     get_available_models,
     get_default_model,
 )
-from kiss.core.vscode_config import save_config
+from kiss.core.user_config import save_config
 from kiss.server import sorcar
 from kiss.server.autocomplete import ranked_function_calling_models
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
@@ -178,7 +178,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
 
     def _models_event(self) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         original = vs.printer.broadcast
 
         def capture(event: dict[str, Any]) -> None:
@@ -265,7 +265,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
 
     def test_picker_keeps_a_router_as_the_selected_model(self) -> None:
         """A persisted router pick survives the availability check."""
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         for pick in (AUTOROUTER, BESTROUTER):
             with vs._state_lock:
                 vs._default_model = pick
@@ -275,7 +275,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
 
     def test_stale_pick_falls_back_to_a_real_model_not_a_router(self) -> None:
         """An unavailable cached pick lands on the first real model, never a router."""
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         with vs._state_lock:
             vs._default_model = "stale-unavailable-model"
         event = self._models_event()
@@ -315,7 +315,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
 
     def test_tab_pick_router_runs_the_task_through_the_sea(self) -> None:
         """A run with no wire ``model`` takes the tab's pick, here ``bestrouter``."""
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         with vs._state_lock:
             vs._default_model = BESTROUTER
         run = self._run("say hello")
@@ -366,7 +366,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
 
     def test_agent_script_blank_model_setting_still_gets_a_real_model(self) -> None:
         """A ``settings()["model"]`` of ``""`` means "the tab's pick" — never the router."""
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         with vs._state_lock:
             vs._default_model = AUTOROUTER
         sea = Path(self.tmpdir) / "blankmodel_sea.py"
@@ -581,7 +581,7 @@ class Sea(BaseSea):
 
         The test repo is not a KISS checkout, so the scheduled job has no work dir.
         """
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         tab_id = f"pick-{uuid.uuid4().hex}"
         real = orchestrator_model()
         self._send(

@@ -5,7 +5,7 @@
 """End-to-end tests for the review-round fixes to the "interact with a
 RUNNING sub-agent" feature:
 
-``VSCodeServer._open_persisted_subagent_tabs`` must SUBSCRIBE the
+``AgentServer._open_persisted_subagent_tabs`` must SUBSCRIBE the
 reopened deterministic frontend tab (``{parent_tab_id}__sub_{id}``)
 to a STILL-RUNNING sub-agent's live stream — otherwise the input
 textbox shown on that tab is a dead surface (Stop / prompt injection
@@ -13,7 +13,7 @@ cannot resolve the sub-agent, live events never arrive).  A sub-agent
 is a daemon sub-task with its own ``stop_event``, so Stop on its tab
 leaves the parent's event untouched.
 
-All tests drive the real production code (``VSCodeServer._stop_task``
+All tests drive the real production code (``AgentServer._stop_task``
 / ``_open_persisted_subagent_tabs``, the real registry and printer) —
 no mocks of the code under test.
 """
@@ -30,7 +30,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
 
 
@@ -83,7 +83,7 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
 
     def _setup_rows_and_server(
         self,
-    ) -> tuple[VSCodeServer, _RecordingPrinter, str, str, str]:
+    ) -> tuple[AgentServer, _RecordingPrinter, str, str, str]:
         chat_id = "chat-persisted-reopen"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         sub_id, _ = th._add_task(
@@ -92,7 +92,7 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
             extra={"subagent": {"parent_task_id": parent_id}},
         )
         printer = _RecordingPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         return server, printer, chat_id, parent_id, sub_id
 
     def _register_live_sub(

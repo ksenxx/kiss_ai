@@ -4,7 +4,7 @@
 # add your name here
 """UI anti-pattern fixes in the remote webapp server (audit F1-F12).
 
-Every test drives real code: the ``_WS_SHIM_JS`` string runs verbatim
+Every test drives real code: ``media/transport.js`` runs verbatim
 in headless Chromium (Playwright) against an instrumented
 ``WebSocket`` stub, exactly like
 ``test_remote_webapp_reconnect_no_reload.py``; the server-side checks
@@ -54,24 +54,26 @@ from websockets.exceptions import InvalidStatus
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_available_models
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.core.utils import finish
-from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.sorcar import TIPS_OPT_OUT_MARKER
 from kiss.server.web_server import (
     _MAX_ATTACHMENTS,
     _MAX_PROMPT_BYTES,
-    _WS_SHIM_JS,
+    MEDIA_DIR,
     RemoteAccessServer,
     _build_html,
     _share_page_filename,
 )
 from kiss.tests.conftest import goto_retrying_network_change
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
+_TRANSPORT_JS = (MEDIA_DIR / "transport.js").read_text(encoding="utf-8")
 PAGE_URL = "https://shim-ui.test/"
 _PASSWORD = "correct-horse-battery-staple"
 
@@ -169,7 +171,7 @@ def _build_test_page() -> str:
     }};
   </script>
   <script>
-{_WS_SHIM_JS}
+{_TRANSPORT_JS}
   </script>
 </body></html>
 """
@@ -553,7 +555,10 @@ class _LiveServer(IsolatedAsyncioTestCase):
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": self.remote_password})
+        save_config({
+            "remote_password":
+                self.remote_password if self.remote_password else "",
+        })
         self._server = RemoteAccessServer(
             host=self.host,
             port=self._port,
@@ -572,11 +577,24 @@ class _LiveServer(IsolatedAsyncioTestCase):
                 CONFIG_PATH.unlink()
 
     async def _ws(self, host: str = "127.0.0.1") -> Any:
+        """Open the daemon's WebSocket: plain ``ws://`` on loopback, TLS elsewhere."""
+        if host == "127.0.0.1":
+            return await connect(f"ws://{host}:{self._port}/ws")
         return await connect(f"wss://{host}:{self._port}/ws", ssl=no_verify_ssl())
 
     async def _recv(self, ws: Any) -> dict[str, Any]:
         msg: dict[str, Any] = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
         return msg
+
+    async def _send(self, ws: Any, cmd: dict[str, Any]) -> None:
+        """Send *cmd* as a password-authenticated client does.
+
+        Every frame after ``auth`` must repeat the password (the daemon
+        re-checks it against the stored password and drops the socket with
+        ``auth_failed`` otherwise), which the browser's transport adds
+        by itself.
+        """
+        await ws.send(json.dumps({**cmd, "password": _PASSWORD}))
 
     async def _authenticated_ws(self) -> Any:
         ws = await self._ws()
@@ -588,9 +606,10 @@ class _LiveServer(IsolatedAsyncioTestCase):
     async def _http_get(
         self, path: str, host: str = "127.0.0.1",
     ) -> tuple[int, dict[str, str], bytes]:
-        """GET *path* over raw HTTPS; return (status, headers, body)."""
+        """GET *path* over raw HTTP (loopback) or HTTPS; return (status, headers, body)."""
         reader, writer = await asyncio.open_connection(
-            host, self._port, ssl=no_verify_ssl(), limit=16 * 1024 * 1024,
+            host, self._port, limit=16 * 1024 * 1024,
+            ssl=None if host == "127.0.0.1" else no_verify_ssl(),
         )
         try:
             writer.write(
@@ -616,7 +635,9 @@ class TestAuthFailureFrame(_LiveServer):
     """F1: the server's wrong-password frame is typed and in plain words."""
 
     async def test_second_wrong_password_gets_auth_failed_code(self) -> None:
-        async with await self._ws() as ws:
+        async with connect(
+            f"ws://127.0.0.1:{self._port}/ws", additional_headers=FORWARDED_VISITOR,
+        ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             self.assertEqual((await self._recv(ws))["type"], "auth_required")
             await ws.send(json.dumps({"type": "auth", "password": "still wrong"}))
@@ -634,10 +655,10 @@ class TestSubmitLimits(_LiveServer):
         ws = await self._authenticated_ws()
         try:
             big = "x" * (_MAX_PROMPT_BYTES + 1)
-            await ws.send(json.dumps({
+            await self._send(ws, {
                 "type": "submit", "tabId": "tab-big", "prompt": big,
                 "workDir": self._work_dir, "useWorktree": False,
-            }))
+            })
             seen: list[dict[str, Any]] = []
             while True:
                 msg = await self._recv(ws)
@@ -649,7 +670,7 @@ class TestSubmitLimits(_LiveServer):
             types = [m["type"] for m in seen]
             self.assertEqual(types[-2:], ["status", "error"], seen)
             self.assertFalse(seen[-2]["running"], "the composer is re-enabled")
-            # R4-2: typed so the webview can hand the draft back to the
+            # R4-2: typed so the chat page can hand the draft back to the
             # composer instead of losing what the user typed.
             self.assertEqual(seen[-1]["code"], "prompt_refused")
             self.assertIn("too long to send", seen[-1]["text"])
@@ -679,19 +700,19 @@ class TestSubmitLimits(_LiveServer):
         models = get_available_models()
         if not models:
             self.skipTest("no models configured in this environment")
-        agent = _ScriptedAgent("Sorcar VS Code")
+        agent = _ScriptedAgent("Sorcar")
         agent_state.register(
             AgentState("pre-tab-att", agent=agent, tab_id="tab-att", server_owned=True),
         )
         ws = await self._authenticated_ws()
         try:
             count = _MAX_ATTACHMENTS + 3
-            await ws.send(json.dumps({
+            await self._send(ws, {
                 "type": "submit", "tabId": "tab-att", "prompt": "hi",
                 "workDir": self._work_dir, "useWorktree": False,
                 "model": models[0],
                 "attachments": [{"path": f"f{i}.txt"} for i in range(count)],
-            }))
+            })
             seen: list[dict[str, Any]] = []
             while True:
                 msg = await self._recv(ws)
@@ -734,10 +755,10 @@ class TestSubmitLimits(_LiveServer):
         self._server._run_cmd = _capture  # type: ignore[method-assign]
         ws = await self._authenticated_ws()
         try:
-            await ws.send(json.dumps({
+            await self._send(ws, {
                 "type": "submit", "tabId": "tab-ok", "prompt": "hi",
                 "attachments": [{"path": "a.txt"}],
-            }))
+            })
             with self.assertRaises(asyncio.TimeoutError):
                 while True:
                     msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.7))
@@ -784,17 +805,20 @@ class TestRemoteAccessOffPages(_LiveServer):
             self.skipTest("machine has no non-loopback interface")
         return ip
 
-    async def test_403_page_points_at_settings_not_config_json(self) -> None:
+    async def test_403_page_points_at_install_sh_not_config_json(self) -> None:
         ip = self._require_lan_ip()
         status, headers, body = await self._http_get("/", host=ip)
         self.assertEqual(status, 403)
         self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
         text = body.decode("utf-8")
         self.assertIn("This device is not allowed yet", text)
-        self.assertIn("open Settings and set a Remote password", text)
+        # The password is chosen and printed by install.sh; the page
+        # must not send the visitor to a Settings box that cannot set it.
+        self.assertIn("run install.sh to set a remote password", text)
+        self.assertNotIn("open Settings", text)
         # The config path is kept for administrators, folded away.
         details = text[text.index("<details>"):text.index("</details>")]
-        self.assertIn("~/.kiss/config.json", details)
+        self.assertIn(f"remote_password in ~/{HOME_DIR}/config.json", details)
         self.assertNotIn("config.json", text[:text.index("<details>")])
 
     async def test_ws_from_lan_is_refused_with_the_same_page(self) -> None:
@@ -808,8 +832,7 @@ class TestTipsOptOut(_LiveServer):
     """The remote page's "Don't show tips again" choice is persisted.
 
     ``tipsOptOut`` writes / removes ``$KISS_HOME/TIPS_DISABLED``, the
-    marker the VS Code extension's ``tipsDisabled()`` reads, so the
-    choice holds on every surface.
+    marker ``tips_data`` reads, so the choice holds for every client.
     """
 
     # ``$KISS_HOME`` is the session-wide temporary directory the test
@@ -842,7 +865,7 @@ class TestTipsOptOut(_LiveServer):
         get there: on a loaded machine the frame is handled later than
         any fixed pause.
         """
-        await ws.send(json.dumps(cmd))
+        await self._send(ws, cmd)
         deadline = asyncio.get_running_loop().time() + 10.0
         while True:
             try:
@@ -896,10 +919,10 @@ class TestSharePageFilename(_LiveServer):
     async def _share(self, chat_id: str, title: str) -> dict[str, Any]:
         ws = await self._authenticated_ws()
         try:
-            await ws.send(json.dumps({
+            await self._send(ws, {
                 "type": "shareChat", "chatId": chat_id, "title": title,
                 "html": self.BODY, "tabId": "tab-share",
-            }))
+            })
             while True:
                 event = await self._recv(ws)
                 if event.get("type") == "share_done":

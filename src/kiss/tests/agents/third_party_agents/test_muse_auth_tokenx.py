@@ -91,7 +91,6 @@ from urllib.parse import parse_qs, quote
 import pytest
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
 from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import _make_backend as ms_make_backend
@@ -129,7 +128,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingServer,
     serve_recording,
-    start_serving,
+    serving,
 )
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
@@ -1209,9 +1208,7 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A hop to a host off every allowlist follows bodyless and redacted."""
-    rogue = _TokenXApiServer(("127.0.0.2", 0), _TokenXApiHandler)
-    thread = start_serving(rogue)
-    try:
+    with serving(_TokenXApiServer(("127.0.0.2", 0), _TokenXApiHandler)) as rogue:
         tg_config.save({"bot_token": _REAL_TG_TOKEN})
         backend = _tg_backend(api_server)
         assert backend.connect() is True
@@ -1230,8 +1227,6 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
         audit = _audit_text()
         assert "127.0.0.2" in audit
         assert _REAL_TG_TOKEN not in audit and surrogate not in audit
-    finally:
-        stop_http_server(rogue, thread)
 
 
 def test_vault_client_credentials_cache_edges(
@@ -1511,8 +1506,8 @@ def test_concurrent_scratch_validation_is_isolated(
         agent._backend = _tg_backend(api_server)
         results[key] = json.loads(auth_tools(agent)["authenticate_telegram"](token))
 
-    good = threading.Thread(target=authenticate, args=("good", _REAL_TG_TOKEN))
-    bad = threading.Thread(target=authenticate, args=("bad", "1:concurrent-bad-token"))
+    good = threading.Thread(target=authenticate, args=("good", _REAL_TG_TOKEN), daemon=True)
+    bad = threading.Thread(target=authenticate, args=("bad", "1:concurrent-bad-token"), daemon=True)
     good.start()
     bad.start()
     # Bounded: pytest-timeout is disabled repo-wide, so an authd hang
@@ -1867,7 +1862,7 @@ def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> N
         )
 
     with daemon.vault.locked():
-        thread = threading.Thread(target=candidate)
+        thread = threading.Thread(target=candidate, daemon=True)
         thread.start()
         # The candidate is blocked at (or will block at) the critical
         # section; the authoritative store lands first either way.
@@ -1908,7 +1903,7 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
         scrubbed.set()
 
     with config_file_lock(tg_config.path):
-        thread = threading.Thread(target=scrub)
+        thread = threading.Thread(target=scrub, daemon=True)
         thread.start()
         # The scrub is blocked on the lock, BEFORE its read.
         assert not scrubbed.wait(0.4)
@@ -2004,7 +1999,7 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
         result["error"] = resp.text
 
     try:
-        thread = threading.Thread(target=blocked_request)
+        thread = threading.Thread(target=blocked_request, daemon=True)
         thread.start()
         # Wait until the boundary has authorized, resolved the credential
         # (pinning the generation), and entered the kernel connect, which

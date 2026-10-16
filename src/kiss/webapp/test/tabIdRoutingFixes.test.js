@@ -1,0 +1,220 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+'use strict';
+
+const assert = require('assert');
+const {makePage, send} = require('./simplify2_harness');
+
+function initialTabId(posted) {
+  const ready = posted.find(m => m && m.type === 'ready' && m.tabId);
+  assert.ok(ready, 'page posted a ready message with its active tabId');
+  return ready.tabId;
+}
+
+// Chat tabs have no row of their own: the open tabs are read back
+// through the test API (a background root is not on the group strip).
+function tabRecord(win, tabId) {
+  return win._testApi.openTabs().find(t => t.id === tabId) || null;
+}
+
+function notificationToasts(win) {
+  return Array.from(win.document.querySelectorAll('[data-notification-id]'));
+}
+
+function testPhantomSubagentTabNotMaterialised() {
+  const {win} = makePage();
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: 'phantom-sub-1',
+    parent_tab_id: '',
+    description: 'leaked sub-agent',
+    task_id: 'sub-task-9',
+    isSubagentTab: true,
+    isDone: false,
+  });
+  assert.strictEqual(
+    tabRecord(win, 'phantom-sub-1'),
+    null,
+    'a page that does not own the target tab must not materialise ' +
+      'a phantom sub-agent tab from a blank-parent openSubagentTab',
+  );
+  send(win, {
+    type: 'task_events',
+    task: 'leaked sub-agent',
+    task_id: 'sub-task-9',
+    tabId: 'phantom-sub-1',
+    events: [
+      {type: 'prompt', text: 'SECRET-SUBAGENT-PROMPT', taskId: 'sub-task-9'},
+    ],
+  });
+  assert.ok(
+    !win.document.body.textContent.includes('SECRET-SUBAGENT-PROMPT'),
+    'the phantom tab transcript leaked into a foreign page',
+  );
+  console.log('  ok - blank-parent openSubagentTab does not create phantom tabs');
+}
+
+function testOwnedTabConversionStillWorks() {
+  const {win, posted} = makePage();
+  send(win, {type: 'new_tab', task_id: 'sub-task-9'});
+  const resume = posted.find(m => m && m.type === 'resumeSession');
+  assert.ok(resume && resume.tabId, 'created tab posted resumeSession');
+  const ownedTabId = resume.tabId;
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: ownedTabId,
+    parent_tab_id: '',
+    description: 'converted sub-agent',
+    task_id: 'sub-task-9',
+    isSubagentTab: true,
+    isDone: true,
+  });
+  const rec = tabRecord(win, ownedTabId);
+  assert.ok(rec, 'the owned tab still exists');
+  assert.ok(
+    rec.isSubagentTab,
+    'the owned tab was converted into a sub-agent tab',
+  );
+  assert.strictEqual(rec.title, 'converted sub-agent');
+  assert.ok(rec.isDone, 'the converted tab carries isDone');
+  console.log('  ok - blank-parent openSubagentTab still converts the owned tab');
+}
+
+function testUnknownParentStillDropped() {
+  const {win} = makePage();
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: 'sub-of-foreign-parent',
+    parent_tab_id: 'foreign-parent-tab',
+    description: 'other window fan-out',
+    task_id: 'sub-task-10',
+  });
+  assert.strictEqual(
+    tabRecord(win, 'sub-of-foreign-parent'),
+    null,
+    'non-empty unknown parent_tab_id must still be dropped',
+  );
+  console.log('  ok - unknown-parent openSubagentTab still dropped');
+}
+
+function testForeignTabNotificationDropped() {
+  const {win, posted} = makePage();
+  const ownTab = initialTabId(posted);
+
+  send(win, {
+    type: 'notification',
+    id: 'n-own',
+    severity: 'info',
+    message: 'own-tab toast',
+    tabId: ownTab,
+  });
+  assert.strictEqual(
+    notificationToasts(win).length,
+    1,
+    'a toast stamped with a LOCAL tab id must render',
+  );
+
+  send(win, {
+    type: 'notification',
+    id: 'n-foreign',
+    severity: 'info',
+    message: 'foreign-window toast',
+    tabId: 'foreign-window-tab',
+  });
+  const ids = notificationToasts(win).map(el =>
+    el.getAttribute('data-notification-id'),
+  );
+  assert.ok(
+    !ids.includes('n-foreign'),
+    "another window's tab-stamped notification must not render here",
+  );
+
+  send(win, {
+    type: 'notification',
+    id: 'n-global',
+    severity: 'info',
+    message: 'global toast',
+  });
+  assert.ok(
+    notificationToasts(win)
+      .map(el => el.getAttribute('data-notification-id'))
+      .includes('n-global'),
+    'a tabless (global) notification must still render',
+  );
+  console.log('  ok - notifications route by local tab ownership');
+}
+
+function testBackgroundTabErrorRetained() {
+  const {win, posted} = makePage();
+  const bgTabId = initialTabId(posted);
+  win._testApi.createNewTab();
+  assert.ok(tabRecord(win, bgTabId), 'the initial tab is still open');
+  assert.notStrictEqual(
+    win._testApi.getActiveTabId(),
+    bgTabId,
+    'the initial tab is now a background tab',
+  );
+
+  send(win, {type: 'error', text: 'bg boom', tabId: bgTabId});
+  assert.ok(
+    !win.document.getElementById('output').textContent.includes('bg boom'),
+    "a background tab's error must not render into the ACTIVE tab",
+  );
+
+  // The Chats panel's pick brings the background chat back on screen.
+  win._testApi.switchToTab(bgTabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), bgTabId);
+  assert.ok(
+    win.document.getElementById('output').textContent.includes('bg boom'),
+    "the background tab's error banner must appear after switching to it",
+  );
+  console.log('  ok - background-tab error retained and shown on switch');
+}
+
+function testForeignTabErrorDropped() {
+  const {win} = makePage();
+  send(win, {type: 'error', text: 'foreign boom', tabId: 'foreign-tab-1'});
+  assert.ok(
+    !win.document.body.textContent.includes('foreign boom'),
+    "another window's error must not render here",
+  );
+  console.log('  ok - foreign-tab error dropped');
+}
+
+function testActiveTabErrorRendered() {
+  const {win, posted} = makePage();
+  const ownTab = initialTabId(posted);
+  send(win, {type: 'error', text: 'active boom', tabId: ownTab});
+  assert.ok(
+    win.document.getElementById('output').textContent.includes('active boom'),
+    'an active-tab error must render immediately',
+  );
+  send(win, {type: 'error', text: 'tabless boom'});
+  assert.ok(
+    win.document.getElementById('output').textContent.includes('tabless boom'),
+    'a tabless error must render immediately',
+  );
+  console.log('  ok - active-tab and tabless errors render immediately');
+}
+
+function main() {
+  testPhantomSubagentTabNotMaterialised();
+  testOwnedTabConversionStillWorks();
+  testUnknownParentStillDropped();
+  testForeignTabNotificationDropped();
+  testBackgroundTabErrorRetained();
+  testForeignTabErrorDropped();
+  testActiveTabErrorRendered();
+  console.log('tabIdRoutingFixes: all tests passed');
+}
+
+try {
+  main();
+  process.exit(0);
+} catch (err) {
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}

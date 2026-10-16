@@ -8,8 +8,7 @@ The post-wake speech translation is done by a KISS (Sorcar) agent —
 :class:`kiss.core.kiss_agent.KISSAgent` running the ``gpt-audio``
 model non-agentically with the utterance attached as audio — instead
 of a hand-rolled OpenAI client call.  The agent must return BOTH the
-English text and the language of the speech, and the listener's
-``SPEECH`` protocol line must carry that language.
+English text and the language of the speech.
 
 Real audio, real speech models, real GPT calls — no mocks:
 
@@ -25,9 +24,6 @@ Real audio, real speech models, real GPT calls — no mocks:
   that empty audio and a failing API degrade to empty results without
   raising.
 
-- ``TestListenerSpeechLanguage`` streams "Sorcar" + a sentence through
-  the actual wake-word listener subprocess and asserts the ``SPEECH``
-  line's JSON payload includes ``text``, ``speaker`` and ``language``.
 """
 
 from __future__ import annotations
@@ -43,7 +39,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from kiss.server.voice_wake import (
+from kiss.server.speech import (
     SAMPLE_RATE,
     TRAILING_SILENCE_KEEP_SECONDS,
     parse_transcription_reply,
@@ -92,23 +88,6 @@ def _wav_pcm(wav: Path) -> bytes:
 def _tts_pcm(directory: Path, name: str, text: str, voice: str | None = None) -> bytes:
     """Synthesize *text* and return its raw 16kHz mono s16le PCM."""
     return _wav_pcm(_tts_wav(directory, name, text, voice))
-
-
-def _concat_wavs(
-    out: Path, parts: list[Path], gap_seconds: float, tail_seconds: float
-) -> Path:
-    """Concatenate WAV *parts* with silence gaps into a 16kHz mono WAV."""
-    gap = b"\x00\x00" * int(SAMPLE_RATE * gap_seconds)
-    tail = b"\x00\x00" * int(SAMPLE_RATE * tail_seconds)
-    with wave.open(str(out), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        for i, part in enumerate(parts):
-            with wave.open(str(part), "rb") as rf:
-                wf.writeframes(rf.readframes(rf.getnframes()))
-            wf.writeframes(tail if i == len(parts) - 1 else gap)
-    return out
 
 
 def _sine_pcm(seconds: float, frequency: float = 440.0) -> bytes:
@@ -367,7 +346,7 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
     def test_api_failure_returns_empty_result(self) -> None:
         script = (
             "import json, math, struct\n"
-            "from kiss.server.voice_wake import ("
+            "from kiss.server.speech import ("
             "SAMPLE_RATE, transcribe_pcm)\n"
             "pcm = b''.join(struct.pack('<h', int(20000 * math.sin("
             "2 * math.pi * 440 * i / SAMPLE_RATE)))"
@@ -389,90 +368,6 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
         self.assertEqual(
             json.loads(proc.stdout.strip().splitlines()[-1]),
             {"text": "", "language": None},
-        )
-
-
-def _run_listener(wav: Path) -> subprocess.CompletedProcess[str]:
-    """Run the listener subprocess over *wav* and return the result."""
-    return subprocess.run(
-        [
-            "uv", "run", "python", "-m",
-            "kiss.server.voice_wake", "--wav", str(wav),
-        ],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env=dict(os.environ),
-    )
-
-
-# How many listener runs may come back with zero SPEECH lines before the
-# test gives up.  ``transcribe_pcm`` already retries a refusal-shaped
-# reply once (gpt-audio intermittently answers a perfectly valid audio
-# attachment with "Please provide the audio, and I will transcribe…",
-# which the listener reports as NO_SPEECH), and both attempts being
-# refused is rare but not negligible — measured at roughly one run in
-# six on identical audio.  Two extra runs take the odds of a spurious
-# failure to well under 1%, and no assertion is relaxed: a run that DOES
-# produce speech is still held to the full payload contract.
-_LISTENER_ATTEMPTS = 3
-
-
-@unittest.skipUnless(
-    HAVE_MAC_TTS and HAVE_OPENAI_KEY, "needs macOS TTS and OPENAI_API_KEY"
-)
-class TestListenerSpeechLanguage(unittest.TestCase):
-    """Full listener subprocess: SPEECH payload carries the language."""
-
-    def test_speech_payload_has_text_speaker_and_language(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            wake = _tts_wav(tmp_path, "wake", "Hey Sorcar")
-            speech = _tts_wav(
-                tmp_path, "speech", "Please summarize the latest changes."
-            )
-            wav = _concat_wavs(
-                tmp_path / "combined.wav",
-                [wake, speech],
-                gap_seconds=0.6,
-                tail_seconds=2.5,
-            )
-            transcripts = []
-            payloads: list[dict[str, str]] = []
-            for _ in range(_LISTENER_ATTEMPTS):
-                proc = _run_listener(wav)
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                lines = proc.stdout.splitlines()
-                self.assertIn("WAKE", lines, proc.stdout)
-                payloads = [
-                    json.loads(line[len("SPEECH "):])
-                    for line in lines
-                    if line.startswith("SPEECH ")
-                ]
-                # Keep stderr alongside stdout: a NO_SPEECH run is only
-                # diagnosable from the listener's stderr, which says
-                # whether the transcription API call failed/timed out or
-                # returned a refusal-shaped hallucination.
-                transcripts.append(
-                    {"stdout": proc.stdout, "stderr": proc.stderr[-2000:]}
-                )
-                if payloads:
-                    break
-        self.assertEqual(
-            len(payloads), 1,
-            "the listener reported no speech after "
-            f"{_LISTENER_ATTEMPTS} runs: {transcripts}",
-        )
-        payload = payloads[0]
-        self.assertEqual(
-            set(payload), {"text", "speaker", "language"}, payload
-        )
-        self.assertIn("summarize", payload["text"].lower())
-        self.assertEqual(payload["language"], "en")
-        self.assertTrue(
-            payload["speaker"] is None
-            or (isinstance(payload["speaker"], int) and payload["speaker"] >= 1)
         )
 
 

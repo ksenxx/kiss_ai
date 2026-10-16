@@ -1150,6 +1150,48 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         return str(getattr(event, "type", "") or "")
 
+    @staticmethod
+    def _part_final_text(part: Any) -> str | None:
+        """Return the text of a message content part the stream finalised.
+
+        Args:
+            part: An ``output_text`` or ``refusal`` content part object
+                (from a ``message`` item or a ``content_part.done`` event).
+
+        Returns:
+            The part's text (``""`` when the field is empty), or ``None``
+            when the part is of neither type and carries no text.
+        """
+        ptype = getattr(part, "type", "") if part is not None else ""
+        if ptype == "output_text":
+            return str(getattr(part, "text", "") or "")
+        if ptype == "refusal":
+            return str(getattr(part, "refusal", "") or "")
+        return None
+
+    @staticmethod
+    def _function_call_item(tc: dict[str, str]) -> dict[str, Any]:
+        """Build the conversation ``function_call`` item for a streamed call.
+
+        Args:
+            tc: A ``{"id", "name", "arguments"[, "item_id"]}`` tool-call
+                dict collected by :meth:`_consume_stream_events`.
+
+        Returns:
+            The Responses-API ``function_call`` input item; the stream's
+            item id is kept under ``id`` when the provider sent one.
+        """
+        fc_item: dict[str, Any] = {
+            "type": "function_call",
+            "call_id": tc.get("id", ""),
+            "name": tc.get("name", ""),
+            "arguments": tc.get("arguments", ""),
+        }
+        item_id = tc.get("item_id", "")
+        if item_id:
+            fc_item["id"] = item_id
+        return fc_item
+
     def _consume_stream(
         self,
         stream: Any,
@@ -1312,18 +1354,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 self._close_thinking_if_open()
                 output_index = self._stream_output_index(event, 0)
                 content_index = int(getattr(event, "content_index", 0) or 0)
-                part = getattr(event, "part", None)
-                ptype = getattr(part, "type", "") if part is not None else ""
-                if ptype == "output_text":
-                    final_text = str(getattr(part, "text", "") or "")
-                elif ptype == "refusal":
-                    final_text = str(getattr(part, "refusal", "") or "")
-                else:
-                    final_text = ""
-                if ptype in ("output_text", "refusal"):
+                part_text = self._part_final_text(getattr(event, "part", None))
+                if part_text is not None:
                     emitted = self._commit_final_text(
                         (output_index, content_index),
-                        final_text,
+                        part_text,
                         text_part_buffers,
                         text_delta_seen,
                     )
@@ -1337,15 +1372,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     output_index = self._stream_output_index(event, 0)
                     parts = getattr(item, "content", None) or []
                     for content_index, part in enumerate(parts):
-                        ptype = getattr(part, "type", "")
-                        if ptype == "output_text":
-                            final_text = str(getattr(part, "text", "") or "")
-                        elif ptype == "refusal":
-                            final_text = str(getattr(part, "refusal", "") or "")
-                        else:
+                        part_text = self._part_final_text(part)
+                        if part_text is None:
                             continue
                         key = (output_index, content_index)
-                        added_message_buffers[key] = final_text
+                        added_message_buffers[key] = part_text
                 elif item is not None and getattr(item, "type", "") == "function_call":
                     item_id = str(getattr(item, "id", "") or "")
                     call_id = str(getattr(item, "call_id", "") or "")
@@ -1507,16 +1538,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     output_index = self._stream_output_index(event, 0)
                     parts = getattr(item, "content", None) or []
                     for content_index, part in enumerate(parts):
-                        ptype = getattr(part, "type", "")
-                        if ptype == "output_text":
-                            final_text = str(getattr(part, "text", "") or "")
-                        elif ptype == "refusal":
-                            final_text = str(getattr(part, "refusal", "") or "")
-                        else:
+                        part_text = self._part_final_text(part)
+                        if part_text is None:
                             continue
                         emitted = self._commit_final_text(
                             (output_index, content_index),
-                            final_text,
+                            part_text,
                             text_part_buffers,
                             text_delta_seen,
                             allow_suffix=False,
@@ -2033,15 +2060,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     or tc.get("item_id") in existing_item_ids
                 ):
                     continue
-                fc_item: dict[str, Any] = {
-                    "type": "function_call",
-                    "call_id": tc.get("id", ""),
-                    "name": tc.get("name", ""),
-                    "arguments": tc.get("arguments", ""),
-                }
+                fc_item = self._function_call_item(tc)
                 item_id = tc.get("item_id", "")
-                if item_id:
-                    fc_item["id"] = item_id
                 resolved_order = item_output_indexes.get(item_id)
                 if resolved_order is None:
                     try:
@@ -2086,16 +2106,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if content:
                 self.conversation.append({"role": "assistant", "content": content})
             for tc in raw_tool_calls:
-                fc_item = {
-                    "type": "function_call",
-                    "call_id": tc.get("id", ""),
-                    "name": tc.get("name", ""),
-                    "arguments": tc.get("arguments", ""),
-                }
-                item_id = tc.get("item_id", "")
-                if item_id:
-                    fc_item["id"] = item_id
-                self.conversation.append(fc_item)
+                self.conversation.append(self._function_call_item(tc))
         self._pending_function_calls = [
             {"name": tc.get("name", ""), "call_id": tc.get("id", "")}
             for tc in raw_tool_calls

@@ -1,0 +1,133 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// The task panel that opens every task of the chat thread is the one
+// panel the eye should find first: it paints the user bubble's accent
+// wash under a 1px accent hairline, on every surface (sidebar page, editor-tab
+// page, remote webapp and shared chat pages all inline
+// media/main.css).  The model's thinking tokens are a plain text block
+// inside the Thoughts panel, not a boxed panel of their own.
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+const CSS = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+
+/**
+ * Return the concatenated declaration bodies of every top-level CSS
+ * rule whose selector list contains *selector* exactly (comments
+ * stripped so commented-out declarations never match assertions).
+ */
+function ruleBody(selector) {
+  const css = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+  const blockRe = /([^{}]+)\{([^{}]*)\}/g;
+  let match;
+  const bodies = [];
+  while ((match = blockRe.exec(css)) !== null) {
+    const selectors = match[1].split(',').map(s => s.trim());
+    if (selectors.includes(selector)) bodies.push(match[2]);
+  }
+  return bodies.join('\n');
+}
+
+function decl(body, prop) {
+  const re = new RegExp(
+    '(?:^|[;\\s])' + prop.replace(/[-\\]/g, '\\$&') + '\\s*:\\s*([^;]+)',
+  );
+  const m = re.exec(body);
+  return m ? m[1].trim() : null;
+}
+
+function testTaskPanelIsTheAccentTintedPanel() {
+  const tool = ruleBody('.tc');
+  const panel = ruleBody('.ev.task-panel');
+  assert.ok(tool, 'main.css must style .tc');
+  assert.ok(panel, 'main.css must style .ev.task-panel');
+
+  // The transcript panels share the neutral surface; the task panel
+  // alone paints the user bubble's accent wash (deeper than the
+  // --accent-tint of other accent-marked panels) under an accent
+  // hairline, with a tight top-right corner as the bubble's tail.
+  assert.strictEqual(
+    decl(tool, 'background'),
+    'var(--surface)',
+    '.tc must paint the neutral --surface',
+  );
+  assert.strictEqual(
+    decl(panel, 'background'),
+    'var(--bubble-user-tint)',
+    'BUG: .ev.task-panel background must be the user bubble tint',
+  );
+  assert.strictEqual(
+    decl(panel, 'border'),
+    '1px solid var(--accent-line)',
+    'BUG: .ev.task-panel border must be the accent hairline',
+  );
+  assert.strictEqual(
+    decl(panel, 'border-radius'),
+    decl(tool, 'border-radius'),
+    'the task panel is rounded like the other transcript panels',
+  );
+  assert.strictEqual(
+    decl(panel, 'border-top-right-radius'),
+    'var(--radius-sm)',
+    'the task panel has a tight top-right corner, the bubble tail',
+  );
+  assert.strictEqual(
+    decl(tool, 'border-top-right-radius'),
+    null,
+    'a tool panel has no bubble tail',
+  );
+  console.log('  ok - .ev.task-panel paints the user bubble tint and hairline');
+}
+
+function testThinkingTextIsNotABoxedPanel() {
+  const think = ruleBody('.think');
+  assert.ok(think, 'main.css must style .think');
+  assert.strictEqual(decl(think, 'background'), null, '.think paints no background');
+  assert.strictEqual(decl(think, 'border'), null, '.think draws no border');
+  assert.strictEqual(decl(think, 'max-height'), null, '.think is no scroller of its own');
+  assert.strictEqual(decl(think, 'font-style'), 'italic', '.think reads as thinking');
+  assert.strictEqual(ruleBody('.think .lbl'), '', 'no "Thinking" header rule');
+  assert.strictEqual(ruleBody('.think .cnt'), '', 'no thinking content box rule');
+  console.log('  ok - .think is plain text inside the Thoughts panel');
+}
+
+function testTaskPanelTextMatchesTheTranscript() {
+  const text = ruleBody('.task-panel-text');
+  assert.ok(text, 'main.css must style .task-panel-text');
+  assert.strictEqual(
+    decl(text, 'white-space'),
+    'pre-wrap',
+    'the task text keeps its line breaks',
+  );
+  assert.strictEqual(
+    decl(text, 'color'),
+    'var(--fg)',
+    'the task text is the transcript foreground',
+  );
+  // The old fixed panel's inverted palette and its tooltip are gone.
+  assert.strictEqual(ruleBody('#task-panel'), '', 'no fixed #task-panel');
+  assert.strictEqual(
+    ruleBody('#custom-tooltip.task-panel-tooltip'),
+    '',
+    'no task-panel tooltip variant',
+  );
+  console.log('  ok - .task-panel-text reads like the transcript');
+}
+
+function main() {
+  console.log('taskPanelThinkStyle.test.js');
+  testTaskPanelIsTheAccentTintedPanel();
+  testThinkingTextIsNotABoxedPanel();
+  testTaskPanelTextMatchesTheTranscript();
+  console.log('all task-panel style tests passed');
+}
+
+main();

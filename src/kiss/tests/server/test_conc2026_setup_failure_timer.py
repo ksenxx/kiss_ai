@@ -34,7 +34,7 @@ import pytest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     nproc_limit_lowered_to_one,
     thread_start_can_be_starved,
@@ -57,7 +57,7 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
         broken_script = Path(tmp.name) / "broken_agent.py"
         broken_script.write_text("def prompt(:\n", encoding="utf-8")
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.use_private_tab_registry(Path(tmp.name) / "tabs.json")
         tab_id = "TAB-C3-TIMER"
         state = AgentState(
@@ -110,7 +110,7 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
         broken_script = Path(tmp.name) / "broken_agent.py"
         broken_script.write_text("def prompt(:\n", encoding="utf-8")
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.use_private_tab_registry(Path(tmp.name) / "tabs.json")
         tab_id = "TAB-C3-TIMER-OK"
         state = AgentState("c3-timer-task-ok", tab_id=tab_id, server_owned=True)

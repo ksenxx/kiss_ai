@@ -55,7 +55,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ def _register_wt_tab(task_id: str, tab_id: str) -> AgentState:
     """Register a server-owned worktree-mode state with a real agent."""
     state = AgentState(
         task_id,
-        agent=ChatSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar"),
         tab_id=tab_id,
         server_owned=True,
     )
@@ -154,7 +154,7 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
@@ -197,7 +197,7 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
         """Regression: when no other task is running, the empty
         worktree must still be auto-discarded (BUG-42 behavior)."""
         repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
@@ -234,7 +234,7 @@ class TestBug70UntrackedFileConflict:
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
@@ -279,7 +279,7 @@ class TestBug70UntrackedFileConflict:
         with worktree changes must NOT report conflict."""
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
@@ -316,7 +316,7 @@ class TestRed10PostTaskPendingWtDuplication:
         """After the fix, a single helper handles the post-task
         pending-worktree logic.  The helper must exist so future
         changes don't drift between the three sites."""
-        assert hasattr(VSCodeServer, "_present_pending_worktree"), (
+        assert hasattr(AgentServer, "_present_pending_worktree"), (
             "RED-10: the post-task pending-worktree logic is still "
             "duplicated across _run_task_inner and "
             "_emit_pending_worktree.  Expected a single helper "

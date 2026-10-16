@@ -15,7 +15,7 @@ PERSISTED metrics paths (the task-level cleanup ``finally`` in
 fallback, so a failed task run by a plain agent records the same step
 count in its ``task_history`` row as the failure banner shows.
 
-This test drives the real ``VSCodeServer._run_task`` end-to-end with a
+This test drives the real ``AgentServer._run_task`` end-to-end with a
 real agent whose ``run`` bumps only ``step_count`` (leaving
 ``total_steps`` untouched) before failing, then asserts the persisted
 history row's ``steps`` column equals the ``step_count`` the failure
@@ -34,7 +34,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _load_history
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _TASK_PROMPT = "steps-fallback persisted metrics task"
 
@@ -44,7 +44,7 @@ class TestPersistedStepsFallback(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-steps-fallback-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:
@@ -64,7 +64,7 @@ class TestPersistedStepsFallback(unittest.TestCase):
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
 
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         state = agent_state.AgentState(
             "steps-fallback-state",
             agent=agent,

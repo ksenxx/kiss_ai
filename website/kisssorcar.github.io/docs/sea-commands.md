@@ -4,7 +4,7 @@
 
 ## What a slash command does
 
-Typing this in the chat box of the VS Code extension or the web app:
+Typing this in the chat box of the web app:
 
 ```
 /slack tell #eng that the deploy is done
@@ -64,7 +64,7 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
   you type "/deploy ship v2.3" and press Enter
         |
         v
-  chat client (VS Code extension / web app)
+  chat client (web app)
     - shows a "Commands" popup while you type the command word
     - submits the prompt unchanged
         |
@@ -271,7 +271,7 @@ Every command the package ships, with the first sentence of its `description()` 
 | `/imessage` | `agents/third_party_agents/imessage/imessage_sea.py` | Sends iMessages and attachments and reads conversations through the macOS Messages app via AppleScript (macOS only); use run_agent(agent="imessage", task="...") or the `kiss-imessage` CLI. |
 | `/irc` | `agents/third_party_agents/irc/irc_sea.py` | Joins IRC channels and sends and reads messages on the IRC server configured in ~/.kiss/third_party_agents/irc/config.json (server, nick, optional TLS); use it with `run_agent(agent="irc", task=...)` or the `kiss-irc -t "<task>"` CLI (`kiss-irc --channel <#channel>` polls a channel and answers new messages). |
 | `/line` | `agents/third_party_agents/line/line_sea.py` | Sends text and image push/reply messages, reads profiles and quota and leaves groups on LINE through the Messaging API with a stored channel access token, receiving inbound messages via a local webhook queue; use it with `run_agent(agent="line", task="Send 'Hello!' to user U123456789")` or the `kiss-line -t '<task>'` CLI (`kiss-line --channel <id>` runs one inbound poll tick). |
-| `/machine` | `agents/seas/machine/machine_sea.py` | Registers, forgets or lists remote Sorcar machines whose tasks the CHATS panel shows next to the local ones: `/machine add user@host` (an SSH login; the daemon port is tunnelled over SSH, no password), `/machine add <name> <https://host:port> <password>`, `/machine remove <name>`, `/machine list`. |
+| `/machine` | `agents/seas/machine/machine_sea.py` | Registers, forgets or lists remote Sorcar machines whose tasks the CHATS panel shows next to the local ones: `/machine add user@host` (an SSH login used once to enroll this daemon's certificate there; no password), `/machine add <name> <https://host:port> <password>`, `/machine remove <name>`, `/machine list`. |
 | `/matrix` | `agents/third_party_agents/matrix/matrix_sea.py` | Sends and reads messages in Matrix rooms through matrix-nio, signing in with the homeserver's OAuth 2.0 device grant or a hand-supplied access token; use it as run_agent(agent="matrix", task="...") or the `kiss-matrix` CLI (`-t <task>` for one task, `--channel <room>` for a poll tick). |
 | `/mattermost` | `agents/third_party_agents/mattermost/mattermost_sea.py` | Channel agent for Mattermost that lists teams, channels and users and reads, posts and manages messages through the REST API with a personal access token stored under ~/.kiss/third_party_agents/mattermost; use `run_agent(agent="mattermost", task=...)` or the `kiss-mattermost` CLI. |
 | `/merge` | `agents/seas/merge/merge_sea.py` | Resolves the git merge conflicts left in the current repository by reading both sides of every conflict block, writing a resolution that keeps the intent of both, and staging the resolved files without committing; use it as `/merge <task>` in the chat (e.g. |

@@ -60,6 +60,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -848,21 +849,60 @@ class MCPManager:
         Returns:
             The connection record; ``error`` is non-empty on failure.
         """
+        key, conn = self._start(config, auth)
+        self._evict_surplus({key})
+        self._await_ready(key, conn, time.monotonic() + CONNECT_TIMEOUT)
+        return conn
+
+    def connect_all(self, configs: Iterable[MCPServerConfig]) -> list[_Connection]:
+        """Connect to every one of *configs* at once (see :meth:`connect`).
+
+        The handshakes are independent tasks on the manager's loop, so
+        they are all started first and then awaited under one shared
+        :data:`CONNECT_TIMEOUT`: N servers stuck mid-handshake cost the
+        caller (the agent's tool setup, on its task thread) one timeout
+        instead of N.  Eviction runs once for the whole batch and
+        spares every member of it: evicting per started connection let
+        a batch larger than the pool cap tear down its own earliest
+        members before the caller had read their tools.
+
+        Args:
+            configs: The servers to connect to.
+
+        Returns:
+            One connection record per config, in order; ``error`` is
+            non-empty on the failed ones.
+        """
+        started = [self._start(config, None) for config in configs]
+        self._evict_surplus({key for key, _ in started})
+        deadline = time.monotonic() + CONNECT_TIMEOUT
+        for key, conn in started:
+            self._await_ready(key, conn, deadline)
+        return [conn for _, conn in started]
+
+    def _start(self, config: MCPServerConfig, auth: Any) -> tuple[str, _Connection]:
+        """Start (or reuse) the connection for *config*; return its key and record."""
         key = _connection_key(config)
-        conn = locked_call(self._lock, self._connection_for, key, config, auth)
+        return key, locked_call(self._lock, self._connection_for, key, config, auth)
+
+    def _await_ready(self, key: str, conn: _Connection, deadline: float) -> None:
+        """Wait until *conn* is ready or *deadline* (``time.monotonic()``) passes.
+
+        A connection that misses the deadline is dropped from the pool
+        and its task told to stop; one stuck mid-handshake is reaped by
+        :meth:`_reap_straggler`.  A shut-down manager's already-failed
+        record (``task is None``) never started, so there is nothing to
+        wait for.  The global ``_shut_down`` flag is no evidence about
+        *conn*: a shutdown that began after ``_connection_for`` returned
+        a pending connection stamps it in ``disconnect_all``, and the
+        wait sees that.
+        """
         if conn.task is None:
-            # The shut-down manager's already-failed record: it never
-            # started.  The global flag is no evidence about *conn*: a
-            # shutdown that began after ``_connection_for`` returned a
-            # pending connection stamps it in ``disconnect_all``, and
-            # the wait below sees that.
-            return conn
-        self._evict_surplus(key)
-        if not _wait_interruptible(conn.ready, CONNECT_TIMEOUT):
+            return
+        if not _wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
             locked_call(self._lock, self._orphan_timed_out, key, conn)
             self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn)
-        return conn
 
     def _connection_for(self, key: str, config: MCPServerConfig, auth: Any) -> _Connection:
         """Return the live connection under *key*, starting one when there is none (locked)."""
@@ -896,7 +936,7 @@ class MCPManager:
         if conn.task is not None and not conn.task.done():
             self._orphans.append(conn)
 
-    def _evict_surplus(self, keep: str) -> None:
+    def _evict_surplus(self, keep: set[str]) -> None:
         """Tear down connections that are idle or beyond the pool cap.
 
         Nothing else ever disconnects a server: ``shutdown`` runs only at
@@ -919,18 +959,19 @@ class MCPManager:
         so the cap still holds — it is enforced a little later.
 
         Args:
-            keep: The connection key just connected, never evicted.
+            keep: The connection keys just connected (one, or a whole
+                :meth:`connect_all` batch), never evicted.
         """
         for conn in locked_call(self._lock, self._pop_surplus, keep):
             conn.error = conn.error or "evicted: idle or over the connection cap"
             self._loop.call_soon_threadsafe(conn.stop.set)
 
-    def _pop_surplus(self, keep: str) -> list[_Connection]:
+    def _pop_surplus(self, keep: set[str]) -> list[_Connection]:
         """Remove and return the idle and over-cap connections (locked; :meth:`_evict_surplus`)."""
         now = time.monotonic()
         evictable = {
             key for key, conn in self._connections.items()
-            if key != keep and conn.in_flight == 0 and conn.ready.is_set()
+            if key not in keep and conn.in_flight == 0 and conn.ready.is_set()
         }
         doomed = {
             key for key in evictable
@@ -1371,8 +1412,8 @@ _RESERVED_TOOL_NAMES = frozenset({
 def make_mcp_tools(work_dir: str) -> list[Any]:
     """Build the agent tools for every configured, permitted MCP server.
 
-    Connects to each server configured for *work_dir* (errors are
-    logged and the server skipped so a broken server never breaks
+    Connects to every server configured for *work_dir* at once (errors
+    are logged and the server skipped so a broken server never breaks
     agent startup), lists its tools, filters them through the
     ``mcp_permissions`` wildcard rules, and wraps the survivors as
     kiss tool functions named ``<server>_<tool>``.
@@ -1390,8 +1431,8 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
     manager = MCPManager.instance()
     tools: list[Any] = []
     taken_names: set[str] = set(_RESERVED_TOOL_NAMES)
-    for name, config in servers.items():
-        conn = manager.connect(config)
+    connections = manager.connect_all(servers.values())
+    for (name, config), conn in zip(servers.items(), connections, strict=True):
         if conn.session is None:
             logger.warning(
                 "MCP server %s unavailable: %s", name, conn.error or "unknown error",

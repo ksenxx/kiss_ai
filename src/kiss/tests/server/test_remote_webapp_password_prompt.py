@@ -7,7 +7,7 @@
 Bug being locked in ("why doesn't the remote webapp ask for a
 password?"):
 
-    Every fresh browser page-load runs the ``_WS_SHIM_JS`` shim, whose
+    Every fresh browser page-load runs ``media/transport.js``, whose
     ``onopen`` handler unconditionally sends an ``auth`` message with
     the password read from ``localStorage`` — which is the empty string
     on a device that has never logged in (a brand-new phone, an
@@ -69,13 +69,13 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     _AUTH_LOCKOUT,
     RemoteAccessServer,
 )
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
 _PASSWORD = "correct-horse-battery-staple"
 
@@ -112,6 +112,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         return await connect(
             f"wss://127.0.0.1:{self._port}/ws",
             ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         )
 
     async def _probe(self, password: str) -> str | None:

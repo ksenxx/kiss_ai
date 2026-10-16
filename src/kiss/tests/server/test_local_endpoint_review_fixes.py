@@ -15,8 +15,9 @@ Every test drives a real ``RemoteAccessServer`` (or the real
    address and port belong to the same bound socket.
 4. Publication and ownership-checked removal of the endpoint file are
    serialised by one lock.
-5. A non-``wss://`` endpoint record is treated as "no daemon", so
-   ``connect`` raises ``ConnectionError`` instead of ``ValueError``.
+5. An endpoint record whose URL is not a WebSocket one (``ws://`` or
+   ``wss://``) is treated as "no daemon", so ``connect`` raises
+   ``ConnectionError`` instead of ``ValueError``.
 6. ``local_endpoint.send`` gives up on a daemon that stopped reading.
 7. Closing the listeners (the blocking shutdown path) removes the
    endpoint file.
@@ -47,19 +48,23 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.server.sorcar import is_loopback_ip
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
     _generate_self_signed_cert,
     _get_local_ips,
-    _is_loopback_ip,
 )
 from kiss.tests.local_ws import connect_local, make_test_tls
-from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.conftest import (
+    FORWARDED_VISITOR,
+    redirect_persistence,
+    restore_persistence,
+)
 
 
 class _ServerBase(IsolatedAsyncioTestCase):
@@ -99,12 +104,16 @@ class _ServerBase(IsolatedAsyncioTestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _password_attempt(self, password: str) -> dict:
-        """One browser-style auth attempt; returns the daemon's first reply."""
+        """One remote-browser-style auth attempt; returns the daemon's first reply.
+
+        The client carries a forwarded client IP, as a cloudflared visitor
+        does: a direct loopback browser would be admitted without a password.
+        """
         endpoint = local_endpoint.read_endpoint(self.endpoint_file)
         assert endpoint is not None
         async with connect(
             endpoint.url, ssl=local_endpoint.client_ssl_context(endpoint),
-            compression=None,
+            compression=None, additional_headers=FORWARDED_VISITOR,
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": password}))
             return dict(json.loads(await asyncio.wait_for(ws.recv(), 10)))
@@ -134,7 +143,7 @@ class TestLockoutDoesNotBlockLocalToken(_ServerBase):
         vc.save_config({"remote_password": "s3cret"})
         for i in range(_AUTH_FAIL_MAX):
             await self._password_attempt(f"wrong-{i}")
-        self.assertGreater(server._auth_lock_remaining("127.0.0.1"), 0.0)
+        self.assertGreater(server._auth_lock_remaining(FORWARDED_VISITOR["X-Forwarded-For"]), 0.0)
         # A browser from the locked IP is still told it is locked ...
         self.assertEqual((await self._password_attempt("s3cret")).get("type"), "auth_locked")
         # ... but the extension / Python client with the token gets in.
@@ -154,12 +163,13 @@ class TestEndpointNamesABoundSocket(_ServerBase):
             (sock.family, sock.getsockname()[1]) for sock in server._ws_server.sockets
         }
         self.assertIn((socket.AF_INET, server.port), bound)
-        self.assertEqual(endpoint.url, f"wss://127.0.0.1:{server.port}/ws")
+        self.assertEqual(endpoint.url, f"ws://127.0.0.1:{server.port}/ws")
+        self.assertIsNone(local_endpoint.client_ssl_context(endpoint))
         ws = await connect_local(server, open_timeout=5.0)
         await ws.close()
 
     async def test_lan_only_listener_publishes_loopback_alias(self) -> None:
-        lan_ips = sorted(ip for ip in _get_local_ips() if not _is_loopback_ip(ip) and ":" not in ip)
+        lan_ips = sorted(ip for ip in _get_local_ips() if not is_loopback_ip(ip) and ":" not in ip)
         if not lan_ips:
             self.skipTest("no non-loopback IPv4 address on this host")
         server = self._make_server(host=lan_ips[0])
@@ -167,7 +177,7 @@ class TestEndpointNamesABoundSocket(_ServerBase):
         self.assertIsNotNone(server._ws_loopback_server, "loopback alias must be bound")
         endpoint = local_endpoint.read_endpoint(self.endpoint_file)
         assert endpoint is not None
-        self.assertEqual(endpoint.url, f"wss://127.0.0.1:{server.port}/ws")
+        self.assertEqual(endpoint.url, f"ws://127.0.0.1:{server.port}/ws")
         ws = await connect_local(server, open_timeout=5.0)
         await ws.send(json.dumps({"type": "ping"}))
         self.assertEqual(json.loads(await asyncio.wait_for(ws.recv(), 10)).get("type"), "pong")
@@ -276,9 +286,9 @@ class TestEndpointFileHelpers(TestCase):
         self.assertGreaterEqual(elapsed, 0.3, "removal must wait for the lock holder")
         self.assertFalse(self.path.exists())
 
-    def test_non_wss_record_is_not_an_endpoint(self) -> None:
+    def test_non_websocket_record_is_not_an_endpoint(self) -> None:
         self.path.write_text(json.dumps({
-            "url": "ws://127.0.0.1:1/ws", "token": "t" * 64, "ca": None, "pid": 1,
+            "url": "http://127.0.0.1:1/ws", "token": "t" * 64, "ca": None, "pid": 1,
         }))
         self.assertIsNone(local_endpoint.read_endpoint(self.path))
         with self.assertRaises(ConnectionError):
