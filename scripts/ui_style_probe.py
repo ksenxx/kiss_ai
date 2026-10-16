@@ -10,8 +10,8 @@ Usage::
     uv run python scripts/ui_style_probe.py tmp/probe.txt
 
 Renders the same scenes as ``ui_theme_screenshots.py`` (welcome,
-transcript, model menu, history, "..." menu, settings) on the VS Code
-webview, the remote webapp at desktop and phone width, and the share
+transcript, model menu, history, "..." menu, settings) on the chat
+page at desktop and phone width, and the share
 page, and writes one line per distinct control::
 
     selector | h x w | fs | pad | radius | border | bg | colour | weight ...
@@ -122,16 +122,12 @@ def main() -> None:
     server, base = shots.start_media_server()
     with out_path.open("w") as out, sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(viewport={"width": 460, "height": 900})
-        page = ctx.new_page()
-        shots.open_page(page, base, shots.vscode_page_html("dark-plus"), "vscode-dark-plus")
-        transcript = scenes(page, "vscode-dark", out)
-        ctx.close()
+        transcript = ""
         for width, height, label in ((1280, 800, "desktop"), (390, 844, "phone")):
             ctx = browser.new_context(viewport={"width": width, "height": height})
             page = ctx.new_page()
             shots.open_page(page, base, shots.remote_page_html(), f"remote-{label}")
-            scenes(page, f"remote-{label}-dark", out)
+            transcript = scenes(page, f"remote-{label}-dark", out)
             ctx.close()
         share_html = shots.web_server._build_share_page(
             "Design tokens", '<div class="share-task">' + transcript + "</div>"

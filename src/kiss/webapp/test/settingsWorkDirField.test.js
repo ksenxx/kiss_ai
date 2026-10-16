@@ -1,0 +1,360 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// End-to-end (JSDOM) tests for the Settings panel having NO "Working
+// directory" (and no "Memory directory") field, and for how the config
+// reply carries the ONE global working directory instead.
+//
+// The working directory is a single daemon-wide value (config.json
+// work_dir) that every task runs in.  The web client treats
+// `configData.config.work_dir` this way:
+//
+//   * it is adopted as-is -- no per-browser-tab sessionStorage pin, no
+//     `setWorkDir` echo back to the daemon (that used to re-pin the
+//     connection; there is no connection pin any more);
+//   * the Settings form never carries `work_dir` in `saveConfig`, because
+//     the folder is changed only through the chat header's working
+//     directory drop-down (a `listDir` check, then `setWorkDir`;
+//     the daemon persists it and broadcasts `workDirChanged`);
+//   * a `workDirChanged` broadcast from the daemon (a pick made in another
+//     browser tab) re-scopes this client without any echo.
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require('jsdom');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+
+// The served web page carries body.remote-chat (web_server.py injects the
+// class).  `stalePin` seeds the sessionStorage key an older WS shim used
+// to write, to prove main.js no longer reads it.
+function makePage(opts) {
+  const {stalePin = ''} = opts || {};
+  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
+  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
+  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  html = html.replace('<body', '<body class="remote-chat"');
+
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    url: 'https://localhost/',
+  });
+  const win = dom.window;
+
+  win.Element.prototype.scrollIntoView = function () {};
+  win.Element.prototype.scrollTo = function () {};
+  win.HTMLElement.prototype.scrollTo = function () {};
+
+  if (stalePin) {
+    win.sessionStorage.setItem('sorcar-work-dir', stalePin);
+  }
+
+  const posted = [];
+  let state;
+  win.acquireTransport = function () {
+    return {
+      postMessage: msg => posted.push(msg),
+      getState: () => state,
+      setState: s => {
+        state = s;
+      },
+    };
+  };
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  return {win, posted};
+}
+
+function send(win, data) {
+  win.dispatchEvent(new win.MessageEvent('message', {data}));
+}
+
+function openSettings(win) {
+  const gear = win.document.querySelector('#settings-btn');
+  assert.ok(gear, 'the tab bar must render the settings gear');
+  gear.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+}
+
+function closeSettings(win) {
+  win.document
+    .getElementById('settings-panel-close')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+}
+
+// Typing for real: set the value and fire the event the browser fires.
+function typeInto(win, id, value) {
+  const node = win.document.getElementById(id);
+  assert.ok(node, `#${id} must exist`);
+  node.value = value;
+  node.dispatchEvent(new win.Event('input', {bubbles: true}));
+}
+
+function assertNoDirectoryFields(win) {
+  assert.strictEqual(
+    win.document.getElementById('cfg-work-dir'),
+    null,
+    'the settings panel must not have a working-directory field',
+  );
+  assert.strictEqual(
+    win.document.getElementById('cfg-memory-dir'),
+    null,
+    'the settings panel must not have a memory-directory field',
+  );
+  const labels = Array.from(
+    win.document.querySelectorAll('#config-form .config-label'),
+  ).map(l => l.textContent.trim());
+  assert.ok(
+    !labels.some(t => /^(Working|Memory) directory/.test(t)),
+    'no settings label may read "Working directory" or "Memory directory"',
+  );
+}
+
+// The chat tabs mirrored from the registry, in tab order. There is no
+// row of chat tabs any more (the Chats panel lists them), so the
+// internal tab list is the subject.
+function tabBarIds(win) {
+  // Array.from: the list comes from the JSDOM realm; deepStrictEqual
+  // compares prototypes too.
+  return Array.from(win._testApi.openTabs())
+    .filter(t => !t.isSubagentTab && !t.isContentTab)
+    .map(t => t.id);
+}
+
+function tabEntry(tabId, workDir) {
+  return {tabId, chatId: '', title: tabId, workDir};
+}
+
+function lastMsg(posted, type) {
+  for (let i = posted.length - 1; i >= 0; i -= 1) {
+    if (posted[i] && posted[i].type === type) return posted[i];
+  }
+  return null;
+}
+
+function setWorkDirs(posted) {
+  return posted.filter(m => m && m.type === 'setWorkDir').map(m => m.workDir);
+}
+
+// The directory the active tab's daemon-bound commands actually carry:
+// typing an @-mention posts getFiles stamped with workDirForTab().
+function mentionWorkDir(win, posted) {
+  const before = posted.length;
+  typeInto(win, 'task-input', '@readm');
+  const msg = lastMsg(posted.slice(before), 'getFiles');
+  assert.ok(msg, 'typing an @-mention must post a getFiles command');
+  typeInto(win, 'task-input', '');
+  return msg.workDir;
+}
+
+// The directory the chat header's working directory drop-down shows.
+function headerWorkDir(win) {
+  return win.document.getElementById('chat-workdir').value;
+}
+
+function testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
+  const {win, posted} = makePage();
+  openSettings(win);
+  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  assertNoDirectoryFields(win);
+
+  typeInto(win, 'cfg-max-budget', '77');
+  closeSettings(win);
+
+  const saved = lastMsg(posted, 'saveConfig');
+  assert.ok(saved, 'closing the settings panel must save the form');
+  assert.strictEqual(saved.config.max_budget, 77, 'the edit is saved');
+  assert.ok(
+    !('work_dir' in saved.config) && !('memory_dir' in saved.config),
+    'the form has no directory boxes, so it must not invent either key ' +
+      '(the daemon merges the payload; a blank would wipe the stored value)',
+  );
+  win.close();
+  console.log('  ok - the web client settings carry no directory fields');
+}
+
+function testRemoteBlankWhenNothingIsStored() {
+  const {win, posted} = makePage();
+  openSettings(win);
+  send(win, {type: 'configData', config: {}});
+  closeSettings(win);
+
+  const saved = lastMsg(posted, 'saveConfig');
+  assert.ok(saved, 'closing the settings panel must save the form');
+  assert.ok(!('work_dir' in saved.config), 'nothing to save as work_dir');
+  assert.deepStrictEqual(setWorkDirs(posted), [], 'nothing to announce');
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '',
+    'with no global directory yet, commands carry none and the daemon ' +
+      'resolves its own fallback',
+  );
+  win.close();
+  console.log('  ok - a blank stored working directory announces nothing');
+}
+
+function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
+  const {win, posted} = makePage();
+  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  assert.deepStrictEqual(
+    setWorkDirs(posted),
+    [],
+    'the config reply reports the global value; echoing it back as ' +
+      'setWorkDir would persist and re-broadcast what the daemon just said',
+  );
+  assert.strictEqual(
+    win.sessionStorage.getItem('sorcar-work-dir'),
+    null,
+    'no per-browser-tab pin is written: every page uses the one global value',
+  );
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/project',
+    'commands from this page run in the global working directory',
+  );
+  assert.strictEqual(headerWorkDir(win), '/srv/project');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
+  });
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['p-1', 'q-1'],
+    'the tab bar still shows every registry tab: the directory is where ' +
+      'tasks run, not a filter',
+  );
+  win.close();
+  console.log('  ok - the web client adopts the global directory without echo');
+}
+
+function testRemoteIgnoresStaleSessionPin() {
+  const {win, posted} = makePage({stalePin: '/srv/mine'});
+  send(win, {type: 'configData', config: {work_dir: '/srv/global'}});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/global',
+    'a sessionStorage pin left by an older page must not override the ' +
+      'global working directory',
+  );
+  assert.deepStrictEqual(setWorkDirs(posted), [], 'and nothing is echoed');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [tabEntry('mine-1', '/srv/mine'), tabEntry('g-1', '/srv/global')],
+  });
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['mine-1', 'g-1'],
+    'the tab bar shows every registry tab whatever folder it ran in',
+  );
+  win.close();
+  console.log(
+    '  ok - a stale per-tab pin is ignored in favour of the global value',
+  );
+}
+
+function testRemoteWorkDirChangesThroughTheHeaderDropDown() {
+  const {win, posted} = makePage();
+  send(win, {
+    type: 'configData',
+    config: {
+      work_dir: '/srv/project',
+      recent_work_dirs: [{path: '/srv/elsewhere', ts: 1}],
+    },
+  });
+
+  // The chat header's working directory drop-down is the one place to
+  // change the folder now that the settings box is gone.
+  const select = win.document.getElementById('chat-workdir');
+  select.value = '/srv/elsewhere';
+  assert.strictEqual(select.value, '/srv/elsewhere', 'the folder is listed');
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
+
+  const check = lastMsg(posted, 'listDir');
+  assert.ok(
+    check && String(check.token).startsWith('workdir:'),
+    'the daemon is asked to list the picked folder first',
+  );
+  assert.strictEqual(check.path, '/srv/elsewhere');
+  assert.strictEqual(
+    setWorkDirs(posted).length,
+    0,
+    'nothing is sent before the daemon confirms the folder exists',
+  );
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/project',
+    'and nothing is adopted locally either: commands keep the old folder',
+  );
+  send(win, {
+    type: 'dirListing',
+    token: check.token,
+    path: '/srv/elsewhere',
+    root: '/srv/elsewhere',
+    entries: [],
+  });
+
+  assert.deepStrictEqual(
+    setWorkDirs(posted),
+    ['/srv/elsewhere'],
+    'a real folder is sent as setWorkDir: the daemon persists it as the ' +
+      'global value and broadcasts workDirChanged to every other client',
+  );
+  assert.strictEqual(
+    lastMsg(posted, 'saveConfig'),
+    null,
+    'the drop-down does not go through saveConfig; setWorkDir is the one path',
+  );
+  assert.strictEqual(headerWorkDir(win), '/srv/elsewhere');
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/elsewhere',
+    'this page re-scopes at once instead of waiting for the broadcast',
+  );
+  win.close();
+  console.log(
+    '  ok - the web client changes the global folder through the header drop-down',
+  );
+}
+
+function testRemoteFollowsWorkDirChangedBroadcast() {
+  const {win, posted} = makePage();
+  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  // A pick made in another browser tab reaches this page as the daemon's
+  // broadcast.
+  send(win, {type: 'workDirChanged', workDir: '/srv/picked-elsewhere'});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/picked-elsewhere',
+    'every client follows the daemon broadcast so all surfaces agree',
+  );
+  assert.strictEqual(headerWorkDir(win), '/srv/picked-elsewhere');
+  assert.deepStrictEqual(
+    setWorkDirs(posted),
+    [],
+    'a broadcast is adopted, never echoed back as another setWorkDir',
+  );
+  win.close();
+  console.log(
+    '  ok - the web client follows workDirChanged from other surfaces',
+  );
+}
+
+function main() {
+  testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
+  testRemoteBlankWhenNothingIsStored();
+  testRemoteAdoptsGlobalWorkDirWithoutEcho();
+  testRemoteIgnoresStaleSessionPin();
+  testRemoteWorkDirChangesThroughTheHeaderDropDown();
+  testRemoteFollowsWorkDirChangedBroadcast();
+  console.log('settingsWorkDirField.test.js: all tests passed');
+}
+
+main();

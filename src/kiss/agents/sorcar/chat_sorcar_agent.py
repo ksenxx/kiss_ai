@@ -5,8 +5,8 @@
 """Stateful Sorcar agent with chat-session persistence.
 
 Subclasses :class:`SorcarAgent` to add multi-turn chat-session state
-management — the same workflow that the VS Code extension performs in
-``VSCodeServer._run_task()``, but as a standalone reusable Python agent.
+management — the same workflow that the daemon performs in
+``AgentServer._run_task()``, but as a standalone reusable Python agent.
 """
 
 from __future__ import annotations
@@ -167,8 +167,8 @@ class ChatSorcarAgent(SorcarAgent):
 
     Maintains a ``chat_id`` and automatically loads prior chat context,
     persists tasks and results to ``history.db``, and augments prompts
-    with previous session context — replicating the stateful workflow
-    from the VS Code extension as a standalone reusable agent.
+    with previous session context — replicating the daemon's stateful
+    workflow as a standalone reusable agent.
     """
 
     def __init__(self, name: str) -> None:
@@ -232,7 +232,7 @@ class ChatSorcarAgent(SorcarAgent):
         return self._last_user_prompt
 
     def new_chat(self) -> None:
-        """Reset to a new chat session (equivalent to VS Code 'Clear').
+        """Reset to a new chat session (the chat page's 'Clear').
 
         Retires any pending worktree first (``SorcarAgent.new_chat``),
         and drops any pending one-shot :meth:`resume_from_task_id`
@@ -400,7 +400,7 @@ class ChatSorcarAgent(SorcarAgent):
         """Build the ``task_settings`` display-event payload.
 
         The shape mirrors the task-history sidebar's session fields so
-        the chat webview can render the static task panel's info line
+        the chat page can render the static task panel's info line
         exactly like a history row (see ``renderHistory`` and
         ``taskPanelInfoHTML`` in ``media/main.js``).
 
@@ -465,16 +465,16 @@ class ChatSorcarAgent(SorcarAgent):
     ) -> bool:
         """Persist a minimal replayable event stream when none was recorded.
 
-        Runs that happen inside a chat webview stream every agent event
-        through a recording printer (the VS Code server's ``JsonPrinter``
-        / ``WebPrinter``), which persists them to the ``events`` table.
-        Runs that happen OUTSIDE a chat webview — the third-party
-        channel agents, or a remote webapp invocation with a
-        non-recording printer — leave the ``events`` table empty, so the
-        chat webview would load a blank session even though the task and
-        its result are in ``task_history``.
+        Runs that happen from a chat page stream every agent event
+        through a recording printer (the daemon's ``JsonPrinter`` /
+        ``WebPrinter``), which persists them to the ``events`` table.
+        Runs that happen OUTSIDE a chat page — the third-party channel
+        agents, or an API invocation with a non-recording printer —
+        leave the ``events`` table empty, so the chat page would load a
+        blank session even though the task and its result are in
+        ``task_history``.
 
-        This synthesizes the events the webview needs to render the
+        This synthesizes the events the chat page needs to render the
         exchange — a ``prompt`` event (the user's task), a ``result``
         event (the agent's summary / success / cost) and, when the agent
         proposed one via ``finish(suggested_next_task=...)``, a
@@ -547,7 +547,7 @@ class ChatSorcarAgent(SorcarAgent):
         and saves the result back to history.
 
         Only the result summary is persisted here.  Callers that record
-        chat events (e.g. the VS Code server) persist events incrementally
+        chat events (e.g. the daemon) persist events incrementally
         via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.
 
         Args:

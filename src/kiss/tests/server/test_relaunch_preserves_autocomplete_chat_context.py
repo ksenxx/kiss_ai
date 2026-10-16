@@ -2,30 +2,29 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression: after VS Code is closed and relaunched, ghost-text
-autocomplete on a restored tab must still be aware of the tab's prior
-chat context — identifiers used in previous tasks of the same chat must
-appear as completion candidates.
+"""Regression: after the daemon is restarted and the chat page reloaded,
+ghost-text autocomplete on a restored tab must still be aware of the
+tab's prior chat context — identifiers used in previous tasks of the
+same chat must appear as completion candidates.
 
-Reproduces this bug in ``VSCodeServer._cmd_complete``:
+Reproduces this bug in ``AgentServer._cmd_complete``:
 
-1. A prior VS Code session ran a task in tab ``T`` under
+1. A prior daemon session ran a task in tab ``T`` under
    ``chat_id = X``.  The task's persisted text contains the identifier
    ``zephyrIdentifierMarker`` (something the user might want to auto-
    complete later in the same conversation).
-2. VS Code is closed (which stops the daemon).
-3. VS Code is relaunched.  The webview restores its tabs from
-   ``vscode.getState()`` and posts a ``ready`` message whose
-   ``restoredTabs`` array names ``{tabId=T, chatId=X}``.  The extension
-   replays this as a ``resumeSession`` command to the freshly-started
-   daemon.
+2. The daemon is stopped.
+3. The daemon is restarted and the chat page reloaded.  The page
+   restores its tabs from the persisted tab state and posts a ``ready``
+   message whose ``restoredTabs`` array names ``{tabId=T, chatId=X}``,
+   which the daemon replays as a ``resumeSession`` command.
 4. ``_replay_session`` handles ``resumeSession`` by recording
    ``_tab_chat_views[T] = X``.  Because no task-keyed
    ``kiss.server.agent_state.AgentState`` for tab ``T`` exists after a
    cold daemon restart (per the C2/C3 rule: loading a chat into a tab
    is a view operation and must not allocate a runtime state slot),
    the tab's chat association lives ONLY in ``_tab_chat_views``.
-5. User types ``zephyr`` into the chat input.  The webview posts a
+5. User types ``zephyr`` into the chat input.  The chat page posts a
    ``complete`` command to the daemon.  Before the fix,
    ``_cmd_complete`` reads the chat id from the running-agent registry
    (``agent_state.find_by_tab(tab_id)``) — which yields nothing for a
@@ -42,8 +41,8 @@ fallback when the tab has no runtime state (or ``tab.chat_id`` is
 empty), so the resumed chat's identifiers keep flowing into ghost-text
 suggestions from the very first keystroke after relaunch.
 
-The end-to-end test drives a real :class:`VSCodeServer` through
-``_handle_command`` — exactly as the extension layer would — from a
+The end-to-end test drives a real :class:`AgentServer` through
+``_handle_command`` — exactly as the WebSocket handler would — from a
 cold start, with only ``KISS_HOME`` / persistence redirected to an
 isolated tmpdir.  The autocomplete worker thread is the real one; the
 test waits for the ``completions`` broadcast that the worker emits.
@@ -68,7 +67,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 _MARKER = "zephyrIdentifierMarker"
@@ -134,7 +133,7 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
         )
         assert _MARKER in combined, combined
 
-        server = VSCodeServer()
+        server = AgentServer()
 
         events: list[dict[str, Any]] = []
         events_lock = threading.Lock()

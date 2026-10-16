@@ -22,11 +22,6 @@ from kiss.core.config import kiss_home
 from kiss.core.utils import seed_file_atomically
 
 
-def kiss_home_dir() -> Path:
-    """Return ``~/.kiss/`` (or ``$KISS_HOME`` when set)."""
-    return kiss_home()
-
-
 def ensure_user_asset_from_default(
     name: str, default_content: str,
 ) -> Path | None:
@@ -52,7 +47,7 @@ def ensure_user_asset_from_default(
         created.  ``None`` when ``~/.kiss/`` is not writable (read-only
         FS, missing ``HOME``) so callers can skip silently.
     """
-    user_path = kiss_home_dir() / name
+    user_path = kiss_home() / name
     try:
         seed_file_atomically(user_path, default_content)
     except OSError:

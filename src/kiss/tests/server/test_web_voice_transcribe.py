@@ -5,16 +5,16 @@
 """End-to-end tests for remote-webapp voice transcription.
 
 Bug being reproduced — the remote webapp recognized the "Hey Sorcar" wake
-word but never transcribed the speech that followed.  In webview mode
-the VS Code extension host runs a local listener that captures and
-translates post-wake speech; in browser mode nothing did: the page's
+word but never transcribed the speech that followed.  The daemon's
+local listener captures and translates post-wake speech on the
+daemon's own microphone; in the browser nothing did: the page's
 ``voice.js`` only flashed the mic button on a wake, captured no audio,
 and the server had no handler to transcribe it.  The fix makes the
 page capture the utterance and ship it as ``{"type":
 "voiceTranscribe", "audio": <base64 16kHz mono s16le PCM>}`` over the
 WebSocket, and adds a server-side handler that translates the audio
 with the same KISS transcription agent the local listener uses
-(:func:`kiss.server.voice_wake.transcribe_pcm`) and replies
+(:func:`kiss.server.speech.transcribe_pcm`) and replies
 with ``{"type": "voiceSpeech", "text": ..., "speaker": ...,
 "language": ...}`` — ``language`` being the agent-reported tag of the
 spoken language (``null`` when unknown).
@@ -25,7 +25,7 @@ The transcription test uses ACTUAL VOICE: a sentence synthesized with
 the macOS TTS engine (``say``) is sent as PCM and the real gpt-audio
 API must return its text.  Before the fix, a ``voiceTranscribe``
 message got no ``voiceSpeech`` reply at all (it fell through to the
-generic webview-command translator), so every test here timed out.
+generic client-command translator), so every test here timed out.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,

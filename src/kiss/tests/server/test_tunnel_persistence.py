@@ -36,7 +36,8 @@ import sys
 import threading
 import time
 
-from kiss.core.vscode_config import (
+from kiss.core.remote_password import password_accepted
+from kiss.core.user_config import (
     CONFIG_PATH,
     load_config,
     save_config,
@@ -213,7 +214,7 @@ def test_wait_for_remote_password_picks_up_late_write() -> None:
             t0 = time.monotonic()
             pw = ws._wait_for_remote_password(timeout=5.0)
             elapsed = time.monotonic() - t0
-            assert pw == "set-late"
+            assert password_accepted("set-late", pw)
             assert 0.9 < elapsed < 3.0
         finally:
             thread.join(timeout=2.0)

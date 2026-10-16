@@ -16,8 +16,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -30,6 +29,7 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
     _config,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     raw_post_status,
     serve_recording,
@@ -57,7 +57,7 @@ class _WeixinApi(RecordingServer):
         self.send_http_status = 200
 
 
-class _WeixinApiHandler(BaseHTTPRequestHandler):
+class _WeixinApiHandler(RecordingHandler):
     """Emulates the WeChat Official Account HTTP API."""
 
     @property
@@ -96,17 +96,6 @@ class _WeixinApiHandler(BaseHTTPRequestHandler):
                 self._json(200, {"errcode": 0, "errmsg": "ok"})
         else:
             self._json(404, {"errcode": 404, "errmsg": "not found"})
-
-    def _json(self, status: int, body: dict[str, Any]) -> None:
-        """Send a JSON response."""
-        data = json.dumps(body).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
 
 
 @pytest.fixture()

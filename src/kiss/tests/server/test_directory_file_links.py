@@ -4,7 +4,7 @@
 # add your name here
 """E2E: directory paths in transcripts are clickable links.
 
-The chat webview linkifies path-looking strings and asks the host which
+The chat page linkifies path-looking strings and asks the daemon which
 ones exist (``checkPaths``); clicking a confirmed link sends
 ``openFile``.  Directories used to be excluded — every path naming a
 directory stayed inert plain text.  These tests pin the new behaviour
@@ -30,7 +30,7 @@ from unittest import IsolatedAsyncioTestCase, skipIf
 
 from websockets.asyncio.client import connect
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import (
     _DIR_LISTING_MAX_CHARS,
     _DIR_LISTING_MAX_ENTRIES,

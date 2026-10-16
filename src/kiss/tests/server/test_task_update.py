@@ -46,7 +46,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import _agent_usage
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import agent_state, task_update
 from kiss.server.task_update import (
     TaskUpdateRunner,
@@ -405,16 +405,16 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert "Task prompt: Parent task prompt" in digest
 
 
-def test_update_of_a_subagent_hangs_off_the_subagents_webview_tab(
+def test_update_of_a_subagent_hangs_off_the_subagents_client_tab(
     tmp_path: Path,
 ) -> None:
     """A task update requested on a running SUB-agent announces itself
-    under the tab every webview shows that sub-agent in.
+    under the tab every client shows that sub-agent in.
 
     The sub-agent's own ``_tab_id`` is the fan-out's synthetic
-    ``task-…__sub_N`` id, which no webview has: a ``new_tab`` carrying
-    it is dropped by every surface (``main.js`` ``case 'new_tab'``) and
-    the update's tab never opens anywhere.  The webviews show the
+    ``task-…__sub_N`` id, which no client has: a ``new_tab`` carrying
+    it is dropped by every client (``main.js`` ``case 'new_tab'``) and
+    the update's tab never opens anywhere.  The clients show the
     sub-agent as ``{parent_tab_id}__sub_{task_id}``, and that is what
     the update's ``new_tab`` must carry — before any client has
     subscribed to the sub-agent's stream.
@@ -466,8 +466,13 @@ def test_update_of_a_subagent_hangs_off_the_subagents_webview_tab(
         r for r in _chat_rows(chat_id) if r["parent_task_id"] == sub_task_id
     )
     assert update_row["is_side_channel"] == 1
-    (done,) = printer.events_of_type("subagentDone")
-    assert done["tab_id"].startswith(f"task-{sub_task_id}__update-")
+    # Completion names the tab every surface opened on the ``new_tab``
+    # (``{parent_tab_id}__sub_{task_id}``) and the update's synthetic tab.
+    derived_tab, synthetic_tab = (
+        e["tab_id"] for e in printer.events_of_type("subagentDone")
+    )
+    assert derived_tab == f"{new_tab['parent_tab_id']}__sub_{new_tab['task_id']}"
+    assert synthetic_tab.startswith(f"task-{sub_task_id}__update-")
 
 
 def test_mark_legacy_updates_as_side_channels_stamps_only_update_children() -> None:
@@ -738,9 +743,8 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
 class TestGetTaskUpdateOverLocalChannel(unittest.TestCase):
     """A local-channel ``getTaskUpdate`` gets a direct ``taskUpdate`` reply.
 
-    Editor-tab chat panels of the VS Code extension (local WSS clients)
-    poll ``getTaskUpdate`` to fill the secondary sidebar's Task Info
-    view, so the command is served to local and remote clients alike and
+    Chat pages on the local WSS connection poll ``getTaskUpdate`` to
+    fill the Task Info view, so the command is served to local and remote clients alike and
     the reply must come back on the requesting connection.
     """
 

@@ -5,8 +5,8 @@
 """The failed-event journal is shared by every Sorcar process.
 
 The history database and its ``<db>.failed_events.jsonl`` sidecar are
-written by the ``kiss-web`` daemon, by ``kiss`` CLI runs and by VS Code
-reloads at the same time.  A process replaying the sidecar must never
+written by the ``kiss-web`` daemon, by ``kiss`` CLI runs and by daemon
+restarts at the same time.  A process replaying the sidecar must never
 delete a batch another process journalled while the replay was in
 flight — that batch is a chat transcript nobody can recover.
 

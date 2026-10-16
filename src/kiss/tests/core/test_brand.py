@@ -71,7 +71,6 @@ def test_load_brand_custom_partial_and_broken_files(tmp_path: Path) -> None:
     assert loaded["short_name"] == "s10s"
     assert loaded["tagline"] == DEFAULT_BRAND["tagline"]
     assert loaded["identity"] == DEFAULT_BRAND["identity"]
-    assert loaded["extension_description"] == DEFAULT_BRAND["extension_description"]
 
     # home_dir must be a single directory name; anything else keeps ``.kiss``.
     for bad in ("", ".", "..", "a/b", "a\\b", 7):
@@ -176,7 +175,7 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
     shutil.copytree(
         src_root, copy, ignore=shutil.ignore_patterns("node_modules", "__pycache__")
     )
-    brand_file = copy / "kiss" / "agents" / "vscode" / "media" / "brand.json"
+    brand_file = copy / "kiss" / "webapp" / "media" / "brand.json"
     brand_file.write_text(
         json.dumps({
             "product_name": "Seamless Loop",
@@ -193,9 +192,10 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
         "from kiss.core.brand import PRODUCT_NAME, SHORT_NAME\n"
         "from kiss.core.config import kiss_home\n"
         "from kiss.core.models.model_info import USER_MY_MODELS_PATH, user_model_info_path\n"
-        "from kiss.core.vscode_config import _RC_HOOK_LINE\n"
+        "from kiss.core.user_config import _RC_HOOK_LINE\n"
         "from kiss.agents.third_party_agents.telegram import telegram_sea\n"
-        "from kiss.server import web_server, tls_certs\n"
+        "from kiss.core import tls_certs\n"
+        "from kiss.server import web_server\n"
         "print(PRODUCT_NAME); print(SHORT_NAME)\n"
         "print(kiss_home() == Path.home() / '.s10s')\n"
         "print(USER_MY_MODELS_PATH == kiss_home() / 'MY_MODELS.json'\n"

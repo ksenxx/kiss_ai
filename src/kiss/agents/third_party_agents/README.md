@@ -38,25 +38,23 @@ surfaces, and what each channel can do.
 Every KISS Sorcar surface feeds the same local kiss-web daemon, so the **same
 plain-language prompts work everywhere**:
 
-1. **VS Code extension.** Open the KISS Sorcar sidebar and type your prompt in the
-   chat box (`@` mentions attach files; the model picker and budget field sit next to
-   the input).
-2. **Web / mobile app.** The identical chat interface served over a cloudflared
-   tunnel — copy the URL and password from the Settings panel and open it on any
-   phone, tablet, or browser.
-3. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Hey Sorcar,
+1. **Web / mobile app.** Open the chat page and type your prompt in the chat box
+   (`@` mentions attach files; the model picker and budget field sit next to the
+   input).  The same page is served over a cloudflared tunnel — copy the URL and
+   password from the Settings panel and open it on any phone, tablet, or browser.
+2. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Hey Sorcar,
    tell the eng Slack channel that the deploy is done."* You can also steer a running
    task by voice; Sorcar replies aloud in the language you spoke.
-4. **Your existing messaging apps.** Once a channel gateway is running (see
+3. **Your existing messaging apps.** Once a channel gateway is running (see
    [Always-on gateways](#always-on-gateways) below), any message you send to the bot
    in Telegram, Slack, Discord, email, WhatsApp, ... *is* a prompt: it becomes a
    Sorcar task and the answer comes back in the same chat or thread. Follow-up
    messages in the same thread continue the same conversation.
-5. **Any OpenAI-compatible client.** Open WebUI, LibreChat, or an `openai` SDK script
+4. **Any OpenAI-compatible client.** Open WebUI, LibreChat, or an `openai` SDK script
    pointed at the daemon's OpenAI-compatible server — every user message you type
    there is a prompt to the daemon (see
    [Infrastructure: two extra surfaces](#infrastructure-two-extra-surfaces)).
-6. **Other agents.** A peer agent speaking the A2A protocol can send prompts to your
+5. **Other agents.** A peer agent speaking the A2A protocol can send prompts to your
    daemon machine-to-machine (same section).
 
 Unlike a fire-and-forget script, the chat surfaces show you the task's live progress
@@ -179,7 +177,7 @@ conversation:
 > Check my GitHub auth; if it's missing, sign me in and store the credential.
 
 You do not have to type such a prompt yourself. The right sidebar's **Apps** panel
-(kiss-web and the VS Code extension) lists every channel agent with a connected /
+lists every channel agent with a connected /
 not-connected / unknown badge — the daemon probes them in a short-lived subprocess
 (`python -m kiss.agents.third_party_agents.auth_status`, 20-second deadline, result
 cached for 30 seconds; a probe that fails or times out shows as unknown; a service
@@ -192,8 +190,8 @@ Each channel's `check_<service>_auth` returns setup instructions when unconfigur
 and several channels go further with a guided sign-in. Three styles exist, and in
 every one the sign-in itself stays in your hands — the agent never types or asks for
 your password or 2FA code. In every style the agent first does what it can by itself:
-under the kiss-web daemon (the usual web app / VS Code setup) it opens the sign-in
-page or developer portal in the **Browser tab** that every KISS surface switches to,
+under the kiss-web daemon (the usual web app setup) it opens the sign-in
+page or developer portal in the **Browser tab** the web app switches to,
 so you approve or copy a token right there and are never asked to open a URL —
 wherever the daemon runs, a remote or headless host included. Without the daemon it
 opens the page in your **default browser** on that machine and shows you the URL
@@ -533,7 +531,7 @@ directly:
 ## Example prompts
 
 Everything below is a prompt you can type — or speak, with the wake word "Hey Sorcar, …" —
-into any Sorcar chat surface (VS Code sidebar, web/mobile app, a channel gateway, an
+into any Sorcar chat surface (web/mobile app, a channel gateway, an
 OpenAI-compatible client).
 
 ### Getting started

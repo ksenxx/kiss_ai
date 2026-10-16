@@ -19,43 +19,27 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-import sys
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.gdocs.gdocs_sea as gdocs_mod
 from kiss.agents.third_party_agents.gdocs.gdocs_sea import (
     _SERVICE,
-    GoogleDocsAgent,
     GoogleDocsChannelBackend,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     connect,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _TOKEN = TOKEN
 
-_AUTH_TOOL_NAMES = [
-    "check_google_docs_auth",
-    "authenticate_google_docs",
-    "clear_google_docs_auth",
-    "finish_google_docs_auth",
-]
-
-_BACKEND_TOOL_NAMES = {
-    "gdocs_create_document",
-    "gdocs_read_document",
-    "gdocs_append_text",
-    "gdocs_replace_text",
-    "gdocs_insert_text",
-    "gdocs_batch_update",
-    "gdocs_list_documents",
-}
 
 # Realistic Document payload: a string element (schema noise), a
 # section break, a paragraph with a non-text run in the middle, and a
@@ -169,19 +153,11 @@ _DRIVE_FILES = [
 ]
 
 
-class _DocsRequestHandler(BaseHTTPRequestHandler):
+class _DocsRequestHandler(RecordingHandler):
     """Emulates the Google Docs v1 + Drive v3 REST APIs and records requests."""
 
     def _authorized(self) -> bool:
         return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _reply(self, status: int, body: str, content_type: str = "application/json") -> None:
-        payload = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def _record(self, body: Any) -> None:
         parsed = urlparse(self.path)
@@ -194,14 +170,6 @@ class _DocsRequestHandler(BaseHTTPRequestHandler):
                 "body": body,
             }
         )
-
-    def _read_body(self) -> Any:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
-        try:
-            return json.loads(raw.decode("utf-8")) if raw else {}
-        except ValueError:
-            return None
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         self._record(None)
@@ -249,9 +217,6 @@ class _DocsRequestHandler(BaseHTTPRequestHandler):
         else:
             self._reply(404, json.dumps({"error": {"message": "Not found"}}))
 
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
-
 
 @pytest.fixture()
 def docs_server():
@@ -272,65 +237,6 @@ def backend(docs_server, composio):
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
-
-
-def test_unauthenticated_agent_exposes_only_auth_tools() -> None:
-    """A fresh agent is unauthenticated and exposes exactly the auth tool set."""
-    agent = GoogleDocsAgent()
-    assert agent.name == "Google Docs Agent"
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
-
-
-def test_connect_link_flow_authenticates_agent(composio) -> None:
-    """authenticate -> user approves -> finish unlocks the backend tools."""
-    agent = GoogleDocsAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    started = json.loads(tools["authenticate_google_docs"]())
-    assert started["status"] == "consent_required"
-    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
-    assert json.loads(tools["finish_google_docs_auth"]())["ok"] is True
-    assert agent._is_authenticated() is True
-    assert agent._backend.connection_info == "Google Docs connected through Composio."
-    names = {t.__name__ for t in agent._get_tools()}
-    assert set(_AUTH_TOOL_NAMES) <= names
-    assert _BACKEND_TOOL_NAMES <= names
-    assert "poll_messages" not in names  # channel protocol method, not an LLM tool
-    assert "connect" not in names
-
-
-def test_clear_auth_removes_connection_and_relocks(composio) -> None:
-    """clear_google_docs_auth deletes the Composio connection and re-locks the agent."""
-    account = connect(composio, _SERVICE)
-    agent = GoogleDocsAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    result = tools["clear_google_docs_auth"]()
-    assert "cleared" in result.lower()
-    assert composio.deleted == [account]
-    assert agent._is_authenticated() is False
-    assert len(agent._get_tools()) == len(_AUTH_TOOL_NAMES)
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns the auth tools of a fresh agent."""
-    tools = gdocs_mod.GdocsSea().tools([])
-    assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
-    assert all(callable(t) for t in tools)
-
-
-def test_connect_without_credentials_fails() -> None:
-    """connect() fails cleanly when no token is persisted or injected."""
-    b = GoogleDocsChannelBackend()
-    assert b.connect() is False
-    assert "not connected" in b.connection_info
-
-
-def test_connect_with_composio_connection_succeeds(composio) -> None:
-    """connect() succeeds once a Composio connection is recorded."""
-    connect(composio, _SERVICE)
-    b = GoogleDocsChannelBackend()
-    assert b.connect() is True
-    assert "connected through Composio" in b.connection_info
 
 
 def test_poll_messages_returns_empty(backend) -> None:
@@ -547,14 +453,3 @@ def test_request_returns_plain_text_body(backend) -> None:
     b, _ = backend
     result = b._request("GET", f"{b._base_url}/plain")
     assert result == {"ok": True, "result": "just text"}
-
-
-def test_main_exits_with_no_args() -> None:
-    """main() prints usage and exits when called with no arguments."""
-    original_argv = sys.argv
-    sys.argv = ["kiss-gdocs"]
-    try:
-        with pytest.raises(SystemExit):
-            gdocs_mod.main()
-    finally:
-        sys.argv = original_argv

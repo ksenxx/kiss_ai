@@ -34,7 +34,7 @@ the page (history replay) or never visible at all when the sub-agent
 completed before any flush hit the DB.
 
 This test exercises the production code path with a real
-:class:`VSCodeServer` and a real :class:`JsonPrinter`, no
+:class:`AgentServer` and a real :class:`JsonPrinter`, no
 mocks/patches/fakes.  It asserts that the new tab is subscribed to
 the sub-agent's own task id regardless of whether any events have
 been persisted yet.
@@ -50,7 +50,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -123,7 +123,7 @@ class TestReplaySessionRunningSubagentNoEvents:
         )
 
         printer = _SubscribeCapturingPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
 
         parent_state = AgentState(
             str(parent_id),

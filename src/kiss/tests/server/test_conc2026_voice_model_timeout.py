@@ -11,7 +11,7 @@ its caller ``_ensure_voice_model`` held the module-level
 connection (captive portal, firewall silently dropping packets) then
 blocked that worker forever; every retrying ``/voice-model.tar.gz``
 request parked another shared executor worker on the lock until the
-whole daemon stopped dispatching commands.  ``voice_wake``'s
+whole daemon stopped dispatching commands.  ``kiss.server.speech``'s
 ``_download_url_to_file`` exists precisely because of this bug class
 (its docstring says so); the fix reuses it.
 
@@ -21,7 +21,7 @@ never sends a byte.  ``web_server.VOICE_MODEL_URL`` and
 attribute overrides (see ``_voice_model_cache_path``'s docstring and
 ``test_wave2_webserver_bugs.py``); the per-read timeout is the
 ``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment override read at call
-time by ``voice_wake.download_timeout_seconds``.
+time by ``speech.download_timeout_seconds``.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
     def test_total_deadline_env_rejects_nonfinite_values(self) -> None:
         """``inf`` / ``1e999`` must not disable the total deadline —
         the parser falls back to the finite default."""
-        from kiss.server.voice_wake import (
+        from kiss.server.speech import (
             DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS,
             download_total_timeout_seconds,
         )

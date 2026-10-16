@@ -9,7 +9,7 @@ Every provider SDK here streams over httpx, and a thread parked in
 ``recv()`` on a connection carrying no bytes cannot be rescued by the
 agent: the cooperative stop flag is only read when the agent emits
 something, and CPython delivers the ``KeyboardInterrupt`` that
-``VSCodeServer._stop_task`` injects only at a bytecode boundary.  Task
+``AgentServer._stop_task`` injects only at a bytecode boundary.  Task
 ``709ebce3`` was unstoppable for 178 seconds for exactly this reason
 (``reports/stop_button_delay_2026-08-05.html``).
 

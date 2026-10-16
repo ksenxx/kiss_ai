@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Fixer-5 voice_wake bugs (findings F5-09, F5-10).
+"""Fixer-5 voice bugs (findings F5-09, F5-10).
 
 F5-09 — the voice-model cache dir was frozen to the real
 ``~/.kiss/models`` at import time, bypassing the repository-wide lazy
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-import kiss.server.voice_wake as voice_wake
-from kiss.server.voice_wake import parse_transcription_reply
+import kiss.server.speech as speech
+from kiss.server.speech import parse_transcription_reply
 
 
 class TestModelsDirHonoursKissHome(unittest.TestCase):
@@ -37,9 +37,9 @@ class TestModelsDirHonoursKissHome(unittest.TestCase):
         old = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = "/tmp/fixer5-profile"
         try:
-            # voice_wake was imported long before KISS_HOME changed.
+            # speech was imported long before KISS_HOME changed.
             self.assertEqual(
-                voice_wake.default_models_dir(),
+                speech.default_models_dir(),
                 Path("/tmp/fixer5-profile") / "models",
             )
         finally:
@@ -54,7 +54,7 @@ class TestModelsDirHonoursKissHome(unittest.TestCase):
         old = os.environ.pop("KISS_HOME", None)
         try:
             self.assertEqual(
-                voice_wake.default_models_dir(),
+                speech.default_models_dir(),
                 Path.home() / ".kiss" / "models",
             )
         finally:
@@ -63,7 +63,7 @@ class TestModelsDirHonoursKissHome(unittest.TestCase):
 
     def test_unknown_module_attribute_still_raises(self) -> None:
         with pytest.raises(AttributeError):
-            _ = voice_wake.NO_SUCH_ATTRIBUTE  # type: ignore[attr-defined]
+            _ = speech.NO_SUCH_ATTRIBUTE  # type: ignore[attr-defined]
 
 
 class TestParseTranscriptionReply(unittest.TestCase):

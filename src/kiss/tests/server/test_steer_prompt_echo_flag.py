@@ -5,7 +5,7 @@
 
 """A message typed into a running task is echoed as a ``steer`` prompt.
 
-The chat webview shows the task's text in the accent "Task" panel and
+The chat page shows the task's text in the accent "Task" panel and
 must show every message the user types into the RUNNING task in a
 panel like it (the "Message" panel): both are the user's words.  The
 daemon tells the two apart by stamping the steering echo with

@@ -55,10 +55,11 @@ dependencies = [
     # Patched Playwright driver without the CDP leaks bot-protection
     # vendors fingerprint (kiss.agents.sorcar.web_stealth).
     "patchright>=1.63.0",
-    # Local "Sorcar" wake-word listener (kiss.server.voice_wake).
+    # Speaker identification of browser voice input (kiss.server.speech).
     # Pinned to 0.3.44: it is the newest release shipping macOS wheels
     # (0.3.45 only publishes Linux/Windows wheels).
     "vosk==0.3.44",
+    # Real-microphone end-to-end tests (tests/webapp) only.
     "sounddevice>=0.5.0",
     "slack_sdk>=3.30.0",
     "google-api-python-client>=2.100.0",
@@ -74,7 +75,7 @@ dependencies = [
     # newest release with universal2 wheels (48.x) instead of falling back
     # to a Rust source build.  The advisories still open on 48.0.1 concern
     # PKCS7 decryption and X.509 chain verification, which KISS never calls
-    # (it only mints its own TLS certificate in kiss.server.tls_certs and
+    # (it only mints its own TLS certificate in kiss.core.tls_certs and
     # signs with Ed25519 in qq_sea).
     "cryptography>=50.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "cryptography>=48.0.1,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
@@ -106,7 +107,7 @@ path = "src/kiss/core/_version.py"
 # node_modules/ is gitignored, but in an agent worktree it is a symlink to the
 # main checkout's directory, which the directory-only gitignore rule does not
 # match; without this rule a build from a worktree ships 147 MB of npm packages.
-exclude = ["src/kiss/agents/vscode/node_modules"]
+exclude = ["src/kiss/webapp/node_modules"]
 
 [tool.hatch.build.targets.sdist]
 # PyPI rejects files over 100 MiB. The sdist only has to build the wheel, so it
@@ -256,9 +257,12 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = false
 exclude = [
-    "src/kiss/agents/vscode/kiss_project/",
     "src/kiss/agents/claude_skills/",
 ]
+
+[[tool.mypy.overrides]]
+module = "sounddevice.*"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "backports.zstd.*"
@@ -298,10 +302,6 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "vosk.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "sounddevice.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

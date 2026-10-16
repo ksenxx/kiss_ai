@@ -1,0 +1,58 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+'use strict';
+
+const assert = require('assert');
+const {makePage} = require('./simplify2_harness');
+
+function isOpen(win, id) {
+  return win.document.getElementById(id).classList.contains('open');
+}
+
+function run() {
+  const {win, posted} = makePage();
+  const doc = win.document;
+
+  win.__TRICKS__ = ['do the thing'];
+  const tricksBtn = doc.getElementById('tricks-btn');
+  tricksBtn.click();
+  assert.ok(isOpen(win, 'tricks-panel'), 'tricks panel opens');
+  assert.ok(isOpen(win, 'tricks-overlay'), 'tricks overlay opens');
+  assert.ok(
+    doc.getElementById('tricks-list').textContent.includes('do the thing'),
+    'tricks list renders window.__TRICKS__',
+  );
+  doc.getElementById('tricks-overlay').click();
+  assert.ok(!isOpen(win, 'tricks-panel'), 'overlay click closes tricks panel');
+  assert.ok(!isOpen(win, 'tricks-overlay'), 'tricks overlay closes');
+  tricksBtn.click();
+  assert.ok(isOpen(win, 'tricks-panel'), 'tricks re-opens');
+  tricksBtn.click();
+  assert.ok(!isOpen(win, 'tricks-panel'), 'toggle button closes tricks panel');
+
+  const gear = doc.querySelector('#settings-btn');
+  assert.ok(gear, 'tab bar renders the settings gear button');
+  gear.click();
+  assert.ok(isOpen(win, 'settings-panel'), 'settings panel opens');
+  assert.ok(isOpen(win, 'settings-overlay'), 'settings overlay opens');
+  assert.ok(
+    posted.some(m => m.type === 'getConfig'),
+    'opening the settings panel requests {getConfig}',
+  );
+  const before = posted.length;
+  doc.getElementById('settings-panel-close').click();
+  assert.ok(!isOpen(win, 'settings-panel'), 'X closes settings panel');
+  assert.ok(!isOpen(win, 'settings-overlay'), 'settings overlay closes');
+  assert.ok(
+    !posted.slice(before).some(m => m.type === 'saveConfig'),
+    'closing before the config form is populated must not saveConfig',
+  );
+
+  win.close();
+  console.log('  ok - settings/tricks panels open and close');
+}
+
+run();
+console.log('simplify2_panels.test.js: all tests passed');

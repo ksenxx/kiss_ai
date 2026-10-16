@@ -32,7 +32,7 @@ from unittest import TestCase
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from kiss.server import tls_certs
+from kiss.core import tls_certs
 from kiss.tests.conftest import posix_only
 
 

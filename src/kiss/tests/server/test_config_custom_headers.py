@@ -26,7 +26,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
     """_cmd_save_config persists custom_headers and they appear in configData."""
 
     def setUp(self) -> None:
-        import kiss.core.vscode_config as vc
+        import kiss.core.user_config as vc
         from kiss.core import config as config_module
 
         self._orig_dir = vc.CONFIG_DIR
@@ -38,7 +38,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
         config_module.DEFAULT_CONFIG = config_module.Config()
 
     def tearDown(self) -> None:
-        import kiss.core.vscode_config as vc
+        import kiss.core.user_config as vc
         from kiss.core import config as config_module
 
         config_module.DEFAULT_CONFIG = self._orig_default_config
@@ -77,7 +77,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
             "apiKeys": {},
         })
 
-        from kiss.core.vscode_config import load_config
+        from kiss.core.user_config import load_config
 
         cfg = load_config()
         assert cfg["custom_headers"] == "X-Test:123\nAuth:Bearer abc"

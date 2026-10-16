@@ -3,130 +3,67 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-# Install KISS Sorcar from source.
+# Install KISS Sorcar: the kiss-web daemon, its webapp and the sorcar CLI.
 #
-# Bootstrap the tools needed to build and install the VS Code extension from
-# a cloned checkout, finish the runtime setup the extension would otherwise
-# do on its first activation (bundled Python environment, ``sorcar`` CLI,
-# Playwright, cloudflared, the kiss-web daemon — see "Runtime setup without
-# VS Code" below), then launch VS Code (the desktop app, and VS Code in the
-# browser via ``code serve-web``) and open the webapp.  The extension's
-# DependencyInstaller re-checks all of it on activation, so installing the
-# VSIX directly takes the same path, just later; it also owns the
-# interactive parts (API keys, the remote-access password).
+# What ends up on the machine:
 #
-# Usage: ./install.sh [--non-interactive]
+#   ~/.kiss/kiss/                 the app directory (``$KISS_HOME/kiss``)
+#     pyproject.toml, uv.lock     the project uv builds the venv from
+#     src/kiss/**/*.pyc           the KISS Sorcar library, byte-compiled;
+#                                 the ``.py`` sources are not installed
+#     src/kiss/agents/seas/**.py  the bundled SEAs, kept as Python scripts:
+#                                 ``run_agent``/``sea`` load them by path
+#     src/kiss/**/*_sea.py        channel and cron SEAs, same reason
+#     (and the few other modules COMPILE_KEEP_SOURCE names: the /cron
+#     agent, _version.py, the two files sync_db ships to a remote)
+#     src/kiss/webapp/media/  the webapp frontend kiss-web serves
+#     .venv/                      the Python environment (``uv sync``)
+#   ~/.local/bin/sorcar           the CLI (``uv run --directory ~/.kiss/kiss sorcar``)
+#   ~/.local/bin/cloudflared      the public tunnel of the webapp
 #
-#   Run from a terminal, the script asks ``[Y/n]`` before installing
-#   Homebrew.  ``--non-interactive`` (same as
-#   ``KISS_NONINTERACTIVE=1``) answers every question with its default (Yes)
-#   and never touches the terminal; it is also what happens automatically
-#   when there is no terminal to ask on.  See "Interactive mode" below.
+# Steps:
+#   [1/5] Copy the project files into ~/.kiss/kiss (the library, the
+#         SEAs and the webapp's ``media`` frontend; no tests).
+#   [2/5] Build the Python environment with uv (installed when missing).
+#   [3/5] Byte-compile the library with the venv's own interpreter and
+#         delete the compiled sources (see COMPILE_KEEP_SOURCE below).
+#   [4/5] Install the ``sorcar`` CLI, Playwright's Chromium and cloudflared.
+#   [5/5] Refresh ~/.kiss/MODEL_INFO.json, run the post-install hooks and
+#         set the remote-access password; repeat steps 1-5 into every
+#         other brand home on the machine (a ``~/.<brand>`` with
+#         post-install hooks, or the home the existing service runs
+#         from); start the kiss-web daemon -- the brand's app, not the
+#         stock one, when there is a brand home: the one the service
+#         runs from, else the first one installed -- then open the webapp in a
+#         browser and, for a VS Code user, print the notice that VS Code
+#         is no longer supported.
 #
-# Log saved to ~/.kiss/install.log
+# Usage:
+#   ./install.sh                  interactive: asks before installing Homebrew
+#   ./install.sh --non-interactive  every question takes its default answer
 #
-# ---------------------------------------------------------------------------
-# Bulletproof terminal-signal immunity via new-session detachment
-# ---------------------------------------------------------------------------
+# Environment:
+#   KISS_HOME            state directory (default ~/.kiss); the app goes in $KISS_HOME/kiss
+#   KISS_NONINTERACTIVE  same as --non-interactive
+#   KISS_SKIP_LAUNCH     do not start kiss-web or open the webapp
+#   KISS_WEB_PORT        port of the kiss-web daemon (default 8787)
+#   _KISS_BRAND_PASS     set by this script on the nested run it makes
+#                        into another brand home (see step [5/5])
 #
-# Failure mode this block cures
-# -----------------------------
-# A user clicked the VS Code "Update" button (settings panel), which calls
-# ``runUpdate()`` in ``SorcarSidebarView.ts``.  That method used to open a
-# VS Code integrated terminal and ``terminal.sendText`` a compound command
-# ending in ``bash '/Users/ksen/.kiss/kiss_ai/install.sh'`` (current builds
-# run the installer as the terminal process instead, but extensions in the
-# wild still inject the command as prompt text).  The install ran through Xcode
-# CLT, Homebrew, git, node and VS Code CLI, then died
-# right in the middle of the TypeScript compile::
+# The first run sets a random remote-access password (stored as
+# ``remote_password`` in $KISS_HOME/config.json, where the Settings page
+# shows it); every later run keeps it, so an update never invalidates
+# the password your devices know.  It is printed in a box of ``*`` at
+# the end of every run, on the terminal only, never in the log.  For a
+# new one, run ``$KISS_HOME/kiss/.venv/bin/python -m
+# kiss.core.remote_password --rotate``.
 #
-#     >>> [4/5] Building VS Code extension...
-#        Compiling extension TypeScript...
-#
-#     > kiss-sorcar@2026.6.38 compile
-#     > tsc -p ./
-#
-#     ^C
-#        ⚠ Interrupt received but ignored — long npm/git steps can sit
-#           silent for 30-60 s while they download or extract.  Press
-#           Ctrl+C again within 3 s to really abort.
-#     ksen@Mac kiss_ai %
-#
-# The user explicitly says they did NOT press Ctrl-C — something delivered
-# SIGINT (or ``\x03`` into the PTY) during ``tsc``.  install.sh's outer
-# ``handle_interrupt`` trap fired (the diagnostic printed) but the script
-# STILL exited (the shell prompt returned).
-#
-# Why the existing trap defences are not enough
-# ---------------------------------------------
-# 1. SIGINT delivered to a terminal foreground process group is delivered to
-#    EVERY process in that group simultaneously — including ``npm``, ``node``,
-#    and ``tsc``.  install.sh's own SIGINT trap only protects install.sh's
-#    own bash process.
-# 2. ``run_with_heartbeat`` wraps its child in ``( trap '' INT TERM; exec ... )``
-#    so the child inherits SIG_IGN across exec.  POSIX says SIG_IGN survives
-#    exec, BUT Node.js installs its own SIGINT handling in some configurations
-#    and may not respect inherited SIG_IGN — so ``tsc`` (which runs on Node)
-#    can still die on a stray SIGINT, npm returns non-zero, and ``set -e``
-#    aborts install.sh.
-# 3. Some child processes (e.g. ``"$CODE_CLI" --install-extension``) are
-#    NOT wrapped in ``run_with_heartbeat`` and therefore are NOT protected
-#    by the SIG_IGN subshell at all.
-#
-# Why ``setsid`` (a new session with no controlling TTY) is the bulletproof
-# answer
-# -----------------------------------------------------------------------
-# Terminal-driven signals (Ctrl-C / Ctrl-Z / hangup on ``\x03``-and-close
-# from a PTY teardown) are delivered by the kernel ONLY to the process
-# group(s) of the controlling terminal's session.  A session with NO
-# controlling terminal literally cannot receive ``SIGINT`` from any
-# terminal — the kernel has nowhere to deliver them from.  Once the install
-# body runs inside a fresh session created with ``setsid(2)``, no amount of
-# ``\x03`` injected into the original VS Code PTY can reach it.
-#
-# Why we fork via perl instead of ``exec setsid`` directly
-# --------------------------------------------------------
-# Running install.sh from bash makes install.sh the leader of its own
-# process group (typically also of its session, depending on how it was
-# launched).  ``setsid(2)`` refuses with EPERM when called by a process
-# group leader — so a direct ``exec setsid bash install.sh`` would fail
-# immediately.  We must fork FIRST: the child (not the leader) can then
-# successfully call ``setsid`` and exec a fresh ``bash`` on this script.
-# ``perl`` is available at ``/usr/bin/perl`` on every macOS release and
-# every standard Linux distro the install supports, and ``POSIX::setsid``
-# is part of the core POSIX module that ships with perl itself — no CPAN
-# dependencies.
-#
-# The parent perl IGNOREs INT/TERM/HUP, then ``waitpid``s the child and
-# forwards its exit code.  Ignoring those three signals in the parent is
-# important too: a stray ``\x03`` from the original terminal can still hit
-# the parent's process group, and if the parent died the user would see
-# the same "shell prompt returned, install aborted" symptom even though
-# the install child is happily continuing in its detached session.
-#
-# Defense in depth
-# ----------------
-# The existing ``handle_interrupt``/``handle_hup`` traps below, the
-# ``run_with_heartbeat`` SIG_IGN subshell, and the
-# ``exec > >(tee -a "$LOG_FILE") 2>&1`` redirect remain unchanged — they
-# stay as belt-and-braces defence in depth (and keep the existing
-# regression tests passing).  The new-session detachment is now the
-# PRIMARY defence.
-#
-# Sentinel: ``_KISS_NEW_SESSION=1`` is exported before the re-exec so the
-# re-exec'd child does NOT fork again (no infinite loop).
-#
-# Graceful fallback: if ``perl`` is unavailable (extremely unlikely on
-# macOS / mainstream Linux), the script simply continues without
-# detachment, preserving the previous trap-only behaviour.  Interactive
-# mode (below) skips the detachment deliberately, for the same trap-only
-# behaviour: its ``[Y/n]`` questions and ``sudo``'s password prompt need
-# the controlling terminal that ``setsid`` would take away.
-# ---------------------------------------------------------------------------
-#
-# ---------------------------------------------------------------------------
-# Leaving the kiss-web service's control group (Linux with systemd)
-# ---------------------------------------------------------------------------
+# Re-running the script updates the app in place: the app directory is
+# rebuilt from the checkout this script lives in, the venv is re-synced
+# and the daemon is restarted (never while it reports tasks in flight).
+# The daemon's Update button and the curl bootstrap (scripts/install.sh)
+# both run this script from the ``~/.kiss/kiss_ai`` checkout.
+
 # The remote webapp's Terminal tab is a shell the kiss-web daemon forks
 # (src/kiss/server/terminal_tab.py); so are the daemon's Update button
 # and a Sorcar task's shell tool.  On Linux the daemon is the systemd
@@ -191,19 +128,16 @@ fi
 # ---------------------------------------------------------------------------
 # Interactive mode (the default at a terminal)
 # ---------------------------------------------------------------------------
-# A human running ``./install.sh`` (or the ``curl ... | bash`` one-liner,
-# which still has a controlling terminal) is asked ``[Y/n]`` before
-# Homebrew is installed (see ``confirm`` below); "no" skips it and
-# carries on.  Tools the install cannot proceed without (git, Node.js,
-# VS Code) are still installed without a question when missing, and an
-# already-installed tool is used as-is — this script never upgrades
-# third-party software.
+# A human running ``./install.sh`` at a terminal is asked ``[Y/n]``
+# before Homebrew is installed (see ``confirm`` below); "no" skips it and
+# carries on.  The tool the install cannot proceed without (uv) is still
+# installed without a question when missing, and an already-installed
+# tool is used as-is — this script never upgrades third-party software.
 #
 # ``_KISS_INTERACTIVE`` is 0 instead when
 #
 # * ``--non-interactive`` is passed or ``KISS_NONINTERACTIVE`` is set —
-#   what the automated callers do (the VS Code Update button, the kiss-web
-#   daemon's update endpoint, the Docker entrypoint); or
+#   what an automated caller does; or
 # * ``/dev/tty`` cannot be opened, i.e. there is no terminal to ask on
 #   (cron, CI, a daemon), including inside the detached re-exec below.
 #
@@ -257,14 +191,14 @@ if ($pid == 0) {
     # controlling TTY anyway, but explicit /dev/null prevents any
     # accidental read() blocking on the dead inherited FD.  STDOUT and
     # STDERR are inherited unchanged so the user still sees progress
-    # in the original VS Code terminal.
+    # in the original terminal.
     open(STDIN, "<", "/dev/null") or die "kiss-install: reopen stdin: $!\n";
     exec { "bash" } "bash", $script, @ARGV
         or die "kiss-install: exec bash failed: $!\n";
 }
 
 # Parent: ignore every terminal-driven signal so that even if the
-# original VS Code PTY injects ``\x03`` (SIGINT) or closes (SIGHUP), or
+# original PTY injects ``\x03`` (SIGINT) or closes (SIGHUP), or
 # something kills our pgrp with SIGTERM, this waitpid loop continues
 # undisturbed until the install child finishes.
 $SIG{INT}  = "IGNORE";
@@ -298,34 +232,31 @@ fi
 # END: kiss-new-session-reexec
 
 # `pipefail` is required so any internal pipeline whose tail is `tee` (or
-# any always-zero command) propagates a non-zero exit from its body
-# (e.g. a failed `npm run package`) instead of returning `tee`'s
-# always-zero status.  Without it, a broken VSIX build was silently
-# masked and the container ended up shipping the stale committed VSIX.
+# any always-zero command, like the ``tar | tar`` copy below) propagates a
+# non-zero exit from its body instead of returning the tail's status.
 set -eo pipefail
 
 # ---------------------------------------------------------------------------
-# Cross-process update lock — the same lock as scripts/install.sh.
+# Cross-process update lock — the same lock as install.sh and
+# scripts/install.sh.
 #
-# Two installers on one checkout (the kiss-web daemon's update endpoint runs
-# this script directly with --non-interactive, the VS Code Update button in
-# another window runs it too) race each other's git reset, npm build and
-# extension install.  scripts/install.sh already holds the lock for its
-# whole lifetime and exports KISS_UPDATE_LOCK_HELD=1 before handing over to
-# this script; callers that run this script directly get the same
+# Two installers at once (this script and install.sh, or two runs of this
+# script) would race each other's copy into ~/.kiss/kiss, uv sync and
+# daemon restart.  scripts/install.sh holds the lock for its whole
+# lifetime and exports KISS_UPDATE_LOCK_HELD=1 before handing over to an
+# installer; callers that run this script directly get the same
 # protection here.
 #
 # The lock is a kernel advisory lock (flock(2)) on $HOME/.kiss/.update.lock
-# -- $HOME, not $KISS_HOME, because the resources it protects (this
-# checkout under ~/.kiss/kiss_ai, the global extension install) follow
-# $HOME.  Bash keeps the file open on fd 9 for its whole lifetime; perl
+# -- $HOME, not $KISS_HOME, because the resources it protects (the
+# checkout under ~/.kiss/kiss_ai, ~/.local/bin/sorcar) follow $HOME.  Bash keeps the file open on fd 9 for its whole lifetime; perl
 # (already required by the re-exec above; flock(1) is not on macOS) locks
 # that very open file description, so the lock persists after perl exits
 # and the kernel drops it when this process dies, however it dies -- no
 # EXIT trap, no stale lock to break.  The pid in the file only feeds the
-# refusal message.  fd 9 must not leak into long-lived children (VS Code,
-# anything a build step leaves behind): every launch line below closes it
-# with ``9>&-``.
+# refusal message.  fd 9 must not leak into long-lived children (the
+# kiss-web daemon, anything a step leaves behind): every launch line
+# below closes it with ``9>&-``.
 #
 # Placement matters: this block sits AFTER the new-session re-exec above, so
 # the lock is taken (and its pid recorded) by the detached bash that does
@@ -362,18 +293,14 @@ if [ -z "${KISS_UPDATE_LOCK_HELD:-}" ]; then
 fi
 # The marker's only consumer is the lock decision above: this script hands
 # over to no further installer, so drop it now.  Left exported it would
-# leak into every long-lived child (the launched VS Code, the daemon the
-# extension restarts), whose OWN later update runs would then skip
-# acquire_update_lock entirely — with the original lock long gone.
+# leak into every long-lived child (the kiss-web daemon), whose OWN later
+# update runs would then skip acquire_update_lock entirely — with the
+# original lock long gone.
 unset KISS_UPDATE_LOCK_HELD
 # END: kiss-update-lock
 
-# Capture the user's working directory *before* any `cd` so that VS Code can
-# later be launched with this directory as the workspace root.  The agents
-# spawned inside VS Code default their PWD to the workspace root (see
-# ``kiss.server.server`` — ``os.getcwd()`` is the fallback when
-# ``KISS_WORKDIR`` is unset), so opening the workspace here makes the
-# agents' PWD match the user's original shell PWD.
+# The directory this script was run from: the kiss-web daemon serves it
+# (its Sorcar tasks default their work dir to it).
 USER_PWD="$PWD"
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -383,18 +310,18 @@ LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
 # Name of the state directory under $HOME the build being installed uses
 # when $KISS_HOME is unset: ``home_dir`` of the brand overlay
-# (.brand/brand.json, see apply_brand_overlay below) when there is one,
+# (.brand/brand.json, see copy_brand_overlay below) when there is one,
 # else of the checkout's own media/brand.json -- ``.kiss`` for stock KISS
-# Sorcar.  The same key drives kiss.core.config.kiss_home() and the
-# extension's kissHomeDir() (src/kissHome.js), so the installer writes its
-# marker, progress file and MODEL_INFO.json where the installed product
-# reads them.  Anything but a single path component falls back to .kiss.
+# Sorcar.  The same key drives kiss.core.config.kiss_home(), so the
+# installer puts the app, the progress file and MODEL_INFO.json where the
+# installed product reads them.  Anything but a single path component
+# falls back to .kiss.
 brand_field() {
     # Print string field $1 of the checkout's brand.json (the .brand/
     # overlay first), or nothing when neither file defines it.
     local file
     for file in "$PROJECT_DIR/.brand/brand.json" \
-                "$PROJECT_DIR/src/kiss/agents/vscode/media/brand.json"; do
+                "$PROJECT_DIR/src/kiss/webapp/media/brand.json"; do
         [ -f "$file" ] || continue
         tr -d '\n\r' < "$file" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
         return 0
@@ -411,59 +338,43 @@ brand_home_dir_name() {
 BRAND_HOME_DIR_NAME="$(brand_home_dir_name)"
 BRAND_PRODUCT_NAME="$(brand_field product_name)"
 BRAND_PRODUCT_NAME="${BRAND_PRODUCT_NAME:-KISS Sorcar}"
-# The extension's state directory (kissHomeDir() in userAssets.ts honours
-# $KISS_HOME).  The update marker and the progress file below must land
-# here, not in a hard-coded $HOME/.kiss, or a custom-KISS_HOME install
-# never sees them.
+# The state directory ($KISS_HOME, else ~/<home_dir>).  The app and the
+# progress file below must land here, not in a hard-coded $HOME/.kiss, or
+# a custom-KISS_HOME install never sees them.
 KISS_HOME_DIR="${KISS_HOME:-$HOME/$BRAND_HOME_DIR_NAME}"
-# Current install step, mirrored by the VS Code extension as a live,
-# non-blocking progress notification (src/installProgress.ts).  Line 1 is
-# this script's pid (the toast is dropped when that process is gone, so a
-# killed install cannot leave a spinner behind), line 2 the step text.
-# The EXIT trap below removes the file when the install ends, which closes
-# the notification.
+# Current install step, for anything watching the install (the daemon's
+# update log tails this script; ``cat`` the file to see where a detached
+# run is).  Line 1 is this script's pid, line 2 the step text.  The EXIT
+# trap below removes the file when the install ends.
 PROGRESS_FILE="$KISS_HOME_DIR/.install-progress"
-# Node.js release installed when the machine has none.  Keep this at the
-# newest release of the 22.x line (https://nodejs.org/dist/latest-v22.x/):
-# releases before v22.23.2 carry the HIGH-severity CVEs fixed in the
-# July 2026 security release.
-NODE_VERSION="v22.23.3"
+# Where the app is installed: the ``kiss`` directory of the state
+# directory, ~/.kiss/kiss for stock KISS Sorcar.  Everything the runtime
+# needs lives here (project files, byte-compiled library, SEAs, frontend,
+# venv); ``~/.kiss/kiss_ai`` next to it is the checkout the curl
+# bootstrap clones and is not touched.
+APP_DIR="$KISS_HOME_DIR/kiss"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$KISS_HOME_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 # ---------------------------------------------------------------------------
-# Signal handling
+# Signal handling (as in install.sh)
 #
-# A previous regression looked like::
+# ``uv sync`` and the Playwright download can sit silent for tens of
+# seconds — long enough for a stray signal (a backgrounded shell, a
+# sleeping laptop, a closed terminal tab) to kill the script just as it
+# was about to make progress.  Trap SIGINT/SIGTERM at the bash level so a
+# single stray signal prints a diagnostic instead of silently
+# terminating; a *second* signal within 3 s is honored as a real abort.
 #
-#     >>> [4/5] Building VS Code extension...
-#     npm warn deprecated prebuild-install@7.1.3: No longer maintained. ...
-#     ^C
-#
-# i.e. the install aborted right after npm ci's first deprecation warning.
-# `npm ci` can sit silent for tens of seconds between log lines while it
-# fetches/extracts tarballs — long enough for the user (or a stray signal
-# from a backgrounded shell / sleeping laptop / closed terminal tab) to
-# kill the script just as it was about to make progress.
-#
-# Trap SIGINT/SIGTERM at the bash level so a single stray signal prints a
-# diagnostic instead of silently terminating, and so the user can see how
-# far they got.  A *second* signal within 3 s is honored as a real abort.
-#
-# CRITICAL: install.sh ignoring SIGINT in its own trap is not enough.  The
-# signal is delivered to the entire foreground process group, so any
-# wrapped child (``npm ci``, ``bash copy-kiss.sh``, ``git ls-files``…)
-# that does NOT trap SIGINT itself dies immediately — which made the
-# subsequent ``wait`` in ``run_with_heartbeat`` return non-zero and
-# triggered ``set -e``, aborting the install at e.g.
-# "Copying source files..." even though install.sh's own trap had run.
-# The fix below: ``run_with_heartbeat`` spawns the wrapped command inside
-# a subshell that sets ``trap '' INT TERM`` and then ``exec``s the binary.
-# POSIX guarantees that a signal *ignored* at exec time stays ignored in
-# the new process, so npm and its descendants survive a single stray
-# signal too.  A confirmed double-Ctrl+C in ``handle_interrupt`` kills the
-# tracked child explicitly to give the user a real escape hatch.
+# The trap alone is not enough: the signal is delivered to the entire
+# foreground process group, so a wrapped child that does not trap SIGINT
+# itself dies at once, which makes the ``wait`` in ``run_with_heartbeat``
+# return non-zero and ``set -e`` abort the install.  Hence
+# ``run_with_heartbeat`` spawns the wrapped command inside a subshell that
+# sets ``trap '' INT TERM`` and then ``exec``s the binary: a signal
+# *ignored* at exec time stays ignored in the new process.  A confirmed
+# double-Ctrl+C in ``handle_interrupt`` kills the tracked child explicitly.
 # ---------------------------------------------------------------------------
 LAST_SIGNAL_TS=0
 # PID of the wrapped command currently running under ``run_with_heartbeat``
@@ -478,6 +389,9 @@ CURRENT_HB_PID=""
 # leaves the ``read`` waiting; re-printing the question after the notice
 # tells the user the script still expects an answer.
 CONFIRM_PENDING=""
+# The notice goes to stderr: the trap runs after whatever foreground
+# command the signal hit, and when that command's stdout was a file
+# (``list_app_files > "$list"``) the notice would otherwise land in it.
 handle_interrupt() {
     local now
     now=$(date +%s)
@@ -495,36 +409,27 @@ handle_interrupt() {
         if [ -n "$CURRENT_HB_PID" ]; then
             kill "$CURRENT_HB_PID" 2>/dev/null || true
         fi
-        echo "   Re-run 'bash $0' to resume; the build cache is preserved."
+        echo "   Re-run 'bash $0' to resume; the Python environment is preserved."
         exit 130
     fi
     LAST_SIGNAL_TS=$now
     echo ""
-    echo "   ⚠ Interrupt received but ignored — long npm/git steps can sit"
+    echo "   ⚠ Interrupt received but ignored — uv and Playwright can sit"
     echo "      silent for 30-60 s while they download or extract.  Press"
     echo "      Ctrl+C again within 3 s to really abort."
     if [ -n "$CONFIRM_PENDING" ]; then
         printf '   %s [Y/n] ' "$CONFIRM_PENDING"
     fi
-}
+} >&2
 
 # Re-route stdout/stderr to the log file when the controlling terminal
-# closes (SIGHUP).  This matters when the VS Code "Update" button runs
-# ``install.sh`` in an integrated terminal: VS Code disposes that
-# terminal when the extension is deactivated, which is exactly what
-# ``code --install-extension --force`` triggers inside step [5/5] —
-# VS Code's extension manager detects the on-disk update, deactivates
-# the running extension, and the documented behavior is to "dispose the
-# terminal and exit the underlying process".  Terminal disposal first
-# writes ``\x03`` (Ctrl+C) to the PTY (caught by ``handle_interrupt``
-# above) and then closes the PTY (SIGHUP).  Without this trap the SIGHUP
-# kills bash mid-step, leaving the ``.extension-updated`` marker
-# unwritten — exactly the symptom users see: an unexplained ``^C`` in
-# step [5/5] with the install aborted before the marker write.
+# closes (SIGHUP).  This matters when the script runs in a terminal the
+# kiss-web daemon hosts (the webapp's Terminal tab): restarting the daemon
+# in step [5/5] closes that terminal, first writing ``\x03`` (Ctrl+C) to
+# the PTY (caught by ``handle_interrupt`` above) and then closing the PTY
+# (SIGHUP).  Without this trap the SIGHUP kills bash mid-step.
 # ``2>/dev/null`` swallows EBADF/ENXIO from the closed PTY; ``|| true``
-# keeps ``set -e`` from killing the script if the re-route itself fails
-# (the script then continues writing into the dead PTY, which is no
-# worse than the pre-fix behavior).
+# keeps ``set -e`` from killing the script if the re-route itself fails.
 handle_hup() {
     exec >>"$LOG_FILE" 2>&1 || true
     echo ""
@@ -535,11 +440,13 @@ trap handle_interrupt INT TERM
 trap handle_hup HUP
 
 # Print a step banner and publish the step to PROGRESS_FILE (see there).
-# Every ">>> ..." banner of the install goes through here so the VS Code
-# notification always names the step the terminal is on.  Publishing is
-# best-effort: an unwritable $KISS_HOME must not fail the install.
+# Publishing is best-effort: an unwritable $KISS_HOME must not fail the
+# install.
 report_step() {
     echo ">>> $1"
+    publish_step "$1"
+}
+publish_step() {
     # Write, then rename: a poll must never read a truncated file, which
     # would look like the install had ended.
     { printf '%s\n%s\n' "$$" "$1" > "$PROGRESS_FILE.tmp" \
@@ -547,14 +454,14 @@ report_step() {
 }
 # KISS_WEB_RESTART_LOCK_HELD names the kiss-web restart lock this script
 # holds, if any (acquire_kiss_web_restart_lock below); released here so an
-# aborted run does not leave the extension locked out of restarting.
+# aborted run does not leave the daemon locked out of restarting.
 KISS_WEB_RESTART_LOCK_HELD=""
 trap 'rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"; [ -z "$KISS_WEB_RESTART_LOCK_HELD" ] || release_kiss_web_restart_lock "$KISS_WEB_RESTART_LOCK_HELD"' EXIT
 
 # Run "$@" while printing a heartbeat every HEARTBEAT_INTERVAL seconds so
-# the user can tell the install is still working.  Without this the npm ci
-# step can sit silent for ~1 min and look hung.  Exit code is forwarded
-# from the wrapped command.
+# the user can tell the install is still working.  Without this ``uv sync``
+# can sit silent for ~1 min and look hung.  Exit code is forwarded from
+# the wrapped command.
 HEARTBEAT_INTERVAL="${KISS_HEARTBEAT_INTERVAL:-15}"
 run_with_heartbeat() {
     local label="$1"
@@ -562,12 +469,11 @@ run_with_heartbeat() {
     local start
     start=$(date +%s)
     # Run the command inside a subshell that ignores SIGINT/SIGTERM, then
-    # ``exec`` the real binary.  POSIX says SIG_IGN survives exec, so npm
-    # and every descendant inherit "ignore" for INT/TERM — a stray signal
-    # delivered to install.sh's terminal process group can no longer kill
-    # them, which was the actual root cause of the
-    # "Copying source files..." abort.  The install.sh-level trap above
-    # remains the only way to actually stop the build (double-Ctrl+C).
+    # ``exec`` the real binary.  POSIX says SIG_IGN survives exec, so the
+    # command and every descendant inherit "ignore" for INT/TERM — a stray
+    # signal delivered to this script's terminal process group can no
+    # longer kill them.  The trap above remains the only way to actually
+    # stop the install (double-Ctrl+C).
     ( trap '' INT TERM; exec "$@" ) 9>&- &
     local cmd_pid=$!
     CURRENT_CMD_PID=$cmd_pid
@@ -597,8 +503,8 @@ run_with_heartbeat() {
     local hb_pid=$!
     CURRENT_HB_PID=$hb_pid
     # Use ``+e`` so a non-zero exit from the wrapped command is returned to
-    # the caller instead of aborting the whole script — callers (e.g. the
-    # npm ci retry loop) need to inspect the exit code.  ``wait`` itself
+    # the caller instead of aborting the whole script — callers need to
+    # inspect the exit code.  ``wait`` itself
     # can also return early under signal delivery; loop until the child
     # is actually gone so a stray signal during this exact instant cannot
     # leave the caller seeing a bogus non-zero rc while the child keeps
@@ -708,58 +614,6 @@ if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
     fi
 fi
 
-ensure_xcode_clt() {
-    [ "$OS" = "Darwin" ] || return 0
-
-    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
-        echo "   Xcode Command Line Tools already installed at $(xcode-select -p)"
-        return 0
-    fi
-
-    echo "   Xcode Command Line Tools not found — attempting non-interactive install..."
-
-    local SENTINEL=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-    sudo touch "$SENTINEL" 2>/dev/null || true
-    local PROD
-    # `|| true` keeps a failing `softwareupdate` (no network, managed Macs)
-    # from killing the script via `set -eo pipefail`.
-    PROD="$(softwareupdate -l 2>/dev/null \
-        | awk '/^[[:space:]]*\*.*Command Line Tools/ {
-                 sub(/^[[:space:]]*\*[[:space:]]*(Label:[[:space:]]*)?/, "");
-                 print
-             }' \
-        | tail -n1 || true)"
-    if [ -n "$PROD" ]; then
-        echo "   Installing: $PROD"
-        sudo softwareupdate -i "$PROD" --verbose 2>&1 || true
-    else
-        echo "   No Command Line Tools package found in softwareupdate catalog."
-    fi
-    sudo rm -f "$SENTINEL" 2>/dev/null || true
-
-    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
-        echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
-        return 0
-    fi
-
-    echo "   Non-interactive install did not complete. Triggering GUI installer..."
-    xcode-select --install 2>&1 || true
-
-    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
-        echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
-    else
-        # The GUI install can take many minutes and the non-interactive
-        # runs (detached, see the kiss-new-session-reexec block above)
-        # cannot wait for keyboard input, so exit-and-rerun is the one
-        # behaviour that works for every launch path; it matches the
-        # ``install_git`` fallback.
-        echo ""
-        echo "   A dialog has appeared to install the Xcode Command Line Tools."
-        echo "   Complete the installation in that dialog, then re-run this script."
-        exit 1
-    fi
-}
-
 ensure_homebrew() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -804,513 +658,16 @@ ensure_homebrew() {
     fi
 }
 
-install_git() {
-    case "$OS" in
-        Darwin)
-            if command -v brew &>/dev/null; then
-                echo "   Installing git via Homebrew..."
-                brew install git
-            else
-                echo "   Triggering Xcode Command Line Tools (provides git)..."
-                xcode-select --install 2>&1 || true
-                echo "   NOTE: Complete the Xcode CLT dialog, then re-run this script."
-                exit 1
-            fi
-            ;;
-        Linux)
-            if command -v apt-get &>/dev/null; then
-                sudo apt-get update -y && sudo apt-get install -y git
-            elif command -v dnf &>/dev/null; then
-                sudo dnf install -y git
-            elif command -v yum &>/dev/null; then
-                sudo yum install -y git
-            elif command -v pacman &>/dev/null; then
-                sudo pacman -S --noconfirm git
-            elif command -v apk &>/dev/null; then
-                sudo apk add git
-            else
-                echo "   ERROR: No supported package manager found. Install git from https://git-scm.com"
-                exit 1
-            fi
-            ;;
-    esac
-}
-
-install_node() {
-    echo "   Downloading Node.js $NODE_VERSION ..."
-    local OS_NODE ARCH_NODE
-    OS_NODE="$(echo "$OS" | tr '[:upper:]' '[:lower:]')"
-    case "$ARCH" in
-        x86_64)         ARCH_NODE="x64" ;;
-        aarch64|arm64)  ARCH_NODE="arm64" ;;
-    esac
-    local URL="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${OS_NODE}-${ARCH_NODE}.tar.gz"
-    mkdir -p "$HOME/.local"
-    if curl -fsSL "$URL" | tar xz -C "$HOME/.local" --strip-components=1; then
-        echo "   Node.js $NODE_VERSION installed to ~/.local/"
-    else
-        echo "   ERROR: Failed to download Node.js from $URL"
-        return 1
-    fi
-}
-
-install_code_cli() {
-    case "$OS" in
-        Darwin)
-            local VSCODE_APP="/Applications/Visual Studio Code.app"
-            if [ ! -d "$VSCODE_APP" ]; then
-                echo "   Downloading VS Code for macOS..."
-                local ARCH_VS
-                case "$ARCH" in
-                    aarch64|arm64) ARCH_VS="darwin-arm64" ;;
-                    x86_64)        ARCH_VS="darwin" ;;
-                esac
-                local TMP_ZIP
-                TMP_ZIP="$(mktemp /tmp/vscode-XXXXXX.zip)"
-                if curl -fsSL "https://update.code.visualstudio.com/latest/${ARCH_VS}/stable" -o "$TMP_ZIP"; then
-                    unzip -q "$TMP_ZIP" -d /Applications/
-                    rm -f "$TMP_ZIP"
-                    echo "   VS Code installed to /Applications/"
-                else
-                    rm -f "$TMP_ZIP"
-                    echo "   ERROR: Failed to download VS Code"
-                    return 1
-                fi
-            fi
-            local CODE_BIN="$VSCODE_APP/Contents/Resources/app/bin/code"
-            if [ -x "$CODE_BIN" ]; then
-                ln -sf "$CODE_BIN" "$BIN_DIR/code"
-                echo "   Linked VS Code CLI to $BIN_DIR/code"
-            fi
-            ;;
-        Linux)
-            if command -v snap &>/dev/null; then
-                sudo snap install --classic code 2>&1 || true
-            elif command -v apt-get &>/dev/null; then
-                curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-                    | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg 2>&1
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
-                    | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null 2>&1
-                sudo apt-get update -y && sudo apt-get install -y code 2>&1
-            elif command -v dnf &>/dev/null; then
-                sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>&1
-                sudo tee /etc/yum.repos.d/vscode.repo >/dev/null <<'REPO'
-[code]
-name=Visual Studio Code
-baseurl=https://packages.microsoft.com/yumrepos/vscode
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.microsoft.com/keys/microsoft.asc
-REPO
-                sudo dnf install -y code 2>&1
-            else
-                echo "   Please install VS Code from https://code.visualstudio.com"
-                return 1
-            fi
-            ;;
-    esac
-}
-
-find_code_cli() {
-    CODE_CLI=""
-    # Honor an explicit override so callers running inside a specific editor
-    # distribution can force its CLI.  The Docker/code-server entrypoint sets
-    # KISS_CODE_CLI=code-server so the extension is installed into
-    # code-server's extensions directory
-    # (~/.local/share/code-server/extensions) — the one the browser IDE
-    # actually reads — instead of a separately apt-installed Microsoft VS Code
-    # (~/.vscode/extensions), which code-server never loads.
-    if [ -n "${KISS_CODE_CLI:-}" ]; then
-        local override
-        override="$(command -v "$KISS_CODE_CLI" 2>/dev/null || true)"
-        if [ -n "$override" ] && [ -x "$override" ]; then
-            CODE_CLI="$override"
-            return 0
-        fi
-    fi
-    for candidate in \
-        "$(command -v code 2>/dev/null || true)" \
-        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
-        "$BIN_DIR/code" \
-        "/usr/local/bin/code" \
-        "/usr/bin/code" \
-        "/snap/bin/code"; do
-        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-            CODE_CLI="$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Remove VS Code's on-disk caches before the extension is built and
-# installed, so the freshly installed build never loads through stale cached
-# state (a corrupted ``CachedExtensionVSIXs`` entry or stale ``CachedData``
-# V8 snapshots can make ``--install-extension`` appear to succeed while the
-# reloaded window keeps running old code).  Only cache directories are
-# touched — VS Code recreates each of them on the next launch:
-#
-#     Cache, CachedData, CachedExtensions, CachedExtensionVSIXs,
-#     "Code Cache", GPUCache
-#
-# swept under every user-data root this installer can target:
-#
-#     macOS:        ~/Library/Application Support/Code
-#     Linux:        ~/.config/Code
-#     code-server:  ${XDG_DATA_HOME:-~/.local/share}/code-server
-#                   (the Docker entrypoint installs into code-server via
-#                   KISS_CODE_CLI — see find_code_cli)
-#
-# User state next to the caches (``User/``, ``extensions/``,
-# ``Local Storage``, ``Session Storage``, ``Workspaces``, ``Backups``) is
-# deliberately NOT touched.  Every removal is best-effort (``|| true``): a
-# cache directory being rewritten by a running VS Code can make ``rm -rf``
-# fail (ENOTEMPTY/EACCES), and a failed cache sweep must never abort an
-# otherwise healthy install under ``set -e``.
-clear_vscode_cache() {
-    local data_dir cache_subdir cleared
-    cleared=0
-    for data_dir in \
-        "$HOME/Library/Application Support/Code" \
-        "$HOME/.config/Code" \
-        "${XDG_DATA_HOME:-$HOME/.local/share}/code-server"; do
-        [ -d "$data_dir" ] || continue
-        for cache_subdir in \
-            "Cache" \
-            "CachedData" \
-            "CachedExtensions" \
-            "CachedExtensionVSIXs" \
-            "Code Cache" \
-            "GPUCache"; do
-            if [ -e "$data_dir/$cache_subdir" ]; then
-                rm -rf "$data_dir/$cache_subdir" 2>/dev/null || true
-                cleared=1
-                # Report honestly: a cache directory being rewritten by a
-                # running VS Code can survive the sweep (ENOTEMPTY/EACCES).
-                if [ -e "$data_dir/$cache_subdir" ]; then
-                    echo "   WARNING: could not fully clear $data_dir/$cache_subdir (in use?); continuing."
-                else
-                    echo "   Cleared $data_dir/$cache_subdir"
-                fi
-            fi
-        done
-    done
-    if [ "$cleared" = 0 ]; then
-        echo "   No VS Code caches found to clear."
-    fi
-}
-
-launch_vscode() {
-    # ``$USER_PWD`` is captured at the top of this script before any ``cd``.
-    # Passing it to VS Code makes it the workspace root so that agents
-    # spawned inside the editor inherit it as their PWD.
-    case "$OS" in
-        Darwin)
-            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1 9>&-; then
-                echo "Launched VS Code via 'open -a' with workspace $USER_PWD."
-                return 0
-            fi
-            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1 9>&-; then
-                echo "Launched VS Code from /Applications with workspace $USER_PWD."
-                return 0
-            fi
-            ;;
-        Linux)
-            for candidate in \
-                "$(command -v code 2>/dev/null || true)" \
-                "$BIN_DIR/code" \
-                "/usr/local/bin/code" \
-                "/usr/bin/code" \
-                "/snap/bin/code" \
-                "/usr/share/code/code"; do
-                if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 9>&- &)
-                    echo "Launched VS Code from $candidate with workspace $USER_PWD."
-                    return 0
-                fi
-            done
-            ;;
-    esac
-
-    if find_code_cli && [ -n "$CODE_CLI" ]; then
-        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 9>&- &)
-        echo "Launched VS Code from $CODE_CLI with workspace $USER_PWD."
-        return 0
-    fi
-
-    echo "Could not launch VS Code automatically. Open VS Code manually to finish setup."
-    return 1
-}
-
-# Return 0 (true) when a VS Code window is already running.  Used to skip the
-# explicit ``launch_vscode`` at the end of the install: when the editor is
-# already open, the extension's own file watchers detect the reinstall (the
-# overwritten ``out/extension.js`` and the freshly written
-# ``~/.kiss/.extension-updated`` marker) and fire
-# ``workbench.action.reloadWindow``.  That reload already brings the user back
-# into a working window, so a second ``open``/launch here would only spawn a
-# redundant duplicate window.
-vscode_is_running() {
-    case "$OS" in
-        Darwin)
-            # AppleScript reliably reports whether the app is running.
-            if command -v osascript &>/dev/null; then
-                local running
-                running="$(osascript -e 'application "Visual Studio Code" is running' 2>/dev/null)"
-                [ "$running" = "true" ] && return 0
-            fi
-            # Fallback: match the app's main process by its bundle path.
-            command -v pgrep &>/dev/null && pgrep -f "Visual Studio Code.app" &>/dev/null && return 0
-            ;;
-        Linux)
-            command -v pgrep &>/dev/null || return 1
-            # The Electron main process is named "code"; also match common
-            # absolute-path invocations in case the name is shortened.
-            pgrep -x code &>/dev/null && return 0
-            pgrep -f "/usr/share/code/code" &>/dev/null && return 0
-            pgrep -f "/snap/code/" &>/dev/null && return 0
-            ;;
-    esac
-    return 1
-}
-
 # ---------------------------------------------------------------------------
-# CLI launcher helpers
+# Runtime setup (as in install.sh, with the app directory as the project)
 # ---------------------------------------------------------------------------
-
-# Install a launcher for a repo-root script (e.g. ./rsorcar, ./sorcar-docker)
-# into $BIN_DIR so it can be run from anywhere, mirroring how the ``sorcar``
-# CLI itself is installed into ~/.local/bin (see ``installCliScript`` in
-# DependencyInstaller.ts).
-#
-# The launcher is a thin wrapper that ``exec``s the real script inside
-# $PROJECT_DIR — deliberately NOT a symlink and NOT a copy.  Both scripts
-# locate their own directory (``dirname "$0"`` / ``BASH_SOURCE``) and treat
-# it as the KISS Sorcar checkout: ``rsorcar`` deploys the folder in which the
-# script is actually present, and ``sorcar-docker`` builds the Docker image
-# from that folder.  A symlink or copy in ~/.local/bin would make them
-# resolve ~/.local/bin instead of the checkout and fail.
-install_repo_script_launcher() {
-    local name="$1"
-    local target="$PROJECT_DIR/$name"
-    if [ ! -f "$target" ]; then
-        echo "   WARNING: $target not found — skipping $name launcher."
-        return 0
-    fi
-    {
-        echo '#!/bin/bash'
-        echo "# Installed by install.sh — launcher for $target"
-        echo "# Wrapper (not a symlink/copy): the real script must see its own"
-        echo "# directory as the KISS Sorcar checkout."
-        echo "exec bash \"$target\" \"\$@\""
-    } > "$BIN_DIR/$name"
-    chmod +x "$BIN_DIR/$name"
-    echo "   Installed $BIN_DIR/$name -> $target"
-}
-
-# Keep the freshly built ``kiss-sorcar.vsix`` from dirtying git, in both
-# kinds of checkout this script runs in ($1 = repo root):
-#
-# * Public ``kiss_ai`` clones: every release commit deliberately SHIPS the
-#   prebuilt VSIX as a tracked file (``tree_with_vsix`` in scripts/release.sh)
-#   so docker/code-server installs work without npm.  The build step above
-#   just overwrote that tracked file, so without countermeasures ``git
-#   status`` reports it modified and the auto-commit / worktree flows would
-#   commit the multi-MB binary on every task.  Remedy: put HEAD's copy back
-#   into BOTH the index and the working tree (``git checkout HEAD --``).
-#   By the time this guard runs the freshly built VSIX has already been
-#   installed into VS Code, so replacing it on disk with the release copy
-#   loses nothing — manual ``code --install-extension`` retries and
-#   docker-startup.sh then use the release-shipped bytes, and the repo is
-#   left byte-for-byte clean so the Update button's later ``git stash`` /
-#   ``git reset --hard @{upstream}`` preflight and ``git worktree add``
-#   never trip over a dirty or skip-worktree-pinned entry.  A single
-#   checkout also self-heals every broken index state this file can get
-#   into: a staged modification, a staged ``git rm --cached`` deletion
-#   (the old error message told users to run exactly that), and unmerged
-#   stages left by a conflicted ``git stash pop``.  Failures here only
-#   leave the file dirty for the preflight stash to handle, so they warn
-#   instead of aborting an otherwise finished install.
-#
-# * The development repo, where no commit contains the VSIX (it is matched
-#   by ``*.vsix`` in .gitignore): the file being tracked can only mean an
-#   accidental ``git add -f``, which the auto-commit flow would turn into a
-#   committed binary.  That remains a hard error (exit 1) telling the user
-#   how to untrack it.  The locally built VSIX stays untracked on disk for
-#   ``code --install-extension`` retries and docker-startup.sh.
-guard_vsix_tracking() {
-    local project_dir="$1"
-    local vsix_rel="src/kiss/agents/vscode/kiss-sorcar.vsix"
-    if git -C "$project_dir" rev-parse --verify --quiet "HEAD:$vsix_rel" >/dev/null; then
-        # Public kiss_ai clone: the release ships the VSIX tracked, by design.
-        # Clear any stale skip-worktree pin first: a pinned entry whose blob
-        # changes upstream makes ``git reset --hard @{upstream}`` fail with
-        # "Entry ... not uptodate", bricking every later update.
-        git -C "$project_dir" update-index --no-skip-worktree -- "$vsix_rel" 2>/dev/null || true
-        # Rewrite the index entry to HEAD's mode+blob via --index-info: the
-        # mode-0 line drops every stage of the path (a plain entry, a staged
-        # modification or deletion, and unmerged stages 1-3 alike), then the
-        # stage-0 line re-registers HEAD's blob.  ``git checkout HEAD --`` is
-        # NOT equivalent: it silently skips an unmerged entry whose stage-2
-        # blob already matches HEAD.
-        local mode blob zero
-        read -r mode _ blob _ < <(git -C "$project_dir" ls-tree HEAD -- "$vsix_rel") || true
-        zero="${blob//?/0}"
-        printf '0 %s\t%s\n%s %s 0\t%s\n' "$zero" "$vsix_rel" "$mode" "$blob" "$vsix_rel" |
-            git -C "$project_dir" update-index --index-info 2>/dev/null || true
-        # Write the release blob back to the working tree over the local
-        # rebuild.
-        git -C "$project_dir" checkout-index -q -f -- "$vsix_rel" 2>/dev/null || true
-        # Verify the result instead of trusting the exit codes above: only a
-        # path that is byte-for-byte clean keeps later ``git stash`` /
-        # ``git reset --hard`` preflights and worktree flows working.  The
-        # ``ls-files -v`` check must report a plain tracked entry ("H", not a
-        # skip-worktree "S"): a surviving pin hides a dirty file from ``git
-        # status`` while still bricking the next ``reset --hard``, and it
-        # also makes this verification fail honestly when the status command
-        # itself errors out (an empty capture alone would look clean).
-        local dirty
-        if dirty=$(git -C "$project_dir" status --porcelain -- "$vsix_rel" 2>/dev/null) &&
-            [ -z "$dirty" ] &&
-            [ "$(git -C "$project_dir" ls-files -v -- "$vsix_rel" 2>/dev/null)" = "H $vsix_rel" ]; then
-            echo "   Restored release-shipped $vsix_rel in git index and working tree"
-            echo "   (the freshly built VSIX was already installed into VS Code)."
-        else
-            echo "   WARNING: could not restore $vsix_rel from HEAD; the locally" >&2
-            echo "   rebuilt VSIX may show up as a git modification." >&2
-        fi
-        return 0
-    fi
-    if ! git -C "$project_dir" ls-files --error-unmatch "$vsix_rel" &>/dev/null; then
-        return 0  # untracked (development repo, healthy state) — nothing to do
-    fi
-    echo "   ERROR: $vsix_rel is tracked by git but must remain ignored." >&2
-    echo "   Run: git -C \"$project_dir\" rm --cached \"$vsix_rel\"" >&2
-    echo "   and ensure \`*.vsix\` stays in .gitignore." >&2
-    return 1
-}
-
-# ---------------------------------------------------------------------------
-# Brand overlay: ``$PROJECT_DIR/.brand/``
-# ---------------------------------------------------------------------------
-# A white-label distribution re-brands KISS Sorcar by replacing the data
-# files under src/kiss/agents/vscode/media/ (brand.json, brand.css,
-# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg, welcome-logo.png; see kiss.core.brand and
-# scripts/apply-brand.js).  Editing those tracked files in place would
-# make the Update button's pre-flight (``git stash`` / ``git reset --hard
-# @{upstream}`` / ``git stash pop``) conflict on every release, because
-# the branded display strings in package.json sit right next to the
-# version line every release bumps.  The customization therefore lives in
-# the git-ignored ``.brand/`` directory next to the checkout:
-#
-#   * apply_brand_overlay saves the checkout's own copies of package.json
-#     and of every media file ``.brand/`` overrides into a temporary
-#     snapshot, then copies the overlay over media/ right before the
-#     extension build (copy-kiss.sh then rewrites package.json's display
-#     strings from media/brand.json and bundles the branded media into
-#     kiss_project);
-#   * restore_brand_overlay copies the snapshot back once the VSIX has
-#     been packaged, or the build failed.  package.json gets its pre-build
-#     content plus the version copy-kiss.sh synced, which is the only
-#     change a stock build makes to the manifest.
-#
-# The snapshot (not ``git checkout``) is what goes back, so unrelated local
-# edits survive and a plain directory copy works too.  The checkout ends
-# up exactly as a stock build leaves it, the installed extension carries
-# the brand, and every later update rebuilds with the same overlay.
-# Without a ``.brand/`` directory both functions do nothing (stock KISS
-# Sorcar), so a development checkout is never re-branded by accident.
-BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png welcome-logo-dark.png)
-BRAND_MEDIA_REL="src/kiss/agents/vscode/media"
-BRAND_MANIFEST_REL="src/kiss/agents/vscode/package.json"
-# Snapshot directory while the overlay is applied; empty otherwise.
-BRAND_OVERLAY_BACKUP=""
-
-apply_brand_overlay() {
-    local project_dir="$1"
-    local overlay="$project_dir/.brand"
-    local f
-    [ -d "$overlay" ] || return 0
-    echo "   Applying brand overlay from $overlay..."
-    BRAND_OVERLAY_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/kiss-brand-backup.XXXXXX")" || return 1
-    cp -f "$project_dir/$BRAND_MANIFEST_REL" "$BRAND_OVERLAY_BACKUP/package.json" || return 1
-    for f in "${BRAND_OVERLAY_FILES[@]}"; do
-        [ -f "$overlay/$f" ] || continue
-        cp -f "$project_dir/$BRAND_MEDIA_REL/$f" "$BRAND_OVERLAY_BACKUP/$f" || return 1
-        cp -f "$overlay/$f" "$project_dir/$BRAND_MEDIA_REL/$f" || return 1
-        echo "      $BRAND_MEDIA_REL/$f"
-    done
-}
-
-restore_brand_overlay() {
-    local project_dir="$1"
-    local f
-    [ -n "$BRAND_OVERLAY_BACKUP" ] || return 0
-    for f in "${BRAND_OVERLAY_FILES[@]}"; do
-        [ -f "$BRAND_OVERLAY_BACKUP/$f" ] || continue
-        cp -f "$BRAND_OVERLAY_BACKUP/$f" "$project_dir/$BRAND_MEDIA_REL/$f"
-    done
-    # No manifest snapshot means apply failed on its very first copy and
-    # nothing was changed yet.
-    if [ -f "$BRAND_OVERLAY_BACKUP/package.json" ] &&
-        ! python3 - "$BRAND_OVERLAY_BACKUP/package.json" "$project_dir/$BRAND_MANIFEST_REL" <<'EOF'
-import json, pathlib, sys
-saved, manifest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-before = json.loads(saved.read_text())
-version = json.loads(manifest.read_text()).get("version")
-if before.get("version") == version:
-    manifest.write_bytes(saved.read_bytes())
-else:
-    before["version"] = version
-    manifest.write_text(json.dumps(before, indent=2) + "\n")
-EOF
-    then
-        cp -f "$BRAND_OVERLAY_BACKUP/package.json" "$project_dir/$BRAND_MANIFEST_REL"
-    fi
-    rm -rf "$BRAND_OVERLAY_BACKUP"
-    BRAND_OVERLAY_BACKUP=""
-    echo "   Restored the checkout's own brand files (the built VSIX keeps the overlay)."
-}
-
-# ---------------------------------------------------------------------------
-# Runtime setup without VS Code
-# ---------------------------------------------------------------------------
-# The VS Code extension's DependencyInstaller performs the same steps on
-# its first activation and stays the owner of the interactive ones (API
-# keys, the remote-access password).  Doing the non-interactive part here
-# means an install with no VS Code window attached (a headless server, a
-# Docker build, a white-label post-install hook that needs the runtime)
-# still ends with the bundled Python environment, the ``sorcar`` CLI and
-# a running kiss-web daemon; the extension's first activation then finds
-# a matching fingerprint and takes its fast path.  Every step is
-# best-effort: a failure is reported and the install completes, since
-# the extension retries on activation.
-#
-# The daemon is restarted under the extension's own rules: never while
+# The daemon is restarted under the same rules as install.sh: never while
 # the running daemon reports tasks in flight, and not at all when it is
 # healthy and already runs this exact runtime (that keeps its public
 # tunnel URL).
-# BEGIN: kiss-runtime-setup  (tests extract this block verbatim)
+# BEGIN: kiss-runtime-setup
 # kiss-web always listens on 8787; the override exists for the tests.
 KISS_WEB_PORT="${KISS_WEB_PORT:-8787}"
-
-installed_kiss_projects() {
-    # Print the kiss_project directory of every installed copy of
-    # extension version $1, the copy the ``code`` CLI installs into first
-    # (desktop / code-server) and the VS Code Server copy last.
-    local version="$1" root dir
-    [ -n "$version" ] || return 0
-    for root in "$HOME/.vscode/extensions" \
-                "$HOME/.vscode-insiders/extensions" \
-                "$HOME/.vscode-oss/extensions" \
-                "$HOME/.local/share/code-server/extensions" \
-                "$HOME/.vscode-server/extensions" \
-                "$HOME/.vscode-server-insiders/extensions"; do
-        dir="$root/ksenxx.kiss-sorcar-$version/kiss_project"
-        [ -f "$dir/pyproject.toml" ] && echo "$dir"
-    done
-    return 0
-}
 
 ensure_uv() {
     # Print the path of uv, installing it into ~/.local/bin when missing.
@@ -1330,7 +687,7 @@ ensure_uv() {
 
 add_local_bin_to_shell_rc() {
     # Put ~/.local/bin (uv, sorcar, cloudflared) on PATH in the login
-    # shell's rc file, once; same file choice and line as the extension.
+    # shell's rc file, once.
     local rc line
     case "${SHELL:-}" in
         */zsh|*/zsh-5) rc="$HOME/.zshrc" ;;
@@ -1382,71 +739,15 @@ install_cloudflared() {
     return 0
 }
 
-setup_bundled_runtime() {
-    # Build the Python environment of every installed copy of extension
-    # version $1, then the ``sorcar`` CLI (bound to the first copy),
-    # Playwright's Chromium and cloudflared.
-    # Leaves the first copy in KISS_PRIMARY_PROJECT for the daemon start.
-    local version="$1" uv project primary="" bin_dir="$HOME/.local/bin"
-    local projects
-    KISS_PRIMARY_PROJECT=""
-    projects="$(installed_kiss_projects "$version")"
-    if [ -z "$projects" ]; then
-        echo "   No installed copy of the extension found; the extension sets up its runtime on first activation."
-        return 0
-    fi
-    if ! uv="$(ensure_uv)"; then
-        echo "   WARNING: uv is not available; the extension installs it on first activation."
-        return 0
-    fi
-    while IFS= read -r project; do
-        echo "   Installing Python dependencies in $project..."
-        if (cd "$project" && "$uv" sync); then
-            [ -n "$primary" ] || primary="$project"
-        else
-            echo "   WARNING: uv sync failed in $project; the extension retries on activation."
-        fi
-    done <<< "$projects"
-    [ -n "$primary" ] || return 0
-    KISS_PRIMARY_PROJECT="$primary"
-
-    # The CLI wrapper, byte for byte what the extension writes.
-    if mkdir -p "$bin_dir" && printf '%s\n' '#!/bin/bash' \
-            "# Installed by ${BRAND_PRODUCT_NAME:-KISS Sorcar} VS Code extension" \
-            'export KISS_WORKDIR="$PWD"' \
-            "exec \"$uv\" run --directory \"$primary\" sorcar \"\$@\"" > "$bin_dir/sorcar.tmp" \
-            && chmod 755 "$bin_dir/sorcar.tmp" && mv -f "$bin_dir/sorcar.tmp" "$bin_dir/sorcar"; then
-        echo "   Installed the sorcar CLI at $bin_dir/sorcar"
-    else
-        echo "   WARNING: could not install the sorcar CLI at $bin_dir/sorcar; the extension retries on activation."
-    fi
-    add_local_bin_to_shell_rc
-
-    echo "   Installing Playwright Chromium..."
-    if ! (cd "$primary" && "$uv" run python -m playwright install chromium); then
-        echo "   WARNING: Playwright Chromium install failed; the extension retries on activation."
-    elif [ "$(uname -s)" = "Linux" ]; then
-        # Chromium's system libraries need root (install-deps calls sudo
-        # itself); only try when that cannot stall on a password prompt.
-        if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
-            (cd "$primary" && "$uv" run python -m playwright install-deps chromium) \
-                || echo "   WARNING: Chromium system libraries not installed (playwright install-deps failed)."
-        else
-            echo "   Chromium system libraries: run 'sudo $primary/.venv/bin/python -m playwright install-deps chromium' if the browser fails to start."
-        fi
-    fi
-    install_cloudflared
-}
-
 kiss_web_port_open() {
     (exec 3<>"/dev/tcp/127.0.0.1/$KISS_WEB_PORT") 2>/dev/null
 }
 
 kiss_web_fingerprint() {
-    # Same digest as computeKissWebFingerprint in DependencyInstaller.ts:
-    # the kiss-web launcher bytes, the work dir, and the newest mtime of
-    # the bundled sources.  Matching it lets the extension skip its own
-    # restart on first activation.
+    # Digest of the kiss-web launcher bytes, the work dir, and the newest
+    # mtime of the bundled modules — the ``.pyc`` files too, which every
+    # install writes afresh, so an updated library never matches the
+    # running daemon's fingerprint.
     "$1/.venv/bin/python" - "$1" "$2" <<'EOF'
 import hashlib, os, sys
 project, workdir = sys.argv[1], sys.argv[2]
@@ -1468,7 +769,7 @@ def walk(directory):
             continue
         if entry.is_dir(follow_symlinks=False):
             walk(entry.path)
-        elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".py"):
+        elif entry.is_file(follow_symlinks=False) and entry.name.endswith((".py", ".pyc")):
             try:
                 latest = max(latest, entry.stat().st_mtime_ns)
             except OSError:
@@ -1494,6 +795,61 @@ kiss_web_is_idle() {
     done
 }
 
+service_kiss_home() {
+    # Print the KISS_HOME the existing kiss-web unit/plist sets, if any.
+    local unit="$HOME/.config/systemd/user/kiss-web.service"
+    local plist="$HOME/Library/LaunchAgents/com.kiss.web-server.plist"
+    [ -f "$unit" ] && sed -n 's/^Environment=KISS_HOME=//p' "$unit" | unit_unescape
+    [ -f "$plist" ] && sed -n '/<key>KISS_HOME<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$plist" | xml_unescape
+    return 0
+}
+
+stored_remote_password() {
+    # Print the ``remote_password`` of the state directory $1 as the app
+    # at $2 reads it (empty when none is stored or it cannot be read);
+    # never stores one.
+    KISS_HOME="$1" "$2/.venv/bin/python" -m kiss.core.remote_password --show 2>/dev/null 9>&- || true
+}
+
+home_relative() {
+    # Print path $1 with a leading $HOME shortened to ``~``.  Not a
+    # pattern substitution: bash 3.2 (macOS) prints its ``\~`` replacement
+    # literally and bash 5 tilde-expands a bare ``~`` back to $HOME.
+    local home="${HOME%/}"
+    case "$1" in
+        "$home") printf '~\n' ;;
+        "$home"/*) printf '~%s\n' "${1#"$home"}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+other_brand_homes() {
+    # Print, one per line, every state directory on this machine other
+    # than $KISS_HOME_DIR that a white-label brand keeps: a ``$HOME/.<name>``
+    # whose post-install.d/ holds an executable hook, and the home the
+    # existing service runs from (service_kiss_home) when it exists.
+    local dir hook seen=$'\n'"${KISS_HOME_DIR%/}"$'\n'
+    {
+        for dir in "$HOME"/.*/; do
+            dir="${dir%/}"
+            case "${dir##*/}" in .|..) continue ;; esac
+            for hook in "$dir"/post-install.d/*; do
+                if [ -f "$hook" ] && [ -x "$hook" ]; then
+                    echo "$dir"
+                    break
+                fi
+            done
+        done
+        service_kiss_home
+    } | while IFS= read -r dir; do
+        dir="${dir%/}"
+        [ -n "$dir" ] && [ -d "$dir" ] || continue
+        case "$seen" in *$'\n'"$dir"$'\n'*) continue ;; esac
+        seen="$seen$dir"$'\n'
+        echo "$dir"
+    done
+}
+
 previous_kiss_web_homes() {
     # State directories of the daemon the existing service runs: the
     # KISS_HOME its unit/plist sets, and its runtime's own default home.
@@ -1501,8 +857,7 @@ previous_kiss_web_homes() {
     # still be asked before it is replaced.
     local unit="$HOME/.config/systemd/user/kiss-web.service"
     local plist="$HOME/Library/LaunchAgents/com.kiss.web-server.plist" bin python
-    [ -f "$unit" ] && sed -n 's/^Environment=KISS_HOME=//p' "$unit" | unit_unescape
-    [ -f "$plist" ] && sed -n '/<key>KISS_HOME<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$plist" | xml_unescape
+    service_kiss_home
     # The first word of ExecStart is the launcher (older units pass
     # ``--workdir``); its sibling python knows the runtime's own home.
     for bin in "$([ -f "$unit" ] && sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$unit" | unit_unescape)" \
@@ -1515,12 +870,12 @@ previous_kiss_web_homes() {
 }
 
 acquire_kiss_web_restart_lock() {
-    # Take the extension's restart lock $1 ({"pid":…,"token":…}, created
-    # exclusively) so a VS Code window and this script never restart the
-    # daemon at the same time; a lock whose owner is dead is broken.
-    # Same patience as the extension: a lock without a readable owner is
-    # left alone for 2 minutes (the extension creates the file before it
-    # writes its identity), a live owner for 10 minutes.
+    # Take the restart lock $1 ({"pid":…,"token":…}, created exclusively)
+    # so two installers (the daemon's Update button and a terminal run,
+    # say) never restart the daemon at the same time; a lock whose owner
+    # is dead is broken.  A lock without a readable owner is left alone
+    # for 2 minutes (the file is created before the identity is written),
+    # a live owner for 10 minutes.
     local owner
     if ( set -o noclobber; echo "{\"pid\":$$,\"token\":\"install-$$\"}" > "$1" ) 2>/dev/null; then
         KISS_WEB_RESTART_LOCK_HELD="$1"
@@ -1539,7 +894,7 @@ acquire_kiss_web_restart_lock() {
 
 release_kiss_web_restart_lock() {
     # Remove lock $1 if this script holds it (also run from the EXIT trap,
-    # so an interrupted restart never leaves the extension locked out).
+    # so an interrupted restart never leaves the next installer locked out).
     grep -qs "\"token\":\"install-$$\"" "$1" && rm -f "$1"
     KISS_WEB_RESTART_LOCK_HELD=""
     return 0
@@ -1584,8 +939,7 @@ kiss_web_hosts_this_shell() {
 
 restart_kiss_web_launch_agent() {
     # Boot service $1 (gui/<uid>/<label>) out of launchd, register plist
-    # $3 in domain $2 afresh and start it — the same sequence the
-    # extension's macLaunchd.js runs.  ``launchctl bootout`` only asks
+    # $3 in domain $2 afresh and start it.  ``launchctl bootout`` only asks
     # the daemon to exit and returns at once; until the old process is
     # gone the label stays registered, so an immediate ``bootstrap`` is
     # refused ("Bootstrap failed: 5: Input/output error") and the
@@ -1601,8 +955,7 @@ restart_kiss_web_launch_agent() {
         echo "   Waiting for the old kiss-web to exit..."
         while launchctl print "$service" &>/dev/null; do
             if [ "$waited" -ge "${KISS_WEB_DRAIN_TIMEOUT:-30}" ]; then
-                # Fail closed, as the extension does: keep the
-                # registration launchd still holds (the plist it read,
+                # Fail closed: keep the registration launchd still holds (the plist it read,
                 # not the one just written) and restart its process.
                 echo "   WARNING: the old kiss-web has not exited after ${waited}s; restarting it in place."
                 stop_stray_kiss_web
@@ -1659,7 +1012,7 @@ xml_unescape() {
 
 write_kiss_web_plist() {
     # Write LaunchAgent $1 running kiss-web $2 in work dir $3 with logs
-    # under $4; same content as the extension writes.  The daemon resolves
+    # under $4.  The daemon resolves
     # its state dir from $KISS_HOME, so a KISS_HOME set for this install
     # must reach the service too.
     local plist="$1" kiss_web="$2" workdir="$3" home="$4" kiss_home_entry=""
@@ -1703,7 +1056,7 @@ EOF
 
 write_kiss_web_unit() {
     # Write systemd user unit $1 running kiss-web $2 in work dir $3 with
-    # logs under $4; same content as the extension writes.
+    # logs under $4.
     local unit="$1" kiss_web="$2" workdir="$3" home="$4" kiss_home_line=""
     if [ -n "${KISS_HOME:-}" ]; then
         kiss_home_line="Environment=KISS_HOME=$(unit_escape "$KISS_HOME")"$'\n'
@@ -1737,14 +1090,14 @@ start_kiss_web_daemon() {
     local project="$1" workdir="$2" kiss_web="$1/.venv/bin/kiss-web"
     local python="$1/.venv/bin/python" home lock
     if [ ! -x "$kiss_web" ]; then
-        echo "   kiss-web not built in $project; the extension starts the daemon on first activation."
+        echo "   kiss-web not built in $project; not starting the daemon."
         return 0
     fi
     home="$("$python" -c 'from kiss.core.config import kiss_home; print(kiss_home())')" || return 0
     mkdir -p "$home"
     lock="$home/.kiss-web.restart.lock"
     if ! acquire_kiss_web_restart_lock "$lock"; then
-        echo "   A VS Code window is restarting kiss-web; leaving it to that."
+        echo "   Another installer is restarting kiss-web; leaving it to that."
         return 0
     fi
     restart_kiss_web_locked "$project" "$workdir" "$home"
@@ -1772,7 +1125,7 @@ restart_kiss_web_locked() {
         [ -n "$old" ] && candidates+=("$old/sorcar-local.json")
     done < <(previous_kiss_web_homes)
     if ! kiss_web_is_idle "$python" "${candidates[@]}"; then
-        echo "   kiss-web has tasks in flight; restart deferred (the extension restarts it, or re-run this script once they finish)."
+        echo "   kiss-web has tasks in flight; restart deferred (re-run this script once they finish)."
         return 0
     fi
     # "Up" below means the new daemon rewrote its endpoint file after this
@@ -1814,8 +1167,11 @@ restart_kiss_web_locked() {
         echo "   Starting kiss-web as a detached background process..."
         stop_stray_kiss_web
         # ``exec`` so no shell lingers holding this script's output open;
-        # ``9>&-`` keeps the update lock out of the daemon.
-        (cd "$workdir" && exec nohup "$kiss_web" >> "$home/kiss-web-stdout.log" 2>> "$home/kiss-web-stderr.log" < /dev/null 9>&-) &
+        # ``3>&-`` keeps the saved terminal (the password box's fd) and
+        # ``9>&-`` the update lock out of the daemon.  The closes are a
+        # separate ``exec``: ``exec CMD 9>&-`` leaks bash 3.2's (macOS)
+        # undo copy of fd 9 into CMD, which then holds the lock.
+        (cd "$workdir" && exec 3>&- 9>&- && exec nohup "$kiss_web" >> "$home/kiss-web-stdout.log" 2>> "$home/kiss-web-stderr.log" < /dev/null) &
     fi
     while [ "$waited" -lt "${KISS_WEB_START_TIMEOUT:-90}" ]; do
         if [ "$endpoint" -nt "$stamp" ] && kiss_web_port_open; then
@@ -1832,49 +1188,223 @@ restart_kiss_web_locked() {
 }
 # END: kiss-runtime-setup
 
-# Tee stdout+stderr to the install log AND the terminal.  We use ``exec``
-# process substitution rather than wrapping the install body in
-# ``{ ... } 2>&1 | tee "$LOG_FILE"`` because the latter forks a subshell
-# for the entire install body, and POSIX bash *resets* trapped signals
-# back to their default disposition inside that subshell (see bash(1)
-# "TRAPS / Trapped signals that are not being ignored are reset to their
-# original values in a subshell or subshell environment when one is
-# created").  In other words, the ``trap handle_interrupt INT TERM``
-# above had no effect inside the pipeline subshell — a stray ``\x03``
-# injected into the PTY by VS Code's terminal-disposal teardown killed
-# the subshell instantly, manifesting as an unexplained ``^C`` in step
-# [5/5] with the install aborted before the ``.extension-updated``
-# marker write.
-#
-# ``exec > >(tee -a "$LOG_FILE") 2>&1`` keeps the install body running
-# in the outer (trap-handled) shell while still streaming output to
-# both the user's terminal AND the log file.  ``-a`` appends so a
-# previous install's log is preserved when this run is itself a retry
-# after an interrupted attempt.
-#
-# The ``trap '' INT TERM`` INSIDE the process substitution is load-
-# bearing too: VS Code's terminal teardown signals the whole foreground
-# process GROUP, so the same stray SIGINT that the outer trap absorbs
-# also reaches the tee child.  With default disposition tee died, and
-# the outer shell's very next write (the trap's own diagnostic!) hit a
-# dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
-# defeating the trap fix above.  Ignored dispositions survive exec, so
-# tee inherits SIG_IGN and keeps draining until bash exits and closes
-# the pipe.  HUP is ignored for the same reason: when the terminal goes
-# away (kiss-web restarting under a Terminal tab it hosts, VS Code
-# closing a pane) the shell forwards SIGHUP to the whole group, and tee
-# must keep the log fed while ``handle_hup`` reroutes the script's own
-# output; its writes to the hung-up terminal fail with EIO, which tee
-# reports once and ignores.  ``9>&-`` keeps the update-lock fd out of tee: tee outlives
-# this shell by the few milliseconds it takes to see EOF and exit, and
-# it closes its stdout first (coreutils ``close_stdout``), so a caller
-# that saw our output end would otherwise find the lock still held.
-exec > >(trap '' INT TERM HUP; exec tee -a "$LOG_FILE" 9>&-) 2>&1
+# ---------------------------------------------------------------------------
+# The app directory
+# ---------------------------------------------------------------------------
+# BEGIN: kiss-app-files  (tests extract this block verbatim)
+# Python files installed as scripts rather than byte-compiled: glob
+# patterns (bash ``case`` syntax, ``*`` also matches ``/``) matched
+# against the path relative to the app directory.  Every other
+# ``src/kiss/**/*.py`` is replaced by its ``.pyc`` in step [3/5].
+COMPILE_KEEP_SOURCE=(
+    # The bundled SEAs: ``run_agent``, the ``sea`` CLI and the webapp
+    # load them from their ``.py`` path (sea_commands.py, sea_lint.py).
+    "src/kiss/agents/seas/*"
+    # Channel SEAs (agents/third_party_agents/*/<channel>_sea.py) and the
+    # cron prompt SEA (agents/sorcar/cron_prompt_sea.py): loaded by path too.
+    "*_sea.py"
+    # The ``/cron`` built-in command (BUILTIN_COMMANDS in sea_commands.py):
+    # a SEA script like the others, located through its module name.
+    "src/kiss/agents/sorcar/cron_agent.py"
+    # Read as text by the webapp's version check (web_server._parse_version_py)
+    # and by hatchling for the project version.
+    "src/kiss/core/_version.py"
+    # kiss.scripts.sync_db ships its own source (``__file__``) and this
+    # module's to the remote machine it synchronizes the database with.
+    "src/kiss/scripts/sync_db.py"
+    "src/kiss/agents/sorcar/chat_summary.py"
+)
+
+keep_source() {
+    # True when the app-relative path $1 is in COMPILE_KEEP_SOURCE.
+    local pattern
+    for pattern in "${COMPILE_KEEP_SOURCE[@]}"; do
+        # shellcheck disable=SC2254
+        case "$1" in $pattern) return 0 ;; esac
+    done
+    return 1
+}
+
+list_app_files() {
+    # Print, relative to the checkout, every file the app needs: the
+    # project files uv builds the venv from, and the kiss package without
+    # its tests and without the webapp's JS tooling (package.json, eslint,
+    # the jsdom tests) — only the ``media`` frontend, which kiss-web serves.
+    # A git checkout lists its tracked files; a tarball falls back to find.
+    local path
+    for path in pyproject.toml uv.lock README.md LICENSE; do
+        [ -f "$PROJECT_DIR/$path" ] && echo "$path"
+    done
+    (
+        cd "$PROJECT_DIR"
+        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git ls-files src/kiss
+        else
+            find src/kiss \( -name __pycache__ -o -name node_modules -o -name out \) -prune \
+                -o -type f ! -name '*.pyc' ! -name .DS_Store -print
+        fi
+    ) | while IFS= read -r path; do
+        case "$path" in
+            src/kiss/tests/*) ;;
+            src/kiss/webapp/media/*) echo "$path" ;;
+            src/kiss/webapp/*) ;;
+            *) echo "$path" ;;
+        esac
+    done
+}
+
+copy_app_files() {
+    # Rebuild the project files and ``src`` of $APP_DIR from the checkout.
+    # The venv is kept (``uv sync`` reuses it); the rest is replaced so a
+    # file removed upstream does not linger.
+    local list="$KISS_HOME_DIR/.install-files" count
+    mkdir -p "$APP_DIR"
+    rm -rf "$APP_DIR/src" "$APP_DIR/pyproject.toml" "$APP_DIR/uv.lock" \
+           "$APP_DIR/README.md" "$APP_DIR/LICENSE"
+    list_app_files > "$list"
+    count="$(wc -l < "$list" | tr -d ' ')"
+    if [ "$count" -eq 0 ]; then
+        echo "   ERROR: no files to install found under $PROJECT_DIR/src/kiss"
+        rm -f "$list"
+        return 1
+    fi
+    (cd "$PROJECT_DIR" && tar cf - -T "$list") | (cd "$APP_DIR" && tar xf -) || {
+        rm -f "$list"
+        return 1
+    }
+    rm -f "$list"
+    echo "   Copied $count files to $APP_DIR"
+}
+
+# A white-label brand keeps its own versions of these frontend files in
+# the checkout's ``.brand/`` directory; the app gets them in place of the
+# stock files.
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png welcome-logo-dark.png)
+BRAND_MEDIA_REL="src/kiss/webapp/media"
+
+copy_brand_overlay() {
+    local overlay="$PROJECT_DIR/.brand" f
+    [ -d "$overlay" ] || return 0
+    echo "   Applying brand overlay from $overlay..."
+    for f in "${BRAND_OVERLAY_FILES[@]}"; do
+        [ -f "$overlay/$f" ] || continue
+        cp -f "$overlay/$f" "$APP_DIR/$BRAND_MEDIA_REL/$f" || return 1
+        echo "      $BRAND_MEDIA_REL/$f"
+    done
+}
+
+build_app_venv() {
+    # Build the Python environment of $APP_DIR with uv ($1).
+    echo "   Installing Python dependencies in $APP_DIR..."
+    run_with_heartbeat "uv sync" "$1" sync --directory "$APP_DIR" || return 1
+    # Pin the interpreter line uv chose: the ``.pyc`` files written below
+    # load only on that line, so a later ``uv run`` must not switch it.
+    "$APP_DIR/.venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' \
+        > "$APP_DIR/.python-version"
+}
+
+compile_app_library() {
+    # Byte-compile the library with the venv's own interpreter (a ``.pyc``
+    # loads only on the Python line that wrote it) and delete the compiled
+    # sources.  ``-b`` writes ``foo.pyc`` beside ``foo.py``, where Python
+    # imports it once ``foo.py`` is gone; ``unchecked-hash`` keeps Python
+    # from looking for a source to validate it against.  The files of
+    # COMPILE_KEEP_SOURCE stay as scripts and lose their ``.pyc`` instead.
+    local python="$APP_DIR/.venv/bin/python" src="$APP_DIR/src" path rel
+    local compiled=0 scripts=0
+    "$python" -m compileall -q -f -b --invalidation-mode unchecked-hash "$src" || return 1
+    find "$src" -name __pycache__ -type d -prune -exec rm -rf {} +
+    while IFS= read -r path; do
+        rel="${path#"$APP_DIR"/}"
+        if keep_source "$rel"; then
+            rm -f "${path%.py}.pyc"
+            scripts=$((scripts + 1))
+        else
+            rm -f "$path"
+            compiled=$((compiled + 1))
+        fi
+    done < <(find "$src" -name '*.py' -type f)
+    echo "   Byte-compiled $compiled modules; $scripts Python scripts kept as source"
+}
+# END: kiss-app-files
+
+install_sorcar_cli() {
+    # The ``sorcar`` CLI wrapper, bound to $APP_DIR through uv ($1).
+    if printf '%s\n' '#!/bin/bash' \
+            "# Installed by ${BRAND_PRODUCT_NAME:-KISS Sorcar} install.sh" \
+            'export KISS_WORKDIR="$PWD"' \
+            "exec \"$1\" run --directory \"$APP_DIR\" sorcar \"\$@\"" > "$BIN_DIR/sorcar.tmp" \
+            && chmod 755 "$BIN_DIR/sorcar.tmp" && mv -f "$BIN_DIR/sorcar.tmp" "$BIN_DIR/sorcar"; then
+        echo "   Installed the sorcar CLI at $BIN_DIR/sorcar"
+    else
+        echo "   WARNING: could not install the sorcar CLI at $BIN_DIR/sorcar"
+    fi
+    add_local_bin_to_shell_rc
+}
+
+install_repo_script_launcher() {
+    # A launcher in $BIN_DIR for the checkout's $1 script (rsorcar,
+    # sorcar-docker): a wrapper, not a symlink or copy, so the script sees
+    # its own directory as the checkout.
+    local name="$1"
+    local target="$PROJECT_DIR/$name"
+    if [ ! -f "$target" ]; then
+        echo "   WARNING: $target not found — skipping $name launcher."
+        return 0
+    fi
+    {
+        echo '#!/bin/bash'
+        echo "# Installed by install.sh — launcher for $target"
+        echo "# Wrapper (not a symlink/copy): the real script must see its own"
+        echo "# directory as the KISS Sorcar checkout."
+        echo "exec bash \"$target\" \"\$@\""
+    } > "$BIN_DIR/$name"
+    chmod +x "$BIN_DIR/$name"
+    echo "   Installed $BIN_DIR/$name -> $target"
+}
+
+install_playwright_chromium() {
+    # Playwright's Chromium for the browser tools, through uv ($1).
+    echo "   Installing Playwright Chromium..."
+    if ! run_with_heartbeat "playwright install" "$1" run --directory "$APP_DIR" python -m playwright install chromium; then
+        echo "   WARNING: Playwright Chromium install failed; run '$APP_DIR/.venv/bin/python -m playwright install chromium' later."
+    elif [ "$(uname -s)" = "Linux" ]; then
+        # Chromium's system libraries need root (install-deps calls sudo
+        # itself); only try when that cannot stall on a password prompt.
+        if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
+            (cd "$APP_DIR" && "$1" run python -m playwright install-deps chromium) \
+                || echo "   WARNING: Chromium system libraries not installed (playwright install-deps failed)."
+        else
+            echo "   Chromium system libraries: run 'sudo $APP_DIR/.venv/bin/python -m playwright install-deps chromium' if the browser fails to start."
+        fi
+    fi
+}
+
+# Tee stdout+stderr to the install log AND the terminal.  A process
+# substitution, not a ``{ … } | tee`` pipeline: bash resets trapped
+# signals to their default disposition inside a pipeline's subshells, so
+# the INT/TERM/HUP traps above would be dead for the whole install body;
+# the script also keeps its own pid (the lock, the progress file and the
+# daemon's updater all name it) and ``set -e`` keeps seeing the script's
+# exit status.  The tee child ignores
+# INT/TERM/HUP so a stray terminal signal cannot cut the log short, and
+# closes the lock fd so it never keeps the update lock alive.
+# fd 3 keeps the terminal: the remote-access password is printed there
+# at the end, and must not land in the log.  A nested brand-home pass
+# (``_KISS_BRAND_PASS``, step [5/5]) writes to the outer run's tee
+# instead: its own tee would put every line in the log twice.
+exec 3>&1
+if [ -z "${_KISS_BRAND_PASS:-}" ]; then
+    exec > >(trap '' INT TERM HUP; exec 9>&-; exec tee -a "$LOG_FILE") 2>&1
+else
+    exec 2>&1
+fi
 
 {
-    echo "=== KISS Sorcar Source Install ==="
+    echo "=== ${BRAND_PRODUCT_NAME:-KISS Sorcar} App Install ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Directory: $PROJECT_DIR"
+    echo "Checkout: $PROJECT_DIR"
+    echo "App directory: $APP_DIR"
     echo "OS: $OS ($ARCH)"
     if [ "$_KISS_INTERACTIVE" = 1 ]; then
         echo "Mode: interactive (asks before installing Homebrew; pass --non-interactive to skip the question)"
@@ -1883,356 +1413,238 @@ exec > >(trap '' INT TERM HUP; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     fi
     echo ""
 
-    if [ "$OS" = "Darwin" ]; then
-        report_step "Checking Xcode Command Line Tools..."
-        ensure_xcode_clt
-        echo ""
+    if [ ! -d "$PROJECT_DIR/src/kiss" ]; then
+        echo "ERROR: $PROJECT_DIR/src/kiss not found; run this script from a KISS Sorcar checkout."
+        exit 1
+    fi
 
+    if [ "$OS" = "Darwin" ]; then
+        # Homebrew is optional: it is only the preferred way to install
+        # cloudflared (install_cloudflared falls back to a GitHub download).
         report_step "Checking Homebrew..."
         ensure_homebrew
         echo ""
     fi
 
-    report_step "[1/5] Checking git..."
-    if ! command -v git &>/dev/null; then
-        install_git
-        hash -r
-    fi
-    if ! command -v git &>/dev/null; then
-        echo "   ERROR: git is still not available after the install attempt."
+    report_step "[1/5] Copying ${BRAND_PRODUCT_NAME:-KISS Sorcar} to $APP_DIR..."
+    copy_app_files
+    copy_brand_overlay
+    echo ""
+
+    report_step "[2/5] Building the Python environment..."
+    if ! UV="$(ensure_uv)"; then
+        echo "   ERROR: uv is not available and could not be installed (https://astral.sh/uv)."
         exit 1
     fi
-    # `|| true`: under `pipefail` a git that prints no parseable version
-    # would otherwise abort the script at this assignment.
-    INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-    echo "   git $INSTALLED_GIT ready"
-    echo ""
-
-    report_step "Checking uv..."
-    if command -v uv &>/dev/null; then
-        INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        echo "   uv $INSTALLED_UV ready"
-    else
-        echo "   uv not found — will be installed with the bundled runtime in step [5/5]"
-    fi
-    echo ""
-
-    report_step "[2/5] Checking Node.js..."
-    if ! command -v node &>/dev/null || ! command -v npm &>/dev/null || ! command -v npx &>/dev/null; then
-        install_node || true
-    fi
-    if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
-        INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
-        echo "   node v$INSTALLED_NODE ready"
-        echo "   npm $(npm --version) ready"
-    else
-        echo "   ERROR: Node.js, npm, and npx are required to build the extension."
-        echo "   Install Node.js from https://nodejs.org and re-run this script."
+    echo "   Using uv at $UV"
+    if ! build_app_venv "$UV"; then
+        echo "   ERROR: uv sync failed in $APP_DIR"
         exit 1
     fi
     echo ""
 
-    report_step "[3/5] Checking VS Code CLI..."
-    if ! find_code_cli; then
-        install_code_cli || true
-        find_code_cli || true
-    fi
-    if [ -n "$CODE_CLI" ]; then
-        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
-        echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
-    else
-        echo "   ERROR: VS Code CLI not found — cannot install the extension."
-        echo "   Install VS Code from https://code.visualstudio.com and re-run this script."
+    report_step "[3/5] Byte-compiling the library..."
+    if ! compile_app_library; then
+        echo "   ERROR: byte-compiling $APP_DIR/src failed"
         exit 1
     fi
     echo ""
 
-    # Clear VS Code's caches BEFORE the extension is built and installed so
-    # the update in step [5/5] cannot be served from stale cached state (see
-    # clear_vscode_cache above for what is swept and why it is best-effort).
-    report_step "Clearing VS Code caches..."
-    clear_vscode_cache
-    echo ""
-
-    report_step "[4/5] Building VS Code extension..."
-    VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
-    VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
-    cd "$VSCODE_EXT_DIR"
-    # npm ci flags — chosen so a fresh OR repeat run cannot hang:
-    #
-    # --ignore-scripts: the lockfile's only packages with install scripts are
-    #   `keytar` (an *optional*, lazily-imported dep of @vscode/vsce used
-    #   solely for publish credentials — never by `vsce package`) and
-    #   `@vscode/vsce-sign` (signing only).  keytar's install script runs
-    #   `prebuild-install || node-gyp rebuild`, which downloads from the
-    #   archived atom/node-keytar GitHub releases (or compiles natively) and
-    #   can block forever with no output — hanging the Update button's
-    #   install at "[4/5] Building VS Code extension..." right after npm's
-    #   deprecation warnings.  Neither script is needed to compile and
-    #   package the VSIX.
-    #
-    # --omit=optional: matches the release scripts.  Skips keytar entirely
-    #   (it is an *optional* dep of @vscode/vsce), so even npm's
-    #   "deprecated prebuild-install" warning — the last line many users
-    #   saw before the script appeared to hang — is gone.
-    #
-    # --prefer-offline: re-runs reuse the npm cache populated by the
-    #   previous attempt instead of re-downloading the whole dependency
-    #   tree.  Critical for the Update button: when a user re-runs the
-    #   script after an interrupted attempt, the second run is ~10× faster
-    #   because every tarball is already in ~/.npm.
-    #
-    # --no-audit --no-fund skip more network round-trips and noise.
-    NPM_CI_FLAGS=(--ignore-scripts --omit=optional --prefer-offline --no-audit --no-fund)
-    echo "   Installing extension dependencies (npm ci)..."
-    echo "   This typically takes 30–90 s the first time and ~10 s on re-runs."
-    # Retry once on transient failure (network blip, mirror flake).  The
-    # heartbeat wrapper makes sure the user sees elapsed-time output every
-    # ~15 s, so a silent stretch of npm output no longer looks like a hang.
-    if ! run_with_heartbeat "npm ci" npm ci "${NPM_CI_FLAGS[@]}"; then
-        echo "   npm ci failed — retrying once with a clean node_modules..."
-        rm -rf node_modules
-        run_with_heartbeat "npm ci (retry)" npm ci "${NPM_CI_FLAGS[@]}"
-    fi
-    echo "   Compiling extension TypeScript..."
-    run_with_heartbeat "tsc" npm run compile
-    # The build runs between apply_brand_overlay and restore_brand_overlay,
-    # so a failing step is recorded instead of exiting under ``set -e``
-    # and the checkout is restored either way.
-    build_rc=0
-    apply_brand_overlay "$PROJECT_DIR" || build_rc=$?
-    if [ "$build_rc" = 0 ]; then
-        echo "   Copying bundled KISS runtime..."
-        run_with_heartbeat "copy-kiss" npm run copy-kiss || build_rc=$?
-    fi
-    if [ "$build_rc" = 0 ]; then
-        echo "   Packaging VSIX..."
-        run_with_heartbeat "vsce package" npm run package || build_rc=$?
-    fi
-    restore_brand_overlay "$PROJECT_DIR"
-    if [ "$build_rc" != 0 ]; then
-        echo "   ERROR: extension build failed (exit $build_rc)"
-        exit "$build_rc"
-    fi
-    cd "$PROJECT_DIR"
-    if [ ! -f "$VSIX" ]; then
-        echo "   ERROR: Failed to build VSIX"
-        exit 1
-    fi
-    echo "   Built $VSIX"
-    echo ""
-
-    # The ``sorcar`` CLI itself is installed into ~/.local/bin once the
-    # bundled runtime is built (setup_bundled_runtime, step [5/5]).  Install
-    # the companion repo-root scripts the same way so they too can be run
-    # from anywhere.
-    report_step "Installing rsorcar and sorcar-docker launchers..."
+    report_step "[4/5] Installing the sorcar CLI, Playwright Chromium and cloudflared..."
+    install_sorcar_cli "$UV"
     install_repo_script_launcher rsorcar
     install_repo_script_launcher sorcar-docker
+    install_playwright_chromium "$UV"
+    install_cloudflared
     echo ""
 
-    # The banner sits outside the block below because tests extract that
-    # block verbatim and run it without report_step.
-    report_step "[5/5] Installing VS Code extension..."
-    # BEGIN: kiss-step-5-5-terminal-freeze  (tests extract this block verbatim)
-    # Heads-up BEFORE the disruptive part of this step.  When install.sh
-    # runs inside a VS Code integrated terminal (the Update button, or a
-    # user-opened terminal), ``--install-extension --force`` below makes
-    # VS Code detect the on-disk extension update and reload — and that
-    # reload can dispose (or simply stop rendering) the very terminal this
-    # script is printing to.  The output then appears to freeze with no
-    # prompt ever returning, and users conclude the install hung.  In a
-    # non-interactive run it did not: the new-session (setsid) detachment
-    # at the top of this script keeps the install running, and the log
-    # (see ``$LOG_FILE``) shows it completing a few seconds later.  An
-    # interactive run skipped that detachment to keep its terminal, so a
-    # disposed terminal can cut it short; the log tells which happened.
-    # The only reliable channel to tell the user is this terminal, BEFORE
-    # it can die — hence the notice below must stay ahead of the
-    # ``--install-extension`` call.
-    echo "   NOTE: VS Code may reload to pick up the update while this step runs."
-    echo "         If this terminal stops updating (or never shows a prompt again),"
-    if [ "${_KISS_INTERACTIVE:-0}" = 1 ]; then
-        echo "         check the log; if the reload closed this terminal the install"
-        echo "         may have been cut short, and re-running this script resumes it."
-    else
-        echo "         the install is NOT stuck — it keeps running detached and"
-        echo "         finishes on its own."
-    fi
-    echo "         Follow progress with:"
-    echo "             tail -f \"$LOG_FILE\""
-    echo "         Completion is marked by the line: === Source bootstrap complete ==="
-    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1 9>&-; then
-        echo "   ERROR: '$CODE_CLI --install-extension' failed; the update was not applied."
-        exit 1
-    fi
-    echo "   Extension installed into VS Code"
-    # VS Code in the browser (``code serve-web``, started at the end of
-    # this script) is a VS Code Server: it loads its extensions from
-    # ~/.vscode-server/extensions, not from the desktop's directory, so
-    # install the VSIX there as well.  This happens before the post-install
-    # hooks below so a brand hook patches this copy too (and before
-    # guard_vsix_tracking may put the release archive back in place of the
-    # fresh build).  Not fatal: the desktop install above is the one the
-    # rest of the setup depends on.
-    if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
-        if "$CODE_CLI" --install-extension "$VSIX" --extensions-dir "$HOME/.vscode-server/extensions" --force 2>&1 9>&-; then
-            echo "   Extension installed into VS Code Server ($HOME/.vscode-server/extensions)"
-        else
-            echo "   WARNING: could not install the extension into $HOME/.vscode-server/extensions;"
-            echo "            VS Code in the browser will run without KISS Sorcar."
-        fi
-    fi
-    # Keep the freshly built VSIX from dirtying git (see guard_vsix_tracking
-    # for the full rationale).  Public kiss_ai clones ship the VSIX as a
-    # tracked file in every release commit, so "tracked" is a healthy state
-    # there and the guard restores HEAD's copy instead of failing; in the
-    # development repo a tracked VSIX means an accidental ``git add -f``
-    # and remains a hard error.
-    if ! guard_vsix_tracking "$PROJECT_DIR"; then
-        exit 1
-    fi
-
-    # The kiss-web daemon is restarted only at the very end of this step
-    # (start_kiss_web_daemon), under the extension's own rules: never
-    # while the running daemon reports tasks in flight, in which case the
-    # old daemon keeps serving and the extension's DependencyInstaller
-    # restarts it later (``restartKissWebDaemon``, fingerprint mismatch
-    # after the window reload).  Running this script therefore never
-    # clobbers in-flight agent runs.
-
-    # MODEL_INFO.json IS copied into the user's kiss home directory:
-    # every install/update refreshes ``$KISS_HOME/MODEL_INFO.json`` from
-    # the bundled ``src/kiss/core/models/MODEL_INFO.json``, and an
-    # *installed* KISS Sorcar reads its model catalog from that copy at
-    # runtime (``kiss.core.models.model_info._select_catalog_path``).
-    # The settings panel's "Update Models" button then refreshes the
-    # copy in place via ``kiss.scripts.update_models --model-info``.
-    # Development checkouts (project roots with a .git marker) keep
-    # reading the bundled file directly, so this copy never shadows a
-    # checkout's own source of truth.
-    #
-    # User-curated model overrides / extensions live in
-    # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
-    # short documentation block and one commented-out example entry —
-    # matching the ``MY_INJECTION.md`` pattern.
-    # The state directory is spelled out here and below rather than taken
-    # from KISS_HOME_DIR: the tests paste these fragments into harnesses
-    # that define neither KISS_HOME_DIR nor BRAND_HOME_DIR_NAME (there the
-    # stock ``.kiss`` applies).
+    report_step "[5/5] Finishing the setup..."
+    # An installed KISS Sorcar (a project root without .git, as $APP_DIR)
+    # reads its model catalog from $KISS_HOME/MODEL_INFO.json
+    # (kiss.core.models.model_info._select_catalog_path); refresh that copy
+    # from the bundled file on every install.  User overrides live in
+    # ~/.kiss/MY_MODELS.json and are never touched.
     MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
-    MODEL_INFO_DST="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}/MODEL_INFO.json"
+    MODEL_INFO_DST="$KISS_HOME_DIR/MODEL_INFO.json"
     if [ -f "$MODEL_INFO_SRC" ]; then
-        mkdir -p "$(dirname "$MODEL_INFO_DST")"
         cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
         echo "   Copied MODEL_INFO.json to $MODEL_INFO_DST"
     else
-        echo "   WARNING: $MODEL_INFO_SRC not found; skipped the ~/.kiss copy"
+        echo "   WARNING: $MODEL_INFO_SRC not found; skipped the $KISS_HOME_DIR copy"
     fi
 
-    # INJECTIONS.md is intentionally NOT copied into the user's kiss
-    # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
-    # directly from the installed package at runtime by
-    # ``kiss.server.tricks.read_tricks`` and ``getTricks`` in
-    # ``SorcarTab.ts``, so every extension upgrade automatically
-    # delivers the latest bundled tricks without clobbering user
-    # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
-    # — auto-seeded on first read with a single ``## Trick`` starter
-    # ("Write end-to-end 100% coverage tests for the feature first.
-    # Then implement the feature.").
-    #
-    # Re-introducing the copy here would mean a stale user-side
-    # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed
-    # bundled file forever after the first install.
-    KISS_HOME_DIR="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}"
-    mkdir -p "$KISS_HOME_DIR"
-
-    # Finish the runtime setup the extension would otherwise do on its
-    # first activation (see "Runtime setup without VS Code" above).  The
-    # Python environment is built before the hooks so a hook that needs
-    # it finds it; the daemon is (re)started after them, below, so it
-    # serves the extension as the hooks left it.
-    EXT_VERSION="$(node -p 'require(process.argv[1]).version' \
-        "$PROJECT_DIR/src/kiss/agents/vscode/package.json" 2>/dev/null || true)"
-    # ``|| …`` keeps ``set -e`` out of the function: every failure inside
-    # is reported and the install goes on.
-    setup_bundled_runtime "$EXT_VERSION" \
-        || echo "   WARNING: the runtime setup did not complete; the extension retries on activation."
-
     # Post-install hooks: every executable in $KISS_HOME_DIR/post-install.d/
-    # runs now, with the new extension directory on disk and before the
-    # reload marker below, so a layer that patches the installed extension
-    # (a white-label brand such as SeamlessLabs' s10s registers its
-    # installer here) is applied before the window reloads.  Hooks run in
-    # name order with KISS_HOME set and no stdin; a failing hook is
-    # reported and the update still completes.
+    # runs now, with the app on disk and before the daemon restart, so a
+    # layer that patches the installed files (a white-label brand) is
+    # applied before the daemon serves them.  Hooks run in name order
+    # with KISS_HOME and KISS_APP_DIR set and no stdin; a failing hook is
+    # reported and the install still completes.
     for hook in "$KISS_HOME_DIR"/post-install.d/*; do
         [ -f "$hook" ] && [ -x "$hook" ] || continue
         echo "   Running post-install hook $hook..."
         hook_rc=0
-        KISS_HOME="$KISS_HOME_DIR" "$hook" < /dev/null || hook_rc=$?
+        KISS_HOME="$KISS_HOME_DIR" KISS_APP_DIR="$APP_DIR" "$hook" < /dev/null || hook_rc=$?
         if [ "$hook_rc" != 0 ]; then
             echo "   WARNING: post-install hook $hook exited with status $hook_rc"
         fi
     done
 
-    # The marker must land in $KISS_HOME_DIR, not a hard-coded $HOME/.kiss:
-    # the extension resolves its state dir through $KISS_HOME (kissHomeDir()
-    # in userAssets.ts) and watches $KISS_HOME/.extension-updated to reload
-    # the window (extension.ts) and finish the update (DependencyInstaller).
-    # Writing the marker elsewhere leaves a custom-KISS_HOME install without
-    # its reload signal — the update appears to never happen.
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$KISS_HOME_DIR/.extension-updated"
-    # Remove any stale source-install marker from older versions of this
-    # installer.  The extension now always runs against the kiss_project
-    # bundled inside the VSIX, so the marker is no longer consulted and
-    # leaving it around would only mislead troubleshooting.  Older
-    # installers wrote it to the hard-coded ~/.kiss regardless of
-    # KISS_HOME, so clean both locations.
-    rm -f "$KISS_HOME_DIR/install_dir" "$HOME/.kiss/install_dir"
-    echo ""
+    # The remote-access password, stored as ``remote_password`` in
+    # $KISS_HOME_DIR/config.json (the Settings page shows it); the daemon
+    # checks it on every command a browser from another device sends.
+    # kiss.core.remote_password keeps the stored one and draws a random
+    # one only when none is stored yet, so an update never changes the
+    # password.  It is also shown in the box at the end of this script.
+    PREVIOUS_PASSWORD="$(stored_remote_password "$KISS_HOME_DIR" "$APP_DIR")"
+    REMOTE_PASSWORD="$(KISS_HOME="$KISS_HOME_DIR" "$APP_DIR/.venv/bin/python" -m kiss.core.remote_password 9>&-)" \
+        || { REMOTE_PASSWORD=""; echo "   WARNING: could not set the remote-access password."; }
+    if [ -z "$REMOTE_PASSWORD" ]; then
+        :
+    elif [ "$REMOTE_PASSWORD" = "$PREVIOUS_PASSWORD" ] && [ -n "${_KISS_BRAND_PASS:-}" ]; then
+        echo "   Kept the remote-access password of $KISS_HOME_DIR (shown in its Settings)."
+    elif [ "$REMOTE_PASSWORD" = "$PREVIOUS_PASSWORD" ]; then
+        echo "   Kept the existing remote-access password (shown at the end)."
+    elif [ -n "${_KISS_BRAND_PASS:-}" ]; then
+        echo "   Set a new remote-access password for $KISS_HOME_DIR (shown in its Settings)."
+    else
+        echo "   Set a new remote-access password (shown at the end)."
+    fi
 
-    # The daemon serves the directory this script was run from — the same
-    # one VS Code opens below, and so the extension's own work dir.
-    if [ -n "${KISS_PRIMARY_PROJECT:-}" ]; then
-        start_kiss_web_daemon "$KISS_PRIMARY_PROJECT" "$USER_PWD" \
-            || echo "   WARNING: kiss-web was not restarted; the extension restarts it on activation."
+    # Other brand homes.  A white-label brand (Seamless Loop, say) keeps
+    # its own state directory ~/.<brand> with its own app copy in
+    # ~/.<brand>/kiss and a post-install hook that re-brands it, and its
+    # kiss-web service runs from there (KISS_HOME in the unit/plist).
+    # Installing only into $KISS_HOME_DIR would leave that app stale and
+    # the restart below would switch the daemon to this one: so this
+    # checkout is installed into every other brand home as well, by a
+    # nested non-interactive run of this script -- steps 1-5 into
+    # $home/kiss, that home's MODEL_INFO.json, hooks and password.
+    # ``_KISS_BRAND_PASS`` makes the nested run skip this discovery (no
+    # recursion), the password box and the VS Code notice;
+    # KISS_SKIP_LAUNCH keeps it from touching the daemon or a browser.  A
+    # failed nested pass is a warning; this install still completes.
+    #
+    # The daemon is then the brand's, not this stock app: the home the
+    # existing service runs from when that is one of those homes and its
+    # app is there, else -- for an install into the stock ~/.kiss -- the
+    # first brand home the nested pass installed into (its hook has
+    # branded that app by now).  A brand on the machine is what the user
+    # chose to run; the stock app stays installed next to it and comes
+    # back once the brand's hook is removed (its own installer's revert)
+    # and the service definition no longer names that home.  An install
+    # into a brand's or a custom home starts its own daemon unless the
+    # service runs from another brand home.
+    RESTART_HOME=""
+    if [ -z "${_KISS_BRAND_PASS:-}" ]; then
+        first_brand_home=""
+        while IFS= read -r brand_home; do
+            [ -n "$brand_home" ] || continue
+            report_step "Installing into brand home $(home_relative "$brand_home")..."
+            if KISS_HOME="$brand_home" KISS_SKIP_LAUNCH=1 KISS_UPDATE_LOCK_HELD=1 _KISS_BRAND_PASS=1 \
+                    bash "$PROJECT_DIR/install.sh" --non-interactive < /dev/null 9>&-; then
+                echo "   Installed into brand home $brand_home"
+                [ -n "$first_brand_home" ] || first_brand_home="$brand_home"
+            else
+                echo "   WARNING: the install into brand home $brand_home failed (status $?); this install carries on."
+            fi
+        done < <(other_brand_homes)
+        service_home="$(service_kiss_home | head -n 1)"
+        service_home="${service_home%/}"
+        if [ -n "$service_home" ] && [ "$service_home" != "${KISS_HOME_DIR%/}" ] \
+            && [ -x "$service_home/kiss/.venv/bin/kiss-web" ]; then
+            RESTART_HOME="$service_home"
+            RESTART_WHY="The kiss-web service runs from brand home $RESTART_HOME; restarting that app."
+        elif [ "${KISS_HOME_DIR%/}" = "$HOME/.kiss" ] && [ -n "$first_brand_home" ]; then
+            RESTART_HOME="$first_brand_home"
+            RESTART_WHY="Brand home $RESTART_HOME is installed and branded; starting the daemon from that app, not from $APP_DIR."
+        fi
+    fi
+
+    # The daemon serves the directory this script was run from.
+    if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
+        if [ -n "$RESTART_HOME" ]; then
+            echo "   $RESTART_WHY"
+            # That home's password is the one the restarted daemon asks for.
+            brand_password="$(stored_remote_password "$RESTART_HOME" "$RESTART_HOME/kiss")"
+            [ -z "$brand_password" ] || REMOTE_PASSWORD="$brand_password"
+            KISS_HOME="$RESTART_HOME" start_kiss_web_daemon "$RESTART_HOME/kiss" "$USER_PWD" \
+                || echo "   WARNING: kiss-web was not restarted; start it with '$RESTART_HOME/kiss/.venv/bin/kiss-web'."
+        else
+            start_kiss_web_daemon "$APP_DIR" "$USER_PWD" \
+                || echo "   WARNING: kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+        fi
+    else
+        echo "   KISS_SKIP_LAUNCH set; not starting the kiss-web daemon."
     fi
     echo ""
 
-    echo "=== Source bootstrap complete ==="
-    echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Project: $PROJECT_DIR"
-    echo ""
-    echo "API keys and the remote-access password are set in VS Code (the extension"
-    echo "asks on first activation) or in the web app's settings."
-    # END: kiss-step-5-5-terminal-freeze
+    if [ -n "${_KISS_BRAND_PASS:-}" ]; then
+        echo "=== Brand home $KISS_HOME_DIR: app install complete ==="
+    else
+        echo "=== App install complete ==="
+        echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "App directory: $APP_DIR"
+        echo "CLI: $BIN_DIR/sorcar"
+        echo ""
+        echo "API keys are set in the webapp's settings; the remote-access password is printed below."
+    fi
 }
 
-echo ""
-echo "Log saved to $LOG_FILE"
-# Only explicitly launch VS Code when it is not already running.  If a window
-# is already open, the extension's watchers on ``out/extension.js`` and
-# ``~/.kiss/.extension-updated`` (both touched in step [5/5]) trigger
-# ``workbench.action.reloadWindow`` to pick up the update — launching here too
-# would open a redundant second window.
-if [ -n "${KISS_SKIP_LAUNCH:-}" ]; then
-    # The caller (e.g. scripts/docker-startup.sh) owns launching the editor —
-    # typically because it will start code-server itself right after this
-    # script returns.  Launching here too would bind the same port and make
-    # the caller's code-server fail with EADDRINUSE, crashing the container.
-    echo "KISS_SKIP_LAUNCH set; skipping VS Code launch (caller will start the editor)."
-elif vscode_is_running; then
-    echo "VS Code is already running; the extension will reload to finish setup."
-    echo "Skipping explicit launch to avoid opening a duplicate window."
-else
-    echo "Launching VS Code to finish setup..."
-    launch_vscode || true
+print_box() {
+    # Print the lines $@ framed in ``*``, as wide as the longest line.
+    local line width=0 stars
+    for line in "$@"; do
+        [ ${#line} -le "$width" ] || width=${#line}
+    done
+    stars="$(printf '%*s' "$((width + 6))" '' | tr ' ' '*')"
+    echo ""
+    echo "$stars"
+    for line in "$@"; do
+        printf '*  %-*s  *\n' "$width" "$line"
+    done
+    echo "$stars"
+}
+
+print_password_box() {
+    # The remote-access password ($1) framed in ``*``, on the terminal (fd 3,
+    # the stdout saved before the log tee) so it never lands in the log.
+    print_box "Remote access password:  $1" \
+        "Type it in the web app on another device; it is also shown in Settings." >&3
+}
+
+vscode_user_detected() {
+    # True for a VS Code user: this shell runs in a VS Code terminal (the
+    # retired extension's Update button ran this script there), or a copy
+    # of that extension is installed for VS Code, Cursor or code-server.
+    local dir ext
+    [ "${TERM_PROGRAM:-}" = vscode ] && return 0
+    [ -n "${VSCODE_IPC_HOOK_CLI:-}${VSCODE_GIT_IPC_HANDLE:-}" ] && return 0
+    for dir in "$HOME/.vscode-server/extensions" "$HOME/.vscode-server-insiders/extensions" \
+               "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" \
+               "$HOME/.cursor/extensions" "$HOME/.local/share/code-server/extensions"; do
+        for ext in "$dir"/ksenxx.kiss-sorcar-*; do
+            [ -d "$ext" ] && return 0
+        done
+    done
+    return 1
+}
+
+print_vscode_notice() {
+    # The VS Code extension is gone: tell its users where the product
+    # lives now, on the terminal (fd 3) and in the log, and as the last
+    # install step so an old extension's progress toast shows it too.
+    local notice="VS Code is no longer supported by ${BRAND_PRODUCT_NAME:-KISS Sorcar}."
+    local url="Use the web app instead: http://127.0.0.1:${KISS_WEB_PORT:-8787}"
+    print_box "$notice" "$url" >&3
+    print_box "$notice" "$url" >> "$LOG_FILE"
+    publish_step "$notice $url"
+}
+
+if [ -z "${_KISS_BRAND_PASS:-}" ]; then
+    echo ""
+    echo "Log saved to $LOG_FILE"
 fi
 
-# ---------------------------------------------------------------------------
-# Browser helpers shared by the two blocks below
-# ---------------------------------------------------------------------------
 # BEGIN: kiss-browser-helpers  (tests extract this block verbatim)
 machine_is_remote() {
     # An SSH session, or Linux without a display, has no browser to open.
@@ -2244,11 +1656,13 @@ machine_is_remote() {
 open_in_browser() {
     case "$OS" in
         Darwin)
-            open "$1" >/dev/null 2>&1 9>&-
+            open "$1" >/dev/null 2>&1 3>&- 9>&-
             ;;
         Linux)
             command -v xdg-open >/dev/null 2>&1 || return 1
-            (nohup xdg-open "$1" >/dev/null 2>&1 9>&- &)
+            # ``3>&-``: the saved terminal (the password box's fd) must not
+            # stay open in a browser that outlives the installer.
+            (nohup xdg-open "$1" >/dev/null 2>&1 3>&- 9>&- &)
             ;;
         *)
             return 1
@@ -2258,134 +1672,27 @@ open_in_browser() {
 # END: kiss-browser-helpers
 
 # ---------------------------------------------------------------------------
-# Open VS Code in the browser
-# ---------------------------------------------------------------------------
-# ``code serve-web`` (the VS Code CLI) serves VS Code itself over HTTP on
-# 127.0.0.1, guarded by a connection token in the URL.  The CLI announces
-# the URL at once ("Web UI available at http://127.0.0.1:PORT?tkn=...")
-# and downloads the VS Code Server on the first visit (the page shows a
-# "downloading, please wait" notice and reloads itself).  The server loads
-# extensions from ~/.vscode-server/extensions, where step [5/5] installed
-# the VSIX, and the window opens on the same workspace as the desktop
-# launch above.  The server is left running detached, like the editor; a
-# re-run of this script reuses it when it is still alive.  On a remote
-# machine the URL is printed with an ssh port-forward hint instead of
-# opening a browser.  ``KISS_SKIP_LAUNCH`` (Docker) skips this too.
-#
-# The progress notification is updated here, outside the block, because
-# tests extract the block verbatim and run it without report_step.
-[ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Starting VS Code in the browser..."
-# BEGIN: kiss-open-vscode-web
-# 0 lets the CLI pick a free port; the announced URL carries the real one.
-KISS_VSCODE_WEB_PORT="${KISS_VSCODE_WEB_PORT:-0}"
-KISS_VSCODE_WEB_WAIT_SECS="${KISS_VSCODE_WEB_WAIT_SECS:-60}"
-
-vscode_web_url() {
-    # Print the URL ``code serve-web`` announced in its log ($1), if any.
-    sed -n 's/^Web UI available at \(http[^[:space:]]*\).*/\1/p' "$1" | head -n 1
-}
-
-url_port() {
-    # Print the port of an http://host:PORT... URL ($1).
-    local rest="${1#http://}"
-    rest="${rest%%[/?]*}"
-    printf '%s\n' "${rest##*:}"
-}
-
-port_is_open() {
-    # True when something accepts TCP connections on 127.0.0.1:$1.
-    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
-open_vscode_web() {
-    local home_dir="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}"
-    local log="$home_dir/vscode-web.log" pid_file="$home_dir/vscode-web.pid"
-    local pid url port waited=0
-    if [ -z "${CODE_CLI:-}" ] && ! find_code_cli; then
-        echo "No VS Code CLI found; not starting VS Code in the browser."
-        return 1
-    fi
-    echo ""
-    pid="$(cat "$pid_file" 2>/dev/null || true)"
-    url="$(vscode_web_url "$log" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -n "$url" ] && port_is_open "$(url_port "$url")"; then
-        echo "VS Code is already served in the browser by 'code serve-web' (pid $pid)."
-    else
-        echo "Starting VS Code in the browser ('code serve-web')..."
-        echo "   This accepts the VS Code Server license terms (https://aka.ms/vscode-server-license)."
-        mkdir -p "$home_dir"
-        : > "$log"
-        (nohup "$CODE_CLI" serve-web --port "$KISS_VSCODE_WEB_PORT" --accept-server-license-terms \
-            --default-folder "$USER_PWD" < /dev/null > "$log" 2>&1 9>&- &
-         echo $! > "$pid_file")
-        pid="$(cat "$pid_file")"
-        while :; do
-            url="$(vscode_web_url "$log")"
-            [ -n "$url" ] && break
-            if ! kill -0 "$pid" 2>/dev/null || [ "$waited" -ge "$KISS_VSCODE_WEB_WAIT_SECS" ]; then
-                echo "   'code serve-web' did not announce a URL (log: $log)."
-                sed 's/^/       /' "$log" | tail -n 5
-                echo "   To serve VS Code in the browser yourself, run:"
-                echo "       '$CODE_CLI' serve-web --accept-server-license-terms"
-                return 1
-            fi
-            sleep 1
-            waited=$((waited + 1))
-        done
-    fi
-
-    if machine_is_remote; then
-        port="$(url_port "$url")"
-        echo ""
-        echo "This machine is remote; forward the port from your own device with"
-        echo "    ssh -L $port:127.0.0.1:$port ${USER:-$(id -un)}@$(hostname)"
-        echo "and then open VS Code in your browser at:"
-        echo "    $url"
-        return 0
-    fi
-    echo ""
-    echo "Opening VS Code in the browser at $url"
-    echo "   (the first visit downloads the VS Code Server and reloads itself)"
-    if ! open_in_browser "$url"; then
-        echo "   Could not open a browser; open the URL above yourself."
-    fi
-}
-
-if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
-    open_vscode_web || true
-fi
-# END: kiss-open-vscode-web
-
-# ---------------------------------------------------------------------------
 # Open the webapp
 # ---------------------------------------------------------------------------
-# The kiss-web daemon is started by the extension once VS Code has finished
-# the runtime setup (uv sync, cloudflared, ...), which takes a few minutes
-# on a fresh install.  Wait for the daemon's URL file, trust its local
-# certificate authority in this user's browsers (``kiss-web --trust-ca``,
-# so the browser does not warn about the Local URL), then open the Local
-# URL (https://127.0.0.1:PORT) in the default browser.  On a remote
-# machine (an SSH session, or Linux without a display) there is no
-# browser to open here, so the cloudflared URL is printed for the user to
-# open on their own device.  ``KISS_SKIP_LAUNCH`` (Docker) skips this too.
-#
-# The progress notification is updated here, outside the block, because
-# tests extract the block verbatim and run it without report_step.
+# Step [5/5] started the kiss-web daemon (or left a healthy one running).
+# Wait for the daemon's URL file, then open the Local URL
+# (http://127.0.0.1:PORT, plain HTTP on loopback) in the default
+# browser.  On a remote machine
+# (an SSH session, or Linux without a display) there is no browser to
+# open here, so the cloudflared URL is printed for the user to open on
+# their own device.  ``KISS_SKIP_LAUNCH`` skips this too.
 [ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Waiting for the kiss-web daemon to open the webapp..."
 # BEGIN: kiss-open-webapp
-KISS_WEBAPP_WAIT_SECS="${KISS_WEBAPP_WAIT_SECS:-900}"
+KISS_WEBAPP_WAIT_SECS="${KISS_WEBAPP_WAIT_SECS:-120}"
 
 find_kiss_web() {
-    # kiss-web lives in the venv the extension builds inside its installed
-    # copy of the project (``kiss_project/.venv``); a development checkout
-    # may carry its own.  Any copy will do: ``--trust-ca`` reads the CA
-    # from $KISS_HOME/tls and the URLs come from remote-url.json.
+    # kiss-web lives in the app's venv; a development checkout may carry
+    # its own.  Any copy will do: the URLs come from remote-url.json.
     local candidate
     for candidate in \
+        "$APP_DIR/.venv/bin/kiss-web" \
         "$(command -v kiss-web 2>/dev/null || true)" \
-        "$PROJECT_DIR/.venv/bin/kiss-web" \
-        "$HOME"/.vscode*/extensions/ksenxx.kiss-sorcar-*/kiss_project/.venv/bin/kiss-web \
-        "$HOME"/.local/share/code-server/extensions/ksenxx.kiss-sorcar-*/kiss_project/.venv/bin/kiss-web; do
+        "$PROJECT_DIR/.venv/bin/kiss-web"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
@@ -2401,11 +1708,13 @@ url_file_field() {
 }
 
 open_webapp() {
-    local url_file="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}/remote-url.json"
+    # The URL file of the daemon that was (re)started: the brand home's
+    # when the daemon is a brand's (RESTART_HOME, step [5/5]).
+    local url_file="${RESTART_HOME:-${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}}/remote-url.json"
     local remote=0 kiss_web="" tunnel="" loopback="" waited=0
     machine_is_remote && remote=1
     echo ""
-    echo "Waiting for the kiss-web daemon (the extension starts it inside VS Code)..."
+    echo "Waiting for the kiss-web daemon..."
     while :; do
         [ -n "$kiss_web" ] || kiss_web="$(find_kiss_web || true)"
         if [ -n "$kiss_web" ] && [ -s "$url_file" ]; then
@@ -2419,10 +1728,9 @@ open_webapp() {
         fi
         if [ "$waited" -ge "$KISS_WEBAPP_WAIT_SECS" ]; then
             echo "   The kiss-web daemon did not come up within ${KISS_WEBAPP_WAIT_SECS}s."
-            echo "   Once VS Code has finished the setup, trust its certificate and"
-            echo "   print the webapp URL with:"
+            echo "   Once it is running, print the webapp URL with:"
             # kiss-web is usually not on PATH: name the binary if found.
-            echo "       '${kiss_web:-kiss-web}' --trust-ca && '${kiss_web:-kiss-web}' --url"
+            echo "       '${kiss_web:-kiss-web}' --url"
             return 1
         fi
         sleep 5
@@ -2431,13 +1739,6 @@ open_webapp() {
             echo "   ... still waiting (${waited}s)"
         fi
     done
-
-    echo "   Trusting the webapp's certificate authority in this user's browsers..."
-    # The CLI reads $KISS_HOME/tls: pin the home this install uses (the
-    # binary may come from the checkout's venv, whose brand may differ).
-    if ! KISS_HOME="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}" "$kiss_web" --trust-ca 9>&-; then
-        echo "   WARNING: 'kiss-web --trust-ca' failed; browsers may warn about the Local URL."
-    fi
 
     if [ "$remote" = 1 ]; then
         echo ""
@@ -2461,3 +1762,11 @@ if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
     open_webapp || true
 fi
 # END: kiss-open-webapp
+
+# Last of all, so it is the first thing the user sees looking back.  A
+# nested brand-home pass prints neither: the outer run shows its own
+# password box (the restarted daemon's) and the notice once.
+if [ -z "${_KISS_BRAND_PASS:-}" ]; then
+    [ -z "${REMOTE_PASSWORD:-}" ] || print_password_box "$REMOTE_PASSWORD"
+    ! vscode_user_detected || print_vscode_notice
+fi

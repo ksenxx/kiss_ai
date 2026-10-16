@@ -199,7 +199,7 @@ class TestOneTabPerChat(TabMirroringBase):
             "tab-s1", [t.get("tabId") for t in snap.get("tabs", [])],
         )
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         self.assertNotIn(
             "tab-s1", vs._tab_chat_views,
             "the displaced tab's chat-view mapping leaked",

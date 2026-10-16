@@ -35,7 +35,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,

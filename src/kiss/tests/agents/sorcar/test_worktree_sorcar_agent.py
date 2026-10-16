@@ -246,7 +246,7 @@ class TestChatSorcarAgent:
     def test_new_chat_preserves_pending_worktree(self) -> None:
         """new_chat() keeps the pending worktree's branch for review.
 
-        Simulates the VS Code "New Chat" button being clicked while
+        Simulates the chat page's "New Chat" button being clicked while
         worktree action buttons are visible.  The agent commits the
         work onto its ``kiss/wt-*`` branch, removes the directory and
         never merges into the user's branch behind their back.

@@ -12,7 +12,7 @@ folder, and ``_cmd_get_config`` documents that the reported
 ``work_dir`` is taken from the command's ``workDir`` "stamped per
 connection by RemoteAccessServer" so the settings panel shows the
 folder *this* instance will actually use.  But ``_handle_ready``
-fans the webview's ``ready`` message out into synthesized
+fans the chat page's ``ready`` message out into synthesized
 ``getModels`` / ``getInputHistory`` / ``getConfig`` commands that
 carry only the ``connId`` — the ``workDir`` stamp on the incoming
 ``ready`` command is dropped.  The ``configData`` reply triggered by
@@ -50,13 +50,14 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
 from kiss.tests.server.conftest import (
+    FORWARDED_VISITOR,
     find_free_port,
     no_verify_ssl,
     redirect_persistence,
@@ -108,8 +109,8 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(self, password: str = "") -> ClientConnection:
-        """Open one WSS connection and send an auth attempt."""
-        ws = await connect(self.url, ssl=self.ctx)
+        """Open one WSS connection (as a forwarded visitor) and send an auth attempt."""
+        ws = await connect(self.url, ssl=self.ctx, additional_headers=FORWARDED_VISITOR)
         self._sockets.append(ws)
         await ws.send(json.dumps({"type": "auth", "password": password}))
         return ws
@@ -212,9 +213,11 @@ class AuthFailureRegistryGrowthTest(_ServerTestBase):
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         self.assertEqual(resp["type"], "auth_locked")
         await ws.close()
-        self.assertGreater(self.server._auth_lock_remaining("127.0.0.1"), 0.0)
+        self.assertGreater(
+            self.server._auth_lock_remaining(FORWARDED_VISITOR["X-Forwarded-For"]), 0.0,
+        )
 
-        ws = await connect(self.url, ssl=self.ctx)
+        ws = await connect(self.url, ssl=self.ctx, additional_headers=FORWARDED_VISITOR)
         self._sockets.append(ws)
         try:
             await ws.send(json.dumps({"type": "auth", "password": "s3cret"}))

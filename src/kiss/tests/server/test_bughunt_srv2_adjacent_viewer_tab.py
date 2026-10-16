@@ -25,7 +25,7 @@ import unittest
 
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 
@@ -34,7 +34,7 @@ class TestAdjacentTaskFromViewerTab(unittest.TestCase):
 
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()

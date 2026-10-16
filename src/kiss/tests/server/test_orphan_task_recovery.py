@@ -19,18 +19,18 @@ The combination means neither :func:`_save_task_result` nor
 cleanup ``finally`` ever ran.  That can happen if a ``BaseException``
 subclass propagates out of the inner ``try`` (covered by
 ``test_agent_failed_abruptly.py`` and the outer ``except``), OR if
-the host process is killed externally — SIGKILL, VS Code extension
-reload, OOM — in which case no Python code runs at all.
+the host process is killed externally — SIGKILL, a hard daemon
+restart, OOM — in which case no Python code runs at all.
 
 Because no Python code runs in the external-kill variant, the only
 viable fix is a startup-time recovery sweep:
 :func:`_recover_orphaned_tasks` rewrites any surviving sentinel row
-to a diagnostic message, and ``VSCodeServer.__init__`` invokes it on
+to a diagnostic message, and ``AgentServer.__init__`` invokes it on
 every fresh server boot (with an empty active set, since at
 construction time no task in THIS process is running yet).
 
 The tests here exercise that boot-time wiring with a real
-``VSCodeServer``.  The sweep-level protection tests (active-id set,
+``AgentServer``.  The sweep-level protection tests (active-id set,
 owner liveness, creation cut-off), which depend only on ``kiss.core``
 and ``kiss.agents.sorcar``, live in
 ``kiss.tests.agents.sorcar.test_orphan_task_recovery`` together with
@@ -54,9 +54,9 @@ from kiss.tests.agents.sorcar.test_orphan_task_recovery import (
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    server = VSCodeServer()
+    server = AgentServer()
     thread = server._orphan_sweep_thread
     if thread is not None:
         thread.join(timeout=30)
@@ -135,9 +135,9 @@ class TestOrphanTaskRecovery(TestCase):
         helper's pre-emptive persist) can write the truthful result.
         """
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
-        from kiss.server.server import VSCodeServer
+        from kiss.server.server import AgentServer
 
-        server = VSCodeServer()
+        server = AgentServer()
         fresh_id = _insert_sentinel_row(
             "task racing the boot sweep",
             chat_id="recovery-test-chat-7",
@@ -152,7 +152,7 @@ class TestOrphanTaskRecovery(TestCase):
         )
 
     def test_concurrent_boot_does_not_corrupt(self) -> None:
-        """Two ``VSCodeServer`` constructions on different threads
+        """Two ``AgentServer`` constructions on different threads
         must both complete without raising; the orphan row ends up
         with the recovered text exactly once.
         """

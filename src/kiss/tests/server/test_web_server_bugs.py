@@ -9,13 +9,13 @@
   whole authenticated WebSocket connection.  Driven through the server
   API's ``ready`` (the only production caller of ``_handle_ready``,
   and the one place the list is sanitized).
-* D3 (F5): ``translate_webview_command`` no longer rewrites
+* D3 (F5): ``translate_client_command`` no longer rewrites
   ``userActionDone`` (the branch was dead — no client ever sends it;
   ``media/main.js`` posts ``userAnswer`` directly), so the command
   passes through unchanged with all dispatch stamps intact.
 
 No mocks/patches: a real :class:`RemoteAccessServer` (and its real
-:class:`VSCodeServer`) is constructed and driven directly.
+:class:`AgentServer`) is constructed and driven directly.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.sorcar import ApiContext, translate_webview_command
+from kiss.server.sorcar import ApiContext, translate_client_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -81,7 +81,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         self.server._printer.broadcast = self.broadcasts.append  # type: ignore[method-assign, assignment]
 
     async def asyncTearDown(self) -> None:
-        sweep = self.server._vscode_server._orphan_sweep_thread
+        sweep = self.server._agent_server._orphan_sweep_thread
         if sweep is not None and sweep.is_alive():
             await asyncio.to_thread(sweep.join, 30)
         if th._db_conn is not None:
@@ -136,7 +136,7 @@ class TestTranslateUserActionDone(TestCase):
 
     def test_user_action_done_passes_through_unchanged(self) -> None:
         """No client sends ``userActionDone`` (``media/main.js`` posts
-        ``userAnswer`` directly), so ``translate_webview_command`` no
+        ``userAnswer`` directly), so ``translate_client_command`` no
         longer rewrites it — the command passes through unchanged."""
         cmd = {
             "type": "userActionDone",
@@ -144,5 +144,5 @@ class TestTranslateUserActionDone(TestCase):
             "connId": "conn-9",
             "workDir": "/some/work/dir",
         }
-        out = translate_webview_command(dict(cmd))
+        out = translate_client_command(dict(cmd))
         self.assertEqual(out, cmd)

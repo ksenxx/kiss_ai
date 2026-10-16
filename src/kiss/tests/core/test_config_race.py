@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Race-condition regression test for ``vscode_config.save_config``.
+"""Race-condition regression test for ``user_config.save_config``.
 
 ``save_config`` performs a read-modify-write on ``~/.kiss/config.json``:
 it loads the existing file, overlays the caller's keys, and atomically
@@ -28,14 +28,14 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 
 _DISTINCT_WRITES: dict[str, Any] = {
     "max_budget": 222,
     "custom_endpoint": "http://endpoint.example",
     "custom_headers": "X-Race:1",
     "custom_api_key": "race-api-key",
-    "remote_password": "race-password",
+    "remote_password": "racepassword",
     "work_dir": "/race/work/dir",
     "last_model": "race-model",
     "auto_commit_mode": False,

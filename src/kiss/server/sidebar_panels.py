@@ -4,9 +4,8 @@
 # add your name here
 """Data behind the right sidebar's "Schedule", "Apps" and "Spend" subpanels.
 
-Every chat surface (the remote webapp's task-info panel, the VS Code
-sidebar chat's drawer and the editor-tabs Task Info view) stacks three
-global subpanels under the per-task ones:
+The chat page's task-info panel stacks three global subpanels under
+the per-task ones:
 
 * **Schedule** lists the scheduled cron jobs
   (:mod:`kiss.agents.sorcar.cron_agent`), answered by
@@ -248,11 +247,10 @@ def _machine_row(machine: machines.Machine) -> tuple[machines.Machine, dict[str,
     Returns:
         The machine and its row: ``name`` (as registered), ``address``
         (as registered), ``ip`` (the host's address), ``port`` (the
-        daemon port of a URL machine, the local port of an SSH
-        machine's tunnel, 0 while the tunnel is closed), ``local``
-        (False), ``status`` (``"reachable"`` or ``"unreachable"``) and
-        ``error`` (the reason when unreachable).  :func:`machines_report`
-        adds ``label``.
+        daemon port, 0 for an SSH machine registered before enrollment
+        existed), ``local`` (False), ``status`` (``"reachable"`` or
+        ``"unreachable"``) and ``error`` (the reason when unreachable).
+        :func:`machines_report` adds ``label``.
     """
     link = machines.link_for(machine)
     try:
@@ -261,12 +259,8 @@ def _machine_row(machine: machines.Machine) -> tuple[machines.Machine, dict[str,
         machines.note_host(machine, pong.get("machine"))
     except machines.MachineError as exc:
         status, error = "unreachable", str(exc)
-    if link.tunnel is not None:
-        host = urlsplit("ssh://" + machine.ssh).hostname or ""
-        port = urlsplit(link.tunnel.url).port or 0
-    else:
-        parts = urlsplit(machine.url)
-        host, port = parts.hostname or "", parts.port or machines.DEFAULT_PORT
+    host = machines.machine_host(machine)
+    port = (urlsplit(machine.url).port or machines.DEFAULT_PORT) if machine.url else 0
     return machine, {
         "name": machine.name, "address": machine.address(), "ip": _resolve_ip(host),
         "port": port, "local": False, "status": status, "error": error,
@@ -282,8 +276,11 @@ def machines_report(
     and is always reachable.  The registered rows are pinged in
     parallel (each through its cached :class:`~kiss.agents.sorcar.machines.MachineLink`,
     whose backoff keeps an offline machine cheap) and cached for
-    :data:`MACHINES_STATUS_TTL_SECONDS`; *refresh* pings again.
-    Blocks for the slowest ping, so async callers run it in a thread.
+    :data:`MACHINES_STATUS_TTL_SECONDS`; *refresh* pings again, and
+    so does a registry that changed since the cached ping (a machine
+    a ``/machine add`` task or the CLI registered, which never goes
+    through :func:`machine_action`).  Blocks for the slowest ping, so
+    async callers run it in a thread.
 
     Args:
         local_ip: The address the local daemon is reached at.
@@ -301,11 +298,12 @@ def machines_report(
     global _machines_cache, _machines_checked_at
     requested_at = time.time()
     with _machines_lock:
+        registered = machines.load_machines()
         if (
             time.time() - _machines_checked_at >= MACHINES_STATUS_TTL_SECONDS
             or (refresh and _machines_checked_at < requested_at)
+            or [machine for machine, _row in _machines_cache] != registered
         ):
-            registered = machines.load_machines()
             with ThreadPoolExecutor(max_workers=max(1, len(registered))) as pool:
                 _machines_cache = list(pool.map(_machine_row, registered))
             _machines_checked_at = time.time()
@@ -352,6 +350,102 @@ def machine_action(action: str, name: str, address: str = "", password: str = ""
     with _machines_lock:
         _machines_checked_at = 0.0
     return ""
+
+
+def machine_work_dirs(name: str, work_dir: str = "") -> dict[str, Any]:
+    """Return the working directory of registered machine *name* and its recent ones.
+
+    The chat header's WORKDIR drop-down of a tab bound to a machine
+    lists that machine's directories, not this daemon's: this asks the
+    machine's daemon for its ``configData`` (``getConfig``) -- after
+    making *work_dir*, when given, its global working directory
+    (``setWorkDir`` with ``reply: true``, which answers with the same
+    ``configData`` once adopted).  ``recent_work_dirs`` is the
+    machine's own list: the directories that still exist there, most
+    recently selected first.
+
+    Args:
+        name: The registered machine (its name or host).
+        work_dir: A directory of the machine to adopt first; "" to
+            only read.
+
+    Returns:
+        ``{"machine": name, "workDir": ..., "recentWorkDirs": [{"path",
+        "ts"}, ...], "error": ""}``, or with ``error`` set (and the
+        other fields empty) when the machine is not registered, is
+        unreachable or refused.
+    """
+    reply: dict[str, Any] = {"machine": name, "workDir": "", "recentWorkDirs": [], "error": ""}
+    machine = machines.find_machine(name)
+    if machine is None:
+        reply["error"] = f"no machine named {name!r}"
+        return reply
+    cmd: dict[str, Any] = {"type": "getConfig"}
+    if work_dir:
+        cmd = {"type": "setWorkDir", "workDir": work_dir, "reply": True}
+    try:
+        config = machines.link_for(machine).request(cmd, "configData").get("config") or {}
+    except machines.MachineError as exc:
+        reply["error"] = str(exc)
+        return reply
+    reply["workDir"] = str(config.get("work_dir") or "")
+    reply["recentWorkDirs"] = [
+        row for row in config.get("recent_work_dirs") or []
+        if isinstance(row, dict) and isinstance(row.get("path"), str)
+    ]
+    return reply
+
+
+MACHINE_WORKSPACE_REPLIES: dict[str, str] = {
+    "listDir": "dirListing",
+    "gitStatus": "gitStatus",
+    "gitLog": "gitLog",
+    "gitShow": "gitShow",
+    "gitAction": "gitActionResult",
+    "fsAction": "fsResult",
+    "openFile": "fileContent",
+    "saveFile": "fileSaved",
+}
+"""The workspace commands a registered machine answers for a tab bound to it, by reply type.
+
+The remote webapp's Explorer, Source Control view, folder picker and
+file editor of a tab whose tasks run on a machine browse that
+machine's working directory: each of these commands, when it carries
+``machine``, is forwarded to the machine's daemon unchanged
+(:func:`machine_workspace_reply`) instead of being served here.
+"""
+
+
+def machine_workspace_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the workspace command *cmd* to registered machine *name* and return its reply.
+
+    *cmd* is one of :data:`MACHINE_WORKSPACE_REPLIES`; it is sent to
+    the machine's daemon as is, minus ``machine`` and this daemon's
+    ``connId`` (its
+    ``workDir``, ``path`` and ``tabId`` name a directory and a tab of
+    the machine: the tab runs there under the same id, see
+    :mod:`kiss.server.remote_tabs`), and the reply comes back stamped
+    with the machine so the client can tell it from this daemon's.
+
+    Returns:
+        The machine's reply, or one of the expected type carrying the
+        ``error`` (and the command's ``path``, ``token`` and ``tabId``)
+        when the machine is not registered or unreachable.
+    """
+    reply_type = MACHINE_WORKSPACE_REPLIES[str(cmd["type"])]
+    forwarded = {k: v for k, v in cmd.items() if k not in ("machine", "connId")}
+    machine = machines.find_machine(name)
+    try:
+        if machine is None:
+            raise machines.MachineError(f"no machine named {name!r}")
+        reply = machines.link_for(machine).request(forwarded, reply_type)
+    except machines.MachineError as exc:
+        reply = {k: cmd[k] for k in ("path", "token", "tabId") if k in cmd}
+        reply.update({"type": reply_type, "error": str(exc)})
+        if reply_type == "dirListing":
+            reply["entries"] = []
+    reply["machine"] = name
+    return reply
 
 
 def recommendations_report() -> dict[str, Any]:

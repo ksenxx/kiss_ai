@@ -171,6 +171,8 @@ SEA's ``EVIDENCE_MAX_CHARS`` (its ``observed_evidence()`` cuts a longer file at 
 equal to it by ``test_rsi7d_sea.py``."""
 REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
+GIT_TIMEOUT_SECONDS = 300.0
+"""Seconds a git command of the replay tools (clone, log, status ...) may take."""
 SEAS_DIR_OPTION = "--seas-dir"
 """Task-text option naming the folder whose SEAs the sweep is restricted to (and may edit)."""
 SORCAR = "sorcar"
@@ -2183,10 +2185,21 @@ def write_autorouter_evidence(text: str) -> str:
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run ``git *args`` in *cwd* and return the completed process (no exception on failure)."""
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
-    )
+    """Run ``git *args`` in *cwd* and return the completed process (no exception on failure).
+
+    Stdin is closed and the call is capped at :data:`GIT_TIMEOUT_SECONDS`
+    (a hook, editor or prompt that waits for a terminal is reported as a
+    failure, exit 124), so a stuck git never hangs the rsi7d task.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
+            stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            exc.cmd, 124, "", f"git {' '.join(args)} did not finish within {exc.timeout:g}s"
+        )
 
 
 def _task_row(task_id: str) -> dict[str, Any] | None:
@@ -2595,8 +2608,8 @@ def _legacy_daemon_error(
 ) -> str:
     """Return the ``Error: ...`` a replay tool answers when this daemon cannot dispatch, else "".
 
-    The daemon imports its own installed kiss package (the VS Code
-    extension's bundled copy), which can be older than this checkout and
+    The daemon imports its own installed kiss package (the copy
+    under ``$KISS_HOME/kiss``), which can be older than this checkout and
     lack ``agent_dispatch.dispatch_result``; the message names the
     *tool* call (with its original arguments) to run under this
     checkout's package instead.

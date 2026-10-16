@@ -11,3 +11,6 @@ __pycache__
 jobs
 tmp
 dist
+.kiss-worktrees
+reports
+papers

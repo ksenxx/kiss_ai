@@ -13,7 +13,7 @@ gpt-5.6-sol review sequence:
   ``prompt`` / ``result`` events, whose durable copy is recorded and
   persisted with the ``tabId`` STRIPPED (replay re-stamps events with
   the subscribing viewer's own tab id).  The base
-  ``JsonPrinter.broadcast`` (production-reachable: ``VSCodeServer()``
+  ``JsonPrinter.broadcast`` (production-reachable: ``AgentServer()``
   defaults to it) recorded + persisted EVERY event after taskId
   injection: a
   viewer-targeted transient ``clear`` (a display type) leaked into the

@@ -33,7 +33,7 @@ from typing import Any
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -55,7 +55,7 @@ def _noop() -> None:
     """Target for the never-started placeholder worker thread."""
 
 
-def _install_own_run(server: VSCodeServer, tab_id: str, chat_id: str) -> AgentState:
+def _install_own_run(server: AgentServer, tab_id: str, chat_id: str) -> AgentState:
     """Register *tab_id*'s own run exactly as ``_cmd_run`` does before starting it."""
     with server._state_lock:
         state = AgentState(
@@ -76,7 +76,7 @@ def test_viewer_whose_run_lands_mid_subscribe_is_not_hijacked() -> None:
     launcher, viewer = "launcher-tab", "viewer-tab"
     task_a = "task-a-row"
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     with server._state_lock:
         server._tab_chat_views[launcher] = chat_id
         server._tab_chat_views[viewer] = chat_id
@@ -111,7 +111,7 @@ def test_idle_viewer_is_still_subscribed() -> None:
     launcher, viewer = "launcher-tab-2", "idle-viewer-tab"
     task_a = "task-a-row-2"
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     with server._state_lock:
         server._tab_chat_views[launcher] = chat_id
         server._tab_chat_views[viewer] = chat_id

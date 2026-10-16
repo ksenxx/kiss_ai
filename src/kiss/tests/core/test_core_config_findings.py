@@ -10,7 +10,7 @@
 * **F3** — ``is_parallel`` was a ``DEFAULTS`` key with no reader; it was
   persisted and broadcast to every client forever.
 * **F4** — the ``max_budget`` default was spelled ``200.0`` in
-  ``config.py`` and ``100`` in ``vscode_config.py``.
+  ``config.py`` and ``100`` in ``user_config.py``.
 * **F7** — ``save_config`` could only ever write keys listed in
   ``DEFAULTS``, silently dropping ``tunnel_token`` / ``email`` /
   ``skill_permissions`` / ``mcp_permissions`` passed *in*.
@@ -33,8 +33,8 @@ from pathlib import Path
 import pytest
 
 import kiss.core.config as config_module
-import kiss.core.vscode_config as vscode_config
-from kiss.core.vscode_config import (
+import kiss.core.user_config as user_config
+from kiss.core.user_config import (
     API_KEY_ENV_VARS,
     DEFAULTS,
     RETIRED_KEYS,
@@ -65,9 +65,9 @@ def config_file(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
+    monkeypatch.setitem(vars(user_config), "CONFIG_DIR", fake_home / ".kiss")
     monkeypatch.setitem(
-        vars(vscode_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
+        vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
     )
     for key in API_KEY_ENV_VARS:
         monkeypatch.setitem(os.environ, key, os.environ.get(key, ""))
@@ -215,7 +215,7 @@ def test_save_config_never_persists_api_keys(config_file: Path) -> None:
 _WORKER = textwrap.dedent(
     """
     import sys
-    from kiss.core.vscode_config import save_config
+    from kiss.core.user_config import save_config
 
     index, writes = int(sys.argv[1]), int(sys.argv[2])
     for _ in range(writes):

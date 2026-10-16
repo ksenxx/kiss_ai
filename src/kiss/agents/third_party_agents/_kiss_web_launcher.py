@@ -10,7 +10,7 @@ public synchronous client API :func:`kiss.server.sorcar.run`: the
 launcher connects to a kiss-web daemon's local WSS endpoint, submits
 the documented ``run`` command, and blocks until the daemon reports
 the task finished.  The task therefore executes with the full kiss-web
-lifecycle — live event broadcasts to every connected webview,
+lifecycle — live event broadcasts to every connected chat page,
 follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
@@ -99,7 +99,7 @@ def _ensure_api_server() -> str:
                 # stale snapshot on every channel run.  The channel tabs
                 # are transient, so they live next to the private
                 # endpoint file.
-                server._vscode_server.use_private_tab_registry(
+                server._agent_server.use_private_tab_registry(
                     Path(private_dir) / "tabs.json",
                 )
                 startup = asyncio.run_coroutine_threadsafe(

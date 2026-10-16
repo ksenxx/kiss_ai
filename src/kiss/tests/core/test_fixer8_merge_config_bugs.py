@@ -10,7 +10,7 @@ Core-only tests (depending only on ``kiss.core``) moved here from
 
 from __future__ import annotations
 
-from kiss.core.vscode_config import DEFAULTS, sanitize_config
+from kiss.core.user_config import DEFAULTS, sanitize_config
 
 
 class TestSanitizeConfigBooleanBudget:

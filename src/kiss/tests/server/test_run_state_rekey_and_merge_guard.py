@@ -17,7 +17,7 @@ Bug 2 — ``_cmd_run`` destroyed an in-flight merge: a thread-less
 state with ``is_merging=True`` was unregistered and replaced by a fresh
 state, orphaning the review.  The run must be refused instead.
 
-Both tests drive the real :class:`VSCodeServer` command dispatch; the
+Both tests drive the real :class:`AgentServer` command dispatch; the
 first stubs only the inner task body while performing the exact
 registry re-key the printer bridge performs mid-run.
 """
@@ -29,14 +29,14 @@ import time
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _Harness(unittest.TestCase):
     """Shared server harness with captured broadcasts."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict] = []
         self._evt_lock = threading.Lock()
 

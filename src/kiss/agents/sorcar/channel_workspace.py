@@ -42,6 +42,8 @@ import os
 import threading
 import time
 
+from kiss.agents.sorcar._concurrency import locked_call
+
 logger = logging.getLogger(__name__)
 
 WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
@@ -52,6 +54,15 @@ WORKSPACE_WAIT_TIMEOUT_SECONDS = 900.0
 A channel run (``channel: True``) whose workspace differs from a running channel
 task's waits at most this long in :func:`enter_workspace` before it
 fails with a diagnostic, so a conflicting task cannot hang it forever.
+"""
+_WAIT_SLICE_SECONDS = 1.0
+"""Longest single sleep of a waiting :func:`enter_workspace`.
+
+The wait runs on the task thread, and the daemon stops a task by
+injecting ``KeyboardInterrupt`` there; CPython raises it only when the
+thread next runs bytecode, so one unsliced ``Condition.wait(900)``
+deferred a Stop until the conflicting workspace exited or the whole
+timeout expired.
 """
 _WORKSPACE_COND = threading.Condition()
 _ACTIVE_WORKSPACES: dict[str, int] = {}
@@ -88,33 +99,53 @@ def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
         must not call :func:`exit_workspace`).
     """
     deadline = None if timeout is None else time.monotonic() + timeout
-    with _WORKSPACE_COND:
-        while any(active != workspace for active in _ACTIVE_WORKSPACES):
-            remaining = (
-                None if deadline is None else deadline - time.monotonic()
+    return locked_call(_WORKSPACE_COND, _enter_workspace_locked, workspace, deadline)
+
+
+def _conflicting(workspace: str) -> bool:
+    """Return True while a different workspace is active; caller holds ``_WORKSPACE_COND``."""
+    return any(active != workspace for active in _ACTIVE_WORKSPACES)
+
+
+def _enter_workspace_locked(workspace: str, deadline: float | None) -> bool:
+    """Body of :func:`enter_workspace`; the caller holds ``_WORKSPACE_COND``.
+
+    Args:
+        workspace: The launching agent's workspace identifier.
+        deadline: ``time.monotonic()`` instant to give up at, or
+            ``None`` to wait indefinitely.
+
+    Returns:
+        Whether the workspace was entered (see :func:`enter_workspace`).
+    """
+    if _conflicting(workspace):
+        logger.info(
+            "waiting for concurrent kiss-web launches using "
+            "workspaces %s to finish before publishing workspace %r",
+            sorted(_ACTIVE_WORKSPACES), workspace,
+        )
+    while _conflicting(workspace):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            logger.error(
+                "timed out waiting for concurrent kiss-web launches "
+                "using workspaces %s to finish before publishing "
+                "workspace %r to the process-global %s environment "
+                "variable",
+                sorted(_ACTIVE_WORKSPACES), workspace, WORKSPACE_ENV_VAR,
             )
-            if remaining is not None and remaining <= 0:
-                logger.error(
-                    "timed out waiting for concurrent kiss-web launches "
-                    "using workspaces %s to finish before publishing "
-                    "workspace %r to the process-global %s environment "
-                    "variable",
-                    sorted(_ACTIVE_WORKSPACES), workspace, WORKSPACE_ENV_VAR,
-                )
-                return False
-            logger.info(
-                "waiting for concurrent kiss-web launches using "
-                "workspaces %s to finish before publishing workspace %r",
-                sorted(_ACTIVE_WORKSPACES), workspace,
-            )
-            _WORKSPACE_COND.wait(remaining)
-        # The count and the thread's record are two adjacent stores
-        # with no call between them: an asynchronously injected stop
-        # cannot land between the hold and its record.
-        _ACTIVE_WORKSPACES[workspace] = _ACTIVE_WORKSPACES.get(workspace, 0) + 1
-        _HELD.workspace = workspace
-        os.environ[WORKSPACE_ENV_VAR] = workspace
-        return True
+            return False
+        # Sliced so an injected Stop lands within one slice.
+        _WORKSPACE_COND.wait(
+            _WAIT_SLICE_SECONDS if remaining is None else min(remaining, _WAIT_SLICE_SECONDS)
+        )
+    # The count and the thread's record are two adjacent stores
+    # with no call between them: an asynchronously injected stop
+    # cannot land between the hold and its record.
+    _ACTIVE_WORKSPACES[workspace] = _ACTIVE_WORKSPACES.get(workspace, 0) + 1
+    _HELD.workspace = workspace
+    os.environ[WORKSPACE_ENV_VAR] = workspace
+    return True
 
 
 def exit_workspace(workspace: str) -> None:
@@ -126,14 +157,18 @@ def exit_workspace(workspace: str) -> None:
     Args:
         workspace: The workspace passed to :func:`enter_workspace`.
     """
-    with _WORKSPACE_COND:
-        if getattr(_HELD, "workspace", "") == workspace:
-            _HELD.workspace = ""
-        count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
-        if count > 0:
-            _ACTIVE_WORKSPACES[workspace] = count
-        else:
-            _ACTIVE_WORKSPACES.pop(workspace, None)
-        if not _ACTIVE_WORKSPACES:
-            os.environ.pop(WORKSPACE_ENV_VAR, None)
-        _WORKSPACE_COND.notify_all()
+    locked_call(_WORKSPACE_COND, _exit_workspace_locked, workspace)
+
+
+def _exit_workspace_locked(workspace: str) -> None:
+    """Body of :func:`exit_workspace`; the caller holds ``_WORKSPACE_COND``."""
+    if getattr(_HELD, "workspace", "") == workspace:
+        _HELD.workspace = ""
+    count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
+    if count > 0:
+        _ACTIVE_WORKSPACES[workspace] = count
+    else:
+        _ACTIVE_WORKSPACES.pop(workspace, None)
+    if not _ACTIVE_WORKSPACES:
+        os.environ.pop(WORKSPACE_ENV_VAR, None)
+    _WORKSPACE_COND.notify_all()

@@ -4,10 +4,10 @@
 # add your name here
 """Reproduction probe: a tab that STARTED a task and then resumes its
 OWN still-running chat (the close+reopen / reload path) must, on the
-real ``VSCodeServer``:
+real ``AgentServer``:
 
 * broadcast ``status running:true`` for that tab during the resume so
-  the re-opened webview re-learns the task is running, and
+  the re-opened chat page re-learns the task is running, and
 * still accept ``appendUserMessage`` for that tab (inject it, not drop).
 
 This drives the REAL daemon (no stubs of project logic).
@@ -22,7 +22,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -50,7 +50,7 @@ class TestStartedTabResumeOwnRunningChat:
             {"type": "text_delta", "text": "partial"}, task_id=task_id,
         )
 
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         subs: list[tuple[Any, str]] = []
@@ -78,7 +78,7 @@ class TestStartedTabResumeOwnRunningChat:
         ]
         assert running_events, (
             "resume of a started tab's OWN running chat must broadcast "
-            "status running:true so the re-opened webview re-learns the "
+            "status running:true so the re-opened chat page re-learns the "
             f"task is running; broadcasts were: {[e.get('type') for e in events]}"
         )
 
@@ -94,7 +94,7 @@ class TestStartedTabResumeOwnRunningChat:
         ``prompt`` event), exactly like ``appendUserMessage``.
 
         This is the root cause of "input ignored during the task" after a
-        close+reopen: the re-opened webview can momentarily believe the
+        close+reopen: the re-opened chat page can momentarily believe the
         task is NOT running (before the resume's ``status running:true``
         arrives) and therefore send the typed text as a ``submit`` (→
         ``run``) rather than an ``appendUserMessage``.  The daemon — the
@@ -108,7 +108,7 @@ class TestStartedTabResumeOwnRunningChat:
         worker = threading.Thread(target=release.wait, daemon=True)
         worker.start()
 
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
 
@@ -145,7 +145,7 @@ class TestStartedTabResumeOwnRunningChat:
             and e.get("tabId") == tab_id
             and e.get("text") == "also update the docs"
         ]
-        assert prompt_echoes, "the injected prompt must be echoed to the webview"
+        assert prompt_echoes, "the injected prompt must be echoed to the chat page"
         assert state.task_thread is worker
         assert not any(e.get("type") == "clear" for e in events)
 

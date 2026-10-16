@@ -1,0 +1,208 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+'use strict';
+
+const assert = require('assert');
+const {makePage, send} = require('./simplify2_harness');
+
+function runParallelPanel(win) {
+  const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
+  for (const h of headers) {
+    const txt = (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim();
+    if (txt.startsWith('run_parallel')) return h.closest('.ev.tc');
+  }
+  return null;
+}
+
+function subagentTabEls(win) {
+  return Array.from(
+    win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
+  );
+}
+
+function activeTabEl(win) {
+  return win.document.querySelector('#tab-list .chat-tab.active');
+}
+
+function bootParallelRun(n) {
+  const {win, posted} = makePage();
+  const ready = posted.find(m => m.type === 'ready');
+  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
+  const parentId = ready.tabId;
+
+  send(win, {
+    type: 'status',
+    running: true,
+    tabId: parentId,
+    startTs: Date.now(),
+  });
+  const taskNames = [];
+  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: parentId,
+    extras: {tasks: JSON.stringify(taskNames)},
+  });
+  const panel = runParallelPanel(win);
+  assert.ok(panel, 'run_parallel tool_call must render a .ev.tc panel');
+
+  const taskIds = [];
+  const subTabIds = [];
+  for (let i = 0; i < n; i++) {
+    const taskId = 'sub-task-' + (i + 1);
+    taskIds.push(taskId);
+    const before = posted.length;
+    send(win, {
+      type: 'new_tab',
+      task_id: taskId,
+      parent_tab_id: parentId,
+      taskId: '',
+    });
+    const resume = posted
+      .slice(before)
+      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
+    assert.ok(resume, 'new_tab must make the page post resumeSession');
+    subTabIds.push(resume.tabId);
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: resume.tabId,
+      parent_tab_id: parentId,
+      description: 'sub ' + (i + 1),
+      task_id: taskId,
+      taskIndex: i,
+    });
+  }
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    n,
+    'each spawned sub-agent must get its own tab',
+  );
+  return {win, posted, parentId, panel, taskIds, subTabIds};
+}
+
+function testDoneClosesOnlyFinishedTab() {
+  const {win, posted, panel, subTabIds} = bootParallelRun(2);
+
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
+
+  const remaining = subagentTabEls(win);
+  assert.strictEqual(
+    remaining.length,
+    1,
+    'the finished sub-agent tab must close as soon as it finishes, ' +
+      'leaving only the still-running sibling open',
+  );
+  assert.strictEqual(
+    remaining[0].dataset.tabId,
+    subTabIds[1],
+    'the surviving tab must be the still-running sibling',
+  );
+  assert.ok(
+    posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
+    'the backend must be told to close the finished sub-agent tab',
+  );
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'the run_parallel panel must stay uncollapsed while a sibling ' +
+      'sub-agent is still running',
+  );
+  win.close();
+  console.log('  ok - subagentDone closes only the finished tab');
+}
+
+function testLastDoneClosesTabAndCollapsesPanel() {
+  const {win, posted, panel, subTabIds} = bootParallelRun(2);
+
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
+  send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
+
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'every finished sub-agent tab must be closed',
+  );
+  for (const id of subTabIds) {
+    assert.ok(
+      posted.some(m => m.type === 'closeTab' && m.tabId === id),
+      'the backend must be told to close sub-agent tab ' + id,
+    );
+  }
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'the run_parallel panel must collapse once no open sub-agent ' +
+      'tab remains',
+  );
+  win.close();
+  console.log('  ok - last subagentDone closes its tab and collapses panel');
+}
+
+function testDoneOnActiveTabSwitchesAway() {
+  const {win, parentId, subTabIds} = bootParallelRun(2);
+
+  const subEl = subagentTabEls(win).find(
+    el => el.dataset.tabId === subTabIds[0],
+  );
+  assert.ok(subEl, 'the first sub-agent tab must be in the tab bar');
+  subEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(
+    activeTabEl(win).dataset.tabId,
+    subTabIds[0],
+    'clicking the sub-agent tab must activate it',
+  );
+
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
+
+  const active = activeTabEl(win);
+  assert.ok(active, 'a tab must be active after the finished tab closed');
+  assert.notStrictEqual(
+    active.dataset.tabId,
+    subTabIds[0],
+    'the closed sub-agent tab must not stay active',
+  );
+  assert.ok(
+    [parentId, subTabIds[1]].includes(active.dataset.tabId),
+    'an adjacent tab (parent or sibling) must become active',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    1,
+    'only the still-running sibling sub-agent tab must remain open',
+  );
+  win.close();
+  console.log('  ok - subagentDone on the active tab switches away');
+}
+
+function testDoneUnknownTabIsNoop() {
+  const {win, posted, subTabIds} = bootParallelRun(2);
+
+  const before = posted.length;
+  send(win, {type: 'subagentDone', tab_id: 'no-such-tab'});
+
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'a subagentDone for an unknown tab must not touch open tabs',
+  );
+  assert.ok(
+    !posted
+      .slice(before)
+      .some(m => m.type === 'closeTab' && subTabIds.includes(m.tabId)),
+    'no open sub-agent tab may be closed for an unknown tab id',
+  );
+  win.close();
+  console.log('  ok - subagentDone for an unknown tab id is a no-op');
+}
+
+function main() {
+  testDoneClosesOnlyFinishedTab();
+  testLastDoneClosesTabAndCollapsesPanel();
+  testDoneOnActiveTabSwitchesAway();
+  testDoneUnknownTabIsNoop();
+  console.log('subagentTabAutoCloseOnDone.test.js: all tests passed');
+}
+
+main();

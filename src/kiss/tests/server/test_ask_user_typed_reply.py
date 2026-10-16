@@ -25,7 +25,7 @@ import time
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _QUESTION = "Paste the Bot User OAuth Token (xoxb-...)"
@@ -37,7 +37,7 @@ class TestTypedReplyAnswersPendingQuestion(unittest.TestCase):
 
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.stop = threading.Event()
         self.result: dict[str, str] = {}
         self.done = threading.Event()

@@ -30,9 +30,9 @@ from kiss.server import agent_state
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _register_state(
@@ -80,7 +80,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "stop-test-1"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -145,7 +145,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "error-test-1"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -199,7 +199,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "success-test-1"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -264,7 +264,7 @@ class TestBudgetExceededResultPanel(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "budget-test-1"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:

@@ -31,9 +31,9 @@ from kiss.server import agent_state
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _start_source_task(
@@ -55,7 +55,7 @@ def _start_source_task(
     Returns the registered state, the started task thread, and an
     event set once the stubbed run is executing.
     """
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = agent_state.AgentState(
         task_id,
         agent=agent,

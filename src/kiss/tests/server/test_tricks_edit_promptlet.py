@@ -163,7 +163,7 @@ class TestEditMyInjectionTrick(_TricksHome):
         )
         self.assertEqual(tricks.read_tricks_data()["tricks"][:2], ["A\nB\nC", "Other."])
 
-    def test_crlf_text_from_the_vscode_page_matches_and_is_normalised(self) -> None:
+    def test_crlf_text_from_the_chat_page_matches_and_is_normalised(self) -> None:
         self.user_file.write_text(
             "## Trick\r\n\r\nLine one.\r\nLine two.\r\n\r\n## Trick\r\n\r\nOther.\r\n",
             encoding="utf-8",

@@ -33,7 +33,7 @@ import kiss.server.merge_flow as merge_flow_module
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import run_git
 
@@ -61,7 +61,7 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         _init_repo(self.tmpdir)
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = self.tmpdir
         self.owner = agent_state.AgentState(
             TASK_ID, tab_id=OWNER_TAB, server_owned=True,
@@ -166,7 +166,7 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
             original_branch="main",
             wt_dir=wt_dir,
         )
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = wt
         self.owner.agent = cast(ChatSorcarAgent, agent)
         return wt

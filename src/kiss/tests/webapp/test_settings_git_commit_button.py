@@ -1,0 +1,92 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+
+
+"""Tests that stay behind from ``kiss.tests.webapp.test_settings_git_commit_button``
+(now ``kiss.tests.server.test_settings_git_commit_button``): they assert on assets outside
+kiss.core/kiss.agents.sorcar/kiss.server (e.g. the real
+chat.html/main.js media content), so they keep their original
+location while the server-only majority of the file moved to
+tests/server.
+"""
+
+
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+_MEDIA_DIR = (
+    Path(__file__).resolve().parents[3] / "kiss" / "webapp" / "media"
+)
+
+
+
+
+class TestGitCommitButtonWiring(unittest.TestCase):
+    """The page carries the button and posts the command."""
+
+    def test_button_markup_in_more_menu(self) -> None:
+        html = (_MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
+        i_menu = html.find('id="more-menu"')
+        i_btn = html.find('id="autocommit-btn"')
+        self.assertGreater(i_menu, -1)
+        self.assertGreater(i_btn, -1)
+        self.assertLess(i_menu, i_btn, 'button must be in the "..." menu')
+        tag = html[html.rfind("<button", 0, i_btn) : html.index(">", i_btn) + 1]
+        self.assertIn('data-tooltip="git commit"', tag)
+        self.assertIn("more-menu-item", tag)
+        btn_block = html[i_btn : html.index("</button>", i_btn)]
+        self.assertIn('<span class="more-item-label">Git Commit</span>', btn_block)
+
+    def test_main_js_posts_autocommit_action(self) -> None:
+        # Since 81905ace3 (editor-title git-commit button) the click
+        # handler delegates to the shared triggerManualGitCommit()
+        # helper instead of posting autocommitAction inline.
+        js = (_MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+        self.assertIn("getElementById('autocommit-btn')", js)
+        wiring = re.search(
+            r"autocommitBtn\.addEventListener\('click',(.*?)\}\);\s*\}",
+            js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(wiring, "button click handler must exist")
+        assert wiring is not None
+        self.assertIn("triggerManualGitCommit()", wiring.group(1))
+        helper = re.search(
+            r"function triggerManualGitCommit\(\) \{(.*?)\n  \}",
+            js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(helper, "triggerManualGitCommit helper must exist")
+        assert helper is not None
+        self.assertIn("api.autocommitAction(", helper.group(1))
+        self.assertIn("autocommitTargetTabId()", helper.group(1))
+        self.assertIn("setAutocommitInFlight(true)", helper.group(1))
+        self.assertIn("closeSettingsPanel()", helper.group(1))
+        self.assertIn("workDirForTab(commitTabId)", helper.group(1))
+
+    def test_gitcommit_css_present(self) -> None:
+        main_css = (_MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+        remote_css = (
+            _MEDIA_DIR / "remote-codex.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".more-menu-item", main_css)
+        self.assertIn(".more-menu-item", remote_css)
+
+
+class TestGitCommitCommandCatalog(unittest.TestCase):
+    """``autocommitAction`` is present in every command catalog."""
+
+    def test_in_browser_catalog(self) -> None:
+        api_js = (_MEDIA_DIR / "api.js").read_text(encoding="utf-8")
+        match = re.search(
+            r"const SORCAR_API_COMMANDS = \[(.*?)\];", api_js, re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        names = re.findall(r"'([^']+)'", match.group(1))
+        self.assertIn("autocommitAction", names)

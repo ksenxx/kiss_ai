@@ -27,7 +27,7 @@ from kiss.agents.seas.sync.git_sync import GitSyncError, sync
 from kiss.agents.seas.sync.sync_sea import SyncSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
-from kiss.tests.agents.seas.conftest import HERMETIC_GIT, git, run_sea
+from kiss.tests.agents.seas.conftest import HERMETIC_GIT, commit, git, run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
@@ -58,10 +58,7 @@ def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _commit(repo: Path, name: str, text: str) -> str:
     """Write *text* to *name* in *repo*, commit it and return the commit sha."""
-    (repo / name).write_text(text, encoding="utf-8")
-    git(repo, "add", name)
-    git(repo, "commit", "-q", "-m", f"{name}: {text.strip()[:20]}")
-    return git(repo, "rev-parse", "HEAD")
+    return commit(repo, f"{name}: {text.strip()[:20]}", {name: text})
 
 
 def _remote_and_clones(tmp_path: Path, *names: str) -> list[Path]:

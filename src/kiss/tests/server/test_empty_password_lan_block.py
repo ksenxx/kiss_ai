@@ -68,12 +68,12 @@ from unittest import IsolatedAsyncioTestCase
 import websockets
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
 _PASSWORD = "correct-horse-battery-staple"
 _PASSWORD2 = "a-different-password"
@@ -173,10 +173,16 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
 
         return await asyncio.to_thread(probe)
 
-    async def _ws_connect(self, host: str) -> Any:
-        """Open a WSS connection to /ws via *host*."""
+    async def _ws_connect(self, host: str, forwarded: bool = False) -> Any:
+        """Open a WSS connection to /ws via *host*.
+
+        *forwarded* makes a loopback client look like a cloudflared
+        visitor, which (unlike a direct loopback browser) must give the
+        password.
+        """
         return await connect(
             f"wss://{host}:{self._port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR if forwarded else None,
         )
 
     async def _auth_reply(self, host: str, password: str) -> str | None:
@@ -221,6 +227,19 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         with self.assertRaises(websockets.exceptions.InvalidStatus) as cm:
             await self._ws_connect(ip)
         self.assertEqual(cm.exception.response.status_code, 403)
+
+    async def test_lan_plain_http_is_400_loopback_plain_is_served(self) -> None:
+        """Plain (non-TLS) HTTP is served on loopback only; LAN peers get 400."""
+        ip = self._require_lan_ip()
+        request = b"GET / HTTP/1.1\r\nHost: kiss\r\n\r\n"
+
+        def probe(host: str) -> str:
+            with socket.create_connection((host, self._port), 10) as raw:
+                raw.sendall(request)
+                return raw.recv(4096).split(b"\r\n")[0].decode()
+
+        self.assertIn("400", await asyncio.to_thread(probe, ip))
+        self.assertIn("200", await asyncio.to_thread(probe, "127.0.0.1"))
 
     async def test_localhost_keeps_full_access(self) -> None:
         """Loopback clients still get the page and empty-password auth."""
@@ -278,11 +297,11 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         the password is changed once before the first attempt (whose
         stale pre-change password earns ``auth_required``) and AGAIN
         between the attempts (so a reload done only at the first
-        attempt would reject the retry).  On loopback, clearing the
-        password makes the empty probe succeed.
+        attempt would reject the retry).  A direct loopback browser
+        is admitted without a password whatever is configured.
         """
         save_config({"remote_password": _PASSWORD})
-        async with await self._ws_connect("127.0.0.1") as ws:
+        async with await self._ws_connect("127.0.0.1", forwarded=True) as ws:
             save_config({"remote_password": _PASSWORD2})
             await ws.send(
                 json.dumps({"type": "auth", "password": _PASSWORD})

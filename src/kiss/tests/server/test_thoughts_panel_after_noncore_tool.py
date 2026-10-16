@@ -9,14 +9,14 @@ Originally ``JsonPrinter`` only rendered the return value of a handful of
 screenshot or a go_to_url left a tool call with nothing after it.  Commit
 a8d394a7 removed that whitelist: every tool's return value is broadcast
 except ``finish``, whose value the agentic loop renders as its own
-``result`` panel.  These tests pin that, and the event ORDER the webview
+``result`` panel.  These tests pin that, and the event ORDER the chat page
 is entitled to rely on -- a tool's result reaching the transcript before
 the next thinking block starts.
 
-The webview's own half of this story -- that a thought following a tool
+The chat page's own half of this story -- that a thought following a tool
 call always lands inside a Thoughts panel, even when its result never
 arrives -- is covered by the real DOM tests in
-``agents/vscode/test/thoughtsPanelArming.test.js``.
+``webapp/test/thoughtsPanelArming.test.js``.
 """
 
 from __future__ import annotations

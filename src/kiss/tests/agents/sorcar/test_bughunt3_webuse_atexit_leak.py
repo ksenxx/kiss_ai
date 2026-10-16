@@ -8,7 +8,7 @@
 unregisters it, so every agent run (``SorcarAgent.run`` constructs a
 fresh ``WebUseTool`` and closes it in its ``finally``) permanently
 retains the closed tool object in the atexit table — unbounded growth
-over a long VS Code session.  After ``close()`` the registration must be
+over a long daemon lifetime.  After ``close()`` the registration must be
 gone; ``_ensure_browser`` re-registers when the tool is revived.
 """
 

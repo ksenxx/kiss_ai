@@ -6,7 +6,7 @@
 
 User-visible bug
 ----------------
-When a task is started from the VS Code chat UI, the task's panel
+When a task is started from the chat page, the task's panel
 does not appear in the History sidebar until the task FINISHES.
 Pressing Run shows the task in the active tab, but the History
 sidebar list still lacks the row for the new task — only after the
@@ -27,7 +27,7 @@ the ``task_history`` row.  ``refreshHistory`` then queries history
 while the row does not yet exist in the DB.  No ``tasks_updated``
 broadcast is emitted at start time; the only existing
 ``tasks_updated`` broadcast lives in
-``vscode/task_runner.py`` and fires AT THE END of the task.  Net
+``server/task_runner.py`` and fires AT THE END of the task.  Net
 effect: the sidebar gets one refresh request before the row exists
 and the next refresh trigger arrives only when the task finishes.
 
@@ -40,10 +40,10 @@ the task is still running.
 
 This test drives the full production code path:
 
-1. Real ``VSCodeServer`` over an in-process printer that captures
+1. Real ``AgentServer`` over an in-process printer that captures
    every broadcast event (and the timestamp of each broadcast
    relative to the agent run lifecycle).
-2. Issue a ``run`` command exactly as the webview does.
+2. Issue a ``run`` command exactly as the chat page does.
 3. Patch the underlying ``SorcarAgent.run`` so it blocks on a
    ``threading.Event`` — simulating an agent that is RUNNING but
    has not yet produced a result.  While blocked, the test asserts
@@ -70,7 +70,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     redirect_persistence,
@@ -123,7 +123,7 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         self.saved = redirect_persistence(self.tmpdir)
         init_repo(self.tmpdir)
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.events_lock = threading.Lock()
         self.broadcast_counter = [0]

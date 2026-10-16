@@ -7,7 +7,7 @@
 ``_cmd_complete`` keeps a per-connection snapshot of the last-reported
 active editor file (``_last_active_file``) and its content
 (``_last_active_content``) so a ``complete`` command that carries no
-``activeFile`` (e.g. focus is inside the webview) can still harvest
+``activeFile`` (e.g. focus is inside the chat page) can still harvest
 completions from the file the user was just editing.
 
 Malformed (non-string) values are coerced before use — but the two
@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import make_capturing_server
 
 
@@ -130,7 +130,7 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt2-race-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.first_clear_entered = threading.Event()
         self.release = threading.Event()

@@ -37,6 +37,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from kiss.agents.sorcar.chat_summary import launch_ms
+
 # Per-kind clip limits (characters) applied when an entry is rendered.
 _CLIP: dict[str, int] = {
     "THOUGHT": 400,
@@ -240,13 +242,8 @@ def _event_ms(ev: dict[str, Any]) -> int:
 
 
 def _start_ms(task: dict[str, Any]) -> int:
-    """Return the task's start time in epoch milliseconds.
-
-    Legacy rows carry no ``start_ts``; they fall back to the row's
-    insertion ``timestamp`` (seconds), the same fallback the history
-    sidebar applies.
-    """
-    return int(task.get("start_ts") or 0) or int(float(task.get("timestamp") or 0) * 1000)
+    """Return the task's start time in epoch milliseconds (:func:`launch_ms` on its row)."""
+    return launch_ms(task.get("start_ts"), task.get("timestamp"))
 
 
 def _fmt_ts(ms: int) -> str:
@@ -334,6 +331,22 @@ def header_lines(task: dict[str, Any], spend: str, total: int) -> list[str]:
     lines.append(f"Transcript entries: {total}")
     if task.get("parent_task_id"):
         lines.append(f"Sub-agent of task: {task['parent_task_id']}")
+    return lines
+
+
+def _timed_header(task: dict[str, Any], entries: list[Entry], spend: str) -> list[str]:
+    """Return the ``== Task ==`` section: :func:`header_lines`, the last event's age and now."""
+    events = task["events"]
+    last_ms = _event_ms(events[-1]) if events else 0
+    now = time.time()
+    lines = ["== Task ==", *header_lines(task, spend, len(entries))]
+    if last_ms:
+        ago = _fmt_duration(int(now - last_ms / 1000))
+        lines.append(f"Last event: {_fmt_ts(last_ms)} ({ago} ago)")
+    lines.append(
+        f"Now: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))} "
+        f"(local: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(now))})"
+    )
     return lines
 
 
@@ -460,17 +473,7 @@ def overview(task_id: str) -> str:
     if isinstance(loaded, str):
         return loaded
     task, entries, spend = loaded
-    events = task["events"]
-    last_ms = _event_ms(events[-1]) if events else 0
-    now = time.time()
-    lines = ["== Task ==", *header_lines(task, spend, len(entries))]
-    if last_ms:
-        ago = _fmt_duration(int(now - last_ms / 1000))
-        lines.append(f"Last event: {_fmt_ts(last_ms)} ({ago} ago)")
-    lines.append(
-        f"Now: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))} "
-        f"(local: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(now))})"
-    )
+    lines = _timed_header(task, entries, spend)
     # Side-channel children (earlier /ask and task-update runs) are not
     # the task's own work; their answers already appear as ASK ANSWER
     # entries, so only the count is shown.
@@ -574,17 +577,7 @@ def context(task_id: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
     if isinstance(loaded, str):
         return loaded
     task, entries, spend = loaded
-    events = task["events"]
-    last_ms = _event_ms(events[-1]) if events else 0
-    now = time.time()
-    lines = ["== Task ==", *header_lines(task, spend, len(entries))]
-    if last_ms:
-        ago = _fmt_duration(int(now - last_ms / 1000))
-        lines.append(f"Last event: {_fmt_ts(last_ms)} ({ago} ago)")
-    lines.append(
-        f"Now: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))} "
-        f"(local: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(now))})"
-    )
+    lines = _timed_header(task, entries, spend)
     workers = [c for c in child_tasks(str(task["id"])) if not c.get("is_side_channel")]
     lines += ["", f"== Sub-agent tasks ({len(workers)}) =="]
     lines += [_child_line(c) for c in workers] or ["(none)"]

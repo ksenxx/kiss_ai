@@ -30,7 +30,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
@@ -121,7 +121,7 @@ class TestMalformedWorkDirUsesGlobal(IsolatedAsyncioTestCase):
             probe_b = await self._recv_type(ws_b, "pathsExist")
             self.assertEqual(probe_b["results"], {"only-in-b.txt": True})
             self.assertEqual(
-                self.server._vscode_server.work_dir, str(self.dir_b),
+                self.server._agent_server.work_dir, str(self.dir_b),
             )
             for payload in payloads:
                 await ws_a.send(json.dumps(payload))
@@ -186,7 +186,7 @@ class TestMalformedWorkDirUsesGlobal(IsolatedAsyncioTestCase):
             "pathsExist",
         )
         self.assertEqual(reply["results"], {"only-in-b.txt": True})
-        self.assertEqual(self.server._vscode_server.work_dir, str(self.dir_b))
+        self.assertEqual(self.server._agent_server.work_dir, str(self.dir_b))
 
     async def test_explicit_string_work_dir_wins_over_global(self) -> None:
         reply = await self._global_roundtrip(

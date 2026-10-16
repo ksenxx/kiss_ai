@@ -55,7 +55,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
 _GIT_ID = (

@@ -209,7 +209,7 @@ def test_anthropic_tool_result_pdf_becomes_document_block(temp_dir):
 
 
 def test_printer_truncate_result_masks_base64_payload(temp_dir):
-    """The terminal/webview must never render the raw base64 blob."""
+    """The terminal/chat page must never render the raw base64 blob."""
     png_path = temp_dir / "screenshot.png"
     png_path.write_bytes(_PNG_1x1)
     read_output = UsefulTools().Read(str(png_path))

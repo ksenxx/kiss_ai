@@ -33,7 +33,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
 
 OWNER_TAB = "owner-tab"
@@ -48,7 +48,7 @@ class TestHistoryAwaitingAnswer(unittest.TestCase):
         th._close_db()
         th._DB_PATH = Path(self.tmp) / "history.db"  # type: ignore[attr-defined]
         self.printer = WebPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = self.tmp
         # Every frame that would leave the daemon for a connected client.
         self.events: list[dict[str, Any]] = []

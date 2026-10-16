@@ -5,8 +5,8 @@
 """The daemon side of the chat header drop-down's selected-so-far list.
 
 Every directory adopted as the global working directory -- a
-chat-header drop-down pick or Explorer check mark on any surface
-(``setWorkDir``), a VS Code window's connect-time seed, a ``saveConfig``
+chat-header drop-down pick or Explorer check mark in any client
+(``setWorkDir``), a client's connect-time seed, a ``saveConfig``
 carrying ``work_dir`` -- passes through ``_apply_new_work_dir``, which
 records it in ``config.json`` (``recent_work_dirs``: ``{path, ts}``
 rows).  ``getConfig`` returns the rows most recently opened first,
@@ -14,8 +14,8 @@ skipping directories that no longer exist.  Tested against a real
 ``RemoteAccessServer`` over its local channel plus the config helpers on a
 real temporary ``config.json``.
 
-The webview half (the "..." menu item, the panel, both surfaces) is
-covered by ``agents/vscode/test/workDirPanel.test.js``.
+The chat page half (the "..." menu item, the panel) is
+covered by ``webapp/test/workDirPanel.test.js``.
 """
 
 from __future__ import annotations
@@ -32,14 +32,14 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _IsolatedConfig:
-    """Point ``vscode_config`` at a throwaway ``config.json``."""
+    """Point ``user_config`` at a throwaway ``config.json``."""
 
     def enter(self, tmpdir: str) -> None:
         self._orig = (vc.CONFIG_DIR, vc.CONFIG_PATH)
@@ -292,8 +292,8 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
         raise AssertionError(f"{path} never recorded")
 
     async def test_windows_and_webapp_share_one_history(self) -> None:
-        """Two VS Code windows announce their folders (``setWorkDir``);
-        the remote webapp then picks one of them (``saveConfig``): every
+        """Two browser windows announce their folders (``setWorkDir``);
+        a third client then picks one of them (``saveConfig``): every
         ``getConfig`` lists the shared history, most recent first."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
@@ -402,12 +402,12 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
             await self._recent_paths(reader, writer),
             [str(self.dir_b), str(self.dir_a)],
         )
-        self.assertEqual(self.server._vscode_server.work_dir, str(self.dir_b))
+        self.assertEqual(self.server._agent_server.work_dir, str(self.dir_b))
         self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_b))
 
     async def test_filesystem_root_is_never_recorded(self) -> None:
         """``_apply_new_work_dir`` refuses a root before recording it."""
-        self.server._vscode_server._apply_new_work_dir("/")
+        self.server._agent_server._apply_new_work_dir("/")
         self.assertEqual(vc.recent_work_dirs(), [])
         reader, writer = await self._connect()
         self.assertEqual(await self._recent_paths(reader, writer), [])

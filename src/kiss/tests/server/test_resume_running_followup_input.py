@@ -34,7 +34,7 @@ Reproduces and pins two bugs in the multi-viewer routing layer:
    routed as an ``appendUserMessage`` against an already-finished
    task — getting dropped again.
 
-The test drives the real ``VSCodeServer`` end-to-end through
+The test drives the real ``AgentServer`` end-to-end through
 ``_handle_command``, the real ``_replay_session`` /
 ``_attach_viewer_to_running_chat`` paths, and the real ``_TaskRunnerMixin``
 worker thread.  Only the innermost LLM-driven ``run`` (the
@@ -63,7 +63,7 @@ import yaml
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     redirect_persistence,
@@ -74,9 +74,9 @@ from kiss.tests.server.conftest import (
 _LIVE_TEXT = "live-delta-marker"
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    """Create a ``VSCodeServer`` whose broadcasts mirror ``WebPrinter``."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    """Create a ``AgentServer`` whose broadcasts mirror ``WebPrinter``."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
     printer = server.printer

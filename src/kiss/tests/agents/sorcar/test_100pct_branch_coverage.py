@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for 100% branch coverage of sorcar/ and vscode/ modules.
+"""Integration tests for 100% branch coverage of sorcar/ and server/ modules.
 
 Targets remaining uncovered branches in:
   _channel_cli.py (channel-agent CLI helpers)

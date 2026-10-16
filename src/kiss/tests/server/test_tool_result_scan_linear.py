@@ -31,7 +31,7 @@ from pathlib import Path
 from kiss.server.json_printer import JsonPrinter, _extract_image_path_candidates
 
 _VOSK_JS = (
-    Path(__file__).resolve().parents[2] / "agents" / "vscode" / "media" / "vosk.js"
+    Path(__file__).resolve().parents[2] / "webapp" / "media" / "vosk.js"
 )
 
 # The scan must finish far below this on any machine; the quadratic

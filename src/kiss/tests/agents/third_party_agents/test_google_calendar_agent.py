@@ -18,17 +18,14 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-import sys
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.gcal.gcal_sea as gcal_mod
 from kiss.agents.third_party_agents.gcal.gcal_sea import (
     _SERVICE,
-    GoogleCalendarAgent,
     GoogleCalendarChannelBackend,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
@@ -71,13 +68,6 @@ _CALENDARS = {
         {"id": "team@example.com", "summary": "Team", "accessRole": "reader"},
     ]
 }
-
-_AUTH_TOOL_NAMES = [
-    "check_google_calendar_auth",
-    "authenticate_google_calendar",
-    "clear_google_calendar_auth",
-    "finish_google_calendar_auth",
-]
 
 
 class _CalendarRequestHandler(BaseHTTPRequestHandler):
@@ -190,84 +180,6 @@ def backend(gcal_server, composio):
 
 def _last(server: RecordingServer) -> dict[str, Any]:
     return server.requests[-1]
-
-
-def test_agent_unauthenticated_exposes_only_auth_tools() -> None:
-    """A fresh agent is unauthenticated and exposes exactly the 4 auth tools."""
-    agent = GoogleCalendarAgent()
-    assert agent.name == "Google Calendar Agent"
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
-
-
-def test_check_auth_unauthenticated_explains_setup() -> None:
-    """check_google_calendar_auth explains how to set up credentials."""
-    agent = GoogleCalendarAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    msg = tools["check_google_calendar_auth"]()
-    assert "Not authenticated with Google Calendar" in msg
-    assert "authenticate_google_calendar" in msg
-    assert "No Composio API key" in msg
-
-
-def test_connect_link_flow_authenticates_agent(composio) -> None:
-    """authenticate -> user approves -> finish unlocks the Calendar tools."""
-    agent = GoogleCalendarAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    started = json.loads(tools["authenticate_google_calendar"]())
-    assert started["status"] == "consent_required"
-    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
-    assert json.loads(tools["finish_google_calendar_auth"]())["ok"] is True
-    assert agent._is_authenticated() is True
-    assert agent._backend.connection_info == "Google Calendar connected through Composio."
-    names = {t.__name__ for t in agent._get_tools()}
-    assert set(_AUTH_TOOL_NAMES) <= names
-    assert {
-        "gcal_list_calendars",
-        "gcal_list_events",
-        "gcal_get_event",
-        "gcal_create_event",
-        "gcal_update_event",
-        "gcal_delete_event",
-        "gcal_quick_add",
-    } <= names
-    assert "connect" not in names  # channel protocol method, not an LLM tool
-    tools = {t.__name__: t for t in agent._get_tools()}
-    assert json.loads(tools["check_google_calendar_auth"]())["ok"] is True
-
-
-def test_clear_auth_removes_connection_and_relocks_tools(composio) -> None:
-    """clear_google_calendar_auth deletes the connection and re-locks backend tools."""
-    account = connect(composio, _SERVICE)
-    agent = GoogleCalendarAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    result = tools["clear_google_calendar_auth"]()
-    assert "cleared" in result.lower()
-    assert composio.deleted == [account]
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns the auth tool set when locked."""
-    tools = gcal_mod.GcalSea().tools([])
-    assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
-    assert all(callable(t) for t in tools)
-
-
-def test_connect_without_token_fails() -> None:
-    """connect() fails cleanly when no token is persisted."""
-    b = GoogleCalendarChannelBackend()
-    assert b.connect() is False
-    assert "not connected" in b.connection_info
-
-
-def test_connect_with_composio_connection_succeeds(composio) -> None:
-    """connect() succeeds once a Composio connection is recorded."""
-    connect(composio, _SERVICE)
-    b = GoogleCalendarChannelBackend()
-    assert b.connect() is True
-    assert "connected through Composio" in b.connection_info
 
 
 def test_list_calendars(backend) -> None:
@@ -497,15 +409,6 @@ def test_request_wraps_non_json_success_body(backend) -> None:
     """A 200 with a non-JSON body is returned as plain text, not an error."""
     b, _ = backend
     assert json.loads(b._request("GET", "/plaintext")) == {"ok": True, "result": "pong"}
-
-
-def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
-    """main() with no CLI arguments prints the usage line and exits 1."""
-    monkeypatch.setattr(sys, "argv", ["kiss-gcal"])
-    with pytest.raises(SystemExit) as excinfo:
-        gcal_mod.main()
-    assert excinfo.value.code == 1
-    assert "Usage: kiss-gcal" in capsys.readouterr().out
 
 
 def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> None:

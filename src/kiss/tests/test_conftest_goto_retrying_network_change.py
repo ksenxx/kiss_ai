@@ -1,7 +1,7 @@
 """``goto_retrying_network_change`` and the webapp's dead self-reload.
 
 The remote webapp reloads itself once when one of its scripts fails to
-load (``web_server._WS_SHIM_JS``). In the full-suite run of 2026-09-30
+load (``media/assetLoadGuard.js``). In the full-suite run of 2026-09-30
 ``test_remote_model_dropdown_mobile`` timed out 30 s waiting for
 ``#model-btn`` although that button is static markup in ``chat.html``:
 a host network change had aborted a page script AND the reload's own
@@ -29,12 +29,12 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_remote_model_dropdown_mobile import (
-    _start_live_server,
-)
 from kiss.tests.conftest import (
     goto_retrying_network_change,
     reload_retrying_network_change,
+)
+from kiss.tests.webapp.test_remote_model_dropdown_mobile import (
+    _start_live_server,
 )
 
 

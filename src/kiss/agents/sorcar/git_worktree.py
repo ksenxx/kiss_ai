@@ -193,7 +193,11 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
 
 
 _repo_locks: dict[str, threading.RLock] = {}
-_repo_locks_guard = threading.Lock()
+# Re-entrant and taken through ``locked_call`` like every lock a task
+# thread reaches (``repo_lock`` runs on task threads): a plain ``with``
+# on it could leak it under the Stop injection (gh-74174) and hang
+# ``repo_lock()`` for EVERY repository of the daemon.
+_repo_locks_guard = threading.RLock()
 
 # ``(resolved repo root, branch)`` pairs whose keep-for-review decision
 # is held in THIS process only: :meth:`GitWorktreeOps.save_preserve_marker`
@@ -381,11 +385,9 @@ def repo_lock(repo: Path) -> threading.RLock:
     Returns:
         A :class:`threading.RLock` specific to the resolved repo path.
     """
-    key = str(repo.resolve())
-    with _repo_locks_guard:
-        if key not in _repo_locks:
-            _repo_locks[key] = threading.RLock()
-        return _repo_locks[key]
+    return locked_call(
+        _repo_locks_guard, _repo_locks.setdefault, str(repo.resolve()), threading.RLock(),
+    )
 
 
 _GIT_TIMEOUT_SECONDS: float = 300.0
@@ -656,11 +658,10 @@ _RESCUE_SKIP_COMPONENTS = frozenset({
 # Basename glob patterns (``fnmatch``) whose files are never rescued
 # either: regenerable build artifacts that do not live under a skipped
 # directory.  Without this list every worktree that rebuilt one of
-# them (a fresh ``kiss-sorcar.vsix``, pytest-cov's ``.coverage`` data,
-# stray ``*.pyc``) differed from the main-tree copy and landed a
-# ``<stem>.kiss-rescued-<ns><ext>`` sibling on each teardown.
+# them (pytest-cov's ``.coverage`` data, stray ``*.pyc``) differed
+# from the main-tree copy and landed a ``<stem>.kiss-rescued-<ns><ext>``
+# sibling on each teardown.
 _RESCUE_SKIP_PATTERNS = (
-    "*.vsix",
     ".coverage",
     ".coverage.*",
     "*.pyc",
@@ -851,7 +852,7 @@ def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
 
     The single shared porcelain parser — used by
     :meth:`GitWorktreeOps.copy_dirty_state` and (via
-    ``merge_flow._porcelain_paths``) by the VS Code merge flow — so
+    ``merge_flow._porcelain_paths``) by the merge flow — so
     the parsers cannot drift apart.
 
     The output is split on ``\\n`` only (NOT ``splitlines()``, which
@@ -970,7 +971,12 @@ class GitWorktreeOps:
         # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
         # ``repo_lock`` is an RLock, so callers already holding it are
         # unaffected.
-        with repo_lock(repo), _reclaim_process_lock(repo):
+        return locked_call(repo_lock(repo), GitWorktreeOps._create_locked, repo, branch, wt_dir)
+
+    @staticmethod
+    def _create_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """:meth:`create`'s body, run under ``repo_lock``."""
+        with _reclaim_process_lock(repo):
             result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
             if result.returncode != 0:
                 logger.warning(
@@ -1007,7 +1013,12 @@ class GitWorktreeOps:
             True when the worktree exists and is stamped, False
             otherwise (nothing is left on disk).
         """
-        with repo_lock(repo), _reclaim_process_lock(repo):
+        return locked_call(repo_lock(repo), GitWorktreeOps._reattach_locked, repo, branch, wt_dir)
+
+    @staticmethod
+    def _reattach_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """:meth:`reattach`'s body, run under ``repo_lock``."""
+        with _reclaim_process_lock(repo):
             result = _git("worktree", "add", str(wt_dir), branch, cwd=repo)
             if result.returncode != 0:
                 logger.warning("Failed to reattach worktree: %s", result.stderr.strip())
@@ -1045,33 +1056,37 @@ class GitWorktreeOps:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        with repo_lock(repo):
-            if _same_path(wt_dir, repo):
-                # The main working tree is not an agent worktree: git
-                # rightly refuses to remove it, and the ``rmtree``
-                # fallback below would delete the user's whole project.
-                logger.error(
-                    "Refusing to remove %s: it is the main working tree, "
-                    "not an agent worktree",
-                    wt_dir,
-                )
-                return
-            if not wt_dir.exists():
-                GitWorktreeOps.prune(repo)
-                return
-            result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
-            if result.returncode != 0:
-                result = _git(
-                    "worktree", "remove", "--force", "--force", str(wt_dir),
-                    cwd=repo,
-                )
-            if result.returncode != 0:
-                logger.warning(
-                    "worktree remove failed: %s; deleting directory directly",
-                    result.stderr.strip(),
-                )
-                GitWorktreeOps._rmtree_reporting_leftovers(wt_dir)
-                GitWorktreeOps.prune(repo)
+        locked_call(repo_lock(repo), GitWorktreeOps._remove_locked, repo, wt_dir)
+
+    @staticmethod
+    def _remove_locked(repo: Path, wt_dir: Path) -> None:
+        """:meth:`remove`'s body, run under ``repo_lock``."""
+        if _same_path(wt_dir, repo):
+            # The main working tree is not an agent worktree: git
+            # rightly refuses to remove it, and the ``rmtree``
+            # fallback below would delete the user's whole project.
+            logger.error(
+                "Refusing to remove %s: it is the main working tree, "
+                "not an agent worktree",
+                wt_dir,
+            )
+            return
+        if not wt_dir.exists():
+            GitWorktreeOps.prune(repo)
+            return
+        result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
+        if result.returncode != 0:
+            result = _git(
+                "worktree", "remove", "--force", "--force", str(wt_dir),
+                cwd=repo,
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "worktree remove failed: %s; deleting directory directly",
+                result.stderr.strip(),
+            )
+            GitWorktreeOps._rmtree_reporting_leftovers(wt_dir)
+            GitWorktreeOps.prune(repo)
 
     @staticmethod
     def _rmtree_reporting_leftovers(path: Path) -> None:
@@ -1107,8 +1122,12 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        with repo_lock(repo):
-            _git("worktree", "prune", cwd=repo)
+        locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
+
+    @staticmethod
+    def _prune_locked(repo: Path) -> None:
+        """:meth:`prune`'s body, run under ``repo_lock``."""
+        _git("worktree", "prune", cwd=repo)
 
     @staticmethod
     def stage_all(wt_dir: Path) -> None:
@@ -1637,29 +1656,35 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        with repo_lock(repo):
-            git_common = _git_common_dir(repo)
-            if git_common is None:  # pragma: no cover — not a git repo
-                raise OSError(f"{repo} is not a git repository")
-            info_file = git_common / "info" / filename
-            info_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(
-                info_file, "a+", encoding="utf-8", errors="surrogateescape",
-            ) as f, _file_lock(f):
-                f.seek(0)
-                content = f.read()
-                if entry in content.splitlines():
-                    return
-                _race_delay()
-                prefix = "" if not content or content.endswith("\n") else "\n"
-                f.write(f"{prefix}{entry}\n")
-                # Flush while the flock is still held: the context
-                # managers unwind in reverse order, releasing the lock
-                # BEFORE ``open()``'s exit flushes the buffered write.
-                # Without this a second process could grab the flock,
-                # read the still-unflushed file, miss the entry, and
-                # append a duplicate.
-                f.flush()
+        locked_call(
+            repo_lock(repo), GitWorktreeOps._append_info_line_locked, repo, filename, entry,
+        )
+
+    @staticmethod
+    def _append_info_line_locked(repo: Path, filename: str, entry: str) -> None:
+        """:meth:`_append_info_line`'s body, run under ``repo_lock``."""
+        git_common = _git_common_dir(repo)
+        if git_common is None:  # pragma: no cover — not a git repo
+            raise OSError(f"{repo} is not a git repository")
+        info_file = git_common / "info" / filename
+        info_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(
+            info_file, "a+", encoding="utf-8", errors="surrogateescape",
+        ) as f, _file_lock(f):
+            f.seek(0)
+            content = f.read()
+            if entry in content.splitlines():
+                return
+            _race_delay()
+            prefix = "" if not content or content.endswith("\n") else "\n"
+            f.write(f"{prefix}{entry}\n")
+            # Flush while the flock is still held: the context
+            # managers unwind in reverse order, releasing the lock
+            # BEFORE ``open()``'s exit flushes the buffered write.
+            # Without this a second process could grab the flock,
+            # read the still-unflushed file, miss the entry, and
+            # append a duplicate.
+            f.flush()
 
     @staticmethod
     def ensure_excluded(repo: Path) -> None:
@@ -1718,11 +1743,11 @@ class GitWorktreeOps:
 
         A fresh worktree checks out tracked files only, so every
         git-ignored ``node_modules`` of the main checkout is missing and
-        JS tests, ``npm run compile`` and the extension lint fail until
-        the agent runs ``npm install`` (minutes, hundreds of MB) or links
-        the directory by hand — a 24-hour audit of ``history.db`` found
-        seven worktree tasks reinstalling and several rerunning a
-        340-file suite after "compiled extension missing" failures.
+        JS tests and the webapp lint fail until the agent runs ``npm
+        install`` (minutes, hundreds of MB) or links the directory by
+        hand — a 24-hour audit of ``history.db`` found seven worktree
+        tasks reinstalling and several rerunning a 340-file suite after
+        "missing node_modules" failures.
 
         Each ignored directory named ``node_modules`` reported by ``git
         ls-files --ignored --directory`` in *repo* is linked at the same
@@ -2323,8 +2348,8 @@ class GitWorktreeOps:
           the repository.
         * Paths with a component in :data:`_RESCUE_SKIP_COMPONENTS`
           (``__pycache__``, ``.venv``, ``node_modules``, ...) or a
-          basename matching :data:`_RESCUE_SKIP_PATTERNS` (``*.vsix``,
-          ``.coverage``, ``.coverage.*``, ``*.pyc``, ...; deliberately
+          basename matching :data:`_RESCUE_SKIP_PATTERNS` (``.coverage``,
+          ``.coverage.*``, ``*.pyc``, ...; deliberately
           not ``.coverage*``, which would discard a ``.coveragerc``)
           are skipped: they are
           regenerable build/cache artifacts, and a copied virtualenv
@@ -3266,7 +3291,12 @@ class GitWorktreeOps:
         Returns:
             The number of branches deleted.
         """
-        with repo_lock(repo), _reclaim_process_lock(repo):
+        return locked_call(repo_lock(repo), GitWorktreeOps._sweep_orphaned_state_locked, repo)
+
+    @staticmethod
+    def _sweep_orphaned_state_locked(repo: Path) -> int:
+        """:meth:`sweep_orphaned_state`'s body, run under ``repo_lock``."""
+        with _reclaim_process_lock(repo):
             GitWorktreeOps.prune(repo)
             in_use = GitWorktreeOps.checked_out_branches(repo)
             result = _git(
@@ -3438,9 +3468,16 @@ class GitWorktreeOps:
             removed — or, for never-consumed pool spares, simply
             removed).
         """
-        excluded = exclude_branches or set()
+        return locked_call(
+            repo_lock(repo), GitWorktreeOps._reclaim_orphaned_worktrees_locked,
+            repo, exclude_branches or set(),
+        )
+
+    @staticmethod
+    def _reclaim_orphaned_worktrees_locked(repo: Path, excluded: set[str]) -> int:
+        """:meth:`reclaim_orphaned_worktrees`'s body, run under ``repo_lock``."""
         reclaimed = 0
-        with repo_lock(repo), _reclaim_process_lock(repo):
+        with _reclaim_process_lock(repo):
             # ``.kiss-worktrees/`` under the main tree would otherwise
             # show up as an untracked directory in ``git status`` and
             # trip the "main tree is dirty" guard below.  ``ensure_

@@ -47,6 +47,7 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     save_mcp_server,
 )
+from kiss.core import tool_interrupt
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
 
@@ -272,7 +273,7 @@ class MCPLoginSession:
             # a network call for a while, and ``active()`` must not
             # stall behind that wait.
             previous.cancel()
-            previous._finished.wait(timeout=5.0)
+            previous.wait(5.0)
         session = cls(cfg)
         session._server = _RedirectServer()
         cls._set_active(session)
@@ -310,8 +311,25 @@ class MCPLoginSession:
             self._server.server_close()
 
     def wait(self, seconds: float) -> bool:
-        """Wait up to *seconds* for the session to end; return True if it did."""
-        return self._finished.wait(timeout=seconds)
+        """Wait up to *seconds* for the session to end; return True if it did.
+
+        Waits in 0.2 s slices: the sign-in tools call this on the task
+        thread, where an injected Stop lands only between C-level waits
+        and the tool-panel Stop is honoured through
+        :func:`~kiss.core.tool_interrupt.raise_if_interrupted` (a no-op
+        outside a tool call, as from the command line).
+
+        Raises:
+            ToolCallInterrupted: When the calling tool call was stopped.
+        """
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if self._finished.wait(timeout=min(max(remaining, 0.0), 0.2)):
+                return True
+            tool_interrupt.raise_if_interrupted()
+            if remaining <= 0:
+                return False
 
     def _run(self) -> None:
         """Run the async sign-in on this thread's own event loop."""

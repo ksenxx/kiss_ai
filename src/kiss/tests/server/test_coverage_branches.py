@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for 100% branch coverage of sorcar/ and vscode/ modules.
+"""Integration tests for 100% branch coverage of sorcar/ and server/ modules.
 
 No mocks, patches, fakes, or test doubles. All tests use real objects
 and real function calls.
@@ -26,7 +26,7 @@ from kiss.server.json_printer import (
     JsonPrinter,
     _coalesce_events,
 )
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestJsonPrinterBranches:
@@ -82,11 +82,11 @@ class TestCoalesceEventsBranches:
         assert len(result) == 2
 
 
-class TestVSCodeServerBranches:
-    """Cover uncovered branches in VSCodeServer."""
+class TestAgentServerBranches:
+    """Cover uncovered branches in AgentServer."""
 
     def _make_server(self):
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
         def capture(event):
             events.append(event)
@@ -166,29 +166,6 @@ class TestVSCodeServerBranches:
         wt_events = [e for e in events if e.get("type") == "worktree_done"]
         assert len(wt_events) == 0
 
-    def test_handle_command_generate_commit_message_routing(self):
-        """generateCommitMessage is routed properly - routes to thread."""
-        with tempfile.TemporaryDirectory() as d:
-            repo = os.path.join(d, "repo")
-            os.makedirs(repo)
-            subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=repo, capture_output=True,
-            )
-            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
-            Path(repo, "f.txt").write_text("content\n")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
-            server, events = self._make_server()
-            server.work_dir = repo
-            server._handle_command({"type": "generateCommitMessage"})
-            time.sleep(1)
-            commit_events = [e for e in events if e["type"] == "commitMessage"]
-            assert len(commit_events) == 1
-            assert commit_events[0]["message"] == ""
-            assert "No staged changes" in commit_events[0]["error"]
-
 
 class TestHandleMessageContentBlockNoIsError:
     """Cover the case where content block lacks is_error/content attributes."""
@@ -203,9 +180,9 @@ class TestHandleMessageContentBlockNoIsError:
         assert len(events) == 0
 
 
-class TestVSCodeServerMoreBranches:
+class TestAgentServerMoreBranches:
     def _make_server(self):
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict] = []
         def capture(event):
             events.append(event)

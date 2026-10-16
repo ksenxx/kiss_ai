@@ -119,7 +119,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         raise RuntimeError(resolved)
     printer = getattr(parent_agent, "printer", None)
     parent_task_id = _persisted_task_id(parent_agent)
-    # The tab the webviews show the parent under — for a sub-agent
+    # The tab the chat pages show the parent under — for a sub-agent
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{parent_task_id or parent_tab_id}__merge"
@@ -167,6 +167,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         if printer is not None:
             _notify_subagent_done(
                 printer, _persisted_task_id(agent), sub_tab_id, model_name,
+                parent_tab_id,
             )
 
 

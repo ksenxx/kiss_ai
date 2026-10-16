@@ -6,7 +6,7 @@
 
 Two integration surfaces are pinned:
 
-* the ``getSeaCommands`` API handler on :class:`VSCodeServer`,
+* the ``getSeaCommands`` API handler on :class:`AgentServer`,
   including the ``connId``-scoped delivery contract shared by every
   other read command;
 * the slash-command run: ``/xxx text`` runs the SEA ``xxx`` DIRECTLY
@@ -35,7 +35,7 @@ from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state, sorcar
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
@@ -50,9 +50,9 @@ class _CapturePrinter(JsonPrinter):
         self.events.append(event)
 
 
-def _make_server() -> tuple[VSCodeServer, _CapturePrinter]:
+def _make_server() -> tuple[AgentServer, _CapturePrinter]:
     printer = _CapturePrinter()
-    return VSCodeServer(printer=printer), printer
+    return AgentServer(printer=printer), printer
 
 
 @pytest.fixture(autouse=True)

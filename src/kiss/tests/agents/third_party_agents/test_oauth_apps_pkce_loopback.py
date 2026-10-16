@@ -377,12 +377,16 @@ def test_pkce_cancel_releases_port(token_server: _TokenServer, service: str) -> 
     assert LoopbackPkceSession._port_owner is None
     assert _can_bind(port)
 
+    # A fresh session works after the cancel.  It picks its own port:
+    # re-binding ``port`` explicitly would race another test process
+    # that may have been handed the released port meanwhile (the
+    # same-port takeover is covered by the replacement test below).
     other = f"{service}_b"
     try:
-        second = _start(other, token_server, port)
+        second = _start(other, token_server)
         assert LoopbackPkceSession._port_owner is second
         requests.get(
-            f"http://127.0.0.1:{port}/callback",
+            f"http://127.0.0.1:{_port(second)}/callback",
             params={"code": "after-cancel", "state": _query(second)["state"]},
             timeout=10,
         )
@@ -462,20 +466,6 @@ def test_pkce_half_open_connection_does_not_pin_the_port(
         assert not session._server_thread.is_alive()
         assert LoopbackPkceSession._port_owner is None
         assert _can_bind(port)
-
-        other = f"{service}_b"
-        try:
-            replacement = _start(other, token_server, port)
-            assert LoopbackPkceSession._port_owner is replacement
-            requests.get(
-                f"http://127.0.0.1:{port}/callback",
-                params={"code": "after-half-open", "state": _query(replacement)["state"]},
-                timeout=10,
-            )
-            finished, status = ConsentSession.finish(other, wait_seconds=15)
-            assert (finished, status) == (replacement, "ok")
-        finally:
-            ConsentSession.cancel_active(other)
     finally:
         half_open.close()
 

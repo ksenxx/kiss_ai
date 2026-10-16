@@ -4,12 +4,10 @@
 # add your name here
 """End-to-end tests for the ``kiss-runtime-setup`` block of ``install.sh``.
 
-That block finishes, without a VS Code window, the runtime setup the
-extension's ``DependencyInstaller`` otherwise performs on first
-activation: uv, ``uv sync`` of every installed copy of the bundled
-``kiss_project``, the ``sorcar`` CLI wrapper, Playwright Chromium,
-cloudflared, ``~/.local/bin`` on PATH, and the kiss-web daemon as the
-user's service.
+That block holds the installer's runtime helpers: uv, ``~/.local/bin``
+on PATH, cloudflared, and the kiss-web daemon registered as the user's
+service from the installed app directory and (re)started only when that
+is safe.
 
 Every test extracts the block verbatim from ``install.sh`` (between
 ``# BEGIN: kiss-runtime-setup`` and the matching END marker) and runs it
@@ -22,8 +20,6 @@ port, exactly as kiss-web does, so the block's "is it up" logic is
 exercised for real.  The active-task probe talks to a real fake daemon
 over ``wss://`` (``kiss.tests.local_ws.fake_daemon``).
 
-Branches that need root (``playwright install-deps`` run as uid 0) are
-not reachable without privileges and are not covered.
 """
 
 from __future__ import annotations
@@ -31,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import platform
 import shutil
 import socket
 import subprocess
@@ -51,7 +46,6 @@ pytestmark = posix_only("runs the runtime-setup block of install.sh under bash")
 
 REPO = Path(__file__).resolve().parents[3]
 INSTALL = REPO / "install.sh"
-VERSION = "9.9.9"
 _BEGIN = "# BEGIN: kiss-runtime-setup"
 _END = "# END: kiss-runtime-setup"
 # Real utilities the block needs; everything else on PATH is a stub.
@@ -137,15 +131,15 @@ class Sandbox:
             return []
         return self.calls.read_text(encoding="utf-8").splitlines()
 
-    def project(self, root: str, version: str = VERSION, venv: bool = True) -> Path:
-        """Create an installed ``kiss_project`` copy under extension root *root*.
+    def project(self, name: str = "kiss", venv: bool = True) -> Path:
+        """Create an installed app directory ``~/.kiss/<name>`` (``$APP_DIR``).
 
         With *venv*, ``.venv/bin/python`` is the test's own interpreter
         (it imports ``kiss``) and ``.venv/bin/kiss-web`` is a stand-in
         daemon: it records its working directory, writes the endpoint
         file under its home and listens on ``$KISS_WEB_PORT``.
         """
-        project = self.home / root / f"ksenxx.kiss-sorcar-{version}" / "kiss_project"
+        project = self.home / ".kiss" / name
         (project / "src" / "kiss").mkdir(parents=True)
         (project / "pyproject.toml").write_text("[project]\nname='kiss'\n", encoding="utf-8")
         (project / "src" / "kiss" / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -239,30 +233,6 @@ def _wait_port(port: int, timeout: float = 10) -> bool:
                 return True
         time.sleep(0.05)
     return False
-
-
-# --------------------------------------------------------------------------
-# installed_kiss_projects
-# --------------------------------------------------------------------------
-
-
-def test_installed_kiss_projects_lists_every_copy_desktop_first(sandbox: Sandbox) -> None:
-    server = sandbox.project(".vscode-server/extensions", venv=False)
-    code_server = sandbox.project(".local/share/code-server/extensions", venv=False)
-    desktop = sandbox.project(".vscode/extensions", venv=False)
-    # An extension directory without the bundled project is not a copy.
-    (
-        sandbox.home
-        / ".vscode-insiders/extensions"
-        / f"ksenxx.kiss-sorcar-{VERSION}"
-        / "kiss_project"
-    ).mkdir(parents=True)
-    sandbox.project(".vscode-oss/extensions", version="1.0.0", venv=False)
-    res = sandbox.run(f'installed_kiss_projects "{VERSION}"')
-    assert res.returncode == 0, res.stderr
-    assert res.stdout.splitlines() == [str(desktop), str(code_server), str(server)]
-    res = sandbox.run('installed_kiss_projects ""; echo "rc=$?"')
-    assert res.stdout == "rc=0\n"
 
 
 # --------------------------------------------------------------------------
@@ -435,184 +405,66 @@ def test_cloudflared_macos_tarball_failure_is_a_warning(sandbox: Sandbox) -> Non
 
 
 # --------------------------------------------------------------------------
-# setup_bundled_runtime
+# kiss_web_fingerprint
 # --------------------------------------------------------------------------
 
-_UV_STUB = """\
-case "$1" in
-    sync) touch .synced; [ -f .sync-fails ] && exit 1; exit 0 ;;
-    run) [ -f .playwright-fails ] && exit 1; exit 0 ;;
-esac
-"""
+
+def _touch(path: Path, seconds: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+    os.utime(path, ns=(seconds * 1_000_000_000, seconds * 1_000_000_000))
 
 
-def test_setup_without_an_installed_copy_is_a_no_op(sandbox: Sandbox) -> None:
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo "primary=$KISS_PRIMARY_PROJECT"')
-    assert "No installed copy of the extension found" in res.stdout
-    assert res.stdout.endswith("primary=\n")
-
-
-def test_setup_without_uv_warns_and_continues(sandbox: Sandbox) -> None:
-    sandbox.project(".vscode/extensions", venv=False)
-    sandbox.stub("curl", "exit 22\n")
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo "primary=$KISS_PRIMARY_PROJECT"')
-    assert "WARNING: uv is not available" in res.stdout
-    assert res.stdout.endswith("primary=\n")
-
-
-def test_setup_syncs_every_copy_and_installs_the_cli(sandbox: Sandbox) -> None:
-    """Both copies are synced; the CLI binds to the first that succeeded."""
-    desktop = sandbox.project(".vscode/extensions", venv=False)
-    server = sandbox.project(".vscode-server/extensions", venv=False)
-    (desktop / ".sync-fails").touch()
-    uv = sandbox.stub("uv", _UV_STUB)
-    sandbox.stub("sudo", "")
-    sandbox.stub("cloudflared", "")
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo "primary=$KISS_PRIMARY_PROJECT"')
-    assert res.returncode == 0, res.stderr
-    assert (desktop / ".synced").exists() and (server / ".synced").exists()
-    assert f"WARNING: uv sync failed in {desktop}" in res.stdout
-    assert res.stdout.endswith(f"primary={server}\n")
-    wrapper = sandbox.home / ".local/bin/sorcar"
-    assert wrapper.read_text(encoding="utf-8") == (
-        "#!/bin/bash\n"
-        "# Installed by KISS Sorcar VS Code extension\n"
-        'export KISS_WORKDIR="$PWD"\n'
-        f'exec "{uv}" run --directory "{server}" sorcar "$@"\n'
-    )
-    assert wrapper.stat().st_mode & 0o777 == 0o755
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in (sandbox.home / ".bashrc").read_text()
-    calls = sandbox.logged_calls()
-    assert "uv run python -m playwright install chromium" in calls
-    if platform.system() == "Linux":
-        assert "sudo -n true" in calls
-        assert "uv run python -m playwright install-deps chromium" in calls
-
-
-def test_setup_uses_the_brand_product_name_in_the_cli_comment(sandbox: Sandbox) -> None:
-    sandbox.project(".vscode/extensions", venv=False)
-    sandbox.stub("uv", _UV_STUB)
-    sandbox.stub("sudo", "exit 1\n")
-    sandbox.stub("cloudflared", "")
-    res = sandbox.run(f'BRAND_PRODUCT_NAME="Seamless Loop"; setup_bundled_runtime "{VERSION}"')
-    assert res.returncode == 0, res.stderr
-    assert "# Installed by Seamless Loop VS Code extension" in (
-        sandbox.home / ".local/bin/sorcar"
-    ).read_text(encoding="utf-8")
-
-
-@pytest.mark.skipif(platform.system() != "Linux", reason="install-deps is Linux-only")
-def test_setup_hints_at_install_deps_when_sudo_would_prompt(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions", venv=False)
-    sandbox.stub("uv", _UV_STUB)
-    sandbox.stub("sudo", "exit 1\n")
-    sandbox.stub("cloudflared", "")
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"')
-    assert f"sudo {project}/.venv/bin/python -m playwright install-deps chromium" in res.stdout
-    assert "install-deps" not in "".join(c for c in sandbox.logged_calls() if c.startswith("uv"))
-
-
-@pytest.mark.skipif(platform.system() != "Linux", reason="install-deps is Linux-only")
-def test_setup_install_deps_failure_is_a_warning(sandbox: Sandbox) -> None:
-    sandbox.project(".vscode/extensions", venv=False)
-    sandbox.stub("uv", 'case "$*" in *install-deps*) exit 1;; esac\n' + _UV_STUB)
-    sandbox.stub("sudo", "")
-    sandbox.stub("cloudflared", "")
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo rc=$?')
-    assert "WARNING: Chromium system libraries not installed" in res.stdout
-    assert res.stdout.endswith("rc=0\n")
-
-
-def test_setup_playwright_failure_is_a_warning(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions", venv=False)
-    (project / ".playwright-fails").touch()
-    sandbox.stub("uv", _UV_STUB)
-    sandbox.stub("sudo", "")
-    sandbox.stub("cloudflared", "")
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo rc=$?')
-    assert "WARNING: Playwright Chromium install failed" in res.stdout
-    assert "install-deps" not in "".join(sandbox.logged_calls())
-    assert res.stdout.endswith("rc=0\n")
-
-
-def test_setup_with_every_sync_failing_installs_no_cli(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions", venv=False)
-    (project / ".sync-fails").touch()
-    sandbox.stub("uv", _UV_STUB)
-    res = sandbox.run(f'setup_bundled_runtime "{VERSION}"; echo "primary=$KISS_PRIMARY_PROJECT"')
-    assert res.stdout.endswith("primary=\n")
-    assert not (sandbox.home / ".local/bin/sorcar").exists()
-    assert "playwright" not in "".join(sandbox.logged_calls())
-
-
-# --------------------------------------------------------------------------
-# kiss_web_fingerprint: must equal the extension's computeKissWebFingerprint
-# --------------------------------------------------------------------------
-
-_TS_FINGERPRINT_JS = """
-const fs = require('fs'), path = require('path'), crypto = require('crypto');
-const [project, bin, workDir] = process.argv.slice(1);
-const hash = crypto.createHash('sha256');
-hash.update(fs.readFileSync(bin));
-hash.update(workDir);
-let latest = BigInt(0);
-const walk = (dir) => {
-  for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
-    if (entry.name === '__pycache__' || entry.name === 'tests') continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full);
-    else if (entry.isFile() && entry.name.endsWith('.py')) {
-      const st = fs.statSync(full, {bigint: true});
-      if (st.mtimeNs > latest) latest = st.mtimeNs;
-    }
-  }
-};
-walk(path.join(project, 'src', 'kiss'));
-hash.update(latest.toString());
-process.stdout.write(hash.digest('hex'));
-"""
-
-
-def test_fingerprint_matches_the_extension_algorithm(sandbox: Sandbox) -> None:
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is required to run the extension's algorithm")
-    project = sandbox.project(".vscode/extensions")
+def test_fingerprint_follows_the_launcher_the_work_dir_and_the_newest_module(
+    sandbox: Sandbox,
+) -> None:
+    """The digest covers the launcher bytes, the work dir and the newest
+    ``.py``/``.pyc`` under ``src/kiss`` outside ``tests`` and ``__pycache__``;
+    nothing else moves it."""
+    project = sandbox.project()
     src = project / "src" / "kiss"
-    (src / "tests").mkdir()
-    (src / "__pycache__").mkdir()
-    (src / "sub").mkdir()
-    newest = src / "sub" / "b.py"
-    newest.write_text("y = 2\n", encoding="utf-8")
-    os.utime(src / "a.py", ns=(1_700_000_000_123_456_789, 1_700_000_000_123_456_789))
-    os.utime(newest, ns=(1_800_000_000_987_654_321, 1_800_000_000_987_654_321))
-    # Newer files in the excluded directories must not count.
-    for excluded in (src / "tests" / "t.py", src / "__pycache__" / "c.py"):
-        excluded.write_text("", encoding="utf-8")
-        os.utime(excluded, ns=(1_900_000_000_000_000_000, 1_900_000_000_000_000_000))
-    (src / "sub" / "data.txt").write_text("", encoding="utf-8")
-    os.utime(src / "sub" / "data.txt", ns=(1_900_000_000_000_000_000, 1_900_000_000_000_000_000))
-    workdir = "/some/work dir"
-    res = sandbox.run(f'kiss_web_fingerprint "{project}" "{workdir}"')
-    assert res.returncode == 0, res.stderr
-    expected = subprocess.run(
-        [
-            node,
-            "-e",
-            _TS_FINGERPRINT_JS,
-            str(project),
-            str(project / ".venv/bin/kiss-web"),
-            workdir,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert len(expected) == 64
-    assert res.stdout.strip() == expected
-    # A different work dir is a different runtime.
-    other = sandbox.run(f'kiss_web_fingerprint "{project}" "/elsewhere"').stdout.strip()
-    assert other != expected and len(other) == 64
+    _touch(src / "a.py", 1_700_000_000)
+    _touch(src / "sub" / "b.py", 1_800_000_000)
+    base = sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip()
+    assert len(base) == 64
+    # Newer files that are not modules, or sit in the excluded directories,
+    # must not count.
+    for ignored in (src / "tests" / "t.py", src / "__pycache__" / "c.py", src / "sub" / "data.txt"):
+        _touch(ignored, 1_900_000_000)
+    assert sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip() == base
+    # A rebuilt library (fresh .pyc) and a different work dir are different runtimes.
+    _touch(src / "sub" / "b.cpython-313.pyc", 1_850_000_000)
+    rebuilt = sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip()
+    assert rebuilt != base and len(rebuilt) == 64
+    elsewhere = sandbox.run(f'kiss_web_fingerprint "{project}" "/elsewhere"').stdout.strip()
+    assert elsewhere not in (base, rebuilt)
+    (project / ".venv/bin/kiss-web").write_text("#!/bin/bash\n", encoding="utf-8")
+    assert sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip() not in (
+        base,
+        rebuilt,
+    )
+
+
+def test_fingerprint_ignores_symlinked_sources(sandbox: Sandbox) -> None:
+    """Symlinked files and directories under ``src/kiss`` are not part of the
+    installed library and do not move the digest."""
+    project = sandbox.project()
+    src = project / "src" / "kiss"
+    _touch(src / "a.py", 1_700_000_000)
+    base = sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip()
+    external = sandbox.root / "external.py"
+    _touch(external, 1_900_000_000)
+    (src / "link.py").symlink_to(external)
+    (src / "linked_dir").symlink_to(sandbox.root)
+    assert sandbox.run(f'kiss_web_fingerprint "{project}" "/w"').stdout.strip() == base
+
+
+def test_fingerprint_fails_when_the_launcher_is_missing(sandbox: Sandbox) -> None:
+    project = sandbox.project()
+    (project / ".venv/bin/kiss-web").unlink()
+    res = sandbox.run(f'kiss_web_fingerprint "{project}" "/w" || echo rc=$?')
+    assert res.stdout.endswith("rc=1\n")
 
 
 # --------------------------------------------------------------------------
@@ -693,7 +545,7 @@ async def _run_with_busy_daemon(
 
 
 def test_start_skips_when_kiss_web_is_not_built(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions", venv=False)
+    project = sandbox.project(venv=False)
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
@@ -702,7 +554,7 @@ def test_start_skips_when_kiss_web_is_not_built(sandbox: Sandbox) -> None:
 
 
 def test_start_gives_up_quietly_when_the_runtime_python_is_broken(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     python = project / ".venv/bin/python"
     python.unlink()
     python.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
@@ -715,10 +567,9 @@ def test_start_gives_up_quietly_when_the_runtime_python_is_broken(sandbox: Sandb
 
 
 def test_start_leaves_a_healthy_daemon_with_the_same_fingerprint_alone(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     fp = sandbox.run(f'kiss_web_fingerprint "{project}" "{sandbox.workdir}"').stdout.strip()
     kiss_home = sandbox.home / ".kiss"
-    kiss_home.mkdir()
     (kiss_home / ".kiss-web.fingerprint").write_text(fp + "\n", encoding="utf-8")
     (kiss_home / "sorcar-local.json").write_text("{}", encoding="utf-8")
     sandbox.uname("Linux")
@@ -732,11 +583,10 @@ def test_start_leaves_a_healthy_daemon_with_the_same_fingerprint_alone(sandbox: 
 
 
 def test_start_defers_while_the_daemon_has_tasks_in_flight(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     endpoint = sandbox.home / ".kiss" / "sorcar-local.json"
-    endpoint.parent.mkdir()
     res = asyncio.run(
         _run_with_busy_daemon(
             sandbox, endpoint, f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?'
@@ -752,11 +602,10 @@ def test_start_defers_for_a_busy_daemon_of_the_stock_home_after_a_brand_switch(
     sandbox: Sandbox,
 ) -> None:
     """The new runtime's home is empty, but ~/.kiss still owns a busy daemon."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     endpoint = sandbox.home / ".kiss" / "sorcar-local.json"
-    endpoint.parent.mkdir()
     res = asyncio.run(
         _run_with_busy_daemon(
             sandbox,
@@ -770,12 +619,11 @@ def test_start_defers_for_a_busy_daemon_of_the_stock_home_after_a_brand_switch(
 
 
 def test_start_registers_and_starts_the_systemd_user_service(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     sandbox.stub("loginctl", "")
     kiss_home = sandbox.home / ".kiss"
-    kiss_home.mkdir()
     (kiss_home / ".kiss-web.restart-pending").touch()
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
     assert res.returncode == 0, res.stderr
@@ -823,7 +671,7 @@ def test_start_warns_when_kiss_web_hosts_the_terminal(
     ``kiss-service-cgroup-escape`` block) and talks to a human says so
     before stopping the daemon.  The Update button (non-interactive)
     and a plain terminal get no such notice."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     sandbox.stub("loginctl", "")
@@ -848,7 +696,7 @@ def test_start_warns_when_kiss_web_hosts_the_terminal(
 
 
 def test_start_propagates_kiss_home_to_the_service(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     sandbox.stub("loginctl", "")
@@ -868,7 +716,7 @@ def test_start_propagates_kiss_home_to_the_service(sandbox: Sandbox) -> None:
 
 
 def test_start_falls_back_to_a_detached_process_without_systemd(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", "exit 1\n")
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
@@ -897,7 +745,7 @@ def _launchctl_stub(
     drain = "never" if drain_probes is None else str(drain_probes)
     start = (
         f"(cd {str(sandbox.workdir)!r} && exec nohup "
-        f"{str(sandbox.home)!r}/.vscode/extensions/ksenxx.kiss-sorcar-{VERSION}/kiss_project"
+        f"{str(sandbox.home)!r}/.kiss/kiss"
         "/.venv/bin/kiss-web > /dev/null 2>&1 < /dev/null) &"
     )
     return sandbox.stub(
@@ -938,7 +786,7 @@ def _launchctl_stub(
 
 
 def test_start_registers_the_launch_agent_on_macos(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox)
     custom = sandbox.home / "custom-home"
@@ -981,7 +829,7 @@ def test_start_macos_waits_for_the_old_daemon_before_bootstrapping(sandbox: Sand
     daemon was booted out and never came back ("WARNING: launchctl
     kickstart failed", then the full start timeout).  The block waits for
     launchd to drop the registration first."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox, drain_probes=2)
     (sandbox.root / "launchd.registered").write_text("registered", encoding="utf-8")
@@ -1008,7 +856,7 @@ def test_start_macos_waits_for_the_old_daemon_before_bootstrapping(sandbox: Sand
 
 
 def test_start_macos_retries_a_refused_bootstrap(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox, bootstrap_refusals=2)
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
@@ -1021,7 +869,7 @@ def test_start_macos_retries_a_refused_bootstrap(sandbox: Sandbox) -> None:
 
 
 def test_start_macos_falls_back_to_load_when_every_bootstrap_is_refused(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox, bootstrap_refusals=99)
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
@@ -1038,9 +886,9 @@ def test_start_macos_falls_back_to_load_when_every_bootstrap_is_refused(sandbox:
 def test_start_macos_kickstarts_in_place_when_the_old_daemon_never_exits(
     sandbox: Sandbox,
 ) -> None:
-    """Fail closed like the extension: a registration launchd will not drop
+    """Fail closed: a registration launchd will not drop
     is restarted (``kickstart -k``) rather than left booted out."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox, drain_probes=None)
     (sandbox.root / "launchd.registered").write_text("registered", encoding="utf-8")
@@ -1059,7 +907,7 @@ def test_start_macos_kickstarts_in_place_when_the_old_daemon_never_exits(
 
 
 def test_start_macos_without_kiss_home_omits_the_env_entry(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     sandbox.stub(
         "launchctl", '[ "$1" = kickstart ] && exit 1\n[ "$1" = print ] && exit 1\nexit 0\n'
@@ -1077,7 +925,7 @@ def test_start_macos_without_kiss_home_omits_the_env_entry(sandbox: Sandbox) -> 
 
 
 def test_start_macos_reports_a_failed_kickstart(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     # Registered after the bootstrap, but kickstart refuses.
     sandbox.stub(
@@ -1103,7 +951,7 @@ def test_start_macos_warns_when_kiss_web_hosts_the_shell(
     """launchd keeps no record of which service forked a shell, so on macOS
     the parent chain is walked; a kiss-web ancestor and a human at the
     terminal get the closing-terminal notice."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox)
     # A ``ps`` that reports kiss-web two hops up from any pid asked about.
@@ -1128,12 +976,11 @@ def test_start_macos_warns_when_kiss_web_hosts_the_shell(
 
 
 def test_start_reports_a_daemon_that_never_comes_up(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", '[ "$*" = "--user start kiss-web.service" ] && exit 1\nexit 0\n')
     sandbox.stub("loginctl", "")
     kiss_home = sandbox.home / ".kiss"
-    kiss_home.mkdir()
     (kiss_home / "sorcar-local.json").write_text("{}", encoding="utf-8")
     res = sandbox.run(
         f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?',
@@ -1149,7 +996,7 @@ def test_start_reports_a_daemon_that_never_comes_up(sandbox: Sandbox) -> None:
 
 
 # --------------------------------------------------------------------------
-# write_kiss_web_plist / write_kiss_web_unit: escaping as the extension does
+# write_kiss_web_plist / write_kiss_web_unit: escaping
 # --------------------------------------------------------------------------
 
 
@@ -1183,7 +1030,7 @@ def test_unit_escapes_percent_and_backslash(sandbox: Sandbox) -> None:
     )
 
 
-def test_unit_escapes_newlines_like_the_extension(sandbox: Sandbox) -> None:
+def test_unit_escapes_newlines(sandbox: Sandbox) -> None:
     unit = sandbox.root / "kiss-web.service"
     res = sandbox.run(
         f'write_kiss_web_unit "{unit}" "/opt/kiss-web" "$(printf \'/work/two\\nlines\')" "/home/x"'
@@ -1193,71 +1040,48 @@ def test_unit_escapes_newlines_like_the_extension(sandbox: Sandbox) -> None:
 
 
 # --------------------------------------------------------------------------
-# Review-driven cases: symlinks, the restart lock, previous homes, old
+# Review-driven cases: the restart lock, previous homes, old
 # daemons, best-effort failures
 # --------------------------------------------------------------------------
 
 
-def test_fingerprint_ignores_symlinked_sources_like_the_extension(sandbox: Sandbox) -> None:
-    """``Dirent.isFile()`` is false for symlinks, so the twin must skip them too."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is required to run the extension's algorithm")
-    project = sandbox.project(".vscode/extensions")
-    src = project / "src" / "kiss"
-    external = sandbox.root / "external.py"
-    external.write_text("z = 3\n", encoding="utf-8")
-    os.utime(external, ns=(1_900_000_000_000_000_000, 1_900_000_000_000_000_000))
-    (src / "link.py").symlink_to(external)
-    (src / "linked_dir").symlink_to(sandbox.root)
-    res = sandbox.run(f'kiss_web_fingerprint "{project}" "/w"')
-    expected = subprocess.run(
-        [node, "-e", _TS_FINGERPRINT_JS, str(project), str(project / ".venv/bin/kiss-web"), "/w"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert res.stdout.strip() == expected
-
 
 def test_start_yields_to_a_live_restart_lock_holder(sandbox: Sandbox) -> None:
-    """The extension's ``.kiss-web.restart.lock`` with a live owner wins."""
-    project = sandbox.project(".vscode/extensions")
+    """A ``.kiss-web.restart.lock`` with a live owner (another installer) wins."""
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     holder = subprocess.Popen(["sleep", "60"])
     kiss_home = sandbox.home / ".kiss"
-    kiss_home.mkdir()
     lock = kiss_home / ".kiss-web.restart.lock"
     lock.write_text(json.dumps({"pid": holder.pid, "token": "window"}), encoding="utf-8")
     try:
         res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
     finally:
         holder.kill()
-    assert "A VS Code window is restarting kiss-web" in res.stdout
+    assert "Another installer is restarting kiss-web" in res.stdout
     assert sandbox.logged_calls() == []
     assert json.loads(lock.read_text(encoding="utf-8"))["token"] == "window"
 
 
 def test_start_breaks_a_lock_left_by_a_dead_process_and_releases_its_own(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     sandbox.stub("loginctl", "")
     dead = subprocess.Popen(["true"])
     dead.wait()
     kiss_home = sandbox.home / ".kiss"
-    kiss_home.mkdir()
     lock = kiss_home / ".kiss-web.restart.lock"
     lock.write_text(json.dumps({"pid": dead.pid, "token": "gone"}), encoding="utf-8")
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
     assert "kiss-web is up" in res.stdout, res.stdout
     assert not lock.exists()
-    # A lock without a readable owner may be one the extension has just
+    # A lock without a readable owner may be one another installer has just
     # created and not yet written: it is respected for two minutes.
     lock.write_text("", encoding="utf-8")
     res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
-    assert "A VS Code window is restarting kiss-web" in res.stdout
+    assert "Another installer is restarting kiss-web" in res.stdout
     assert lock.exists()
     stale = time.time() - 3 * 60
     os.utime(lock, (stale, stale))
@@ -1268,15 +1092,15 @@ def test_start_breaks_a_lock_left_by_a_dead_process_and_releases_its_own(sandbox
 
 def test_start_asks_the_daemon_of_the_previous_service_home(sandbox: Sandbox) -> None:
     """A busy daemon that an earlier install ran under another KISS_HOME is probed."""
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     old_home = sandbox.home / "old%home"
     old_home.mkdir()
     unit = sandbox.home / ".config/systemd/user/kiss-web.service"
     unit.parent.mkdir(parents=True)
-    # Written the way the extension writes it: an argument after the
-    # launcher (older units) and a %-containing home escaped as %%.
+    # An argument after the launcher (older units) and a %-containing
+    # home escaped as %%.
     unit.write_text(
         f"[Service]\nExecStart=/nowhere/kiss-web --workdir /x\n"
         f"Environment=KISS_HOME={str(old_home).replace('%', '%%')}\n",
@@ -1295,9 +1119,8 @@ def test_start_asks_the_daemon_of_the_previous_service_home(sandbox: Sandbox) ->
 
 def test_start_asks_the_daemon_of_the_previous_runtime_brand_home(sandbox: Sandbox) -> None:
     """The old service's runtime resolves its own home (a brand's, say) — probed too."""
-    project = sandbox.project(".vscode/extensions")
-    old_project = sandbox.project(".vscode-server/extensions", version="1.2.3")
-    old_project = old_project.rename(old_project.parent / "kiss&project")
+    project = sandbox.project()
+    old_project = sandbox.project("kiss&old")
     sandbox.uname("Darwin")
     sandbox.stub("launchctl", "")
     brand_home = sandbox.home / ".oldbrand"
@@ -1330,11 +1153,10 @@ async def _old_daemon_handler(ws: ServerConnection) -> None:
 
 
 def test_start_defers_for_a_daemon_too_old_to_report_its_tasks(sandbox: Sandbox) -> None:
-    project = sandbox.project(".vscode/extensions")
+    project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     endpoint = sandbox.home / ".kiss" / "sorcar-local.json"
-    endpoint.parent.mkdir()
 
     async def go() -> subprocess.CompletedProcess[str]:
         daemon_dir = sandbox.root / "old"
@@ -1348,30 +1170,6 @@ def test_start_defers_for_a_daemon_too_old_to_report_its_tasks(sandbox: Sandbox)
     assert "restart deferred" in res.stdout
     assert sandbox.logged_calls() == []
 
-
-def test_setup_reports_an_unwritable_shell_rc_and_cli_dir_and_continues(sandbox: Sandbox) -> None:
-    """Filesystem failures are warnings; the install must go on."""
-    sandbox.project(".vscode/extensions", venv=False)
-    sandbox.stub("uv", _UV_STUB)
-    sandbox.stub("sudo", "exit 1\n")
-    sandbox.stub("cloudflared", "")
-    rc = sandbox.home / ".bashrc"
-    rc.write_text("# read only\n", encoding="utf-8")
-    rc.chmod(0o444)
-    local_bin = sandbox.home / ".local" / "bin"
-    local_bin.mkdir(parents=True)
-    local_bin.chmod(0o555)
-    try:
-        res = sandbox.run(
-            f'setup_bundled_runtime "{VERSION}" || echo "WARNING: wrapped"; echo INSTALL_CONTINUED'
-        )
-    finally:
-        local_bin.chmod(0o755)
-        rc.chmod(0o644)
-    assert res.stdout.endswith("INSTALL_CONTINUED\n"), res.stdout
-    assert "WARNING: could not install the sorcar CLI" in res.stdout
-    assert "WARNING: could not add ~/.local/bin to PATH" in res.stdout
-    assert rc.read_text(encoding="utf-8") == "# read only\n"
 
 
 def test_unit_escapes_a_trailing_newline(sandbox: Sandbox) -> None:

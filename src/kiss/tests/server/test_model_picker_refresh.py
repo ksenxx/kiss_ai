@@ -4,7 +4,7 @@
 # add your name here
 """Integration test: model picker recovers from a stale ``"No model"``.
 
-On a fresh installation the ``VSCodeServer`` is constructed before any
+On a fresh installation the ``AgentServer`` is constructed before any
 API key is configured, so ``self._default_model`` is initialised to the
 ``"No model"`` sentinel.  When the user subsequently provides an
 ``ANTHROPIC_API_KEY`` (either by typing it into the settings panel or by
@@ -30,9 +30,9 @@ from kiss.core import config as config_module
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _clear_all_keys() -> dict[str, str]:
@@ -79,7 +79,7 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.core.vscode_config as vc
+        import kiss.core.user_config as vc
 
         saved_kiss_model = os.environ.pop("KISS_MODEL", None)
         saved_config_dir, saved_config_path = vc.CONFIG_DIR, vc.CONFIG_PATH
@@ -154,7 +154,7 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.core.vscode_config as vc
+        import kiss.core.user_config as vc
         from kiss.agents.sorcar.persistence import _save_last_model
 
         saved = _clear_all_keys()

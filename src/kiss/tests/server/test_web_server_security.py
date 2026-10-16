@@ -16,7 +16,7 @@ Coverage:
   ``remote_password`` is empty.
 * H2 — ``cloudflared`` stdout pipe must be ``DEVNULL`` so a chatty
   child cannot deadlock on a full pipe buffer.
-* H3 — password compare must use :func:`secrets.compare_digest`
+* H3 — password-hash compare must use :func:`hmac.compare_digest`
   (constant-time), not plain ``!=``.
 * H4 — repeated wrong-password attempts from the same source must
   trigger an IP-based rate limit so brute-force is bounded.
@@ -46,7 +46,7 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import (
     RemoteAccessServer,
@@ -56,7 +56,7 @@ from kiss.server.web_server import (
 )
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 
 
 class _ConfigSnapshot:
@@ -100,7 +100,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
 
     @pytest.mark.slow
     async def test_tunnel_proc_is_none_when_no_password(self) -> None:
-        """No cloudflared subprocess is spawned when remote_password=''."""
+        """No cloudflared subprocess is spawned when remote_password is empty."""
         self.assertIsNone(self.server._tunnel_proc)
 
     @pytest.mark.slow
@@ -268,20 +268,20 @@ class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
         self._snap.__exit__()
 
     async def test_compare_digest_invoked_during_auth(self) -> None:
-        """Auth with a wrong password invokes secrets.compare_digest."""
-        import secrets as secrets_mod
+        """Auth with a wrong password invokes hmac.compare_digest on the stored password."""
+        import hmac as hmac_mod
 
-        original = secrets_mod.compare_digest
+        original = hmac_mod.compare_digest
         calls: list[tuple[bytes, bytes]] = []
 
         def _spy(a: bytes, b: bytes) -> bool:  # type: ignore[override]
             calls.append((a, b))
             return original(a, b)
 
-        secrets_mod.compare_digest = _spy  # type: ignore[assignment]
+        hmac_mod.compare_digest = _spy  # type: ignore[assignment]
         try:
             async with connect(
-                f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
+                f"ws://127.0.0.1:{self.port}/ws", additional_headers=FORWARDED_VISITOR,
             ) as ws:
                 await ws.send(
                     json.dumps({"type": "auth", "password": "wrong-password"}),
@@ -289,15 +289,11 @@ class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
                 resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 self.assertEqual(resp["type"], "auth_required")
         finally:
-            secrets_mod.compare_digest = original  # type: ignore[assignment]
+            hmac_mod.compare_digest = original  # type: ignore[assignment]
 
-        self.assertGreaterEqual(len(calls), 1)
-        a, b = calls[0]
-        self.assertIsInstance(a, bytes)
-        self.assertIsInstance(b, bytes)
         self.assertIn(
-            b"right-password", {a, b},
-            "compare_digest must compare against the configured password",
+            (b"wrong-password", b"right-password"), calls,
+            "compare_digest must compare the typed password with the stored one",
         )
 
 
@@ -336,7 +332,7 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         try:
             async with connect(
                 f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
-                close_timeout=2,
+                close_timeout=2, additional_headers=FORWARDED_VISITOR,
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": password}))
                 try:

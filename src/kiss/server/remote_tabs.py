@@ -4,7 +4,7 @@
 # add your name here
 """Chat tabs whose tasks run on a registered remote machine.
 
-The machine drop-down at the top of a chat webview chooses where the
+The machine drop-down at the top of a chat page chooses where the
 tab's tasks run; a ``submit`` carries the choice as ``machine`` (empty
 for this machine).  A click on a remote machine's row of the CHATS
 panel binds a tab the same way: its ``resumeSession`` carries the
@@ -16,7 +16,7 @@ per tab bound to a remote machine: an authenticated WebSocket to that
 machine's daemon (:meth:`MachineLink.open_connection`) over which the
 tab's commands are forwarded unchanged, same ``tabId``, so the remote
 daemon runs, queues and stops the tab's tasks exactly as it would for
-its own webview.  Every frame the remote stamps with the tab id is
+its own chat page.  Every frame the remote stamps with the tab id is
 handed to this daemon's clients as it is, bypassing the printer's
 task bookkeeping: the task, its events and its history row live on the
 remote machine only (the CHATS panel shows them through the merged
@@ -121,14 +121,15 @@ class RemoteTab:
         tab_ids: The root tab plus the sub-agent tabs this daemon's
             clients opened for its tasks; their frames are relayed.
         task_ids: The ids of the sub-agent tasks the remote announced
-            (``new_tab``); a ``resumeSession`` naming one is forwarded.
+            (``new_tab``); a ``resumeSession`` naming one is forwarded,
+            and frames addressed to its ``{parent}__sub_{task_id}`` tab
+            are relayed before any client resumed it
+            (:meth:`_owns_sub_tab`).
         subagent: Whether the bound tab's run is a sub-agent run of a
             task of this daemon (a forwarded ``run`` with a
             ``parentTaskId``): the ``new_tab`` the remote announces
             for it is relayed, under the caller's tab or parentless
             as the remote broadcast it.  False for a tab the user bound.
-        parent_tab_id: The caller's tab (the ``parentTabId`` of that
-            ``run``), "" when the caller has none or for a user-bound tab.
         task_id: The run's persisted task id, learnt from the first
             frame of the bound tab that carries one; "" until then.
         pending_spawns: The ``new_tab`` frames announced before the
@@ -158,8 +159,7 @@ class RemoteTab:
     """
 
     def __init__(
-        self, tab_id: str, machine: Machine, owner: RemoteTabs,
-        subagent: bool = False, parent_tab_id: str = "",
+        self, tab_id: str, machine: Machine, owner: RemoteTabs, subagent: bool = False,
     ) -> None:
         """Connect to *machine* and start relaying its frames for *tab_id*.
 
@@ -172,7 +172,6 @@ class RemoteTab:
         self.tab_ids: set[str] = {tab_id}
         self.task_ids: set[str] = set()
         self.subagent = subagent
-        self.parent_tab_id = parent_tab_id
         self.task_id = ""
         self.pending_spawns: dict[str, str] = {}
         self.spawn = ""
@@ -206,7 +205,13 @@ class RemoteTab:
                 accept the command in time.
         """
         dropped = _DROPPED_RUN_FIELDS if cmd.get("type") == "run" else _DROPPED_FIELDS
-        text = json.dumps({k: v for k, v in cmd.items() if k not in dropped})
+        frame = {k: v for k, v in cmd.items() if k not in dropped}
+        # The machine's daemon checks the password on every frame of a
+        # password-authenticated peer (an SSH machine's stream is
+        # certificate-authenticated and sends none).
+        if self.machine.password:
+            frame["password"] = self.machine.password
+        text = json.dumps(frame)
         try:
             local_endpoint.send(self._ws, text, timeout=REQUEST_TIMEOUT)
         except (ConnectionClosed, OSError) as exc:
@@ -253,7 +258,7 @@ class RemoteTab:
         with self.lock:
             if self.retired:
                 return
-            if kind == "new_tab" and parent in self.tab_ids:
+            if kind == "new_tab" and self._owns_sub_tab(parent):
                 if msg.get("task_id"):
                     self.task_ids.add(str(msg["task_id"]))
             elif kind == "new_tab" and self.subagent:
@@ -287,7 +292,7 @@ class RemoteTab:
                     conn = self.replay_conn[parent]
                     to = [conn]
                     self.replay_sinks.setdefault(sub_tab, []).append(conn)
-            elif kind == "subagentDone" and sub_tab in self.tab_ids:
+            elif kind == "subagentDone" and self._owns_sub_tab(sub_tab):
                 pass
             elif msg.get("tabId") in self.tab_ids:
                 tab_id = str(msg["tabId"])
@@ -320,6 +325,24 @@ class RemoteTab:
                 # is global, as the daemon's own broadcast of it is: a
                 # peer that only addressed other tabs still gets it.
                 self._owner.deliver(str(msg.get("tabId") or ""), text)
+
+    def _owns_sub_tab(self, tab_id: str) -> bool:
+        """Whether *tab_id* is a tab of this stream's tasks (under ``lock``).
+
+        A tab a client joined (``tab_ids``), or the sub-agent tab
+        ``{parent}__sub_{task_id}`` of a task the stream announced
+        (``task_ids``) that no client has resumed yet: a sub-agent that
+        fans out at once names that derived id as the parent of its
+        children's ``new_tab``, and a sub-agent's ``subagentDone`` may
+        name it, before any surface's ``resumeSession`` for the tab has
+        reached this daemon.  A local run broadcasts those frames to
+        every client, so the stream relays them too, or the surfaces
+        would never open the nested tabs.
+        """
+        if tab_id in self.tab_ids:
+            return True
+        _parent, sep, task_id = tab_id.rpartition("__sub_")
+        return bool(sep) and task_id in self.task_ids
 
     def _own_run_frame(self, kind: Any, msg: dict[str, Any]) -> str:
         """Note what a frame of the bound tab tells about the sub-agent run (under ``lock``).
@@ -422,7 +445,7 @@ class RemoteTabs:
         try:
             tab.send(cmd)
         except MachineError as exc:
-            self._backend._vscode_server._refuse_run(tab_id, str(exc))
+            self._backend._agent_server._refuse_run(tab_id, str(exc))
 
     def _bind(
         self, tab_id: str, machine_name: str, cmd: dict[str, Any], title: str,
@@ -442,7 +465,7 @@ class RemoteTabs:
         """
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
-            self._backend._vscode_server._refuse_run(
+            self._backend._agent_server._refuse_run(
                 tab_id, f"{machine_name} is not a registered machine",
             )
             return None
@@ -458,10 +481,9 @@ class RemoteTabs:
             try:
                 tab = RemoteTab(
                     tab_id, machine, self, subagent=bool(cmd.get("parentTaskId")),
-                    parent_tab_id=str(cmd.get("parentTabId", "") or ""),
                 )
             except MachineError as exc:
-                self._backend._vscode_server._refuse_run(tab_id, str(exc))
+                self._backend._agent_server._refuse_run(tab_id, str(exc))
                 return None
             displaced: RemoteTab | None = None
             same: RemoteTab | None = None  # a bind to the same machine that won
@@ -488,7 +510,7 @@ class RemoteTabs:
             if stood_down:
                 return None
             if lost:
-                self._backend._vscode_server._refuse_run(
+                self._backend._agent_server._refuse_run(
                     tab_id, f"lost the connection to {machine.name}",
                 )
                 return None
@@ -503,7 +525,7 @@ class RemoteTabs:
         # one running here does not: the surfaces open its nested tab
         # under the caller on the relayed ``new_tab``.
         if not cmd.get("parentTaskId"):
-            self._backend._vscode_server._registry_update_tab(
+            self._backend._agent_server._registry_update_tab(
                 tab_id,
                 title=title,
                 work_dir=str(cmd.get("workDir", "") or ""),
@@ -615,14 +637,12 @@ class RemoteTabs:
         self._forward(tab, tab_id, cmd)
         return True
 
-    def replay_to(self, conn_id: str, single_tab_id: str) -> None:
+    def replay_to(self, conn_id: str) -> None:
         """Replay every bound tab to *conn_id*, with its binding.
 
         Called after a client's ``ready`` was handled, so the client has
         the tabs (the ``tabs_state`` snapshot) before their transcripts
-        arrive; *single_tab_id* (an editor-tab panel's one tab) narrows
-        the replays as it does for the daemon's own chats.  A stream
-        carrying a sub-agent run of a local task has no tab of its own
+        arrive.  A stream carrying a sub-agent run of a local task has no tab of its own
         to replay: the client gets the run's ``new_tab`` again (if it
         is still running) and opens and resumes the nested tab itself.
         """
@@ -630,14 +650,11 @@ class RemoteTabs:
             tabs = {t.tab_id: t for t in self._tabs.values()}
         for tab_id, tab in tabs.items():
             if tab.subagent:
-                if not single_tab_id or single_tab_id == tab.parent_tab_id:
-                    # Under the lock retirement takes (as a relayed frame
-                    # is): a stream retired meanwhile announces nothing.
-                    with tab.lock:
-                        if tab.spawn and not tab.retired:
-                            self.deliver_to(conn_id, tab.spawn)
-                continue
-            if single_tab_id and tab_id != single_tab_id:
+                # Under the lock retirement takes (as a relayed frame
+                # is): a stream retired meanwhile announces nothing.
+                with tab.lock:
+                    if tab.spawn and not tab.retired:
+                        self.deliver_to(conn_id, tab.spawn)
                 continue
             self.deliver_to(conn_id, _tab_machine_frame(tab_id, tab.machine.name))
             with tab.lock:
@@ -679,7 +696,7 @@ class RemoteTabs:
             registered = self._tabs.get(tab.tab_id) is tab
             self._retire(tab)
         if lost and registered:
-            self._backend._vscode_server._refuse_run(
+            self._backend._agent_server._refuse_run(
                 tab.tab_id, f"lost the connection to {tab.machine.name}",
             )
             self._announce(tab.tab_id, "")

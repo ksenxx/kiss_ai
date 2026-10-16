@@ -144,10 +144,12 @@ class AgentState:
         self.followup_queue_closed: bool = False
         self.is_task_active: bool = is_task_active
         self.is_merging: bool = False
-        # The thread executing an interactive merge/discard, so
-        # shutdown can WAIT for it: a merge rewrites the repository and
-        # must never be cut short.  It runs in the event loop's default
-        # executor, not in ``task_thread``.
+        # The thread holding the ``is_merging`` claim: the stop guard
+        # recognises its own thread's merge, and a claim whose thread
+        # died is released as orphaned (``merge_in_progress``).  An
+        # interactive merge runs in the event loop's default executor,
+        # not in ``task_thread``; shutdown waits for the claim, not the
+        # (pooled, long-lived) thread.
         self.merge_thread: threading.Thread | None = None
         self.interrupted_by_shutdown: bool = False
         # Raised by the task runner the moment a cancelling

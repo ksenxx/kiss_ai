@@ -21,7 +21,7 @@ queue is gone (tab closed → queue set to ``None``), task X's
 so ``_await_user_response`` raises ``KeyboardInterrupt`` via its M4
 guard instead of hijacking another task's answer.
 
-Both tests use the real ``VSCodeServer``, real ``JsonPrinter``
+Both tests use the real ``AgentServer``, real ``JsonPrinter``
 subscription state, and real ``agent_state`` registry entries —
 no mocks or patched methods.
 """
@@ -34,7 +34,7 @@ import unittest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _register_state(task_id: str, tab_id: str) -> AgentState:
@@ -49,7 +49,7 @@ class TestViewerStopWithStaleSubscription(unittest.TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -97,7 +97,7 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         self.server.printer._thread_local.task_id = None

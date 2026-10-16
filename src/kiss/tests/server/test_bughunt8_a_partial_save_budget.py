@@ -24,16 +24,16 @@ import unittest
 from typing import Any
 
 from kiss.core import config as core_config
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestPartialSaveConfigBudget(unittest.TestCase):
     """A payload without ``max_budget`` must not reset the live budget."""
 
     def setUp(self) -> None:
-        self._cfg_path = vscode_config.CONFIG_PATH
+        self._cfg_path = user_config.CONFIG_PATH
         self._saved = (
             self._cfg_path.read_bytes() if self._cfg_path.exists() else None
         )
@@ -54,7 +54,7 @@ class TestPartialSaveConfigBudget(unittest.TestCase):
     def test_partial_payload_keeps_configured_budget(self) -> None:
         """saveConfig without max_budget keeps the on-disk budget live."""
         self._write_config({"max_budget": 7})
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
 
@@ -69,7 +69,7 @@ class TestPartialSaveConfigBudget(unittest.TestCase):
     def test_payload_with_budget_still_applies(self) -> None:
         """A payload that DOES carry max_budget updates the live value."""
         self._write_config({"max_budget": 7})
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
 

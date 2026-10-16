@@ -7,7 +7,7 @@ and API key setup/deletion in the configuration panel.
 
 Split out of ``tests/server/test_features_integration.py``: these methods
 depend only on ``kiss.core`` (``KISSAgent``, ``kiss_error``,
-``vscode_config``, ``config``), so they belong in ``tests/core`` per the
+``user_config``, ``config``), so they belong in ``tests/core`` per the
 placement invariants.  The methods that exercise
 ``kiss.agents.sorcar.sorcar_agent`` or ``kiss.server.server`` remain in
 ``tests/server``, importing the shared fixture below.
@@ -31,7 +31,7 @@ import pytest
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.vscode_config import (
+from kiss.core.user_config import (
     API_KEY_ENV_VARS,
     load_config,
     save_api_key,
@@ -44,7 +44,7 @@ def _restore_default_config():
     """Restore the DEFAULT_CONFIG binding after every test.
 
     ``save_config``/``save_api_key`` trigger
-    ``vscode_config._refresh_config`` which rebinds
+    ``user_config._refresh_config`` which rebinds
     ``kiss.core.config.DEFAULT_CONFIG`` from the (test-redirected)
     config file; without restoration the rebound object leaks into
     later test modules and breaks
@@ -255,7 +255,7 @@ class TestWebBrowserToggle:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        import kiss.core.vscode_config as _vc
+        import kiss.core.user_config as _vc
 
         monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
         monkeypatch.setitem(
@@ -276,7 +276,7 @@ class TestApiKeySetupAndDeletion:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        import kiss.core.vscode_config as _vc
+        import kiss.core.user_config as _vc
 
         monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
         monkeypatch.setitem(
@@ -291,7 +291,7 @@ class TestApiKeySetupAndDeletion:
 
     def test_save_api_key_sets_env_and_store(self) -> None:
         """Saving a key writes the canonical store AND sets os.environ."""
-        from kiss.core.vscode_config import api_keys_env_path
+        from kiss.core.user_config import api_keys_env_path
 
         save_api_key("GEMINI_API_KEY", "gem-test-123")
         assert os.environ["GEMINI_API_KEY"] == "gem-test-123"
@@ -302,7 +302,7 @@ class TestApiKeySetupAndDeletion:
 
     def test_overwrite_key_replaces_in_store(self) -> None:
         """Saving a new value for an existing key replaces the old one."""
-        from kiss.core.vscode_config import api_keys_env_path
+        from kiss.core.user_config import api_keys_env_path
 
         save_api_key("OPENAI_API_KEY", "old-val")
         save_api_key("OPENAI_API_KEY", "new-val")
@@ -313,7 +313,7 @@ class TestApiKeySetupAndDeletion:
 
     def test_multiple_keys_independent(self) -> None:
         """Saving/deleting one key doesn't affect others."""
-        from kiss.core.vscode_config import api_keys_env_path
+        from kiss.core.user_config import api_keys_env_path
 
         save_api_key("GEMINI_API_KEY", "gem-val")
         save_api_key("OPENAI_API_KEY", "oai-val")

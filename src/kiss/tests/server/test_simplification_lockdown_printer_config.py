@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Characterization (lockdown) tests for json_printer and vscode_config.
+"""Characterization (lockdown) tests for json_printer and user_config.
 
 Pins the CURRENT externally-observable behavior of
 ``kiss.server.json_printer.JsonPrinter`` and
-``kiss.core.vscode_config`` so the planned simplifications
+``kiss.core.user_config`` so the planned simplifications
 (tmp/findings-6.md sections B1, B2, B3, C1, C2, A3) cannot silently
 change behavior:
 

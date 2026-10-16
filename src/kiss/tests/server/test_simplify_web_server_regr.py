@@ -235,8 +235,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         The root ``install.sh`` never touches git, so running it directly
         against an existing clone would rebuild the stale checkout as-is;
         the committed bootstrap synchronizes with origin first and hands
-        over.  Mirrors the VS Code extension's ``runUpdate()``, which
-        prefers the bootstrap the same way.  ``KISS_NONINTERACTIVE=1``
+        over.  ``KISS_NONINTERACTIVE=1``
         must reach the bootstrap (it takes no ``--non-interactive`` flag).
         """
         root = self.server._install_root

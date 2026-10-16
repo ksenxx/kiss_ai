@@ -44,7 +44,7 @@ import tempfile
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 from kiss.tests.server.conftest import find_free_port

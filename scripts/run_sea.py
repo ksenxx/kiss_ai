@@ -54,7 +54,7 @@ def main() -> int:
     parser.add_argument("-b", "--max-budget", type=float, default=None, help="USD budget")
     args = parser.parse_args()
 
-    from kiss.core.vscode_config import load_api_keys_readonly
+    from kiss.core.user_config import load_api_keys_readonly
 
     load_api_keys_readonly()
 

@@ -13,7 +13,7 @@ the settings panel's manual "Git Commit" command and runs
 ``_commit_main_tree`` directly (see
 ``test_settings_git_commit_button.py``).
 
-These tests drive :class:`VSCodeServer` with real ``git`` state — no
+These tests drive :class:`AgentServer` with real ``git`` state — no
 mocks, no test doubles.  The LLM call for commit-message generation is
 replaced with a deterministic override of the module-level
 ``generate_commit_message_from_diff`` function in ``merge_flow``,
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, run_git
 
 
@@ -40,7 +40,7 @@ class _ServerHarness(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         init_repo(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
@@ -110,7 +110,7 @@ class TestAutocommitChanges(_ServerHarness):
         assert evt["tabId"] == "t1"
 
     def test_progress_notification_precedes_done(self) -> None:
-        """The webview shows a progress toast before the result."""
+        """The chat page shows a progress toast before the result."""
         Path(self.tmpdir, "seed.txt").write_text("progress\n")
 
         self.server._commit_main_tree("t1")

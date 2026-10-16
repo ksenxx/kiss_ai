@@ -111,12 +111,7 @@ _DISPLAY_EVENT_TYPES = frozenset(
 #: events (``task_runner._broadcast_failure_result``).
 TAB_STAMPED_TASK_EVENT_TYPES = frozenset({"prompt", "result", "ask_answer"})
 
-# Tools whose ``tool_call`` event names a file the agent CHANGED (as
-# opposed to merely read).  Used to track, per task, which files the
-# task modified so the end-of-task auto-commit can also commit repos
-# other than the tab's work_dir one.
-
-#: Image formats the chat webview renders inline in a tool's event
+#: Image formats the chat page renders inline in a tool's event
 #: panel (as ``data:`` URIs, so replays keep working after the file —
 #: often inside a discarded worktree — is gone).
 _IMAGE_MIME_BY_EXT = {
@@ -137,9 +132,9 @@ _MAX_RESULT_IMAGE_BYTES = 2 * 1024 * 1024
 
 #: Cap on the TOTAL base64 image payload embedded across one task's
 #: events.  Replays send a task's whole event list in a single frame
-#: and the VS Code extension drops its socket above 32 MiB
-#: (``AgentClient.ts``), so unbounded per-event embedding would make an
-#: image-heavy task's history unloadable.  12 MiB leaves ample room
+#: capped at ``MAX_REPLAY_FRAME_BYTES`` (16 MiB), so unbounded
+#: per-event embedding would make an image-heavy task's history
+#: unloadable.  12 MiB leaves ample room
 #: for the textual events sharing the frame.
 _MAX_TASK_IMAGE_B64_BYTES = 12 * 1024 * 1024
 
@@ -255,7 +250,7 @@ def stamp_event_ts(event: dict[str, Any]) -> None:
     Adds a ``ts`` field (ms since the epoch) when the event does not
     already carry one, so live transports, in-memory recordings, and
     the persisted DB rows all agree on WHEN the event happened and the
-    chat webview (extension and remote web app alike) can render the
+    chat page can render the
     compact per-panel timestamp badge — including on replays, which
     keep the original stamp.
 
@@ -718,7 +713,7 @@ class JsonPrinter(Printer):
         self._tool_call_started: dict[str, float] = {}
         # Per-task total of base64 image bytes already embedded, so an
         # image-heavy task stops embedding before its replayed event
-        # list outgrows the extension's frame limit (see
+        # list outgrows the replay frame budget (see
         # _MAX_TASK_IMAGE_B64_BYTES).  Guarded by ``self._lock``.
         self._image_b64_used: dict[str, int] = {}
         # Task ids whose state cleanup_task already freed, newest last
@@ -769,7 +764,7 @@ class JsonPrinter(Printer):
         # Makes "record a task event + choose its live recipients +
         # schedule their sends" atomic with respect to "snapshot a
         # running task's recording + schedule the replay that carries
-        # it".  The webview REPLACES a tab's transcript on a replay, so
+        # it".  The page REPLACES a tab's transcript on a replay, so
         # with the two interleaved an event could render twice (in the
         # snapshot and again live, after the replay) or vanish (sent
         # live, then wiped by a replay whose snapshot predates it).
@@ -1150,7 +1145,7 @@ class JsonPrinter(Printer):
         seconds classifying, retiring the previous worktree and checking
         out a new one, with nothing on screen.  ``launch_phase`` is a
         transient event (see :meth:`broadcast_transient`) the chat
-        webview renders as a single status line at the end of the
+        page renders as a single status line at the end of the
         transcript, replaced by each later phase and removed by an
         empty *text* — or by the agent's first event, whichever comes
         first.
@@ -2415,8 +2410,8 @@ class JsonPrinter(Printer):
         because worktree runs delete the file's directory after the
         merge, which would break transcript replays.  A per-task byte
         budget (``_MAX_TASK_IMAGE_B64_BYTES``) stops embedding before
-        the task's replayed event list outgrows the extension's frame
-        limit.
+        the task's replayed event list outgrows the replay frame
+        budget.
 
         Args:
             content: The tool's full return text (untruncated).

@@ -3,11 +3,11 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Vendor-display test for Z.AI + Moonshot extracted from
-``kiss.tests.agents.vscode.test_zai_moonshot_keys``.
+``kiss.tests.webapp.test_zai_moonshot_keys``.
 
 Moved here because ``kiss.server.helpers.model_vendor`` is the only
 production dependency; the settings-panel media checks stayed behind
-in tests/agents/vscode.
+in tests/webapp.
 """
 
 from __future__ import annotations

@@ -4,10 +4,10 @@
 # add your name here
 """Race reproduction: ``setWorkDir`` must sync the printer atomically.
 
-``_cmd_set_work_dir`` updates ``VSCodeServer.work_dir`` under
+``_cmd_set_work_dir`` updates ``AgentServer.work_dir`` under
 ``_state_lock`` but (pre-fix) mirrored the value onto
 ``printer.work_dir`` OUTSIDE the lock.  Two racing ``setWorkDir``
-commands (two VS Code windows reconnecting together) could therefore
+commands (two browser windows reconnecting together) could therefore
 interleave the printer writes in the OPPOSITE order of the server
 writes, leaving ``printer.work_dir != server.work_dir`` permanently —
 so global ``configData`` events kept reporting a folder the daemon no
@@ -31,7 +31,7 @@ import threading
 import time
 
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _TimedWorkDirPrinter(JsonPrinter):
@@ -68,7 +68,7 @@ def test_racing_set_work_dir_keeps_printer_and_server_consistent() -> None:
     LOST the server-side update.
     """
     printer = _TimedWorkDirPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     server.work_dir = "/init"
     printer._work_dir = "/init"
 

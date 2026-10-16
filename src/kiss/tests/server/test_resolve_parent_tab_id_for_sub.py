@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for
-:meth:`VSCodeServer._resolve_parent_tab_id_for_sub`.
+:meth:`AgentServer._resolve_parent_tab_id_for_sub`.
 
 The helper is responsible for populating ``parent_tab_id`` on the
 ``openSubagentTab`` broadcast.  A blank return value breaks the
@@ -21,7 +21,7 @@ import pytest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _clear_states() -> None:
@@ -56,7 +56,7 @@ class TestResolveParentTabIdForSub:
 
     def test_task_id_match_via_registry_key(self) -> None:
         """Tier 1: the parent state registered under the lookup id."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("42", "parent-tab", chat_id="c1")
         out = server._resolve_parent_tab_id_for_sub(
             parent_task_id="42", chat_id="c1", sub_tab_id="task-42__sub_0",
@@ -67,7 +67,7 @@ class TestResolveParentTabIdForSub:
         """A sub-agent state registered under the lookup id must never
         be returned as the parent; the lookup falls through to the
         chat-id tier."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("42", "sub-tab", is_subagent=True, chat_id="c1")
         _register("41", "parent-tab", chat_id="c1")
         out = server._resolve_parent_tab_id_for_sub(
@@ -79,7 +79,7 @@ class TestResolveParentTabIdForSub:
         """Tier 2: when no state is registered under the task id, fall
         back to the unique non-subagent state sharing the sub-agent's
         ``chat_id``."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-parent", "parent-tab", chat_id="c2")
         _register("t-sub", "other-sub", is_subagent=True, chat_id="c2")
         out = server._resolve_parent_tab_id_for_sub(
@@ -91,7 +91,7 @@ class TestResolveParentTabIdForSub:
         """Two non-subagent states with the same ``chat_id`` is
         ambiguous; the helper must NOT guess.  It falls through to
         the next tier (synthetic-tab-id parse, then warning)."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-a", "parent-a", chat_id="c3")
         _register("t-b", "parent-b", chat_id="c3")
         out = server._resolve_parent_tab_id_for_sub(
@@ -102,7 +102,7 @@ class TestResolveParentTabIdForSub:
     def test_chat_id_fallback_with_no_chat_id(self) -> None:
         """Empty ``chat_id`` must NOT trigger the chat-id tier (which
         would match every state with default ``chat_id=""``)."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-parent", "parent-tab", chat_id="")
         out = server._resolve_parent_tab_id_for_sub(
             parent_task_id=None, chat_id="", sub_tab_id="no-suffix",
@@ -113,7 +113,7 @@ class TestResolveParentTabIdForSub:
         """Tier 3: when the sub-tab id is
         ``f"{parent_tab_id}__sub_{n}"`` and the prefix matches a
         known non-subagent ``tab_id``, return that prefix."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-real", "real-parent-id", chat_id="")
         out = server._resolve_parent_tab_id_for_sub(
             parent_task_id=None, chat_id="",
@@ -124,7 +124,7 @@ class TestResolveParentTabIdForSub:
     def test_synthetic_tab_id_parse_unknown_prefix(self) -> None:
         """Synthetic prefix that doesn't match any registered tab
         must fall through to the warning tier."""
-        server = VSCodeServer()
+        server = AgentServer()
         out = server._resolve_parent_tab_id_for_sub(
             parent_task_id=None, chat_id="",
             sub_tab_id="ghost-parent__sub_0",
@@ -140,7 +140,7 @@ class TestResolveParentTabIdForSub:
         ``""`` is still the only safe return — the frontend treats
         it as "no parent" — but the warning makes the failure
         observable."""
-        server = VSCodeServer()
+        server = AgentServer()
         with caplog.at_level(
             logging.WARNING, logger="kiss.server.server",
         ):
@@ -155,7 +155,7 @@ class TestResolveParentTabIdForSub:
     def test_task_id_match_preferred_over_chat_id(self) -> None:
         """Tier 1 wins even when Tier 2 would match a different
         state."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("7", "correct-parent", chat_id="other-chat")
         _register("t-wrong", "wrong-parent", chat_id="lookup-chat")
         out = server._resolve_parent_tab_id_for_sub(
@@ -167,7 +167,7 @@ class TestResolveParentTabIdForSub:
     def test_chat_id_tier_excludes_the_sub_tab_itself(self) -> None:
         """The chat-id tier must never resolve the sub-agent's own tab
         as its parent."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-self", "task-9__sub_0", chat_id="c5")
         _register("t-parent", "parent-tab", chat_id="c5")
         out = server._resolve_parent_tab_id_for_sub(
@@ -181,7 +181,7 @@ class TestResolveParentTabIdForSub:
         finished attaches to the nearest LIVE ancestor: a completion
         helper announced after its parent's tab closed must still get a
         tab under the surviving grandparent."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-root", "root-tab", chat_id="c6")
         st = _register("t-helper", "root-tab__sub_t-mid__sub_t-helper", is_subagent=True)
         st.is_task_active = True
@@ -196,7 +196,7 @@ class TestResolveParentTabIdForSub:
     def test_finished_sub_keeps_finished_parent(self) -> None:
         """Finished history keeps its real parent (also finished) so a
         hand-close of that parent's reopened tab still cascades."""
-        server = VSCodeServer()
+        server = AgentServer()
         _register("t-root", "root-tab", chat_id="c7")
         out = server._resolve_parent_tab_id_for_sub(
             parent_task_id="t-mid", chat_id="c7",

@@ -6,7 +6,7 @@
 
 R09-1.  A task whose agent called ``create_worktree`` but never
 ``commit_and_merge`` leaves its ``kiss/wt-*`` branch pending and the
-webview shows the Merge / Discard bar.  If the user clicks neither
+chat page shows the Merge / Discard bar.  If the user clicks neither
 button and submits the next task on the same tab, the server must not
 lose the worktree: before the new run starts the pending worktree is
 parked on its branch (``_retire_previous_worktree``: the work is
@@ -17,7 +17,7 @@ back — not by the retire, and not by the orphan-reclaim sweep a later
 
 Everything here is real: a real git repository, a real linked worktree
 created by the agent's own ``create_worktree`` tool, real ``run``
-commands dispatched through ``VSCodeServer._run_task`` on real worker
+commands dispatched through ``AgentServer._run_task`` on real worker
 threads, and the real reclaim sweep.  The model is a local stand-in
 endpoint scripting each task's tool calls.
 """
@@ -31,7 +31,7 @@ from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import kiss_wt_branches, run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -56,7 +56,7 @@ class TestPendingWorktreeSurvivesNextRun(unittest.TestCase):
         self.offline.__enter__()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = self.repo
         # Per task prompt: how many model calls have been answered.
         self.calls: dict[str, int] = {}

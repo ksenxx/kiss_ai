@@ -1,7 +1,6 @@
 {
   "pythonVersion": "3.13",
   "exclude": [
-    "src/kiss/agents/vscode/kiss_project/",
     "src/kiss/agents/claude_skills/"
   ],
   "reportMissingModuleSource": "none",

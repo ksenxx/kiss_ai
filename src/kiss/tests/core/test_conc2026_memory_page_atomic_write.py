@@ -241,26 +241,26 @@ def test_fresh_config_with_secrets_is_private(tmp_path: Path) -> None:
     fresh files come out private and a previously exposed config is
     repaired on the next save.
     """
-    from kiss.core import vscode_config
+    from kiss.core import user_config
 
     root = tmp_path / "kiss-home"
     root.mkdir()
     root.chmod(0o755)
     config_path = root / "config.json"
-    module_ns = cast(dict[str, Any], vars(vscode_config))
+    module_ns = cast(dict[str, Any], vars(user_config))
     had_dir = "CONFIG_DIR" in module_ns
     had_path = "CONFIG_PATH" in module_ns
     old_dir = module_ns.get("CONFIG_DIR")
     old_path = module_ns.get("CONFIG_PATH")
     old_umask = os.umask(0o022)
     try:
-        vscode_config.CONFIG_DIR = root
-        vscode_config.CONFIG_PATH = config_path
+        user_config.CONFIG_DIR = root
+        user_config.CONFIG_PATH = config_path
         secrets = {
             "remote_password": "regression-password",
             "tunnel_token": "regression-tunnel-token",
         }
-        vscode_config.save_config(dict(secrets))
+        user_config.save_config(dict(secrets))
         stored = json.loads(config_path.read_text(encoding="utf-8"))
         assert stored["remote_password"] == secrets["remote_password"]
         assert stored["tunnel_token"] == secrets["tunnel_token"]
@@ -270,10 +270,11 @@ def test_fresh_config_with_secrets_is_private(tmp_path: Path) -> None:
         # A config a prior release exposed as 0644 is repaired by the
         # next save instead of having its insecure mode "preserved".
         config_path.chmod(0o644)
-        vscode_config.save_config({"remote_password": "rotated"})
+        rotated = "rotated"
+        user_config.save_config({"remote_password": rotated})
         assert _mode(config_path) == 0o600, oct(_mode(config_path))
         stored = json.loads(config_path.read_text(encoding="utf-8"))
-        assert stored["remote_password"] == "rotated"
+        assert stored["remote_password"] == rotated
         assert stored["tunnel_token"] == secrets["tunnel_token"]
     finally:
         os.umask(old_umask)

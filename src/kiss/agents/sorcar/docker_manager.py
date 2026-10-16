@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: straight into the conversation and blows the model's context window.
 MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_max_chars
 
-#: Environment variable used to tag a streaming exec — and every process
+#: Environment variable used to tag an exec — and every process
 #: it spawns — so a timed-out command can be killed by matching
 #: ``/proc/<pid>/environ`` inside the container's own pid namespace.
 _EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
@@ -51,6 +51,14 @@ _EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
 #: indefinitely delayed start costs one inspect every few seconds.
 _REAP_POLL_INTERVAL_S = 0.2
 _REAP_POLL_MAX_INTERVAL_S = 5.0
+
+#: How long a timed-out or stopped command waits for the reaper's first
+#: kill sweep before returning: long enough that the command is normally
+#: dead when the caller gets its result (one ``exec_run``, under a
+#: hundred milliseconds on an idle daemon, over a second on a busy one),
+#: short enough that a daemon withholding the sweep's stream cannot hold
+#: the task thread.  The sweep itself continues on the reaper thread.
+_KILL_WAIT_S = 2.0
 
 #: ``docker_image`` spelling that attaches to an already running container
 #: (``container:<name-or-id>``) instead of starting one from an image.
@@ -91,29 +99,11 @@ def _new_utf8_decoder() -> Any:
     return codecs.getincrementaldecoder("utf-8")("replace")
 
 
-def _join_demuxed(stdout_parts: list[bytes], stderr_parts: list[bytes]) -> str:
-    """Decode the collected stdout then stderr chunks of a non-streaming exec.
-
-    Each stream is decoded as one byte string, so a multibyte character
-    split across chunks survives; the two streams are joined by a newline,
-    stdout first, as the streaming path reports them.
-    """
-    texts = [b"".join(parts).decode("utf-8", errors="replace")
-             for parts in (stdout_parts, stderr_parts)]
-    return "\n".join(text for text in texts if text)
-
-
-def _mark_cancelled(state: dict[str, bool]) -> bool:
-    """Cancel the exec *state*; return whether its start was already committed."""
-    state["cancelled"] = True
-    return state["start_committed"]
-
-
 def _stop_requested(cancel: threading.Event | None) -> bool:
     """Return whether *cancel* fired or the calling thread's tool call was interrupted.
 
-    Both docker ``Bash`` paths poll this in 0.2 s slices (like the host
-    Bash tool) so a task Stop and a tool-panel Stop end a command
+    :meth:`DockerManager._exec` polls this in 0.2 s slices (like the
+    host Bash tool) so a task Stop and a tool-panel Stop end a command
     promptly instead of after its whole timeout.
 
     Args:
@@ -131,15 +121,18 @@ def _drain_exec_stream(
 ) -> None:
     """Decode a docker exec stream onto *out_queue* until it ends.
 
-    Runs on a reader thread so the caller can enforce a timeout on a
-    generator that otherwise blocks forever.  stdout and stderr each get
-    their own incremental decoder because their frames interleave.
+    Runs on the exec's worker thread so the caller can enforce a timeout
+    on a generator that otherwise blocks forever.  stdout and stderr each
+    get their own incremental decoder because their frames interleave.
+    A read failure propagates to the worker (it is not a clean end of
+    stream); note that the SDK's ``CancellableStream`` already turns a
+    dropped socket into a plain end of stream, which the worker then
+    detects through ``exec_inspect`` (:meth:`_ExecRun._wait_for_exit_code`).
 
     Args:
         output_gen: The demuxed ``CancellableStream`` from ``exec_start``
             (typed ``Any`` because the SDK exposes no stub for it).
-        out_queue: Receives ``(is_stderr, text)`` items and a final
-            ``None`` sentinel marking end of stream.
+        out_queue: Receives ``(is_stderr, text)`` items.
     """
     decoders = {False: _new_utf8_decoder(), True: _new_utf8_decoder()}
     try:
@@ -154,15 +147,15 @@ def _drain_exec_stream(
                 text = decoders[is_stderr].decode(raw)
                 if text:
                     out_queue.put((is_stderr, text))
-    except Exception:  # pragma: no cover — docker socket error mid-stream
-        logger.debug("docker exec stream failed", exc_info=True)
     finally:
-        # Close the HTTP response, not the stream, for the reasons given in
-        # ``DockerManager._exec``: the SDK leaves it to the caller and the
-        # stream's own ``close()`` keeps the socket descriptor until GC.
-        # Guarded so the ``None`` sentinel below is always queued: a
-        # ``close()`` that raises would otherwise leave the consumer
-        # waiting out the whole deadline for a command that finished.
+        # The SDK leaves closing a streamed exec to the caller; without
+        # it the socket lingers until a GC cycle.  The HTTP response is
+        # closed rather than the stream: ``CancellableStream.close()``
+        # only shuts the raw socket, keeps the descriptor until GC and
+        # makes the response's own close raise ``ValueError`` later
+        # (measured against a live daemon: 15 execs left 16 / 11 / 0
+        # descriptors open with no close / stream close / response
+        # close).  Guarded so the trailing bytes are always flushed.
         try:
             getattr(output_gen, "_response", output_gen).close()
         except Exception:
@@ -171,7 +164,19 @@ def _drain_exec_stream(
             trailing = decoder.decode(b"", True)
             if trailing:
                 out_queue.put((is_stderr, trailing))
-        out_queue.put(None)
+
+
+def _take_output(
+    item: tuple[bool, str],
+    stdout_parts: list[str],
+    stderr_parts: list[str],
+    on_text: Callable[[str], None] | None,
+) -> None:
+    """Keep one decoded ``(is_stderr, text)`` piece and hand it to *on_text* when given."""
+    is_stderr, text = item
+    (stderr_parts if is_stderr else stdout_parts).append(text)
+    if on_text is not None:
+        on_text(text)
 
 
 def _collapse_progress(output: str) -> str:
@@ -238,6 +243,168 @@ def _with_exit_code(output: str, exit_code: int) -> str:
         return output
     suffix = f"[exit code: {exit_code}]"
     return f"{output}\n{suffix}" if output else suffix
+
+
+class _ExecRun:
+    """One docker exec, shared by the task thread, its worker thread and its reaper.
+
+    The task thread (:meth:`DockerManager._exec`) only ever waits on
+    :attr:`out_queue` in 0.2 s slices, where an injected Stop lands.
+    Every daemon call that may block — ``exec_create``, ``exec_start``,
+    reading the stream, ``exec_inspect`` for the exit code — runs on the
+    worker (:meth:`run_worker`), and the kill sweep on the reaper
+    (:meth:`reap`), so neither a slow daemon nor a withheld stream can
+    hold the task thread past its deadline.
+
+    The exec is tagged with a unique environment token so a timed-out
+    command can be killed inside the container instead of running (and
+    consuming container resources) for the rest of the container's life.
+    Timeout and exec startup are coordinated through :attr:`lock`: a
+    single kill scan at the deadline is not enough, because the daemon
+    may delay ``exec_create``/``exec_start`` past the deadline, in which
+    case the scan sees no tagged process and the command starts — and
+    runs forever — *after* ``Bash`` has returned the timeout error.  The
+    worker therefore commits to starting only while not cancelled
+    (checked under the lock after ``exec_create``); a timed-out caller
+    sets ``cancelled`` under the same lock, so either the worker never
+    calls ``exec_start`` at all, or the caller sees the commitment and
+    hands the exec to a reaper that kills it once it has started.  A
+    start the daemon definitively refused (``exec_start`` answered with
+    an error status, e.g. ``409`` for a paused container) is recorded as
+    well, because such an exec never gets a pid and a reaper waiting for
+    one would poll until the container closes.
+    """
+
+    def __init__(self, manager: "DockerManager", container_id: str | None, command: str) -> None:
+        self.manager = manager
+        self.container_id = container_id
+        self.command = command
+        self.token = uuid.uuid4().hex
+        self.exec_id = ""  # set by the worker before it commits to starting
+        # Output arrives piece by piece (not returned whole by
+        # ``exec_start``) so a timed-out command can still report what
+        # it printed before the kill.  A ``None`` item marks the end of
+        # the worker, whether the exec finished or the worker failed.
+        self.out_queue: queue.Queue[tuple[bool, str] | None] = queue.Queue()
+        self.error: BaseException | None = None
+        self.exit_code: int | None = None
+        self.lock = threading.RLock()
+        self.cancelled = False
+        self.start_committed = False
+        self.start_refused = False
+
+    def run_worker(self) -> None:
+        """Worker thread body: create, start and drain the exec, then fetch its exit code."""
+        try:
+            self.exec_id = self.manager._tagged_exec_create(
+                self.container_id, self.command, self.token,
+            )
+            with self.lock:
+                if self.cancelled:
+                    return
+                self.start_committed = True
+            try:
+                stream = self.manager.client.api.exec_start(
+                    self.exec_id, stream=True, demux=True,
+                )
+            except docker.errors.APIError:  # type: ignore[attr-defined]
+                # The daemon answered the start with an error status:
+                # the exec never ran.  Any other failure (a dropped
+                # connection) is ambiguous and keeps the reaper.
+                with self.lock:
+                    self.start_refused = True
+                raise
+            _drain_exec_stream(stream, self.out_queue)
+            self._wait_for_exit_code()
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.out_queue.put(None)
+
+    def _wait_for_exit_code(self) -> None:
+        """Poll ``exec_inspect`` until the exit code is known or the exec is cancelled.
+
+        The stream can end before the process does: it closed its own
+        stdio, or the daemon connection dropped (the SDK reports that as
+        a plain end of stream).  Each inspect may block for as long as
+        the daemon waits for the exec's streams to close, which is why
+        this runs on the worker and not on the task thread.
+        """
+        while not self.cancelled:
+            self.exit_code = self.manager.client.api.exec_inspect(self.exec_id).get("ExitCode")
+            if self.exit_code is not None:
+                return
+            time.sleep(0.2)
+
+    def _mark_cancelled(self) -> bool:
+        """Cancel the exec (caller holds :attr:`lock`); return whether it needs a reaper."""
+        self.cancelled = True
+        return self.start_committed and not self.start_refused
+
+    def cancel(self) -> None:
+        """Kill the exec from the task thread (timeout or injected Stop).
+
+        The reaper is installed first, so a Stop forced during the wait
+        below still leaves someone to kill a start the daemon delayed
+        past the deadline; the wait for its first sweep is bounded by
+        :data:`_KILL_WAIT_S` and sliced so an injected Stop lands.  The
+        state is taken through ``locked_call`` so a second injection
+        cannot leak the lock under the worker.
+        """
+        if not locked_call(self.lock, self._mark_cancelled):
+            return
+        swept = threading.Event()
+        threading.Thread(
+            target=self.reap, args=(swept,),
+            name=f"docker-exec-reaper-{self.token[:8]}", daemon=True,
+        ).start()
+        deadline = time.monotonic() + _KILL_WAIT_S
+        while not swept.is_set() and time.monotonic() < deadline:
+            swept.wait(0.2)
+
+    def reap(self, swept: threading.Event) -> None:
+        """Reaper thread body: sweep the token-tagged tree now and again once the exec has started.
+
+        The first sweep runs at once (``exec_inspect`` can block for up
+        to 2 s while the daemon waits for the exec's streams to close,
+        which is exactly the window in which a background child of an
+        already-exited shell — ``(sleep 2; touch m) &`` — would finish
+        its work) and *swept* is set when it is done.  By then the
+        daemon may still not have started the container-side process,
+        so the thread polls ``exec_inspect`` as well: once the exec has
+        started (``Pid`` is non-zero only then) it sweeps the tree, and
+        it stops after the sweep that finds the exec itself finished.
+        That last sweep matters: the exec's own shell may already have
+        exited while background children it spawned (``sleep 71 &``)
+        live on, holding the output stream open; they carry the token
+        too and die here.  A never-started exec is watched for as long
+        as the container lives — a fixed window would let a start
+        delayed past it run forever, the exact bug this reaper exists
+        to prevent — unless the daemon refused the start.  The poll
+        interval backs off so an indefinitely delayed start costs one
+        inspect every few seconds.
+
+        Args:
+            swept: Set once the first sweep has run.
+        """
+        try:
+            self.manager._kill_exec(self.token)
+        finally:
+            swept.set()
+        interval = _REAP_POLL_INTERVAL_S
+        while self.manager.container is not None and not self.start_refused:
+            try:
+                info = self.manager.client.api.exec_inspect(self.exec_id)
+            except Exception:  # container/exec already gone
+                logger.debug("could not inspect timed-out exec", exc_info=True)
+                return
+            if info.get("Pid"):
+                self.manager._kill_exec(self.token)
+                if not info.get("Running"):
+                    return  # the exec itself is finished; its tree is swept
+            time.sleep(interval)
+            interval = min(interval * 2, _REAP_POLL_MAX_INTERVAL_S)
+
 
 class DockerManager:
     """Manages Docker container lifecycle and command execution."""
@@ -439,11 +606,9 @@ class DockerManager:
         if guard is not None:
             return guard
         timeout_seconds = int(lift_install_timeout(command, timeout_seconds))
-        if self.stream_callback:
-            return self._bash_streaming(
-                container, command, timeout_seconds, max_output_chars,
-            )
-        exit_code, output = self._exec(container, command, timeout_seconds, self.stop_event)
+        exit_code, output = self._exec(
+            container, command, timeout_seconds, self.stop_event, self.stream_callback,
+        )
         # A tool-panel Stop ended the wait cooperatively (the exec is
         # already killed): surface it as the interrupted result.
         tool_interrupt.raise_if_interrupted()
@@ -549,11 +714,27 @@ class DockerManager:
         command: str,
         timeout_seconds: float,
         cancel: threading.Event | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> tuple[int | None, str]:
-        """Run *command* in *container* without streaming, bounded by *timeout_seconds*.
+        """Run *command* in *container*, bounded by *timeout_seconds*.
+
+        The exec is created, started, drained and inspected for its
+        exit code on a worker thread (see :class:`_ExecRun`) so this
+        thread can enforce the deadline on every step, including the
+        daemon's own ``exec_create``/``exec_start``/``exec_inspect``
+        latency; this thread consumes the decoded output in 0.2 s
+        slices (where an injected Stop lands) and hands each piece to
+        *on_text* when given — here and not on the worker, because
+        printers attribute output to a task via thread-local state.  At
+        the deadline, on a Stop or on a worker failure the exec is
+        cancelled: a reaper thread kills its token-tagged process tree
+        and this thread waits a bounded time for that first sweep.
 
         Args:
-            container: The caller's snapshot of the open container.
+            container: The caller's snapshot of the open container —
+                passed in (not re-read from ``self.container``) so a
+                concurrent ``close()`` cannot null the attribute
+                between the caller's guard and this method's use.
             command: The bash command to execute.
             timeout_seconds: Maximum time to wait before treating the
                 command as hung; the container-side process is killed.
@@ -561,118 +742,78 @@ class DockerManager:
                 container-side process is killed the same way.  An
                 interrupt of the calling thread's tool call (see
                 :func:`_stop_requested`) ends it the same way.
+            on_text: Optional callback receiving each piece of output as
+                it arrives (the ``Bash`` stream callback).
 
         Returns:
             ``(exit_code, output)`` — the exit code is ``None`` on
-            timeout and ``-1`` when *cancel* or the interrupt fired; the
-            output is stdout followed by stderr, untruncated.
+            timeout and ``-1`` when *cancel* or the interrupt fired (the
+            output then ends with ``Killed: the task was stopped.``); the
+            output is stdout followed by stderr, untruncated.  The
+            verdict is taken from the stop event, the clock and the exit
+            code alone, not from how the wait ended: a Stop or a deadline
+            that lands while the worker's final item is being taken
+            still wins over a known exit code.
         """
-        result_holder: dict[str, Any] = {}
-        error_holder: dict[str, BaseException] = {}
-        # Output is accumulated chunk by chunk (not returned whole by
-        # ``exec_start``) so a timed-out command can still report what it
-        # printed before the kill.  ``list.append`` is atomic, so the
-        # deadline path may join the lists while the worker still appends.
-        stdout_parts: list[bytes] = []
-        stderr_parts: list[bytes] = []
-
-        # The exec is tagged with a unique environment token — exactly
-        # like the streaming path — so a timed-out command can be
-        # killed inside the container instead of running (and consuming
-        # container resources) for the rest of the container's life.
-        #
-        # Timeout and exec startup are coordinated through *state*: a
-        # single kill scan at the deadline is not enough, because the
-        # daemon may delay ``exec_create``/``exec_start`` past the
-        # deadline, in which case the scan sees no tagged process and
-        # the command starts — and runs forever — *after* Bash has
-        # returned the timeout error.  The worker therefore commits to
-        # starting only while not cancelled (checked under the lock
-        # after ``exec_create``); a timed-out caller sets ``cancelled``
-        # under the same lock, so either the worker never calls
-        # ``exec_start`` at all, or the caller sees the commitment and
-        # hands the exec to a reaper that kills it once it has started.
-        token = uuid.uuid4().hex
-        container_id = container.id
-        state_lock = threading.RLock()
-        state = {"cancelled": False, "start_committed": False}
-
-        def run_exec() -> None:
-            try:
-                result_holder["exec_id"] = self._tagged_exec_create(
-                    container_id, command, token,
-                )
-                with state_lock:
-                    if state["cancelled"]:
-                        return
-                    state["start_committed"] = True
-                # The SDK leaves closing a streamed exec to the caller;
-                # without it the socket lingers until a GC cycle.  The
-                # HTTP response is closed rather than the stream:
-                # ``CancellableStream.close()`` only shuts the raw socket,
-                # keeps the descriptor until GC and makes the response's
-                # own close raise ``ValueError`` later (measured against a
-                # live daemon: 15 execs left 16 / 11 / 0 descriptors open
-                # with no close / stream close / response close).
-                stream = self.client.api.exec_start(
-                    result_holder["exec_id"], stream=True, demux=True,
-                )
-                try:
-                    for stdout_chunk, stderr_chunk in stream:
-                        if stdout_chunk:
-                            stdout_parts.append(stdout_chunk)
-                        if stderr_chunk:
-                            stderr_parts.append(stderr_chunk)
-                finally:
-                    getattr(stream, "_response", stream).close()
-            except BaseException as exc:
-                error_holder["error"] = exc
-
-        def cancel_exec() -> None:
-            # On the task thread (timeout or injected Stop): through
-            # ``locked_call`` so a second injection cannot leak the
-            # lock under the worker.
-            if locked_call(state_lock, _mark_cancelled, state):
-                # ``exec_id`` is guaranteed set: the worker stores it
-                # before committing, and the shared lock publishes it.
-                self._reap_timed_out_exec(result_holder["exec_id"], token)
-
-        thread = threading.Thread(target=run_exec, daemon=True)
-        thread.start()
+        run = _ExecRun(self, container.id, command)
+        threading.Thread(
+            target=run.run_worker, name=f"docker-exec-worker-{run.token[:8]}", daemon=True,
+        ).start()
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
         deadline = time.monotonic() + timeout_seconds
         try:
-            while thread.is_alive() and not _stop_requested(cancel):
+            while not _stop_requested(cancel):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                thread.join(min(remaining, 0.2))
+                try:
+                    item = run.out_queue.get(timeout=min(remaining, 0.2))
+                except queue.Empty:
+                    continue
+                if item is None:
+                    if run.error is not None:
+                        raise run.error
+                    break
+                _take_output(item, stdout_parts, stderr_parts, on_text)
+            # Output the worker had decoded by the time the wait ended
+            # still belongs to the command: a Stop or a deadline that
+            # lands between two slices (after an empty slice, before the
+            # next check) must not drop the pieces already sitting in the
+            # queue.  Only those pieces are taken — the worker keeps
+            # producing until it is cancelled below — and this thread is
+            # the queue's only consumer, so each of them is there.
+            for _ in range(run.out_queue.qsize()):
+                item = run.out_queue.get_nowait()
+                if item is None:
+                    break
+                _take_output(item, stdout_parts, stderr_parts, on_text)
         except BaseException:
             # An injected Stop (task stop watchdog, tool-panel interrupt)
-            # landed between joins: the exec must not outlive the call.
-            cancel_exec()
+            # landed between slices or in the final drain, or the worker
+            # failed mid-stream: the exec must not outlive the call.
+            run.cancel()
             raise
-        if thread.is_alive():
-            cancel_exec()
-            if _stop_requested(cancel):
-                return -1, "Killed: the task was stopped."
-            return None, _join_demuxed(stdout_parts, stderr_parts)
-        if error_holder:  # pragma: no branch
-            raise error_holder["error"]
-
-        exit_code = self.client.api.exec_inspect(
-            result_holder["exec_id"],
-        ).get("ExitCode", 0)
-        return int(exit_code), _join_demuxed(stdout_parts, stderr_parts)
+        stopped = _stop_requested(cancel)
+        timed_out = time.monotonic() >= deadline
+        output = "\n".join(
+            part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
+        )
+        if stopped or timed_out or run.exit_code is None:
+            run.cancel()
+            if stopped:
+                return -1, "\n".join(filter(None, (output, "Killed: the task was stopped.")))
+            return None, output
+        return run.exit_code, output
 
     def _tagged_exec_create(
         self, container_id: str | None, command: str, token: str,
     ) -> str:
         """Create a token-tagged bash exec and return its id.
 
-        Single builder for both :meth:`Bash` paths so the exec options
-        (shell wrapping, captured streams, ``workdir``, the
-        :data:`_EXEC_TOKEN_VAR` tag that :meth:`_kill_exec` matches on)
-        cannot drift between them.
+        Builds the exec options (shell wrapping, captured streams,
+        ``workdir``, the :data:`_EXEC_TOKEN_VAR` tag that
+        :meth:`_kill_exec` matches on) in one place.
 
         Args:
             container_id: Id of the container to run the exec in
@@ -694,130 +835,6 @@ class DockerManager:
         )
         return str(resp["Id"])
 
-    def _bash_streaming(
-        self,
-        container: Container,
-        command: str,
-        timeout_seconds: float,
-        max_output_chars: int,
-    ) -> str:
-        """Run *command*, streaming its output, and return the full result.
-
-        The docker exec stream is drained on a reader thread so this
-        thread can enforce *timeout_seconds*; the callback is invoked
-        here (not on the reader) because printers attribute output to a
-        task via thread-local state.
-
-        Args:
-            container: The caller's snapshot of the open container —
-                passed in (not re-read from ``self.container``) so a
-                concurrent ``close()`` cannot null the attribute
-                between :meth:`Bash`'s guard and this method's use.
-            command: The bash command to execute.
-            timeout_seconds: Maximum time to wait before treating the
-                command as hung; the container-side process is killed.
-            max_output_chars: Maximum characters in output before truncation.
-
-        Returns:
-            The command's output, the timeout error, or the
-            ``Killed: the task was stopped.`` result when the task's
-            stop event fired (the exec is killed in every early exit).
-
-        Raises:
-            ToolCallInterrupted: When the tool panel's Stop interrupted
-                this call; the exec is killed first.
-        """
-        assert self.stream_callback is not None
-        token = uuid.uuid4().hex
-        exec_id = self._tagged_exec_create(container.id, command, token)
-        output_gen = self.client.api.exec_start(exec_id, stream=True, demux=True)
-        out_queue: queue.Queue[tuple[bool, str] | None] = queue.Queue()
-        threading.Thread(
-            target=_drain_exec_stream, args=(output_gen, out_queue), daemon=True,
-        ).start()
-
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        deadline = time.monotonic() + timeout_seconds
-        eof = False
-        # Short slices keep this loop in Python, where an injected Stop
-        # lands; one ``get`` over the whole deadline would block in C
-        # for the command's full timeout.
-        try:
-            while not _stop_requested(self.stop_event):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item = out_queue.get(timeout=min(remaining, 0.2))
-                except queue.Empty:
-                    continue
-                if item is None:
-                    eof = True
-                    break
-                is_stderr, text = item
-                (stderr_parts if is_stderr else stdout_parts).append(text)
-                self.stream_callback(text)
-        except BaseException:
-            self._kill_exec(token)
-            raise
-
-        output = "\n".join(
-            part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
-        )
-        if not eof:
-            self._kill_exec(token)
-            tool_interrupt.raise_if_interrupted()
-            if self.stop_event is not None and self.stop_event.is_set():
-                output = "\n".join(filter(None, (output, "Killed: the task was stopped.")))
-                return _truncate_output(_with_exit_code(output, -1), max_output_chars)
-            return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
-
-        exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
-        return _truncate_output(_with_exit_code(output, exit_code), max_output_chars)
-
-    def _reap_timed_out_exec(self, exec_id: str, token: str) -> None:
-        """Guarantee a timed-out exec dies even if it has not started yet.
-
-        By the time the caller notices the timeout, the worker has
-        committed to ``exec_start`` but the daemon may not have started
-        the container-side process, so an immediate kill scan would find
-        nothing and the command would run forever once it starts.  A
-        daemon reaper thread polls ``exec_inspect`` instead: while the
-        exec is running it kills the token-tagged process tree, and it
-        stops once the exec has finished (``Pid`` is non-zero only after
-        the process has started).  A never-started exec is watched for
-        as long as the container lives — a fixed window would let a
-        start delayed past it run forever, the exact bug this reaper
-        exists to prevent.  The poll interval backs off so an
-        indefinitely delayed start costs one inspect every few seconds,
-        and the thread exits when the container is closed or the exec
-        vanishes.
-
-        Args:
-            exec_id: The docker exec to watch.
-            token: The unique tag given to the exec's environment.
-        """
-
-        def reap() -> None:
-            interval = _REAP_POLL_INTERVAL_S
-            while True:
-                if self.container is None:  # container closed: nothing to kill
-                    return
-                try:
-                    info = self.client.api.exec_inspect(exec_id)
-                except Exception:  # container/exec already gone
-                    logger.debug("could not inspect timed-out exec", exc_info=True)
-                    return
-                if info.get("Running"):
-                    self._kill_exec(token)
-                elif info.get("Pid"):
-                    return  # started and already finished (killed or done)
-                time.sleep(interval)
-                interval = min(interval * 2, _REAP_POLL_MAX_INTERVAL_S)
-
-        threading.Thread(target=reap, daemon=True).start()
-
     def _kill_exec(self, token: str) -> None:
         """Kill the container-side processes of a timed-out exec.
 
@@ -831,10 +848,9 @@ class DockerManager:
         Args:
             token: The unique tag given to the exec's environment.
         """
-        # Snapshot: the reaper's poll loop and the streaming timeout
-        # path both call this without the lifecycle lock, so a
-        # concurrent close() can null ``self.container`` after their
-        # own liveness checks.  A closed container took the tagged
+        # Snapshot: the reaper's poll loop calls this without the
+        # lifecycle lock, so a concurrent close() can null
+        # ``self.container`` after its own liveness check.  A closed container took the tagged
         # process tree with it — nothing is left to kill.
         container = self.container
         if container is None:

@@ -10,13 +10,13 @@ overwrite each other's tabs.  The design assumes a single owner per
 ``KISS_HOME`` — and the canonical ``kiss-web`` daemon is that owner —
 but ``_kiss_web_launcher._ensure_api_server`` builds a second,
 private loopback-WSS ``RemoteAccessServer`` in the channel-agent process whose
-``VSCodeServer`` used to bind the SAME ``KISS_HOME/tabs.json``.  Every
+``AgentServer`` used to bind the SAME ``KISS_HOME/tabs.json``.  Every
 channel run registers a tab, so the canonical daemon's tabs were
 erased by the embedded server's stale snapshot (and vice versa), and
-the embedded server's transient tabs leaked into every VS Code window.
+the embedded server's transient tabs leaked into every chat client.
 
 The fix gives the embedded server a private registry of its own
-(``VSCodeServer.use_private_tab_registry``, called by the launcher).
+(``AgentServer.use_private_tab_registry``, called by the launcher).
 
 The test runs the real canonical server and the real launcher
 entry point (``_ensure_api_server``) in one process against one KISS
@@ -93,7 +93,7 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
     ) -> None:
         barrier.wait(timeout=30)
         for index in range(_TABS_PER_SIDE):
-            server._vscode_server._cmd_open_tab({
+            server._agent_server._cmd_open_tab({
                 "type": "openTab",
                 "tabId": f"{prefix}-{index}",
                 "title": f"{prefix} {index}",
@@ -135,11 +135,11 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
         }
         expected_embedded = {f"channel-{i}" for i in range(_TABS_PER_SIDE)}
         self.assertEqual(
-            {e["tabId"] for e in canonical._vscode_server.tab_registry.snapshot()},
+            {e["tabId"] for e in canonical._agent_server.tab_registry.snapshot()},
             expected_canonical,
         )
         self.assertEqual(
-            {e["tabId"] for e in embedded._vscode_server.tab_registry.snapshot()},
+            {e["tabId"] for e in embedded._agent_server.tab_registry.snapshot()},
             expected_embedded,
         )
         on_disk = _tab_ids(self.canonical_tabs)
@@ -157,11 +157,11 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
             work_dir=str(self.tmp),
         )
         self.assertEqual(
-            {e["tabId"] for e in restarted._vscode_server.tab_registry.snapshot()},
+            {e["tabId"] for e in restarted._agent_server.tab_registry.snapshot()},
             expected_canonical,
         )
         self.assertNotIn(
-            "vscode-earlier", embedded._vscode_server._tab_chat_views,
+            "vscode-earlier", embedded._agent_server._tab_chat_views,
             "the embedded server inherited a canonical tab's chat binding",
         )
 
@@ -172,12 +172,12 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
         launcher._ensure_api_server()
         embedded = launcher._API_SERVER
         assert embedded is not None
-        vscode = embedded._vscode_server
-        vscode._cmd_open_tab({"type": "openTab", "tabId": "channel-x", "title": "x"})
-        vscode.tab_registry.update_tab("channel-x", chat_id="chat-x", title="renamed")
-        vscode.tab_registry.close_tab("channel-x")
+        server = embedded._agent_server
+        server._cmd_open_tab({"type": "openTab", "tabId": "channel-x", "title": "x"})
+        server.tab_registry.update_tab("channel-x", chat_id="chat-x", title="renamed")
+        server.tab_registry.close_tab("channel-x")
         self.assertEqual(self.canonical_tabs.read_bytes(), before)
-        self.assertEqual(vscode.tab_registry.snapshot(), [])
+        self.assertEqual(server.tab_registry.snapshot(), [])
 
     def test_embedded_server_is_created_once_per_process(self) -> None:
         first = launcher._ensure_api_server()

@@ -15,7 +15,7 @@ ended while a flush timer was in flight therefore leaked a permanent
 ``system_output`` attributed to the finished task.
 
 No mocks, patches, fakes, or test doubles: a real :class:`JsonPrinter`
-(via the shared :class:`MemoryPrinter` transport used by all vscode
+(via the shared :class:`MemoryPrinter` transport used by the server
 tests) and the real production timer callback.
 """
 

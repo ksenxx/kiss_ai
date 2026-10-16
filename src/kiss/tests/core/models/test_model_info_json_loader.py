@@ -24,15 +24,18 @@ New contract (after dropping ``~/.kiss/MODEL_INFO.json``):
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.models import model_info as mi_module
 from kiss.core.models.model_info import (
     MY_MODELS_DEFAULT_CONTENT,
     PACKAGE_MODEL_INFO_PATH,
-    USER_MY_MODELS_PATH,
     ModelInfo,
     _build_model_info_entry,
     _load_model_info,
@@ -52,9 +55,31 @@ def test_package_model_info_json_is_present_and_well_formed() -> None:
         assert "output_price_per_1M" in entry, name
 
 
-def test_user_my_models_path_lives_under_home_kiss() -> None:
-    """The optional user overrides file must live at ~/.kiss/MY_MODELS.json."""
-    assert USER_MY_MODELS_PATH == Path.home() / ".kiss" / "MY_MODELS.json"
+def _user_my_models_path_in_fresh_process(env: dict[str, str]) -> Path:
+    """Import model_info in a child interpreter under *env* and return its path."""
+    code = "from kiss.core.models.model_info import USER_MY_MODELS_PATH; print(USER_MY_MODELS_PATH)"
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env, check=True, capture_output=True, text=True, timeout=120,
+    )
+    return Path(proc.stdout.strip())
+
+
+def test_user_my_models_path_follows_kiss_home(tmp_path: Path) -> None:
+    """The user overrides file is ``MY_MODELS.json`` in the KISS home.
+
+    Without ``KISS_HOME`` that is ``~/<brand home_dir>`` (``~/.kiss`` for
+    the stock brand); with it, the directory it names.  Checked in fresh
+    interpreters because the path is bound at import and this process's
+    ``KISS_HOME`` was already rewritten by the test conftest.
+    """
+    base = {k: v for k, v in os.environ.items() if k != "KISS_HOME"}
+    assert _user_my_models_path_in_fresh_process(base) == (
+        Path.home() / HOME_DIR / "MY_MODELS.json"
+    )
+    assert _user_my_models_path_in_fresh_process({**base, "KISS_HOME": str(tmp_path)}) == (
+        tmp_path / "MY_MODELS.json"
+    )
 
 
 def test_my_models_default_content_is_valid_json_with_docs_and_example() -> None:

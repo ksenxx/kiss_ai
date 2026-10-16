@@ -98,8 +98,8 @@ class _FakeIRCServer:
         self._conn.sendall(line.encode("utf-8") + b"\r\n")
 
     def wait_received(self, needle: str, timeout: float = 5.0) -> bool:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if any(needle in line for line in self.received):
                 return True
             time.sleep(0.05)
@@ -187,8 +187,8 @@ class TestIRCBugs:
         # sentinel arrives we know the NOTICE was (correctly) not enqueued.
         self.server.send_line(":bob!u@h PRIVMSG #ch :sentinel")
         messages: list = []
-        deadline = time.time() + 5.0
-        while time.time() < deadline and len(messages) < 2:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(messages) < 2:
             more, _ = self.backend.poll_messages("", "")
             messages.extend(more)
             time.sleep(0.1)

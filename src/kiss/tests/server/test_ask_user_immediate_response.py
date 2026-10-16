@@ -37,7 +37,7 @@ import time
 import unittest
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _register_task_state(
@@ -59,7 +59,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
     """``_await_user_response`` returns the answer with minimal latency."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -145,7 +145,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -156,7 +156,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
         Reproduces the user-visible scenario end-to-end: an agent
         thread is blocked inside ``_await_user_response``; the
         websocket layer's ``userAnswer`` command flows through
-        ``VSCodeServer._handle_command`` (the same entry point used
+        ``AgentServer._handle_command`` (the same entry point used
         by ``RemoteAccessServer._run_cmd`` for both WSS and UDS
         peers); the waiter must wake immediately.
         """
@@ -248,7 +248,7 @@ class TestUserAnswerSubscriberFallback(unittest.TestCase):
     """``_cmd_user_answer`` routes to the task's queue via subscriber graph."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()

@@ -793,7 +793,7 @@ class TestCleanupTab(unittest.TestCase):
 
 
 class TestCloseTabServer(unittest.TestCase):
-    """_close_tab on VSCodeServer cleans up the tab's registered
+    """_close_tab on AgentServer cleans up the tab's registered
     AgentState and printer subscriptions."""
 
     def tearDown(self) -> None:
@@ -804,8 +804,8 @@ class TestCloseTabServer(unittest.TestCase):
         import os
 
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
-        from kiss.server.server import VSCodeServer
-        return VSCodeServer()
+        from kiss.server.server import AgentServer
+        return AgentServer()
 
     @staticmethod
     def _register_idle_state(task_id: str, tab_id: str) -> agent_state.AgentState:

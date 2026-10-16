@@ -724,7 +724,7 @@ the machine's daemon over the registered link and whose frames it
 relays back, as it does for a chat tab bound to a machine.  What
 differs is what travels: the SEA runs as the machine's own copy (a
 registered command by its name, the run's `seaCommand`, which the
-machine's daemon resolves to its own copy in `_apply_scripts` and
+machine's daemon resolves to its own copy in `task_runner._apply_sea` and
 refuses when it has none; the default agent as the machine's plain
 run; a `.py` path at the same path there), the
 `work_dir` option is a path on the machine as given (empty: its
@@ -941,6 +941,21 @@ The `run()` parameters without a `settings()` key (the allowlist is
   choice with no SEA key (`is_parallel` is a removed settings key):
   a SEA that wants no fan-out picks a `tool_profile` without the
   `agents` group.
+- **`machine`** — the registered remote machine the run executes on
+  (`/machine add`; its name or host/IP, `machines.find_machine`): the
+  local daemon forwards the `run` command, stamped `machine`, to that
+  machine's daemon over the registered link and relays its frames
+  back (`server.remote_tabs`), so the client's wait is unchanged.
+  `work_dir` is then a path on that machine.  Empty (the default)
+  runs on the local daemon.  `run_agent(..., machine=...)` fills it;
+  see [Running a SEA](#running-a-sea-run_agent-run_parallel-and-xxx-commands).
+- **`sea_command`** — the name of a registered command, sent as the
+  wire field `seaCommand` in place of `sea_path`: the executing daemon
+  resolves it to its own copy of that command's SEA
+  (`task_runner._apply_sea`, which refuses a name it has no
+  command for).  How a run on a `machine` names a SEA the machine has
+  under its own paths; `run_agent` sets it when `agent` is a command
+  name and `machine` is given.  Empty (the default) sends `sea_path`.
 
 ### Setting semantics
 
@@ -1621,6 +1636,8 @@ def run(
     endpoint_file: str | Path | None = None,
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
+    machine: str = "",
+    sea_command: str = "",
 ) -> TaskResult
 ```
 
@@ -1717,24 +1734,52 @@ class TaskResult:
   (a `WorkerSea` whose only tools are `finish`, `machine_add`, `machine_remove` and
   `machine_list` over the registry in `$KISS_HOME/machines.json`
   (`kiss.agents.sorcar.machines`): `/machine add [name] <address> [password]`
-  takes either `user@host[:port]`, an SSH login (the daemon reads the
-  machine's `sorcar-local.json` endpoint file over ssh, looking in
+  takes either `user@host[:port]`, an SSH login used once to enroll
+  this daemon on the machine (one ssh login finds the machine's daemon
+  home by its `sorcar-local.json` endpoint file, looking in
   `$KISS_HOME`, then the local brand's home directory, then every other
   `~/.*` directory there, so the machine may run another brand of the
-  daemon; forwards a free local port to its daemon with an `ssh -L`
-  tunnel whose remote command prints a readiness line once the local
-  port is bound and then holds the session open, and logs in with the
-  machine's local token, so no password is
-  needed; `$KISS_SSH_CONFIG` names the ssh config to use, and the login
-  shell there must be a POSIX shell), or `https://host:port` with the
+  daemon; copies this daemon's local CA, `$KISS_HOME/tls/ca.pem`, into
+  that home's `tls/trusted-clients/<host>-<fingerprint>.pem`, and reads
+  back the daemon port and the machine's own CA; the machine is then
+  registered at `https://<host>:<port>` with its CA pinned and every
+  later connection dials that port directly, presenting this daemon's
+  client certificate, `$KISS_HOME/tls/client.pem`, which the machine's
+  daemon admits like its own local token whatever its remote password
+  and whether or not the peer is on localhost; the daemon picks a new
+  file up within two seconds, deleting the file revokes the machine at
+  its next connection, and a daemon without a `trusted-clients`
+  directory predates enrollment and is reported as such; no ssh process
+  outlives the enrollment, so the machine's daemon port must be
+  reachable from here; `$KISS_SSH_CONFIG` names the ssh config to use,
+  an alias of it resolves through `ssh -G`, and the login shell there
+  must be a POSIX shell), or `https://host:port` with the
   machine's remote password, which pins the remote `kiss-web`'s TLS
   certificate and checks the password with one handshake before saving;
   the name defaults to the host; `/machine remove <name>` forgets it,
   `/machine list` shows each machine's address and reachability; once a
   machine is registered the Chats panel lists its tasks next to the
-  local ones, de-duplicated by task id and filterable by machine name,
+  local ones, de-duplicated by task id, in the same order as the local
+  list (running first, then latest finished first) and filterable by
+  machine name (the link to each machine keeps its sockets alive with
+  WebSocket pings, so an idle hour does not drop it, and a request
+  whose previously kept socket has closed is sent once more over a
+  fresh one),
   and clicking one resumes that chat in a local tab bound to the machine
-  (its own web UI is never opened), the chat header's machine drop-down
+  (its own web UI is never opened; the chat header then shows the
+  machine and that machine's working directory, with the directories
+  picked there before in the drop-down, so a pick or the folder picker
+  changes the machine's working directory, never this daemon's --
+  `getMachineWorkDirs`, and `setWorkDir` with `machine`, which the
+  daemon proxies to the machine; the Explorer and Source Control views
+  show the machine's working directory and repository, and a file
+  opened from them is read and saved there: every workspace command
+  (`listDir`, `gitStatus`, `gitLog`, `gitShow`, `gitAction`,
+  `fsAction`, `openFile`, `saveFile`) stamped `machine` is forwarded to
+  the machine's daemon over the link and its reply, stamped `machine`,
+  sent back -- `sidebar_panels.MACHINE_WORKSPACE_REPLIES`; a daemon's
+  link is never a local client of the machine, whatever token it
+  presents, so the machine answers these as it would a browser), the chat header's machine drop-down
   offers it (a machine registered by its address is shown by the host
   name its daemon reports with every ping), and `run_agent(machine=...)`
   can run a sub-task on it; with the `https://` form the password may be left out only for a

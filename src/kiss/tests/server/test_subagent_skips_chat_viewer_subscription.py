@@ -25,7 +25,7 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 CHAT_ID = "chat-shared"
 VIEWER_TAB = "idle-viewer-tab"
@@ -36,7 +36,7 @@ class TestSubagentSkipsChatViewerSubscription(unittest.TestCase):
     """``_on_run_task_id_allocated(is_subagent=True)`` leaves chat viewers alone."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

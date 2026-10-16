@@ -57,7 +57,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     redirect_persistence,
@@ -68,8 +68,8 @@ from kiss.tests.server.conftest import (
 _LIVE_TEXT = "live-follow-up-delta"
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    """Create a ``VSCodeServer`` whose broadcasts mirror ``WebPrinter``.
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    """Create a ``AgentServer`` whose broadcasts mirror ``WebPrinter``.
 
     Events with an explicit ``tabId`` are captured verbatim; events
     with a (thread-local) task id are recorded, persisted, and fanned
@@ -77,7 +77,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
     exactly the dispatch that decides which frontend tabs (across all
     connected windows) see a task's stream.
     """
-    server = VSCodeServer()
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
     printer = server.printer

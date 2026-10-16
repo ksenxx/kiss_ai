@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as persistence
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.server.conftest import init_repo
 
@@ -284,7 +284,7 @@ class IsolatedKissHome:
 
     Guarantees the real ``~/.kiss`` and the developer's checkout are
     never touched: the history database, the ``config.json`` consulted
-    by :mod:`kiss.core.vscode_config`, and the git repository the
+    by :mod:`kiss.core.user_config`, and the git repository the
     agents work in all live under one throwaway temp directory.
     """
 
@@ -298,15 +298,15 @@ class IsolatedKissHome:
 
         self._saved_env = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(self.kiss_home)
-        # vscode_config prefers its module-global override over
+        # user_config prefers its module-global override over
         # $KISS_HOME, and other test modules set it, so pin both.
-        module_globals = vars(vscode_config)
+        module_globals = vars(user_config)
         self._saved_cfg: tuple[Any, Any] = (
             module_globals.get("CONFIG_DIR"),
             module_globals.get("CONFIG_PATH"),
         )
-        vscode_config.CONFIG_DIR = self.kiss_home  # type: ignore[attr-defined]
-        vscode_config.CONFIG_PATH = self.kiss_home / "config.json"  # type: ignore[attr-defined]
+        user_config.CONFIG_DIR = self.kiss_home  # type: ignore[attr-defined]
+        user_config.CONFIG_PATH = self.kiss_home / "config.json"  # type: ignore[attr-defined]
         self._saved_db = (
             persistence._DB_PATH,
             persistence._db_conn,
@@ -349,10 +349,10 @@ class IsolatedKissHome:
             ("CONFIG_DIR", "CONFIG_PATH"), self._saved_cfg, strict=True,
         ):
             if value is None:
-                if hasattr(vscode_config, name):
-                    delattr(vscode_config, name)
+                if hasattr(user_config, name):
+                    delattr(user_config, name)
             else:
-                setattr(vscode_config, name, value)
+                setattr(user_config, name, value)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 

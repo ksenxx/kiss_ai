@@ -10,7 +10,7 @@ result YAML the agent returns and, after the ``task_done`` event,
 emits ONE ``followup_suggestion`` event per watching tab and persists it
 exactly once — no separate follow-up LLM call is made any more.
 
-Drives the real ``VSCodeServer._run_task`` lifecycle with a real
+Drives the real ``AgentServer._run_task`` lifecycle with a real
 ``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result (the same harness as ``test_wave2_runner_bugs.py``),
 a real ``JsonPrinter`` subclass that records every broadcast, and the
@@ -34,7 +34,7 @@ from kiss.core.utils import finish
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -112,8 +112,8 @@ def _run_scripted_task(
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
-    agent = _ScriptedAgent("Sorcar VS Code")
+    server = AgentServer(printer=printer)
+    agent = _ScriptedAgent("Sorcar")
     agent.viewer_tab = viewer_tab
     state = AgentState(f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True)
     agent_state.register(state)

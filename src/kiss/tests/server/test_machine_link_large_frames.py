@@ -86,9 +86,11 @@ class TestMachineLinkLargeFrames(TestCase):
         ui = link.open_connection()
         self.addCleanup(ui.close)
         task_id = self.remote.task_ids[f"{CHAT_ID}/{BIG_TASK}"]
+        # A raw frame on a password-authenticated socket carries the
+        # machine's password, as RemoteTabStream.send does.
         ui.send(json.dumps({
             "type": "resumeSession", "chatId": CHAT_ID, "taskId": task_id,
-            "tabId": "tab-ui",
+            "tabId": "tab-ui", "password": "pw-remote",
         }))
 
         # The history click is broadcast: the stream receives the whole

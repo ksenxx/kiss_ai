@@ -150,7 +150,7 @@ class TestMessageParity:
 
 
 class TestResultStatusParity:
-    """The Result panel status banner must match the webview exactly:
+    """The Result panel status banner must match the chat page exactly:
     success -> no banner, is_continue -> "Status: Continue",
     success false -> "Status: FAILED"."""
 

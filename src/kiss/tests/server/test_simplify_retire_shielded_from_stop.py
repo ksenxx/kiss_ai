@@ -43,7 +43,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -62,7 +62,7 @@ class _CapturePrinter(JsonPrinter):
 class _StopDuringRetireAgent(ChatSorcarAgent):
     """Agent whose pending-worktree retire presses Stop and outlasts the watchdog's grace."""
 
-    server: VSCodeServer
+    server: AgentServer
     tab_id: str
     retire_completed = False
     run_entered = False
@@ -111,8 +111,8 @@ def test_stop_during_pre_run_retire_is_not_injected() -> None:
     repo = _init_repo()
     tab_id = "retire-shield-tab"
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
-    agent = _StopDuringRetireAgent("Sorcar VS Code")
+    server = AgentServer(printer=printer)
+    agent = _StopDuringRetireAgent("Sorcar")
     agent.server = server
     agent.tab_id = tab_id
     # The previous run on this tab left its worktree pending.

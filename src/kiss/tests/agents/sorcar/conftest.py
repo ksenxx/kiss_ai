@@ -7,10 +7,10 @@
 Orphan-sweep join hook
 ----------------------
 
-Every :class:`kiss.server.server.VSCodeServer` constructor
+Every :class:`kiss.server.server.AgentServer` constructor
 starts a daemon thread named ``orphan-task-sweep`` that runs SQL on a
 per-thread SQLite connection aliased into ``persistence._db_conn``.
-Many tests in this folder construct a ``VSCodeServer``, then in
+Many tests in this folder construct a ``AgentServer``, then in
 ``teardown_method`` close ``th._db_conn``, restore the redirected DB
 globals, and ``rmtree`` the temp KISS_HOME — WITHOUT joining the sweep
 thread.  If the sweep is still executing when the connection is closed
@@ -27,7 +27,7 @@ Rather than editing ~60 test files, the ``pytest_runtest_call``
 hookwrapper below joins every live ``orphan-task-sweep`` thread right
 after the test body finishes and BEFORE ``teardown_method`` runs —
 exactly the window in which the DB connection is still valid.  This
-mirrors the identical hook in ``tests/agents/vscode/conftest.py``.
+mirrors the identical hook in ``tests/webapp/conftest.py``.
 
 Persistence connection-cache reset
 ----------------------------------
@@ -41,7 +41,7 @@ tests can keep writing into the orphaned old file while these tests
 read a fresh, empty database — producing order-dependent failures such
 as ``sqlite3.OperationalError: no such table: task_history``.  The
 autouse reset below mirrors ``tests/server/conftest.py`` and
-``tests/agents/vscode/conftest.py``; many persistence-layer tests
+``tests/webapp/conftest.py``; many persistence-layer tests
 relocated here from ``tests/server`` relied on its identical autouse
 reset there.
 """

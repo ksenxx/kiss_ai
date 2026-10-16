@@ -1757,19 +1757,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     "output": output,
                 }
             ]
-        tool_calls = msg.get("tool_calls") or []
-        if role == "assistant" and tool_calls:
-            if isinstance(content, str) and content.strip():
-                items.append({"role": "assistant", "content": content})
-            elif isinstance(content, list):
+        if role == "assistant":
+            if isinstance(content, list):
                 text = "".join(
                     p.get("text", "")
                     for p in content
                     if isinstance(p, dict) and p.get("type") == "text"
                 )
-                if text.strip():
-                    items.append({"role": "assistant", "content": text})
-            for tc in tool_calls:
+            else:
+                text = content if isinstance(content, str) else ""
+            if text.strip():
+                items.append({"role": "assistant", "content": text})
+            for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 args = fn.get("arguments")
                 items.append(
@@ -1784,15 +1783,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 )
             return items
         if isinstance(content, list):
-            if role == "assistant":
-                text = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-                if text.strip():
-                    items.append({"role": "assistant", "content": text})
-                return items
             parts = cls._chat_parts_to_responses_parts(content)
             if parts:
                 items.append({"role": role, "content": parts})
