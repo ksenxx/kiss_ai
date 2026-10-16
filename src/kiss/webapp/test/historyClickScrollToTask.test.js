@@ -106,7 +106,6 @@ function setupTabWithNeighbour() {
     task_id: '42',
     task: 'Task B',
     events: [
-      {type: 'task_start', task: 'Task B'},
       {type: 'system_output', text: 'output of task B\n'},
     ],
   });
@@ -117,7 +116,6 @@ function setupTabWithNeighbour() {
     task: 'Task A',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Task A'},
       {type: 'system_output', text: 'output of task A\n'},
     ],
   });
@@ -262,7 +260,6 @@ function testClickLoadsTaskNotInTranscript() {
     task_id: '40',
     task: 'Task Z',
     events: [
-      {type: 'task_start', task: 'Task Z'},
       {type: 'system_output', text: 'output of task Z\n'},
     ],
   });
@@ -332,7 +329,6 @@ function testClickOwnTaskWithoutRegionReclaimsPanel() {
     task: 'Task A',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Task A'},
       {type: 'system_output', text: 'output of task A\n'},
     ],
   });

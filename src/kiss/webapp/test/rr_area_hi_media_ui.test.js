@@ -92,7 +92,6 @@ function testFollowupBarReplay() {
     task_id: '7',
     task: 'Old task',
     events: [
-      {type: 'task_start', task: 'Old task'},
       {type: 'system_output', text: 'did things\n'},
       {type: 'followup_suggestion', text: 'Replay me'},
     ],

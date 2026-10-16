@@ -73,7 +73,6 @@ function testActiveTabReplayFollowupClickCopies() {
     task_id: '42',
     task: 'My reloaded task',
     events: [
-      {type: 'task_start', task: 'My reloaded task'},
       {type: 'system_output', text: 'did things\n'},
       {type: 'followup_suggestion', text: 'replayed next step'},
       {type: 'task_done'},
@@ -99,7 +98,6 @@ function testAdjacentTaskFollowupClickCopies() {
     task_id: '42',
     task: 'Newest task',
     events: [
-      {type: 'task_start', task: 'Newest task'},
       {type: 'system_output', text: 'newest output\n'},
     ],
   });
@@ -110,7 +108,6 @@ function testAdjacentTaskFollowupClickCopies() {
     task: 'Older task',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Older task'},
       {type: 'system_output', text: 'older output\n'},
       {type: 'followup_suggestion', text: 'older suggested step'},
       {type: 'task_done'},
@@ -147,7 +144,6 @@ function testBackgroundTabReplayFollowupClickCopies() {
     task_id: '42',
     task: 'Background task',
     events: [
-      {type: 'task_start', task: 'Background task'},
       {type: 'system_output', text: 'bg output\n'},
       {type: 'followup_suggestion', text: 'bg next step'},
       {type: 'task_done'},

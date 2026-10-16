@@ -70,6 +70,8 @@ const EXTRA_SECTION =
   '<div class="meta-section-resizer" role="separator" aria-orientation="horizontal" ' +
   'aria-label="Resize the Extra section" tabindex="0"></div>';
 
+const pages = [];
+
 function makePage(opts) {
   const {
     storage = {},
@@ -91,6 +93,7 @@ function makePage(opts) {
   if (url) domOpts.url = url;
   const dom = new JSDOM(html, domOpts);
   const win = dom.window;
+  pages.push(win);
   if (url) {
     for (const [k, v] of Object.entries(storage))
       win.localStorage.setItem(k, v);
@@ -875,14 +878,13 @@ async function main() {
     );
   });
 
+  for (const win of pages) win.close();
   if (failures) {
     console.log(`\n${failures} test(s) failed`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log('\nall metaPanelSections tests passed');
-  // main.js starts timers (task-update polling, debounces) in every
-  // window booted above; exit explicitly instead of waiting for them.
-  process.exit(0);
 }
 
 main();

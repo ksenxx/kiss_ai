@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -29,10 +28,14 @@ from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
-class _RecordingHandler(BaseHTTPRequestHandler):
+class _RecordingHandler(RecordingHandler):
     """Handler that records requests and returns service-shaped JSON."""
 
     def _record(self, body: bytes) -> None:
@@ -40,29 +43,19 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
         )
 
-    def _respond_json(self, status: int, payload: dict[str, Any]) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
     def do_GET(self) -> None:  # noqa: N802
         """Serve Helix GET and Eyre scry endpoints."""
         self._record(b"")
         if self.path.startswith("/users"):
-            self._respond_json(200, {"data": [{"id": "botid123", "login": "kissbot"}]})
+            self._json(200, {"data": [{"id": "botid123", "login": "kissbot"}]})
         elif self.path.startswith("/channels"):
-            self._respond_json(
-                200, {"data": [{"broadcaster_id": "123", "broadcaster_login": "streamer"}]}
-            )
+            self._json(200, {"data": [{"broadcaster_id": "123", "broadcaster_login": "streamer"}]})
         elif self.path.startswith("/search/channels"):
-            self._respond_json(200, {"data": [{"broadcaster_login": "streamer"}]})
+            self._json(200, {"data": [{"broadcaster_login": "streamer"}]})
         elif self.path.startswith("/~/scry/channels/"):
-            self._respond_json(200, {"channels": {}})
+            self._json(200, {"channels": {}})
         else:
-            self._respond_json(404, {"error": "Not Found", "status": 404})
+            self._json(404, {"error": "Not Found", "status": 404})
 
     def do_PUT(self) -> None:  # noqa: N802
         """Serve Eyre channel PUT (poke) endpoints."""
@@ -73,7 +66,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
         else:
-            self._respond_json(404, {"error": "Not Found", "status": 404})
+            self._json(404, {"error": "Not Found", "status": 404})
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve Helix POST and Eyre login/poke endpoints."""
@@ -84,16 +77,11 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
         elif self.path.startswith("/chat/messages"):
-            self._respond_json(200, {"data": [{"message_id": "m1", "is_sent": True}]})
+            self._json(200, {"data": [{"message_id": "m1", "is_sent": True}]})
         elif self.path.startswith("/moderation/bans"):
-            self._respond_json(
-                400, {"error": "Bad Request", "status": 400, "message": "missing field"}
-            )
+            self._json(400, {"error": "Bad Request", "status": 400, "message": "missing field"})
         else:
-            self._respond_json(404, {"error": "Not Found", "status": 404})
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+            self._json(404, {"error": "Not Found", "status": 404})
 
 
 @pytest.fixture()

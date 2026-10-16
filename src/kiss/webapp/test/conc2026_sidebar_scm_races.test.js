@@ -44,6 +44,8 @@ async function test(name, fn) {
   }
 }
 
+const pages = [];
+
 function makePage() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -56,6 +58,7 @@ function makePage() {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  pages.push(win);
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
@@ -548,8 +551,8 @@ async function main() {
   });
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
-  process.exit(0);
+  for (const win of pages) win.close();
+  if (failures.length) process.exitCode = 1;
 }
 
 main().catch(err => {

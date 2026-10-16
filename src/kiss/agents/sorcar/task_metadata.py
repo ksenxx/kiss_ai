@@ -468,7 +468,9 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     Tags are computed for every row whose ``tags`` is empty, the SEA for
     every sub-agent row whose parent's trajectory shows the dispatch,
     and a ``chat_summaries`` row is written for every chat that has
-    none.  Writes are committed in short batches so a live daemon
+    none or whose derived ``summary`` is empty (a ``--refresh`` blanks
+    it; the user's ``user_summary`` is never touched).  Writes are
+    committed in short batches so a live daemon
     sharing the database is never locked out for long.
 
     Args:
@@ -512,7 +514,8 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     chats = db.execute(
         "SELECT DISTINCT chat_id FROM task_history t "
         "WHERE (parent_task_id IS NULL OR parent_task_id = '') AND chat_id != '' "
-        "AND NOT EXISTS (SELECT 1 FROM chat_summaries c WHERE c.chat_id = t.chat_id)"
+        "AND NOT EXISTS (SELECT 1 FROM chat_summaries c "
+        "WHERE c.chat_id = t.chat_id AND c.summary != '')"
     ).fetchall()
     for start in range(0, len(chats), _BACKFILL_BATCH):
         with db:

@@ -1162,6 +1162,7 @@ class AgentServer(
             summary = summaries.get(chat_id, {})
             session["chat_summary"] = summary.get("summary", "")
             session["chat_last_launched"] = summary.get("last_launched", 0)
+            session["chat_last_finished"] = summary.get("last_finished", 0)
         min_ts, max_ts = (None, None) if remote_only else _history_date_range()
         if machines or remote_only:
             page = merged_history(

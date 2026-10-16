@@ -32,8 +32,7 @@ import logging
 import socket
 import ssl
 import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any
@@ -44,6 +43,7 @@ from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.email.email_sea import EmailChannelBackend, _config
 from kiss.agents.third_party_agents.irc import irc_sea
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 _REPLY_TEXT = "handled your request"
@@ -447,16 +447,6 @@ class TestEmailAckMessage:
         assert imap.unseen() == []
 
 
-def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
-    """Poll *predicate* until true or *timeout* elapses."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def _recv_line(conn: socket.socket) -> bytes:
     """Read one CRLF-terminated line from *conn*."""
     line = b""
@@ -498,7 +488,7 @@ class TestRunnerAckDispatch:
                 with first:
                     first.settimeout(5.0)
                     first.sendall(b":alice!a@example.com PRIVMSG #general :hi\r\n")
-                    assert _wait_for(lambda: not backend._message_queue.empty())
+                    assert wait_until(lambda: not backend._message_queue.empty())
                     runner = ChannelRunner(backend=backend, channel_name="#general", agent_name="t")
                     # run_once() reconnects, joins, polls the queued message,
                     # launches the task and replies on the new connection.

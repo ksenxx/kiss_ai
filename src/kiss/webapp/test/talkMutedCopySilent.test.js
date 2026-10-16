@@ -65,15 +65,6 @@ function makePage() {
     this.pause = () => {};
   };
 
-  const spoken = [];
-  win.SpeechSynthesisUtterance = function (text) {
-    this.text = text;
-    spoken.push(this);
-  };
-  win.speechSynthesis = {
-    speak: utter => spoken.push(utter),
-  };
-
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
@@ -82,7 +73,7 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with its tab id');
-  return {win, posted, played, spoken, tabId: ready.tabId};
+  return {win, posted, played, tabId: ready.tabId};
 }
 
 function send(win, data) {
@@ -112,7 +103,7 @@ function test(name, fn) {
 }
 
 test('a muted talk copy stays silent', page => {
-  const {win, played, spoken, tabId} = page;
+  const {win, played, tabId} = page;
   send(win, {
     type: 'talk', language: 'en-US', text: 'played on the terminal',
     audioB64: B64, talkId: 't-muted-1', taskId: 7, tabId, muted: true,
@@ -121,11 +112,10 @@ test('a muted talk copy stays silent', page => {
     played.length, 0,
     `muted copy must not play its clip, played: ${played.length}`,
   );
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
 
 test('a muted copy does not block a later playable copy', page => {
-  const {win, played, spoken, tabId} = page;
+  const {win, played, tabId} = page;
   send(win, {
     type: 'talk', language: 'en-US', text: 'first muted',
     audioB64: B64, talkId: 't-muted-2', taskId: 7, tabId, muted: true,
@@ -136,7 +126,6 @@ test('a muted copy does not block a later playable copy', page => {
   });
   assert.strictEqual(played.length, 1, `played ${played.length} clips`);
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -27,9 +27,12 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
+const recognizers = [];
+
 class FakeRecognizer {
   constructor() {
     this._handlers = {};
+    recognizers.push(this);
   }
   setWords() {}
   on(event, cb) {
@@ -201,13 +204,39 @@ async function main() {
     log, ['ctx-open', 'track-stopped', 'ctx-closed', 'ctx-open'],
   );
 
+  // Audit 2026-10-16 (webapp-other F1): the microphone goes away in the
+  // middle of a wake-word capture.  The "Listening ..." overlay and the
+  // red flash the wake turned on (for 45 s) must come down with the
+  // pipeline, as they do when the user turns the mic off.
+  const wrap = win.document.getElementById('input-text-wrap');
+  recognizers[recognizers.length - 1]._handlers.result({
+    result: {text: 'hey sorcar'},
+  });
+  assert.ok(wrap.classList.contains('listening'), 'overlay on after wake');
+  assert.ok(btn.classList.contains('voice-triggered'), 'flash on after wake');
+  tracks[1].end();
+  await tick();
+  assert.ok(btn.classList.contains('voice-error'), 'error state shown');
+  assert.ok(
+    !wrap.classList.contains('listening'),
+    'the Listening overlay is gone with the microphone',
+  );
+  assert.ok(
+    !btn.classList.contains('voice-triggered'),
+    'the wake flash is gone with the microphone: ' + btn.className,
+  );
+  btn.click();
+  await tick();
+  assert.strictEqual(tracks.length, 3, 'a fresh microphone request');
+  assert.ok(btn.classList.contains('voice-listening'), 'listening again');
+
   // An `ended` from the track of a pipeline that was already torn down
   // (the user turned the mic off first) changes nothing.
   btn.click();
   await tick();
   assert.ok(btn.classList.contains('voice-off'));
   const after = log.slice();
-  tracks[1].end();
+  tracks[2].end();
   await tick();
   assert.ok(btn.classList.contains('voice-off'), 'still off');
   assert.deepStrictEqual(log, after, 'nothing torn down twice');

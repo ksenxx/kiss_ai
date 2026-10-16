@@ -53,7 +53,7 @@ function installFakeIntervals(win) {
   return {tick, intervals};
 }
 
-function makePage() {
+function makePage(narrow) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -87,7 +87,7 @@ function makePage() {
   };
   win.matchMedia = function (query) {
     return {
-      matches: query === '(min-width: 900px)',
+      matches: !narrow && query === '(min-width: 900px)',
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -229,10 +229,150 @@ function testNoWorkspaceNoPoll() {
   console.log('  ok - no workspace, no poll');
 }
 
+function logReply(token) {
+  return {
+    type: 'gitLog',
+    token,
+    workDir: WD,
+    repo: WD,
+    head: 'a1b2c3d',
+    commits: [
+      {
+        sha: 'a1b2c3d',
+        shortSha: 'a1b2c3d',
+        parents: [],
+        author: 'a',
+        date: '2026-10-16T00:00:00Z',
+        refs: [],
+        subject: 'first',
+        files: [],
+      },
+    ],
+  };
+}
+
+function lastToken(posted) {
+  const st = ofType(posted, 'gitStatus');
+  return st[st.length - 1].token;
+}
+
+// Audit 2026-10-16 (mainjs-2 F2): a poll reply that repeats the status
+// on screen must not rebuild the Changes list and the commit graph --
+// that detached the focused row every 5 s, breaking keyboard
+// navigation and the context menu's focus hand-back.  A changed reply
+// still updates the list.
+function testUnchangedPollReplyKeepsFocus() {
+  const {win, posted, clock} = makePage();
+  const doc = win.document;
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'configData', config: {work_dir: WD}});
+  const tok = lastToken(posted);
+  send(win, statusReply(tok, 3));
+  send(win, logReply(tok));
+  const rows = doc.querySelectorAll('#scm-changes .scm-row');
+  assert.strictEqual(rows.length, 3, 'the Changes list shows the 3 files');
+  const commit = doc.querySelector('#scm-graph .scm-commit');
+  assert.ok(commit, 'the graph shows the commit');
+  rows[1].focus();
+  assert.strictEqual(doc.activeElement, rows[1]);
+
+  clock.tick(5000);
+  send(win, statusReply(lastToken(posted), 3));
+  assert.strictEqual(
+    doc.activeElement,
+    rows[1],
+    'an unchanged poll reply leaves the focused row in place',
+  );
+  assert.ok(rows[1].isConnected, 'the row was not rebuilt');
+  assert.ok(commit.isConnected, 'the graph was not rebuilt');
+  assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '3');
+
+  // The graph row keeps its focus too.
+  commit.focus();
+  clock.tick(5000);
+  send(win, statusReply(lastToken(posted), 3));
+  assert.strictEqual(doc.activeElement, commit, 'the commit row kept focus');
+
+  // The tree changed: the list follows (and the badge).
+  clock.tick(5000);
+  send(win, statusReply(lastToken(posted), 1));
+  assert.strictEqual(
+    doc.querySelectorAll('#scm-changes .scm-row').length,
+    1,
+    'a changed reply rebuilds the list',
+  );
+  assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '1');
+  win.close();
+  console.log('  ok - an unchanged poll reply keeps focus; a changed one updates');
+}
+
+function testNoPollWhileThePanelIsOffScreen() {
+  // Phone: the task-info panel is a drawer that starts closed.
+  {
+    const {win, posted, clock} = makePage(true);
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'configData', config: {work_dir: WD}});
+    const n = ofType(posted, 'gitStatus').length;
+    clock.tick(15000);
+    assert.strictEqual(
+      ofType(posted, 'gitStatus').length,
+      n,
+      'the closed drawer shows no badge: nothing to poll for',
+    );
+    byId(win, 'meta-drawer-btn').dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true}),
+    );
+    clock.tick(5000);
+    assert.ok(
+      ofType(posted, 'gitStatus').length > n,
+      'the open drawer polls again',
+    );
+    win.close();
+  }
+  // Desktop: a content tab slides the docked panel off the pane; the
+  // drawer tab brings it back.
+  {
+    const {win, posted, clock} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'configData', config: {work_dir: WD}});
+    clock.tick(5000);
+    send(win, {
+      type: 'fileContent',
+      path: WD + '/a.txt',
+      name: 'a.txt',
+      content: 'x',
+      version: 'v1',
+    });
+    assert.ok(
+      win.document.body.classList.contains('meta-hidden'),
+      'the panel is hidden behind the content pane',
+    );
+    const n = ofType(posted, 'gitStatus').length;
+    clock.tick(15000);
+    assert.strictEqual(
+      ofType(posted, 'gitStatus').length,
+      n,
+      'the hidden panel shows no badge: nothing to poll for',
+    );
+    byId(win, 'meta-drawer').dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true}),
+    );
+    clock.tick(5000);
+    assert.ok(
+      ofType(posted, 'gitStatus').length > n,
+      'the panel shown again polls again',
+    );
+    win.close();
+  }
+  console.log('  ok - no poll while the task-info panel is off screen');
+}
+
 function main() {
   testBadgeFollowsTheWorkingTree();
   testPollPausesWhenHiddenOrDisconnected();
   testNoWorkspaceNoPoll();
+  testUnchangedPollReplyKeepsFocus();
+  testNoPollWhileThePanelIsOffScreen();
   console.log('scmBadgePoll.test.js: all tests passed');
   process.exit(0);
 }

@@ -165,6 +165,19 @@ def _release(url: str) -> None:
     _lock.notify_all()
 
 
+DOCKER_MARKER = Path("/.dockerenv")
+
+
+def in_docker(marker: Path = DOCKER_MARKER) -> bool:
+    """Return True when this process runs inside a Docker container.
+
+    Docker creates ``/.dockerenv`` in every container it starts; its
+    presence is the check.  *marker* names that file (a test points it
+    at a file it can create).
+    """
+    return marker.exists()
+
+
 def is_headless_environment() -> bool:
     """Return True when running in a headless/Docker/Linux environment.
 
@@ -178,7 +191,7 @@ def is_headless_environment() -> bool:
         return True
     if env in ("0", "false", "no"):  # pragma: no branch
         return False
-    if Path("/.dockerenv").exists():  # pragma: no branch
+    if in_docker():  # pragma: no branch
         return True
     if sys.platform.startswith("linux"):  # pragma: no branch
         if (  # pragma: no branch

@@ -29,6 +29,11 @@ const KEYS = [
   'OPENROUTER_API_KEY',
   'ZAI_API_KEY',
   'MOONSHOT_API_KEY',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_REGION',
 ];
 
 function lastMsg(posted, type) {
@@ -76,6 +81,15 @@ function main() {
       box.value,
       stored[k],
       `configData must populate ${k} (load-path inventory is missing it)`,
+    );
+    // Every credential is masked with a reveal toggle; the AWS region
+    // is plain text (an identifier, not a secret) and gets no toggle.
+    const secret = k !== 'AWS_REGION';
+    assert.strictEqual(box.type, secret ? 'password' : 'text', `${k} input type`);
+    assert.strictEqual(
+      Boolean(win.document.getElementById('cfg-key-' + k + '-toggle')),
+      secret,
+      `${k} reveal toggle presence`,
     );
   }
 

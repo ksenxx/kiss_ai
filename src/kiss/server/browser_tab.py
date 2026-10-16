@@ -12,6 +12,12 @@ KISS tab: JPEG frames from the DevTools ``Page.startScreencast`` API are
 pushed to every client that shows the tab, and the clients' mouse,
 wheel, keyboard and paste events are replayed through ``Input.*``.
 
+The browser is this daemon's machine's.  A ``browserOpen`` stamped
+``machine`` (the chat is bound to a registered machine) goes to that
+machine's daemon instead, through :mod:`kiss.server.remote_views`,
+which shows the page here as the tab ``browser__N@machine`` and
+forwards the tab-addressed commands by that id.
+
 Playwright is asyncio-based, so the service owns a private event loop
 thread; the public methods are thread-safe and may be called from the
 daemon's command executor threads or from its server loop.

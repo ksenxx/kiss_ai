@@ -37,6 +37,11 @@ class TestAPIKeyEnvVarsType:
             "OPENROUTER_API_KEY",
             "ZAI_API_KEY",
             "MOONSHOT_API_KEY",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_REGION",
         }
         assert API_KEY_ENV_VARS == expected
 

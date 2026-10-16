@@ -26,7 +26,6 @@ import base64
 import json
 from email import message_from_bytes
 from email.message import Message
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -34,7 +33,11 @@ import pytest
 
 from kiss.agents.third_party_agents.gmail.gmail_sea import _SERVICE, GmailChannelBackend
 from kiss.tests.agents.third_party_agents.composio_test_utils import connect, fake_composio
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -92,7 +95,7 @@ def _api_message(msg_id: str, wanted: list[str]) -> dict[str, Any]:
     }
 
 
-class _GmailHandler(BaseHTTPRequestHandler):
+class _GmailHandler(RecordingHandler):
     """Local Gmail endpoint: profile, messages.list/get, threads.get, drafts.create."""
 
     def _send(self, status: int, payload: Any) -> None:
@@ -157,9 +160,6 @@ class _GmailHandler(BaseHTTPRequestHandler):
         message = body.get("message", {})
         thread_id = message.get("threadId", "dm-1")
         self._send(200, {"id": "d-1", "message": {"id": "dm-1", "threadId": thread_id}})
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
 
 
 @pytest.fixture()

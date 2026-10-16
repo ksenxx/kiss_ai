@@ -27,7 +27,6 @@ import json
 import stat
 import time
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
@@ -50,7 +49,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
 from kiss.tests.conftest import IS_WINDOWS
 
 _USER_TOKEN = "user-access-token"
@@ -58,18 +57,10 @@ _BOT_TOKEN = "bot-secret-token"
 _HOOK_PATH = "/api/webhooks/901/hook-secret-token"
 
 
-class _DiscordHandler(BaseHTTPRequestHandler):
+class _DiscordHandler(RecordingHandler):
     """Emulates the Discord endpoints the agent uses."""
 
     server: _DiscordServer  # type: ignore[assignment]
-
-    def _reply(self, status: int, body: Any) -> None:
-        payload = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def _read(self) -> bytes:
         return self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -85,27 +76,24 @@ class _DiscordHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
         elif auth not in (f"Bearer {_USER_TOKEN}", f"Bot {_BOT_TOKEN}"):
-            self._reply(401, {"message": "401: Unauthorized", "code": 0})
+            self._json(401, {"message": "401: Unauthorized", "code": 0})
         elif path == "/api/v10/users/@me":
-            self._reply(200, {"id": "42", "username": "alice", "discriminator": "0"})
+            self._json(200, {"id": "42", "username": "alice", "discriminator": "0"})
         elif path == "/api/v10/users/@me/guilds":
-            self._reply(200, [{"id": "777", "name": "Guild"}])
+            self._json(200, [{"id": "777", "name": "Guild"}])
         else:
-            self._reply(404, {"message": "Unknown"})
+            self._json(404, {"message": "Unknown"})
 
     def do_POST(self) -> None:  # noqa: N802 - http.server naming
         url = urlsplit(self.path)
         if url.path == "/api/oauth2/token":
             self.server.token_forms.append(dict(parse_qsl(self._read().decode())))
-            self._reply(200, self.server.token_answer)
+            self._json(200, self.server.token_answer)
         elif url.path == _HOOK_PATH:
             self.server.webhook_posts.append((url.query, json.loads(self._read())))
-            self._reply(200, {"id": "m-1", "channel_id": "555"})
+            self._json(200, {"id": "m-1", "channel_id": "555"})
         else:
-            self._reply(404, {"message": "Unknown"})
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence per-request logging."""
+            self._json(404, {"message": "Unknown"})
 
 
 class _DiscordServer(ThreadedHTTPServer):

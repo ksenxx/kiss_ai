@@ -14,13 +14,12 @@ token, so ``SlackChannelBackend.connect()`` follows its real
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, RecordingServer
 
 
-class InvalidAuthHandler(BaseHTTPRequestHandler):
+class InvalidAuthHandler(RecordingHandler):
     """Record the request and reply 200 with Slack's invalid-token error body."""
 
     def _respond(self) -> None:
@@ -44,6 +43,3 @@ class InvalidAuthHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         """Handle POST requests (e.g. auth.test, chat.postMessage)."""
         self._respond()
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""

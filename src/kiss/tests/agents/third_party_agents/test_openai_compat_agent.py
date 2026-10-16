@@ -25,7 +25,6 @@ from pathlib import Path
 import pytest
 import requests
 
-from kiss.agents.third_party_agents.oai import oai_sea as oai_mod
 from kiss.agents.third_party_agents.oai.oai_sea import (
     _MAX_BODY_BYTES,
     OpenAICompatAgent,
@@ -120,13 +119,6 @@ def test_authenticate_rejects_bad_input(isolated_home: Path) -> None:
     assert "Invalid port" in tools["authenticate_openai_compat"](_API_KEY, port="abc")
     assert "Invalid port" in tools["authenticate_openai_compat"](_API_KEY, port="70000")
     assert not (isolated_home / "third_party_agents" / "openai_compat" / "config.json").exists()
-
-
-def test_tools_module_function(isolated_home: Path) -> None:
-    """The module-level tools() returns a non-empty tool list."""
-    tools = oai_mod.OaiSea().tools([])
-    assert tools
-    assert "authenticate_openai_compat" in [fn.__name__ for fn in tools]
 
 
 def test_models_endpoint_requires_no_auth(

@@ -10,9 +10,11 @@ non-agentic tasks only).
 """
 
 import contextlib
+import copy
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -364,15 +366,27 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     :data:`_CUSTOM_MODEL_DEFAULTS` over e.g. ``gpt-5.6-sol`` would
     replace its real 500K context and per-token prices with 128K and
     $0, silently breaking budget accounting for the bundled model.
+    A ``bedrock/<id>`` name (how a Bedrock Claude model is added to the
+    picker: name only, no endpoint) copies its ``claude-*`` entry,
+    cache prices included and scaled by the profile's premium (see
+    :func:`bedrock_price_factor`), so the entry reloaded at the next
+    start bills exactly what that Bedrock profile charges.
     """
     info = MODEL_INFO.get(name)
     if info is None:
-        return dict(_CUSTOM_MODEL_DEFAULTS)
-    return {
+        catalog = MODEL_INFO.get(bedrock_catalog_name(name) or "")
+        if catalog is None:
+            return dict(_CUSTOM_MODEL_DEFAULTS)
+        info = _scaled_prices(catalog, bedrock_price_factor(name))
+    entry = {
         "context_length": info.context_length,
         "input_price_per_1M": info.input_price_per_1M,
         "output_price_per_1M": info.output_price_per_1M,
+        "cache_read_price_per_1M": info.cache_read_price_per_1M,
+        "cache_write_price_per_1M": info.cache_write_price_per_1M,
+        "cache_write_1h_price_per_1M": info.cache_write_1h_price_per_1M,
     }
+    return {key: value for key, value in entry.items() if value is not None}
 
 
 def save_custom_model(
@@ -907,16 +921,36 @@ _NATIVE_PROVIDERS: tuple[tuple[str, str, str | None], ...] = (
     ("cc/", "Claude Code CLI", None),
     ("codex/", "Codex CLI", None),
     ("claude-", "Anthropic", "ANTHROPIC_API_KEY"),
+    ("bedrock/", "Bedrock", None),
     ("gemini-", "Gemini", "GEMINI_API_KEY"),
 )
 """Providers that are not OpenAI-compatible, as ``(prefix, label, key)``.
 
-The counterpart of :data:`OPENAI_COMPATIBLE_PROVIDERS` for the four
+The counterpart of :data:`OPENAI_COMPATIBLE_PROVIDERS` for the five
 vendors the :func:`model` factory routes with their own SDK or CLI.  A
-``None`` key means the credential is a local executable rather than an
-API key.  Together the two tables are the complete routing table, and
-:func:`get_model_provider` is the only place either is consulted.
+``None`` key means the credential is not a single API key: a local
+executable for the CLIs, the AWS credentials of
+:func:`bedrock_credentials_configured` for Bedrock.  Together the two
+tables are the complete routing table, and :func:`get_model_provider` is
+the only place either is consulted.
 """
+
+
+def bedrock_credentials_configured() -> bool:
+    """Whether Amazon Bedrock credentials are set in the config.
+
+    Either a bearer token (``AWS_BEARER_TOKEN_BEDROCK``) or an access key
+    pair (``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY``) configures
+    Bedrock.  Ambient AWS credentials (``~/.aws``, an instance role) also
+    work at request time but are not detected here.
+
+    Returns:
+        True when one of the two credential forms is configured.
+    """
+    keys = config_module.DEFAULT_CONFIG
+    return bool(keys.AWS_BEARER_TOKEN_BEDROCK) or bool(
+        keys.AWS_ACCESS_KEY_ID and keys.AWS_SECRET_ACCESS_KEY
+    )
 
 
 def _match_openai_compatible_provider(
@@ -1056,7 +1090,7 @@ def _decisions_model(
 MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 
 _ANTHROPIC_OPENROUTER_PREFIXES = ("openrouter/anthropic/", "openrouter/~anthropic/")
-_ANTHROPIC_CACHE_PREFIXES = ("claude-",) + _ANTHROPIC_OPENROUTER_PREFIXES
+_ANTHROPIC_CACHE_PREFIXES = ("claude-", "bedrock/") + _ANTHROPIC_OPENROUTER_PREFIXES
 # Anthropic bills cache hits at 0.1x the base input price, except on the
 # families below: Fable 5.1 / Mythos 5.1 read at 0.025x ($0.25/MTok on a
 # $10 base), Opus 5.5 at 0.05x ($0.20/MTok on a $4 base) and Sonnet 5.5
@@ -1252,6 +1286,211 @@ def _openai_bare_name(name: str) -> str | None:
     return None
 
 
+BEDROCK_PREFIX = "bedrock/"
+"""Model-name prefix that routes a Claude model through Amazon Bedrock."""
+
+# Cross-region inference profile prefixes Bedrock puts before the vendor
+# id (``us.anthropic.claude-...``); ``anthropic.`` is the vendor segment.
+_BEDROCK_ID_PREFIXES = ("global.", "us.", "eu.", "apac.", "jp.", "au.", "anthropic.")
+# Bedrock version suffixes: ``-v1:0`` (dated ids) or ``-v1`` (undated ids).
+_BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(?::\d+)?$")
+# The ``-<date>`` snapshot segment of a dated Claude id.
+_CLAUDE_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _split_bedrock_name(model_name: str) -> tuple[str, str, str] | None:
+    """Split ``bedrock/<id>[-<level>]`` into ``(<id>, <claude name>, <level>)``.
+
+    The optional effort alias suffix (``-high``, ``-xhigh``, ...) comes
+    off the id; the cross-region prefix, the ``anthropic.`` vendor segment
+    and the ``-v<n>[:<m>]`` version come off the Claude name, so
+    ``bedrock/us.anthropic.claude-opus-4-6-v1:0-high`` gives
+    ``("us.anthropic.claude-opus-4-6-v1:0", "claude-opus-4-6", "-high")``.
+    Returns None when the name is not a Bedrock name or its id is not a
+    Claude id.
+    """
+    if not model_name.startswith(BEDROCK_PREFIX):
+        return None
+    bedrock_id = model_name[len(BEDROCK_PREFIX):]
+    level = ""
+    for suffix in (_XHIGH_SUFFIX, *_LEVEL_ALIAS_SUFFIXES):
+        if bedrock_id.endswith(suffix):
+            bedrock_id, level = bedrock_id[: -len(suffix)], suffix
+            break
+    claude = bedrock_id
+    for prefix in _BEDROCK_ID_PREFIXES:
+        if claude.startswith(prefix):
+            claude = claude[len(prefix):]
+    claude = _BEDROCK_VERSION_SUFFIX_RE.sub("", claude)
+    if not claude.startswith("claude-"):
+        return None
+    return bedrock_id, claude, level
+
+
+def _claude_catalog_key(claude: str, level: str) -> str | None:
+    """Return the ``claude-*`` catalog key for *claude* + *level*: dated, else undated."""
+    undated = _CLAUDE_DATE_SUFFIX_RE.sub("", claude)
+    for candidate in (claude + level, undated + level):
+        if candidate in MODEL_INFO:
+            return candidate
+    return None
+
+
+def bedrock_claude_name(model_name: str) -> str | None:
+    """Return the ``claude-*`` name behind a ``bedrock/`` name.
+
+    Bedrock ids carry a cross-region prefix, the ``anthropic.`` vendor
+    segment and a version suffix the catalog does not: the name behind
+    ``bedrock/us.anthropic.claude-opus-4-6-v1:0`` is ``claude-opus-4-6``
+    and behind ``bedrock/anthropic.claude-haiku-4-5-20251001-v1:0-high``
+    it is ``claude-haiku-4-5-20251001-high``.  The catalog key is
+    preferred (dated, else undated, so a dated id whose catalog entry is
+    undated resolves to that entry and its effort aliases); an id the
+    catalog does not know keeps its dated name, which the Anthropic
+    adapter's version heuristics (thinking, effort, output cap) and the
+    pricing rules still understand.
+
+    Args:
+        model_name: Any model name.
+
+    Returns:
+        The ``claude-*`` name, or None when *model_name* is not a
+        ``bedrock/`` name or its id is not a Claude id.
+    """
+    split = _split_bedrock_name(model_name)
+    if split is None:
+        return None
+    _, claude, level = split
+    return _claude_catalog_key(claude, level) or claude + level
+
+
+def bedrock_catalog_name(model_name: str) -> str | None:
+    """Return the catalog key a ``bedrock/`` name is priced as.
+
+    The ``claude-*`` key when the catalog has one (see
+    :func:`bedrock_claude_name`); otherwise the OpenRouter twin of the
+    undated name, which lists Claude models the direct catalog has
+    dropped (Opus 4.1 exists only as ``openrouter/anthropic/claude-opus-4.1``,
+    so ``bedrock/anthropic.claude-opus-4-1-20250805-v1:0`` is priced by
+    that entry).
+
+    Args:
+        model_name: Any model name.
+
+    Returns:
+        The catalog key, or None when *model_name* is not a ``bedrock/``
+        name or names a Claude model no catalog entry describes.
+    """
+    split = _split_bedrock_name(model_name)
+    if split is None:
+        return None
+    _, claude, level = split
+    key = _claude_catalog_key(claude, level)
+    if key is not None:
+        return key
+    twin = openrouter_twin(_CLAUDE_DATE_SUFFIX_RE.sub("", claude) + level)
+    # An effort suffix resolves only to an entry that carries it (as for
+    # ``claude-*`` keys): a bare twin would silently drop the level.
+    if twin is None or not twin.endswith(level):
+        return None
+    return twin
+
+
+def bedrock_model_id(model_name: str) -> str:
+    """Return the id sent as ``model`` to Bedrock for a ``bedrock/`` name.
+
+    The ``bedrock/`` prefix and a trailing effort alias suffix are
+    removed; everything else (cross-region prefix, vendor segment,
+    version) is Bedrock's own and kept.
+
+    Args:
+        model_name: A ``bedrock/...`` model name.
+
+    Returns:
+        The Bedrock model or inference-profile id.
+    """
+    split = _split_bedrock_name(model_name)
+    if split is not None:
+        return split[0]
+    return model_name[len(BEDROCK_PREFIX):]
+
+
+# Bedrock bills Claude 4.5 and later 10% above the ``global.`` profile
+# rate (which the ``claude-*`` catalog entries hold) when called through a
+# geographic (``us.``/``eu.``/``apac.``/``jp.``/``au.``) or in-region
+# (``anthropic.``) profile: every price in the "Geo and In-region
+# Cross-region Inference" table at https://aws.amazon.com/bedrock/pricing/
+# is exactly 1.1x the global one (Opus 4.6 $5.50/$27.50, cache read
+# $0.55; Haiku 5.5 long context $0.55/$2.75).  Opus 4.1 and older cost
+# the same on every profile.
+_BEDROCK_GEO_PRICE_FACTOR = 1.1
+_BEDROCK_GEO_MIN_GENERATION = (4, 5)
+_PER_1M_PRICE_FIELDS = (
+    "input_price_per_1M",
+    "output_price_per_1M",
+    "cache_read_price_per_1M",
+    "cache_write_price_per_1M",
+    "cache_write_1h_price_per_1M",
+    "audio_input_price_per_1M",
+    "audio_output_price_per_1M",
+    "image_output_price_per_1M",
+)
+
+
+def _claude_generation(claude: str) -> tuple[int, int]:
+    """Return the ``(major, minor)`` version in an undated ``claude-*`` name.
+
+    ``claude-opus-4-6`` gives ``(4, 6)``, ``claude-3-7-sonnet`` ``(3, 7)``
+    and ``claude-sonnet-4`` ``(4, 0)``: the first run of numeric segments.
+    """
+    numbers: list[int] = []
+    for token in claude.split("-"):
+        if token.isdigit():
+            numbers.append(int(token))
+        elif numbers:
+            break
+    return (numbers[0] if numbers else 0, numbers[1] if len(numbers) > 1 else 0)
+
+
+def bedrock_price_factor(model_name: str) -> float:
+    """Return the factor a ``bedrock/`` name's prices carry over its Claude entry.
+
+    1.1 for a geographic or in-region profile of a Claude 4.5-or-later
+    model (see :data:`_BEDROCK_GEO_PRICE_FACTOR`); 1.0 for a ``global.``
+    profile, an older Claude model, and any name that is not a Bedrock
+    Claude id.
+
+    Args:
+        model_name: Any model name.
+
+    Returns:
+        The multiplier to apply to every per-1M price of the catalog entry.
+    """
+    split = _split_bedrock_name(model_name)
+    if split is None or split[0].startswith("global."):
+        return 1.0
+    generation = _claude_generation(_CLAUDE_DATE_SUFFIX_RE.sub("", split[1]))
+    return _BEDROCK_GEO_PRICE_FACTOR if generation >= _BEDROCK_GEO_MIN_GENERATION else 1.0
+
+
+def _scaled_prices(info: ModelInfo, factor: float) -> ModelInfo:
+    """Return *info* with every per-1M price multiplied by *factor*.
+
+    *info* itself when *factor* is 1; otherwise a shallow copy with the
+    registered (non-None) prices scaled (rounded past float noise, so
+    $6.25 x 1.1 is stored as 6.875, not 6.875000000000001), so the
+    catalog entry is never mutated.
+    """
+    if factor == 1.0:
+        return info
+    scaled = copy.copy(info)
+    for field in _PER_1M_PRICE_FIELDS:
+        price = getattr(info, field)
+        if price is not None:
+            setattr(scaled, field, round(price * factor, 9))
+    return scaled
+
+
 def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float | None] | None:
     """Return the published ``(read, write_5m, write_1h)`` cache prices for *name*.
 
@@ -1265,7 +1504,7 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         inp: The model's input price per 1M tokens.
     """
     if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
-        claude = name.rsplit("/", 1)[-1]
+        claude = bedrock_claude_name(name) or name.rsplit("/", 1)[-1]
         read_mult = 0.1
         for families, multiplier in _ANTHROPIC_CACHE_READ_MULTIPLIERS:
             if claude.startswith(families):
@@ -1337,8 +1576,54 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         info.cache_write_1h_price_per_1M = write_1h
 
 
+def _apply_bedrock_premium(name: str, info: ModelInfo) -> None:
+    """Reprice a registry ``bedrock/`` entry seeded at the global rate.
+
+    Before the geographic premium was accounted for,
+    :func:`_seed_new_custom_entry` copied the ``claude-*`` prices verbatim
+    into a ``bedrock/`` registry entry.  An entry of a geographic or
+    in-region profile whose input and output prices still equal its
+    ``claude-*`` entry's is such a seed (no such profile is billed at the
+    global rate) and is scaled in place by :func:`bedrock_price_factor`.
+    A hand-written or already-scaled entry differs from the catalog
+    entry and is left alone.
+
+    Args:
+        name: The MODEL_INFO key.
+        info: The ModelInfo to mutate in place.
+    """
+    factor = bedrock_price_factor(name)
+    if factor == 1.0:
+        return
+    # The direct ``claude-*`` entry only (not :func:`bedrock_catalog_name`,
+    # whose OpenRouter-twin fallback uses a helper defined further down
+    # this module while the loop below runs at import).
+    catalog = MODEL_INFO.get(bedrock_claude_name(name) or "")
+    if catalog is None or catalog is info:
+        return
+    if (info.input_price_per_1M, info.output_price_per_1M) != (
+        catalog.input_price_per_1M,
+        catalog.output_price_per_1M,
+    ):
+        return
+    scaled = _scaled_prices(info, factor)
+    for field in _PER_1M_PRICE_FIELDS:
+        setattr(info, field, getattr(scaled, field))
+
+
+def _normalize_entry(name: str, info: ModelInfo) -> None:
+    """Apply the load-time price rules to one catalog entry (in place).
+
+    Provider cache prices (:func:`_apply_cache_pricing`), then the
+    Bedrock geographic premium (:func:`_apply_bedrock_premium`): run for
+    every entry at import and for a registry entry looked up after start.
+    """
+    _apply_cache_pricing(name, info)
+    _apply_bedrock_premium(name, info)
+
+
 for _name, _info in MODEL_INFO.items():
-    _apply_cache_pricing(_name, _info)
+    _normalize_entry(_name, _info)
 
 def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
@@ -1388,7 +1673,9 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     The one lookup rule shared by :func:`calculate_cost`,
     :func:`get_fallback_model` and :func:`get_max_context_length`: the
     name is tried as given, then in its harbor-stripped form (see
-    :func:`_strip_provider_prefix`), so callers may pass either.
+    :func:`_strip_provider_prefix`), so callers may pass either; a
+    ``bedrock/`` name is priced as its ``claude-*`` catalog key (see
+    :func:`bedrock_catalog_name`).
 
     A name outside the loaded catalog is looked up in ``MY_MODELS.json``
     as it is NOW: the catalog is built once at import, so a settings-panel
@@ -1403,24 +1690,32 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     Returns:
         The matching :class:`ModelInfo`, or ``None``.
     """
-    bare = _strip_provider_prefix(model_name)
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(bare)
+    info = MODEL_INFO.get(model_name)
     if info is not None:
         return info
-    my_models = _read_my_models()
-    key = model_name if model_name in my_models else bare
-    entry = my_models.get(key)
-    if entry is None:
-        return None
-    try:
-        info = _build_model_info_entry(entry)
-    except (KeyError, TypeError, ValueError):
-        return None
-    # Same normalization the import-time catalog gets, so a hot-added
-    # custom model bills cache hits at the provider's discount instead
-    # of the full input price until the next restart.
-    _apply_cache_pricing(key, info)
-    return info
+    bare = bedrock_catalog_name(model_name) or _strip_provider_prefix(model_name)
+    info = MODEL_INFO.get(bare)
+    if info is None:
+        my_models = _read_my_models()
+        key = model_name if model_name in my_models else bare
+        entry = my_models.get(key)
+        if entry is None:
+            return None
+        try:
+            info = _build_model_info_entry(entry)
+        except (KeyError, TypeError, ValueError):
+            return None
+        # Same normalization the import-time catalog gets, so a hot-added
+        # custom model bills cache hits at the provider's discount instead
+        # of the full input price until the next restart.
+        _normalize_entry(key, info)
+        if key == model_name:
+            # An entry registered under the name itself holds the prices
+            # that name pays (a seeded ``bedrock/`` entry is scaled already).
+            return info
+    # Resolved through the ``claude-*`` key: a geographic or in-region
+    # Bedrock profile pays Bedrock's premium over that entry.
+    return _scaled_prices(info, bedrock_price_factor(model_name))
 
 
 def model_runs_task_to_completion(model_name: str) -> bool:
@@ -1539,6 +1834,9 @@ def model(
             Accepts harbor-style ``provider/model`` names (e.g.
             ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``) — the
             redundant provider prefix is stripped automatically.
+            ``bedrock/<Bedrock model or inference-profile id>`` (e.g.
+            ``bedrock/us.anthropic.claude-opus-4-6-v1:0``) runs the
+            Claude model through Amazon Bedrock.
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an
             OpenAI-compatible adapter is built with that base_url and
@@ -1628,17 +1926,23 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("claude-"):
+    if model_name.startswith(("claude-", BEDROCK_PREFIX)):
+        # ``bedrock/<id>`` is the same Claude adapter over the Anthropic
+        # SDK's Bedrock client: a bearer token (``AWS_BEARER_TOKEN_BEDROCK``)
+        # takes the api_key slot; without one the adapter signs with the
+        # AWS access key pair (or the ambient boto3 credential chain).
+        bedrock = model_name.startswith(BEDROCK_PREFIX)
         cls = _load_model_class(
             "AnthropicModel",
             "Anthropic SDK not installed. Install 'anthropic' to use Claude models.",
         )
         return cls(  # type: ignore[no-any-return]
             model_name=model_name,
-            api_key=keys.ANTHROPIC_API_KEY,
+            api_key=keys.AWS_BEARER_TOKEN_BEDROCK if bedrock else keys.ANTHROPIC_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
+            bedrock=bedrock,
         )
     if model_runs_task_to_completion(model_name):
         class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
@@ -1687,6 +1991,7 @@ def _configured_providers() -> dict[str, bool]:
     configured = {
         "Claude Code CLI": shutil.which("claude") is not None,
         "Codex CLI": find_codex_executable() is not None,
+        "Bedrock": bedrock_credentials_configured(),
         "Unknown": False,
     }
     for provider in OPENAI_COMPATIBLE_PROVIDERS:
@@ -1725,16 +2030,48 @@ def get_model_provider(model_name: str) -> str:
     return "Unknown"
 
 
+def _output_price(model_name: str) -> float:
+    """Return the catalog output price of *model_name* (a sort key)."""
+    return MODEL_INFO[model_name].output_price_per_1M
+
+
+def registered_bedrock_model(cheapest: bool) -> str | None:
+    """Return the registered ``bedrock/`` model to use by default, if any.
+
+    The catalog lists no Bedrock ids (they differ per model and region),
+    so the candidates are the ``bedrock/<id>`` entries the user added
+    under Settings → Custom Models.  Ranked by output price: the most
+    expensive is the strongest (the default model), the cheapest the
+    fast model.
+
+    Args:
+        cheapest: Pick the lowest-priced entry instead of the highest.
+
+    Returns:
+        The model name, or None when no ``bedrock/`` model is registered.
+    """
+    names = [
+        name
+        for name, info in MODEL_INFO.items()
+        if name.startswith(BEDROCK_PREFIX) and info.is_generation_supported
+    ]
+    if not names:
+        return None
+    return min(names, key=_output_price) if cheapest else max(names, key=_output_price)
+
+
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
     """Return the choice for the first provider with a configured credential.
 
     Providers are checked in priority order: Anthropic → OpenAI → Gemini →
-    OpenRouter → Together → Claude Code CLI → Codex CLI.
+    OpenRouter → Together → Bedrock → Claude Code CLI → Codex CLI.
 
     Args:
         choices: Mapping from ``config.DEFAULT_CONFIG`` API-key attribute
-            names (plus ``"cc"`` / ``"codex"`` for the subscription CLIs) to
-            the model name to return for that provider.
+            names (plus ``"bedrock"`` for Amazon Bedrock and ``"cc"`` /
+            ``"codex"`` for the subscription CLIs) to the model name to
+            return for that provider; an empty ``"bedrock"`` choice (no
+            Bedrock model registered) skips that provider.
 
     Returns:
         The chosen model name, or ``"No model"`` when nothing is configured.
@@ -1753,6 +2090,8 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
     ):
         if getattr(keys, key_name):
             return choices[key_name]
+    if bedrock_credentials_configured() and choices["bedrock"]:
+        return choices["bedrock"]
     if shutil.which("claude") is not None:
         return choices["cc"]
     if find_codex_executable() is not None:
@@ -1763,7 +2102,8 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Claude Code CLI.
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Bedrock
+    (the cheapest registered ``bedrock/`` model) → Claude Code CLI.
 
     Returns:
         A fast model name for the first available provider.
@@ -1775,6 +2115,7 @@ def get_fast_model() -> str:
             "GEMINI_API_KEY": "gemini-3.5-flash-lite",
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
             "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "bedrock": registered_bedrock_model(cheapest=True) or "",
             "cc": "cc/haiku",
             "codex": "codex/default",
         }
@@ -1784,7 +2125,8 @@ def get_fast_model() -> str:
 def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
-    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI > Claude Code CLI.
+    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
+    Bedrock (the strongest registered ``bedrock/`` model) > Claude Code CLI.
     Falls back to ``"No model"`` if no keys are set.
     """
     return _model_for_first_configured_provider(
@@ -1794,6 +2136,7 @@ def get_default_model() -> str:
             "GEMINI_API_KEY": "gemini-3.8-flash",
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5.5",
             "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
+            "bedrock": registered_bedrock_model(cheapest=False) or "",
             "cc": "cc/opus",
             "codex": "codex/default",
         }
@@ -1846,7 +2189,9 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         multiplier)``, or ``None`` when the model has no long-context
         tier.
     """
-    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
+    bare = _strip_thinking_alias(
+        bedrock_claude_name(model_name) or _strip_provider_prefix(model_name)
+    )
     if bare.startswith(
         _OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES + _ANTHROPIC_OPENROUTER_PREFIXES
     ):
@@ -2078,8 +2423,13 @@ def openrouter_twin(model_name: str) -> str | None:
     # dropped first so the alias lookup below sees the exact catalog key;
     # anything still routed (``openrouter/...``, ``meta-llama/...``) has no
     # twin.  The alias lookup needs the exact key, which is why the
-    # alias is resolved only after the redundant prefix is gone.
-    bare_alias = _strip_provider_prefix(model_name)
+    # alias is resolved only after the redundant prefix is gone.  A
+    # ``bedrock/`` name has the twin of its ``claude-*`` catalog key, or
+    # is priced by an OpenRouter entry already (which is then its twin).
+    catalog = bedrock_catalog_name(model_name)
+    if catalog is not None and catalog.startswith("openrouter/"):
+        return catalog
+    bare_alias = catalog or _strip_provider_prefix(model_name)
     if "/" in bare_alias:
         return None
     bare = _strip_thinking_alias(bare_alias)

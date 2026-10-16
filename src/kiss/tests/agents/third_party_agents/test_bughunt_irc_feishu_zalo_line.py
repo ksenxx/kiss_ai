@@ -22,7 +22,6 @@ import socket
 import threading
 import time
 from contextlib import closing
-from http.server import BaseHTTPRequestHandler
 
 import pytest
 
@@ -37,7 +36,7 @@ from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import start_serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
 
 
 class _FakeIRCServer:
@@ -257,19 +256,16 @@ class TestIRCFreshDaemonTools:
         assert "Not connected to IRC" in result["error"]
 
 
-class _JSONResponder(BaseHTTPRequestHandler):
+class _JSONResponder(RecordingHandler):
     body: bytes = b"{}"
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(type(self).body)
-
-    def log_message(self, *args) -> None:  # type: ignore[override]
-        pass
 
 
 class TestZaloBugs:
