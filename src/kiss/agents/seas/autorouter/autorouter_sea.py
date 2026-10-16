@@ -393,10 +393,10 @@ class AutorouterSea(BaseSea):
         protocol.
         """
         return settings | {
-            "model": orchestrator_model(),
+            "model": "openrouter/moonshotai/kimi-k3",
             "auto_classify": False,
-            "use_web_tools": False,
-            "use_memory": False,
+            "use_web_tools": True,
+            "use_memory": True,
         }
 
     def tools(self, tools: list[Any]) -> list[Any]:
