@@ -84,6 +84,7 @@ EOF
 #!/bin/bash
 echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
 echo "KISS_HOME=${KISS_HOME:-unset} APP=$0" >> "$KISS_TEST_MARK_DIR/daemon-start"
+pwd >> "$KISS_TEST_MARK_DIR/daemon-pwd"
 exec sleep 60
 EOF
         chmod 755 "$app/.venv/bin/python" "$app/.venv/bin/kiss-web"
@@ -96,9 +97,24 @@ HOOK = """#!/bin/bash
 echo "KISS_HOME=$KISS_HOME APP=$KISS_APP_DIR" >> "$KISS_TEST_MARK_DIR/hooks"
 """
 
+# The editor CLI (``KISS_CODE_CLI``): records every call; an uninstall
+# succeeds, removing the extension directories, unless the test leaves a
+# ``code-fails`` mark, when it fails like a CLI with no window to talk to.
+STUB_CODE = """#!/bin/bash
+echo "$*" >> "$KISS_TEST_MARK_DIR/code"
+[ ! -e "$KISS_TEST_MARK_DIR/code-fails" ] || exit 1
+if [ "$1" = --uninstall-extension ]; then
+    /bin/rm -rf "$HOME"/.vscode/extensions/"$2"-* "$HOME"/.vscode-server/extensions/"$2"-*
+fi
+exit 0
+"""
+
 NESTED_PASS = "Installing into brand home "
 NOTICE = "VS Code is no longer supported by KISS Sorcar."
+NOTICE_REMOVED = "The VS Code extension has been removed and will never be updated."
+NOTICE_UNINSTALL = "Uninstall it from the Extensions view of VS Code (ksenxx.kiss-sorcar)."
 NOTICE_URL = "Use the web app instead: http://127.0.0.1:8787"
+NOTICE_FILE = "VSCODE-EXTENSION-REMOVED.txt"
 PASSWORD_HINT = "Type it in the web app on another device; it is also shown in Settings."
 
 
@@ -130,6 +146,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
             ("uv", STUB_UV),
             ("uname", STUB_UNAME),
             ("cloudflared", STUB_CLOUDFLARED),
+            ("code", STUB_CODE),
         ):
             (self.stubs / name).write_text(body)
             (self.stubs / name).chmod(0o755)
@@ -166,11 +183,12 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
                     os.kill(int(pid), signal.SIGKILL)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run(self, extra_env: dict[str, str] | None = None) -> str:
-        """Run install.sh non-interactively; return its combined output."""
+    def _run(self, extra_env: dict[str, str] | None = None, cwd: Path | None = None) -> str:
+        """Run install.sh non-interactively from *cwd* (the scratch
+        directory by default); return its combined output."""
         proc = subprocess.run(
             ["bash", str(self.project / "install.sh"), "--non-interactive"],
-            cwd=self.tmp,
+            cwd=cwd or self.tmp,
             env={**self.env, **(extra_env or {})},
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -342,7 +360,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         )
         self.assertNotIn("The kiss-web service runs from brand home", out)
         self.assertEqual(
-            self._marks("daemon-start"),
+            self._daemon_starts(),
             [f"KISS_HOME={brandx} APP={brandx / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertTrue((brandy / "kiss" / "src" / "kiss" / "__init__.pyc").exists())
@@ -368,7 +386,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertTrue((brandx / "kiss" / "src" / "kiss" / "__init__.pyc").exists())
         self.assertNotIn("is installed and branded", out)
         self.assertEqual(
-            self._marks("daemon-start"),
+            self._daemon_starts(),
             [f"KISS_HOME={custom} APP={custom / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertIn("https://custom.trycloudflare.com", out)
@@ -395,7 +413,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertNotIn("is installed and branded", out)
         app = self.home / ".kiss" / "kiss"
         self.assertEqual(
-            self._marks("daemon-start"),
+            self._daemon_starts(),
             [f"KISS_HOME=unset APP={app / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertIn("*  Remote access password:  pw-.kiss", out)
@@ -459,6 +477,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         (self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-1.0.0").mkdir(parents=True)
         out = self._run({"KISS_SKIP_LAUNCH": "1", "KISS_WEB_PORT": "9999"})
         self.assertIn(f"*  {NOTICE}", out)
+        self.assertIn(f"*  {NOTICE_REMOVED}", out)
         self.assertIn("*  Use the web app instead: http://127.0.0.1:9999", out)
 
     def test_vscode_notice_for_code_server_extension(self) -> None:
@@ -466,6 +485,164 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
          / "ksenxx.kiss-sorcar-2.3.4").mkdir(parents=True)
         out = self._run({"KISS_SKIP_LAUNCH": "1"})
         self.assertIn(NOTICE, out)
+
+    def _daemon_pwd(self) -> Path:
+        """The resolved directory the detached daemon was started in."""
+        return Path(self._wait_mark("daemon-pwd", 1)[0]).resolve()
+
+    def _wait_mark(self, name: str, count: int) -> list[str]:
+        """The lines of mark *name* once it has *count* of them (a call the
+        installer detaches lands a moment after it exits)."""
+        deadline = time.monotonic() + 10.0
+        while len(self._marks(name)) < count:
+            self.assertLess(time.monotonic(), deadline, f"mark {name} never reached {count}")
+            time.sleep(0.05)
+        return self._marks(name)
+
+    def test_installed_extension_is_uninstalled_and_the_web_app_told(self) -> None:
+        # The retired extension's own Update button: a VS Code terminal
+        # with two copies of the extension on the machine.
+        local = self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12"
+        remote = self.home / ".vscode-server" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12"
+        local.mkdir(parents=True)
+        remote.mkdir(parents=True)
+        out = self._run({"KISS_SKIP_LAUNCH": "1", "TERM_PROGRAM": "vscode"})
+        self.assertIn(f"*  {NOTICE_REMOVED}", out)
+        self.assertNotIn(NOTICE_UNINSTALL, out)
+        self.assertFalse(local.exists())
+        self.assertFalse(remote.exists())
+        notice_file = self.home / ".kiss" / NOTICE_FILE
+        calls = self._wait_mark("code", 2)
+        self.assertEqual(calls[0], "--uninstall-extension ksenxx.kiss-sorcar")
+        self.assertEqual(calls[1], f"--reuse-window {notice_file}")
+        notice = notice_file.read_text()
+        self.assertIn("KISS Sorcar has left VS Code.", notice)
+        self.assertIn(NOTICE_REMOVED.replace("The VS Code", "The KISS Sorcar VS Code"), notice)
+        self.assertIn("This update uninstalled it", notice)
+        self.assertIn(NOTICE_URL, notice)
+        # The web app's notice flag and the old extension's reload marker.
+        self.assertTrue((self.home / ".kiss" / ".vscode-retired").is_file())
+        self.assertTrue((self.home / ".kiss" / ".extension-updated").is_file())
+        # The progress step carried the whole notice for the old toast.
+        log = self.log.read_text()
+        self.assertIn(f"*  {NOTICE_REMOVED}", log)
+
+    def test_failed_uninstall_tells_the_user_to_do_it(self) -> None:
+        # No VS Code terminal, no running editor: the daemon ran this
+        # update for an extension user, and the CLI cannot uninstall.
+        ext = self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12"
+        ext.mkdir(parents=True)
+        (self.marks / "code-fails").touch()
+        out = self._run({"KISS_SKIP_LAUNCH": "1"})
+        self.assertIn(f"*  {NOTICE_REMOVED}", out)
+        self.assertIn(f"*  {NOTICE_UNINSTALL}", out)
+        self.assertTrue(ext.is_dir())
+        self.assertEqual(self._marks("code"), ["--uninstall-extension ksenxx.kiss-sorcar"])
+        notice = (self.home / ".kiss" / NOTICE_FILE).read_text()
+        self.assertIn(NOTICE_UNINSTALL, notice)
+        self.assertNotIn("This update uninstalled it", notice)
+        self.assertTrue((self.home / ".kiss" / ".vscode-retired").is_file())
+        self.assertTrue((self.home / ".kiss" / ".extension-updated").is_file())
+
+    def test_vscode_terminal_without_the_extension_only_gets_the_notice(self) -> None:
+        out = self._run({"KISS_SKIP_LAUNCH": "1", "TERM_PROGRAM": "vscode"})
+        self.assertIn(f"*  {NOTICE_REMOVED}", out)
+        self.assertNotIn(NOTICE_UNINSTALL, out)
+        notice_file = self.home / ".kiss" / NOTICE_FILE
+        self.assertEqual(self._wait_mark("code", 1), [f"--reuse-window {notice_file}"])
+        notice = notice_file.read_text()
+        self.assertNotIn("uninstall", notice.lower())
+        # A developer's VS Code shell is not an extension user: no web
+        # app notice, nothing for an old extension to reload on.
+        self.assertFalse((self.home / ".kiss" / ".vscode-retired").exists())
+        self.assertFalse((self.home / ".kiss" / ".extension-updated").exists())
+
+    def test_every_editor_cli_uninstalls_and_the_first_opens_the_notice(self) -> None:
+        # Four editors on PATH: each uninstalls; the first alone opens
+        # the notice (picking it must not SIGPIPE the list under pipefail).
+        for name in ("code-insiders", "cursor", "code-server"):
+            os.symlink(self.stubs / "code", self.stubs / name)
+        ext = self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12"
+        ext.mkdir(parents=True)
+        out = self._run({"KISS_SKIP_LAUNCH": "1", "TERM_PROGRAM": "vscode"})
+        self.assertIn(f"*  {NOTICE_REMOVED}", out)
+        calls = self._wait_mark("code", 5)
+        self.assertEqual(calls[:4], ["--uninstall-extension ksenxx.kiss-sorcar"] * 4)
+        self.assertEqual(calls[4], f"--reuse-window {self.home / '.kiss' / NOTICE_FILE}")
+        self.assertTrue((self.home / ".kiss" / ".extension-updated").is_file())
+
+    def test_no_editor_cli_leaves_the_notice_file_and_flag(self) -> None:
+        ext = self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12"
+        ext.mkdir(parents=True)
+        out = self._run({"KISS_SKIP_LAUNCH": "1", "TERM_PROGRAM": "vscode", "KISS_CODE_CLI": ""})
+        self.assertIn(f"*  {NOTICE_UNINSTALL}", out)
+        self.assertEqual(self._marks("code"), [])
+        self.assertTrue(ext.is_dir())
+        self.assertTrue((self.home / ".kiss" / NOTICE_FILE).is_file())
+        self.assertTrue((self.home / ".kiss" / ".vscode-retired").is_file())
+
+    def test_the_notice_flag_lands_in_the_restarted_brand_daemons_home(self) -> None:
+        brandx = self._brand_home("brandx")
+        (self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12").mkdir(parents=True)
+        self._write_service_unit(brandx)
+        self._run({"KISS_SKIP_LAUNCH": "1"})
+        self.assertTrue((brandx / ".vscode-retired").is_file())
+        self.assertFalse((self.home / ".kiss" / ".vscode-retired").exists())
+
+    def test_the_notice_names_the_brand_whose_daemon_is_restarted(self) -> None:
+        # The brand's hook brands the app the nested pass installed; the
+        # stock clone's run then restarts that daemon, so the terminal box
+        # and the VS Code notice file name the brand, as the web app will.
+        brandx = self._brand_home("brandx")
+        hook = brandx / "post-install.d" / "hook"
+        hook.write_text(
+            HOOK + 'media="$KISS_APP_DIR/src/kiss/webapp/media"\n'
+            'mkdir -p "$media"\n'
+            'echo \'{"product_name": "Brand X"}\' > "$media/brand.json"\n'
+        )
+        (self.home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-2026.10.12").mkdir(parents=True)
+        self._write_service_unit(brandx)
+        out = self._run({"KISS_SKIP_LAUNCH": "1", "TERM_PROGRAM": "vscode"})
+        self.assertIn("*  VS Code is no longer supported by Brand X.", out)
+        self.assertNotIn(NOTICE, out)
+        notice = (self.home / ".kiss" / NOTICE_FILE).read_text()
+        self.assertIn("Brand X has left VS Code.", notice)
+        self.assertIn("The Brand X VS Code extension has been removed", notice)
+        self.assertNotIn("KISS Sorcar", notice)
+
+    def test_daemon_serves_the_directory_the_installer_ran_from(self) -> None:
+        self._run({"KISS_WEBAPP_WAIT_SECS": "0"})
+        self.assertEqual(self._daemon_pwd(), self.tmp.resolve())
+
+    def test_daemon_serves_home_when_run_from_the_bootstrap_clone(self) -> None:
+        # The daemon's update and the old extension's Update button run
+        # the installer from ~/.kiss/kiss_ai; that clone must not become
+        # the user's work dir.
+        clone = self.home / ".kiss" / "kiss_ai"
+        clone.mkdir(parents=True)
+        self._run({"KISS_WEBAPP_WAIT_SECS": "0"}, cwd=clone)
+        self.assertEqual(self._daemon_pwd(), self.home.resolve())
+
+    def test_daemon_serves_home_when_run_from_a_symlinked_stock_clone(self) -> None:
+        # ~/.kiss is a symlink and the install goes into another home:
+        # the clone under the stock directory is still not a work dir.
+        stock = self.tmp / "stock-state"
+        (stock / "kiss_ai").mkdir(parents=True)
+        os.symlink(stock, self.home / ".kiss")
+        brand = self.tmp / "brand-state"
+        brand.mkdir()
+        self._run(
+            {"KISS_HOME": str(brand), "KISS_WEBAPP_WAIT_SECS": "0"},
+            cwd=self.home / ".kiss" / "kiss_ai",
+        )
+        self.assertEqual(self._daemon_pwd(), self.home.resolve())
+
+    def test_daemon_serves_home_when_run_from_a_custom_kiss_home(self) -> None:
+        state = self.tmp / "state"
+        inside = state / "kiss_ai"
+        inside.mkdir(parents=True)
+        self._run({"KISS_HOME": str(state), "KISS_WEBAPP_WAIT_SECS": "0"}, cwd=inside)
+        self.assertEqual(self._daemon_pwd(), self.home.resolve())
 
     def test_no_vscode_notice_otherwise(self) -> None:
         # Another extension, and a file (not a directory) with the name,

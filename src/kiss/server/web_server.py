@@ -140,6 +140,7 @@ from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import tips_data
 from kiss.server.tricks import read_tricks_data
+from kiss.server.vscode_retired import vscode_retired_notice
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
@@ -5236,17 +5237,23 @@ class RemoteAccessServer:
         )
         await self._server_api.dispatch(cmd, ctx)
 
-    @staticmethod
-    def _bootstrap_events() -> list[dict[str, Any]]:
-        """The ``tricksData`` and ``tipsData`` events a ``ready`` answers with.
+    def _bootstrap_events(self) -> list[dict[str, Any]]:
+        """The events a ``ready`` answers with: ``tricksData``,
+        ``tipsData`` and, after an install that retired the VS Code
+        extension, its ``notification``.
 
-        Reads ``MY_INJECTION.md``, the bundled promptlets and tips, and
-        the opt-out marker, so callers run it off the event loop.
+        Reads ``MY_INJECTION.md``, the bundled promptlets and tips, the
+        opt-out marker and the ``.vscode-retired`` flag, so callers run
+        it off the event loop.
         """
-        return [
+        events: list[dict[str, Any]] = [
             {"type": "tricksData", **read_tricks_data()},
             {"type": "tipsData", **tips_data(_read_version())},
         ]
+        notice = vscode_retired_notice(self._loopback_url)
+        if notice is not None:
+            events.append(notice)
+        return events
 
     def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
@@ -5612,6 +5619,10 @@ class RemoteAccessServer:
         # which a white-label brand's daemon never reads.
         env = dict(os.environ)
         env["KISS_HOME"] = str(kiss_home())
+        # The installer serves its cwd from the restarted daemon: keep
+        # this daemon's work dir (never the clone's directory, which an
+        # update would otherwise turn into the user's work dir).
+        cwd = self.work_dir if os.path.isdir(self.work_dir) else str(Path.home())
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
@@ -5628,18 +5639,15 @@ class RemoteAccessServer:
                 # checkout as-is.  ``KISS_NONINTERACTIVE=1`` is what
                 # both installers read in place of ``--non-interactive``.
                 argv = [bash, str(bootstrap)]
-                cwd = str(script.parent)
                 env["KISS_NONINTERACTIVE"] = "1"
             else:
                 argv = [bash, str(script), "--non-interactive"]
-                cwd = str(script.parent)
         else:
             argv = [
                 bash, "-c",
                 'set -o pipefail; '
                 'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
             ]
-            cwd = str(Path.home())
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"
         spawned = self._spawn_detached(

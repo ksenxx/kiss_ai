@@ -35,8 +35,14 @@
 #         from); start the kiss-web daemon -- the brand's app, not the
 #         stock one, when there is a brand home: the one the service
 #         runs from, else the first one installed -- then open the webapp in a
-#         browser and, for a VS Code user, print the notice that VS Code
-#         is no longer supported.
+#         browser and, for a VS Code user, retire the VS Code extension:
+#         uninstall it, open the notice that VS Code is no longer
+#         supported in their VS Code window, print it, and have the web
+#         app show it (see "Retire the VS Code extension" below).
+#
+# The daemon serves the directory this script is run from, except that a
+# run from inside ~/.kiss (the curl bootstrap's clone, the app) serves
+# $HOME (see daemon_work_dir).
 #
 # Usage:
 #   ./install.sh                  interactive: asks before installing Homebrew
@@ -47,6 +53,9 @@
 #   KISS_NONINTERACTIVE  same as --non-interactive
 #   KISS_SKIP_LAUNCH     do not start kiss-web or open the webapp
 #   KISS_WEB_PORT        port of the kiss-web daemon (default 8787)
+#   KISS_CODE_CLI        the one editor CLI to retire the VS Code extension
+#                        with (default: code, code-insiders, cursor and
+#                        code-server on PATH); empty for none
 #   _KISS_BRAND_PASS     set by this script on the nested run it makes
 #                        into another brand home (see step [5/5])
 #
@@ -299,10 +308,6 @@ fi
 unset KISS_UPDATE_LOCK_HELD
 # END: kiss-update-lock
 
-# The directory this script was run from: the kiss-web daemon serves it
-# (its Sorcar tasks default their work dir to it).
-USER_PWD="$PWD"
-
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 BIN_DIR="$HOME/.local/bin"
@@ -317,11 +322,12 @@ LOG_FILE="$LOG_DIR/install.log"
 # installed product reads them.  Anything but a single path component
 # falls back to .kiss.
 brand_field() {
-    # Print string field $1 of the checkout's brand.json (the .brand/
-    # overlay first), or nothing when neither file defines it.
-    local file
-    for file in "$PROJECT_DIR/.brand/brand.json" \
-                "$PROJECT_DIR/src/kiss/webapp/media/brand.json"; do
+    # Print string field $1 of brand.json $2, or without $2 of the
+    # checkout's brand.json (the .brand/ overlay first); nothing when no
+    # file defines it.
+    local file files=("$PROJECT_DIR/.brand/brand.json" "$PROJECT_DIR/src/kiss/webapp/media/brand.json")
+    [ -z "${2:-}" ] || files=("$2")
+    for file in "${files[@]}"; do
         [ -f "$file" ] || continue
         tr -d '\n\r' < "$file" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
         return 0
@@ -342,6 +348,25 @@ BRAND_PRODUCT_NAME="${BRAND_PRODUCT_NAME:-KISS Sorcar}"
 # progress file below must land here, not in a hard-coded $HOME/.kiss, or
 # a custom-KISS_HOME install never sees them.
 KISS_HOME_DIR="${KISS_HOME:-$HOME/$BRAND_HOME_DIR_NAME}"
+# The directory the kiss-web daemon serves (its Sorcar tasks default
+# their work dir to it): where this script was run from, unless that is
+# inside a state directory -- the daemon's own update runs the curl
+# bootstrap from its clone, ~/.kiss/kiss_ai, and the retired VS Code
+# extension's Update button did the same, and neither should turn the
+# clone into the user's work dir.  Those runs serve $HOME instead.
+daemon_work_dir() {
+    # Physical paths: a symlinked $HOME (macOS /var -> /private/var) must
+    # still match.
+    local here stock state
+    here="$(pwd -P)"
+    stock="$(cd "$HOME/.kiss" 2>/dev/null && pwd -P)" || stock="$HOME/.kiss"
+    state="$(cd "$KISS_HOME_DIR" 2>/dev/null && pwd -P)" || state="$KISS_HOME_DIR"
+    case "$here/" in
+        "$stock/"*|"$state/"*) echo "$HOME" ;;
+        *) echo "$PWD" ;;
+    esac
+}
+USER_PWD="$(daemon_work_dir)"
 # Current install step, for anything watching the install (the daemon's
 # update log tails this script; ``cat`` the file to see where a detached
 # run is).  Line 1 is this script's pid, line 2 the step text.  The EXIT
@@ -1083,6 +1108,161 @@ WantedBy=default.target
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Retire the VS Code extension
+# ---------------------------------------------------------------------------
+# The product left VS Code: its extension is gone from the repository and
+# will never be updated.  Its users still land here, through the old
+# extension's Update button (a VS Code terminal running this script) or
+# the daemon's own update, so this run tells them where the product lives
+# now -- in the terminal, in a file opened in their VS Code window and as
+# a notice in the web app -- and takes the stale extension out of the
+# editor.
+VSCODE_EXTENSION_ID="ksenxx.kiss-sorcar"
+# Under the daemon's home; kiss.server.vscode_retired turns a fresh flag
+# into the web app's notice.
+VSCODE_RETIRED_FLAG=".vscode-retired"
+VSCODE_NOTICE_FILE="VSCODE-EXTENSION-REMOVED.txt"
+
+vscode_extension_dirs() {
+    # Print every installed copy of the retired extension: VS Code and
+    # VS Code Insiders, their remote servers, Cursor and code-server.
+    local dir ext
+    for dir in "$HOME/.vscode-server/extensions" "$HOME/.vscode-server-insiders/extensions" \
+               "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" \
+               "$HOME/.cursor/extensions" "$HOME/.local/share/code-server/extensions"; do
+        for ext in "$dir/$VSCODE_EXTENSION_ID"-*; do
+            [ ! -d "$ext" ] || printf '%s\n' "$ext"
+        done
+    done
+}
+
+vscode_user_detected() {
+    # True for a VS Code user: this shell runs in a VS Code terminal (the
+    # retired extension's Update button ran this script there), or a copy
+    # of that extension is installed.
+    [ "${TERM_PROGRAM:-}" = vscode ] && return 0
+    [ -n "${VSCODE_IPC_HOOK_CLI:-}${VSCODE_GIT_IPC_HANDLE:-}" ] && return 0
+    [ -n "$(vscode_extension_dirs)" ]
+}
+
+flag_vscode_retired() {
+    # Have the web app of the daemon whose home is $1 show its "VS Code
+    # extension removed" notice: the daemon sends it to every page while
+    # the flag is fresh.  Only an installed copy of the extension earns
+    # it; a VS Code terminal alone is any developer's shell.
+    [ -n "$(vscode_extension_dirs)" ] || return 0
+    mkdir -p "$1"
+    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$1/$VSCODE_RETIRED_FLAG"
+}
+
+find_code_clis() {
+    # Print the editor CLIs that can uninstall the extension and open a
+    # file in the editor: code, code-insiders, cursor and code-server on
+    # PATH (a VS Code terminal puts the ``code`` of its own window there,
+    # a Remote-SSH one included), and on macOS the CLI inside the app
+    # bundle when ``code`` is not on PATH.  ``KISS_CODE_CLI`` names the
+    # one CLI to use instead (tests point it at a stub).
+    local name path
+    if [ -n "${KISS_CODE_CLI+x}" ]; then
+        [ -z "$KISS_CODE_CLI" ] || printf '%s\n' "$KISS_CODE_CLI"
+        return 0
+    fi
+    for name in code code-insiders cursor code-server; do
+        path="$(command -v "$name" 2>/dev/null || true)"
+        [ -z "$path" ] || printf '%s\n' "$path"
+    done
+    if [ "$OS" = Darwin ] && ! command -v code >/dev/null 2>&1; then
+        for path in "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+                    "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
+            [ ! -x "$path" ] || printf '%s\n' "$path"
+        done
+    fi
+}
+
+vscode_window_reachable() {
+    # Whether ``code --reuse-window FILE`` would land in a window the user
+    # is looking at: this script runs in a VS Code terminal, or VS Code is
+    # running on this machine.  Otherwise the CLI would launch the editor
+    # just to show the notice.
+    [ "${TERM_PROGRAM:-}" = vscode ] && return 0
+    [ -n "${VSCODE_IPC_HOOK_CLI:-}" ] && return 0
+    command -v pgrep >/dev/null 2>&1 || return 1
+    case "$OS" in
+        Darwin) pgrep -f "Visual Studio Code.app" >/dev/null 2>&1 ;;
+        Linux) pgrep -x code >/dev/null 2>&1 || pgrep -f "/share/code/code" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+retire_vscode_extension() {
+    # Uninstall every installed copy of the extension through the editor
+    # CLIs, open the notice as a file in the running VS Code window (the
+    # old extension's Update terminal closes with this script, taking the
+    # box below with it), and leave the ``.extension-updated`` marker that
+    # extension reloads its window on, so the uninstall takes effect now
+    # instead of at the next editor restart.  Prints the lines of the
+    # terminal notice box.
+    local cli notice_file="$KISS_HOME_DIR/$VSCODE_NOTICE_FILE" had_extension=0
+    local url="http://127.0.0.1:${KISS_WEB_PORT:-8787}" product="$BRAND_PRODUCT_NAME"
+    # The product the user runs is the brand's when this run restarted a
+    # brand home's daemon (step [5/5]): its hook has branded that app, so
+    # the notice names what the user saw in VS Code, as the web app's
+    # notice from that daemon does.
+    if [ -n "${RESTART_HOME:-}" ]; then
+        product="$(brand_field product_name "$RESTART_HOME/kiss/src/kiss/webapp/media/brand.json")"
+        product="${product:-$BRAND_PRODUCT_NAME}"
+    fi
+    [ -z "$(vscode_extension_dirs)" ] || had_extension=1
+    if [ "$had_extension" = 1 ]; then
+        while IFS= read -r cli; do
+            [ -n "$cli" ] || continue
+            "$cli" --uninstall-extension "$VSCODE_EXTENSION_ID" >/dev/null 2>&1 3>&- 9>&- < /dev/null || true
+        done < <(find_code_clis)
+    fi
+    {
+        echo "$product has left VS Code."
+        echo ""
+        echo "The $product VS Code extension has been removed and will never be updated."
+        if [ "$had_extension" = 1 ] && [ -z "$(vscode_extension_dirs)" ]; then
+            echo "This update uninstalled it; VS Code may ask to reload its window."
+        elif [ "$had_extension" = 1 ]; then
+            echo "Uninstall it from the Extensions view of VS Code ($VSCODE_EXTENSION_ID)."
+        fi
+        echo ""
+        echo "Use the web app instead: $url"
+        echo "It is in your browser after every update, and the sorcar CLI is unchanged."
+    } > "$notice_file"
+    if vscode_window_reachable; then
+        # The first CLI; no ``| head`` (its early exit would SIGPIPE the
+        # producer under pipefail).
+        cli="$(find_code_clis)"
+        cli="${cli%%$'\n'*}"
+        # Detached: a CLI with no window to talk to must not hold the
+        # install; ``3>&-`` keeps the saved terminal out of the editor.
+        [ -z "$cli" ] || (nohup "$cli" --reuse-window "$notice_file" >/dev/null 2>&1 3>&- 9>&- < /dev/null &)
+    fi
+    [ "$had_extension" = 0 ] || date -u '+%Y-%m-%dT%H:%M:%SZ' > "$KISS_HOME_DIR/.extension-updated"
+    echo "VS Code is no longer supported by $product."
+    echo "The VS Code extension has been removed and will never be updated."
+    if [ "$had_extension" = 1 ] && [ -n "$(vscode_extension_dirs)" ]; then
+        echo "Uninstall it from the Extensions view of VS Code ($VSCODE_EXTENSION_ID)."
+    fi
+    echo "Use the web app instead: $url"
+}
+
+print_vscode_notice() {
+    # The VS Code extension is gone: retire it and tell its users where
+    # the product lives now, on the terminal (fd 3) and in the log, and
+    # as the last install step so an old extension's progress toast
+    # shows it too.
+    local line lines=()
+    while IFS= read -r line; do lines+=("$line"); done < <(retire_vscode_extension)
+    print_box "${lines[@]}" >&3
+    print_box "${lines[@]}" >> "$LOG_FILE"
+    publish_step "${lines[*]}"
+}
+
 start_kiss_web_daemon() {
     # Register kiss-web from kiss_project $1 as the user's service
     # (launchd on macOS, systemd on Linux, a detached process elsewhere)
@@ -1560,7 +1740,12 @@ fi
         fi
     fi
 
-    # The daemon serves the directory this script was run from.
+    # The web app's "VS Code extension removed" notice, from the home of
+    # the daemon this run (re)starts; a nested brand pass starts none.
+    [ -n "${_KISS_BRAND_PASS:-}" ] || flag_vscode_retired "${RESTART_HOME:-$KISS_HOME_DIR}"
+
+    # The daemon serves the directory this script was run from (see
+    # daemon_work_dir).
     if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
         if [ -n "$RESTART_HOME" ]; then
             echo "   $RESTART_WHY"
@@ -1610,34 +1795,6 @@ print_password_box() {
     # the stdout saved before the log tee) so it never lands in the log.
     print_box "Remote access password:  $1" \
         "Type it in the web app on another device; it is also shown in Settings." >&3
-}
-
-vscode_user_detected() {
-    # True for a VS Code user: this shell runs in a VS Code terminal (the
-    # retired extension's Update button ran this script there), or a copy
-    # of that extension is installed for VS Code, Cursor or code-server.
-    local dir ext
-    [ "${TERM_PROGRAM:-}" = vscode ] && return 0
-    [ -n "${VSCODE_IPC_HOOK_CLI:-}${VSCODE_GIT_IPC_HANDLE:-}" ] && return 0
-    for dir in "$HOME/.vscode-server/extensions" "$HOME/.vscode-server-insiders/extensions" \
-               "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" \
-               "$HOME/.cursor/extensions" "$HOME/.local/share/code-server/extensions"; do
-        for ext in "$dir"/ksenxx.kiss-sorcar-*; do
-            [ -d "$ext" ] && return 0
-        done
-    done
-    return 1
-}
-
-print_vscode_notice() {
-    # The VS Code extension is gone: tell its users where the product
-    # lives now, on the terminal (fd 3) and in the log, and as the last
-    # install step so an old extension's progress toast shows it too.
-    local notice="VS Code is no longer supported by ${BRAND_PRODUCT_NAME:-KISS Sorcar}."
-    local url="Use the web app instead: http://127.0.0.1:${KISS_WEB_PORT:-8787}"
-    print_box "$notice" "$url" >&3
-    print_box "$notice" "$url" >> "$LOG_FILE"
-    publish_step "$notice $url"
 }
 
 if [ -z "${_KISS_BRAND_PASS:-}" ]; then
