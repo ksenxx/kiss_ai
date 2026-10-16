@@ -17,6 +17,7 @@ from typing import Any
 # at construction time; the exceptions it raises are httpx2's as well.
 import httpx2
 from anthropic import Anthropic, APITimeoutError
+from anthropic.lib.bedrock import AnthropicBedrock
 from anthropic.resources.messages import Messages
 
 from kiss.core import stop_signal
@@ -517,9 +518,112 @@ def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dic
         blocks.append({"type": "text", "text": tail})
     return blocks
 
+def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
+    """Tell whether the request *kwargs* would carry a prompt-cache breakpoint.
+
+    Looks at the request as it goes on the wire: the SDK merges
+    ``extra_body`` over the outer keyword arguments, so a ``system`` (or
+    any other field) supplied there replaces the outer one.  A breakpoint
+    is a top-level ``cache_control`` (automatic caching) or a
+    ``cache_control`` on a system block, a tool, or a content block of a
+    message.
+
+    Args:
+        kwargs: The ``messages.create`` keyword arguments.
+
+    Returns:
+        ``True`` when at least one breakpoint is present.
+    """
+    extra_body = kwargs.get("extra_body")
+    payload = {**kwargs, **extra_body} if isinstance(extra_body, dict) else kwargs
+    if "cache_control" in payload:
+        return True
+    system = payload.get("system")
+    blocks: list[Any] = list(system) if isinstance(system, list) else []
+    blocks.extend(payload.get("tools") or [])
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            blocks.extend(content)
+    return any(isinstance(block, dict) and "cache_control" in block for block in blocks)
+
+
+_BEDROCK_DEFAULT_REGION = "us-east-1"
+# Request fields of the Anthropic API that Bedrock's InvokeModel rejects:
+# automatic prompt caching and the priority service tier.
+_BEDROCK_UNSUPPORTED_FIELDS = ("cache_control", "service_tier")
+
+
+def _bedrock_credentials() -> tuple[str, str, str, str]:
+    """Return the configured ``(access key, secret key, session token, region)``.
+
+    Read from ``DEFAULT_CONFIG`` (the settings panel's key store, or the
+    ``AWS_*`` environment variables); the region defaults to
+    ``us-east-1`` when unset.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    return (
+        DEFAULT_CONFIG.AWS_ACCESS_KEY_ID,
+        DEFAULT_CONFIG.AWS_SECRET_ACCESS_KEY,
+        DEFAULT_CONFIG.AWS_SESSION_TOKEN,
+        DEFAULT_CONFIG.AWS_REGION or _BEDROCK_DEFAULT_REGION,
+    )
+
+
+def _bedrock_client(bearer_token: str, timeout: httpx2.Timeout) -> AnthropicBedrock:
+    """Build the Anthropic SDK's Amazon Bedrock client.
+
+    A bearer token (``AWS_BEARER_TOKEN_BEDROCK``) is the client's
+    ``api_key``; the SDK refuses it together with an access key pair, so
+    the pair is passed only when no token is set.  With neither, the
+    client falls back to boto3's credential chain (``~/.aws``, an
+    instance role).
+
+    Args:
+        bearer_token: The Bedrock API key (bearer token), or ``""``.
+        timeout: The per-request httpx timeout.
+
+    Returns:
+        An ``anthropic.AnthropicBedrock`` instance (SigV4 signing with the
+        key pair needs ``boto3``, which the SDK imports at request time).
+    """
+    access_key, secret_key, session_token, region = _bedrock_credentials()
+    if bearer_token:
+        return AnthropicBedrock(
+            api_key=bearer_token,
+            aws_region=region,
+            timeout=timeout,
+            max_retries=_MAX_RETRIES,
+        )
+    # The constructor (and ``with_options``, which builds a copy through
+    # it) re-reads AWS_BEARER_TOKEN_BEDROCK from the environment when no
+    # api_key is passed and treats an EMPTY exported value as a token:
+    # it refuses the key pair next to it and sends ``Authorization:
+    # Bearer`` with nothing behind it.  An empty key is unset by KISS's
+    # own rules (``DEFAULT_CONFIG`` reads it as ""), so it is unset for
+    # the SDK too.  Two task threads may both read the empty value before
+    # either removes it, and the loser of that race must not raise:
+    # ``os.environ.pop(key, None)`` is not atomic either (it reads, then
+    # deletes outside its KeyError handler), so the deletion itself is
+    # guarded.
+    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "":
+        try:
+            del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
+        except KeyError:
+            pass
+    return AnthropicBedrock(
+        aws_access_key=access_key or None,
+        aws_secret_key=secret_key or None,
+        aws_session_token=session_token or None,
+        aws_region=region,
+        timeout=timeout,
+        max_retries=_MAX_RETRIES,
+    )
+
 
 class AnthropicModel(Model):
-    """A model that uses Anthropic's Messages API (Claude)."""
+    """A model that uses Anthropic's Messages API (Claude), directly or via Amazon Bedrock."""
 
     def __init__(
         self,
@@ -528,16 +632,23 @@ class AnthropicModel(Model):
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
+        bedrock: bool = False,
     ):
         """Initialize an AnthropicModel instance.
 
         Args:
-            model_name: The name of the Claude model to use.
-            api_key: The Anthropic API key for authentication.
+            model_name: The name of the Claude model to use; with
+                ``bedrock=True`` a ``bedrock/<Bedrock model id>`` name.
+            api_key: The Anthropic API key for authentication; with
+                ``bedrock=True`` the Bedrock bearer token
+                (``AWS_BEARER_TOKEN_BEDROCK``), empty to sign requests
+                with the AWS access key pair instead.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
                 thinking block starts and ``False`` when it ends.
+            bedrock: Route the requests through Amazon Bedrock (the SDK's
+                ``AnthropicBedrock`` client) instead of the Anthropic API.
         """
         super().__init__(
             model_name,
@@ -546,16 +657,31 @@ class AnthropicModel(Model):
             thinking_callback=thinking_callback,
         )
         self.api_key = api_key
-        # The (api_key, workspace_id) pair the current client was built
-        # from, so initialize() rebuilds it only on a real change.
-        self._client_inputs: tuple[str, str] | None = None
-        # The id sent as ``model=`` over the wire.  A generated effort
-        # alias (``claude-opus-5-5-medium``, ``alias_of`` marker in the
-        # catalog) maps back to its base id: the Messages API only knows
-        # the base names and answers 404 ``not_found_error`` otherwise.
-        from kiss.core.models.model_info import _strip_thinking_alias
+        self.bedrock = bedrock
+        # The credentials the current client was built from, so
+        # initialize() rebuilds it only on a real change.
+        self._client_inputs: tuple[str, ...] | None = None
+        # ``_api_model_name`` is the id sent as ``model=`` over the wire
+        # and ``_catalog_model_name`` the ``claude-*`` catalog key the
+        # capability checks (thinking, effort) and pricing use.  Direct: a
+        # generated effort alias (``claude-opus-5-5-medium``, ``alias_of``
+        # marker in the catalog) maps back to its base id, which is the
+        # only name the Messages API knows (404 ``not_found_error``
+        # otherwise).  Bedrock: the wire id is Bedrock's own
+        # (``us.anthropic.claude-opus-4-6-v1:0``) and the catalog key is
+        # the Claude model behind it.
+        from kiss.core.models.model_info import (
+            _strip_thinking_alias,
+            bedrock_claude_name,
+            bedrock_model_id,
+        )
 
-        self._api_model_name = _strip_thinking_alias(model_name)
+        if bedrock:
+            self._api_model_name = bedrock_model_id(model_name)
+            self._catalog_model_name = bedrock_claude_name(model_name) or model_name
+        else:
+            self._api_model_name = _strip_thinking_alias(model_name)
+            self._catalog_model_name = model_name
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -581,16 +707,26 @@ class AnthropicModel(Model):
         # it every time abandons a whole httpx connection pool to the
         # garbage collector for nothing.  It is rebuilt only when the
         # inputs it was constructed from changed.
+        timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
         workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
-        inputs = (self.api_key, workspace_id)
+        inputs = (
+            (self.api_key, *_bedrock_credentials())
+            if self.bedrock
+            else (self.api_key, workspace_id)
+        )
         if self.client is None or inputs != self._client_inputs:
-            default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
-            self.client = Anthropic(
-                api_key=self.api_key,
-                timeout=httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT),
-                max_retries=_MAX_RETRIES,
-                default_headers=default_headers,
-            )
+            if self.bedrock:
+                self.client = _bedrock_client(self.api_key, timeout)
+            else:
+                default_headers = (
+                    {"anthropic-workspace-id": workspace_id} if workspace_id else None
+                )
+                self.client = Anthropic(
+                    api_key=self.api_key,
+                    timeout=timeout,
+                    max_retries=_MAX_RETRIES,
+                    default_headers=default_headers,
+                )
             self._client_inputs = inputs
         content: str | list[dict[str, Any]] = prompt
         if attachments:
@@ -835,7 +971,7 @@ class AnthropicModel(Model):
         # by the caller wins over both the framework key and a catalog
         # alias level.
         kwargs.pop("reasoning_effort", None)
-        effort_level = _effort_level_for(self.model_name, self.model_config)
+        effort_level = _effort_level_for(self._catalog_model_name, self.model_config)
         if effort_level is not None:
             output_config = kwargs.get("output_config")
             output_config = dict(output_config) if isinstance(output_config, dict) else {}
@@ -869,9 +1005,11 @@ class AnthropicModel(Model):
             "Anthropic Messages",
         )
 
-        if "thinking" not in kwargs and _supports_extended_thinking(self._api_model_name):
+        if "thinking" not in kwargs and _supports_extended_thinking(self._catalog_model_name):
             if not user_set_max_tokens:
-                version = _parse_claude_version(self._api_model_name)
+                from kiss.core.models.model_info import _strip_thinking_alias
+
+                version = _parse_claude_version(_strip_thinking_alias(self._catalog_model_name))
                 # Opus 4.6+ allows 65536 output tokens; Opus 4.5 (like
                 # every Sonnet) is capped at 64000 and answers HTTP 400
                 # "max_tokens: 65536 > 64000" otherwise (verified live
@@ -882,7 +1020,7 @@ class AnthropicModel(Model):
                     and (version[1], version[2] or 0) >= (4, 6)
                 )
                 max_tokens = 65536 if is_big_opus else 64000
-            if _uses_adaptive_thinking(self._api_model_name):
+            if _uses_adaptive_thinking(self._catalog_model_name):
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
                 budget = min(10000, max_tokens - 1)
@@ -923,8 +1061,25 @@ class AnthropicModel(Model):
             if "tool_choice" not in kwargs and "thinking" not in kwargs:
                 kwargs["tool_choice"] = {"type": "any"}
 
-        if enable_cache:
-            kwargs["cache_control"] = {"type": "ephemeral"}
+        # Top-level ``cache_control`` (automatic prompt caching) and
+        # ``service_tier`` (priority tier) exist only on the Anthropic
+        # API: Bedrock's InvokeModel rejects unknown request fields, and
+        # caches through the explicit breakpoint ``_system_param`` sets.
+        # Both are removed wherever model_config may carry them: as a
+        # kwarg and inside ``extra_body``, which the SDK merges into the
+        # request JSON verbatim.
+        if enable_cache and not self.bedrock:
+            kwargs.setdefault("cache_control", {"type": "ephemeral"})
+        if self.bedrock:
+            for field in _BEDROCK_UNSUPPORTED_FIELDS:
+                kwargs.pop(field, None)
+            extra_body = kwargs.get("extra_body")
+            if isinstance(extra_body, dict):
+                kwargs["extra_body"] = {
+                    key: value
+                    for key, value in extra_body.items()
+                    if key not in _BEDROCK_UNSUPPORTED_FIELDS
+                }
 
         return kwargs
 
@@ -1162,13 +1317,20 @@ class AnthropicModel(Model):
 
         Returns:
             The raw Anthropic message of the ping, for cost accounting, or
-            ``None`` when prompt caching is disabled for this model
-            (``model_config["enable_cache"]`` false): nothing to keep warm.
+            ``None`` when there is nothing to keep warm: prompt caching is
+            disabled for this model (``model_config["enable_cache"]``
+            false), or the request carries no cache breakpoint at all (on
+            Bedrock the only breakpoint is the one on the system prefix,
+            so a run without a system prompt caches nothing).  The check
+            covers the request as sent, including a ``system`` or
+            ``cache_control`` supplied through ``model_config["extra_body"]``.
         """
+        if not self.model_config.get("enable_cache", True):
+            return None
         resolved = self._resolve_openai_tools_schema(function_map, tools_schema)
         tools = self._build_anthropic_tools_schema(resolved)
         kwargs = self._build_create_kwargs(tools=tools or None)
-        if "cache_control" not in kwargs:
+        if not _has_cache_breakpoint(kwargs):
             return None
         pending = [
             block["id"]

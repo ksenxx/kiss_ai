@@ -499,7 +499,9 @@ def _is_secret_config_field(name: str) -> bool:
 
     ``WORKSPACE_ID`` covers ``ANTHROPIC_WORKSPACE_ID``: not a key itself,
     but account-identifying and managed alongside the API keys, so it must
-    not be serialized into trajectories either.
+    not be serialized into trajectories either.  The ``AWS_`` fields are
+    the Bedrock credentials (bearer token, access key pair, session
+    token); ``AWS_REGION`` is not a secret but travels with them.
 
     Args:
         name: The config field name to classify.
@@ -507,7 +509,7 @@ def _is_secret_config_field(name: str) -> bool:
     Returns:
         bool: True when the field must be excluded from serialization.
     """
-    return "API_KEY" in name or "WORKSPACE_ID" in name
+    return "API_KEY" in name or "WORKSPACE_ID" in name or name.startswith("AWS_")
 
 
 def config_to_dict() -> dict[Any, Any]:

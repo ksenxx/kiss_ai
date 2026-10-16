@@ -202,22 +202,22 @@ async function run() {
     } catch (err) {
       fail('bare frames without a password', err);
     }
-    // Such a page rotating the password (Settings > Rotate) keeps
-    // sending bare frames: it was never admitted by password.
-    sock.fireMessage({type: 'remotePasswordRotated', password: 'Rotated0Password0001'});
+    // Such a page saving a new password (Settings > Remote password)
+    // keeps sending bare frames: it was never admitted by password.
+    sock.fireMessage({type: 'remotePasswordChanged', password: 'Rotated0Password0001'});
     transport.postMessage({type: 'ping'});
     try {
       assert.deepStrictEqual(sock.sent[sock.sent.length - 1], {type: 'ping'});
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
-      ok('a page admitted without a password ignores remotePasswordRotated for its frames');
+      ok('a page admitted without a password ignores remotePasswordChanged for its frames');
     } catch (err) {
-      fail('remotePasswordRotated on a bare session', err);
+      fail('remotePasswordChanged on a bare session', err);
     }
     window.close();
   }
 
-  // 6. Settings > Rotate from a password-authenticated page: the
-  //    remotePasswordRotated event reaches the page AND the transport
+  // 6. Settings > Remote password saved from a password-authenticated
+  //    page: the remotePasswordChanged event reaches the page AND the transport
   //    adopts the new password for every later frame (the server checks
   //    each frame against config.json, where the new one now is) and
   //    for the next page load.  A malformed event changes nothing.
@@ -235,18 +235,23 @@ async function run() {
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_ok', local: false});
-    transport.postMessage({type: 'rotateRemotePassword'});
-    sock.fireMessage({type: 'remotePasswordRotated', password: 'Rotated0Password0001'});
+    transport.postMessage({
+      type: 'saveConfig', config: {remote_password: 'Rotated0Password0001'},
+    });
+    sock.fireMessage({type: 'remotePasswordChanged', password: 'Rotated0Password0001'});
     sock.fireMessage({type: 'configData', config: {remote_password: 'Rotated0Password0001'}});
     transport.postMessage({type: 'getConfig'});
-    for (const bad of [{}, {password: ''}, {password: 42}]) {
-      sock.fireMessage({type: 'remotePasswordRotated', ...bad});
+    for (const bad of [{}, {password: 42}]) {
+      sock.fireMessage({type: 'remotePasswordChanged', ...bad});
     }
     transport.postMessage({type: 'ping'});
     try {
       assert.deepStrictEqual(sock.sent, [
         {type: 'auth', password: 'Secret20Chars0000000'},
-        {password: 'Secret20Chars0000000', type: 'rotateRemotePassword'},
+        {
+          password: 'Secret20Chars0000000', type: 'saveConfig',
+          config: {remote_password: 'Rotated0Password0001'},
+        },
         {password: 'Rotated0Password0001', type: 'getConfig'},
         {password: 'Rotated0Password0001', type: 'ping'},
       ]);
@@ -255,13 +260,37 @@ async function run() {
       );
       assert.deepStrictEqual(
         received.map((m) => m.type),
-        ['remotePasswordRotated', 'configData', 'remotePasswordRotated',
-         'remotePasswordRotated', 'remotePasswordRotated'],
+        ['remotePasswordChanged', 'configData', 'remotePasswordChanged',
+         'remotePasswordChanged'],
       );
       assert.strictEqual(received[0].password, 'Rotated0Password0001');
-      ok('after remotePasswordRotated the page sees the event and frames carry the new password');
+      ok('after remotePasswordChanged the page sees the event and frames carry the new password');
     } catch (err) {
-      fail('remotePasswordRotated adoption', err);
+      fail('remotePasswordChanged adoption', err);
+    }
+
+    // 7. The same page clears the password (remote access off).  It is
+    //    signed out with everyone else: the old credential is forgotten
+    //    at once, the next frame goes bare and the server refuses it;
+    //    the reconnect probes bare and shows the handshake's refusal.
+    sock.fireMessage({type: 'remotePasswordChanged', password: ''});
+    transport.postMessage({type: 'ping'});
+    try {
+      assert.deepStrictEqual(sock.sent[sock.sent.length - 1], {type: 'ping'});
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
+      sock.fireMessage({type: 'error', code: 'auth_failed', text: 'Wrong password.'});
+      sock.close();
+      await waitForSocket(sockets, 2);
+      sockets[1].fireOpen();
+      assert.deepStrictEqual(sockets[1].sent, [{type: 'auth', password: ''}]);
+      const refusal = 'Remote access is turned off: no remote password is set.';
+      sockets[1].fireMessage({type: 'error', code: 'localhost_only', text: refusal});
+      const overlay = window.document.getElementById('kiss-server-loading-msg');
+      assert.ok(overlay, 'the connecting overlay message node exists');
+      assert.ok(overlay.textContent.indexOf(refusal) >= 0, overlay.textContent);
+      ok('clearing the password signs the page out; the reconnect shows remote access is off');
+    } catch (err) {
+      fail('remotePasswordChanged with an empty password', err);
     }
     window.close();
   }

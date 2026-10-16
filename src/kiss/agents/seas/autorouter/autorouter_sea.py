@@ -85,6 +85,9 @@ before the hand-scheduled full ``/rsi7d all`` sweep so the two never share the c
 RSI7D_JOB_MODEL = "claude-fable-5-1"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
+ROUTER_MODEL = "openrouter/moonshotai/kimi-k3"
+"""Model every routed session runs on (the ``model`` of :meth:`AutorouterSea.settings`)."""
+
 RSI7D_JOB_BUDGET_USD = 25.0
 """Budget (USD) the relay passes explicitly to the nested rsi7d run.
 
@@ -361,7 +364,7 @@ class AutorouterSea(BaseSea):
         """List ``autorouter`` in the model picker.
 
         A picked ``autorouter`` makes the daemon run every task of the tab
-        through this SEA on :func:`orchestrator_model` (the ``model`` of
+        through this SEA on :data:`ROUTER_MODEL` (the ``model`` of
         :func:`settings`), with :data:`SYSTEM_PROMPT` added to the system prompt
         (:meth:`system_prompt`).
         """
@@ -387,13 +390,13 @@ class AutorouterSea(BaseSea):
         return system_prompt + "\n\n" + SYSTEM_PROMPT
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Configure a routed session: the orchestrator model, no browser, no memory.
+        """Configure a routed session: :data:`ROUTER_MODEL`, web tools and memory on.
 
         Classification is off so the router always sees the full
         protocol.
         """
         return settings | {
-            "model": "openrouter/moonshotai/kimi-k3",
+            "model": ROUTER_MODEL,
             "auto_classify": False,
             "use_web_tools": True,
             "use_memory": True,
@@ -665,14 +668,12 @@ def _terse(cell: str) -> str:
 
 
 def orchestrator_model() -> str:
-    """Return the model the routing agent itself runs on.
+    """Return the best runnable frontier model (the weekly rsi7d job's fallback model).
 
-    The protocol plans, verifies and accepts on the frontier tier, so this is
-    the first runnable candidate of ``TIERS["frontier"]``.  When none is
-    runnable it is the best runnable function-calling model in the picker's
-    order (the picker offers ``autorouter`` exactly when that list is
-    non-empty, so an offered entry always has a runnable orchestrator), and
-    on a keyless install the default model, as any run would get.
+    The first runnable candidate of ``TIERS["frontier"]``; when none is
+    runnable, the best runnable function-calling model in the picker's
+    order, and on a keyless install the default model, as any run would
+    get.  Routed sessions themselves run on :data:`ROUTER_MODEL`.
 
     Returns:
         A model name from the catalog.

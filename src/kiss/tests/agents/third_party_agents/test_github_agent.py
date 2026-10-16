@@ -607,12 +607,17 @@ def test_gh_get_file_contents_with_ref(backend) -> None:
     assert parse_qs(urlparse(server.requests[-1]["path"]).query)["ref"] == ["dev"]
 
 
-def test_gh_get_file_contents_directory(backend) -> None:
-    """A directory path returns the condensed directory listing."""
+@pytest.mark.parametrize(
+    "path,listing",
+    [("src", _DIR_LISTING), ("", _ROOT_LISTING)],
+    ids=["subdirectory", "repo_root"],
+)
+def test_gh_get_file_contents_directory(backend, path: str, listing: list) -> None:
+    """A directory path (the repo root for '') returns the condensed directory listing."""
     b, server = backend
-    result = json.loads(b.gh_get_file_contents("octo", "hello", "src"))
-    assert result == {"ok": True, "directory": _DIR_LISTING}
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/contents/src"
+    result = json.loads(b.gh_get_file_contents("octo", "hello", path))
+    assert result == {"ok": True, "directory": listing}
+    assert urlparse(server.requests[-1]["path"]).path == f"/repos/octo/hello/contents/{path}"
 
 
 def test_gh_get_file_contents_non_base64_object(backend) -> None:
@@ -620,14 +625,6 @@ def test_gh_get_file_contents_non_base64_object(backend) -> None:
     b, _ = backend
     result = json.loads(b.gh_get_file_contents("octo", "hello", "link.txt"))
     assert result == {"ok": True, "path": "link.txt", "type": "symlink", "size": 9}
-
-
-def test_gh_get_file_contents_empty_path_lists_repo_root(backend) -> None:
-    """path='' hits /repos/{owner}/{repo}/contents/ and lists the root directory."""
-    b, server = backend
-    result = json.loads(b.gh_get_file_contents("octo", "hello", ""))
-    assert result == {"ok": True, "directory": _ROOT_LISTING}
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/contents/"
 
 
 def test_gh_get_file_contents_encoding_none_refetches_raw(backend) -> None:

@@ -55,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
         _init_tables(conn)
         if args.refresh:
             conn.execute("UPDATE task_history SET tags = ''")
-            conn.execute("DELETE FROM chat_summaries")
+            # Blank the derived summary only: ``user_summary`` is the
+            # title the user typed and nothing can recompute it.
+            conn.execute("UPDATE chat_summaries SET summary = ''")
     counts = backfill_task_metadata(conn)
     conn.close()
     print(

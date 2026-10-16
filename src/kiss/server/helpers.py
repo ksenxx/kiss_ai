@@ -74,21 +74,25 @@ def model_vendor(name: str) -> tuple[str, int]:
         name: The model name string.
 
     Returns:
-        Tuple of (display name, numeric sort order).
+        Tuple of (display name, numeric sort order).  Each vendor has its
+        own order, so a sort on it keeps every vendor's models contiguous
+        (the model picker draws a group header wherever the vendor changes).
     """
-    if name.startswith("claude-") or name.startswith("cc/"):
+    if name.startswith(("claude-", "cc/")):
         return "Anthropic", 0
+    if name.startswith("bedrock/"):
+        return "Bedrock", 1
     if name.startswith("openai/") or name.startswith(_OPENAI_PREFIXES):
-        return "OpenAI", 1
+        return "OpenAI", 2
     if name.startswith("gemini-"):
-        return "Gemini", 2
+        return "Gemini", 3
     if name.startswith("glm-"):
-        return "Z.AI", 3
+        return "Z.AI", 4
     if name.startswith("kimi-") or name.startswith("moonshot-"):
-        return "Moonshot", 4
+        return "Moonshot", 5
     if name.startswith("openrouter/"):
-        return "OpenRouter", 5
-    return "Together AI", 6
+        return "OpenRouter", 6
+    return "Together AI", 7
 
 
 SUGGESTION_LIMIT = 20

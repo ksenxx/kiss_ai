@@ -783,14 +783,6 @@ body.content-tab-open #chat-header { display: none; }
 .config-password-wrap { position: relative; margin-top: var(--space-1); }
 .config-password-wrap input { margin-top: 0 !important; padding-right: var(--space-8) !important; }
 
-/* Remote password box + its Rotate button on one line (setupSecretInput
-   wraps the box in .config-password-wrap, which takes the free width).
-   #cfg-remote-password-note under it reports the rotation. */
-.config-remote-password-row { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
-.config-remote-password-row .config-password-wrap { flex: 1; min-width: 0; margin-top: 0; }
-.config-remote-password-row input { margin-top: 0 !important; }
-#cfg-remote-password-note { margin-top: calc(-1 * var(--space-2)); }
-
 .config-password-toggle {
   position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
   display: flex; align-items: center; justify-content: center;
@@ -4059,7 +4051,7 @@ button.app-row-main .app-state { color: var(--accent); }
 
 /* The chat panel's header, laid out like a task panel: the chat's
    title on ONE line (ellipsized), then the action strip ("Show
-   details" chevron, "last launched ... ago") on the next.  A plain row
+   details" chevron, "... ago") on the next.  A plain row
    on the list's own background (a list of many chats must not become
    a stack of bands; the accent is reserved for the chat on screen and
    its active task row).  No

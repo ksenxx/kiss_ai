@@ -18,7 +18,6 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -32,7 +31,11 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     connect,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _TOKEN = TOKEN
 
@@ -70,16 +73,8 @@ _CALENDARS = {
 }
 
 
-class _CalendarRequestHandler(BaseHTTPRequestHandler):
+class _CalendarRequestHandler(RecordingHandler):
     """Emulates the Google Calendar v3 REST API and records requests."""
-
-    def _reply(self, status: int, body: str) -> None:
-        payload = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def _read_body(self) -> dict[str, Any] | None:
         length = int(self.headers.get("Content-Length", 0))
@@ -153,9 +148,6 @@ class _CalendarRequestHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         self._handle()
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")

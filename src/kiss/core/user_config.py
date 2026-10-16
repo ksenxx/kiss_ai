@@ -85,8 +85,8 @@ DEFAULTS: dict[str, Any] = {
     "custom_headers": "",
     "use_web_browser": True,
     # The remote-access password the first install.sh run set
-    # (kiss.core.remote_password; later runs keep it), shown read-only in
-    # the Settings panel.  Empty: no password, so the daemon admits
+    # (kiss.core.remote_password; later runs keep it), editable in the
+    # Settings panel.  Empty: no password, so the daemon admits
     # loopback clients only.
     "remote_password": "",
     # Pre-run task classification (kiss.agents.sorcar.task_classifier):
@@ -147,6 +147,13 @@ API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "OPENROUTER_API_KEY",
     "ZAI_API_KEY",
     "MOONSHOT_API_KEY",
+    # Amazon Bedrock credentials (``bedrock/`` Claude models); AWS_REGION
+    # is not a secret but is stored and edited alongside them.
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
 })
 
 

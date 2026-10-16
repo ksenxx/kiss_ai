@@ -344,6 +344,43 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("MOONSHOT_API_KEY", ""),
         description="Moonshot AI (Kimi) API key (can also be set via MOONSHOT_API_KEY env var)",
     )
+    # Amazon Bedrock (``bedrock/<id>`` Claude models): a bearer token OR
+    # an access key pair; the region selects the Bedrock endpoint.
+    AWS_BEARER_TOKEN_BEDROCK: str = Field(
+        default_factory=lambda: os.getenv("AWS_BEARER_TOKEN_BEDROCK", ""),
+        description=(
+            "Amazon Bedrock API key (bearer token) for bedrock/ Claude models "
+            "(can also be set via AWS_BEARER_TOKEN_BEDROCK env var)"
+        ),
+    )
+    AWS_ACCESS_KEY_ID: str = Field(
+        default_factory=lambda: os.getenv("AWS_ACCESS_KEY_ID", ""),
+        description=(
+            "AWS access key id for Bedrock SigV4 signing, used when no bearer "
+            "token is set (can also be set via AWS_ACCESS_KEY_ID env var)"
+        ),
+    )
+    AWS_SECRET_ACCESS_KEY: str = Field(
+        default_factory=lambda: os.getenv("AWS_SECRET_ACCESS_KEY", ""),
+        description=(
+            "AWS secret access key for Bedrock SigV4 signing "
+            "(can also be set via AWS_SECRET_ACCESS_KEY env var)"
+        ),
+    )
+    AWS_SESSION_TOKEN: str = Field(
+        default_factory=lambda: os.getenv("AWS_SESSION_TOKEN", ""),
+        description=(
+            "AWS session token for temporary Bedrock credentials "
+            "(can also be set via AWS_SESSION_TOKEN env var)"
+        ),
+    )
+    AWS_REGION: str = Field(
+        default_factory=lambda: os.getenv("AWS_REGION", ""),
+        description=(
+            "AWS region of the Bedrock endpoint; us-east-1 when unset "
+            "(can also be set via AWS_REGION env var)"
+        ),
+    )
     # Token-cost levers (projects/cost-levers-implementation-plan.md).
     # Each is a plain toggle read from a ``KISS_*`` environment
     # variable so a regression is a flag flip, not a revert.

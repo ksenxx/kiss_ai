@@ -20,13 +20,16 @@ import os
 import subprocess
 import sys
 import unittest
-from http.server import BaseHTTPRequestHandler
 from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
 class TestGoveeImportSafe(unittest.TestCase):
@@ -105,7 +108,7 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
             _build_send_message_script("+14155238886", "hi", service='x" & quit')
 
 
-class _PhoneApiHandler(BaseHTTPRequestHandler):
+class _PhoneApiHandler(RecordingHandler):
     """Real HTTP handler emulating the phone companion REST app.
 
     Each ``/api/sms/messages`` query string is recorded into the owning
@@ -137,9 +140,6 @@ class _PhoneApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
-
-    def log_message(self, format: str, *args: object) -> None:
-        """Silence request logging."""
 
 
 class TestPhoneControlPollCursor(unittest.TestCase):

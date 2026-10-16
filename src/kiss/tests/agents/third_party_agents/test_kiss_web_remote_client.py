@@ -96,11 +96,13 @@ class TestRemoteClientInteraction(unittest.TestCase):
         self._viewer_writer: LocalWriter | None = None
         self._reader_task: concurrent.futures.Future[None] | None = None
         self._received_cv = threading.Condition()
+        # Registered before the start is awaited so a start that times out
+        # is still shut down (stop_async on an unstarted server is a no-op).
+        self.addCleanup(self._shutdown_server)
         asyncio.run_coroutine_threadsafe(
             self.server.start_private_async(),
             self.loop,
         ).result(timeout=30)
-        self.addCleanup(self._shutdown_server)
         # Launches go to this test's daemon, not the process-global one.
         self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
         launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file

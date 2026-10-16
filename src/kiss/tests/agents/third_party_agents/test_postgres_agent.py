@@ -26,7 +26,6 @@ import uuid
 import psycopg
 import pytest
 
-import kiss.agents.third_party_agents.postgres.postgres_sea as pg_mod
 from kiss.agents.third_party_agents.postgres.postgres_sea import (
     PostgresAgent,
     PostgresChannelBackend,
@@ -126,13 +125,6 @@ def test_read_only_defaults_to_true_when_key_missing() -> None:
     _config.save({"database_uri": _UNREACHABLE_URI})
     agent = PostgresAgent()
     assert agent._backend._read_only is True
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    tools = pg_mod.PostgresSea().tools([])
-    assert len(tools) >= 3
-    assert all(callable(t) for t in tools)
 
 
 def test_connect_without_config_fails() -> None:

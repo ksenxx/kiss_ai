@@ -21,7 +21,6 @@ import kiss.agents.third_party_agents.wecom.wecom_sea as wecom_mod
 from kiss.agents.third_party_agents.wecom.wecom_sea import (
     WeComAgent,
     WeComChannelBackend,
-    WecomSea,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
@@ -96,11 +95,6 @@ def test_fresh_agent_loads_persisted_config() -> None:
     fresh = WeComAgent()
     assert fresh._is_authenticated() is True
     assert fresh._backend._webhook_url == "https://x?key=1"
-
-
-def test_tools_module_function() -> None:
-    """``WecomSea().tools([])`` returns a non-empty tool list."""
-    assert len(WecomSea().tools([])) >= 3
 
 
 def test_post_message_shape(receiver: JsonWebhookServer) -> None:

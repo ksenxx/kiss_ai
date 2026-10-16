@@ -22,6 +22,14 @@ const assert = require('assert');
 const path = require('path');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
 
+const pages = [];
+
+function openPage() {
+  const page = makePage({beforeScripts: stubRaf});
+  pages.push(page.win);
+  return page;
+}
+
 // A real, valid 1x1 transparent PNG.
 const PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
@@ -53,7 +61,7 @@ function toolPanels(win) {
 const IMAGE = {path: '/w/shot.png', mime: 'image/png', b64: PNG_B64};
 
 function testLiveStreamKeepsImagePanelOpen() {
-  const wv = makePage({beforeScripts: stubRaf});
+  const wv = openPage();
   const win = wv.win;
   const TAB = startTask(wv, 'chat-imgpanel-1');
 
@@ -143,7 +151,7 @@ function testLiveStreamKeepsImagePanelOpen() {
 }
 
 function testReplayKeepsImagePanelOpenAndVisible() {
-  const wv = makePage({beforeScripts: stubRaf});
+  const wv = openPage();
   const win = wv.win;
   const events = [{type: 'prompt', text: 'replayed task'}];
   for (let i = 0; i < 3; i++) {
@@ -190,7 +198,7 @@ function testReplayKeepsImagePanelOpenAndVisible() {
 // A `summary` folds ordinary panels and leaves image panels expanded
 // after it, outside the collapsed digest.
 function testSummaryAdoptionKeepsImageVisible() {
-  const wv = makePage({beforeScripts: stubRaf});
+  const wv = openPage();
   const win = wv.win;
   const TAB = startTask(wv, 'chat-imgpanel-3');
   send(win, {
@@ -252,13 +260,12 @@ function main() {
   testReplayKeepsImagePanelOpenAndVisible();
   testSummaryAdoptionKeepsImageVisible();
   console.log('All tests passed');
-  // The page keeps ticking panel-time intervals; exit explicitly.
-  process.exit(0);
 }
 
 try {
   main();
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
-  process.exit(1);
+  process.exitCode = 1;
 }
+for (const win of pages) win.close();

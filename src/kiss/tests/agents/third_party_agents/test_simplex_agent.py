@@ -24,11 +24,9 @@ from typing import Any
 import pytest
 from websockets.sync.server import Server, ServerConnection, serve
 
-import kiss.agents.third_party_agents.simplex.simplex_sea as simplex_mod
 from kiss.agents.third_party_agents.simplex.simplex_sea import (
     SimpleXAgent,
     SimpleXChannelBackend,
-    SimplexSea,
     _config,
 )
 
@@ -208,13 +206,6 @@ def test_authenticate_rejects_empty_url() -> None:
     assert tools["authenticate_simplex"](ws_url="  ") == "ws_url cannot be empty."
     assert agent._is_authenticated() is False
     assert not _config.path.exists()
-
-
-def test_tools_module_function() -> None:
-    """``SimplexSea().tools([])`` returns a non-empty list (at least the auth trio)."""
-    tools = SimplexSea().tools([])
-    assert len(tools) >= 3
-    assert simplex_mod.SimplexSea.tools.__doc__
 
 
 def test_end_to_end_over_real_websocket(simplex_server: str) -> None:

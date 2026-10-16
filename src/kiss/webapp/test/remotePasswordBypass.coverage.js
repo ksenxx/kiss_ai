@@ -3,17 +3,18 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// Coverage gate: requires 100% line coverage of the WHOLE of
+// media/transport.js and media/assetLoadGuard.js (not a fenced region) when
+// running test/remotePasswordBypass.test.js, plus every branch except the
+// spec-unreachable `location.reload()` catch.
+
 'use strict';
 
 const assert = require('assert');
-const {spawnSync} = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const {MEDIA, runCovered, paintInstance} = require('./coverage_gate');
 
-const MEDIA = path.resolve(__dirname, '..', 'media');
-const TEST_FILE = path.join(__dirname, 'remotePasswordBypass.test.js');
-const CHILD_TIMEOUT_MS = 5 * 60 * 1000;
 // The two page scripts of media/ that the functional test eval's, each
 // under its own sourceURL pragma.
 const SCRIPTS = [
@@ -25,48 +26,8 @@ function readMediaJs(name) {
   return fs.readFileSync(path.join(MEDIA, name), 'utf-8');
 }
 
-function paintInstance(functions, length) {
-  const painted = new Uint8Array(length);
-  const ranges = [];
-  for (const fn of functions) for (const r of fn.ranges) ranges.push(r);
-  ranges.sort((a, b) => a.startOffset - b.startOffset ||
-                        b.endOffset - a.endOffset);
-  for (const r of ranges) {
-    const v = r.count > 0 ? 1 : 0;
-    const end = Math.min(r.endOffset, length);
-    for (let i = Math.max(0, r.startOffset); i < end; i++) painted[i] = v;
-  }
-  return painted;
-}
-
 function main() {
-  const covDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-shim-cov-'));
-
-  // The child inherits this process's V8 flags (run-all.js passes
-  // --no-maglev --no-concurrent-sparkplug to dodge a V8 exit hang) and is
-  // killed after CHILD_TIMEOUT_MS so a hung functional test is reported
-  // here by name instead of stalling the whole run.
-  const res = spawnSync(process.execPath, [...process.execArgv, TEST_FILE], {
-    env: Object.assign({}, process.env, {NODE_V8_COVERAGE: covDir}),
-    encoding: 'utf-8',
-    timeout: CHILD_TIMEOUT_MS,
-    killSignal: 'SIGKILL',
-  });
-  process.stdout.write(res.stdout || '');
-  process.stderr.write(res.stderr || '');
-  if (res.status !== 0) {
-    fs.rmSync(covDir, {recursive: true, force: true});
-    console.error(
-      res.error && res.error.code === 'ETIMEDOUT'
-        ? `coverage gate: the functional test did not exit within ${CHILD_TIMEOUT_MS / 1000}s, killed`
-        : 'coverage gate: the functional test itself FAILED',
-    );
-    process.exit(res.status || 1);
-  }
-
-  const reports = fs.readdirSync(covDir).map((f) =>
-    JSON.parse(fs.readFileSync(path.join(covDir, f), 'utf-8')));
-  fs.rmSync(covDir, {recursive: true, force: true});
+  const reports = runCovered('remotePasswordBypass.test.js', 'ws-shim');
   for (const {name, url} of SCRIPTS) gate(readMediaJs(name), url, reports);
 }
 

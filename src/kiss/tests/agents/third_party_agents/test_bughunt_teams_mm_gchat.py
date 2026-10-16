@@ -13,15 +13,18 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import _config as _mm_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _GRAPH_MESSAGE = {
     "id": "MSG1",
@@ -32,33 +35,22 @@ _GRAPH_MESSAGE = {
 }
 
 
-class _GraphHandler(BaseHTTPRequestHandler):
+class _GraphHandler(RecordingHandler):
     """Records request paths and returns Graph-shaped JSON responses."""
 
-    def _respond(self, payload: dict[str, Any]) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a recorded GET with a Graph list payload."""
         cast(RecordingServer, self.server).requests.append({"method": "GET", "path": self.path})
-        self._respond({"value": [dict(_GRAPH_MESSAGE)]})
+        self._json(200, {"value": [dict(_GRAPH_MESSAGE)]})
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a recorded POST with a Graph create payload."""
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode() if length else ""
         cast(RecordingServer, self.server).requests.append(
             {"method": "POST", "path": self.path, "body": body}
         )
-        self._respond({"id": "NEW1"})
-
-    def log_message(self, format: str, *args: Any) -> None:
-        """Silence request logging."""
+        self._json(200, {"id": "NEW1"})
 
 
 @pytest.fixture()

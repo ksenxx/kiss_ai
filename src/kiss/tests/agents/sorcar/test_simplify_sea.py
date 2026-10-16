@@ -390,16 +390,17 @@ class Sea(BaseSea):
 
 
 def test_apply_sea_evaluates_then_applies_the_run(tmp_path: Path) -> None:
-    """``apply_sea`` is ``evaluate_sea`` + ``apply_run``: no SEAs leave the command alone.
+    """``apply_sea`` is ``evaluate_sea`` + ``apply_run``: the base layer overrides nothing.
 
     A method returning the wrong type is rejected before anything is
     written; a loaded chain is written exactly as ``apply_run`` writes
     the evaluated :class:`SeaRun`.
     """
+    from kiss.agents.seas.base.base_sea import BaseSea
     from kiss.agents.sorcar.sea_apply import apply_run, apply_sea, load_layers
 
     cmd: dict[str, object] = {"prompt": "do it", "parentTaskId": "t1"}
-    assert apply_sea(cmd, []) == set() and cmd == {"prompt": "do it", "parentTaskId": "t1"}
+    assert apply_sea(cmd, [BaseSea()]) == set() and cmd["prompt"] == "do it"
     rejected = _write_sea(tmp_path / "seas", "rejected", _REJECTED_SEA)
     cmd["seaPath"] = str(rejected)
     with pytest.raises(SeaError, match="prompt.*must return a string, got int"):

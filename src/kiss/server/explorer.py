@@ -11,7 +11,9 @@ the working tree's changes (:func:`git_status`) together with a graph of
 the recent commits and the files each one modified (:func:`git_log`).
 Every function here is a plain synchronous data provider: the daemon
 (``web_server.py``) runs them on a worker thread and wraps the result in
-a wire reply.  Nothing here writes to the repository.
+a wire reply.  Only :func:`git_action` (the commit graph's context-menu
+actions: checkout, branch, tag, cherry-pick) writes to the repository,
+under its ``repo_lock``.
 
 All git output is read in its NUL-delimited form (``-z``), so paths,
 subjects and ref names come through verbatim: no C-style quoting, and

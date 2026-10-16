@@ -818,7 +818,7 @@ def _merge_chats(conn: sqlite3.Connection) -> int:
         ("chat_id", "summary", "last_launched"),
         f"{CHAT_TABLE} in the target database",
     )
-    if not {"chat_id", "parent_task_id", "start_ts"} <= set(
+    if not {"chat_id", "parent_task_id", "start_ts", "end_ts"} <= set(
         table_columns(conn, "main", TASK_TABLE)
     ):
         return 0
@@ -831,6 +831,9 @@ def _merge_chats(conn: sqlite3.Connection) -> int:
         )
     ]
     summaries = _chat_summary_module()
+    # A target from before the column existed gets it here, as the
+    # daemon adds it when it opens the database.
+    summaries.add_last_finished_column(conn)
     for chat_id in chat_ids:
         summaries.upsert_chat_summary(conn, chat_id)
     return len(chat_ids)

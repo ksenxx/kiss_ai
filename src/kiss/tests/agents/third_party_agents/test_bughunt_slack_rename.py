@@ -20,14 +20,17 @@ from __future__ import annotations
 import json
 import urllib.parse
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
 from slack_sdk import WebClient
 
 from kiss.agents.third_party_agents.slack.slack_sea import SlackChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _CHANNELS_JSON = {
     "ok": True,
@@ -44,7 +47,7 @@ _CHANNELS_JSON = {
 }
 
 
-class _SlackHandler(BaseHTTPRequestHandler):
+class _SlackHandler(RecordingHandler):
     """Minimal Slack Web API emulator that records every request."""
 
     server: RecordingServer  # type: ignore[assignment]
@@ -95,9 +98,6 @@ class _SlackHandler(BaseHTTPRequestHandler):
         """Handle POST requests (e.g. files.completeUploadExternal)."""
         self._record_and_respond()
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
-
 
 def _all_sent_params(requests: list[dict[str, str]]) -> set[str]:
     """Collect every parameter name sent in any query string or form body."""
@@ -138,19 +138,22 @@ class TestSlackRenameBugs:
     def _requests(self) -> list[dict[str, str]]:
         return list(self.server.requests)
 
-    def test_find_channel_reads_channels_key(self) -> None:
-        """find_channel must read the 'channels' key of conversations.list."""
-        assert self.backend.find_channel("general") == "C1"
+    @pytest.mark.parametrize(
+        "name,channel_id,used,unused",
+        [
+            ("general", "C1", "/conversations.list", "/conversations.info"),
+            ("C0AKYSNLB7W", "C0AKYSNLB7W", "/conversations.info", "/conversations.list"),
+        ],
+        ids=["name_is_listed", "id_is_verified_via_info"],
+    )
+    def test_find_channel_endpoint(
+        self, name: str, channel_id: str, used: str, unused: str
+    ) -> None:
+        """A name is looked up in conversations.list; an ID is confirmed with conversations.info."""
+        assert self.backend.find_channel(name) == channel_id
         paths = [r["path"] for r in self._requests()]
-        assert any(p.endswith("/conversations.list") for p in paths)
-        assert not any(p.endswith("/conversations.info") for p in paths)
-
-    def test_find_channel_verifies_conversation_id_via_info(self) -> None:
-        """An ID-shaped name is confirmed with conversations.info, not listed."""
-        assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
-        paths = [r["path"] for r in self._requests()]
-        assert any(p.endswith("/conversations.info") for p in paths)
-        assert not any(p.endswith("/conversations.list") for p in paths)
+        assert any(p.endswith(used) for p in paths)
+        assert not any(p.endswith(unused) for p in paths)
 
     def test_list_channels_tool_returns_channels(self) -> None:
         """The list-channels tool must surface channels from the API response."""

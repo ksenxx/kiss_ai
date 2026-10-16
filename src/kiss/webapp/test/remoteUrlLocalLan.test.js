@@ -266,6 +266,45 @@ test('an explicitly configured certificate (no localCa) shows no TLS hint', () =
   win.close();
 });
 
+test('a daemon in a Docker container (inDocker) shows no URL bars at all', () => {
+  const {win} = makePage();
+  // Bars painted before the daemon said so are cleared too.
+  send(win, {
+    type: 'remote_url',
+    url: 'https://tunnel.trycloudflare.com',
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: ['https://192.168.0.5:8787'],
+    localCa: true,
+  });
+  assert.strictEqual(barsIn(win, 'remote-url').length, 3, 'bars render on a host');
+  send(win, {
+    type: 'remote_url',
+    url: 'https://tunnel.trycloudflare.com',
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: ['https://192.168.0.5:8787'],
+    localCa: true,
+    inDocker: true,
+  });
+  const container = win.document.getElementById('remote-url');
+  assert.strictEqual(barsIn(win, 'remote-url').length, 0, 'no URL bar in Docker');
+  assert.strictEqual(
+    win.document.querySelectorAll('.remote-url-tls-hint').length,
+    0,
+    'no TLS hint in Docker',
+  );
+  assert.strictEqual(container.childNodes.length, 0, '#remote-url is empty');
+  // Anything but boolean true means a host: the bars come back.
+  send(win, {
+    type: 'remote_url',
+    url: '',
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: [],
+    inDocker: 'true',
+  });
+  assert.strictEqual(barsIn(win, 'remote-url').length, 1, 'bars back on a host');
+  win.close();
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
   for (const f of failures) {

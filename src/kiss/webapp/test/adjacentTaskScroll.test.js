@@ -36,7 +36,6 @@ function setupWithHistoryTask() {
     task_id: '42',
     task: 'My old task',
     events: [
-      {type: 'task_start', task: 'My old task'},
       {type: 'system_output', text: 'hello\n'},
     ],
   });
@@ -63,7 +62,6 @@ function testEarlyPromptPoisoning() {
   send(win, {type: 'system_prompt', text: 'sys-real', tabId, taskId: '123'});
   send(win, {type: 'prompt', text: 'My new task', tabId, taskId: '123'});
   send(win, {type: 'system_output', text: 'working\n', tabId, taskId: '123'});
-  send(win, {type: 'taskExecuted', tabId, taskId: '123'});
   send(win, {type: 'task_done', tabId, taskId: '123'});
   send(win, {type: 'status', running: false, tabId});
   O.scrollTop = 0;
@@ -152,7 +150,6 @@ function testPrevRequestRenderAndChain() {
     task: 'Older task',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Older task'},
       {type: 'system_output', text: 'older\n'},
     ],
   });

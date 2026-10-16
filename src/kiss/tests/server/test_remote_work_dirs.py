@@ -220,11 +220,30 @@ class TestRemoteWorkDirs(IsolatedAsyncioTestCase):
         # Registered behind the daemon's back, as `/machine add` or the
         # CLI does: the cached report is stale and is rebuilt.
         await asyncio.to_thread(mach.add_machine, "box2", self.remote.url, "pw-remote")
-        after = await self._ask({"type": "getMachines"}, "machines")
-        self.assertEqual(
-            [m["name"] for m in after["machines"] if not m["local"]], ["box", "box2"],
-        )
+        after = await self._machines_listing(["box", "box2"])
         self.assertEqual(after["action"], "")
         await asyncio.to_thread(mach.remove_machine, "box2")
-        gone = await self._ask({"type": "getMachines"}, "machines")
-        self.assertEqual([m["name"] for m in gone["machines"] if not m["local"]], ["box"])
+        await self._machines_listing(["box"])
+
+    async def _machines_listing(self, expected: list[str]) -> dict[str, Any]:
+        """Ask ``getMachines`` and return the reply naming *expected* remote machines.
+
+        The daemon's registry watcher also pushes an unsolicited
+        ``machines`` frame (pinged from the registry as it was when the
+        watcher woke) after every registration; such a frame about the
+        previous state may land before the direct reply, so the frames
+        are read until one lists *expected*.
+        """
+        await self._send({"type": "getMachines"})
+        seen: list[list[str]] = []
+        for _ in range(300):
+            msg = await self._next()
+            if msg.get("type") != "machines":
+                continue
+            names = [m["name"] for m in msg["machines"] if not m["local"]]
+            if names == expected:
+                return msg
+            seen.append(names)
+            if len(seen) > 2:
+                break
+        raise AssertionError(f"no machines reply listing {expected}; got {seen}")

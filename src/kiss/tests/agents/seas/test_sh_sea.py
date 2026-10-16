@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from kiss.agents.seas.base.base_sea import WorkerSea
@@ -158,7 +159,7 @@ def test_unknown_profile_is_rejected_before_the_model_is_called(tmp_path: Path) 
     """A ``tool_profile`` that is not a ``TOOL_PROFILES`` key fails loudly."""
     with serve([finish_body("<p>never</p>", prompt_tokens=500)]) as (url, requests):
         agent = ChatSorcarAgent("bad-profile-test")
-        try:
+        with pytest.raises(ValueError, match="tool_profile must be one of") as excinfo:
             agent.run(
                 prompt_template="Say done.",
                 model_name=MODEL,
@@ -171,11 +172,7 @@ def test_unknown_profile_is_rejected_before_the_model_is_called(tmp_path: Path) 
                 use_memory=False,
                 verbose=False,
             )
-        except ValueError as exc:
-            assert "tool_profile must be one of" in str(exc)
-            assert "'bogus'" in str(exc)
-        else:  # pragma: no cover — the assertion is the test
-            raise AssertionError("an unknown tool_profile must raise ValueError")
+        assert "'bogus'" in str(excinfo.value)
     assert requests == []
 
 
