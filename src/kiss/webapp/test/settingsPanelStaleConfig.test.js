@@ -104,20 +104,16 @@ function testLateConfigDataDoesNotClobberTypedKey() {
     'X-Old: 1',
     'untouched fields must still be populated from configData',
   );
-  // The remote password is chosen by install.sh: configData carries it
-  // and the box shows it, readonly (the eye button reveals it).
+  // The remote password: configData carries it and the plain text box
+  // shows it, editable.
   const pw = win.document.getElementById('cfg-remote-password');
-  assert.strictEqual(pw.readOnly, true, 'the remote password box must stay readonly');
+  assert.strictEqual(pw.readOnly, false, 'the remote password box is editable');
+  assert.strictEqual(pw.type, 'text', 'the remote password is shown in plain text');
   assert.strictEqual(
     pw.value,
     'pw-from-install',
     'the remote password box must show the password configData carries',
   );
-  assert.strictEqual(pw.type, 'password', 'the password is hidden until revealed');
-  win.document
-    .getElementById('cfg-remote-password-toggle')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(pw.type, 'text', 'the eye button reveals the password');
 
   closeSettings(win);
   const save = lastMsg(posted, 'saveConfig');
@@ -137,9 +133,10 @@ function testLateConfigDataDoesNotClobberTypedKey() {
     'X-Old: 1',
     'untouched fields must be saved with their loaded values',
   );
-  assert.ok(
-    !('remote_password' in save.config),
-    'the save must never carry the remote password',
+  assert.strictEqual(
+    save.config.remote_password,
+    'pw-from-install',
+    'the untouched remote password is saved with its loaded value',
   );
   win.close();
   console.log('  ok - a late configData does not clobber a typed field');

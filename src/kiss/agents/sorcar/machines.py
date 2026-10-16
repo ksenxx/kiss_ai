@@ -85,7 +85,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, send
 from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
@@ -560,19 +560,33 @@ def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None
     link backs off for :data:`DOWN_BACKOFF` seconds after a failure);
     the last error is raised once the monotonic *deadline* has passed.
 
+    An SSH machine is pinged through a forward of these handshakes'
+    own, closed on return: the login's shared forward
+    (:func:`tunnel_port`) may carry the links and streams of a machine
+    already registered there, which a failed registration must leave
+    as they are.
+
     Raises:
         MachineError: The last attempt's error.
     """
-    while True:
-        link = MachineLink(machine, cert_file=cert_file)
-        try:
-            link.request({"type": "ping"}, "pong")
-            return
-        except MachineError:
-            if time.monotonic() >= deadline:
-                raise
-        finally:
-            link.close()
+    tunnel = (
+        SshTunnel(machine.ssh, urlsplit(machine.url).port or DEFAULT_PORT)
+        if machine.ssh else None
+    )
+    try:
+        while True:
+            link = MachineLink(machine, cert_file=cert_file, tunnel=tunnel)
+            try:
+                link.request({"type": "ping"}, "pong")
+                return
+            except MachineError:
+                if time.monotonic() >= deadline:
+                    raise
+            finally:
+                link.close()
+    finally:
+        if tunnel is not None:
+            tunnel.close()
         time.sleep(1.0)
 
 
@@ -697,7 +711,12 @@ class SshTunnel:
         self.remote_port = remote_port
         self.local_port = 0
         self.process: subprocess.Popen[bytes] | None = None
-        self._lock = threading.Lock()
+        # RLock: :func:`locked_call` needs the owner check on release.
+        # Every lock here is taken on task threads too (the ``/machine``
+        # SEA's tools), where the runner's Stop injects
+        # ``KeyboardInterrupt`` at any check point, including the one
+        # right after a ``with lock:``'s ``__enter__`` (gh-74174).
+        self._lock = threading.RLock()
         self._last_line = ""
 
     def alive(self) -> bool:
@@ -715,43 +734,46 @@ class SshTunnel:
                 stderr line is quoted) or does not open the port within
                 *timeout* seconds.
         """
-        with self._lock:
-            if self.alive():
-                return self.local_port
-            self._kill()
-            self.local_port = _free_port()
-            forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
-            cmd = ssh_command(
-                self.ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-                "-o", "ServerAliveCountMax=3", "-L", forward,
+        return locked_call(self._lock, self._open_locked, timeout)
+
+    def _open_locked(self, timeout: float) -> int:
+        """:meth:`open`'s body, under the lock."""
+        if self.alive():
+            return self.local_port
+        self._kill()
+        self.local_port = _free_port()
+        forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
+        cmd = ssh_command(
+            self.ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+            "-L", forward,
+        )
+        self._last_line = ""
+        try:
+            self.process = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-            self._last_line = ""
-            try:
-                self.process = subprocess.Popen(
-                    cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
+        except OSError as exc:
+            raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
+        reader = threading.Thread(
+            target=self._read_stderr, args=(self.process,), daemon=True,
+            name=f"ssh-tunnel-stderr {self.ssh}",
+        )
+        reader.start()
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.process.poll() is not None:
+                reader.join(timeout=2.0)
+                message = f"ssh {self.ssh} cannot forward its daemon port {self.remote_port}"
+                raise MachineError(
+                    f"{message}: {self._last_line}" if self._last_line else message
                 )
-            except OSError as exc:
-                raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
-            reader = threading.Thread(
-                target=self._read_stderr, args=(self.process,), daemon=True,
-                name=f"ssh-tunnel-stderr {self.ssh}",
-            )
-            reader.start()
-            deadline = time.monotonic() + timeout
-            while True:
-                if self.process.poll() is not None:
-                    reader.join(timeout=2.0)
-                    message = f"ssh {self.ssh} cannot forward its daemon port {self.remote_port}"
-                    raise MachineError(
-                        f"{message}: {self._last_line}" if self._last_line else message
-                    )
-                if _port_accepts(self.local_port):
-                    return self.local_port
-                if time.monotonic() >= deadline:
-                    self._kill()
-                    raise MachineError(f"ssh {self.ssh} did not open the port forward in time")
-                time.sleep(0.05)
+            if _port_accepts(self.local_port):
+                return self.local_port
+            if time.monotonic() >= deadline:
+                self._kill()
+                raise MachineError(f"ssh {self.ssh} did not open the port forward in time")
+            time.sleep(0.05)
 
     def _read_stderr(self, process: subprocess.Popen[bytes]) -> None:
         """Keep the last stderr line of *process* (and keep its pipe from filling up)."""
@@ -763,8 +785,7 @@ class SshTunnel:
 
     def close(self) -> None:
         """Kill the ssh process, if any, and forget the port."""
-        with self._lock:
-            self._kill()
+        locked_call(self._lock, self._kill)
 
     def _kill(self) -> None:
         """Kill the ssh process, if any, and forget the port (under the lock)."""
@@ -795,7 +816,24 @@ def _port_accepts(port: int) -> bool:
 
 
 _tunnels: dict[str, SshTunnel] = {}
-_tunnels_lock = threading.Lock()
+_tunnels_lock = threading.RLock()
+
+
+def _cached_tunnel(ssh: str, remote_port: int) -> SshTunnel:
+    """Return *ssh*'s cached tunnel, a fresh one when its remote port changed (under the lock)."""
+    tunnel = _tunnels.get(ssh)
+    if tunnel is None or tunnel.remote_port != remote_port:
+        if tunnel is not None:
+            tunnel.close()
+        tunnel = _tunnels[ssh] = SshTunnel(ssh, remote_port)
+    return tunnel
+
+
+def _drain(cache: dict[Any, Any]) -> list[Any]:
+    """Empty *cache* and return what it held (under its lock)."""
+    items = list(cache.values())
+    cache.clear()
+    return items
 
 
 def tunnel_port(ssh: str, remote_port: int) -> int:
@@ -818,29 +856,21 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
             :meth:`SshTunnel.open`) or the registry changed while it
             was opening.
     """
-    with _tunnels_lock:
-        tunnel = _tunnels.get(ssh)
-        if tunnel is None or tunnel.remote_port != remote_port:
-            if tunnel is not None:
-                tunnel.close()
-            tunnel = _tunnels[ssh] = SshTunnel(ssh, remote_port)
+    tunnel = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
     # Test hook (no-op in production): widens the window between the
     # lookup and the open so the close_tunnels race is deterministic
     # under KISS_RACE_DELAY.
     _race_delay()
     port = tunnel.open()
-    with _tunnels_lock:
-        if _tunnels.get(ssh) is tunnel:
-            return port
+    if locked_call(_tunnels_lock, _tunnels.get, ssh) is tunnel:
+        return port
     tunnel.close()
     raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
 
 
 def close_tunnels() -> None:
     """Close and forget every ssh port-forward (after a registry change, at exit)."""
-    with _tunnels_lock:
-        tunnels = list(_tunnels.values())
-        _tunnels.clear()
+    tunnels: list[SshTunnel] = locked_call(_tunnels_lock, _drain, _tunnels)
     for tunnel in tunnels:
         tunnel.close()
 
@@ -857,11 +887,20 @@ class MachineLink:
     often enough to trip the remote daemon's brute-force lockout.
     """
 
-    def __init__(self, machine: Machine, cert_file: Path | None = None) -> None:
+    def __init__(
+        self, machine: Machine, cert_file: Path | None = None, tunnel: SshTunnel | None = None,
+    ) -> None:
+        """A link to *machine*, pinned to *cert_file* (its registered pin by default).
+
+        *tunnel*, for an SSH machine, is a forward of the caller's own
+        to dial instead of the login's shared one (:func:`tunnel_port`);
+        the caller opens nothing and closes it when done.
+        """
         self.machine = machine
         self._cert_file = cert_file if cert_file is not None else machine.cert_file()
+        self._tunnel = tunnel
         self._ws: ClientConnection | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # see SshTunnel: taken through locked_call
         self._generation = 0
         self._retry_at = 0.0
         self._last_error = ""
@@ -881,12 +920,17 @@ class MachineLink:
         return MachineError(message)
 
     def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:
-        """Open and authenticate the socket within *timeout* seconds.
+        """Open and authenticate the socket; the handshake has *timeout* seconds.
 
         The socket is TLS with the machine's pinned certificate as the
         only trust anchor.  An SSH machine is dialled at the local end
-        of its ssh port-forward (:func:`tunnel_port`, opened here when
-        it is not up) and authenticated by this daemon's client
+        of its ssh port-forward (the login's shared one,
+        :func:`tunnel_port`, or the *tunnel* given to the constructor;
+        opened here when it is not up, with the ssh login's own
+        :data:`SSH_TIMEOUT`;
+        *timeout* starts once the forward is up, so a slow login does
+        not leave the handshake no time and back the link off) and
+        authenticated by this daemon's client
         certificate (:func:`client_cert_pair`), which the remote daemon
         admits once this daemon's CA is enrolled there; any other
         machine is dialled directly and authenticated by the registered
@@ -919,7 +963,6 @@ class MachineLink:
         machine = self.machine
         where = f"{machine.name} ({machine.address()})"
         self._check_available()
-        deadline = time.monotonic() + timeout
         enroll_again = (
             f"; run /machine add {machine.name} {machine.ssh} again" if machine.ssh else ""
         )
@@ -937,7 +980,11 @@ class MachineLink:
                 raise self._fail(f"{where}: no usable client certificate: {exc}") from exc
             remote_port = urlsplit(machine.url).port or DEFAULT_PORT
             try:
-                url = f"https://127.0.0.1:{tunnel_port(machine.ssh, remote_port)}"
+                port = (
+                    self._tunnel.open() if self._tunnel is not None
+                    else tunnel_port(machine.ssh, remote_port)
+                )
+                url = f"https://127.0.0.1:{port}"
             except MachineError as exc:
                 raise self._fail(f"{where} is unreachable: {exc}") from exc
             # ssh drops a forwarded connection (EOF or reset) when
@@ -948,6 +995,7 @@ class MachineLink:
             )
         ctx.check_hostname = False
         auth = {"type": "auth", "link": not stream, "password": machine.password}
+        deadline = time.monotonic() + timeout
         try:
             ws = _ws_connect(
                 ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
@@ -990,7 +1038,9 @@ class MachineLink:
         other frames the daemon pushes meanwhile are skipped.  *timeout*
         bounds the wait for the reply, however many frames arrive or
         are already buffered; connecting first, when the socket is not
-        up, has a budget of *timeout* of its own.
+        up, has a budget of *timeout* of its own for the handshake
+        (an SSH machine's port-forward, opened before it, has
+        :data:`SSH_TIMEOUT`).
 
         A socket kept from an earlier request may have died meanwhile
         (the daemon restarted, a network blip, its idle keepalive
@@ -1002,29 +1052,34 @@ class MachineLink:
             MachineError: When the daemon is unreachable, rejects the
                 password, or does not answer within *timeout* seconds.
         """
-        with self._lock:
-            kept = self._ws is not None
-            if self._ws is None:
-                self._ws = self._connect(timeout)
-            deadline = time.monotonic() + timeout
+        return locked_call(self._lock, self._request_locked, cmd, reply_type, timeout)
+
+    def _request_locked(
+        self, cmd: dict[str, Any], reply_type: str, timeout: float,
+    ) -> dict[str, Any]:
+        """:meth:`request`'s body, under the lock."""
+        kept = self._ws is not None
+        if self._ws is None:
+            self._ws = self._connect(timeout)
+        deadline = time.monotonic() + timeout
+        try:
+            return self._exchange(cmd, reply_type, deadline, timeout)
+        except ConnectionClosed as exc:
+            if not kept:
+                self._drop()
+                raise self._fail(
+                    f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
+                ) from exc
+            logger.info("%s: the link's socket had closed, reconnecting", self.machine.name)
+            self._drop()
+            self._ws = self._connect(_remaining(deadline))
             try:
                 return self._exchange(cmd, reply_type, deadline, timeout)
-            except ConnectionClosed as exc:
-                if not kept:
-                    self._drop()
-                    raise self._fail(
-                        f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
-                    ) from exc
-                logger.info("%s: the link's socket had closed, reconnecting", self.machine.name)
+            except ConnectionClosed as again:
                 self._drop()
-                self._ws = self._connect(_remaining(deadline))
-                try:
-                    return self._exchange(cmd, reply_type, deadline, timeout)
-                except ConnectionClosed as again:
-                    self._drop()
-                    raise self._fail(
-                        f"{self.machine.name} ({self.machine.address()}) did not answer: {again}"
-                    ) from again
+                raise self._fail(
+                    f"{self.machine.name} ({self.machine.address()}) did not answer: {again}"
+                ) from again
 
     def _exchange(
         self, cmd: dict[str, Any], reply_type: str, deadline: float, timeout: float,
@@ -1093,13 +1148,11 @@ class MachineLink:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
-        with self._lock:
-            return self._connect(timeout, stream=True)
+        return locked_call(self._lock, self._connect, timeout, True)
 
     def close(self) -> None:
         """Close the socket; the next :meth:`request` re-connects."""
-        with self._lock:
-            self._drop()
+        locked_call(self._lock, self._drop)
 
     def retire(self) -> None:
         """Close for good: every later :meth:`request` fails instead of re-connecting.
@@ -1108,9 +1161,12 @@ class MachineLink:
         leaves the daemon-wide cache, so a caller that fetched it just
         before cannot re-open a socket nothing closes any more.
         """
-        with self._lock:
-            self._retired = True
-            self._drop()
+        locked_call(self._lock, self._retire_locked)
+
+    def _retire_locked(self) -> None:
+        """:meth:`retire`'s body, under the lock."""
+        self._retired = True
+        self._drop()
 
 
 def _remaining(deadline: float) -> float:
@@ -1119,17 +1175,21 @@ def _remaining(deadline: float) -> float:
 
 
 _links: dict[tuple[str, str, str, str], MachineLink] = {}
-_links_lock = threading.Lock()
+_links_lock = threading.RLock()
+
+
+def _cached_link(machine: Machine) -> MachineLink:
+    """Return the cached link to *machine*, made on first use (under the lock)."""
+    key = (machine.name, machine.url, machine.password, machine.ssh)
+    link = _links.get(key)
+    if link is None:
+        link = _links[key] = MachineLink(machine)
+    return link
 
 
 def link_for(machine: Machine) -> MachineLink:
     """Return the daemon-wide cached link to *machine*."""
-    key = (machine.name, machine.url, machine.password, machine.ssh)
-    with _links_lock:
-        link = _links.get(key)
-        if link is None:
-            link = _links[key] = MachineLink(machine)
-        return link
+    return locked_call(_links_lock, _cached_link, machine)
 
 
 def close_links() -> None:
@@ -1138,9 +1198,7 @@ def close_links() -> None:
     A machine registered again gets a fresh tunnel (its daemon port may
     have changed), a removed one leaves no ssh process behind.
     """
-    with _links_lock:
-        links = list(_links.values())
-        _links.clear()
+    links: list[MachineLink] = locked_call(_links_lock, _drain, _links)
     for link in links:
         link.retire()
     close_tunnels()

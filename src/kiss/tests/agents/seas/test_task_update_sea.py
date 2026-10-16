@@ -43,7 +43,6 @@ def _persist_task(
     prompt: str,
     events: list[dict[str, Any]],
     extra: dict[str, Any] | None = None,
-    chat_id: str = "",
 ) -> str:
     """Persist a task row with *events* and return its id."""
     payload: dict[str, object] = {
@@ -52,7 +51,7 @@ def _persist_task(
         "startTs": int(time.time() * 1000) - 90_000,
     }
     payload.update(extra or {})
-    task_id, _chat = _add_task(prompt, chat_id=chat_id, extra=payload)
+    task_id, _chat = _add_task(prompt, extra=payload)
     for ev in events:
         _append_chat_event(ev, task_id=task_id)
     _flush_chat_events(task_id)

@@ -24,7 +24,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.homeassistant.homeassistant_sea as ha_mod
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
     HomeAssistantAgent,
     HomeAssistantChannelBackend,
@@ -196,13 +195,6 @@ def test_new_agent_loads_persisted_config() -> None:
     assert agent._is_authenticated() is True
     assert agent._backend._base_url == "http://ha.local:8123"
     assert agent._backend._token == _TOKEN
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    tools = ha_mod.HomeassistantSea().tools([])
-    assert len(tools) >= 3
-    assert all(callable(t) for t in tools)
 
 
 def test_connect_without_config_fails() -> None:

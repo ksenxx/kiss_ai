@@ -2,133 +2,99 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Structural contract of the channel-agent classes and modules.
+"""Behavioural contract shared by every channel agent.
 
-Verifies that every one of the 23 agents listed below overrides
-_is_authenticated() and _get_auth_tools() while inheriting _get_tools(),
-and that each module exposes main() and (for poll-capable channels)
-_make_backend().  That every agent inherits BaseChannelAgent is asserted
-over the full agent list in test_channel_agents_no_chat_session.py.
+For each of the agents in :data:`ALL_CHANNEL_AGENTS`:
+
+1. A fresh agent in an empty KISS home is unauthenticated and its tool
+   list is exactly its auth tools (backend tools stay locked).
+2. The cron gateway (``gateway_command``) schedules a poll tick only for
+   channels with a poll backend, and refuses the others.
+3. The ``kiss-<channel>`` console script runs the module's ``main``.
 """
 
 from __future__ import annotations
 
 import importlib
+from importlib.metadata import entry_points
 
 import pytest
 
-ALL_AGENTS = [
-    ("BlueBubblesAgent", "kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea"),
-    ("DiscordAgent", "kiss.agents.third_party_agents.discord.discord_sea"),
-    ("FeishuAgent", "kiss.agents.third_party_agents.feishu.feishu_sea"),
-    ("GmailAgent", "kiss.agents.third_party_agents.gmail.gmail_sea"),
-    ("GoogleChatAgent", "kiss.agents.third_party_agents.googlechat.googlechat_sea"),
-    ("IMessageAgent", "kiss.agents.third_party_agents.imessage.imessage_sea"),
-    ("IRCAgent", "kiss.agents.third_party_agents.irc.irc_sea"),
-    ("LineAgent", "kiss.agents.third_party_agents.line.line_sea"),
-    ("MatrixAgent", "kiss.agents.third_party_agents.matrix.matrix_sea"),
-    ("MattermostAgent", "kiss.agents.third_party_agents.mattermost.mattermost_sea"),
-    ("MSTeamsAgent", "kiss.agents.third_party_agents.msteams.msteams_sea"),
-    ("NextcloudTalkAgent", "kiss.agents.third_party_agents.nextcloud.nextcloud_sea"),
-    ("NostrAgent", "kiss.agents.third_party_agents.nostr.nostr_sea"),
-    ("PhoneControlAgent", "kiss.agents.third_party_agents.phone.phone_sea"),
-    ("SignalAgent", "kiss.agents.third_party_agents.signal.signal_sea"),
-    ("SlackAgent", "kiss.agents.third_party_agents.slack.slack_sea"),
-    ("SMSAgent", "kiss.agents.third_party_agents.sms.sms_sea"),
-    ("SynologyChatAgent", "kiss.agents.third_party_agents.synology.synology_sea"),
-    ("TelegramAgent", "kiss.agents.third_party_agents.telegram.telegram_sea"),
-    ("TlonAgent", "kiss.agents.third_party_agents.tlon.tlon_sea"),
-    ("TwitchAgent", "kiss.agents.third_party_agents.twitch.twitch_sea"),
-    ("WhatsAppAgent", "kiss.agents.third_party_agents.whatsapp.whatsapp_sea"),
-    ("ZaloAgent", "kiss.agents.third_party_agents.zalo.zalo_sea"),
-]
-
-
-def _get_agent_class(module_path: str, class_name: str) -> type:
-    mod = importlib.import_module(module_path)
-    cls: type = getattr(mod, class_name)
-    return cls
-
-
-@pytest.mark.parametrize(
-    "class_name,module_path", ALL_AGENTS, ids=[a[0] for a in ALL_AGENTS]
+from kiss.agents.sorcar.cron_agent import _channel_cli_name, gateway_command
+from kiss.tests.agents.third_party_agents.channel_agent_registry import (
+    AGENT_IDS,
+    ALL_CHANNEL_AGENTS,
+    get_agent_class,
 )
-def test_all_agents_have_is_authenticated(
-    class_name: str, module_path: str
+
+GATEWAY_CHANNELS = {
+    "bluebubbles",
+    "dingtalk",
+    "discord",
+    "email",
+    "feishu",
+    "googlechat",
+    "irc",
+    "line",
+    "matrix",
+    "mattermost",
+    "msteams",
+    "nextcloud",
+    "ntfy",
+    "phone",
+    "qq",
+    "signal",
+    "simplex",
+    "slack",
+    "sms",
+    "synology",
+    "telegram",
+    "webhook",
+    "weixin",
+    "whatsapp",
+    "zalo",
+}
+"""Channels whose SEA module has a poll backend, so a gateway tick can be scheduled."""
+
+HIDDEN_CHANNELS = {"a2a", "oai"}
+"""SEA folders that are not listed as channels (``available_channels()`` skips them)."""
+
+
+def _tool_names(tools: list) -> list[str]:
+    return [t.__name__ for t in tools]
+
+
+@pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)
+def test_fresh_agent_exposes_only_auth_tools(
+    class_name: str, module_path: str, isolated_kiss_home: object
 ) -> None:
-    """Every channel agent overrides _is_authenticated()."""
-    cls = _get_agent_class(module_path, class_name)
-    assert "_is_authenticated" in cls.__dict__
+    """An agent in an empty KISS home is unauthenticated and offers only its auth tools."""
+    agent = get_agent_class(class_name, module_path)()
+    assert agent._is_authenticated() is False
+    auth_tools = agent._get_auth_tools()
+    assert auth_tools and all(callable(t) for t in auth_tools)
+    assert _tool_names(agent._get_tools()) == _tool_names(auth_tools)
 
 
-@pytest.mark.parametrize(
-    "class_name,module_path", ALL_AGENTS, ids=[a[0] for a in ALL_AGENTS]
-)
-def test_all_agents_have_get_auth_tools(
-    class_name: str, module_path: str
-) -> None:
-    """Every channel agent overrides _get_auth_tools()."""
-    cls = _get_agent_class(module_path, class_name)
-    assert "_get_auth_tools" in cls.__dict__
+@pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)
+def test_gateway_command_follows_poll_support(class_name: str, module_path: str) -> None:
+    """The cron gateway builds a tick command only for channels with a poll backend."""
+    channel = module_path.rsplit(".", 2)[1]
+    command = gateway_command(channel, "123", pairing=False)
+    if channel in GATEWAY_CHANNELS:
+        assert command == f"{_channel_cli_name(channel)} --channel=123 --quiet"
+    elif channel in HIDDEN_CHANNELS:
+        assert command == f"error: unknown channel {channel!r}"
+    else:
+        assert command == f"error: channel {channel!r} has no gateway (poll) mode"
 
 
-@pytest.mark.parametrize(
-    "class_name,module_path", ALL_AGENTS, ids=[a[0] for a in ALL_AGENTS]
-)
-def test_no_inline_get_tools(class_name: str, module_path: str) -> None:
-    """No agent defines its own _get_tools() — inherited from BaseChannelAgent."""
-    cls = _get_agent_class(module_path, class_name)
-    assert "_get_tools" not in cls.__dict__
-
-
-_POLL_MODULES = [
-    "kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea",
-    "kiss.agents.third_party_agents.discord.discord_sea",
-    "kiss.agents.third_party_agents.feishu.feishu_sea",
-    "kiss.agents.third_party_agents.googlechat.googlechat_sea",
-    "kiss.agents.third_party_agents.irc.irc_sea",
-    "kiss.agents.third_party_agents.line.line_sea",
-    "kiss.agents.third_party_agents.matrix.matrix_sea",
-    "kiss.agents.third_party_agents.mattermost.mattermost_sea",
-    "kiss.agents.third_party_agents.msteams.msteams_sea",
-    "kiss.agents.third_party_agents.nextcloud.nextcloud_sea",
-    "kiss.agents.third_party_agents.phone.phone_sea",
-    "kiss.agents.third_party_agents.signal.signal_sea",
-    "kiss.agents.third_party_agents.slack.slack_sea",
-    "kiss.agents.third_party_agents.sms.sms_sea",
-    "kiss.agents.third_party_agents.synology.synology_sea",
-    "kiss.agents.third_party_agents.telegram.telegram_sea",
-    "kiss.agents.third_party_agents.whatsapp.whatsapp_sea",
-    "kiss.agents.third_party_agents.zalo.zalo_sea",
-]
-
-_NO_POLL_MODULES = [
-    "kiss.agents.third_party_agents.gmail.gmail_sea",
-    "kiss.agents.third_party_agents.imessage.imessage_sea",
-    "kiss.agents.third_party_agents.nostr.nostr_sea",
-    "kiss.agents.third_party_agents.tlon.tlon_sea",
-    "kiss.agents.third_party_agents.twitch.twitch_sea",
-]
-
-
-@pytest.mark.parametrize("module_path", _POLL_MODULES)
-def test_poll_modules_have_make_backend(module_path: str) -> None:
-    """Modules with poll mode support expose a _make_backend() function."""
-    mod = importlib.import_module(module_path)
-    assert hasattr(mod, "_make_backend")
-    assert callable(mod._make_backend)
-
-
-@pytest.mark.parametrize("module_path", _NO_POLL_MODULES)
-def test_non_poll_modules_have_no_make_backend(module_path: str) -> None:
-    """Modules without poll mode support don't expose _make_backend()."""
-    mod = importlib.import_module(module_path)
-    assert not hasattr(mod, "_make_backend")
-
-
-@pytest.mark.parametrize("module_path", _POLL_MODULES + _NO_POLL_MODULES)
-def test_all_modules_have_main(module_path: str) -> None:
-    """All channel agent modules expose a main() function."""
-    mod = importlib.import_module(module_path)
-    assert hasattr(mod, "main")
-    assert callable(mod.main)
+@pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)
+def test_console_script_runs_module_main(class_name: str, module_path: str) -> None:
+    """Every agent module is wired to a ``kiss-*`` console script that loads a callable main()."""
+    scripts = {e.value: e for e in entry_points(group="console_scripts")}
+    entry = scripts[f"{module_path}:main"]
+    assert entry.name.startswith("kiss-")
+    main = entry.load()
+    assert callable(main)
+    assert main is importlib.import_module(module_path).main

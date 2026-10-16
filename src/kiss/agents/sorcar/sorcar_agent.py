@@ -935,7 +935,7 @@ def _model_family(model_name: str) -> str:
         return "openai"
     if name.startswith("gemini-"):
         return "gemini"
-    if name.startswith("claude-"):
+    if name.startswith(("claude-", "bedrock/")):
         return "anthropic"
     return "other"
 
@@ -1515,7 +1515,8 @@ class SorcarAgent(RelentlessAgent):
             Args:
                 model_name: New LLM model name (for example
                     ``"gpt-5.5"``, ``"claude-sonnet-4-8"``,
-                    ``"gemini-3.5-flash"``).
+                    ``"gemini-3.5-flash"``, or a Claude model on Amazon
+                    Bedrock as ``"bedrock/<Bedrock model id>"``).
 
             Returns:
                 A human-readable confirmation string describing the
@@ -1605,6 +1606,7 @@ class SorcarAgent(RelentlessAgent):
                 old_api_key
                 and old_family in ("gemini", "anthropic")
                 and old_family == _model_family(model_name)
+                and getattr(old_model, "bedrock", False) == getattr(new_model, "bedrock", False)
                 and hasattr(new_model, "api_key")
             ):
                 # Native same-provider switch (Gemini→Gemini,
@@ -1615,7 +1617,12 @@ class SorcarAgent(RelentlessAgent):
                 # overriding BEFORE initialize() routes requests with
                 # the task's credential.  setattr: the attribute lives
                 # on the concrete adapters, not the Model base class
-                # (the hasattr guard above ensures it exists).
+                # (the hasattr guard above ensures it exists).  Claude
+                # direct and Claude on Bedrock are one family (same
+                # conversation and config) but different credentials
+                # (Anthropic key vs Bedrock token): the adapter's
+                # ``bedrock`` flag must match too, or the Anthropic key
+                # would be sent to Bedrock and vice versa.
                 setattr(new_model, "api_key", old_api_key)  # noqa: B010
             new_model.initialize("")
             new_model.conversation = old_model.conversation
@@ -1673,9 +1680,9 @@ class SorcarAgent(RelentlessAgent):
         tools.append(talk)
         tools.append(set_model)
         # Typed classification / routing / scoring through OpenRouter's
-        # decisions endpoint (Jev).  Offered only when the settings
-        # panel's "Use Jev" checkbox (``classify_with_decisions``) is on
-        # and it can actually run: an OpenRouter key is configured and
+        # decisions endpoint (Jev).  Offered only when the
+        # ``classify_with_decisions`` config key is on and it can
+        # actually run: an OpenRouter key is configured and
         # the catalog has the model, otherwise every call would fail and
         # the tool would only cost prompt tokens.  Its spend folds into
         # this task's accounting like ``talk``'s synthesis.

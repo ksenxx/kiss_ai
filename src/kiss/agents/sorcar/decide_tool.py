@@ -24,10 +24,10 @@ accounting exactly like ``talk``'s speech synthesis, so the per-task cost
 shown to the user stays honest.
 
 The tool is offered only while :func:`decisions_tool_available` holds: the
-settings panel's "Use Jev" checkbox (``classify_with_decisions``) is on, an
-OpenRouter key is configured and the catalog lists the model.  The same
-gate governs the pre-run task classifier's decisions route, so unticking
-the checkbox stops every use of Jev.
+``classify_with_decisions`` config key is on, an OpenRouter key is
+configured and the catalog lists the model.  The same gate governs the
+pre-run task classifier's decisions route, so turning the key off stops
+every use of Jev.
 """
 
 import json
@@ -65,10 +65,10 @@ def decisions_tool_available() -> bool:
     ``decide`` tool offered to the agent and the pre-run task classifier's
     decisions route (:func:`kiss.agents.sorcar.task_classifier.classify_task`).
     The user's switch is the ``classify_with_decisions`` key of
-    ``~/.kiss/config.json`` — the settings panel's "Use Jev" checkbox, on by
-    default — read on every call so a settings change applies to the next
-    run without a daemon restart.  Even when the switch is on, the model
-    needs an OpenRouter key and a ``"dec": true`` catalog entry; without
+    ``$KISS_HOME/config.json`` (on by default), read on every call so a
+    config change applies to the next run without a daemon restart.
+    Even when the switch is on, the model needs an OpenRouter key and a
+    ``"dec": true`` catalog entry; without
     either every call would fail, so the tool is not offered at all (an
     unusable tool only costs prompt tokens).
 

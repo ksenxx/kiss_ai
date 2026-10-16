@@ -33,7 +33,6 @@ function setup() {
     task_id: '42',
     task: 'My old task',
     events: [
-      {type: 'task_start', task: 'My old task'},
       {type: 'system_output', text: 'hello\n'},
     ],
   });

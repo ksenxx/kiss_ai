@@ -1110,21 +1110,16 @@ def dispatch_command(
     # kiss.agents.sorcar.fanout_guard) so it gets the same read-only
     # tool profile.
     from kiss.agents.sorcar.fanout_guard import is_review_task
-    from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+    from kiss.agents.sorcar.sorcar_agent import _persisted_task_id, subagent_parent_tab_id_of
 
     _is_rev = getattr(parent_agent, "_is_reviewer_subagent", None)
     parent_reviewer = bool(_is_rev()) if callable(_is_rev) else False
     parent_task_id = _persisted_task_id(parent_agent)
-    parent_tab_id = ""
-    if parent_task_id:
-        # The tab the chat pages show the caller under (its own tab id,
-        # or — when the caller is itself a sub-agent — its
-        # ``{parent}__sub_{task}`` tab).  A persisted task id
-        # proves the caller is a ``ChatSorcarAgent``, which always has
-        # the resolver; the guard only covers duck-typed callers.
-        resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
-        if callable(resolve_tab):
-            parent_tab_id = str(resolve_tab() or "")
+    # The tab the chat pages show the caller under (its own tab id, or —
+    # when the caller is itself a sub-agent — its ``{parent}__sub_{task}``
+    # tab).  A caller that has not persisted a row yet (before its first
+    # run) dispatches an ordinary top-level task, so its tab id stays out.
+    parent_tab_id = subagent_parent_tab_id_of(parent_agent) if parent_task_id else ""
     # The arguments the caller left empty come from the calling agent
     # (its model, budget share, chat, web/memory settings, container).
     # Channel dispatches and explicit programmatic callers skip this.

@@ -342,7 +342,6 @@
     return pc ? pc.copyText(text) : Promise.resolve(false);
   }
 
-  // tipsflash0903-coverage:start
   // The revert timer lives on the button and is restarted on every
   // copy: a bare setTimeout let a rapid second click's "Copied!" be
   // wiped early by the first click's stale timer.
@@ -354,13 +353,11 @@
       btn.textContent = 'Copy';
     }, 1500);
   }
-  // tipsflash0903-coverage:end
 
   function onCopyClick(event) {
     const btn = event.currentTarget;
     const code = btn.parentElement.querySelector('pre code');
     const text = code ? code.textContent : '';
-    // tipsflash0903-coverage:start
     // Async clipboard writes can settle out of order: without an
     // ownership check, a rapid first click failing AFTER a second
     // click succeeded replaced the latest "Copied!" with "Failed" and
@@ -373,7 +370,6 @@
       if (btn._kissCopyGen !== gen) return;
       flashCopyResult(btn, ok);
     });
-    // tipsflash0903-coverage:end
   }
 
   class KissTipsPanel extends HTMLElement {

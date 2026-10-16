@@ -368,9 +368,14 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert _agent_usage(parent)[0] == pytest.approx(budget_before + cost)
 
     rows = _chat_rows(chat_id)
-    assert [r["task"] for r in rows] == [
-        "Parent task prompt", task_update.build_prompt(task_id),
-    ]
+    assert len(rows) == 2 and rows[0]["task"] == "Parent task prompt"
+    # The child's row holds the prompt the update run actually used: the
+    # ``/ask`` question with the ask SEA's ``prompt(task)`` suffix and
+    # ``{task_id}`` filled in.
+    prompt = str(rows[1]["task"])
+    assert prompt.startswith(task_update.UPDATE_QUESTION)
+    assert prompt.endswith(ask_sea.ADD_TO_PROMPT.replace("{task_id}", task_id))
+    assert "{task_id}" not in prompt
     assert rows[1]["parent_task_id"] == task_id
     assert rows[1]["cost"] == pytest.approx(cost)
     # A side channel: the daemon replays the finished child as
@@ -392,11 +397,6 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert SYSTEM_PROMPT not in str(system["content"])
     assert SYSTEM_PROMPT_LITE not in str(system["content"])
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
-    prompt = task_update.build_prompt(task_id)
-    assert prompt.startswith(task_update.UPDATE_QUESTION)
-    # The ask SEA's ``prompt(task)`` suffix with ``{task_id}`` filled in.
-    assert prompt.endswith(ask_sea.ADD_TO_PROMPT.replace("{task_id}", task_id))
-    assert "{task_id}" not in prompt
     assert prompt in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
     assert len(tool_results) == 1

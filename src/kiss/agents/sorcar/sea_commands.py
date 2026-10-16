@@ -82,6 +82,7 @@ import os
 import re
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -955,6 +956,8 @@ def _check_text(label: str, value: Any) -> str:
 def _check_dict(label: str, value: Any) -> dict[str, Any]:
     """Return *value* as a dict, or raise :exc:`SeaError`."""
     if not isinstance(value, dict):
+        if inspect.iscoroutine(value):
+            value.close()  # an ``async def settings``: never awaited, keep the GC quiet
         raise SeaError(f"{label} must return a dict, got {type(value).__name__}")
     return value
 
@@ -1041,7 +1044,11 @@ def run_picked_hook(
         return
     if not wait:
         return
-    thread.join(PICKED_HOOK_TIMEOUT_SECONDS)
+    # Sliced so the daemon's forced Stop (an async exception injected into
+    # the task thread) lands between slices instead of after the whole wait.
+    deadline = time.monotonic() + PICKED_HOOK_TIMEOUT_SECONDS
+    while thread.is_alive() and time.monotonic() < deadline:
+        thread.join(0.2)
     if thread.is_alive():
         logger.warning(
             "SEA %s: on_picked_as_model() still running after %.0f s; going on without it",

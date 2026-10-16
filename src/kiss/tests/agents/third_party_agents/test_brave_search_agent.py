@@ -27,8 +27,7 @@ import json
 import shutil
 import stat
 import sys
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -40,7 +39,11 @@ from kiss.agents.third_party_agents.brave.brave_sea import (
     _clamp,
     _config,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _API_KEY = "test-brave-key"
 
@@ -127,16 +130,8 @@ _WEB_RESPONSE_HUGE = {
 }
 
 
-class _BraveRequestHandler(BaseHTTPRequestHandler):
+class _BraveRequestHandler(RecordingHandler):
     """Emulates the Brave Search API and records requests."""
-
-    def _reply(self, status: int, body: str) -> None:
-        payload = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         parsed = urlparse(self.path)
@@ -172,9 +167,6 @@ class _BraveRequestHandler(BaseHTTPRequestHandler):
             self._reply(200, json.dumps(_VIDEO_RESPONSE))
         else:
             self._reply(404, json.dumps({"message": "Not found"}))
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
 
 
 @pytest.fixture()

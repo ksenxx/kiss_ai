@@ -116,8 +116,14 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         return ws
 
     async def _connect_ok(self) -> ClientConnection:
-        """Open + successfully authenticate one WSS connection."""
-        ws = await self._connect("")
+        """Open + successfully authenticate one WSS connection.
+
+        A forwarded visitor is admitted by password only (with none set,
+        remote access is off and the handshake is refused outright), so
+        one is stored and presented.
+        """
+        vc.save_config({"remote_password": "s3cret"})
+        ws = await self._connect("s3cret")
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         self.assertEqual(resp["type"], "auth_ok")
         return ws
@@ -161,11 +167,13 @@ class ReadyFanoutWorkDirTest(_ServerTestBase):
         vc.save_config({"work_dir": str(dir_other)})
 
         ws = await self._connect_ok()
+        # A password-admitted session carries the password on every
+        # frame, as the browser's transport does.
         await ws.send(json.dumps(
-            {"type": "setWorkDir", "workDir": str(dir_mine)},
+            {"type": "setWorkDir", "workDir": str(dir_mine), "password": "s3cret"},
         ))
         await ws.send(json.dumps(
-            {"type": "ready", "tabId": "tab-1", "restoredTabs": []},
+            {"type": "ready", "tabId": "tab-1", "restoredTabs": [], "password": "s3cret"},
         ))
         cfg_event = await self._drain_until(
             ws, lambda m: m.get("type") == "configData",

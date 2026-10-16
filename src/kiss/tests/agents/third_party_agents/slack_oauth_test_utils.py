@@ -18,14 +18,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.tests.agents.third_party_agents.recording_http import start_serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
 
 CLIENT_ID = "kiss-test-slack-client"
 
@@ -100,7 +99,7 @@ class SlackOAuthState:
         }
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _Handler(RecordingHandler):
     server: Any
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
@@ -120,9 +119,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
 
 
 class SlackApiServer(ThreadedHTTPServer):

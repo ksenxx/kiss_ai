@@ -805,17 +805,18 @@ class TestRemoteAccessOffPages(_LiveServer):
             self.skipTest("machine has no non-loopback interface")
         return ip
 
-    async def test_403_page_points_at_install_sh_not_config_json(self) -> None:
+    async def test_403_page_names_settings_and_install_sh_not_config_json(self) -> None:
         ip = self._require_lan_ip()
         status, headers, body = await self._http_get("/", host=ip)
         self.assertEqual(status, 403)
         self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
         text = body.decode("utf-8")
         self.assertIn("This device is not allowed yet", text)
-        # The password is chosen and printed by install.sh; the page
-        # must not send the visitor to a Settings box that cannot set it.
-        self.assertIn("run install.sh to set a remote password", text)
-        self.assertNotIn("open Settings", text)
+        # The password is set in Settings > Remote password on the machine
+        # itself (its loopback browser needs no password) or by install.sh;
+        # the page must name both ways.
+        self.assertIn("set a remote password in Settings", text)
+        self.assertIn("install.sh", text)
         # The config path is kept for administrators, folded away.
         details = text[text.index("<details>"):text.index("</details>")]
         self.assertIn(f"remote_password in ~/{HOME_DIR}/config.json", details)

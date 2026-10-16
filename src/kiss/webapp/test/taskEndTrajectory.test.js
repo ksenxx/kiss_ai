@@ -445,7 +445,6 @@ function testAdjacentReplayFoldsItsOwnContainer() {
     task: 'do something',
     task_id: 'earlier-run',
     events: [
-      {type: 'task_start', task: 'do something'},
       {type: 'tool_call', name: 'Bash', command: 'echo old'},
       {type: 'tool_result', name: 'Bash', content: 'old'},
       {type: 'result', summary: 'old done', success: true},

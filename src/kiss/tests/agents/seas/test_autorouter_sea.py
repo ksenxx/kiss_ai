@@ -81,10 +81,10 @@ def test_sea_methods_follow_the_contract() -> None:
     assert [tool.__name__ for tool in sea.tools([print])][0] == "print"
     assert {tool.__name__ for tool in sea.tools([])} == _TOOL_NAMES
     assert sea.settings({}) == {
-        "model": autorouter_sea.orchestrator_model(),
+        "model": autorouter_sea.ROUTER_MODEL,
         "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
+        "use_web_tools": True,
+        "use_memory": True,
     }
     # The SEA's keys win over what the caller declared below it.
     assert sea.settings({"model": "x", "max_budget": 3.0}) == {
@@ -141,15 +141,15 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
         "BASE\n\nCALLER TEXT\n\n" + autorouter_sea.SYSTEM_PROMPT
     )
     assert "systemPrompt" not in cmd
-    assert cmd["model"] == autorouter_sea.orchestrator_model()
+    assert cmd["model"] == autorouter_sea.ROUTER_MODEL
     assert "toolsFile" not in cmd and "tools" not in cmd
     # ``tools()``: the router's tools come on top of the basic toolset;
     # only a ``none`` tool profile removes it, and nothing stages
     # ``appendBasicTools`` any more.
     assert "appendBasicTools" not in cmd
     assert "isParallel" not in cmd
-    assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
-    assert cmd["useMemory"] is False
+    assert cmd["classifyTasks"] is False and cmd["useWebTools"] is True
+    assert cmd["useMemory"] is True
     assert cmd["toolProfile"] == "full"
     assert {tool.__name__ for tool in cmd["toolsHook"]([])} == _TOOL_NAMES
 
@@ -328,7 +328,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     The scripted model picks a medium model, logs the decision and finishes
     with the pick.  The test checks the tool schemas offered on every step
     (routing tools, ``run_agent``/``run_parallel``/``set_model``/``Bash``
-    present, no browser or memory tools), the system prompt, the real
+    present, browser and memory tools too), the system prompt, the real
     pick — or the real "no runnable model" error on an installation without
     a medium-tier credential — in the tool-result message, and that the
     ledger row landed in ``$KISS_HOME/MODEL_DECISIONS.md`` (not under the
@@ -369,7 +369,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         assert {
             "run_agent", "run_parallel", "set_model", "Bash", "run_commands_parallel", "finish",
         } <= names, names
-        assert not {"go_to_url", "click", "screenshot", "memory_search"} & names, names
+        assert {"go_to_url", "click", "screenshot", "memory_search"} <= names, names
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
         assert autorouter_sea.SYSTEM_PROMPT in system, system[:200]
         assert system.startswith("<identity>"), system[:200]

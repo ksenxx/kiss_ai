@@ -528,7 +528,8 @@ def result_summary(result: str) -> str:
 
     A finished task's result is ``finish()``'s YAML (``success:``,
     ``is_continue:``, ``summary:``), possibly behind the ``ran:`` line
-    :func:`~kiss.agents.sorcar.run_config.with_run_config` prepends.
+    :func:`~kiss.agents.sorcar.agent_dispatch.format_dispatch_result`
+    prepends.
     """
     try:
         parsed = yaml.safe_load(result or "")

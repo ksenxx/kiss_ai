@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import socket
 import threading
-import time
 from collections.abc import Iterator
 
 import pytest
 
 from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend, _config
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -49,16 +49,6 @@ def _read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[s
             lines.append(line)
             if line.startswith(until):
                 return lines
-
-
-def _wait_until(predicate, timeout: float = 6.0) -> bool:
-    """Poll *predicate* until true or *timeout* elapses."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
 
 
 class _IRCServer:
@@ -130,7 +120,7 @@ class TestPingPong:
             conn.sendall(b"PING :alive\r\n")
             _read_lines(conn, "PONG")
             conn.sendall(b":alice!u@h PRIVMSG #chan :hello bot\r\n")
-            assert _wait_until(lambda: not backend._message_queue.empty())
+            assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
             messages, _ = backend.poll_messages("#chan", "")
             assert [m["text"] for m in messages] == ["hello bot"]
             assert messages[0]["user"] == "alice"
@@ -156,10 +146,10 @@ class TestReconnect:
             _read_lines(conn2, "USER ")
             reader2 = backend._reader_thread
             assert reader2 is not None and reader2 is not reader1
-            assert _wait_until(lambda: not reader1.is_alive())
+            assert wait_until(lambda: not reader1.is_alive(), timeout=6.0)
 
             conn2.sendall(b":carol!u@h PRIVMSG #chan :after reconnect\r\n")
-            assert _wait_until(lambda: not backend._message_queue.empty())
+            assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
             messages, _ = backend.poll_messages("", "")
             assert [m["text"] for m in messages] == ["after reconnect"]
             conn1.close()

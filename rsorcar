@@ -579,10 +579,13 @@ KEY_RE='^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*='
 # must start with something other than a blank, a comment sign or a closing
 # quote — an emptied assignment (FOO_API_KEY=, FOO_API_KEY='' as the settings
 # panel would write an empty value, FOO_API_KEY="") is not a key either.  The
-# second form is fish's ``set -gx FOO_API_KEY value``.
+# second form is fish's ``set -gx FOO_API_KEY value``.  The Amazon Bedrock
+# credentials (a bearer token or an access key pair) follow AWS's own naming
+# and are listed by name.
 KEY_VALUE_RE="([\"']?[^[:space:]\"'#]|[\"'][^\"'])"
-KEY_LINE_RE="^[[:space:]]*(export[[:space:]]+)?[A-Z0-9_]*(API_KEY|_TOKEN)[[:space:]]*=[[:space:]]*$KEY_VALUE_RE"
-FISH_KEY_LINE_RE="^[[:space:]]*set[[:space:]]+(-[A-Za-z]+[[:space:]]+)*[A-Z0-9_]*(API_KEY|_TOKEN)[[:space:]]+$KEY_VALUE_RE"
+KEY_NAME_RE="([A-Z0-9_]*(API_KEY|_TOKEN)|AWS_BEARER_TOKEN_BEDROCK|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)"
+KEY_LINE_RE="^[[:space:]]*(export[[:space:]]+)?$KEY_NAME_RE[[:space:]]*=[[:space:]]*$KEY_VALUE_RE"
+FISH_KEY_LINE_RE="^[[:space:]]*set[[:space:]]+(-[A-Za-z]+[[:space:]]+)*$KEY_NAME_RE[[:space:]]+$KEY_VALUE_RE"
 find_rc_file() {
     local best="" best_n=0 candidate n
     for candidate in "$HOME"/.*rc; do

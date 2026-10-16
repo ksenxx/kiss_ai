@@ -449,8 +449,13 @@ class TestFramePassword(_ServerCase):
         self.assertEqual((await self._recv(ws))["type"], "pong")
         await ws.close()
 
-    async def test_config_carries_the_password_but_cannot_set_it(self) -> None:
-        """configData shows the password; saveConfig with another one is ignored."""
+    async def test_config_carries_the_password_and_save_config_sets_it(self) -> None:
+        """configData shows the password; saveConfig with another one stores it.
+
+        The saving session is told the new password
+        (``remotePasswordChanged``) and carries on with it; the full
+        story is in test_save_config_remote_password.py.
+        """
         ws = await self._authed()
         await ws.send(json.dumps({"type": "getConfig", "password": self.password}))
         while (reply := await self._recv(ws))["type"] != "configData":
@@ -458,11 +463,16 @@ class TestFramePassword(_ServerCase):
         self.assertEqual(reply["config"]["remote_password"], self.password)
         await ws.send(json.dumps({
             "type": "saveConfig", "password": self.password,
-            "config": {"remote_password": "other", "max_budget": 7},
+            "config": {"remote_password": "Other-Password-2", "max_budget": 7},
         }))
+        while (reply := await self._recv(ws))["type"] != "remotePasswordChanged":
+            pass
+        self.assertEqual(reply["password"], "Other-Password-2")
         while (reply := await self._recv(ws))["type"] != "configData":
             pass
-        self.assertEqual(reply["config"]["remote_password"], self.password)
+        self.assertEqual(reply["config"]["remote_password"], "Other-Password-2")
         self.assertEqual(reply["config"]["max_budget"], 7)
-        self.assertEqual(load_config()["remote_password"], self.password)
+        self.assertEqual(load_config()["remote_password"], "Other-Password-2")
+        await ws.send(json.dumps({"type": "ping", "password": "Other-Password-2"}))
+        self.assertEqual((await self._recv(ws))["type"], "pong")
         await ws.close()

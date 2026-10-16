@@ -31,7 +31,7 @@ import yaml
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.agent_dispatch import RunOptions, _run_agent, dispatch_result
-from kiss.agents.sorcar.run_config import note_pinned, run_config_line, with_run_config
+from kiss.agents.sorcar.run_config import note_pinned, run_config_line
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
@@ -252,24 +252,6 @@ class Sea(BaseSea):
         line = run_config_line({**settings, "timeout": 30.0})
         assert line.startswith(f"plain model={OTHER_MODEL} tools=full budget=$0.20 ")
         assert line.endswith("pinned=none")
-
-
-
-def test_with_run_config_prefixes_a_non_mapping_result() -> None:
-    """A result that is not YAML mapping gets the line prefixed instead of re-dumped."""
-    settings = {"sea": "x", "model": "m"}
-    assert with_run_config("plain text", settings) == (
-        "ran: x model=m tools=full budget=none timeout=none "
-        "inherited=none pinned=none\nplain text"
-    )
-    assert with_run_config("- a\n- b\n", settings).startswith("ran: x model=m")
-    assert with_run_config("key: [unclosed", settings).startswith("ran: x model=m")
-    out = with_run_config("ran: old\nsuccess: true\n", settings)
-    assert yaml.safe_load(out) == {
-        "ran": run_config_line(settings),
-        "success": True,
-    }
-
 
 def test_run_config_line_shortens_long_values() -> None:
     """Overridden values longer than 40 characters are cut; empty ones read ``empty``."""

@@ -145,12 +145,26 @@ def test_unknown_agent_error() -> None:
     assert "slack" in out
 
 
-def test_channel_name_is_normalized() -> None:
-    # Case/whitespace variants still resolve; the unreachable daemon
-    # then fails the dispatch cleanly instead of "unknown agent".
-    out = run_agent("say hi", "  NTFY ")
+@pytest.mark.parametrize(
+    "alias,canonical",
+    [
+        ("  NTFY ", "ntfy"),
+        ("Home Assistant", "homeassistant"),
+        ("home_assistant", "homeassistant"),
+        ("home-assistant", "homeassistant"),
+        ("SLACK", "slack"),
+    ],
+)
+def test_channel_alias_normalization(alias: str, canonical: str) -> None:
+    """Case, whitespace, spaces, underscores and hyphens all resolve to the channel.
+
+    A hyphen is a channel-name separator, not a path marker; the
+    unreachable daemon then fails the dispatch cleanly instead of
+    "unknown agent".
+    """
+    out = run_agent("say hi", alias)
     assert "unknown agent" not in out
-    assert out.startswith("Error: the ntfy agent task could not run:")
+    assert out.startswith(f"Error: the {canonical} agent task could not run:")
 
 
 def test_empty_task_error() -> None:
@@ -163,27 +177,6 @@ def test_bad_budget_error() -> None:
     for bad in ("nan", "inf", "0", "-2"):
         out = run_agent("say hi", "slack", max_budget=bad)
         assert out == (f"Error: max_budget must be a positive finite number, got {bad!r}.")
-
-
-def test_channel_alias_normalization() -> None:
-    # The SYSTEM.md directive names channels with natural spelling;
-    # case, spaces, hyphens, and underscores must all resolve.
-    for alias, canonical in (
-        ("Home Assistant", "homeassistant"),
-        ("home_assistant", "homeassistant"),
-        ("SLACK", "slack"),
-    ):
-        out = run_agent("say hi", alias)
-        assert "unknown agent" not in out
-        assert out.startswith(f"Error: the {canonical} agent task could not run:")
-
-
-def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
-    # A hyphen is a channel-name separator, not a path marker: the
-    # alias resolves to the channel even though "-" appears in it.
-    out = run_agent("say hi", "home-assistant")
-    assert "unknown agent" not in out
-    assert out.startswith("Error: the homeassistant agent task could not run:")
 
 
 def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
@@ -905,7 +898,6 @@ def test_run_agent_tool_and_sorcar_wiring() -> None:
     tool = make_run_agent_tool("")
     assert tool.__name__ == "run_agent"
     assert "slack" in (tool.__doc__ or "")
-    assert Path(agent_dispatch.__file__).parent.parts[-2:] == ("agents", "sorcar")
     loaded = subprocess.run(
         [
             sys.executable,

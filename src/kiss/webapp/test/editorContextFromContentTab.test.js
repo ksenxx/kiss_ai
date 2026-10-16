@@ -17,6 +17,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
+const pages = [];
 
 function makePage() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -30,6 +31,7 @@ function makePage() {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  pages.push(win);
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
@@ -360,10 +362,11 @@ async function testBrowserTabIsNoEditorContext() {
       console.error(err && err.stack ? err.stack : err);
     }
   }
+  for (const win of pages) win.close();
   if (failures > 0) {
     console.error(failures + ' test(s) failed');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log('All ' + tests.length + ' editorContextFromContentTab tests passed');
-  process.exit(0);
 })();

@@ -30,8 +30,15 @@ from kiss.tests.local_ws import LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 INSTALL_SH = """#!/bin/bash
+: > "./{stamp}"
 pwd > "{marker}"
 exit 0
+"""
+"""Stub installer: touches *stamp* in its working directory, then records that directory.
+
+The stamp is what the tests check — Git for Windows' bash prints MSYS
+paths (``/c/Users/...``, ``/tmp/...``) from ``pwd``, so the recorded
+directory is for diagnostics only.
 """
 
 
@@ -112,12 +119,12 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         flag.write_text("2026-10-15T00:00:00Z\n")
         self.assertEqual(len(self._notices(await self._ready_events())), 1)
 
-    async def _run_update(self, marker: Path) -> str:
-        """Run the daemon's update with a stub installer; return its cwd."""
+    async def _run_update(self, marker: Path, stamp: str) -> str:
+        """Run the daemon's update with a stub installer; return the cwd it recorded."""
         install_root = Path(self.tmpdir) / "kiss_ai"
         install_root.mkdir(exist_ok=True)
         script = install_root / "install.sh"
-        script.write_text(INSTALL_SH.format(marker=marker))
+        script.write_text(INSTALL_SH.format(marker=marker, stamp=stamp))
         script.chmod(0o755)
         self.server._install_root = install_root
         self.server._update_log_path = Path(self.tmpdir) / "update.log"
@@ -140,11 +147,18 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         work_dir = Path(self.tmpdir) / "projects"
         work_dir.mkdir()
         self.server.work_dir = str(work_dir)
-        cwd = await self._run_update(Path(self.tmpdir) / "cwd-1")
-        self.assertEqual(Path(cwd).resolve(), work_dir.resolve())
+        await self._assert_update_runs_in(work_dir, Path(self.tmpdir) / "cwd-1")
 
     async def test_update_without_a_work_dir_runs_from_home(self) -> None:
         self.server.work_dir = str(Path(self.tmpdir) / "gone")
-        cwd = await self._run_update(Path(self.tmpdir) / "cwd-2")
-        self.assertEqual(Path(cwd).resolve(), Path.home().resolve())
+        await self._assert_update_runs_in(Path.home(), Path(self.tmpdir) / "cwd-2")
+
+    async def _assert_update_runs_in(self, expected: Path, marker: Path) -> None:
+        """Run the daemon's update and check the stub installer ran inside *expected*."""
+        stamp = f".kiss-test-update-cwd-{marker.name}-{os.getpid()}"
+        try:
+            cwd = await self._run_update(marker, stamp)
+            self.assertTrue((expected / stamp).is_file(), f"installer ran in {cwd!r}")
+        finally:
+            (expected / stamp).unlink(missing_ok=True)
 

@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import machines as mach
+from kiss.tests.agents.sorcar.test_machines import fake_ssh_only
 
 _FAKE_SSH = '''#!__PYTHON__
 """Stand-in for ssh: ``-N -L`` binds the local port and serves nothing."""
@@ -54,6 +55,7 @@ def _wait_for(predicate: Callable[[], bool], timeout: float) -> bool:
     return predicate()
 
 
+@fake_ssh_only
 def test_registry_change_during_tunnel_open_closes_the_orphan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

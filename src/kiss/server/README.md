@@ -177,7 +177,7 @@ runs the task text as its prompt.
    │ validate path exists                    │   BaseSea subclass (sea_commands.load_sea)
    │ resolve to absolute                     │ settings: fold settings() over the class's
    │ send JSON {"seaPath": "…", …}        │   MRO, base first (WorkerSea / ChannelSea lay
-   │ over the local WSS endpoint             │   their defaults there); type-checked
+   │ over the local ws:// endpoint           │   their defaults there); type-checked
    │                                         ▼
    │                                     ChannelSea: enter the workspace
    │                                         │ (held until the run ends)
@@ -744,6 +744,25 @@ the same `new_tab` from `RemoteTabs.replay_to`.  The result's `ran:`
 line ends with `machine=<name>`; an unregistered name or host is
 refused with the registered names before anything runs.
 
+The Terminal and Browser buttons of a chat bound to a machine open
+the shell, or the page, on that machine (`server.remote_views`): the
+webapp stamps `terminalOpen`/`browserOpen` with `machine`, and
+`RemoteViews` keeps one authenticated stream per machine in use
+(opened on the first such command, closed once it carries no terminal
+or page), forwarding the terminal and browser commands without
+`connId`/`machine` and relaying the machine's `terminal*` and browser
+events back stamped `machine`.  A terminal's events go to the
+connection that opened it (a dropped connection's shell is hung up
+after the terminal grace period unless a reload claims it); a page's
+tab id is namespaced `browser__N@machine`, so a tab-addressed browser
+command finds its machine from the id, its frames go to the local
+connections whose last `browserViewport` for the tab was visible, and
+its `openBrowserTab` goes to every client (the focused reply to a
+`browserOpen` to its requester alone).  `replay_to` tells a connecting
+client the known remote pages in one `browserTabs {remote: true, tabs}`
+snapshot, each tab stamped `machine`; a lost stream ends its terminals with a `terminalError`
+naming the machine and closes its pages everywhere.
+
 `run_parallel(tasks, ..., agent=...)` is N `run_agent` calls
 (`agent_dispatch.run_agents_parallel`): one `start_run_agent` per
 task with the same `agent`, arguments and `options`, so every child is
@@ -879,7 +898,8 @@ The `run()` parameters without a `settings()` key (the allowlist is
   `inherited=` list from there.
 - **`endpoint_file`** — selects which daemon to connect to (default:
   `$KISS_SORCAR_LOCAL`, else `$KISS_HOME/sorcar-local.json`, the file the
-  daemon writes with its WSS URL and per-start local token); the script
+  daemon writes with its plain-loopback `ws://` URL and per-start local
+  token); the script
   already runs on that daemon.
 - **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
   CALLING task's identity (how `run_agent` nests a dispatched run under
@@ -1742,18 +1762,28 @@ class TaskResult:
   daemon; copies this daemon's local CA, `$KISS_HOME/tls/ca.pem`, into
   that home's `tls/trusted-clients/<host>-<fingerprint>.pem`, and reads
   back the daemon port and the machine's own CA; the machine is then
-  registered at `https://<host>:<port>` with its CA pinned and every
-  later connection dials that port directly, presenting this daemon's
-  client certificate, `$KISS_HOME/tls/client.pem`, which the machine's
-  daemon admits like its own local token whatever its remote password
-  and whether or not the peer is on localhost; the daemon picks a new
-  file up within two seconds, deleting the file revokes the machine at
-  its next connection, and a daemon without a `trusted-clients`
-  directory predates enrollment and is reported as such; no ssh process
-  outlives the enrollment, so the machine's daemon port must be
-  reachable from here; `$KISS_SSH_CONFIG` names the ssh config to use,
-  an alias of it resolves through `ssh -G`, and the login shell there
-  must be a POSIX shell), or `https://host:port` with the
+  registered at `https://<host>:<port>` with its CA pinned, and every
+  later connection goes through one persistent `ssh -N -L` port-forward
+  per login (`machines.SshTunnel`, from a local loopback port to
+  `127.0.0.1:<port>` on the machine, kept for the daemon's lifetime and
+  reopened on the next connection once its ssh process has died), so
+  the daemon port need not be reachable from here, only the ssh port;
+  through it this daemon presents its client certificate,
+  `$KISS_HOME/tls/client.pem`, and the machine's daemon, which sniffs
+  the first byte of every connection, serves the forwarded TLS like a
+  direct one and admits the link as it admits a browser on its own
+  loopback, whatever its remote password; the daemon picks a new
+  `trusted-clients` file up within two seconds (`ENROLL_TIMEOUT`, 30 s,
+  bounds the first handshake's retries), a daemon without a
+  `trusted-clients` directory predates enrollment and is reported as
+  such, and since the link arrives as a loopback peer, revoking the
+  machine means removing its ssh access there (deleting the
+  `trusted-clients` file only refuses the certificate on direct,
+  non-loopback connections); the `ssh` client's own configuration
+  applies, or `$KISS_SSH_CONFIG` names the config file to use, an alias
+  of it resolves through `ssh -G`, the login must work non-interactively
+  (`BatchMode`), allow TCP forwarding and land in a POSIX shell, and an
+  unknown host key is accepted on first use), or `https://host:port` with the
   machine's remote password, which pins the remote `kiss-web`'s TLS
   certificate and checks the password with one handshake before saving;
   the name defaults to the host; `/machine remove <name>` forgets it,

@@ -191,7 +191,7 @@ def test_age_text_and_result_clipping() -> None:
     assert len(clipped) == sea.MAX_RESULT_CHARS and clipped.endswith("…")
 
 
-def test_save_and_load_recommendations(tmp_path: Path) -> None:
+def test_save_and_load_recommendations() -> None:
     """Exactly five non-empty sentences are stored atomically; anything else is refused."""
     path = sea.recommendations_file()
     path.unlink(missing_ok=True)

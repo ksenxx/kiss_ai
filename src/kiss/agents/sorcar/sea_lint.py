@@ -109,6 +109,7 @@ from kiss.agents.sorcar.sea_commands import (
     model_sea,
     own_settings,
 )
+from kiss.agents.sorcar.sea_docs import GENERATED_FILES, REPO_ROOT
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
     RENAMED_SETTINGS,
@@ -220,14 +221,13 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
 
 
 PROSE_FILES = (
-    "website/kisssorcar.github.io/docs/sea-commands.md",
-    "website/kisssorcar.github.io/docs/cli.md",
-    "src/kiss/server/README.md",
+    *GENERATED_FILES,
     "src/kiss/agents/sorcar/sea_settings.py",
     "src/kiss/agents/sorcar/agent_dispatch.py",
     "src/kiss/agents/sorcar/sorcar_agent.py",
     "src/kiss/agents/sorcar/run_config.py",
     "src/kiss/agents/sorcar/sea_apply.py",
+    "src/kiss/agents/sorcar/skills.py",
 )
 """Files (relative to the checkout) whose prose the ``stale-prose`` rule reads."""
 
@@ -297,7 +297,7 @@ def lint_prose(root: Path | None = None) -> list[Finding]:
     A file that does not exist (an installed package without the
     website) is skipped.
     """
-    root = root or Path(__file__).resolve().parents[4]
+    root = root or REPO_ROOT
     findings: list[Finding] = []
     for rel in PROSE_FILES:
         path = root / rel

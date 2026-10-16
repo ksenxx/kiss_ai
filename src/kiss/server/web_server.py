@@ -4,19 +4,23 @@
 # add your name here
 """Standalone web server for remote KISS Sorcar access.
 
-Provides HTTPS + WSS access to the Sorcar chat interface from any
+Provides HTTP(S) + WS(S) access to the Sorcar chat interface from any
 browser, including mobile devices.  Uses the ``websockets`` library to
-serve both HTTPS (for the HTML page and static media assets) and
-WSS (for bidirectional command/event communication) on a single port.
-TLS is always enabled; when no explicit certificate is provided a
-machine-local CA and a server certificate signed by it are auto-generated
-in ``~/.kiss/tls/`` (:mod:`kiss.core.tls_certs`).  Trusting the CA once
-(``kiss-web --trust-ca`` on this machine, the ``/ca.crt`` download on a
-phone) removes the browser warning on the Local and LAN URLs.
+serve both the HTML page and static media assets and the WebSocket
+(for bidirectional command/event communication) on a single port.
+Peers on this machine's loopback are served plain HTTP; everything else
+(LAN, tunnel, machine links) speaks TLS, decided per connection by
+sniffing the first byte (see ``_HeadAwareServerConnection``).  When no
+explicit certificate is provided a machine-local CA and a server
+certificate signed by it are auto-generated in ``$KISS_HOME/tls/``
+(:mod:`kiss.core.tls_certs`).  Trusting the CA once (``kiss-web
+--trust-ca`` on this machine, the ``/ca.crt`` download on a phone)
+removes the browser warning on the LAN URL.
 
 Authentication uses the ``remote_password`` setting from
-``~/.kiss/config.json`` (the password ``install.sh`` printed; every
-frame of a password-authenticated client is checked against it).  A
+``$KISS_HOME/config.json`` (set in Settings > Remote password on the
+machine itself or by ``install.sh``; every frame of a
+password-authenticated client is checked against it).  A
 browser on this machine itself (a loopback peer with no forwarded
 client IP) is admitted without it.  While no password is set, the server is
 localhost-only: non-loopback peers are refused with 403 (HTTP and the
@@ -31,7 +35,7 @@ get a **fixed** (non-dynamic) URL, create a named tunnel in the
 `Cloudflare Zero Trust dashboard <https://one.dash.cloudflare.com/>`_,
 copy its token, and set it via the ``CLOUDFLARE_TUNNEL_TOKEN``
 environment variable or the ``tunnel_token`` key in
-``~/.kiss/config.json``.
+``$KISS_HOME/config.json``.
 
 Usage::
 
@@ -101,7 +105,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core import tls_certs
 from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
-from kiss.core.browser_handoff import set_browser_tab_opener
+from kiss.core.browser_handoff import in_docker, set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
@@ -170,7 +174,7 @@ def _voice_model_cache_path() -> Path:
     Resolved on every call so a ``KISS_HOME`` set after this module
     was imported is honoured — freezing it at import time made the
     browser wake-word pipeline re-download the 40MB archive into an
-    empty test home instead of reusing ``~/.kiss/models``.  Assigning
+    empty test home instead of reusing ``$KISS_HOME/models``.  Assigning
     ``web_server.VOICE_MODEL_CACHE`` remains a supported test
     override, matching the lazy ``_URL_FILE`` attribute below.
     """
@@ -1156,7 +1160,7 @@ def _discover_tunnel_url_from_metrics() -> str | None:
 
     Scans running ``cloudflared`` processes for their metrics port, then
     queries the ``/quicktunnel`` endpoint to get the assigned hostname.
-    This is a fallback for when ``~/.kiss/remote-url.json`` does not
+    This is a fallback for when ``$KISS_HOME/remote-url.json`` does not
     exist (e.g. because ``_start_quick_tunnel`` failed to capture the
     URL from stderr).
 
@@ -1596,7 +1600,7 @@ def _try_adopt_existing_cloudflared(
 ) -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
-    Reads ``~/.kiss/cloudflared.pid``, verifies the pid is alive and
+    Reads ``$KISS_HOME/cloudflared.pid``, verifies the pid is alive and
     the metrics ``/ready`` endpoint reports ``readyConnections > 0``,
     and re-discovers the public URL via the ``/quicktunnel`` endpoint
     (falling back to the URL recorded in the pidfile when the metrics
@@ -2003,7 +2007,7 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
 def _wait_for_remote_password(timeout: float = 30.0) -> str:
     """Block up to *timeout* seconds for ``remote_password`` to appear.
 
-    Polls ``~/.kiss/config.json`` every 500 ms.  This eliminates the
+    Polls ``$KISS_HOME/config.json`` every 500 ms.  This eliminates the
     boot-time race where ``kiss-web`` is (re)started *before* the
     installer or the settings page has written the password to disk:
     instead of refusing to start the tunnel and exiting (which causes
@@ -2036,7 +2040,7 @@ def _save_url_file(
     """Write the active server URLs to ``url_file``.
 
     Creates the parent directory if needed.  The default file location
-    is ``~/.kiss/remote-url.json``, which is read by ``kiss-web --url``
+    is ``$KISS_HOME/remote-url.json``, which is read by ``kiss-web --url``
     so users can discover the remote URL without digging through log
     files.  Tests inject a temporary path to avoid touching the live
     file the ``kiss-web`` daemon maintains.
@@ -2366,7 +2370,7 @@ def _trust_local_ca() -> None:
     """``kiss-web --trust-ca``: trust the local CA in this user's browsers.
 
     Creates the CA first when no daemon has run yet, then installs
-    ``~/.kiss/tls/ca.pem`` into every trust store found
+    ``$KISS_HOME/tls/ca.pem`` into every trust store found
     (:func:`kiss.server.tls_trust.trust_local_ca`) and prints one line
     per store plus the phone instructions.
     """
@@ -2378,7 +2382,7 @@ def _trust_local_ca() -> None:
 
 
 def _print_url() -> None:
-    """Print the active remote URL from ``~/.kiss/remote-url.json``.
+    """Print the active remote URL from ``$KISS_HOME/remote-url.json``.
 
     Prints the tunnel URL if available, otherwise the local URL.
     Exits with code 1 if the server is not running or the file is
@@ -2644,7 +2648,7 @@ def _create_ssl_context(
     """Create an SSL context for the HTTPS/WSS server.
 
     If *certfile* and *keyfile* are provided, loads them directly.
-    Otherwise uses the machine-local CA in ``~/.kiss/tls/`` to issue a
+    Otherwise uses the machine-local CA in ``$KISS_HOME/tls/`` to issue a
     server certificate covering ``localhost``, the hostname, the
     loopback addresses and *lan_ips*, re-issuing it when it is missing,
     expiring, signed by a different CA or lacking one of the IPs.
@@ -2679,32 +2683,45 @@ def _trusted_clients_dir() -> Path:
     return _tls_dir() / tls_certs.TRUSTED_CLIENTS_DIR
 
 
-def _load_trusted_client_cas(ctx: ssl.SSLContext, loaded: set[bytes]) -> list[str]:
-    """Load the enrolled client CAs not yet in *loaded* into *ctx*; return their names.
+def _read_trusted_client_cas() -> list[tuple[str, bytes]]:
+    """Return the ``(name, PEM)`` of every file in :func:`_trusted_clients_dir`.
 
-    Every ``*.pem`` of :func:`_trusted_clients_dir` (created when
-    missing: its presence tells an enrolling machine that this daemon
-    understands enrollment) is added to the context's trust store and
-    recorded in *loaded* (by content, so a file re-read on every call
-    is loaded once).  Once any CA is loaded the context requests a
-    client certificate (``CERT_OPTIONAL``: a browser without one still
-    connects, a certificate that chains to no loaded CA fails the
-    handshake).  A CA cannot be unloaded from a live context, so
-    revocation is :func:`tls_certs.enrolled_client_ca`'s re-check
-    against the files on disk at every handshake.  A file that is not
-    a certificate is logged once and skipped.
+    Creates the directory when missing (its presence tells an enrolling
+    machine that this daemon understands enrollment).  Disk I/O: call
+    it off the event loop (``asyncio.to_thread``).
     """
     trusted_dir = _trusted_clients_dir()
     trusted_dir.mkdir(parents=True, exist_ok=True)
+    return tls_certs.trusted_client_cas(trusted_dir)
+
+
+def _load_trusted_client_cas(
+    ctx: ssl.SSLContext, loaded: set[bytes], cas: list[tuple[str, bytes]],
+) -> list[str]:
+    """Load the enrolled client CAs of *cas* not yet in *loaded* into *ctx*; return their names.
+
+    *cas* is :func:`_read_trusted_client_cas`'s list.  Every CA is added
+    to the context's trust store and recorded in *loaded* (by content,
+    so a file re-read on every call is loaded once).  Once any CA is
+    loaded the context requests a client certificate
+    (``CERT_OPTIONAL``: a browser without one still connects, a
+    certificate that chains to no loaded CA fails the handshake).  A CA
+    cannot be unloaded from a live context, so revocation is
+    :func:`tls_certs.enrolled_client_ca`'s re-check against the files
+    on disk at every handshake.  A file that is not a certificate is
+    logged once and skipped.  No disk I/O: safe on the event loop.
+    """
     added: list[str] = []
-    for name, pem in tls_certs.trusted_client_cas(trusted_dir):
+    for name, pem in cas:
         if pem in loaded:
             continue
         loaded.add(pem)
         try:
             ctx.load_verify_locations(cadata=pem.decode("ascii"))
         except (ssl.SSLError, ValueError, UnicodeDecodeError):
-            logger.warning("Ignoring %s/%s.pem: not a PEM certificate", trusted_dir, name)
+            logger.warning(
+                "Ignoring %s/%s.pem: not a PEM certificate", _trusted_clients_dir(), name,
+            )
             continue
         added.append(name)
         ctx.verify_mode = ssl.CERT_OPTIONAL
@@ -4560,9 +4577,11 @@ def _close_orphaned_listener(bind: asyncio.Future[WebSocketServer]) -> None:
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
-    Serves the Sorcar chat page over HTTPS and bridges commands/events
-    over WSS.  TLS is always enabled; a self-signed certificate is
-    auto-generated in ``~/.kiss/tls/`` when *certfile*/*keyfile* are not
+    Serves the Sorcar chat page and bridges commands/events over a
+    WebSocket: plain HTTP for peers on this machine's loopback, TLS for
+    everything else (see ``_HeadAwareServerConnection``); a self-signed
+    certificate is auto-generated in ``$KISS_HOME/tls/`` when
+    *certfile*/*keyfile* are not
     provided.  Optionally starts a ``cloudflared`` tunnel so the server
     is reachable from the public internet without manual port-forwarding
     or DNS setup.
@@ -4574,10 +4593,10 @@ class RemoteAccessServer:
     A named tunnel's public hostname is configured in the Cloudflare
     Zero Trust dashboard and is **not** embedded in the token, nor
     echoed by ``cloudflared`` in a parseable form.  To advertise the
-    public URL to clients (in ``~/.kiss/remote-url.json`` and via the
+    public URL to clients (in ``$KISS_HOME/remote-url.json`` and via the
     ``remote_url`` WebSocket broadcast), the user must supply that URL
     via *tunnel_url*, the ``CLOUDFLARE_TUNNEL_URL`` env var, or the
-    ``tunnel_url`` key in ``~/.kiss/config.json``.
+    ``tunnel_url`` key in ``$KISS_HOME/config.json``.
 
     Args:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
@@ -4792,12 +4811,12 @@ class RemoteAccessServer:
                     403,
                     "This device is not allowed yet",
                     "Remote access to this KISS Sorcar server is turned "
-                    "off. On the computer running KISS Sorcar, run "
-                    "install.sh to set a remote password; then come "
-                    "back to this page.",
+                    "off. On the computer running KISS Sorcar, set a "
+                    "remote password in Settings (or run install.sh); "
+                    "then come back to this page.",
                     "Only localhost may connect while no remote password "
                     f"is set (remote_password in ~/{HOME_DIR}/config.json); "
-                    "run install.sh to set one.",
+                    "set one in Settings on that computer or run install.sh.",
                 )
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
@@ -5154,6 +5173,7 @@ class RemoteAccessServer:
             self._agent_server.drop_connection_state(conn_state["conn_id"])
             self._agent_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._agent_server.terminals.viewer_gone(conn_state["conn_id"])
+            self._server_api.remote_views.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
@@ -5171,18 +5191,25 @@ class RemoteAccessServer:
         clients, machine links and loopback browsers (``"local"`` and
         ``"loopback"``) are always accepted.
 
-        A client that rotates the password itself (Settings > Rotate,
-        the ``rotateRemotePassword`` frame) learns the new one from the
-        ``remotePasswordRotated`` event, but frames it sent before that
+        A client that changes the password itself (Settings > Remote
+        password, a ``saveConfig`` frame carrying a different
+        ``remote_password``) learns the new one from the
+        ``remotePasswordChanged`` event, but frames it sent before that
         event reached it (a command in flight, the ping that follows a
         reconnect's queued batch) still carry the one it was admitted
         with.  Those are honoured: ``conn_state["rotated_from"]`` keeps
-        that password from the rotate frame until the connection's
+        that password from the saving frame until the connection's
         first frame with the password in force, which ends the
         allowance.  It is per connection (gone with the socket) and
         never widens who is admitted: that connection was already in.
         Every other password-authenticated client is shut out at its
         next frame, as before.
+
+        An EMPTY stored password means remote access is off: every
+        frame of every password-authenticated client is refused, the
+        one that cleared the password included (its ``saveConfig``
+        was the last frame it got served), before the equality and
+        in-flight checks, which would otherwise admit a bare frame.
         """
         client_pw = cmd.pop("password", "")
         if kind != "remote":
@@ -5190,10 +5217,16 @@ class RemoteAccessServer:
         if not isinstance(client_pw, str):
             client_pw = ""
         stored = (await asyncio.to_thread(load_config)).get("remote_password", "")
+        if not stored:
+            conn_state.pop("rotated_from", None)
+            return False
         if password_accepted(client_pw, stored):
             conn_state.pop("rotated_from", None)
-            if cmd.get("type") == "rotateRemotePassword":
-                conn_state["rotated_from"] = stored
+            if cmd.get("type") == "saveConfig":
+                cfg = cmd.get("config")
+                new_pw = cfg.get("remote_password") if isinstance(cfg, dict) else None
+                if isinstance(new_pw, str) and new_pw != stored:
+                    conn_state["rotated_from"] = stored
             return True
         rotated_from = conn_state.get("rotated_from", "")
         return bool(rotated_from) and password_accepted(client_pw, rotated_from)
@@ -5433,7 +5466,7 @@ class RemoteAccessServer:
 
         The web server locates the installer via
         :func:`_find_install_script` and runs it as a detached
-        subprocess (output appended to ``~/.kiss/update.log``) since a
+        subprocess (output appended to ``$KISS_HOME/update.log``) since a
         remote browser has no terminal.  When the clone's
         ``install.sh`` is missing, the curl bootstrap
         (:func:`_bootstrap_install_url`) runs instead, which recreates
@@ -5751,14 +5784,14 @@ class RemoteAccessServer:
         self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
 
     async def _handle_update_models(self, conn_id: str = "") -> None:
-        """Refresh ``~/.kiss/MODEL_INFO.json`` via ``update_models.py``.
+        """Refresh ``$KISS_HOME/MODEL_INFO.json`` via ``update_models.py``.
 
         Services the settings panel's "Update Models" button: runs
         :data:`_update_models_argv` —
         ``kiss.scripts.update_models --model-info
         $KISS_HOME/MODEL_INFO.json`` in this daemon's interpreter — as a
         detached subprocess whose output is appended to
-        ``~/.kiss/update_models.log``.  The script seeds a missing
+        ``$KISS_HOME/update_models.log``.  The script seeds a missing
         target from the bundled catalog, fetches the latest vendor
         pricing/context tables, capability-tests new models, and
         rewrites the user-local catalog atomically.  Every process
@@ -7252,7 +7285,11 @@ class RemoteAccessServer:
         address for the local machine) and ``lanUrls`` (the
         ``https://<lan-ip>:PORT`` addresses for other devices on the
         LAN) so the settings panel and the welcome page can show how
-        to reach the webapp alongside the Cloudflare URL.
+        to reach the webapp alongside the Cloudflare URL.  ``inDocker``
+        says whether the daemon runs in a Docker container, where none
+        of those URLs reaches it from outside (the container's ports
+        are published by whoever ran it): the settings panel then shows
+        no URL bars.
 
         Blocking (reads the stored ntfy topic and, via
         :meth:`_lan_urls`, the config file); callers on the event loop
@@ -7271,6 +7308,7 @@ class RemoteAccessServer:
             "loopbackUrl": self._loopback_url,
             "lanUrls": self._lan_urls(),
             "localCa": self._serves_local_ca,
+            "inDocker": in_docker(),
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
@@ -7866,9 +7904,8 @@ class RemoteAccessServer:
             # setting (config key ``use_web_browser``).
             "useWebTools": cmd.get("useWebTools"),
             # Same contract for pre-run task classification: the task
-            # runner falls back to the persisted "Classify tasks
-            # before running" setting (config key ``classify_tasks``)
-            # when no boolean override is carried.
+            # runner falls back to the persisted config key
+            # ``classify_tasks`` when no boolean override is carried.
             "classifyTasks": cmd.get("classifyTasks"),
             # Same contract for persistent memory: absent/non-bool
             # means "no per-run override" and the agent resolves the
@@ -8320,7 +8357,7 @@ class RemoteAccessServer:
     async def _clear_tunnel_url(self) -> None:
         """Withdraw the advertised public URL after stopping the tunnel.
 
-        Rewrites ``~/.kiss/remote-url.json`` with only the local URL,
+        Rewrites ``$KISS_HOME/remote-url.json`` with only the local URL,
         resets :attr:`_active_url`, and broadcasts the change to
         connected clients — the mirror image of what
         :meth:`_restart_tunnel_url` publishes after a start.  Used by
@@ -8333,7 +8370,7 @@ class RemoteAccessServer:
         await self._post_url_if_changed()
 
     async def _restart_tunnel_url(self) -> None:
-        """Start a fresh tunnel and refresh ``~/.kiss/remote-url.json``.
+        """Start a fresh tunnel and refresh ``$KISS_HOME/remote-url.json``.
 
         Always rewrites the URL file (even on failure, so stale data
         does not linger), updates :attr:`_active_url`, and broadcasts
@@ -8576,7 +8613,7 @@ class RemoteAccessServer:
 
         1. **Tunnel health** — if the ``cloudflared`` process died
            (e.g. macOS killed it during sleep), restart it.
-        2. **URL-file presence** — re-write ``~/.kiss/remote-url.json``
+        2. **URL-file presence** — re-write ``$KISS_HOME/remote-url.json``
            if it has been removed (e.g. by a developer's pytest run
            that touches the real file, or by an unrelated cleanup).
            Without this ``kiss-web --url`` cannot discover the active
@@ -8639,15 +8676,19 @@ class RemoteAccessServer:
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
 
-    def _reload_trusted_clients(self) -> None:
+    async def _reload_trusted_clients(self) -> None:
         """Load the newly enrolled machine-link CAs into the live SSL context.
 
-        See :func:`_load_trusted_client_cas`; a no-op without a context
-        or when the directory holds nothing new.
+        The directory is read off the loop (:func:`_read_trusted_client_cas`
+        in a thread); only the context mutation runs on it
+        (:func:`_load_trusted_client_cas`, on the loop like every
+        handshake's ``SSL_new``).  A no-op without a context or when the
+        directory holds nothing new.
         """
         if self._ssl_context is None:
             return
-        for name in _load_trusted_client_cas(self._ssl_context, self._trusted_client_cas):
+        cas = await asyncio.to_thread(_read_trusted_client_cas)
+        for name in _load_trusted_client_cas(self._ssl_context, self._trusted_client_cas, cas):
             logger.info("Admitting machine links with certificates issued by %s", name)
 
     async def _watch_trusted_clients(self) -> None:
@@ -8673,7 +8714,7 @@ class RemoteAccessServer:
             if mtime != self._trusted_clients_mtime or elapsed >= TUNNEL_CHECK_INTERVAL:
                 self._trusted_clients_mtime, elapsed = mtime, 0.0
                 try:
-                    self._reload_trusted_clients()
+                    await self._reload_trusted_clients()
                 except Exception:
                     logger.warning("Could not reload the enrolled machine CAs", exc_info=True)
             await asyncio.sleep(TRUSTED_CLIENTS_POLL)
@@ -8724,7 +8765,7 @@ class RemoteAccessServer:
             )
 
     def _watchdog_check_url_file(self) -> None:
-        """Re-write ``~/.kiss/remote-url.json`` if it went missing.
+        """Re-write ``$KISS_HOME/remote-url.json`` if it went missing.
 
         A developer's pytest run that touches the real file, or an
         unrelated cleanup, can remove it; without a re-write the
@@ -8882,7 +8923,7 @@ class RemoteAccessServer:
 
         Calls :meth:`_terminate_tunnel_proc` (which resets per-process
         state), then clears the backoff counters and active URL.  Does
-        not delete ``~/.kiss/remote-url.json`` because a replacement
+        not delete ``$KISS_HOME/remote-url.json`` because a replacement
         daemon may have already overwritten it; removing it would
         race with the new instance's ``_save_url_file`` and leave
         ``kiss-web --url`` with no URL.
@@ -8906,7 +8947,7 @@ class RemoteAccessServer:
         take the public Cloudflare tunnel down with it.  The spawned
         ``cloudflared`` was launched with ``start_new_session=True``
         and its pid + metrics port were persisted to
-        ``~/.kiss/cloudflared.pid`` by :meth:`_spawn_cloudflared`, so
+        ``$KISS_HOME/cloudflared.pid`` by :meth:`_spawn_cloudflared`, so
         the next ``kiss-web`` instance re-adopts it via
         :func:`_try_adopt_existing_cloudflared` and keeps serving on
         the same ``*.trycloudflare.com`` (or named-tunnel) hostname.
@@ -8935,7 +8976,7 @@ class RemoteAccessServer:
         replaced.
 
         Like :meth:`_stop_tunnel`, this method does not delete
-        ``~/.kiss/remote-url.json``: a sibling kiss-web that has
+        ``$KISS_HOME/remote-url.json``: a sibling kiss-web that has
         already taken over may have overwritten it, and removing it
         would briefly leave ``kiss-web --url`` with no URL.
         """
@@ -9230,7 +9271,7 @@ class RemoteAccessServer:
                 self._ssl_keyfile,
                 lan_ips,
             )
-            self._reload_trusted_clients()
+            await self._reload_trusted_clients()
             # ``_tls_loaded_cert`` stays empty: the first watchdog tick
             # loads the on-disk certificate under the lock
             # (:meth:`_refresh_tls_cert`), which is race-free — reading
@@ -9341,15 +9382,16 @@ class RemoteAccessServer:
                 logger.warning(
                     "remote_password is not set in ~/%s/config.json; "
                     "refusing to start the cloudflared tunnel and "
-                    "refusing non-localhost connections.  Run "
-                    "install.sh to set a password and enable remote "
-                    "access.",
+                    "refusing non-localhost connections.  Set a "
+                    "password in Settings > Remote password (or run "
+                    "install.sh) to enable remote access.",
                     HOME_DIR,
                 )
                 print(
                     "Warning: no remote password is set; cloudflared "
                     "tunnel disabled and non-localhost connections "
-                    "refused.  Run install.sh to set one.",
+                    "refused.  Set one in Settings > Remote password "
+                    "or run install.sh.",
                     file=sys.stderr,
                 )
             elif tunnel_url is None:
@@ -9978,6 +10020,7 @@ class RemoteAccessServer:
         self._agent_server.browser_tabs.shutdown()
         self._agent_server.terminals.shutdown()
         self._server_api.remote_tabs.close_all()
+        self._server_api.remote_views.close_all()
         self._stop_sea_command_watcher()
 
     async def start_async(self) -> None:
@@ -10110,7 +10153,7 @@ def _resolve_tunnel_settings() -> tuple[str | None, str | None]:
 
     Reads the Cloudflare tunnel token from the
     ``CLOUDFLARE_TUNNEL_TOKEN`` env var first, falling back to the
-    ``tunnel_token`` key in ``~/.kiss/config.json``.  The public URL
+    ``tunnel_token`` key in ``$KISS_HOME/config.json``.  The public URL
     is resolved the same way from ``CLOUDFLARE_TUNNEL_URL`` /
     ``tunnel_url``.  An env-var value takes precedence over the config
     value independently for each setting.

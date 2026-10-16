@@ -31,12 +31,23 @@ API_KEY_INPUT_IDS = [
     "cfg-key-OPENROUTER_API_KEY",
     "cfg-key-ZAI_API_KEY",
     "cfg-key-MOONSHOT_API_KEY",
+    "cfg-key-AWS_BEARER_TOKEN_BEDROCK",
+    "cfg-key-AWS_ACCESS_KEY_ID",
+    "cfg-key-AWS_SECRET_ACCESS_KEY",
+    "cfg-key-AWS_SESSION_TOKEN",
     "cfg-custom-api-key",
 ]
 
 
 class TestApiKeyInputsMaskedInHtml(unittest.TestCase):
     """The served settings-panel HTML masks every API-key input."""
+
+    def test_aws_region_is_plain_text(self) -> None:
+        """The AWS region is an identifier, not a secret: a visible text input."""
+        html = _build_html()
+        self.assertRegex(
+            html, r'<input type="text" autocomplete="off" id="cfg-key-AWS_REGION"'
+        )
 
     def test_api_key_inputs_are_password_type(self) -> None:
         """Each API-key input is ``type="password"`` with autocomplete off."""
@@ -66,16 +77,16 @@ class TestApiKeyInputsMaskedInHtml(unittest.TestCase):
         button from ``<template id="secret-toggle-template">`` so the
         icon markup lives in exactly one place.  If that prototype
         disappears the API-key toggles silently stop rendering.  The
-        remote-password box is a readonly password input (the password
-        is chosen by install.sh and shown here) whose eye toggle is
-        cloned from the same template at start-up, not written in HTML.
+        remote-password box is a plain, editable text input (the
+        password is stored and shown in plain text) with no eye toggle.
         """
         html = _build_html()
         self.assertIn('<template id="secret-toggle-template">', html)
         self.assertIn('class="icon-eye"', html)
         self.assertIn('class="icon-eye-off"', html)
         self.assertNotIn('id="cfg-remote-password-toggle"', html)
-        self.assertRegex(html, r'<input type="password" id="cfg-remote-password"[^>]*\breadonly\b')
+        self.assertRegex(html, r'<input type="text" id="cfg-remote-password"')
+        self.assertNotRegex(html, r'id="cfg-remote-password"[^>]*\breadonly\b')
 
 
 class TestEyeToggleWiringInMainJs(unittest.TestCase):
@@ -102,10 +113,9 @@ class TestEyeToggleWiringInMainJs(unittest.TestCase):
             "from the FIRST_PARTY_KEY_IDS inventory.",
         )
         self.assertIn(
-            ".concat(['cfg-custom-api-key', 'cfg-remote-password'])",
+            ".concat(['cfg-custom-api-key'])",
             js,
-            "the custom-model API-key input and the remote password box "
-            "must also get the secret toggle.",
+            "the custom-model API-key input must also get the secret toggle.",
         )
         self.assertIn(
             ".forEach(setupSecretInput)",

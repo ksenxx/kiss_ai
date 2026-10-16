@@ -15,6 +15,8 @@ const MEDIA = path.join(__dirname, '..', 'media');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
+const pages = [];
+
 function makePage() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -27,6 +29,7 @@ function makePage() {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  pages.push(win);
 
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
@@ -295,7 +298,6 @@ function testRunningTaskAppearsWhenBurgerOpened() {
       `animation="${anim2Short}"`,
   );
 
-  win.close();
   console.log(
     '  ok - running task appears via burger menu and swaps to a tick on finish',
   );
@@ -333,7 +335,6 @@ function testRunningTaskVisibleUnderDefaultWorkspaceFilter() {
       findDot(row),
       'matching-work_dir running row MUST carry the spinner',
     );
-    win.close();
   }
 
   {
@@ -410,6 +411,4 @@ function main() {
 }
 
 main();
-// main.js arms a timer that relabels the history's day separators at
-// midnight; the harness never closes its windows, so exit explicitly.
-process.exit(0);
+for (const win of pages) win.close();

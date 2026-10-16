@@ -30,6 +30,12 @@ page that reconnects (a phone waking up, a network blip) gets its
 shell back by sending ``terminalOpen`` with the same ``tab_id``.
 Windows has no pty: there ``terminalOpen`` answers with an error.
 
+The shell is this daemon's machine's.  A ``terminalOpen`` stamped
+``machine`` (the chat is bound to a registered machine) never reaches
+this service: :mod:`kiss.server.remote_views` forwards it, and every
+later command of the tab, to that machine's daemon, whose own
+``TerminalService`` runs the shell, and relays its events back.
+
 The shell starts with the start-up files of :mod:`kiss.server.terminal_rc`
 (bash: ``--rcfile``; zsh: ``ZDOTDIR``), which run the user's own
 dotfiles and then write every command to the history file as it is

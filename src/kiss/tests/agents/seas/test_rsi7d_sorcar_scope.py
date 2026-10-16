@@ -6,7 +6,7 @@
 
 The pseudo-SEA ``sorcar`` (:data:`rsi7d_sea.SORCAR`) covers the plain
 top-level runs, the system prompt files ``src/kiss/SYSTEM.md`` /
-``SYSTEM_LITE.md``, the user's ``~/.kiss/AGENTS.md`` and the code under
+``SYSTEM_LITE.md``, the user's ``$KISS_HOME/AGENTS.md`` and the code under
 ``src/kiss``.  ``request_sorcar_permission`` must grant a target — from a
 permitting sentence of the task text, or by asking the user — before
 ``patch_sorcar`` changes it.  The tests run against a fake KISS checkout

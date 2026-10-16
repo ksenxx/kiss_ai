@@ -73,7 +73,6 @@
     return out;
   }
 
-  // fmtcopy-coverage:start
   // Tags that read as a paragraph-level block: a blank line separates
   // them in the copied text.
   const PARA_TAGS = {
@@ -227,7 +226,6 @@
     walk(root, {pre: false, lists: []});
     return st.out;
   }
-  // fmtcopy-coverage:end
 
   function normalise(text) {
     return String(text == null ? '' : text)
@@ -312,7 +310,6 @@
     btn.title = 'Copy panel text';
     btn.setAttribute('aria-label', 'Copy panel text');
     btn.innerHTML = PANEL_COPY_SVG;
-    // copyflash0903-coverage:start
     // The revert timer is tracked per button and restarted on every
     // copy: a bare setTimeout let a rapid second click's flash be cut
     // short by the first click's stale timer.
@@ -340,12 +337,10 @@
       e.stopPropagation();
       e.preventDefault();
       copyText(normalise(getRawText(panelEl)), doc).then(flash);
-      // copyflash0903-coverage:end
     });
     panelEl.appendChild(btn);
   }
 
-  // panelstop-coverage:start
   /**
    * Add the per-panel Stop button to a tool-call panel, immediately
    * left of its copy button.
@@ -402,7 +397,6 @@
     panelEl.appendChild(btn);
     return btn;
   }
-  // panelstop-coverage:end
 
   // panelts-coverage:start
   function formatEventTs(ts) {

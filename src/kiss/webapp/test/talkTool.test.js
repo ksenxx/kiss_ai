@@ -7,18 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
-
-function installSpeech(win) {
-  const spoken = [];
-  win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
-    this.text = text;
-    this.lang = '';
-  };
-  win.speechSynthesis = {
-    speak: u => spoken.push(u),
-  };
-  return spoken;
-}
+const {installSpeech} = require('./speech_helpers');
 
 function installAudio(win) {
   const created = [];

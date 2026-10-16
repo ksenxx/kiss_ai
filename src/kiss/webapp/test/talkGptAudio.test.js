@@ -7,18 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
-
-function installSpeech(win) {
-  const spoken = [];
-  win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
-    this.text = text;
-    this.lang = '';
-  };
-  win.speechSynthesis = {
-    speak: u => spoken.push(u),
-  };
-  return spoken;
-}
+const {installSpeech, assertNoSpeech} = require('./speech_helpers');
 
 function installAudio(win, playResult) {
   const created = [];
@@ -41,7 +30,7 @@ function testThrowingAudioConstructorDegradesToSilence() {
   send(win, {type: 'talk', text: 'never spoken', talkId: 'a5',
              audioB64: B64});
 
-  assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
+  assertNoSpeech(spoken, 'throwing Audio constructor');
   const created = installAudio(win, Promise.resolve());
   send(win, {type: 'talk', text: 'plays fine', talkId: 'a5b',
              audioB64: B64});

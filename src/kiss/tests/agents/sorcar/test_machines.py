@@ -977,7 +977,9 @@ def test_ssh_tunnel_reaches_a_daemon_whose_address_is_unreachable(
 
 _FAKE_SSH = '''#!__PYTHON__
 """Stand-in for ssh: ``-G`` names a blackhole host, ``-N -L`` relays to the daemon,
-a command runs locally with KISS_HOME set, FAKE_SSH_FAIL refuses the forward."""
+a command runs locally with KISS_HOME set, FAKE_SSH_FAIL refuses the forward,
+FAKE_SSH_SLOW (seconds) is a slow login before the forward is up, FAKE_SSH_PIDFILE
+records the forward's pid."""
 import os
 import socket
 import subprocess
@@ -993,12 +995,16 @@ if "-N" not in args:
     env = dict(os.environ, KISS_HOME=os.environ["FAKE_SSH_HOME"])
     sys.exit(subprocess.run(args[-1], shell=True, env=env).returncode)
 _host, local, _rhost, remote = args[args.index("-L") + 1].split(":")
+if os.environ.get("FAKE_SSH_PIDFILE"):
+    with open(os.environ["FAKE_SSH_PIDFILE"], "w") as handle:
+        handle.write(str(os.getpid()))
 if os.environ.get("FAKE_SSH_FAIL"):
     sys.stderr.write(f"bind [127.0.0.1]:{local}: Address already in use\\n"
                      "Could not request local forwarding.\\n")
     sys.exit(255)
 if os.environ.get("FAKE_SSH_HANG"):
     time.sleep(60)
+time.sleep(float(os.environ.get("FAKE_SSH_SLOW", "0")))
 
 
 def pump(src, dst):
@@ -1030,10 +1036,25 @@ while True:
 '''
 
 
-@posix_only(
+fake_ssh_only = posix_only(
     "the fake ssh is a shebang script on PATH: Windows resolves ``ssh`` to "
     "System32's ssh.exe whatever PATH says, and runs its command through cmd.exe"
 )
+
+
+def _install_fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_home: Path) -> None:
+    """Put :data:`_FAKE_SSH` first on PATH, its logins landing in *remote_home*."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "ssh"
+    script.write_text(_FAKE_SSH.replace("__PYTHON__", sys.executable), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_SSH_HOME", str(remote_home))
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(tmp_path / "no-such-config"))
+
+
+@fake_ssh_only
 def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1048,14 +1069,7 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
     daemon = start_remote_daemon(
         tmp_path / "home", password="pw", seed=[{"chat_id": "c", "task": "one"}],
     )
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "ssh"
-    script.write_text(_FAKE_SSH.replace("__PYTHON__", sys.executable), encoding="utf-8")
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("FAKE_SSH_HOME", str(daemon.home))
-    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(tmp_path / "no-such-config"))
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
     login = "ksen@far.example.org"
     try:
         machine = mach.add_machine("far", login)
@@ -1093,6 +1107,124 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
         monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
         with pytest.raises(mach.MachineError, match="ssh is not installed on this machine"):
             mach.SshTunnel(login, daemon.port).open(timeout=1.0)
+    finally:
+        mach.close_links()
+        daemon.stop()
+
+
+@fake_ssh_only
+def test_slow_ssh_login_leaves_the_handshake_its_whole_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request's *timeout* is the handshake's, not the ssh login's (audit 2026-10-16 F1).
+
+    The forward is opened inside ``_connect`` and ssh's login can take
+    longer than the request budget (a bastion, a far host).  The
+    budget used to start before the login, so a slow login left the
+    WebSocket handshake a millisecond, it failed with "timed out
+    during opening handshake" and the link backed off for
+    ``DOWN_BACKOFF`` seconds although the forward was up.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    login = "ksen@slow.example.org"
+    try:
+        machine = mach.add_machine("slow", login)
+        mach.close_tunnels()  # the next request opens the forward again, slowly
+        monkeypatch.setenv("FAKE_SSH_SLOW", "1.5")
+        link = mach.link_for(machine)
+        started = time.monotonic()
+        assert link.request({"type": "ping"}, "pong", timeout=1.0)["type"] == "pong"
+        assert time.monotonic() - started >= 1.5
+        assert link._retry_at == 0.0
+        assert mach._tunnels[login].alive()
+    finally:
+        mach.close_links()
+        daemon.stop()
+
+
+@fake_ssh_only
+def test_failed_ssh_add_machine_closes_the_forward_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An SSH machine whose daemon does not answer leaves no ``ssh -N`` behind (audit 2026-10-16).
+
+    The login succeeds (the endpoint file and ``trusted-clients`` are
+    still there) but the daemon port is closed: every handshake fails
+    until ``ENROLL_TIMEOUT``.  The forward those handshakes opened is
+    closed with the failure instead of living until the next registry
+    write.
+    """
+    mach.client_cert_pair()  # issues the local CA the enrollment sends
+    remote_home = tmp_path / "remote"
+    (remote_home / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
+    (remote_home / "tls" / tls_certs.CA_CERT_FILE).write_text(_local_ca_pem(), encoding="utf-8")
+    (remote_home / mach.LOCAL_ENDPOINT_FILE).write_text(
+        json.dumps({"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "t"}), "utf-8",
+    )
+    _install_fake_ssh(tmp_path, monkeypatch, remote_home)
+    pidfile = tmp_path / "ssh.pid"
+    monkeypatch.setenv("FAKE_SSH_PIDFILE", str(pidfile))
+    monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
+    login = "ksen@down.example.org"
+    with pytest.raises(mach.MachineError, match="refused the forwarded connection"):
+        mach.add_machine("down", login)
+    assert mach._tunnels == {}
+    pid = int(pidfile.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # the forward is reaped, not left running
+    assert not mach.load_machines() and not list((mach.kiss_home() / "machines").glob("*down*"))
+
+
+@fake_ssh_only
+def test_failed_ssh_re_registration_keeps_the_shared_forward_and_its_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed re-registration leaves the login's forward to the links sharing it.
+
+    ``box`` is registered and a stream is open on its link, so the
+    login's ``ssh -N`` carries live traffic.  Registering ``box`` again
+    then fails: the enrollment now answers with another CA (the
+    machine's endpoint file names the local daemon's ``ca.pem``), so
+    every handshake of the new pin fails TLS verification until
+    ``ENROLL_TIMEOUT``.  The enrollment handshakes use a forward of
+    their own, so the failure closes nothing the registered machine
+    uses: its forward keeps its ssh process, the stream still answers,
+    its link and registry entry are untouched.  The cleanup used to
+    pop and kill the login's cached forward, disconnecting the stream.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
+    login = "ksen@box.example.org"
+    try:
+        machine = mach.add_machine("box", login)
+        link = mach.link_for(machine)
+        stream = link.open_connection()
+        assert _pong(stream)
+        tunnel = mach._tunnels[login]
+        assert tunnel.process is not None
+        pid = tunnel.process.pid
+
+        # The machine's daemon now answers the enrollment with a CA that
+        # did not issue its certificate: same port, wrong pin.
+        wrong = tmp_path / "wrong"
+        (wrong / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
+        (wrong / mach.LOCAL_ENDPOINT_FILE).write_text(json.dumps({
+            "url": f"wss://127.0.0.1:{daemon.port}/ws", "token": "t",
+            "ca": str(mach.kiss_home() / "tls" / tls_certs.CA_CERT_FILE),
+        }, indent=2), encoding="utf-8")
+        monkeypatch.setenv("FAKE_SSH_HOME", str(wrong))
+        with pytest.raises(mach.MachineError, match="refused the TLS handshake"):
+            mach.add_machine("box", login)
+
+        assert mach._tunnels == {login: tunnel}
+        assert tunnel.process is not None and tunnel.process.pid == pid and tunnel.alive()
+        assert _pong(stream)  # the live stream was not disconnected
+        assert mach.link_for(machine) is link
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        assert mach.load_machines() == [machine]
+        assert not list((mach.kiss_home() / "machines").glob(".box*"))  # no staged pin left
     finally:
         mach.close_links()
         daemon.stop()

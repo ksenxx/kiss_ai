@@ -4,8 +4,9 @@
 # add your name here
 """The ``chat_summaries`` table: one row per chat, derived from ``task_history``.
 
-A row holds a 6-8 word summary of the chat's tasks (:func:`summarize_chat`)
-and ``last_launched``, the launch instant of its newest listable task.
+A row holds a 6-8 word summary of the chat's tasks (:func:`summarize_chat`),
+``last_launched``, the launch instant of its newest listable task, and
+``last_finished``, that task's completion instant (0 while it runs).
 The table is a cache: :func:`upsert_chat_summary` recomputes a chat's row
 from scratch from the chat's ``task_history`` rows, and whoever changes
 those rows -- the daemon when a task finishes, the metadata backfill,
@@ -126,13 +127,17 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
     """Recompute and store the ``chat_summaries`` row of *chat_id*.
 
     The summary is built from the chat's oldest listable tasks
-    (sub-agent rows excluded, as in the history panel) and
-    ``last_launched`` is the launch instant of its newest listable task.
-    A chat with no listable task gets no row.  Plain tuples are read, so
-    the connection's row factory does not matter.
+    (sub-agent rows excluded, as in the history panel);
+    ``last_launched`` is the launch instant of its newest listable task
+    and ``last_finished`` that task's completion instant (``end_ts``,
+    epoch ms; 0 while it runs).  A chat with no listable task gets no
+    row.  Plain tuples are read, so the connection's row factory does
+    not matter.
 
     Args:
-        db: Open connection inside the caller's transaction.
+        db: Open connection inside the caller's transaction, whose
+            ``chat_summaries`` table has the ``last_finished`` column
+            (:func:`add_last_finished_column`).
         chat_id: The chat session id.
     """
     first = db.execute(
@@ -141,14 +146,34 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
     ).fetchall()
     if not first:
         return
-    start_ts, timestamp = db.execute(
-        f"SELECT start_ts, timestamp FROM task_history WHERE {LISTABLE} "
+    start_ts, timestamp, end_ts = db.execute(
+        f"SELECT start_ts, timestamp, end_ts FROM task_history WHERE {LISTABLE} "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         (chat_id,),
     ).fetchone()
     db.execute(
-        "INSERT INTO chat_summaries (chat_id, summary, last_launched) VALUES (?, ?, ?) "
+        "INSERT INTO chat_summaries (chat_id, summary, last_launched, last_finished) "
+        "VALUES (?, ?, ?, ?) "
         "ON CONFLICT(chat_id) DO UPDATE SET summary = excluded.summary, "
-        "last_launched = excluded.last_launched",
-        (chat_id, summarize_chat([r[0] or "" for r in first]), launch_ms(start_ts, timestamp)),
+        "last_launched = excluded.last_launched, last_finished = excluded.last_finished",
+        (
+            chat_id,
+            summarize_chat([r[0] or "" for r in first]),
+            launch_ms(start_ts, timestamp),
+            int(end_ts or 0),
+        ),
     )
+
+
+def add_last_finished_column(db: sqlite3.Connection) -> None:
+    """Add ``last_finished`` to a ``chat_summaries`` table from before the column existed.
+
+    Idempotent; the rows it extends read 0 (unknown) until their chat's
+    next recompute.
+
+    Args:
+        db: Open connection whose database has a ``chat_summaries`` table.
+    """
+    columns = {r[1] for r in db.execute("PRAGMA table_info(chat_summaries)").fetchall()}
+    if "last_finished" not in columns:
+        db.execute("ALTER TABLE chat_summaries ADD COLUMN last_finished INTEGER DEFAULT 0")

@@ -1956,6 +1956,45 @@ async function main() {
     );
   });
 
+  await test('Machines: a transcript file link is checked on the machine the daemon bound the tab to', () => {
+    const {win, posted} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {
+      type: 'tabs_state',
+      tabs: [
+        {tabId: 'gpu1', chatId: 'chat-gpu1', title: 'gpu', workDir: '/gpu/ws'},
+        {tabId: 'home1', chatId: 'chat-home1', title: 'home', workDir: '/ws'},
+      ],
+    });
+    send(win, {type: 'tabMachine', tabId: 'gpu1', machine: 'gpu-box'});
+    posted.length = 0;
+    send(win, {type: 'prompt', text: 'see src/train.py please', tabId: 'gpu1'});
+    send(win, {type: 'text_end', tabId: 'gpu1'});
+    const checks = posted.filter(m => m.type === 'checkPaths');
+    eq(checks, [
+      {
+        type: 'checkPaths',
+        paths: ['src/train.py'],
+        workDir: '/gpu/ws',
+        tabId: 'gpu1',
+        machine: 'gpu-box',
+      },
+    ]);
+    const span = win.document.querySelector(
+      '#output [data-path-candidate="src/train.py"]',
+    );
+    assert.strictEqual(span.getAttribute('data-path-machine'), 'gpu-box');
+
+    // A tab the daemon never bound checks on this daemon: no machine.
+    posted.length = 0;
+    send(win, {type: 'prompt', text: 'see src/local.py please', tabId: 'home1'});
+    send(win, {type: 'text_end', tabId: 'home1'});
+    const home = posted.filter(m => m.type === 'checkPaths');
+    assert.strictEqual(home.length, 1);
+    assert.strictEqual(home[0].machine, undefined, 'no machine stamped');
+    assert.strictEqual(home[0].tabId, 'home1');
+  });
+
   if (failures) {
     console.log(`\n${failures} test(s) failed`);
     process.exit(1);

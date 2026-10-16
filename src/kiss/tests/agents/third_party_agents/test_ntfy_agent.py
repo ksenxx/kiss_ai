@@ -27,7 +27,6 @@ from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, st
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     NtfyAgent,
     NtfyChannelBackend,
-    NtfySea,
     _config,
 )
 from kiss.core.config import kiss_home
@@ -174,13 +173,6 @@ def test_authenticate_rejects_empty_topic() -> None:
     tools = {t.__name__: t for t in agent._get_tools()}
     assert "empty" in tools["authenticate_ntfy"]("   ")
     assert not _config.path.exists()
-
-
-def test_tools_module_function() -> None:
-    """``NtfySea().tools([])`` returns a non-empty tool list."""
-    tools = NtfySea().tools([])
-    assert tools
-    assert "check_ntfy_auth" in {t.__name__ for t in tools}
 
 
 def test_publish_then_poll_end_to_end(emulator: _NtfyEmulator) -> None:

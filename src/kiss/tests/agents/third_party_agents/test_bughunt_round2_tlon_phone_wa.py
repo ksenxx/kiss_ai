@@ -22,7 +22,6 @@ agent now uses the QR-paired whatsapp-mcp bridge and has no Meta webhook.)
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -33,24 +32,20 @@ from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_con
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
-class _RecordingHandler(BaseHTTPRequestHandler):
+class _RecordingHandler(RecordingHandler):
     """Handler that records requests and returns service-shaped JSON."""
 
     def _record(self, body: bytes) -> None:
         cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
         )
-
-    def _respond_json(self, status: int, payload: dict[str, Any]) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
@@ -61,9 +56,9 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         self._record(b"")
         parsed = urlparse(self.path)
         if parsed.path == "/api/device/info":
-            self._respond_json(200, {"device_name": "testphone"})
+            self._json(200, {"device_name": "testphone"})
         elif parsed.path == "/api/sms/messages":
-            self._respond_json(
+            self._json(
                 200,
                 {
                     "messages": [
@@ -73,7 +68,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
                 },
             )
         else:
-            self._respond_json(404, {"error": "Not Found"})
+            self._json(404, {"error": "Not Found"})
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve Eyre login and legacy poke endpoints."""
@@ -82,7 +77,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
         else:
-            self._respond_json(200, {})
+            self._json(200, {})
 
     def do_PUT(self) -> None:  # noqa: N802
         """Serve Eyre channel PUT (poke) endpoints."""
@@ -91,10 +86,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
         else:
-            self._respond_json(404, {"error": "Not Found"})
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+            self._json(404, {"error": "Not Found"})
 
 
 def _channel_requests(server: RecordingServer) -> list[dict[str, Any]]:

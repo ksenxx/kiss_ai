@@ -122,6 +122,7 @@ from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
 from kiss.server import sidebar_panels
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
+from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
 from kiss.server.tips import TIPS_OPT_OUT_MARKER
 
 logger = logging.getLogger(__name__)
@@ -293,7 +294,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
-    ApiCommand("rotateRemotePassword"),
     ApiCommand("getMyModels"),
     ApiCommand("saveMyModel", required=("name",)),
     ApiCommand("deleteMyModel", required=("name",)),
@@ -525,8 +525,16 @@ _NO_PASSWORD_REFUSAL: dict[str, Any] = {
     "type": "error",
     "code": "localhost_only",
     "text": "Remote access is turned off: no remote password is set, so "
-            "only this computer may connect. Run install.sh on it to set "
-            "one.",
+            "only this computer may connect. Set one in Settings > Remote "
+            "password on the computer running KISS Sorcar (or run "
+            "install.sh there).",
+}
+#: The private (``local_only``) daemon's answer to any peer that is not
+#: one of the machine's own clients: no password gets it in.
+_LOCAL_ONLY_REFUSAL: dict[str, Any] = {
+    "type": "error",
+    "code": "auth_failed",
+    "text": "This daemon accepts local clients only.",
 }
 _NOT_AUTH_REFUSAL: dict[str, Any] = {
     "type": "error",
@@ -741,6 +749,7 @@ class ServerApi:
         """
         self._backend = backend
         self.remote_tabs = RemoteTabs(backend)
+        self.remote_views = RemoteViews(backend)
         for spec in API.values():
             if not callable(
                 getattr(self, spec.handler, None)
@@ -830,6 +839,12 @@ class ServerApi:
             self.remote_tabs.route, cmd,
         ):
             return
+        # The Terminal and Browser buttons of such a tab open a shell,
+        # or a page, on the machine; see ``kiss.server.remote_views``.
+        if name in VIEW_COMMANDS and await asyncio.to_thread(
+            self.remote_views.route, cmd,
+        ):
+            return
         # The Explorer, Source Control view, folder picker and file
         # editor of such a tab browse the machine's working directory:
         # a workspace command stamped ``machine`` is answered by that
@@ -846,6 +861,7 @@ class ServerApi:
             # The client has the tabs now: replay the ones running on
             # remote machines to it.
             await asyncio.to_thread(self.remote_tabs.replay_to, cmd["connId"])
+            await asyncio.to_thread(self.remote_views.replay_to, cmd["connId"])
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
@@ -886,6 +902,23 @@ class ServerApi:
             and passwords_equal(self._backend.local_token, token)
         )
 
+    def _is_direct_loopback(self, websocket: Any) -> bool:
+        """Whether *websocket* is a client on this machine reaching the daemon directly.
+
+        True when the raw TCP peer is loopback AND the client IP the
+        backend derives for it (:meth:`_client_ip`) is loopback too:
+        the upgrade request carried no ``Cf-Connecting-Ip`` /
+        ``X-Forwarded-For``, so no tunnel or proxy relayed it.  These
+        are the only peers served while no remote password is set.
+
+        Args:
+            websocket: The connection to classify.
+        """
+        backend = self._backend
+        return backend._peer_is_loopback(websocket) and is_loopback_ip(
+            backend._client_ip(websocket),
+        )
+
     def _is_loopback_browser(self, websocket: Any) -> bool:
         """Whether *websocket* is a browser page opened at a loopback address.
 
@@ -908,16 +941,37 @@ class ServerApi:
         Returns:
             True for a browser page served at a loopback address.
         """
-        backend = self._backend
-        if not backend._peer_is_loopback(websocket):
-            return False
-        if not is_loopback_ip(backend._client_ip(websocket)):
+        if not self._is_direct_loopback(websocket):
             return False
         request = getattr(websocket, "request", None)
         headers = getattr(request, "headers", None)
         origin = headers.get("Origin", "") if headers is not None else ""
         host = urlsplit(origin).hostname or ""
         return host == "localhost" or is_loopback_ip(host)
+
+    async def _admit_loopback_browser(self, msg: Any, websocket: Any) -> Auth | None:
+        """Admit a token-less ``auth`` frame from a loopback browser page, else ``None``.
+
+        The web app opened at ``127.0.0.1`` on this machine itself needs
+        no password, whatever its ``auth`` frame carries
+        (:meth:`_is_loopback_browser`); the per-IP lockout protects the
+        password, which such a page is not guessing.
+
+        Args:
+            msg: The decoded first frame.
+            websocket: The connection it arrived on.
+
+        Returns:
+            The loopback :class:`Auth` after ``auth_ok`` was sent, or
+            ``None`` when the frame or the peer does not qualify.
+        """
+        if not isinstance(msg, dict) or msg.get("type") != "auth":
+            return None
+        token = msg.get("token", "")
+        if (isinstance(token, str) and token) or not self._is_loopback_browser(websocket):
+            return None
+        await websocket.send(json.dumps({"type": "auth_ok", "local": False}))
+        return _auth_result("loopback", msg)
 
     async def _admit_local(self, websocket: Any, msg: dict[str, Any]) -> Auth:
         """Answer ``auth_ok`` to a local-token client and return its :class:`Auth`.
@@ -1013,7 +1067,10 @@ class ServerApi:
         1. A source IP that is still rate-limited after too many
            failed logins is answered with ``auth_locked`` (carrying
            ``retry_after`` seconds) and closed — telling the client
-           WHY instead of leaving its loading overlay spinning.
+           WHY instead of leaving its loading overlay spinning.  The
+           local token (0a) and the loopback browser (0b) are still
+           admitted: the lockout guards the password, which neither
+           is guessing.
         2. When no ``remote_password`` is configured, a
            non-loopback TCP peer is refused (``error`` + close) before
            any credential is examined: with no password set, only
@@ -1072,15 +1129,19 @@ class ServerApi:
             return _auth_result("local", msg)
         lock_remaining = backend._auth_lock_remaining(ip)
         if lock_remaining > 0.0:
-            # The lockout is per IP, and every visitor relayed by the
-            # tunnel shares 127.0.0.1 with the Python clients: read one
-            # frame so a valid local token still gets
-            # through, then refuse everything else.
+            # The lockout is per IP, and every peer reaching loopback
+            # without a forwarded client IP shares 127.0.0.1 with the
+            # machine's own clients: read one frame so a valid local
+            # token or the password-free loopback browser page still
+            # gets through, then refuse everything else.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
             try:
                 msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
                 if self._is_local_auth(msg, websocket):
                     return await self._admit_local(websocket, msg)
+                auth = await self._admit_loopback_browser(msg, websocket)
+                if auth is not None:
+                    return auth
             except Exception:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
             await self._refuse(websocket, _auth_locked(lock_remaining))
@@ -1088,15 +1149,22 @@ class ServerApi:
         stored_password = (await asyncio.to_thread(load_config)).get(
             "remote_password", "",
         )
-        if not stored_password and not backend._peer_is_loopback(websocket):
+        if not stored_password and not self._is_direct_loopback(websocket):
             # Defense in depth for the empty-password localhost-only
             # lockdown (primary gate: the transport's
             # ``_process_request`` refuses non-loopback peers with 403
             # before the WS upgrade).  Re-applied per attempt below,
             # so clearing the password at ANY point before a frame is
             # examined refuses an already-admitted non-loopback peer.
+            # A peer relayed to loopback (the tunnel, a proxy) is not
+            # local either: ``password_accepted("", "")`` would admit
+            # it with no password at all.  A private daemon says why
+            # in its own words: a password would not get it in.
             logger.warning(_NO_PASSWORD_LOG, ip)
-            await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
+            await self._refuse(
+                websocket,
+                _LOCAL_ONLY_REFUSAL if backend.local_only else _NO_PASSWORD_REFUSAL,
+            )
             return None
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
@@ -1110,27 +1178,14 @@ class ServerApi:
                     return await self._admit_local(websocket, msg)
                 if backend.local_only:
                     # The private daemon admits no password at all.
-                    await self._refuse(websocket, {
-                        "type": "error",
-                        "code": "auth_failed",
-                        "text": "This daemon accepts local clients only.",
-                    })
+                    await self._refuse(websocket, _LOCAL_ONLY_REFUSAL)
                     return None
                 token = msg.get("token", "")
                 if not isinstance(token, str):
                     token = ""
-                if (
-                    msg.get("type") == "auth"
-                    and not token
-                    and self._is_loopback_browser(websocket)
-                ):
-                    # The web app opened at 127.0.0.1 on this machine
-                    # itself: no password needed, whatever its ``auth``
-                    # frame carries.
-                    await websocket.send(json.dumps({
-                        "type": "auth_ok", "local": False,
-                    }))
-                    return _auth_result("loopback", msg)
+                auth = await self._admit_loopback_browser(msg, websocket)
+                if auth is not None:
+                    return auth
                 # Re-load the configured password before every compare
                 # so a change made while this connection awaited
                 # credentials takes effect NOW.  Without the reload, a
@@ -1141,9 +1196,7 @@ class ServerApi:
                 stored_password = (
                     await asyncio.to_thread(load_config)
                 ).get("remote_password", "")
-                if not stored_password and not backend._peer_is_loopback(
-                    websocket,
-                ):
+                if not stored_password and not self._is_direct_loopback(websocket):
                     logger.warning(_NO_PASSWORD_LOG, ip)
                     await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
                     return None
@@ -1173,7 +1226,14 @@ class ServerApi:
                     await websocket.send(json.dumps({
                         "type": "auth_ok", "local": False,
                     }))
-                    return _auth_result("remote", msg)
+                    # With no password set only a direct loopback peer
+                    # gets here (the gate above): it is admitted as a
+                    # loopback client, never password-checked per
+                    # frame, like a browser opened at 127.0.0.1.  A
+                    # password-authenticated client is "remote".
+                    return _auth_result(
+                        "remote" if stored_password else "loopback", msg,
+                    )
                 if not is_retry and msg.get("type") != "auth":
                     await websocket.close()
                     return None

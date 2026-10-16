@@ -513,7 +513,6 @@ function testAdjacentHistoryRunParallelPanelIsInert() {
     task: 'Older parallel task',
     task_id: '41',
     events: [
-      {type: 'task_start', task: 'Older parallel task'},
       {
         type: 'tool_call',
         name: 'run_parallel',
@@ -764,7 +763,6 @@ function testAdjacentHistoryPanelDoesNotStealLiveFanout() {
     task: 'Newer old task',
     task_id: '77',
     events: [
-      {type: 'task_start', task: 'Newer old task'},
       {
         type: 'tool_call',
         name: 'run_parallel',

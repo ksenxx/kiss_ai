@@ -930,8 +930,9 @@
         msg.code === 'auth_failed' &&
         _authenticated
       ) {
-        // The password was rotated (install.sh ran again) after this
-        // socket authenticated: the server refused a frame and is
+        // The password was changed (Settings > Remote password on the
+        // daemon's computer, or install.sh on a fresh install) after
+        // this socket authenticated: the server refused a frame and is
         // closing the socket.  Forget the stale password so the
         // reconnect probes with the uncounted empty one and gets the
         // password dialog, not a counted wrong guess.
@@ -943,20 +944,28 @@
         return;
       }
       if (
-        msg.type === 'remotePasswordRotated' &&
+        msg.type === 'remotePasswordChanged' &&
         _sessionPassword &&
-        typeof msg.password === 'string' &&
-        msg.password
+        typeof msg.password === 'string'
       ) {
-        // This page asked the daemon to rotate the password (Settings
-        // > Rotate) and is the one client told the new one.  Adopt it
+        // This page saved a new remote password (Settings > Remote
+        // password) and is the one client told it back.  Adopt it
         // before the page sends another frame: the server checks the
         // password on every frame, so the old one would be refused
         // and this session shut out.  A page admitted without a
-        // password (loopback) keeps sending bare frames.
+        // password (loopback) keeps sending bare frames.  An EMPTY
+        // password turns remote access off, this page included: it
+        // is signed out at its next frame, so forget the old
+        // credential now (its grace ended with the save) and let the
+        // reconnect's handshake report that remote access is off.
         _sessionPassword = msg.password;
+        if (!msg.password) _authPassword = '';
         try {
-          localStorage.setItem('sorcar-remote-pwd', msg.password);
+          if (msg.password) {
+            localStorage.setItem('sorcar-remote-pwd', msg.password);
+          } else {
+            localStorage.removeItem('sorcar-remote-pwd');
+          }
         } catch (_e) {}
       }
       if (msg.type === 'error' && !_authenticated) {

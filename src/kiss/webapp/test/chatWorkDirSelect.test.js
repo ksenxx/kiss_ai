@@ -27,131 +27,24 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage,
+  closeWindows,
+  send,
+  byId,
+  msgs,
+  assertJsonEqual,
+  CHOOSE,
+  optionLabels,
+  currentDir,
+  pick,
+  errorNotifications,
+} = require('./workdir_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// Every window a test opened; closed after the test so the page's
-// timers (the 1 s meta-panel poll a desktop layout starts, Monaco's
-// load timeout) do not keep this node process alive once the tests
-// are done.
-const openWindows = [];
-
-function makePage(opts) {
-  const {desktop = false} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  openWindows.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  if (desktop) {
-    // The remote desktop layout (the activity bar's Explorer / Source
-    // Control views) is gated on this media query.
-    win.requestAnimationFrame = cb => {
-      cb();
-      return 0;
-    };
-    win.cancelAnimationFrame = () => {};
-    win.matchMedia = query => ({
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    });
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
 function click(win, el) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function byId(win, id) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  return node;
-}
-
-function msgs(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
-// Messages are created inside the JSDOM realm, whose Object prototype is
-// not Node's, so structural equality goes through JSON.
-function assertJsonEqual(actual, expected) {
-  assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
-}
-
-// pick()'s argument for the "Choose ..." entry (the id of its option).
-const CHOOSE = 'chat-workdir-choose';
-
-/** The labels of the drop-down's options, in order. */
-function optionLabels(win) {
-  return Array.from(byId(win, 'chat-workdir').options, o => o.textContent);
-}
-
-/** The directory the drop-down shows as current ('' = none). */
-function currentDir(win) {
-  return byId(win, 'chat-workdir').value;
-}
-
-/**
- * Pick *value* (a directory, or CHOOSE for "Choose ...") in the
- * drop-down the way a user does: the option becomes the selected one
- * and the select fires `change` -- which a real select only does for
- * a different option, so picking the selected one is asserted against.
- */
-function pick(win, value) {
-  const select = byId(win, 'chat-workdir');
-  const option =
-    value === CHOOSE
-      ? byId(win, CHOOSE)
-      : Array.from(select.options).find(o => o.value === value);
-  assert.ok(option, 'the drop-down lists ' + value);
-  assert.ok(!option.selected, value + ' is not the selected option already');
-  assert.ok(!option.disabled, value + ' can be picked');
-  option.selected = true;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
-
-/** The text of every error notification on screen. */
-function errorNotifications(win) {
-  return Array.from(
-    win.document.querySelectorAll('.kiss-notification-error'),
-    el => el.textContent,
-  );
 }
 
 const NOW = Date.now() / 1000;
@@ -911,7 +804,7 @@ for (const [name, fn] of tests) {
     console.log('not ok - ' + name);
     console.log(e && e.stack ? e.stack : String(e));
   } finally {
-    while (openWindows.length) openWindows.pop().close();
+    closeWindows();
   }
 }
 if (failed) {

@@ -18,15 +18,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness.js');
-
-function paste(win, file) {
-  const inp = win.document.getElementById('task-input');
-  const ev = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(ev, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => file}]},
-  });
-  inp.dispatchEvent(ev);
-}
+const {paste} = require('./attachment_helpers');
 
 function typeAndEnter(win, text) {
   const inp = win.document.getElementById('task-input');

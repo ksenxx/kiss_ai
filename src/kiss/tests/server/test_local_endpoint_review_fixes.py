@@ -45,7 +45,8 @@ import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
 
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
@@ -65,6 +66,24 @@ from kiss.tests.server.conftest import (
     redirect_persistence,
     restore_persistence,
 )
+
+
+async def _ping(ws: ClientConnection) -> None:
+    """Send ``ping`` and wait for its ``pong``, skipping the daemon's own broadcasts.
+
+    The startup PyPI check broadcasts ``update_available`` to every
+    client the moment it completes, which on a loaded machine is just
+    after this connection opened.
+    """
+    await ws.send(json.dumps({"type": "ping"}))
+    deadline = asyncio.get_running_loop().time() + 10
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("no pong within 10 s")
+        frame = json.loads(await asyncio.wait_for(ws.recv(), remaining))
+        if frame.get("type") == "pong":
+            return
 
 
 class _ServerBase(IsolatedAsyncioTestCase):
@@ -115,7 +134,12 @@ class _ServerBase(IsolatedAsyncioTestCase):
             endpoint.url, ssl=local_endpoint.client_ssl_context(endpoint),
             compression=None, additional_headers=FORWARDED_VISITOR,
         ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": password}))
+            try:
+                await ws.send(json.dumps({"type": "auth", "password": password}))
+            except ConnectionClosed:
+                # Refused before any frame was read (no password is set):
+                # the refusal is already queued for the recv below.
+                pass
             return dict(json.loads(await asyncio.wait_for(ws.recv(), 10)))
 
 
@@ -131,8 +155,7 @@ class TestPrivateDaemonIsLocalOnly(_ServerBase):
         self.assertEqual(reply.get("code"), "auth_failed", reply)
         # ... while the token still works.
         ws = await connect_local(server)
-        await ws.send(json.dumps({"type": "ping"}))
-        self.assertEqual(json.loads(await asyncio.wait_for(ws.recv(), 10)).get("type"), "pong")
+        await _ping(ws)
         await ws.close()
 
 
@@ -148,8 +171,7 @@ class TestLockoutDoesNotBlockLocalToken(_ServerBase):
         self.assertEqual((await self._password_attempt("s3cret")).get("type"), "auth_locked")
         # ... but the extension / Python client with the token gets in.
         ws = await connect_local(server, open_timeout=5.0)
-        await ws.send(json.dumps({"type": "ping"}))
-        self.assertEqual(json.loads(await asyncio.wait_for(ws.recv(), 10)).get("type"), "pong")
+        await _ping(ws)
         await ws.close()
 
 
@@ -179,8 +201,7 @@ class TestEndpointNamesABoundSocket(_ServerBase):
         assert endpoint is not None
         self.assertEqual(endpoint.url, f"ws://127.0.0.1:{server.port}/ws")
         ws = await connect_local(server, open_timeout=5.0)
-        await ws.send(json.dumps({"type": "ping"}))
-        self.assertEqual(json.loads(await asyncio.wait_for(ws.recv(), 10)).get("type"), "pong")
+        await _ping(ws)
         await ws.close()
 
     async def test_stuck_endpoint_lock_fails_startup_and_rolls_back(self) -> None:

@@ -38,7 +38,10 @@ from types import TracebackType
 from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
-from kiss.agents.sorcar.chat_summary import upsert_chat_summary
+from kiss.agents.sorcar.chat_summary import (
+    add_last_finished_column,
+    upsert_chat_summary,
+)
 from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
@@ -1484,7 +1487,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             success INTEGER
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
-        -- did and the launch instant (epoch ms) of its latest task.
+        -- did, the launch instant (epoch ms) of its latest task and
+        -- that task's completion instant (0 while it runs).
         -- Maintained by _save_task_extra when a task finishes.
         -- user_summary is the title the user typed over it in the
         -- CHATS panel ('' = none); it survives every recompute.
@@ -1492,6 +1496,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             chat_id TEXT PRIMARY KEY,
             summary TEXT DEFAULT '',
             last_launched INTEGER DEFAULT 0,
+            last_finished INTEGER DEFAULT 0,
             user_summary TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
@@ -1592,6 +1597,10 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
             )
         except sqlite3.OperationalError:  # pragma: no cover — lost the race
             logger.debug("user_summary column already present", exc_info=True)
+    try:
+        add_last_finished_column(conn)
+    except sqlite3.OperationalError:  # pragma: no cover — lost the race
+        logger.debug("last_finished column already present", exc_info=True)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -3558,8 +3567,9 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
         chat_ids: Chat session ids to look up; empty ids are skipped.
 
     Returns:
-        Mapping of chat id to ``{"summary": str, "last_launched": int}``
-        (``last_launched`` in epoch ms); ``summary`` is the title the
+        Mapping of chat id to ``{"summary": str, "last_launched": int,
+        "last_finished": int}`` (instants in epoch ms; ``last_finished``
+        is 0 while the newest task runs); ``summary`` is the title the
         user typed in the CHATS panel when there is one, else the
         computed one.  Chats without a row are absent.
     """
@@ -3570,14 +3580,15 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
         db = _get_db()
         placeholders = ",".join("?" * len(ids))
         rows = db.execute(
-            "SELECT chat_id, summary, last_launched, user_summary FROM chat_summaries "
-            f"WHERE chat_id IN ({placeholders})",
+            "SELECT chat_id, summary, last_launched, last_finished, user_summary "
+            f"FROM chat_summaries WHERE chat_id IN ({placeholders})",
             ids,
         ).fetchall()
     return {
         _safe_str(r["chat_id"]): {
             "summary": _safe_str(r["user_summary"]) or _safe_str(r["summary"]),
             "last_launched": _safe_int(r["last_launched"], 0),
+            "last_finished": _safe_int(r["last_finished"], 0),
         }
         for r in rows
     }

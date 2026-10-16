@@ -8,16 +8,17 @@
 install draws a random password (:func:`generate_password`, 20 letters
 and digits) and stores it in ``config.json`` under ``remote_password``;
 every later install or update keeps the stored one, so the password a
-user has typed into their devices stays valid.  A new one is drawn only
-on request (``python -m kiss.core.remote_password --rotate``) or after
-the key is cleared from ``config.json``.  The password is stored as
-typed, not hashed: the daemon sends it to authenticated clients in
-``configData`` so the Settings panel can show it read-only, and the
-password is always random (about 119 bits of entropy), so the file's
-0600 mode is what protects it, as it protects ``tunnel_token`` next to
-it.  The daemon compares the password a client sends — in its ``auth``
-frame and again in every later frame — with the stored one in constant
-time (:func:`password_accepted`).  ``src/kiss/scripts/remote_config.py``
+user has typed into their devices stays valid.  A new random one is
+drawn only on request (``python -m kiss.core.remote_password --rotate``)
+or after the key is cleared from ``config.json``; the user can also
+type one of their own in the Settings panel (``saveConfig``).  The
+password is stored as typed, not hashed: the daemon sends it to
+authenticated clients in ``configData`` so the Settings panel can show
+and edit it, and the file's 0600 mode is what protects it, as it
+protects ``tunnel_token`` next to it.  The daemon compares the
+password a client sends — in its ``auth`` frame and again in every
+later frame — with the stored one in constant time
+(:func:`password_accepted`).  ``src/kiss/scripts/remote_config.py``
 (shipped alone to deploy targets) stores the same key with the same
 keep-unless-empty rule; keep the two in step.
 """

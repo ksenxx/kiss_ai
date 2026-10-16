@@ -25,7 +25,6 @@ import requests
 from kiss.agents.third_party_agents.weixin.weixin_sea import (
     WeixinAgent,
     WeixinChannelBackend,
-    WeixinSea,
     _config,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -170,11 +169,6 @@ def test_auth_trio_persistence() -> None:
     assert "cleared" in tools["clear_weixin_auth"]().lower()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    assert len(WeixinSea().tools([])) >= 3
 
 
 def test_send_reuses_cached_token(api: _WeixinApi) -> None:
