@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 6: a non-numeric ``max_budget`` must not kill the connection.
 
-``vscode_config.apply_config_to_env`` did a bare
+``user_config.apply_config_to_env`` did a bare
 ``float(cfg["max_budget"])``.  The value comes from two places that
 can both hold junk:
 
@@ -29,9 +29,9 @@ import unittest
 from typing import Any
 
 from kiss.core import config as config_module
-from kiss.core.vscode_config import DEFAULTS, apply_config_to_env
+from kiss.core.user_config import DEFAULTS, apply_config_to_env
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestJunkBudgetDoesNotRaise(unittest.TestCase):
@@ -64,7 +64,7 @@ class TestJunkBudgetDoesNotRaise(unittest.TestCase):
 
     def test_save_config_command_with_junk_budget_does_not_raise(self) -> None:
         """End-to-end: the ``saveConfig`` command path must survive junk."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         server._handle_command(

@@ -4,12 +4,12 @@
 # add your name here
 """End-to-end tests for the Sorcar server API (``kiss.server.sorcar``).
 
-The user interfaces (VS Code extension, remote webapp, CLI) may only
+The user interfaces (the chat page, CLI) may only
 talk to the daemon through the command catalog defined in
 ``kiss.server.sorcar.API``.  These tests exercise the catalog's
 validation logic directly and over a REAL local WebSocket connection
 to a live :class:`RemoteAccessServer` dispatcher — the exact production
-``_ws_handler`` code path the VS Code extension uses — asserting that:
+``_ws_handler`` code path every client uses — asserting that:
 
 * commands outside the API are rejected with an ``error`` event
   delivered only to the sender (and stamped with the sender's tab id),
@@ -17,10 +17,10 @@ to a live :class:`RemoteAccessServer` dispatcher — the exact production
 * commands inside the API flow through to their handlers (a valid
   ``activeTasksQuery`` gets its ``activeTasksResponse`` reply).
 
-Moved from ``kiss.tests.agents.vscode.test_server_api`` because the
+Moved from ``kiss.tests.webapp.test_server_api`` because the
 dependency closure of every test here touches only kiss.core,
 kiss.agents.sorcar and kiss.server; the ``media/api.js`` catalog-drift
-check stayed behind in tests/agents/vscode.
+check stayed behind in tests/webapp.
 """
 
 from __future__ import annotations
@@ -85,9 +85,9 @@ class TestValidateCommand(unittest.TestCase):
         self.assertIsNone(validate_command({"type": "auth", "password": ""}))
 
     def test_catalog_covers_every_backend_handler(self) -> None:
-        from kiss.server.server import VSCodeServer
+        from kiss.server.server import AgentServer
 
-        missing = set(VSCodeServer._HANDLERS) - set(API)
+        missing = set(AgentServer._HANDLERS) - set(API)
         self.assertEqual(missing, set())
 
     def test_api_command_is_frozen(self) -> None:
@@ -201,48 +201,19 @@ class TestServerApiOverLocalConnection(unittest.TestCase):
         self.assertIn("tabs", event)
         self.assertEqual(event["count"], 0)
 
-    def test_vscode_only_command_is_dropped_silently(self) -> None:
-        async def _talk() -> dict[str, Any]:
-            reader, writer = await open_local_connection(self.server)
-            try:
-                writer.write(json.dumps({"type": "voiceAck"}).encode())
-                writer.write(b"\n")
-                writer.write(
-                    json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
-                )
-                await writer.drain()
-                line = await asyncio.wait_for(reader.readline(), timeout=10)
-                event: dict[str, Any] = json.loads(line)
-                return event
-            finally:
-                writer.close()
-                await writer.wait_closed()
+    def test_repeated_auth_frame_is_discarded_silently(self) -> None:
+        """An ``auth`` frame after the handshake draws no error banner.
 
-        event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
-            timeout=15
-        )
-        self.assertEqual(event.get("type"), "activeTasksResponse")
-
-    def test_voice_dropped_frame_is_dropped_silently(self) -> None:
-        """A ``voiceDropped`` frame must not draw an error banner.
-
-        ``media/voice.js`` posts ``voiceDropped`` when the user switches
-        chat tabs mid-utterance; only the VS Code extension host
-        consumes it.  When the webview is served by the daemon the frame
-        reaches this dispatcher, so the catalog must know it and drop
-        it instead of replying ``Unknown command: voiceDropped``.
+        A client re-sending its queued batch after a reconnect can
+        replay its ``auth`` frame; the catalog routes it to the no-op
+        ``ServerApi.auth`` instead of replying ``Unknown command``.
         """
 
         async def _talk() -> dict[str, Any]:
             reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
-                    json.dumps({
-                        "type": "voiceDropped",
-                        "tabId": "tab-x",
-                        "text": "words spoken into a stale tab",
-                    }).encode()
-                    + b"\n"
+                    json.dumps({"type": "auth", "password": "x"}).encode() + b"\n"
                 )
                 writer.write(
                     json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
@@ -258,7 +229,7 @@ class TestServerApiOverLocalConnection(unittest.TestCase):
         event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
             timeout=15
         )
-        self.assertEqual(event.get("type"), "activeTasksResponse")
+        self.assertEqual(event.get("type"), "activeTasksResponse", event)
 
     def test_error_reply_goes_only_to_the_sender(self) -> None:
         async def _talk() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -303,8 +274,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
         from kiss.server.sorcar import ServerApi
 
         for spec in API.values():
-            if spec.handler == "drop":
-                continue
             method = getattr(ServerApi, spec.handler, None)
             self.assertIsNotNone(
                 method, f"{spec.name}: no ServerApi.{spec.handler}"
@@ -321,23 +290,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
                 f"ServerApi.{spec.handler} has non-uniform signature",
             )
 
-    def test_dropped_commands_match_drop_handlers(self) -> None:
-        from kiss.server.sorcar import DROPPED_COMMANDS
-
-        self.assertEqual(
-            DROPPED_COMMANDS,
-            frozenset(c.name for c in API.values() if c.handler == "drop"),
-        )
-        self.assertEqual(
-            DROPPED_COMMANDS,
-            frozenset({
-                "focusEditor", "webviewFocusChanged", "activeTabChanged",
-                "notificationAction", "sizeReport", "resolveDroppedPaths",
-                "voiceToggle", "voiceSensitivity", "voiceAck",
-                "voiceDropped", "auth",
-            }),
-        )
-
     def test_unknown_handler_name_fails_at_construction(self) -> None:
         from kiss.server import sorcar
         from kiss.server.sorcar import ApiCommand, ServerApi
@@ -350,19 +302,19 @@ class TestServerApiCodeBindings(unittest.TestCase):
         finally:
             del sorcar.API["bogusCmd"]
 
-    def test_translate_webview_command(self) -> None:
-        from kiss.server.sorcar import translate_webview_command
+    def test_translate_client_command(self) -> None:
+        from kiss.server.sorcar import translate_client_command
 
-        out = translate_webview_command(
+        out = translate_client_command(
             {"type": "resumeSession", "id": "c1", "tabId": "t"}
         )
         self.assertEqual(
             out, {"type": "resumeSession", "chatId": "c1", "tabId": "t"}
         )
         keep = {"type": "resumeSession", "id": "x", "chatId": "c2"}
-        self.assertEqual(translate_webview_command(dict(keep)), keep)
+        self.assertEqual(translate_client_command(dict(keep)), keep)
         other = {"type": "stop", "tabId": "t"}
-        self.assertEqual(translate_webview_command(dict(other)), other)
+        self.assertEqual(translate_client_command(dict(other)), other)
 
 
 if __name__ == "__main__":

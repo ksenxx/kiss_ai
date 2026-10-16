@@ -13,7 +13,7 @@ bounded wait for the daemon's local endpoint timed out.
 
 Root cause
 ==========
-``RemoteAccessServer.__init__`` constructs a ``VSCodeServer``, whose
+``RemoteAccessServer.__init__`` constructs a ``AgentServer``, whose
 ``__init__`` ran the orphan-task recovery sweep
 (:func:`kiss.agents.sorcar.persistence._recover_orphaned_tasks`)
 **synchronously** — an UPDATE on ``task_history`` behind the
@@ -28,7 +28,7 @@ whole time.
 
 Fix
 ===
-``VSCodeServer.__init__`` starts the sweep on a background daemon
+``AgentServer.__init__`` starts the sweep on a background daemon
 thread (``orphan-task-sweep``).  Startup binds the sockets promptly;
 the sweep completes — and still rewrites the sentinel rows — as soon
 as the database lock becomes available.
@@ -189,7 +189,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         self.locker.rollback()
         self.locker.close()
         self.locker = None
-        sweep = self.server._vscode_server._orphan_sweep_thread
+        sweep = self.server._agent_server._orphan_sweep_thread
         assert sweep is not None, "orphan sweep thread was not started"
         await asyncio.to_thread(sweep.join, 60)
         assert not sweep.is_alive(), "orphan sweep never finished"
@@ -223,7 +223,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         assert elapsed < _STARTUP_BUDGET_SECS, (
             f"uncontended startup took {elapsed:.1f}s"
         )
-        sweep = self.server._vscode_server._orphan_sweep_thread
+        sweep = self.server._agent_server._orphan_sweep_thread
         assert sweep is not None, "orphan sweep thread was not started"
         await asyncio.to_thread(sweep.join, 60)
         assert not sweep.is_alive(), "orphan sweep never finished"

@@ -24,7 +24,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class TestRunEmptyTabId(unittest.TestCase):
@@ -32,7 +32,7 @@ class TestRunEmptyTabId(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt4-emptytab-")
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture_broadcast(event: dict[str, Any]) -> None:

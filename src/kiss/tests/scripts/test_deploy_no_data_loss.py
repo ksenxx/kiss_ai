@@ -39,6 +39,7 @@ import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.remote_password import password_accepted
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -251,18 +252,23 @@ class RemoteConfigTest(unittest.TestCase):
         return done
 
     def test_every_other_setting_survives(self) -> None:
-        """A deploy sets two keys; the rest is not its business."""
+        """A deploy sets two keys; the rest is not its business.
+
+        The password is one of the two, and a deploy that gives none
+        keeps the configured one (printing it back).
+        """
         self.config.write_text(json.dumps(
             {"last_model": "claude-opus-5", "notify": {"ntfy": True},
-             "remote_password": "keepme"}))
+             "remote_password": "previous"}))
 
-        self._configure(_SERVER)
+        done = self._configure(_SERVER)
 
         saved = json.loads(self.config.read_text())
         self.assertEqual(saved["last_model"], "claude-opus-5")
         self.assertEqual(saved["notify"], {"ntfy": True})
-        self.assertEqual(saved["remote_password"], "keepme")
         self.assertEqual(saved["work_dir"], _SERVER)
+        self.assertEqual(done.stdout.strip(), "SORCAR_PASSWORD=previous")
+        self.assertEqual(saved["remote_password"], "previous")
 
     def test_a_file_json_cannot_read_is_kept(self) -> None:
         """It may be the only copy of settings that took a while to get right."""
@@ -329,17 +335,20 @@ class RemoteConfigTest(unittest.TestCase):
         done = self._configure(_SERVER, "new-one")
 
         self.assertIn("SORCAR_PASSWORD=new-one", done.stdout)
-        self.assertEqual(
-            json.loads(self.config.read_text())["remote_password"], "new-one")
+        saved = json.loads(self.config.read_text())
+        self.assertEqual(saved["remote_password"], "new-one")
+        self.assertFalse(password_accepted("old", saved["remote_password"]))
 
     def test_a_machine_without_a_password_gets_one(self) -> None:
         """The web app only opens a public tunnel when a password is set."""
         done = self._configure(_SERVER)
 
         password = done.stdout.strip().split("=", 1)[1]
-        self.assertGreaterEqual(len(password), 12)
-        self.assertEqual(
-            json.loads(self.config.read_text())["remote_password"], password)
+        self.assertEqual(len(password), 20)
+        self.assertTrue(password.isalnum())
+        saved = json.loads(self.config.read_text())
+        self.assertEqual(saved["remote_password"], password)
+        self.assertTrue(password_accepted(password, saved["remote_password"]))
         if not IS_WINDOWS:  # Windows chmod carries no group/other bits
             self.assertEqual(self.config.stat().st_mode & 0o077, 0)
 

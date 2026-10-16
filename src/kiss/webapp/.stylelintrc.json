@@ -1,0 +1,39 @@
+{
+  "extends": "stylelint-config-standard",
+  "plugins": [
+    "./scripts/stylelint-design-tokens.mjs"
+  ],
+  "ignoreFiles": [
+    "media/**/*.min.css",
+    "node_modules/**"
+  ],
+  "rules": {
+    "selector-class-pattern": null,
+    "selector-id-pattern": null,
+    "custom-property-pattern": null,
+    "no-descending-specificity": null,
+    "declaration-block-no-redundant-longhand-properties": null,
+    "declaration-block-single-line-max-declarations": null,
+    "declaration-property-value-keyword-no-deprecated": null,
+    "keyframes-name-pattern": null,
+    "kiss/design-tokens": [
+      true,
+      {
+        "tokenSelectors": [
+          ":root",
+          "body.remote-chat"
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "media/highlight-*.css"
+      ],
+      "rules": {
+        "kiss/design-tokens": null
+      }
+    }
+  ]
+}

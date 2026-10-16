@@ -389,6 +389,42 @@ def _ledger_totals_and_banked(
         steps += event.steps
     return budget, tokens, steps, banked
 
+
+def publish_usage_offsets(agent: RelentlessAgent, printer: Any) -> None:
+    """Publish *agent*'s banked totals as *printer*'s usage offsets.
+
+    The printer adds its per-task offsets to every session-relative
+    event, so the UI shows the task's cumulative usage.  The two
+    writers — the session-start rebase on the agent thread
+    (:meth:`RelentlessAgent._set_printer_offsets`) and a finished
+    child's fold on its own thread
+    (``sorcar_agent._attribute_sub_usage``) — both call this under
+    :data:`_OFFSET_PUBLISH_LOCK`, so publishes land in snapshot order
+    and the offsets never decrease.
+
+    The offsets belong to the agent's own task: a fold runs on
+    whatever thread finished the child (a dispatch job thread, the
+    ``/update`` worker, a server thread), whose thread-keyed setters
+    would file them under that thread's task, so the agent's persisted
+    task is named when it has one (``last_task_id``) and the printer
+    can take a task id (``set_usage_offsets``); otherwise the plain
+    setters serve (a console printer, an agent without a task row).
+
+    Args:
+        agent: The agent whose ledger totals are published.
+        printer: Its printer.
+    """
+    budget, tokens, steps = agent.usage_snapshot()
+    task_id = str(getattr(agent, "last_task_id", "") or "")
+    set_offsets = getattr(printer, "set_usage_offsets", None)
+    if task_id and callable(set_offsets):
+        set_offsets(task_id, budget, tokens, steps)
+    else:
+        printer.budget_offset = budget
+        printer.tokens_offset = tokens
+        printer.steps_offset = steps
+
+
 TASK_PROMPT = """
 {task_description}
 
@@ -490,9 +526,9 @@ class SummarizerFinish:
 
     The summarizer's result IS the failed session's continuation result,
     and its terminal ``result`` printer event is the one the chat
-    webview shows for it.  The built-in plain-text ``finish(result)``
+    page shows for it.  The built-in plain-text ``finish(result)``
     would emit that event with the HTML summary as bare ``text`` (no
-    ``summary`` / ``is_continue`` keys), which the webview renders
+    ``summary`` / ``is_continue`` keys), which the chat page renders
     escaped, tags and all.  This ``finish`` keeps the summarizer's simple
     ``result`` signature but returns the structured continuation
     contract (``success=False, is_continue=True``, HTML summary), so the
@@ -1630,15 +1666,7 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
-        locked_call(_OFFSET_PUBLISH_LOCK, self._publish_printer_offsets)
-
-    def _publish_printer_offsets(self) -> None:
-        """Snapshot the totals into the printer's offsets (lock held)."""
-        printer: Any = self.printer
-        budget, tokens, steps = self.usage_snapshot()
-        printer.tokens_offset = tokens
-        printer.budget_offset = budget
-        printer.steps_offset = steps
+        locked_call(_OFFSET_PUBLISH_LOCK, publish_usage_offsets, self, self.printer)
 
     def _summarize_failed_session(
         self,

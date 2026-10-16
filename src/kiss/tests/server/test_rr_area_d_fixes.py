@@ -4,7 +4,7 @@
 # add your name here
 """Regression tests for the area-D redundancy/race-condition fixes.
 
-Covers (real :class:`VSCodeServer`, real :class:`AgentState` registry,
+Covers (real :class:`AgentServer`, real :class:`AgentState` registry,
 real threads, real on-disk git repos and worktrees — no mocks, patches
 or fakes):
 
@@ -35,7 +35,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _task_accepts_input
 from kiss.server.file_index import FileIndex, FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.tab_registry import _MAX_TABS, OpenTabOutcome, TabRegistry
 
 from ._memory_printer import MemoryPrinter
@@ -86,7 +86,7 @@ class TestDRC1TaskAcceptsInputStartupWindow:
     def test_append_user_message_queued_during_startup_window(self) -> None:
         """End-to-end: ``appendUserMessage`` from another connection in
         the startup window lands in ``pending_user_messages``."""
-        server = VSCodeServer(printer=MemoryPrinter())
+        server = AgentServer(printer=MemoryPrinter())
         state = AgentState(
             "rr-d-rc1-e2e", tab_id="rr-d-rc1-e2e-tab", server_owned=True,
         )
@@ -131,7 +131,7 @@ class TestDRC2OpenTabTriState:
     def test_full_registry_rejects_unknown_tab(self, tmp_path: Path) -> None:
         """The FULL outcome still produces ``openTabRejected``."""
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.tab_registry = TabRegistry(tmp_path / "tabs.json")
         for i in range(_MAX_TABS):
             assert server.tab_registry.open_tab(f"pre-{i}")
@@ -152,7 +152,7 @@ class TestDRC2OpenTabTriState:
         outcome is decided atomically, so every interleaving yields
         EXISTS (still registered) or OPENED (close freed a slot)."""
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.tab_registry = TabRegistry(tmp_path / "tabs.json")
         for i in range(_MAX_TABS - 1):
             assert server.tab_registry.open_tab(f"cap-{i}")
@@ -190,7 +190,7 @@ def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
     raise AssertionError("condition not met in time")
 
 
-def _private_registry(server: VSCodeServer, tmp_path: Path) -> FileIndexRegistry:
+def _private_registry(server: AgentServer, tmp_path: Path) -> FileIndexRegistry:
     """Replace the server's file-index registry with one rooted in *tmp_path*."""
     server._file_index.stop()
     registry = FileIndexRegistry(
@@ -228,7 +228,7 @@ class TestDR1SharedWorkDirUpdate:
     """
 
     def test_set_work_dir_updates_state(self, tmp_path: Path) -> None:
-        server = VSCodeServer(printer=MemoryPrinter())
+        server = AgentServer(printer=MemoryPrinter())
         registry = _private_registry(server, tmp_path)
         try:
             # ``work_dir`` is an optional printer attribute the update
@@ -266,7 +266,7 @@ class TestDR1SharedWorkDirUpdate:
     def test_save_config_updates_state_identically(
         self, tmp_path: Path,
     ) -> None:
-        server = VSCodeServer(printer=MemoryPrinter())
+        server = AgentServer(printer=MemoryPrinter())
         registry = _private_registry(server, tmp_path)
         try:
             setattr(server.printer, "work_dir", "")

@@ -33,11 +33,16 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server
 from kiss.server.sorcar import ServerApi, passwords_equal
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.conftest import find_free_port, no_verify_ssl, write_trajectory
+from kiss.tests.server.conftest import (
+    FORWARDED_VISITOR,
+    find_free_port,
+    no_verify_ssl,
+    write_trajectory,
+)
 
 _PASSWORD = "webapp-api-test-password"
 
@@ -123,7 +128,7 @@ class TestTrajectoryApiMethods(unittest.TestCase):
 class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
     """A remote browser's full session runs on the server's code API.
 
-    Drives the exact frame sequence ``_WS_SHIM_JS`` produces — the
+    Drives the exact frame sequence ``media/transport.js`` produces — the
     ``auth`` handshake (:meth:`ServerApi.authenticate`), then catalog
     commands on the authenticated socket (:meth:`ServerApi.dispatch`)
     — against a live ``RemoteAccessServer`` over real WSS.
@@ -156,6 +161,7 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
         """Open a fresh WSS connection to /ws on the test server."""
         return await connect(
             f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
+            additional_headers=FORWARDED_VISITOR,
         )
 
     async def _recv_type(self, ws: Any, expected: str) -> dict[str, Any]:
@@ -164,6 +170,11 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
             if isinstance(msg, dict) and msg.get("type") == expected:
                 return msg
+
+    @staticmethod
+    async def _send(ws: Any, cmd: dict[str, Any]) -> None:
+        """Send *cmd* with the password every frame of a password client carries."""
+        await ws.send(json.dumps({**cmd, "password": _PASSWORD}))
 
     async def test_handshake_then_commands_run_on_the_api(self) -> None:
         """Wrong→right password, then commands, exactly like the shim."""
@@ -174,19 +185,17 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
                 json.dumps({"type": "auth", "password": _PASSWORD})
             )
             await self._recv_type(ws, "auth_ok")
-            await ws.send(json.dumps({"type": "activeTasksQuery"}))
+            await self._send(ws, {"type": "activeTasksQuery"})
             reply = await self._recv_type(ws, "activeTasksResponse")
             self.assertIn("count", reply)
             self.assertIn("tabs", reply)
-            await ws.send(
-                json.dumps({"type": "definitelyNotACommand"})
-            )
+            await self._send(ws, {"type": "definitelyNotACommand"})
             err = await self._recv_type(ws, "error")
             self.assertIn("Unknown command", err.get("text", ""))
-            await ws.send(
-                json.dumps({"type": "auth", "password": "again"})
-            )
-            await ws.send(json.dumps({"type": "activeTasksQuery"}))
+            # A repeated ``auth`` frame (the shim re-sending its queued
+            # batch after a reconnect) is discarded; the session goes on.
+            await self._send(ws, {"type": "auth"})
+            await self._send(ws, {"type": "activeTasksQuery"})
             await self._recv_type(ws, "activeTasksResponse")
 
     async def test_wrong_second_attempt_closes_with_error(self) -> None:

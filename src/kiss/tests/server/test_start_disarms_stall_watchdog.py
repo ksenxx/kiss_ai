@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from kiss.core.vscode_config import save_config
+from kiss.core.user_config import save_config
 from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server.conftest import find_free_port
 from kiss.tests.server.test_blocking_start_releases_port import (

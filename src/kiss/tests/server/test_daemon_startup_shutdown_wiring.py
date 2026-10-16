@@ -40,7 +40,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.core import config as config_module
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.core.processes import pid_alive
 from kiss.server import agent_state
 from kiss.server.web_server import (
@@ -100,11 +100,11 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
         self._saved_env = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(self.kiss_home)
         self._saved_cfg = (
-            vscode_config.CONFIG_DIR,
-            vscode_config.CONFIG_PATH,
+            user_config.CONFIG_DIR,
+            user_config.CONFIG_PATH,
         )
-        vscode_config.CONFIG_DIR = self.kiss_home
-        vscode_config.CONFIG_PATH = self.kiss_home / "config.json"
+        user_config.CONFIG_DIR = self.kiss_home
+        user_config.CONFIG_PATH = self.kiss_home / "config.json"
         (self.kiss_home / "config.json").write_text(
             json.dumps({"work_dir": str(self.work_dir), **self.config}),
             encoding="utf-8",
@@ -139,7 +139,7 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
             th._db_conn.close()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_db
         config_module.DEFAULT_CONFIG.max_budget = self._saved_budget
-        vscode_config.CONFIG_DIR, vscode_config.CONFIG_PATH = self._saved_cfg
+        user_config.CONFIG_DIR, user_config.CONFIG_PATH = self._saved_cfg
         if self._saved_env is None:
             os.environ.pop("KISS_HOME", None)
         else:
@@ -278,11 +278,11 @@ class TestBrowserTabHandoffRegistration(_DaemonHarness):
         assert opener is not None
         self.assertEqual(
             opener.__func__,  # type: ignore[attr-defined]
-            type(self.server._vscode_server.browser_tabs).open_for_user,
+            type(self.server._agent_server.browser_tabs).open_for_user,
         )
         self.assertIs(
             opener.__self__,  # type: ignore[attr-defined]
-            self.server._vscode_server.browser_tabs,
+            self.server._agent_server.browser_tabs,
         )
         await self._stop()
         self.assertIsNone(

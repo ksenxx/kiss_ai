@@ -19,7 +19,7 @@ classifier and the run share it.
 Harness: an isolated ``KISS_HOME`` whose ``MY_MODELS.json`` points a
 bundled model name at a local stand-in OpenAI-compatible endpoint
 (``StandInModelServer``) that records every request; a real
-``VSCodeServer`` runs the task through ``_cmd_run`` with the real
+``AgentServer`` runs the task through ``_cmd_run`` with the real
 ``ChatSorcarAgent`` the server creates.  The stand-in answers the
 classifier's request (no ``tools``) with a verdict and the agent's
 first request (``tools`` attached) with a ``finish`` call, so the
@@ -43,7 +43,7 @@ from kiss.core.models import model_info
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -164,7 +164,7 @@ def test_classifier_uses_the_custom_models_endpoint(home: IsolatedKissHome) -> N
             "base_url": endpoint.server.url, "api_key": "kiss-test-key",
         }
         printer = _CapturePrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server._cmd_run({
             "type": "run",
             "tabId": _TAB,

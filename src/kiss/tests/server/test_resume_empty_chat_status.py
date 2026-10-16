@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end test: resuming a chat with nothing to replay reports it idle.
 
-The webview keeps a chat adopted from the tab registry open until the
+The chat page keeps a chat adopted from the tab registry open until the
 daemon has told it the chat's state (``statusKnown`` in main.js): the
 ``status`` or ``task_events`` of the replay every ``ready`` triggers.
 A chat with neither a history row nor a live run has nothing to

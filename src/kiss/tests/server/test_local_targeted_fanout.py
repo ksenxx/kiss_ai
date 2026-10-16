@@ -9,9 +9,9 @@ Before this change every task event (every streamed token) was copied
 to every connected local client; with dozens of headless ``run`` clients
 the daemon's event loop drowned in per-client send coroutines.  The
 tests drive a real :class:`RemoteAccessServer` over real local
-connections: a peer that addressed only another tab is skipped, while a
-webview peer and a peer that never addressed a tab keep receiving every
-copy, and global events still reach everyone.
+connections: a peer that addressed only another tab is skipped, while
+a peer that never addressed a tab keeps receiving every copy, and
+global events still reach everyone.
 """
 
 from __future__ import annotations
@@ -144,33 +144,6 @@ class TestTargetedLocalFanout(unittest.IsolatedAsyncioTestCase):
         self.assertIn("text_delta", types_c)
         for types in (types_a, types_b, types_c):
             self.assertIn("tasks_updated", types)
-
-    async def test_webview_peer_receives_copies_for_other_tabs(self) -> None:
-        """A connection that announced a webview mirrors every tab, whatever it addressed."""
-        reader_w, writer_w = await self._connect()
-        await self._wait_for_local_clients(1)
-        await self._send(writer_w, {"type": "stop", "tabId": "tab-w"})
-        await self._wait_for_interest("tab-w")
-        printer = self.server._printer
-        conn_ids: list[str] = []
-        for _ in range(300):
-            with printer._ws_lock:
-                conn_ids = list(printer._local_tab_sets)
-            if conn_ids:
-                break
-            await asyncio.sleep(0.01)
-        printer.mark_local_webview(conn_ids[0])
-        await self._collect(reader_w, 0.3)
-
-        printer.subscribe_tab("task-2", "tab-other")
-        await asyncio.to_thread(
-            printer.broadcast,
-            {"type": "text_delta", "taskId": "task-2", "text": "hi"},
-        )
-        got = await self._collect(reader_w, 1.0)
-        self.assertEqual(
-            [e["tabId"] for e in got if e["type"] == "text_delta"], ["tab-other"],
-        )
 
 
 if __name__ == "__main__":

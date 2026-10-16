@@ -7,7 +7,7 @@
 Moved from ``kiss.tests.server.test_orphan_task_recovery``
 because these tests drive :func:`persistence._recover_orphaned_tasks`
 directly and depend only on ``kiss.core`` and ``kiss.agents.sorcar``.
-The boot-time tests that construct a real ``VSCodeServer`` (and thus
+The boot-time tests that construct a real ``AgentServer`` (and thus
 depend on ``kiss.server``) remain in the original module, which imports
 the row helpers below back from here.
 
@@ -186,8 +186,8 @@ class TestOrphanTaskRecovery(TestCase):
         """A row owned by a LIVE process is never rewritten.
 
         The sweep decides liveness from the database, not from process
-        memory: a second Sorcar process (a ``kiss`` CLI run, a VS Code
-        reload, a restarted daemon) used to rewrite rows for tasks
+        memory: a second Sorcar process (a ``kiss`` CLI run, a
+        restarted daemon) used to rewrite rows for tasks
         still RUNNING in the first process, painting a red failure dot
         on a live task and destroying the sentinel that both the
         shutdown safety net and any later sweep condition on.  Here

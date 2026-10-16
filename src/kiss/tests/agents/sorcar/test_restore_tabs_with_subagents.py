@@ -3,12 +3,12 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests: restoring a parent agent that fanned out
-sub-agents (``run_parallel``) after a VS Code restart.
+sub-agents (``run_parallel``) after a daemon restart.
 
-After a VS Code restart the webview restores its tabs from persisted
+After a daemon restart the chat page restores its tabs from persisted
 state and sends ``resumeSession {chatId, tabId}`` — chat id only, no
-task id — for each restored tab (see ``init()`` in media/main.js and
-the ``ready`` handler in SorcarSidebarView.ts).  For a parent agent
+task id — for each restored tab (see ``init()`` in media/main.js).
+For a parent agent
 that spawned sub-agents the restored parent tab must:
 
 1. load the PARENT's own chat events into the parent tab (NOT the

@@ -74,7 +74,7 @@
 #      force-pushed and no branch is deleted anywhere.
 #      The remote ends up a repository you can commit and push
 #      from — same remotes, shared history, clean ``git status`` — which is
-#      also what install.sh needs (it packages the extension with
+#      also what install.sh needs (it lists the app's files with
 #      ``git ls-files``).  What a deploy no longer carries is the files git
 #      does not track: ``.venv`` (a macOS virtualenv is useless on Linux
 #      anyway), ``tmp/``, build output.  A ``kiss/wt-*`` branch is never
@@ -136,9 +136,8 @@
 #      date unite their table rows and bullets, and the ledger becomes the
 #      union of both machines' rows in time order -- and writes the result on
 #      both machines.
-#   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
-#      build).  A ``code`` CLI is required by install.sh, so code-server is
-#      installed (standalone, no sudo) when the host has no editor CLI.
+#   5. Run install.sh in the synced folder (the app under ~/.kiss/kiss, its
+#      Python environment, the sorcar CLI, Playwright, cloudflared).
 #   6. Build the Python environment with ``uv sync`` and start ``kiss-web`` as
 #      a systemd *user* service with lingering enabled, so the web app keeps
 #      running after you log out and comes back after a reboot.
@@ -436,7 +435,7 @@ fi
 #
 # Everything a deploy writes lands under the remote's $HOME: the whole task
 # database (step 4b, as large as this machine's ~/.kiss/history.db), the
-# checkout, its .venv and uv's cache, code-server.  A cloud VM is often a
+# checkout, its .venv and uv's cache.  A cloud VM is often a
 # 10 GB boot disk with a large data disk mounted beside it, and none of that
 # fits on the boot disk: the upload died with "gzip: stdout: No space left
 # on device", the deploy went on, and every later step failed on a full
@@ -655,7 +654,7 @@ ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss" \
 # install older than that store they are export lines in its shell rc
 # (~/.bashrc, ~/.zshrc, fish's config.fish — the files the kiss-web daemon
 # migrates into the store at startup, see _migrate_legacy_rc_keys in
-# src/kiss/core/vscode_config.py).  When any of those holds a key, this
+# src/kiss/core/user_config.py).  When any of those holds a key, this
 # machine's keys stay here: the remote is being re-deployed, not set up, and
 # its keys may well be newer than these (a key rotated in the remote's
 # settings panel, a provider added there) — a copy would silently roll them
@@ -800,66 +799,14 @@ command -v git >/dev/null 2>&1 || { echo "ERROR: git is missing on this host." >
 # Step 3 (scripts/sync-repo.sh) created this checkout from origin, put it on
 # the branch being deployed, and committed whatever an agent left uncommitted
 # here — so there is a real repository to commit and push from, which is also
-# what install.sh needs (it packages the extension with ``git ls-files``).
+# what install.sh needs (it lists the app's files with ``git ls-files``).
 [ -d .git ] || { echo "ERROR: $REMOTE_DIR is not a git repository." >&2; exit 1; }
 rinfo "Repository: $(git log -1 --format='%h %s' 2>/dev/null || echo 'no commits') on $(git symbolic-ref -q --short HEAD || echo 'detached HEAD')"
 
-# --- 5c. A `code` CLI, which install.sh requires ---------------------------
-# On a headless server there is no desktop VS Code.  code-server ships the
-# same extension CLI, so a shim forwards the extension subcommands to it and
-# swallows editor launches (this script owns what runs).
-#
-# Two different editors can attach to this host, and each reads its own
-# extensions directory:
-#   * code-server (the browser IDE) .... ~/.local/share/code-server/extensions
-#   * VS Code Remote - SSH ............. ~/.vscode-server/extensions
-# Installing only into code-server leaves Remote-SSH windows without the
-# KISS Sorcar panel, so ``--install-extension``/``--uninstall-extension``
-# target both.  ~/.vscode-server is populated with the Remote-SSH server's own
-# CLI when someone has already connected; before that first connection,
-# code-server's compatible CLI pointed at that directory pre-seeds it, so the
-# extension is there the moment Remote-SSH first connects.
-#
-# The shim is rewritten (not only created) on every deploy so existing
-# deployments pick up fixes; a real ``code`` binary is never overwritten.
-CODE_PATH="$(command -v code 2>/dev/null || true)"
-if [ -z "$CODE_PATH" ] || grep -q 'kiss-sorcar code shim' "$CODE_PATH" 2>/dev/null; then
-    if ! command -v code-server >/dev/null 2>&1; then
-        rinfo "Installing code-server (standalone, no sudo)..."
-        curl -fsSL https://code-server.dev/install.sh \
-            | sh -s -- --method=standalone --prefix="$HOME/.local" >/dev/null
-    fi
-    mkdir -p "$HOME/.local/bin"
-    cat > "$HOME/.local/bin/code" <<'SHIM'
-#!/bin/bash
-# kiss-sorcar code shim — stands in for the VS Code CLI on a headless server.
-# Newest CLI shipped by a VS Code Remote-SSH server connection, if any.
-vscode_server_cli() {
-    ls -t "$HOME"/.vscode-server/cli/servers/*/server/bin/code-server \
-          "$HOME"/.vscode-server/bin/*/bin/code-server 2>/dev/null | head -1
-}
-case "${1:-}" in
-    --install-extension|--uninstall-extension)
-        code-server "$@"
-        status=$?
-        cli="$(vscode_server_cli)"
-        [ -n "$cli" ] || cli="$(command -v code-server)"
-        mkdir -p "$HOME/.vscode-server/extensions"
-        "$cli" --extensions-dir "$HOME/.vscode-server/extensions" "$@" || status=$?
-        exit $status
-        ;;
-    --list-extensions|--version|--locate-extension)
-        exec code-server "$@" ;;
-    *) exit 0 ;;
-esac
-SHIM
-    chmod +x "$HOME/.local/bin/code"
-    hash -r
-fi
-
-# --- 5d. install.sh --------------------------------------------------------
+# --- 5c. install.sh --------------------------------------------------------
 # install.sh never pulls — it installs the tree we just shipped, as-is.
-# KISS_SKIP_LAUNCH: no editor launch; this script starts the web app instead.
+# KISS_SKIP_LAUNCH: no daemon start or browser launch; this script starts
+# the web app itself as a systemd user service below.
 # --non-interactive: no [Y/n] questions (there is no pty anyway).
 rinfo "Running install.sh ..."
 KISS_SKIP_LAUNCH=1 bash "$REMOTE_DIR/install.sh" --non-interactive
@@ -935,7 +882,7 @@ mkdir -p "$HOME/.config/systemd/user" "$HOME/.kiss"
 # regenerated from the canonical file and wired back into the unit.
 ENV_FILE_LINE=""
 if ! grep -q "def load_api_keys" \
-        "$REMOTE_DIR/src/kiss/core/vscode_config.py" 2>/dev/null; then
+        "$REMOTE_DIR/src/kiss/core/user_config.py" 2>/dev/null; then
     sed -E 's/^export //' "$HOME/.kiss/api_keys.env" 2>/dev/null \
         | grep -vE '^(PATH|MANPATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH|PS1|PROMPT|LANG|LC_[A-Z]+|HOME|SHELL|TERM|EDITOR)=' \
         | grep -vE '[$`]' > "$HOME/.kiss/api_keys.systemd.env" || true
@@ -1157,7 +1104,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # 10. Run install.sh on the local machine too, so this machine's own install
-#     (VS Code extension, launchers) is as fresh as the one just deployed.
+#     (app, daemon, launchers) is as fresh as the one just deployed.
 #     After the summary box above, so a failing local install can never hide
 #     the remote URL and password the deploy produced.  It runs from
 #     $MAIN_REPO, never from a worktree this script may sit in: install.sh

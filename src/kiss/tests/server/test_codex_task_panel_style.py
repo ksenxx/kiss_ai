@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Server-only test extracted from ``kiss.tests.agents.vscode.test_codex_task_panel_style``.
+"""Server-only test extracted from ``kiss.tests.webapp.test_codex_task_panel_style``.
 
 Moved here because its full dependency closure touches only
 kiss.server (it asserts on the typography variables that
@@ -23,11 +23,11 @@ WEB_SERVER_PY = Path(kiss.server.web_server.__file__)
 
 
 def test_remote_page_font_size_vars_match_task_panel() -> None:
-    """The task panel sizes itself with --vscode-editor-font-size and
-    the chat panels with rem units derived from --vscode-font-size;
+    """The task panel sizes itself with --theme-editor-font-size and
+    the chat panels with rem units derived from --theme-font-size;
     the remote page must inject the SAME size for both so panel
-    contents and the task panel share one size (13px, the webview
+    contents and the task panel share one size (13px, the VS Code
     workbench size and the base of Cursor's UI type scale)."""
     src = WEB_SERVER_PY.read_text(encoding="utf-8")
-    assert "--vscode-font-size: 13px" in src
-    assert "--vscode-editor-font-size: 13px" in src
+    assert "--theme-font-size: 13px" in src
+    assert "--theme-editor-font-size: 13px" in src

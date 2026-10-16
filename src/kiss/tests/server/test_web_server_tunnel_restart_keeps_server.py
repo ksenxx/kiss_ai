@@ -9,7 +9,7 @@ tunnel — whether because the tunnel subprocess died, because the
 Cloudflare edge deregistered it (``readyConnections == 0``), or because
 :meth:`RemoteAccessServer._restart_tunnel_url` is invoked directly — it
 must only respawn ``cloudflared``.  The long-lived HTTPS/WSS listener
-(``_ws_server``) that browsers and the VS Code extension are connected
+(``_ws_server``) that every chat client is connected
 to MUST stay up: tearing it down would drop every in-flight chat
 session and force every client to reconnect for a problem that lives
 entirely on the public-tunnel side.

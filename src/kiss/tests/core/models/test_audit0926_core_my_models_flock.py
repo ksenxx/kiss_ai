@@ -7,7 +7,7 @@
 ``model_info._my_models_flock`` inlined its own open / ``lock_exclusive``
 / ``try: ... finally: unlock`` sequence, a copy of
 ``file_lock.exclusive_file_lock`` that the 2026-09-24 audit had already
-folded out of ``vscode_config``.  It now delegates to the helper.  The
+folded out of ``user_config``.  It now delegates to the helper.  The
 contract the custom-model CRUD relies on is pinned end to end with real
 processes sharing one home directory:
 

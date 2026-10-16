@@ -38,7 +38,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -48,7 +48,7 @@ class TestGhostSuffixQuotesSurvive(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment,method-assign]
 

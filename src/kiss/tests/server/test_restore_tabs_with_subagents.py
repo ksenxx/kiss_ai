@@ -3,12 +3,12 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests: restoring a parent agent that fanned out
-sub-agents (``run_parallel``) after a VS Code restart.
+sub-agents (``run_parallel``) after a daemon restart.
 
-After a VS Code restart the webview restores its tabs from persisted
+After a daemon restart the chat page restores its tabs from persisted
 state and sends ``resumeSession {chatId, tabId}`` — chat id only, no
-task id — for each restored tab (see ``init()`` in media/main.js and
-the ``ready`` handler in SorcarSidebarView.ts).  For a parent agent
+task id — for each restored tab (see ``init()`` in media/main.js).
+For a parent agent
 that spawned sub-agents the restored parent tab must:
 
 1. load the PARENT's own chat events into the parent tab (NOT the
@@ -27,7 +27,7 @@ import tempfile
 import threading
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_restore_tabs_with_subagents import (  # noqa: F401
     _redirect,
     _restore,
@@ -35,9 +35,9 @@ from kiss.tests.agents.sorcar.test_restore_tabs_with_subagents import (  # noqa:
 )
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 
@@ -54,7 +54,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 class TestRestoreParentTabWithSubagents:
     """Simulates the post-restart ``resumeSession`` (chat id only, no
-    task id) that the webview sends for a restored parent tab."""
+    task id) that the chat page sends for a restored parent tab."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -69,7 +69,7 @@ class TestRestoreParentTabWithSubagents:
 
     def _resume_restored_parent_tab(
         self,
-    ) -> tuple[VSCodeServer, list[dict], str, list[str], str]:
+    ) -> tuple[AgentServer, list[dict], str, list[str], str]:
         chat_id = "chat-restart-1"
         parent_id, sub_ids = _seed_parent_with_subagents(chat_id)
         server, events = _make_server()

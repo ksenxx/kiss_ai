@@ -149,7 +149,7 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         id and prompt before the stub returns, so a test can dispatch a
         child task while its parent is still running.
         """
-        registry = self.server._vscode_server.tab_registry
+        registry = self.server._agent_server.tab_registry
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             if kwargs.get("is_agentic") is False:

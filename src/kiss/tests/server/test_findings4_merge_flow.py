@@ -4,7 +4,7 @@
 # add your name here
 """FINDINGS-4 regression tests for merge_flow.py.
 
-Covers (real :class:`VSCodeServer`, real :class:`ChatSorcarAgent`,
+Covers (real :class:`AgentServer`, real :class:`ChatSorcarAgent`,
 real on-disk git repos and worktrees — no mocks):
 
 - F4-20: a session replay (``_emit_pending_worktree``) while a merge
@@ -24,7 +24,7 @@ from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 
 from ._memory_printer import MemoryPrinter
@@ -45,7 +45,7 @@ def _make_repo(path: Path) -> Path:
 
 
 def _setup_wt_tab(
-    server: VSCodeServer, repo: Path, tab_id: str,
+    server: AgentServer, repo: Path, tab_id: str,
 ) -> tuple[Any, ChatSorcarAgent, Path]:
     """Create a worktree agent and register its tab's agent state."""
     wt_agent = ChatSorcarAgent("wt")
@@ -82,7 +82,7 @@ class TestF420ReplayDoesNotResetActiveReview:
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.work_dir = str(repo)
 
         tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-420")
@@ -112,7 +112,7 @@ class TestF421GitFailureNotMistakenForClean:
         self, tmp_path: Path,
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
+        server = AgentServer(printer=MemoryPrinter())
         server.work_dir = str(repo)
 
         tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-421")
@@ -143,7 +143,7 @@ class TestF422CommittedChangesReachWorktreePrompt:
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         server.work_dir = str(repo)
 
         tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-422")

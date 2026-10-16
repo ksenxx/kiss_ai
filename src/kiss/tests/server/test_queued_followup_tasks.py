@@ -26,7 +26,7 @@ Covers:
   ``appendToPrompt`` suffix applied), a failed subtask aborts them,
   and leftovers never leak into a later run on the same tab.
 
-Drives the real ``VSCodeServer._run_task`` lifecycle with a real
+Drives the real ``AgentServer._run_task`` lifecycle with a real
 ``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result (the same harness as
 ``test_suggested_next_task_e2e.py``).  No mocks or patches.
@@ -47,7 +47,7 @@ from kiss.core.utils import finish
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_runner import contains_task_tags
 
 
@@ -85,9 +85,9 @@ class TestContainsTaskTags:
         assert not contains_task_tags("<task>never closed")
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """A real :class:`VSCodeServer` whose broadcasts land in a list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """A real :class:`AgentServer` whose broadcasts land in a list."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
 
     def capture(event: dict[str, Any]) -> None:
@@ -211,9 +211,9 @@ class _QueueScriptedAgent(ChatSorcarAgent):
     """
 
     def __init__(self) -> None:
-        super().__init__("Sorcar VS Code")
+        super().__init__("Sorcar")
         self.prompts: list[str] = []
-        self.server: VSCodeServer | None = None
+        self.server: AgentServer | None = None
         self.tab: str = ""
         self.steer_prompt: str = ""
         self.raise_on_first: bool = False
@@ -259,7 +259,7 @@ def _run_with_steering(
     *,
     raise_on_first: bool = False,
     append_to_prompt: str = "",
-) -> tuple[_QueueScriptedAgent, AgentState, VSCodeServer]:
+) -> tuple[_QueueScriptedAgent, AgentState, AgentServer]:
     """Run *prompt* through the real ``_run_task`` with mid-run steering.
 
     Returns the scripted agent (whose ``prompts`` list records every
@@ -270,7 +270,7 @@ def _run_with_steering(
     if not models:
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     agent = _QueueScriptedAgent()
     agent.server = server
     agent.tab = tab_id

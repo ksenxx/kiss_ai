@@ -8,7 +8,7 @@ The button (``#autocommit-btn`` in ``media/chat.html``) posts an
 ``autocommitAction`` command carrying the tab's id and working
 directory.  The command flows through the Sorcar API catalog
 (``kiss.server.sorcar.API``) to the backend dispatcher
-(``VSCodeServer._HANDLERS``), which stages the tab's working tree,
+(``AgentServer._HANDLERS``), which stages the tab's working tree,
 generates a commit message from the staged diff alone, commits, and
 reports through toast ``notification`` events plus a terminal
 ``autocommit_done`` event marked ``manual: True`` (no
@@ -28,11 +28,11 @@ Contract locked in here:
   state), while a task in a different repository does not block it.
 * While a tab's autocommit is in flight, duplicate clicks are dropped
   (no second commit), and the claim is released afterwards.
-* The webview wires the button: the markup is in ``chat.html`` and
+* The chat page wires the button: the markup is in ``chat.html`` and
   ``main.js`` posts ``autocommitAction`` with tab id and work dir.
 
 No mocks, patches, fakes, or test doubles: real git repositories and
-a real ``VSCodeServer``.  The commit-message LLM helper falls back to
+a real ``AgentServer``.  The commit-message LLM helper falls back to
 ``"kiss: auto-commit agent work"`` when no model is reachable, so the
 commit itself is always real.
 """
@@ -47,7 +47,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.sorcar import API
 
 _DONE_TIMEOUT_S = 120.0
@@ -82,7 +82,7 @@ class TestGitCommitCommandCatalog(unittest.TestCase):
         self.assertEqual(API["autocommitAction"].required, ())
 
     def test_in_backend_dispatcher(self) -> None:
-        self.assertIn("autocommitAction", VSCodeServer._HANDLERS)
+        self.assertIn("autocommitAction", AgentServer._HANDLERS)
 
 
 class TestGitCommitCommandEndToEnd(unittest.TestCase):
@@ -92,7 +92,7 @@ class TestGitCommitCommandEndToEnd(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-gitcommit-btn-")
         self.repo = Path(self.tmpdir) / "repo"
         _make_repo(self.repo)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = str(self.repo)
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]

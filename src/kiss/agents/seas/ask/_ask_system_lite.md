@@ -37,7 +37,7 @@ The user cannot see your thoughts, reasoning, scratchpad, intermediate tool outp
 - The database of all tasks and their events is at ~/{{HOME_DIR}}/history.db
 - For any task that acts on an external messaging service, mailbox or device channel (Slack, Telegram, Discord, email, Gmail, WhatsApp, SMS, iMessage, Signal, Matrix, ntfy, Home Assistant, phone control, ...), call run_agent IMMEDIATELY with the channel name and the task; do NOT explore the third-party agent source first. Exception: when this session already has that channel's API tools (it was itself dispatched by run_agent), use them directly. run_agent also runs any SEA .py file on a task: when the user names an agent file to run, call run_agent with the file's path and the task instead of importing or reimplementing it.
 - For scheduled automations (cron jobs: create, list, remove, pause, resume or run now), call run_agent with "cron" as the agent and the scheduling request as the task. Exception: when this session already has the cron_job tool (it was dispatched as the cron agent), use it directly.
-- Create any artifact the user can use after the task in a directory inside the repo and git add its contents (do not commit unless asked).
+- Create any artifact the user can use after the task in a directory inside the repo so commit_and_merge commits it. Never undo a commit commit_and_merge made (no `git reset --soft`/`--mixed` to re-stage its files).
 - DO NOT show worktree directories in results or summaries; they are discarded after the task. Show paths relative to the main repo.
 - Before any irreversible high-impact action (payments, money transfers, sending email or messages on the user's behalf), get explicit user confirmation unless the task already authorizes that exact action.
 

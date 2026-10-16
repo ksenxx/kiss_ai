@@ -15,7 +15,7 @@ functions against real files, threads and subprocesses (nothing mocked):
    to adopt the same file (the daemon, the CLI and the extension's helper
    all start by adopting ``history.db``) agree on one result.
 
-2. ``vscode_config.load_api_keys`` and ``load_api_keys_readonly`` used to
+2. ``user_config.load_api_keys`` and ``load_api_keys_readonly`` used to
    carry two copies of the "parse the store, import into ``os.environ``,
    refresh ``DEFAULT_CONFIG``" loop that differed only in whether an
    unreadable store or a NUL-poisoned line was logged.  Both now share
@@ -39,10 +39,10 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
+import kiss.core.user_config as user_config
 from kiss.core import config as config_module
 from kiss.core.config import adopt_legacy_file
-from kiss.core.vscode_config import (
+from kiss.core.user_config import (
     API_KEY_ENV_VARS,
     api_keys_env_path,
     load_api_keys,
@@ -200,8 +200,8 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("USERPROFILE", str(fake_home))  # what Path.home() reads on Windows
     monkeypatch.setenv("SHELL", "/bin/bash")
-    monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
-    monkeypatch.setitem(vars(vscode_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json")
+    monkeypatch.setitem(vars(user_config), "CONFIG_DIR", fake_home / ".kiss")
+    monkeypatch.setitem(vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json")
     # The loaders write os.environ directly, so the keys are restored by an
     # explicit snapshot (monkeypatch.delenv records nothing for an absent key).
     watched = (*API_KEY_ENV_VARS, "KISS_AUDIT_NUL", "KISS_AUDIT_SKIPPED")
@@ -239,7 +239,7 @@ def test_both_loaders_import_the_store_and_skip_junk_lines(
         "export KISS_AUDIT_NUL=abc\x00def\n"
     )
     os.environ[_KEY] = "stale"
-    with caplog.at_level(logging.WARNING, logger=vscode_config.__name__):
+    with caplog.at_level(logging.WARNING, logger=user_config.__name__):
         loader()
     assert os.environ[_KEY] == "from-store"
     assert config_module.DEFAULT_CONFIG.GEMINI_API_KEY == "from-store"
@@ -264,7 +264,7 @@ def test_readonly_loader_logs_an_unreadable_store_and_carries_on(
     env_file = _write_store(f"export {_KEY}=hidden\n")
     env_file.chmod(0)
     try:
-        with caplog.at_level(logging.WARNING, logger=vscode_config.__name__):
+        with caplog.at_level(logging.WARNING, logger=user_config.__name__):
             load_api_keys_readonly()
     finally:
         env_file.chmod(0o600)

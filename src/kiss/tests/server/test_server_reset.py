@@ -4,7 +4,7 @@
 # add your name here
 """Integration tests: the settings-panel "Server reset" button.
 
-The chat webview's "Server reset" button (next to "Update") posts a
+The chat page's "Server reset" button (next to "Update") posts a
 ``serverReset`` command.  The server API
 (:meth:`kiss.server.sorcar.ServerApi.server_reset`) routes it to
 :meth:`RemoteAccessServer._handle_server_reset`, which
@@ -312,8 +312,8 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         The requesting connection died with the previous daemon, so
         ``connId`` cannot be preserved across the restart.  The
         broadcast must therefore reach every currently-connected
-        client — both the VS Code extension and any sibling browser
-        webview that was disconnected by the SIGTERM.
+        client — every browser page that was disconnected by the
+        SIGTERM.
         """
         reader_a, _writer_a = await self._connect()
         reader_b, _writer_b = await self._connect()

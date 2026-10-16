@@ -18,7 +18,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   level or inside ``restoredTabs``) must not abort ready handling —
   an unhashable id used to raise ``TypeError`` while processing the
   restored-tab list and skip the remaining restored-tab resumes.
-* F11: ``VSCodeServer._teardown_tab_resources`` must survive a
+* F11: ``AgentServer._teardown_tab_resources`` must survive a
   duck-typed printer without ``cleanup_tab`` (same getattr-guarded
   contract as every sibling cleanup path).
 
@@ -43,7 +43,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -310,7 +310,7 @@ class TestTeardownWithDuckTypedPrinter(unittest.TestCase):
     """F11: tab teardown must tolerate printers without cleanup_tab."""
 
     def test_close_tab_survives_printer_without_cleanup_tab(self) -> None:
-        server = VSCodeServer(printer=cast(Any, _BroadcastOnlyPrinter()))
+        server = AgentServer(printer=cast(Any, _BroadcastOnlyPrinter()))
         server._close_tab("fixer6-tab-x")
         with server._state_lock:
             server._tab_chat_views["fixer6-tab-y"] = "chat-1"

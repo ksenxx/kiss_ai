@@ -21,7 +21,7 @@ repositories (no mocks, patches, fakes, or test doubles):
   — the same parser backing ``merge_flow._porcelain_paths``.
 
 * The canonical ``User prompt:`` / ``Result:`` commit-message block
-  format was spelled independently in ``vscode/helpers.py`` (writer)
+  format was spelled independently by the commit-message writer
   and ``sorcar/git_worktree.py`` (dedup detector).  It is now
   single-sourced via ``USER_PROMPT_HEADING`` / ``TASK_RESULT_HEADING``
   constants; the tests pin the byte-exact writer/detector agreement.

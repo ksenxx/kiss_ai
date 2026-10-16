@@ -15,7 +15,7 @@ changes and nothing was committed because staging itself failed.  The
 user is told their tree is clean when it is not.
 
 No mocks, patches, fakes, or test doubles: a real git repository with
-a real ``index.lock`` file, a real ``VSCodeServer``.
+a real ``index.lock`` file, a real ``AgentServer``.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _git(cwd: str | Path, *args: str) -> str:
@@ -53,7 +53,7 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-qm", "init")
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = str(self.repo)
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]

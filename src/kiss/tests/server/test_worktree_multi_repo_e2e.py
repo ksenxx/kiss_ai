@@ -26,7 +26,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.task_runner import _inherited_isolated_repos
 from kiss.server.web_server import WebPrinter
 from kiss.tests.server.conftest import run_git
@@ -74,7 +74,7 @@ class _TwoRepoRun(unittest.TestCase):
         self.wt_b: Path = Path()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:

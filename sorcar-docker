@@ -3,21 +3,31 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-# Launch KISS Sorcar in a Docker container (code-server in the browser).
+# Launch KISS Sorcar in a Docker container: the kiss-web daemon and its
+# webapp, reached from the host's browser.
 #
 # Usage:  ./sorcar-docker [PORT] [--rebuild]
 #
 # Flow:
-#   1. Reuse the existing Docker image (kiss-sorcar) if present; otherwise
+#   1. Reuse the existing Docker image (kiss-sorcar-web) if present; otherwise
 #      build it from ./Dockerfile. Pass --rebuild to force a fresh build.
-#   2. Transfer git credentials (GH_TOKEN) to the container.
-#   3. Container clones https://github.com/ksenxx/kiss to /home/kiss.
-#   4. Container runs /home/kiss/install.sh (Python env, Playwright, extension).
-#   5. Container launches code-server on port 8080.
-#   6. Host waits for code-server, then opens the browser.
+#   2. Pass git credentials (GH_TOKEN), the webapp password and the model
+#      API keys to the container.
+#   3. Container clones https://github.com/ksenxx/kiss (or, without a token
+#      for it, the public kiss_ai) into the sorcar user's home.
+#   4. Container runs the checkout's install.sh (Python env, Playwright,
+#      cloudflared) and starts kiss-web on port 8787, serving the checkout.
+#   5. Host waits for kiss-web, then opens the browser on it.
+#
+# The container's state (clone, Python environment, daemon config, task
+# history, TLS certificates) lives in the kiss-sorcar-web-home volume, so a
+# removed container comes back with its data and a shorter install.
 #
 # Environment:
-#   GH_TOKEN             — GitHub token (auto-detected from `gh auth token`)
+#   GH_TOKEN             — GitHub token (auto-detected from `gh auth token`;
+#                          optional: without one the public repo is cloned)
+#   KISS_WEB_PASSWORD    — webapp password (default: generated on first
+#                          start and kept in the volume afterwards)
 #   ANTHROPIC_API_KEY    — Anthropic API key (recommended)
 #   ANTHROPIC_WORKSPACE_ID — Anthropic workspace id (required when the API
 #                          key is identity-linked)
@@ -47,11 +57,14 @@ for arg in "$@"; do
             PORT="$(( 10#$arg ))" ;;
     esac
 done
-PORT="${PORT:-8080}"
-IMAGE="kiss-sorcar"
-CONTAINER="kiss-sorcar"
-URL="http://localhost:${PORT}"
-MAX_WAIT=600
+PORT="${PORT:-8787}"
+# The names carry a "-web" suffix so a kiss-sorcar image/container built by the
+# old code-server launcher is never reused with this launcher's port and volume.
+IMAGE="kiss-sorcar-web"
+CONTAINER="kiss-sorcar-web"
+VOLUME="kiss-sorcar-web-home"
+URL="https://localhost:${PORT}"
+MAX_WAIT=900
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -68,17 +81,19 @@ command -v docker &>/dev/null || die "Docker is not installed. Install Docker De
 docker info &>/dev/null 2>&1  || die "Docker daemon is not running. Start Docker and retry."
 
 # ---------------------------------------------------------------------------
-# 2. Git credentials — needed to clone the private repo inside the container
+# 2. Git credentials — the container clones the private repo with them and
+#    falls back to the public one without
 # ---------------------------------------------------------------------------
 if [[ -z "${GH_TOKEN:-}" ]]; then
     if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
         GH_TOKEN="$(gh auth token 2>/dev/null || true)"
     fi
 fi
-if [[ -z "${GH_TOKEN:-}" ]]; then
-    die "No GitHub token found. Run 'gh auth login' or export GH_TOKEN."
+if [[ -n "${GH_TOKEN:-}" ]]; then
+    info "GitHub token acquired"
+else
+    warn "No GitHub token (gh auth login / export GH_TOKEN): the container clones the public kiss_ai repo"
 fi
-info "GitHub token acquired"
 
 # ---------------------------------------------------------------------------
 # 3. Build Docker image (reuse the existing one unless --rebuild is given)
@@ -99,10 +114,10 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Collect environment variables (git credentials + API keys)
+# 5. Collect environment variables (git credentials, password, API keys)
 # ---------------------------------------------------------------------------
-ENV_ARGS=(-e "GH_TOKEN=${GH_TOKEN}")
-for key in ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
+ENV_ARGS=()
+for key in GH_TOKEN KISS_WEB_PASSWORD ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
     [[ -n "${!key:-}" ]] && ENV_ARGS+=(-e "${key}=${!key}")
 done
 
@@ -112,7 +127,8 @@ done
 step "Starting container '$CONTAINER' on port $PORT..."
 docker run -d \
     --name "$CONTAINER" \
-    -p "${PORT}:8080" \
+    -p "${PORT}:8787" \
+    -v "${VOLUME}:/home/sorcar" \
     "${ENV_ARGS[@]}" \
     "$IMAGE" >/dev/null
 
@@ -121,10 +137,11 @@ info "First start clones the repo and runs install.sh — this takes a few minut
 info "Watch progress: docker logs -f $CONTAINER"
 
 # ---------------------------------------------------------------------------
-# 7. Wait for code-server to respond
+# 7. Wait for kiss-web to respond.  Its certificate is signed by a CA the
+#    container generated, so the probe skips verification (-k).
 # ---------------------------------------------------------------------------
 for i in $(seq 1 "$MAX_WAIT"); do
-    if curl -sf "$URL" -o /dev/null 2>/dev/null; then
+    if curl -ksf "$URL" -o /dev/null 2>/dev/null; then
         break
     fi
     if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
@@ -137,14 +154,18 @@ for i in $(seq 1 "$MAX_WAIT"); do
     sleep 1
 done
 
-if ! curl -sf "$URL" -o /dev/null 2>/dev/null; then
+if ! curl -ksf "$URL" -o /dev/null 2>/dev/null; then
     die "Timed out after ${MAX_WAIT}s. Run: docker logs $CONTAINER"
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Open browser
+# 8. Open browser.  The password is whatever the entrypoint reported: the
+#    one passed in, else the one kept in the volume, else a generated one.
 # ---------------------------------------------------------------------------
+PASSWORD="$(docker logs "$CONTAINER" 2>&1 | sed -n 's/.*Webapp password: //p' | tail -1)"
 info "KISS Sorcar is ready at $URL"
+info "Webapp password: ${PASSWORD:-see 'docker logs $CONTAINER'}"
+info "The certificate is self-signed: accept the browser warning once, or install $URL/ca.crt"
 case "$(uname -s)" in
     Darwin) open "$URL" ;;
     Linux)  command -v xdg-open &>/dev/null && xdg-open "$URL" & ;;
@@ -153,6 +174,7 @@ esac
 echo ""
 echo "  ┌──────────────────────────────────────────────────┐"
 echo "  │  KISS Sorcar: ${URL}"
+echo "  │  Password:    ${PASSWORD:-see docker logs}"
 echo "  │  Stop:   docker stop ${CONTAINER}"
 echo "  │  Remove: docker rm   ${CONTAINER}"
 echo "  │  Logs:   docker logs -f ${CONTAINER}"

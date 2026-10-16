@@ -6,9 +6,9 @@
 
 Root cause: when a model fails on the very first call (e.g. codex CLI error,
 auth failure), ``RelentlessAgent.perform_task`` returned an error YAML string
-without ever calling ``printer.print(type="result")``.  In the VS Code task
+without ever calling ``printer.print(type="result")``.  In the daemon's task
 runner, this meant no result event was broadcast, so the user saw nothing in
-the chat webview.
+the chat page.
 
 Fix: ``RelentlessAgent.perform_task`` now calls ``printer.print(error_result,
 type="result", ...)`` before returning early on first-step errors.
@@ -62,7 +62,7 @@ class TestFirstStepErrorResult:
 
     def test_perform_task_prints_result_on_first_step_error(self) -> None:
         """When a model fails on step 1, the printer must receive a result event
-        so that the VS Code webview (or any UI) can display the error."""
+        so that the chat page (or any UI) can display the error."""
         server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthErrorHandler)
         port = server.server_address[1]
         import threading
@@ -117,7 +117,7 @@ class TestFirstStepErrorResult:
 
             assert len(result_events) >= 1, (
                 "Expected at least one result event from the printer, "
-                "but none were printed. This means the webview would show nothing."
+                "but none were printed. This means the chat page would show nothing."
             )
             result_content = result_events[0]["content"]
             result_parsed = yaml.safe_load(result_content)

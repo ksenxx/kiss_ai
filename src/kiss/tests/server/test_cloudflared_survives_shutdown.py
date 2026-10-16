@@ -9,7 +9,7 @@ The spawned ``cloudflared`` subprocess is launched with
 ``~/.kiss/cloudflared.pid`` so the next ``kiss-web`` instance can
 re-adopt it via :func:`_try_adopt_existing_cloudflared`.  That adoption
 is what preserves the public ``*.trycloudflare.com`` (or named-tunnel)
-URL across ``kiss-web`` restarts: VS Code's ``pkill kiss-web`` /
+URL across ``kiss-web`` restarts: the installer's ``pkill kiss-web`` /
 launchd respawn / "Server reset" must not mint a brand-new hostname
 every time.
 

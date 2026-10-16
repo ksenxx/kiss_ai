@@ -15,9 +15,7 @@ panel's "Update Models" button refreshes the copy in place via
 the copy never shadows a checkout's own source of truth.
 
 The copy is exercised for real: the relevant ``install.sh`` block is run
-under bash against a temp ``PROJECT_DIR`` / ``KISS_HOME``.  The
-``DependencyInstaller.ts`` (VS Code extension finalization step) twin
-lives in ``kiss.tests.agents.vscode.test_install_model_info_copy``.
+under bash against a temp ``PROJECT_DIR`` / ``KISS_HOME``.
 """
 
 from __future__ import annotations
@@ -41,17 +39,30 @@ def _install_sh_text() -> str:
 
 
 def _model_info_copy_block(text: str) -> str:
-    """Return the MODEL_INFO copy block of ``install.sh``.
+    """Return the MODEL_INFO copy block of ``install.sh``, with its inputs.
 
     The block starts at the ``MODEL_INFO_SRC=`` assignment and ends just
-    before the following blank-line-separated section.
+    before the following blank-line-separated section.  It reads
+    ``$KISS_HOME_DIR``, so the ``brand_field`` / ``brand_home_dir_name``
+    functions and the assignment that derive it from ``$KISS_HOME`` or
+    ``$HOME`` are extracted in front of it.
     """
+    setup = re.search(
+        r"^brand_field\(\) \{\n.*?^\}\nbrand_home_dir_name\(\) \{\n.*?^\}\n"
+        r'BRAND_HOME_DIR_NAME="\$\(brand_home_dir_name\)"\n',
+        text,
+        re.S | re.M,
+    )
+    home_dir = re.search(r"^KISS_HOME_DIR=.*$", text, re.M)
+    assert setup is not None and home_dir is not None, (
+        "install.sh no longer derives KISS_HOME_DIR from brand_home_dir_name()"
+    )
     m = re.search(r"^\s*MODEL_INFO_SRC=.*?(?=\n\s*\n)", text, re.S | re.M)
     assert m is not None, (
         "install.sh no longer contains the MODEL_INFO_SRC=... copy block "
         "that refreshes $KISS_HOME/MODEL_INFO.json on every install"
     )
-    return m.group(0)
+    return f"{setup.group(0)}{home_dir.group(0)}\nmkdir -p \"$KISS_HOME_DIR\"\n{m.group(0)}"
 
 
 def test_install_sh_copies_model_info_json_for_real(tmp_path: Path) -> None:

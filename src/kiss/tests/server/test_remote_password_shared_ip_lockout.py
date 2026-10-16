@@ -47,12 +47,12 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection
 from websockets.datastructures import Headers
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
+from kiss.server.sorcar import is_loopback_ip
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
     _forwarded_client_ip,
-    _is_loopback_ip,
 )
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
@@ -67,20 +67,20 @@ class TestForwardedIpHelpers(unittest.TestCase):
     """Unit tests for the per-client-IP helper functions."""
 
     def test_is_loopback_ipv4(self) -> None:
-        self.assertTrue(_is_loopback_ip("127.0.0.1"))
-        self.assertTrue(_is_loopback_ip("127.5.6.7"))
+        self.assertTrue(is_loopback_ip("127.0.0.1"))
+        self.assertTrue(is_loopback_ip("127.5.6.7"))
 
     def test_is_loopback_ipv6_and_mapped(self) -> None:
-        self.assertTrue(_is_loopback_ip("::1"))
-        self.assertTrue(_is_loopback_ip("::ffff:127.0.0.1"))
+        self.assertTrue(is_loopback_ip("::1"))
+        self.assertTrue(is_loopback_ip("::ffff:127.0.0.1"))
 
     def test_public_ip_is_not_loopback(self) -> None:
-        self.assertFalse(_is_loopback_ip("203.0.113.7"))
-        self.assertFalse(_is_loopback_ip("::ffff:203.0.113.7"))
+        self.assertFalse(is_loopback_ip("203.0.113.7"))
+        self.assertFalse(is_loopback_ip("::ffff:203.0.113.7"))
 
     def test_malformed_ip_is_not_loopback(self) -> None:
-        self.assertFalse(_is_loopback_ip(""))
-        self.assertFalse(_is_loopback_ip("not-an-ip"))
+        self.assertFalse(is_loopback_ip(""))
+        self.assertFalse(is_loopback_ip("not-an-ip"))
 
     def test_forwarded_prefers_cf_connecting_ip(self) -> None:
         ws = _conn(

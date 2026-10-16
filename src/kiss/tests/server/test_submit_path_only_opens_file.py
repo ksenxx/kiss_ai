@@ -2,19 +2,16 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""A path-only ``submit`` opens the file, not a task — on every surface.
+"""A path-only ``submit`` opens the file, not a task.
 
-The daemon owns the one submit path: the remote webapp sends its
-webview's ``submit`` over WSS, the VS Code extension host forwards its
-webview's ``submit`` over the local WSS endpoint, and ``_handle_submit``
-classifies both.  A prompt that is nothing but the path of an existing
-regular file is a request to open that file: the submitting connection
-gets ``promptOpened`` and then the file — as ``openResolvedFile`` (the
-resolved path, which the extension host opens in a real editor tab) for
-a local client, as ``fileContent`` for a browser — and no task starts.
+``_handle_submit`` classifies every ``submit``: a prompt that is
+nothing but the path of an existing regular file is a request to open
+that file, so the submitting connection gets ``promptOpened`` and then
+the file's ``fileContent`` and no task starts.
 
 These tests drive a real ``RemoteAccessServer`` over its local WSS
-endpoint and over a remote WSS connection and assert the daemon's reply frames.  No test
+endpoint (the classification cases) and over a remote WSS connection
+(the browser's reply) and assert the daemon's reply frames.  No test
 makes a paid LLM call: the prompts that must still start a task use a
 model name absent from ``get_available_models()``, so the worker
 returns at ``task_runner``'s "No model available" guard.
@@ -36,7 +33,7 @@ from kiss.tests.server.test_server_liveness_and_run_refusals import (
     _ServerHarness,
 )
 
-_OPEN_REPLIES = ("openResolvedFile", "fileContent")
+_OPEN_REPLIES = ("fileContent",)
 
 
 def _submit_cmd(prompt: str, tab_id: str, work_dir: str = "") -> dict[str, Any]:
@@ -62,7 +59,7 @@ def _is_open_reply_or_task_end(msg: dict[str, Any], tab_id: str) -> bool:
 
 
 class TestPathOnlySubmitOverLocal(_ServerHarness):
-    """A VS Code window's ``submit`` (local) is answered ``openResolvedFile``."""
+    """The path-only classification, driven over the local endpoint."""
 
     async def _submit(
         self,
@@ -82,7 +79,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         )
 
     async def test_relative_file_path_opens_without_a_task(self) -> None:
-        """The exact prompt of the reported task opens the file natively."""
+        """The exact prompt of the reported task opens the file."""
         target = self.work_dir / "src" / "seas" / "review_paper_sea.py"
         target.parent.mkdir(parents=True)
         target.write_text("print('review paper SEA')\n", encoding="utf-8", newline="\n")
@@ -92,7 +89,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         await self._submit(writer, "./src/seas/review_paper_sea.py", tab_id)
         frames = await self._frames_after_submit(reader, tab_id)
 
-        opens = [f for f in frames if f.get("type") == "openResolvedFile"]
+        opens = [f for f in frames if f.get("type") == "fileContent"]
         self.assertEqual(
             len(opens), 1,
             f"BUG: a path-only submit did not open the file: {frames}",
@@ -101,24 +98,16 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         self.assertEqual(reply["path"], str(target.resolve()))
         self.assertEqual(reply["tabId"], tab_id)
         self.assertNotIn("error", reply)
-        self.assertNotIn(
-            "content", reply,
-            "a VS Code window opens the path itself; it must not be sent "
-            "the file's content",
-        )
-        self.assertFalse(
-            [f for f in frames if f.get("type") == "fileContent"],
-            f"a local client must never get a browser fileContent: {frames}",
-        )
+        self.assertEqual(reply["content"], "print('review paper SEA')\n")
         self.assertFalse(
             [f for f in frames if f.get("type") == "status"],
             f"a path-only submit must not touch the running state: {frames}",
         )
         types = [f.get("type") for f in frames]
         self.assertLess(
-            types.index("promptOpened"), types.index("openResolvedFile"),
-            "the webview must be told the prompt opened a file (and lift "
-            f"its task claim) before the host opens it: {types}",
+            types.index("promptOpened"), types.index("fileContent"),
+            "the page must be told the prompt opened a file (and lift "
+            f"its task claim) before the file arrives: {types}",
         )
         acks = [f for f in frames if f.get("type") == "promptOpened"]
         self.assertEqual(acks[0].get("tabId"), tab_id)
@@ -137,8 +126,8 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         await self._submit(writer, f"  {target}  ", tab_id)
         frames = await self._frames_after_submit(reader, tab_id)
 
-        opens = [f for f in frames if f.get("type") == "openResolvedFile"]
-        self.assertEqual(len(opens), 1, f"no openResolvedFile in {frames}")
+        opens = [f for f in frames if f.get("type") == "fileContent"]
+        self.assertEqual(len(opens), 1, f"no fileContent in {frames}")
         self.assertEqual(opens[0]["path"], str(target.resolve()))
         self.assertIsNone(agent_state.find_by_tab(tab_id))
 
@@ -184,7 +173,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
     async def test_running_tab_treats_the_path_as_a_follow_up(self) -> None:
         """A path typed into a tab whose task runs steers that task.
 
-        The webview sends a running tab's prompt as ``appendUserMessage``
+        The chat page sends a running tab's prompt as ``appendUserMessage``
         when it knows the tab runs; a ``submit`` that races the status
         must be treated the same by the daemon, or a follow-up that
         happens to name a file — "look at notes.md" typed as just
@@ -228,8 +217,8 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         await self._submit(writer, "pinned.txt", tab_id, work_dir=str(other))
         frames = await self._frames_after_submit(reader, tab_id)
 
-        opens = [f for f in frames if f.get("type") == "openResolvedFile"]
-        self.assertEqual(len(opens), 1, f"no openResolvedFile in {frames}")
+        opens = [f for f in frames if f.get("type") == "fileContent"]
+        self.assertEqual(len(opens), 1, f"no fileContent in {frames}")
         self.assertEqual(opens[0]["path"], str(target.resolve()))
 
 
@@ -283,10 +272,6 @@ class TestPathOnlySubmitOverWss(_ServerHarness):
         self.assertEqual(reply["tabId"], tab_id)
         self.assertEqual(reply["content"], "print('review paper SEA')\n")
         self.assertIn("version", reply, "the opened file must be editable")
-        self.assertFalse(
-            [f for f in frames if f.get("type") == "openResolvedFile"],
-            f"a browser has no editor for a resolved path: {frames}",
-        )
         self.assertFalse(
             [f for f in frames if f.get("type") == "status"],
             f"a path-only submit must not touch the running state: {frames}",

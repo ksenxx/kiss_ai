@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import json
 import os
 import shutil
 import subprocess
@@ -35,7 +34,6 @@ import pytest
 from kiss.server.explorer import git_worktrees
 from kiss.server.fs_actions import FIND_MAX_MATCHES, fs_action
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
-from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _git,
@@ -866,46 +864,6 @@ class TestOpenBinaryFiles:
             harness, {"type": "openFile", "path": "README.md"}, "fileContent",
         )
         assert "background" not in plain
-
-
-class TestLocalDrop:
-    """VS Code windows (local peers) never get the remote-only replies."""
-
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            {"type": "gitShow", "sha": "0" * 40},
-            {"type": "gitAction", "action": "cherryPick", "sha": "0" * 40},
-            {"type": "fsAction", "action": "delete", "path": "/nope"},
-        ],
-    )
-    def test_local_delivered_commands_produce_no_reply(self, harness, payload) -> None:
-        import asyncio
-
-        async def _over_local() -> list[dict]:
-            reader, writer = await open_local_connection(harness.server)
-            writer.write((json.dumps(payload) + "\n").encode())
-            await writer.drain()
-            # A control command that always answers, to bound the wait.
-            writer.write((json.dumps({"type": "getTabsState"}) + "\n").encode())
-            await writer.drain()
-            got: list[dict] = []
-            while True:
-                line = await asyncio.wait_for(reader.readline(), 30)
-                if not line:
-                    break
-                msg = json.loads(line)
-                got.append(msg)
-                if msg.get("type") == "tabs_state":
-                    break
-            writer.close()
-            return got
-
-        got = harness.run(_over_local())
-        assert all(
-            m.get("type") not in ("gitShow", "gitActionResult", "fsResult")
-            for m in got
-        ), got
 
 
 def test_git_available() -> None:

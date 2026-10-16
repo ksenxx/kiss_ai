@@ -4,7 +4,7 @@
 # add your name here
 """Concurrency audit W1 — behaviour locks for two redundancy removals.
 
-1. ``vscode_config._edit_api_keys_env_file`` (the standalone "take both
+1. ``user_config._edit_api_keys_env_file`` (the standalone "take both
    locks, then edit" wrapper) had no callers: ``save_api_key`` and
    ``_migrate_legacy_rc_keys`` both call the ``_locked`` variant inside
    their own ``_config_lock`` + store-flock section.  It was removed.
@@ -36,14 +36,14 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
-from kiss.core.utils import atomic_write_text
-from kiss.core.vscode_config import (
+import kiss.core.user_config as user_config
+from kiss.core.user_config import (
     API_KEY_ENV_VARS,
     api_keys_env_path,
     load_api_keys,
     save_api_key,
 )
+from kiss.core.utils import atomic_write_text
 from kiss.tests.conftest import posix_only
 
 _JOIN_TIMEOUT_S = 30.0
@@ -58,9 +58,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("USERPROFILE", str(fake_home))  # what Path.home() reads on Windows
     monkeypatch.setenv("SHELL", "/bin/bash")
-    monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
+    monkeypatch.setitem(vars(user_config), "CONFIG_DIR", fake_home / ".kiss")
     monkeypatch.setitem(
-        vars(vscode_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
+        vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
     )
     for key in API_KEY_ENV_VARS:
         val = os.environ.get(key)

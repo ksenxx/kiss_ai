@@ -21,7 +21,7 @@ D4  ``JsonPrinter._handle_message`` (message-object path) emitted
     ``print(type="tool_result")`` path.
 
 No mocks/patches/fakes: real :class:`JsonPrinter` /
-:class:`VSCodeServer` / :class:`ChatSorcarAgent` /
+:class:`AgentServer` / :class:`ChatSorcarAgent` /
 :class:`AgentState` subclasses (the same technique the wave-2
 regression tests use), real threads, real git repos, and the real
 sqlite persistence layer.
@@ -44,7 +44,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _run_git(repo: Path, *args: str) -> None:
@@ -189,10 +189,10 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
     warm_prompt = "w3f3-b2 warmup run"
     probe_prompt = "w3f3-b2 preloop-failure probe"
     printer = _RecordingPrinter()
-    server = VSCodeServer(printer)
+    server = AgentServer(printer)
     tab = _PreLoopFailTab("w3f3-b2-task", tab_id)
     agent_state.register(tab)
-    agent = _ScriptedAgent("Sorcar VS Code")
+    agent = _ScriptedAgent("Sorcar")
     tab.agent = agent
     try:
         server._run_task({
@@ -238,9 +238,9 @@ def test_b2_warm_agent_second_run_still_attributes_own_metrics(
     first_prompt = "w3f3-b2b first run"
     second_prompt = "w3f3-b2b second run"
     printer = _RecordingPrinter()
-    server = VSCodeServer(printer)
+    server = AgentServer(printer)
     tab = _register_tab_state("w3f3-b2b-task", tab_id)
-    agent = _ScriptedAgent("Sorcar VS Code")
+    agent = _ScriptedAgent("Sorcar")
     tab.agent = agent
     try:
         for prompt in (first_prompt, second_prompt):
@@ -311,10 +311,10 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
     propagation, so B is parked at the lock and the final state is
     consistent everywhere.
     """
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     printer = _GatedWorkDirPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     original_work_dir = load_config().get("work_dir", "")
     dirs = []
     for name in ("proj-a", "proj-b"):

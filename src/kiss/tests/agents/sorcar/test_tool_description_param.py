@@ -6,7 +6,7 @@
 """End-to-end: ``run_agent``, ``run_parallel`` and ``run_commands_parallel``
 take a ``description`` argument, like ``Bash``.
 
-The chat webview folds a tool panel to ``<tool> <description>`` when the
+The chat page folds a tool panel to ``<tool> <description>`` when the
 ``tool_call`` event carries a ``description``; the daemon stamps it from
 the call's arguments.  These tests cover the Python side: the three tools
 accept the argument (and ignore it, as ``Bash`` does), their generated

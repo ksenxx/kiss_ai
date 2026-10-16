@@ -42,7 +42,7 @@ class TestStopAsyncTunnelStopOffLoop(unittest.IsolatedAsyncioTestCase):
             url_file=tmp_dir / "remote-url.json",
             local_endpoint_file=tmp_dir / "sorcar-local.json",
         )
-        server._vscode_server.use_private_tab_registry(tmp_dir / "tabs.json")
+        server._agent_server.use_private_tab_registry(tmp_dir / "tabs.json")
         server._loop = asyncio.get_running_loop()
         # The child prints "ready" only AFTER ignoring SIGTERM, so
         # stop_async's terminate() is guaranteed to hit a child that

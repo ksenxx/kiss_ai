@@ -54,7 +54,7 @@ def test_blocked_tool_is_not_executed_and_prints_error() -> None:
     ``SorcarAgent._block_finish_when_user_message_pending``): the tool
     function must NOT run, the rejection must be returned as the
     result, and the printed ``tool_result`` event must carry
-    ``is_error=True`` so the webview renders the red FAILED panel (a
+    ``is_error=True`` so the chat page renders the red FAILED panel (a
     plain-string rejection would otherwise be hidden inside a streamed
     Bash panel).
     """

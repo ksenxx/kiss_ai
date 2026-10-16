@@ -64,7 +64,7 @@ from unittest import TestCase
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _STOP_LABEL = "Task stopped by user"
@@ -105,7 +105,7 @@ class TestStopBeforeThreadStart(TestCase):
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
         self.thread: threading.Thread | None = None
 

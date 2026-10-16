@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for the "Inject instruction" panel ordering and seeding.
 
-The Inject instruction panel (sidebar button in the VS Code chat
-webview) renders the strings returned by
+The Inject instruction panel (sidebar button on the chat page)
+renders the strings returned by
 :func:`kiss.server.tricks.read_tricks` (Python side, used by
 the kiss-web daemon HTML builder).  The contract:
 
@@ -20,7 +20,7 @@ the kiss-web daemon HTML builder).  The contract:
 2. The panel lists **MY_INJECTION.md tricks first**, then the bundled
    ``src/kiss/INJECTIONS.md`` tricks.  No copy of ``INJECTIONS.md`` is
    ever written into ``~/.kiss/`` — the bundled package file is the
-   only source of those entries, so every extension upgrade
+   only source of those entries, so every upgrade
    automatically delivers the latest bundled tricks without
    clobbering the user's curated list.
 3. User edits to ``~/.kiss/MY_INJECTION.md`` are NEVER overwritten by
@@ -36,12 +36,12 @@ from pathlib import Path
 
 import pytest
 
+from kiss.core.config import kiss_home
 from kiss.server.tricks import (
     DEFAULT_MY_INJECTION,
     MY_INJECTION_DEFAULT_BODY,
     read_tricks,
 )
-from kiss.server.user_assets import kiss_home_dir
 from kiss.tests.conftest import is_root, posix_only
 
 
@@ -203,7 +203,7 @@ def test_kiss_home_unwritable_still_returns_bundled(
     readonly_parent.chmod(0o500)
     try:
         monkeypatch.setenv("KISS_HOME", str(readonly_parent / ".kiss"))
-        assert kiss_home_dir() == readonly_parent / ".kiss"
+        assert kiss_home() == readonly_parent / ".kiss"
         tricks = read_tricks()
         assert tricks == ["bundled trick one", "bundled trick two"]
     finally:

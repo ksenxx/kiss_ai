@@ -44,7 +44,7 @@ from kiss.core.utils import finish
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _RESULT_TEXT = "stop-after-loop finished"
 
@@ -65,7 +65,7 @@ class _CapturePrinter(JsonPrinter):
 class _StopDuringCleanupAgent(ChatSorcarAgent):
     """Agent that finishes at once and presses Stop from inside the cleanup."""
 
-    server: VSCodeServer
+    server: AgentServer
     tab_id: str
     task_id: str = ""
 
@@ -95,8 +95,8 @@ def test_stop_after_agent_loop_does_not_interrupt_cleanup(
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     tab_id = "stop-after-loop-tab"
     printer = _CapturePrinter()
-    server = VSCodeServer(printer=printer)
-    agent = _StopDuringCleanupAgent("Sorcar VS Code")
+    server = AgentServer(printer=printer)
+    agent = _StopDuringCleanupAgent("Sorcar")
     agent.server = server
     agent.tab_id = tab_id
     # ``_cmd_run`` installs the stop event and the thread before start.

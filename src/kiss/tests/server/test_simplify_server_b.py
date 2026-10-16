@@ -11,7 +11,7 @@ setup window (no row yet).  The no-row body broadcast the viewer's
 publishing the tab to the shared registry, so a mirroring client could
 receive events for a tab it had not yet seen in ``tabs_state``.  Both
 cases now run through one body and publish the tab first.  Everything
-here is real: a real ``VSCodeServer``, a run submitted through the real
+here is real: a real ``AgentServer``, a run submitted through the real
 ``_cmd_run`` and parked in a real SEA getter (so it never reaches an
 LLM), the real replay.
 
@@ -36,9 +36,9 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
@@ -92,7 +92,7 @@ class TestReplayPublishesTabBeforeEvents(TestCase):
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.work_dir)
 
     def tearDown(self) -> None:
@@ -222,24 +222,22 @@ class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
             if isinstance(msg, dict) and msg.get("type") == expected:
                 return msg
 
+    @staticmethod
+    async def _send(ws: Any, cmd: dict[str, Any]) -> None:
+        """Send *cmd* with the password every frame of a password client carries."""
+        await ws.send(json.dumps({**cmd, "password": _PASSWORD}))
+
     async def test_terminal_opens_while_another_connection_is_served(self) -> None:
         tab_id = "term-tab-1"
         opener = await self._remote_connection()
         other = await self._remote_connection()
         try:
-            await opener.send(
-                json.dumps(
-                    {
-                        "type": "terminalOpen",
-                        "tab_id": tab_id,
-                        "cols": 80,
-                        "rows": 24,
-                    }
-                )
-            )
+            await self._send(opener, {
+                "type": "terminalOpen", "tab_id": tab_id, "cols": 80, "rows": 24,
+            })
             # The other connection's command is dispatched and answered
             # while the opener's shell is being forked.
-            await other.send(json.dumps({"type": "ping"}))
+            await self._send(other, {"type": "ping"})
             await self._recv_type(other, "pong")
 
             opened = await self._recv_type(opener, "terminalOpened")
@@ -247,20 +245,14 @@ class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
             self.assertFalse(opened["attached"])
             self.assertTrue(opened["shell"])
 
-            await opener.send(
-                json.dumps(
-                    {
-                        "type": "terminalInput",
-                        "tab_id": tab_id,
-                        "data": "echo kiss-$((40+2))\n",
-                    }
-                )
-            )
+            await self._send(opener, {
+                "type": "terminalInput", "tab_id": tab_id, "data": "echo kiss-$((40+2))\n",
+            })
             output = ""
             while "kiss-42" not in output:
                 data = await self._recv_type(opener, "terminalData")
                 output += data["data"]
-            await opener.send(json.dumps({"type": "terminalClose", "tab_id": tab_id}))
+            await self._send(opener, {"type": "terminalClose", "tab_id": tab_id})
             await self._recv_type(opener, "terminalExit")
         finally:
             await opener.close()

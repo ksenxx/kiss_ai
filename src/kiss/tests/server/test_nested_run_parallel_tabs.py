@@ -5,13 +5,13 @@ Bug
 ---
 When a sub-agent spawned by ``run_parallel`` itself calls
 ``run_parallel``, the nested (grand-child) sub-agents never opened any
-tabs in the VS Code webview.
+tabs on the chat page.
 
 Root cause
 ----------
 The child's ``new_tab`` broadcast carried the parent's ``_tab_id`` as
 ``parent_tab_id``.  For a TOP-LEVEL parent that is the real frontend
-tab id (set by the VS Code server), so the broadcast passes the
+tab id (set by the daemon), so the broadcast passes the
 frontend guard::
 
     if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
@@ -22,14 +22,14 @@ the BACKEND synthetic tab id ``task-{grandparent_task_id}__sub_{idx}``
 — while its frontend viewer tab was created by
 ``createBackgroundSubagentTab`` under a different id.  The nested
 children's ``new_tab`` broadcasts would therefore carry a
-``parent_tab_id`` that no frontend tab has, every webview would drop
+``parent_tab_id`` that no frontend tab has, every client would drop
 them, and no tabs would open.
 
 Fix
 ---
 When the parent is itself a sub-agent (``self._subagent_info is not
 None``), ``SorcarAgent._subagent_parent_tab_id`` derives the FRONTEND
-tab id every webview gave this sub-agent —
+tab id every client gave this sub-agent —
 ``{parent_tab_id}__sub_{task_id}``, the ``subagentTabIdFor`` formula of
 ``media/main.js`` — and ``run_agent`` / ``run_parallel`` dispatches use
 it as ``parent_tab_id``.  (An earlier fix looked the viewer up in the
@@ -80,7 +80,7 @@ class TestNestedRunParallelOpensTabs:
         ``{parent_tab_id}__sub_{task_id}`` id before any client has
         subscribed and while the subscribed viewers agree with it; a
         viewer under another id (the parent chat was reopened in a new
-        tab, so every webview shows this sub-agent as
+        tab, so every client shows this sub-agent as
         ``{new_tab}__sub_{task_id}``) wins over the derived id; the
         sub-agent's own synthetic id is never a candidate."""
         printer = JsonPrinter()
@@ -100,11 +100,11 @@ class TestNestedRunParallelOpensTabs:
         # No viewer yet (the child fans out immediately).
         assert sub._subagent_parent_tab_id() == derived
         # Its own synthetic id is registered too (run_agent dispatches
-        # do that) and a webview subscribed under the derived id.
+        # do that) and a client subscribed under the derived id.
         printer.subscribe_tab(task_id, sub._tab_id)
         printer.subscribe_tab(task_id, derived)
         assert sub._subagent_parent_tab_id() == derived
-        # The parent chat was reopened under another tab: the webviews
+        # The parent chat was reopened under another tab: the clients
         # now show this sub-agent as ``reopened-tab__sub_…``.
         printer.cleanup_tab(derived)
         printer.subscribe_tab(task_id, f"reopened-tab__sub_{task_id}")

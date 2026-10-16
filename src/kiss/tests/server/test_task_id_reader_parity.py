@@ -22,7 +22,7 @@ the private attribute answered ``None``, so a reader that kept an
 ``is not None`` guard would start filing events under an EMPTY task
 id, corrupting the event log of every task at once.
 
-Everything is real: a real :class:`~kiss.server.server.VSCodeServer`,
+Everything is real: a real :class:`~kiss.server.server.AgentServer`,
 real agents, a real temporary git repository, a real SQLite history
 database and a real local OpenAI-compatible SSE endpoint.  No mock,
 patch, fake or test double, and no paid model call.
@@ -37,7 +37,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -69,7 +69,7 @@ class _ReaderHarness(unittest.TestCase):
         self._calls_lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:

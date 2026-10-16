@@ -7,10 +7,13 @@
 ``/machine add [name] <address> [password]``, ``/machine remove <name>``
 and ``/machine list`` edit the registry of
 :mod:`kiss.agents.sorcar.machines` (``$KISS_HOME/machines.json``).  The
-address is either ``user@host[:port]``, an SSH login (the daemon opens
-an SSH tunnel to that machine's daemon port itself and logs in with
-the machine's local token, so no password is needed: ``/machine add
-ksen@10.0.0.5``), or ``https://host:port`` with the machine's remote
+address is either ``user@host[:port]``, an SSH login (the daemon
+enrolls its own certificate authority on that machine over ssh, once,
+and from then on reaches the machine's daemon through an ssh port
+forward with a client certificate, so no password is needed and the
+daemon port need not be open to the network: ``/machine add
+ksen@10.0.0.5``),
+or ``https://host:port`` with the machine's remote
 password.  The name defaults to the host.  Once a machine is
 registered the CHATS panel lists its tasks next to the local ones
 (de-duplicated by task id) and can be filtered by machine name.
@@ -22,6 +25,7 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.sorcar.machines import (
+    Machine,
     MachineError,
     add_machine,
     load_machines,
@@ -52,9 +56,9 @@ class MachineSea(WorkerSea):
         """Return the one-sentence help text shown by ``/machine help``."""
         return (
             "Registers, forgets or lists remote Sorcar machines whose tasks the CHATS panel "
-            "shows next to the local ones: `/machine add user@host` (an SSH login; the daemon "
-            "port is tunnelled over SSH, no password), `/machine add <name> <https://host:port> "
-            "<password>`, `/machine remove <name>`, `/machine list`."
+            "shows next to the local ones: `/machine add user@host` (an SSH login used once to "
+            "enroll this daemon's certificate there; no password), `/machine add <name> "
+            "<https://host:port> <password>`, `/machine remove <name>`, `/machine list`."
         )
 
     def system_prompt(self, system_prompt: str) -> str:
@@ -83,10 +87,13 @@ def machine_add(name: str, address: str, password: str = "") -> str:
     Args:
         name: Short label (letters, digits, ``.``, ``_``, ``-``); empty
             means the address's host.
-        address: ``user@host[:port]``, an SSH login: the daemon tunnels
-            the machine's daemon port over SSH (key-based login) and
-            needs no password.  Or ``https://host:port`` of the remote
-            ``kiss-web`` (port 8787 when omitted) with *password*.
+        address: ``user@host[:port]``, an SSH login (key-based) used
+            once to enroll this daemon's certificate on the machine,
+            whose daemon is then reached through an ssh port forward
+            with that certificate; no password, no open port.  Or
+            ``https://host:port`` of
+            the remote ``kiss-web`` (port 8787 when omitted) with
+            *password*.
         password: The machine's remote password for an ``https://``
             address; empty for an SSH login.
 
@@ -98,7 +105,12 @@ def machine_add(name: str, address: str, password: str = "") -> str:
         machine = add_machine(name, address, password)
     except MachineError as exc:
         return f"Not registered: {exc}"
-    return f"Registered machine '{machine.name}' at {machine.address()}."
+    return f"Registered machine '{machine.name}' at {_where(machine)}."
+
+
+def _where(machine: Machine) -> str:
+    """Return the address as registered and, for an SSH machine, the URL it is reached at."""
+    return f"{machine.address()} ({machine.url})" if machine.ssh else machine.address()
 
 
 def machine_remove(name: str) -> str:
@@ -120,10 +132,10 @@ def machine_list() -> str:
 
     Returns:
         One line per machine (``name  address  reachable|<error>``, the
-        address being ``ssh user@host`` or the URL), or a line saying
-        none is registered.
+        address being ``ssh user@host (https://host:port)`` or the
+        URL), or a line saying none is registered.
     """
     machines = load_machines()
     if not machines:
         return "No remote machine is registered."
-    return "\n".join(f"{m.name}  {m.address()}  {machine_status(m)}" for m in machines)
+    return "\n".join(f"{m.name}  {_where(m)}  {machine_status(m)}" for m in machines)

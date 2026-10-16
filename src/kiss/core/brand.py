@@ -6,14 +6,13 @@
 
 Every user-visible name ("KISS Sorcar", the "KISS:" command prefix, the
 agent's identity sentence in ``SYSTEM.md``) comes from
-``src/kiss/agents/vscode/media/brand.json``.  The file sits in the
-extension's ``media/`` directory because that is the single location
-reachable by all three consumers: this Python package, the extension
-host (``src/brand.ts``) and the shared ``chat.html`` template.  A custom
+``src/kiss/webapp/media/brand.json``.  The file sits in the webapp's
+``media/`` directory because both consumers reach it there: this Python
+package and the ``chat.html`` template kiss-web serves.  A custom
 distribution re-brands the product by replacing that file (and the icon
 files next to it) instead of editing source code: it drops its copies
 into the git-ignored ``.brand/`` directory at the checkout root and
-``install.sh`` swaps them in for the extension build (see "Brand
+``install.sh`` copies them over the installed media (see "Brand
 overlay" there), so the checked-in files always carry the stock brand.
 """
 
@@ -23,7 +22,7 @@ import json
 import re
 from pathlib import Path
 
-_MEDIA_DIR = Path(__file__).resolve().parents[1] / "agents" / "vscode" / "media"
+_MEDIA_DIR = Path(__file__).resolve().parents[1] / "webapp" / "media"
 BRAND_FILE = _MEDIA_DIR / "brand.json"
 
 DEFAULT_BRAND: dict[str, str] = {
@@ -34,10 +33,6 @@ DEFAULT_BRAND: dict[str, str] = {
         "You are KISS Sorcar, an AI Assistant and a general-purpose multi-model, "
         "multi-modal, multi-agent AI Agent Framework researched and developed by "
         "Koushik Sen (ksen@berkeley.edu)."
-    ),
-    "extension_description": (
-        "The open-source AI coding agent that beats Cursor and Claude Code on "
-        "Terminal Bench. Free, local, bring your own API key."
     ),
     # Name of the per-user state directory under $HOME (config.json,
     # history.db, memories, ...).  ``KISS_HOME`` in the environment

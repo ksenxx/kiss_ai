@@ -20,7 +20,7 @@ BUG-67 (obsolete): covered ``_start_merge_session``, which was removed
     together with the interactive diff/merge review workflow.
 
 RED-9: ``_restore_pending_merge`` is dead code — defined in
-    ``VSCodeServer`` but never called by any production module.  Only
+    ``AgentServer`` but never called by any production module.  Only
     test files reference it.
 """
 
@@ -40,7 +40,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _register_state(
@@ -125,10 +125,10 @@ class TestBug66EmitPendingNoAutoDiscard:
         with merge/discard buttons for nothing."""
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         tab_id = "tab-bug66"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state(
             "task-bug66", tab_id, agent=agent,
         )
@@ -172,10 +172,10 @@ class TestBug66EmitPendingNoAutoDiscard:
         """
         repo = _make_repo(tmp_path / "repo")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
         tab_id = "tab-bug66-changed"
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         _register_state("task-bug66-changed", tab_id, agent=agent)
         branch = "kiss/wt-bug66-2"
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-2"
@@ -212,7 +212,7 @@ class TestRed9RestorePendingMergeDeadCode:
     def test_no_production_callers(self) -> None:
         """Verify no production code calls _restore_pending_merge.
 
-        ``_restore_pending_merge`` was a ``VSCodeServer`` method, so
+        ``_restore_pending_merge`` was a ``AgentServer`` method, so
         production callers could only live in ``src/kiss/server`` (its
         home) or ``src/kiss/agents/sorcar`` (the agent layer it drives).
         """
@@ -239,7 +239,7 @@ class TestRed9RestorePendingMergeDeadCode:
 
     def test_restore_pending_merge_removed(self) -> None:
         """The method should be removed as dead code."""
-        assert not hasattr(VSCodeServer, "_restore_pending_merge"), (
+        assert not hasattr(AgentServer, "_restore_pending_merge"), (
             "RED-9: _restore_pending_merge is dead code — no production "
             "caller.  Remove it."
         )

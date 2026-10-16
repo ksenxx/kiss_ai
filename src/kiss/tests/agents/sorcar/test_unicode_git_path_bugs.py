@@ -7,7 +7,7 @@
 Moved from ``kiss.tests.server.test_unicode_git_path_bugs``
 because these tests drive :class:`GitWorktreeOps` directly and depend
 only on ``kiss.core`` and ``kiss.agents.sorcar``.  The autocommit test
-that constructs a real ``VSCodeServer`` (and thus depends on
+that constructs a real ``AgentServer`` (and thus depends on
 ``kiss.server``) remains in the original module, which imports the git
 helpers below back from here.
 

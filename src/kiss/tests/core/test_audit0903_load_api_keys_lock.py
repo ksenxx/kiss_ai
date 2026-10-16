@@ -45,7 +45,7 @@ Branch coverage of the modified code: the fix adds no new branches (it
 wraps the existing snapshot/import/refresh body in ``with
 _config_lock:``); the pre-existing branches — store missing, unreadable
 store, junk lines, NUL values — are exercised by
-``test_vscode_config.py``'s ``load_api_keys`` tests, which run against
+``test_user_config.py``'s ``load_api_keys`` tests, which run against
 the same modified function.
 """
 
@@ -59,8 +59,8 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
-from kiss.core.vscode_config import (
+import kiss.core.user_config as user_config
+from kiss.core.user_config import (
     API_KEY_ENV_VARS,
     api_keys_env_path,
     load_api_keys,
@@ -90,7 +90,7 @@ _ROUNDS = 2
 def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Point HOME/SHELL/config at a temp dir and snapshot mutated globals.
 
-    Mirrors ``test_vscode_config.py``'s isolation fixture: the real
+    Mirrors ``test_user_config.py``'s isolation fixture: the real
     ``api_keys_env_path`` (via the monkeypatched ``CONFIG_DIR``) and the
     real module lock are used; only the locations are redirected so the
     test never touches the developer's actual key store or RC files, and
@@ -101,9 +101,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("SHELL", "/bin/bash")
-    monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
+    monkeypatch.setitem(vars(user_config), "CONFIG_DIR", fake_home / ".kiss")
     monkeypatch.setitem(
-        vars(vscode_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
+        vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
     )
     for key in API_KEY_ENV_VARS:
         val = os.environ.get(key)

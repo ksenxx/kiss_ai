@@ -15,7 +15,7 @@ unsubscribe path is tab CLOSE (``_teardown_tab_resources`` →
   welcome view).
 * ``_replay_session`` of a DIFFERENT chat — the tab now displays chat
   B, yet chat A's running task keeps streaming its events into the
-  tab, mixing two unrelated task streams in one webview.
+  tab, mixing two unrelated task streams in one chat page.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 
@@ -35,7 +35,7 @@ class _StaleSubscriptionBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
         self.task_a, self.chat_a = _add_task("live task on chat A")
         self.src_tab = "srv2-src-tab"
         state = agent_state.AgentState(
@@ -133,7 +133,7 @@ class TestReplayOtherChatDropsOldStream(_StaleSubscriptionBase):
 
     def test_owner_tab_self_replay_keeps_own_stream(self) -> None:
         """Regression guard: the launcher tab replaying its OWN running
-        chat (e.g. webview restore) must keep receiving the stream."""
+        chat (e.g. a page reload) must keep receiving the stream."""
         self._resume(self.chat_a, self.task_a, self.src_tab)
         self.printer.emitted.clear()
         self._emit_live_event_for_task_a()

@@ -14,7 +14,7 @@ assert the FIXED behavior; running them on the pre-fix source raises
 from __future__ import annotations
 
 
-def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
+def test_agent_server_source_accepts_int_rebound_task_id() -> None:
     from pathlib import Path
 
     from kiss.server.server import _coerce_id
@@ -28,7 +28,7 @@ def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
     )
 
 
-def test_vscode_server_source_accepts_int_entry_id() -> None:
+def test_agent_server_source_accepts_int_entry_id() -> None:
     from pathlib import Path
 
     from kiss.server.server import _coerce_id

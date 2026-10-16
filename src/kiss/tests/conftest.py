@@ -7,7 +7,7 @@
 Orphan-sweep join guard
 -----------------------
 
-Every :class:`~kiss.server.server.VSCodeServer` constructor starts a
+Every :class:`~kiss.server.server.AgentServer` constructor starts a
 daemon thread named ``orphan-task-sweep`` that runs SQL on a per-thread
 SQLite connection which ``persistence._get_db()`` also publishes in the
 module-global ``_db_conn`` (see ``_run_orphan_sweep`` in
@@ -35,7 +35,7 @@ the sync ``tearDown``, and the ~60 async server test files close
 ``persistence._db_conn`` inside ``asyncTearDown`` — so wrapping only
 the sync ``tearDown`` joins the sweep *after* the connection is already
 closed, leaving the exact SIGSEGV this guard exists to prevent (seen as
-the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
+the order-dependent crash in large ``tests/webapp`` runs, e.g.
 ``test_per_window_reply_isolation.py`` closing the connection while an
 ``orphan-task-sweep`` thread was inside ``_recover_orphaned_tasks``).
 ``asyncTearDown`` is therefore wrapped too, joining sweeps before its
@@ -60,7 +60,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
-from kiss.core import stop_signal, vscode_config
+from kiss.core import stop_signal, user_config
 from kiss.core.kiss_error import KISSError
 from kiss.core.processes import suppress_error_dialogs
 from kiss.tests import subprocess_reaper
@@ -93,7 +93,7 @@ os.environ["KISS_MUSE_AUTH"] = "0"
 def _seed_voice_models(test_home: str, real_home: Path) -> None:
     """Link the developer's downloaded voice models into the test home.
 
-    The voice tests (``kiss.server.voice_wake`` and the browser
+    The voice tests (``kiss.server.speech`` and the browser
     wake-word pipeline) fetch 40-80 MB of Vosk models into
     ``$KISS_HOME/models`` on first use.  With the session-wide
     temporary ``KISS_HOME`` below, every pytest process re-downloaded
@@ -511,7 +511,7 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
 
     The same event can also strike the remote webapp's self-reload: when
     one of the page's scripts fails to load, the guard in
-    ``web_server._ASSET_LOAD_GUARD_JS`` reloads the page (up to three times
+    ``media/assetLoadGuard.js`` reloads the page (up to three times
     per 30 s), and when a reload's own document request is aborted too,
     Chromium shows its error page
     (``chrome-error://chromewebdata/``, an empty DOM). ``page.goto`` tracked
@@ -827,9 +827,9 @@ requires_moonshot_api_key = pytest.mark.skipif(
 )
 @pytest.fixture(autouse=True)
 def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Point ``VSCodeServer``'s default ``work_dir`` away from this repo.
+    """Point ``AgentServer``'s default ``work_dir`` away from this repo.
 
-    ``VSCodeServer.__init__`` falls back to ``os.getcwd()`` when
+    ``AgentServer.__init__`` falls back to ``os.getcwd()`` when
     ``KISS_WORKDIR`` is unset, which is the *developer repository* when
     pytest runs from the repo root.  Since the diff/merge review was
     removed, ``_run_task_inner`` auto-commits a dirty working tree at
@@ -866,7 +866,7 @@ def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
 def _drop_redundant_config_overrides() -> None:
     """Delete ``CONFIG_DIR``/``CONFIG_PATH`` overrides equal to the lazy value.
 
-    ``vscode_config.CONFIG_DIR``/``CONFIG_PATH`` are lazy module
+    ``user_config.CONFIG_DIR``/``CONFIG_PATH`` are lazy module
     attributes that follow ``$KISS_HOME``; a materialized override with
     the very same value resolves identically *now* but silently stops
     following later ``KISS_HOME`` swaps — the mechanism behind the
@@ -879,14 +879,14 @@ def _drop_redundant_config_overrides() -> None:
     """
     from kiss.core.config import kiss_home
 
-    module_dict = vars(vscode_config)
+    module_dict = vars(user_config)
     lazy_dir = kiss_home()
     for name, lazy_value in (
         ("CONFIG_DIR", lazy_dir),
         ("CONFIG_PATH", lazy_dir / "config.json"),
     ):
         if module_dict.get(name) == lazy_value:
-            delattr(vscode_config, name)
+            delattr(user_config, name)
 
 
 @pytest.fixture(autouse=True)
@@ -899,7 +899,7 @@ def _isolated_shared_config() -> Iterator[None]:
     Playwright tests then hang behind ``#auth-modal``).  Two leak paths
     existed, both order-dependent:
 
-    * **Pinned path overrides.**  ``vscode_config.CONFIG_DIR`` /
+    * **Pinned path overrides.**  ``user_config.CONFIG_DIR`` /
       ``CONFIG_PATH`` are *lazy* module attributes (``__getattr__``)
       that follow ``$KISS_HOME`` on every access.  The common test
       pattern ``self._orig = vc.CONFIG_DIR`` … ``vc.CONFIG_DIR =
@@ -931,7 +931,7 @@ def _isolated_shared_config() -> Iterator[None]:
     """
     _drop_redundant_config_overrides()
     override_names = ("CONFIG_DIR", "CONFIG_PATH")
-    module_dict = vars(vscode_config)
+    module_dict = vars(user_config)
     saved_overrides = {
         name: module_dict[name]
         for name in override_names
@@ -956,9 +956,9 @@ def _isolated_shared_config() -> Iterator[None]:
     yield
     for name in override_names:
         if name in saved_overrides:
-            setattr(vscode_config, name, saved_overrides[name])
+            setattr(user_config, name, saved_overrides[name])
         elif name in module_dict:
-            delattr(vscode_config, name)
+            delattr(user_config, name)
     _drop_redundant_config_overrides()
     for shared, saved_content in saved_contents.items():
         try:
@@ -974,7 +974,7 @@ def _isolated_shared_config() -> Iterator[None]:
 def _isolated_tab_registry() -> Iterator[None]:
     """Start every test with an empty shared tab registry.
 
-    ``VSCodeServer`` persists the canonical tab registry to
+    ``AgentServer`` persists the canonical tab registry to
     ``KISS_HOME/tabs.json``.  The session-wide ``KISS_HOME`` above is
     shared by every test in the run, so tabs registered by one test
     (a ``ready`` merge, an ``openTab``, a ``run``) would otherwise leak

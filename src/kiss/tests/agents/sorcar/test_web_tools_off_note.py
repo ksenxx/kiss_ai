@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from kiss.agents.sorcar.sorcar_agent import WEB_TOOLS_OFF_NOTE, SorcarAgent
@@ -102,10 +103,19 @@ def _note_tools(request: dict, profile: str) -> set[str]:
     return {part.strip() for part in listed.split(",")}
 
 
-def test_restricted_note_promises_only_tools_that_are_built(tmp_path: Path) -> None:
+def test_restricted_note_promises_only_tools_that_are_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``skills``, ``memory`` and ``decide`` tools exist only when a skill is
     configured, memory is on and the decisions model is usable; the note must
     not list them otherwise (memory is off and no skill exists here)."""
+    # The developer's own ~/.claude/skills and ~/.agents/skills must not
+    # count as "a skill exists here": an empty home stands in for theirs.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # what Path.home() reads on Windows
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     profile = "skills+memory+decide+shell"
     request = _run(tmp_path, web_tools=False, tool_profile=profile)
     names = {t["function"]["name"] for t in request["tools"]} - {"finish"}

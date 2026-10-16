@@ -2,22 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Command handlers for the VS Code server.
+"""Command handlers for the daemon's backend server.
 
 Split out of ``server.py`` for organisation.  ``_CommandsMixin``
 provides one ``_cmd_*`` method per frontend command type plus the
 class-level ``_HANDLERS`` dispatch table consumed by
-``VSCodeServer._handle_command``.
+``AgentServer._handle_command``.
 """
 
 from __future__ import annotations
 
 import functools
 import logging
-import os
 import queue
-import subprocess
-import sys
 import threading
 import uuid
 from collections.abc import Callable
@@ -29,6 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
+    _set_chat_summary,
     _set_task_favorite,
 )
 from kiss.agents.sorcar.sea_commands import (
@@ -58,23 +56,6 @@ if TYPE_CHECKING:
     from kiss.server.tab_registry import TabRegistry
 
 logger = logging.getLogger(__name__)
-
-
-def _kiss_home_is_default() -> bool:
-    """Return True when this process operates on the brand's default home.
-
-    ``KISS_HOME`` redirects all KISS state (config.json, history.db) to a
-    private directory — the test suite (``src/kiss/tests/conftest.py``)
-    and sandboxed runs rely on it for isolation.  Read at call time (not
-    import time) so callers see the current environment.
-    """
-    custom = os.environ.get("KISS_HOME", "")
-    if not custom:
-        return True
-    try:
-        return Path(custom).resolve() == (Path.home() / HOME_DIR).resolve()
-    except OSError:
-        return False
 
 
 def _reruns_after_teardown(owner: AgentState) -> bool:
@@ -167,72 +148,6 @@ def _split_ask_command(prompt: str) -> str | None:
     return question or None
 
 
-def _restart_kiss_web_daemon() -> bool:
-    """Restart the ``kiss-web`` daemon so it picks up config changes.
-
-    On macOS, uses ``launchctl kickstart -k`` to restart the
-    ``com.kiss.web-server`` LaunchAgent.  On Linux, uses
-    ``systemctl --user restart kiss-web``.  Runs asynchronously in
-    a background thread so the caller does not block.
-
-    SAFETY: when this process operates on a NON-default ``KISS_HOME``
-    (tests, sandboxes), the system LaunchAgent serves a *different*
-    home whose config this process never touched — kick-starting it
-    could only destroy unrelated in-flight work.  Incident 2026-06-11
-    00:37:45: a pytest process exercising ``_cmd_save_config`` with a
-    changed ``remote_password`` SIGTERMed the developer's live
-    kiss-web daemon (pid 2884), killing the very agent task tree
-    (task_history rows 3556, 3618-3624) that had launched the test.
-    The guard below makes that impossible.
-
-    Returns:
-        True when a restart was dispatched; False when skipped because
-        ``KISS_HOME`` points at a non-default location or because the
-        platform has no managed kiss-web daemon (Windows: the VS Code
-        extension installs no service there, so there is nothing to
-        kick).
-    """
-    if not _kiss_home_is_default():
-        logger.warning(
-            "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
-            "default ~/%s — the system daemon serves a different home",
-            os.environ.get("KISS_HOME", ""),
-            HOME_DIR,
-        )
-        return False
-    if sys.platform not in ("darwin", "linux"):
-        logger.info(
-            "Skipping kiss-web daemon restart: no launchd/systemd-managed "
-            "kiss-web daemon on %s",
-            sys.platform,
-        )
-        return False
-
-    def _do_restart() -> None:
-        try:
-            if sys.platform == "darwin":
-                uid = os.getuid()
-                subprocess.run(
-                    [
-                        "launchctl", "kickstart", "-k",
-                        f"gui/{uid}/com.kiss.web-server",
-                    ],
-                    capture_output=True,
-                    timeout=10,
-                )
-            elif sys.platform == "linux":
-                subprocess.run(
-                    ["systemctl", "--user", "restart", "kiss-web"],
-                    capture_output=True,
-                    timeout=10,
-                )
-        except Exception:
-            logger.debug("Failed to restart kiss-web daemon", exc_info=True)
-
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return True
-
-
 def _parse_int(value: Any) -> int | None:
     """Parse a frontend-supplied JSON value as an int.
 
@@ -279,9 +194,9 @@ def broadcast_to_conn(
     """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
 
     Stamping ``connId`` makes the printer deliver the event ONLY to the
-    requesting connection (the VS Code window / browser tab whose user
-    triggered the command), so one window's request never repaints — or
-    pops a banner in — another window's UI; ``""`` broadcasts to all.
+    requesting connection (the browser tab whose user triggered the
+    command), so one tab's request never repaints — or pops a banner
+    in — another tab's UI; ``""`` broadcasts to all.
     Shared by :meth:`_CommandsMixin._broadcast_to_conn` and
     ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
 
@@ -313,7 +228,7 @@ class _CommandsMixin:
     # installer exits.  ``_cmd_run`` refuses to start a NEW task while
     # it is up; it is read and written only under ``_state_lock``
     # (:data:`agent_state.STATE_LOCK`).  A class-level default keeps
-    # it valid on every ``VSCodeServer`` instance.
+    # it valid on every ``AgentServer`` instance.
     _update_installing: bool = False
 
     if TYPE_CHECKING:
@@ -333,7 +248,6 @@ class _CommandsMixin:
         _file_index: FileIndexRegistry
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
-        _commit_msg_tabs: set[str]
         _autocommit_tabs: set[str]
         tab_registry: TabRegistry
         browser_tabs: BrowserTabService
@@ -402,9 +316,6 @@ class _CommandsMixin:
             self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "",
         ) -> None: ...
-        def _generate_commit_message(
-            self, tab_id: str = "", *, work_dir: str = "",
-        ) -> None: ...
         def _commit_main_tree(self, tab_id: str, work_dir: str = "") -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "",
@@ -419,12 +330,12 @@ class _CommandsMixin:
         """
         broadcast_to_conn(self.printer, event, conn_id)
 
-    def _apply_new_work_dir(self, new_dir: str, if_unset: bool = False) -> None:
+    def _apply_new_work_dir(self, new_dir: str) -> None:
         """Adopt *new_dir* as the one global working directory.
 
         The working directory is a single daemon-wide value that every
-        task from every surface (VS Code windows, the remote webapp,
-        the Python API's ``sorcar.run`` without ``work_dir=``) runs in.
+        task from every client (the remote webapp, the Python API's
+        ``sorcar.run`` without ``work_dir=``) runs in.
         Shared by :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`;
         when the directory actually changes it starts indexing the new
         directory for the ``@``-mention picker, persists it as
@@ -445,8 +356,6 @@ class _CommandsMixin:
 
         Args:
             new_dir: The non-empty directory to adopt.
-            if_unset: Adopt only while ``config.json`` holds no
-                ``work_dir`` (a VS Code window's connect-time seed).
         """
         if not isinstance(new_dir, str) or not new_dir or is_root_dir(new_dir):
             logger.warning(
@@ -454,19 +363,17 @@ class _CommandsMixin:
                 new_dir, self.work_dir,
             )
             return
-        from kiss.core.vscode_config import (
+        from kiss.core.user_config import (
             load_config,
             record_recent_work_dir,
             save_config,
         )
 
-        # One adoption at a time, check included: two interleaved
-        # adoptions (a seed racing a pick, a pick racing a settings save)
-        # must end with the live value, the disk and every client on the
-        # same directory — the last one in.
+        # One adoption at a time: two interleaved adoptions (a pick
+        # racing a settings save) must end with the live value, the
+        # disk and every client on the same directory — the last one
+        # in.
         with _CommandsMixin._work_dir_lock:
-            if if_unset and load_config().get("work_dir"):
-                return
             with self._state_lock:
                 changed = self.work_dir != new_dir
                 if changed:
@@ -494,7 +401,7 @@ class _CommandsMixin:
         running:false`` ever lowers it again, so the refusal MUST
         clear it first or the tab's composer stays disabled forever
         (F08-1).  The ``error`` carries ``code: "prompt_refused"`` so
-        the webview can put the refused draft (text and attachments)
+        the page can put the refused draft (text and attachments)
         back into the composer instead of losing what the user typed.
 
         Args:
@@ -538,7 +445,7 @@ class _CommandsMixin:
         the initial ``clear`` event **synchronously**, before starting
         the worker thread.  Emitting ``clear`` here (rather than from
         inside the worker thread) makes the chat-id → tab-id mapping
-        visible to the extension layer immediately after ``_cmd_run``
+        visible to the transport layer immediately after ``_cmd_run``
         returns, so a subsequent ``resumeSession`` for the same chat
         (e.g. a fast history click right after submit) can be routed
         to the correct task process without racing the worker
@@ -546,8 +453,8 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         # Acknowledge + mirror the task-panel text to EVERY client
-        # here, in the common run path, so all run origins (VS Code,
-        # remote-web ``submit``, Python clients) behave identically.
+        # here, in the common run path, so all run origins (a
+        # ``submit``, Python clients) behave identically.
         # Broadcast unconditionally — also for a queued follow-up, a
         # merge refusal or a tab-less run — because the echo doubles
         # as the submit acknowledgment: it carries the byte-truncated
@@ -959,15 +866,29 @@ class _CommandsMixin:
             return
         # Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
         # JSON, preserving its other keys.  No broadcast: the
-        # originating webview updates its star optimistically and the
+        # originating page updates its star optimistically and the
         # next ``getHistory`` refresh shows the persisted flag to
         # every other client.
         _set_task_favorite(task_id, bool(cmd.get("isFavorite", False)))
 
+    def _cmd_set_chat_summary(self, cmd: dict[str, Any]) -> None:
+        """Store the title the user typed over a chat's summary in the CHATS panel.
+
+        An empty ``summary`` drops the user's title, so the computed
+        summary shows again.  Every page is nudged to refresh its
+        history so the other surfaces pick the new title up.
+        """
+        chat_id = _opt_str(cmd.get("chatId"))
+        if not chat_id:
+            return
+        summary = cmd.get("summary")
+        _set_chat_summary(chat_id, summary.strip() if isinstance(summary, str) else "")
+        self.printer.broadcast({"type": "tasks_updated"})
+
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
 
-        The chat webview stamps the active tab's ``workDir`` on every
+        The chat page stamps the active tab's ``workDir`` on every
         ``getFiles`` command so the ``@``-mention picker lists files
         relative to *that* tab's working directory rather than the
         daemon-wide default (which is shared across every tab and
@@ -976,9 +897,9 @@ class _CommandsMixin:
 
         The resulting ``files`` events are routed only to the
         requesting connection (via ``connId``) so typing ``@`` in one
-        VS Code window never pops the file picker in another window,
-        and are stamped with the requesting ``tabId`` so within that
-        window they pop only in the chat tab that typed ``@`` — the
+        browser tab never pops the file picker in another, and are
+        stamped with the requesting ``tabId`` so within that page they
+        pop only in the chat tab that typed ``@`` — the
         picker element is shared by every tab.
         """
         prefix = cmd.get("prefix", "")
@@ -1235,8 +1156,8 @@ class _CommandsMixin:
 
         2. Otherwise, the state of any task that ``ans_tab`` is
            subscribed to.  This covers the multi-viewer case where one
-           tab (e.g. a browser viewer of a chat owned by the VS Code
-           extension's tab) renders the askUser question and submits the
+           tab (e.g. a second browser viewing a chat owned by another
+           tab) renders the askUser question and submits the
            answer: the broadcast was fan-stamped with the viewer's tab
            id, but the live ``user_answer_queue`` lives on the state
            of the task itself.  Resolving through the task id makes a
@@ -1314,7 +1235,7 @@ class _CommandsMixin:
                 _record_steer_input(prompt)
             except Exception:
                 logger.warning("steer input not recorded", exc_info=True)
-        # ``steer`` tells the chat webview this is a message the user
+        # ``steer`` tells the chat page this is a message the user
         # typed into a RUNNING task (not the task's own prompt), which
         # it shows in a panel like the task's.
         echo: dict[str, Any] = {
@@ -1344,7 +1265,7 @@ class _CommandsMixin:
         its own local endpoint and runs it as a sub-agent of
         *owner_task_id*.  The frontend then renders the answering
         session as a nested sub-agent tab under the running task's
-        tab — same webview, no interaction with the outer agent's
+        tab — same page, no interaction with the outer agent's
         (possibly blocked) tool call.
 
         The nested tab is closed by the frontend the moment the
@@ -1691,13 +1612,13 @@ class _CommandsMixin:
     def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
         """Broadcast the canonical ``tabs_state`` snapshot on request.
 
-        Sent by the VS Code extension host's long-lived controller on
-        every daemon (re)connect.  The daemon otherwise emits snapshots
-        only after registry mutations and webview ``ready`` syncs, so a
-        host with no open chat webview would have no baseline — the
-        next remote-client mutation would be the FIRST snapshot it ever
-        sees, and a reconnecting host would never learn of tabs created
-        during the outage.  The reply is a normal broadcast: snapshots
+        Sent by a daemon link (``MachineLink``) on every (re)connect.
+        The daemon otherwise emits snapshots only after registry
+        mutations and ``ready`` syncs, so a peer with no chat page
+        would have no baseline — the next mutation would be the FIRST
+        snapshot it ever sees, and a reconnecting peer would never
+        learn of tabs created during the outage.  The reply is a
+        normal broadcast: snapshots
         are idempotent and every client reconciles against the full
         list, so answering all clients is as cheap as answering one.
         """
@@ -1803,11 +1724,11 @@ class _CommandsMixin:
 
         * The active-file snapshot fallback — used when the current
           command carries no ``activeFile`` (e.g. focus is inside the
-          webview) — is the *same connection's* last-reported editor
-          file, never another window's.
+          chat) — is the *same connection's* last-reported editor
+          file, never another tab's.
         * Request staleness (``_complete_seq_latest``) is tracked per
-          connection so a window typing concurrently with another
-          window cannot mark the other window's pending request stale.
+          connection so a tab typing concurrently with another tab
+          cannot mark the other tab's pending request stale.
         """
         query = cmd.get("query", "")
         if not isinstance(query, str):
@@ -1833,7 +1754,7 @@ class _CommandsMixin:
                 # browser client closed its last file tab): forget the
                 # snapshot rather than completing against a file the
                 # user no longer has open.  An *absent* ``activeFile``
-                # still keeps it (focus inside the webview).
+                # still keeps it (focus inside the chat).
                 self._last_active_file.pop(conn_id, None)
                 self._last_active_content.pop(conn_id, None)
                 active_content = None
@@ -1842,7 +1763,7 @@ class _CommandsMixin:
                     active_content is None
                     and active_file != self._last_active_file.get(conn_id, "")
                 ):
-                    # The window reported a DIFFERENT editor file with
+                    # The client reported a DIFFERENT editor file with
                     # no buffer snapshot: the stored content belongs to
                     # the previous file and must not be paired with the
                     # new path (stale cross-file identifiers).
@@ -1855,10 +1776,8 @@ class _CommandsMixin:
             # ``_active_file_identifier_matches`` falls back to reading
             # ``snapshot_file`` from disk; a ``""`` default would be
             # honoured verbatim as an "open but empty buffer" and
-            # dead-code the documented on-disk fallback.  The VS Code
-            # client really does send ``activeFile`` without
-            # ``activeFileContent`` when the visible editor's document
-            # is not among ``vscode.workspace.textDocuments``.
+            # dead-code the documented on-disk fallback: a client may
+            # send ``activeFile`` without ``activeFileContent``.
             snapshot_content = self._last_active_content.get(conn_id)
             self._complete_seq += 1
             seq = self._complete_seq
@@ -1881,7 +1800,7 @@ class _CommandsMixin:
 
         Sent as a ``seaCommands`` event scoped to the requesting
         connection: ``{type: "seaCommands", commands: [...]}``.  The
-        chat webview uses the list to render the autocomplete popup
+        chat page uses the list to render the autocomplete popup
         when the user types ``/`` at the start of the composer.
         """
         commands = list_commands()
@@ -1924,44 +1843,6 @@ class _CommandsMixin:
             tab_id,
         )
 
-    def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
-        """Generate a git commit message in the background.
-
-        Runs the generator in a daemon thread and passes the caller's
-        ``tabId`` to :meth:`_generate_commit_message` which stamps it
-        on every emitted ``commitMessage`` event so the result reaches
-        only the originating tab (B5 fix).
-
-        The command's ``workDir`` (the tab's own folder) is forwarded so
-        the generator operates on the tab's repository rather than the
-        daemon-wide ``self.work_dir``, which may point at a different —
-        possibly non-git — folder and produce a misleading "Not a git
-        repository." error.
-
-        At most one generation runs per tab: the generator makes a
-        billed LLM call and stamps its answer on the tab, so an
-        impatient double click used to pay twice and let the slower
-        (not the latest) reply win (R09-8).  Extra clicks are dropped
-        while the tab's generation is in flight.
-        """
-        tab_id = cmd.get("tabId", "")
-        work_dir = cmd.get("workDir", "")
-        with self._state_lock:
-            if tab_id in self._commit_msg_tabs:
-                logger.debug(
-                    "Commit message generation already in flight for "
-                    "tab %r; ignoring duplicate request", tab_id,
-                )
-                return
-            self._commit_msg_tabs.add(tab_id)
-        self._start_tab_job(
-            self._commit_msg_tabs,
-            tab_id,
-            functools.partial(
-                self._generate_commit_message, tab_id, work_dir=work_dir,
-            ),
-        )
-
     def _start_tab_job(
         self,
         in_flight: set[str],
@@ -1978,8 +1859,7 @@ class _CommandsMixin:
         dropping every later request as a duplicate.
 
         Args:
-            in_flight: The per-tab claim set (``_commit_msg_tabs`` or
-                ``_autocommit_tabs``).
+            in_flight: The per-tab claim set (``_autocommit_tabs``).
             tab_id: Frontend tab that requested the job.
             job: The work to run on the thread.
         """
@@ -2072,13 +1952,15 @@ class _CommandsMixin:
         value once anything has been adopted, and the daemon's startup
         fallback (``--workdir``, ``$KISS_WORKDIR``, cwd) before that.
         """
-        from kiss.core.vscode_config import (
+        from kiss.core.user_config import (
             get_current_api_keys,
             load_config,
             recent_work_dirs,
         )
 
         cfg = load_config()
+        # ``remote_password`` travels along: the Settings panel shows it
+        # read-only (only install.sh sets it; ``saveConfig`` ignores it).
         cfg["work_dir"] = self.work_dir
         # Only directories that still exist, most recently opened first
         # (the raw stored list may hold deleted or malformed entries).
@@ -2087,8 +1969,7 @@ class _CommandsMixin:
         event: dict[str, Any] = {
             "type": "configData", "config": cfg, "apiKeys": api_keys,
             # The server machine's short host name, shown centered in the
-            # webview's status bar (both the VS Code webview and the
-            # remote webapp) so the user always sees which machine the
+            # page's status bar so the user always sees which machine the
             # agent runs on.  The same name labels the local row of the
             # `machines` reply (the chat header's machine drop-down):
             # `platform.node()` would add the domain on cloud hosts.
@@ -2099,27 +1980,19 @@ class _CommandsMixin:
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
 
-        When the ``remote_password`` actually *changes* to a non-empty
-        value, restarts the ``kiss-web`` daemon so it picks up the new
-        password and starts (or restarts) its Cloudflare tunnel.
+        The remote password is not a setting a client may change: only
+        the first ``install.sh`` run sets it and a ``--rotate`` run of
+        ``kiss.core.remote_password`` replaces it, so a
+        ``remote_password`` in the payload is dropped (and
+        ``sanitize_config`` drops the retired hash key of an earlier
+        release).
 
-        The change comparison is essential: the webview passively
-        flushes the settings form (settings-panel close, blur/change/
-        Enter on the password inputs), echoing back the already-saved
-        password verbatim.  Restarting on every such echo SIGTERMed the
-        daemon mid-task with no user action — the regression that
-        persisted ``"Task interrupted by server restart/shutdown"`` for
-        in-flight tasks (e.g. task_history row 3515).
-
-        W2-F13: the ``prev_password`` read, the ``save_config`` write,
-        and the env re-apply are held under a dedicated lock so two
-        concurrent ``saveConfig`` commands (two windows closing their
-        settings panels together) cannot both observe the OLD on-disk
-        password and both conclude "changed" (dispatching two daemon
-        restarts), nor interleave ``apply_config_to_env`` with a
-        half-merged config.
+        The ``save_config`` write and the env re-apply are held under a
+        dedicated lock so two concurrent ``saveConfig`` commands (two
+        windows closing their settings panels together) cannot
+        interleave ``apply_config_to_env`` with a half-merged config.
         """
-        from kiss.core.vscode_config import (
+        from kiss.core.user_config import (
             apply_config_to_env,
             load_config,
             recent_work_dirs,
@@ -2135,19 +2008,12 @@ class _CommandsMixin:
         # ``work_dir`` is adopted (and persisted) by ``_apply_new_work_dir``
         # alone, below: saving it here first would put a directory it
         # refuses (a filesystem root) on disk, where it would shadow the
-        # previously persisted directory on the next daemon start and
-        # make a VS Code window's ``ifUnset`` seed a no-op.
+        # previously persisted directory on the next daemon start.
         new_work_dir = cfg.pop("work_dir", "")
+        cfg.pop("remote_password", None)
         with _CommandsMixin._save_config_lock:
-            prev_password = load_config().get("remote_password", "")
-            if not cfg.get("remote_password") and prev_password:
-                cfg.pop("remote_password", None)
             save_config(cfg)
             apply_config_to_env(load_config())
-            new_password = cfg.get("remote_password", "")
-            password_changed = bool(
-                new_password and new_password != prev_password,
-            )
 
             # Persist API keys INSIDE ``_save_config_lock``: each
             # ``save_api_key`` edits the canonical key store and the
@@ -2187,8 +2053,45 @@ class _CommandsMixin:
             {"type": "configData", "config": new_cfg}, conn_id,
         )
 
-        if password_changed:
-            _restart_kiss_web_daemon()
+    def _cmd_rotate_remote_password(self, cmd: dict[str, Any]) -> None:
+        """Replace the remote-access password with a fresh random one.
+
+        Services the Settings panel's "Rotate" button next to the
+        Remote password box: the same operation as
+        ``python -m kiss.core.remote_password --rotate`` run on the
+        daemon's machine, done in-process.  The new password is stored
+        in ``config.json`` under ``_save_config_lock`` (the lock a
+        concurrent ``saveConfig`` holds while it merges the file).
+
+        The requesting connection gets a ``remotePasswordRotated``
+        event carrying the new password FIRST, then a fresh
+        ``configData``: the daemon checks the password on every frame of
+        a password-authenticated browser, so the page's transport
+        adopts the new one from that event before it sends anything
+        else, and the Settings panel shows it.  Every other
+        password-authenticated client is shut out at its next command
+        and asked for the new password, which is what a rotation is
+        for; local-token and loopback clients are unaffected.  On
+        failure (``config.json`` unreadable) the requester gets an
+        ``error`` and the stored password is left as it was.
+        """
+        from kiss.core.remote_password import ensure_password
+
+        conn_id = cmd.get("connId", "")
+        try:
+            with _CommandsMixin._save_config_lock:
+                password = ensure_password(rotate=True)
+        except Exception as e:
+            logger.warning("Rotating the remote password failed", exc_info=True)
+            self._broadcast_to_conn({
+                "type": "error", "code": "rotate_remote_password_failed",
+                "text": f"Could not rotate the remote password: {e}",
+            }, conn_id)
+            return
+        self._broadcast_to_conn(
+            {"type": "remotePasswordRotated", "password": password}, conn_id,
+        )
+        self._cmd_get_config(cmd)
 
     def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
         """Send the custom models from ``~/.kiss/MY_MODELS.json``.
@@ -2374,12 +2277,7 @@ class _CommandsMixin:
 
         Sent when the user picks a folder in any surface's chat-header
         work-dir drop-down or ticks a top-level folder in the
-        remote webapp's Explorer.  The VS Code extension also sends it
-        with ``ifUnset: true`` on connect, carrying its workspace
-        folder: that seeds the value on a fresh install (the daemon is
-        a service whose cwd is not the project) and is ignored once
-        ``config.json`` holds a ``work_dir``, so opening a VS Code
-        window never overrides a directory the user chose.
+        remote webapp's Explorer.
 
         Clears the calling connection's ``_last_active_file`` snapshot
         (it refers to a file from the previous workspace), invalidates
@@ -2387,6 +2285,12 @@ class _CommandsMixin:
         the directory actually changes, invalidates the autocomplete
         file cache and broadcasts ``workDirChanged`` (see
         :meth:`_apply_new_work_dir`).
+
+        With ``reply: true`` the caller also gets the ``configData`` of
+        a ``getConfig`` once the directory is adopted: another daemon
+        proxying a pick made for this machine in its chat header
+        (``setWorkDir`` with ``machine``) reads the adopted ``work_dir``
+        and ``recent_work_dirs`` from it.
         """
         new_dir = cmd.get("workDir", "")
         if not isinstance(new_dir, str) or not new_dir:
@@ -2406,7 +2310,9 @@ class _CommandsMixin:
             self._complete_seq_latest.pop(conn_id, None)
         # Outside ``_state_lock``: the adoption takes ``_work_dir_lock``
         # first (see its ordering note).
-        self._apply_new_work_dir(new_dir, if_unset=bool(cmd.get("ifUnset")))
+        self._apply_new_work_dir(new_dir)
+        if cmd.get("reply"):
+            self._cmd_get_config(cmd)
 
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
@@ -2416,6 +2322,7 @@ class _CommandsMixin:
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
         "setFavorite": _cmd_set_favorite,
+        "setChatSummary": _cmd_set_chat_summary,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
         "userAnswer": _cmd_user_answer,
@@ -2429,12 +2336,12 @@ class _CommandsMixin:
         "getInputHistory": _cmd_get_input_history,
         "getSeaCommands": _cmd_get_sea_commands,
         "getAdjacentTask": _cmd_get_adjacent_task,
-        "generateCommitMessage": _cmd_generate_commit_message,
         "autocommitAction": _cmd_autocommit_action,
         "worktreeAction": _cmd_worktree_action,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "rotateRemotePassword": _cmd_rotate_remote_password,
         "getMyModels": _cmd_get_my_models,
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,

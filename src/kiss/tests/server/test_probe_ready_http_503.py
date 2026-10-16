@@ -43,7 +43,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _TUNNEL_STARTUP_GRACE,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,

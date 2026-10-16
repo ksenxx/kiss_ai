@@ -4,14 +4,13 @@
 # add your name here
 """E2E tests: a healthy cloudflared must survive install-triggered restarts.
 
-``./install.sh`` makes the VS Code extension restart the kiss-web
-daemon (fingerprint change).  Two timing-dependent bugs rotated the
-public tunnel URL on such restarts even though the running cloudflared
-was perfectly recoverable:
+``./install.sh`` restarts the kiss-web daemon (fingerprint change).
+Two timing-dependent bugs rotated the public tunnel URL on such
+restarts even though the running cloudflared was perfectly recoverable:
 
 1. **Late detach.**  ``_detach_tunnel`` (which spawns the stderr drain
    shim keeping the detached cloudflared alive) ran only at the END of
-   the shutdown path.  The extension escalates its SIGTERM to SIGKILL
+   the shutdown path.  The installer escalates its SIGTERM to SIGKILL
    after only a few seconds; when kiss-web's cleanup (agent-task
    joins, MCP disconnects, a wedged event loop) outlived that grace,
    the shim was never spawned, cloudflared died of SIGPIPE on its next
@@ -43,7 +42,7 @@ import unittest
 from pathlib import Path
 
 from kiss.core.processes import pid_alive
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
@@ -55,7 +54,7 @@ from kiss.tests.conftest import posix_only
 # which logs to stderr continuously), installs the REAL signal
 # handlers, and waits.  On SIGTERM the real ``_shutdown_on_sigterm``
 # thread runs; the test then SIGKILLs the driver shortly after —
-# exactly like the VS Code extension's SIGTERM->SIGKILL escalation —
+# exactly like the installer's SIGTERM->SIGKILL escalation —
 # and asserts the child survived.  Without the early detach the drain
 # shim is not spawned within that window (the failsafe would only
 # reach ``_detach_tunnel`` after 30s), the SIGKILL closes the pipe's
@@ -140,7 +139,7 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
                 child_pid = int(pid_file.read_text().strip())
                 self.assertTrue(pid_alive(child_pid))
 
-                # The extension's escalation, compressed: SIGTERM, a
+                # The installer's escalation, compressed: SIGTERM, a
                 # short grace (far below the 30s loop-unwind failsafe),
                 # then SIGKILL.
                 proc.send_signal(signal.SIGTERM)

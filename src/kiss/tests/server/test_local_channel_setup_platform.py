@@ -29,7 +29,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 
 from websockets.asyncio.client import connect
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import (
     _SHUTDOWN_SIGNALS,
@@ -113,11 +113,12 @@ class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.server._ws_server)
         await self._wss_auth_round_trip()
 
-        # Local channel: the endpoint file names this listener and a
-        # client presenting its token is served over the same protocol.
+        # Local channel: the endpoint file names this listener (plain
+        # ``ws://`` on loopback, the same port the TLS client used) and
+        # a client presenting its token is served over it.
         self.assertTrue(self.endpoint_file.exists())
         endpoint = json.loads(self.endpoint_file.read_text())
-        self.assertEqual(endpoint["url"], f"wss://127.0.0.1:{self.port}/ws")
+        self.assertEqual(endpoint["url"], f"ws://127.0.0.1:{self.port}/ws")
         self.assertEqual(endpoint["token"], self.server.local_token)
         reader, writer = await open_local_connection(self.server)
         try:

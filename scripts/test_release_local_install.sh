@@ -4,14 +4,14 @@
 #
 # Builds a scratch repo with bare "origin" and "public" remotes, then runs the
 # real main() of release.sh with only the outward-facing pieces stubbed
-# (PyPI/marketplace publishing, gh, the vsix build, and the public push URL,
-# which must point at the local bare repo instead of github.com).  install.sh
+# (PyPI publishing, gh, and the public push URL, which must point at the
+# local bare repo instead of github.com).  install.sh
 # is a recorder at the fixture root, so the test observes exactly how and when
 # the release runs it:
 #   * with --non-interactive and KISS_SKIP_LAUNCH=1,
-#   * strictly after gh, PyPI and marketplace publishing, while the
-#     pre-release stash is still stashed (the uncommitted wip.txt must be
-#     absent when install.sh runs),
+#   * strictly after gh and PyPI publishing, while the pre-release stash is
+#     still stashed (the uncommitted wip.txt must be absent when install.sh
+#     runs),
 #   * also on the "nothing to release" exit,
 #   * and a failing install.sh aborts the release with the stash restored.
 set -e
@@ -39,7 +39,6 @@ make_fixture() {
     mkdir -p scripts src/kiss/core
     echo '[]' > scripts/exclude.json
     echo '__version__ = "2020.1.0"' > src/kiss/core/_version.py
-    echo '*.vsix' > .gitignore
     cat > install.sh <<EOF
 #!/bin/bash
 echo "install" >> "$fix/events.log"
@@ -73,13 +72,7 @@ source "$RELEASE_SH"
 # The only stub that redirects git traffic: push to the local bare "public"
 # repo instead of github.com.
 public_push_url() { git remote get-url public; }
-# No real npm build; the release only needs the vsix file to exist.
-build_vscode_extension() {
-    mkdir -p "\$(dirname "\$VSIX_FILE")"
-    printf 'PK\003\004 fake vsix' > "\$VSIX_FILE"
-}
 publish_to_pypi() { echo "pypi" >> "\$FIX/events.log"; }
-publish_vscode_extension() { echo "vsce" >> "\$FIX/events.log"; }
 gh() { echo "gh" >> "\$FIX/events.log"; }
 main
 EOF
@@ -93,23 +86,20 @@ grep -qx 'args=--non-interactive' "$WORK/ok/install-marker.txt" \
     || fail "install.sh not run with --non-interactive: $(cat "$WORK/ok/install-marker.txt")"
 grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
     || fail "install.sh not run with KISS_SKIP_LAUNCH=1"
-pass "release runs install.sh non-interactively without launching an editor"
+pass "release runs install.sh non-interactively without opening the webapp"
 
 grep -qx 'wip=absent' "$WORK/ok/install-marker.txt" \
     || fail "install.sh saw uncommitted work: it ran after the stash was restored"
 [[ -f "$WORK/ok/repo/wip.txt" ]] || fail "stash was not restored after the install"
 pass "install.sh runs on the released tree, before the stash is restored"
 
-# gh runs twice (release create + vsix upload), then PyPI, then the
-# marketplace, and only then the local install.
+# gh creates the release, then PyPI, and only then the local install.
 [[ "$(cat "$WORK/ok/events.log")" == "gh
-gh
 pypi
-vsce
 install" ]] || fail "wrong publish/install order: $(tr '\n' ' ' < "$WORK/ok/events.log")"
 echo "$OUT" | grep -q "Release completed successfully" \
     || fail "release did not finish after the local install"
-pass "install.sh runs after gh, PyPI and marketplace publishing, before success"
+pass "install.sh runs after gh and PyPI publishing, before success"
 
 # --- Test 2: nothing to release still ends with a local install -------------
 rm -f "$WORK/ok/install-marker.txt" "$WORK/ok/events.log"

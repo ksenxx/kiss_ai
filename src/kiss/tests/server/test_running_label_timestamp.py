@@ -4,7 +4,7 @@
 # add your name here
 
 
-"""Server-only tests extracted from ``kiss.tests.agents.vscode.test_running_label_timestamp``.
+"""Server-only tests extracted from ``kiss.tests.webapp.test_running_label_timestamp``.
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate
@@ -116,7 +116,7 @@ def test_get_history_emits_start_ts_per_session():
 def test_built_html_loads_main_js():
     """Smoke check: the served HTML still references main.js so the
     frontend timestamp handling (pinned by the static main.js checks in
-    ``kiss.tests.agents.vscode.test_running_label_timestamp``) is
-    actually delivered to the webview."""
+    ``kiss.tests.webapp.test_running_label_timestamp``) is
+    actually delivered to the chat page."""
     html = web_server._build_html()  # type: ignore[attr-defined]
     assert "main.js" in html

@@ -11,7 +11,7 @@
    ``feat: rename "foo`` (dangling opening quote).  Only *paired*
    surrounding quotes (LLM decoration) must be stripped.
 
-2. ``vscode_config.apply_config_to_env`` coerced a boolean
+2. ``user_config.apply_config_to_env`` coerced a boolean
    ``max_budget`` to ``1.0``/``0.0`` via ``float()`` (``bool`` is an
    ``int`` subclass), silently shrinking the live budget to $1 or $0.
    ``sanitize_config`` in the very same module explicitly rejects
@@ -26,7 +26,7 @@
    file.  The seed must be atomic: a reader sees either no file or
    the full default content, never a torn write.
 
-4. ``vscode_config.save_api_key`` shell-quoted the key
+4. ``user_config.save_api_key`` shell-quoted the key
    *value* (the H3 fix) but interpolated the key *name* verbatim into
    the ``export`` line — and ``_cmd_save_config`` forwards **any**
    string name from an untrusted client payload.  A name containing a

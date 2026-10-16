@@ -10,7 +10,7 @@ task; the daemon answers by asking the ``/ask`` agent about that task
 sub-agent of it.  Like the chat's ``/ask`` answerer it is a side
 channel: its answer goes to the task-info panel, so its nested tab is
 open only while it runs.  Before the ``side_channel`` stamp, every
-reload of the webview (a ``resumeSession`` of the parent) re-announced
+reload of the chat page (a ``resumeSession`` of the parent) re-announced
 each finished update as ``openSubagentTab{isDone: true}`` — one dead
 tab per periodic update.
 
@@ -121,7 +121,7 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
         )
         child_task_id = str(new_tab.get("task_id") or "")
         assert child_task_id, f"new_tab carries no task id: {new_tab!r}"
-        # What the webview does on ``new_tab``: open the nested tab and
+        # What the chat page does on ``new_tab``: open the nested tab and
         # attach it to the child's session.
         self._send_from_viewer({
             "type": "resumeSession",
@@ -186,7 +186,7 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
             child_tab_prefix = f"task-{parent_task_id}__update-"
             parent_sub_tab = f"{PARENT_TAB_ID}__sub_{child_task_id}"
             # 1. The live run announces its own tab closed when done —
-            # both the daemon-side id and the webview's nested tab.
+            # both the daemon-side id and the chat page's nested tab.
             self._wait_for(
                 lambda: [
                     e for e in list(received)
@@ -199,7 +199,7 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
                 lambda: self._events_for_tab(
                     received, "subagentDone", parent_sub_tab,
                 ),
-                what="subagentDone for the webview's nested update tab",
+                what="subagentDone for the chat page's nested update tab",
             )
             # The row is persisted under the parent as a side channel:
             # the very predicate the daemon's replays key on.

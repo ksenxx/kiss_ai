@@ -33,14 +33,14 @@ from kiss.agents.sorcar.persistence import (
     _load_last_model,
     _record_model_usage,
 )
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 @pytest.fixture(autouse=True)
 def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Point persistence at a temp dir so tests don't touch real data."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.core.vscode_config as vc
+    import kiss.core.user_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()
@@ -53,9 +53,9 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     _close_db()
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer with broadcast capture (no stdout)."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer with broadcast capture (no stdout)."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 

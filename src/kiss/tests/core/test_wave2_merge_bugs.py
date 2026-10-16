@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.vscode_config import load_api_keys
+from kiss.core.user_config import load_api_keys
 
 
 @pytest.mark.skipif(

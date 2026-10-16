@@ -50,10 +50,10 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
-from kiss.server import tls_certs
+from kiss.core import tls_certs
+from kiss.core.tls_certs import cert_needs_renewal
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
-from kiss.server.tls_certs import cert_needs_renewal
 from kiss.server.web_server import (
     RemoteAccessServer,
     WebPrinter,
@@ -159,7 +159,7 @@ class TestM2NoEnvMutation(unittest.TestCase):
             "RemoteAccessServer.__init__ must not mutate os.environ",
         )
         self.assertEqual(server._printer.work_dir, wd)
-        self.assertEqual(server._vscode_server.work_dir, wd)
+        self.assertEqual(server._agent_server.work_dir, wd)
 
     def test_two_instances_do_not_stomp_each_other(self) -> None:
         """Two servers with different work_dir do not overwrite each other."""
@@ -403,14 +403,14 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
         self._resumed: list[str] = []
-        original = self.server._vscode_server._handle_command
+        original = self.server._agent_server._handle_command
 
         def _spy(cmd: dict[str, Any]) -> None:  # noqa: D401
             if cmd.get("type") == "resumeSession":
                 self._resumed.append(cmd.get("chatId", ""))
             return original(cmd)
 
-        self.server._vscode_server._handle_command = _spy  # type: ignore[assignment]
+        self.server._agent_server._handle_command = _spy  # type: ignore[assignment]
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:

@@ -6,7 +6,7 @@
 tab via WebPrinter fan-out.
 
 Reproduces the bug where sub-agent result panels appeared after
-"Suggested next" in the parent chat webview.  The test captures every
+"Suggested next" in the parent chat page.  The test captures every
 event copy stamped with the parent tab's ``tabId`` during fan-out and
 asserts that no sub-agent result event reaches the parent tab.
 

@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for: web browser toggle wiring and API key deletion
-through the VS Code server's saveConfig handler.
+through the daemon's saveConfig handler.
 
 The core-only methods (budget limit, custom endpoint, config persistence,
 key save/overwrite lifecycle) moved to

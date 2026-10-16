@@ -7,7 +7,7 @@ and never stalls the event loop.
 
 The idle poller checks for idle in an executor thread
 (:meth:`RemoteAccessServer._arm_update_barrier_if_idle`, which raises
-``VSCodeServer._update_installing`` under ``STATE_LOCK`` the moment it
+``AgentServer._update_installing`` under ``STATE_LOCK`` the moment it
 sees no active task).  When the toast's Cancel arrived while that thread
 had started but was still waiting for ``STATE_LOCK``, the cancelled
 poller lowered the barrier first and the thread then raised it for
@@ -99,7 +99,7 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         script = self.install_root / "install.sh"
         script.write_text(INSTALL_SH.format(marker=self.marker))
         script.chmod(0o755)
-        self.vscode = self.server._vscode_server
+        self.agent_server = self.server._agent_server
         self.busy = agent_state.AgentState(
             "a1013-idle-cancel-busy", tab_id="tab-a1013-busy", is_task_active=True,
         )
@@ -157,7 +157,7 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
 
     def _barrier_up(self) -> bool:
         with agent_state.STATE_LOCK:
-            return bool(self.vscode._update_installing)
+            return bool(self.agent_server._update_installing)
 
     async def _arm(self) -> tuple[LocalReader, LocalWriter]:
         agent_state.register(self.busy)

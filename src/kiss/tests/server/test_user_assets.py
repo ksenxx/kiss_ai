@@ -9,10 +9,8 @@ Locks in the **runtime** contract of the
 ``MY_INJECTION.md`` (Inject instruction panel) — seeded from an
 inline default string on first read and never overwritten thereafter.
 
-``INJECTIONS.md`` is not copied into ``~/.kiss/`` by either
-``install.sh`` or ``installMarkdownAssets`` in
-``DependencyInstaller.ts``; it is read directly from the bundled
-extension package.
+``INJECTIONS.md`` is not copied into ``~/.kiss/`` by ``install.sh``;
+it is read directly from the bundled ``src/kiss/INJECTIONS.md``.
 
 The contract:
 
@@ -31,20 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.user_assets import (
-    ensure_user_asset_from_default,
-    kiss_home_dir,
-)
+from kiss.server.user_assets import ensure_user_asset_from_default
 from kiss.tests.conftest import is_root, posix_only
-
-
-def test_kiss_home_dir_honours_env(kiss_home: Path) -> None:
-    assert kiss_home_dir() == kiss_home
-
-
-def test_kiss_home_dir_defaults_to_dot_kiss(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KISS_HOME", raising=False)
-    assert kiss_home_dir() == Path.home() / ".kiss"
 
 
 def test_ensure_user_asset_from_default_seeds_with_default_content(

@@ -84,7 +84,7 @@ class BashStreamTaskRoutingTest(unittest.TestCase):
 
         Before the fix the reader thread recorded ``system_output``
         under the ``""`` fallback key, so the task's own recording —
-        what the webview replays into the tool panel's bash sub panel
+        what the chat page replays into the tool panel's bash sub panel
         and what gets persisted to history — was missing the output.
         """
         _, events, result = self._run_bash_with_streaming()
@@ -101,7 +101,7 @@ class BashStreamTaskRoutingTest(unittest.TestCase):
 
         An event without ``taskId`` is treated by ``WebPrinter`` as a
         global system event and is sent verbatim to EVERY connected
-        client — that is the "garbage in the chat webview" symptom.
+        client — that is the "garbage in the chat page" symptom.
         """
         printer, _, _ = self._run_bash_with_streaming()
         sys_events = [

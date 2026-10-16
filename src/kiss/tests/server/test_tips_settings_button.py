@@ -4,10 +4,9 @@
 # add your name here
 """End-to-end tests for the settings-panel Tips button (remote webapp).
 
-The chat webview template ``media/chat.html`` is shared between the
-VS Code extension (``SorcarTab.buildChatHtml``) and the remote webapp
-(``web_server._build_html``), so the Tips button must appear in the
-page served by both hosts.
+The chat page template ``media/chat.html`` is rendered by
+``web_server._build_html``, so the Tips button must appear in the
+page it serves.
 
 Contract locked in here:
 

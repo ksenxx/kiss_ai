@@ -33,7 +33,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     make_capturing_server,
     redirect_persistence,
@@ -77,7 +77,7 @@ def _register_state(
     return st
 
 
-def _history_sessions(server: VSCodeServer, events: list[dict]) -> list[dict]:
+def _history_sessions(server: AgentServer, events: list[dict]) -> list[dict]:
     server._get_history(query=None)
     hist = [e for e in events if e.get("type") == "history"]
     assert len(hist) == 1

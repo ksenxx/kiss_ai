@@ -905,18 +905,21 @@ class WebUseTool:
         Read over a browser-level CDP session (``SystemInfo.getProcessInfo``),
         which a persistent context exposes through its ``browser`` as well.
         A recorded PID lets :meth:`_kill_browser_process` guarantee the
-        process dies even when the graceful Playwright close fails.
+        process dies even when the graceful Playwright close fails.  The
+        round trips go through :func:`_cdp_call`: the sync CDP API has
+        no deadline, and a Chromium that wedges right after launch would
+        otherwise pin the task thread here forever.
         """
         self._browser_pid = None
         self._browser_identity = None
         browser = self._browser or self._context.browser
         try:
-            cdp = browser.new_browser_cdp_session()
+            cdp = _cdp_call(browser, browser._impl_obj.new_browser_cdp_session())
             try:
-                info = cdp.send("SystemInfo.getProcessInfo")
+                info = _cdp_call(browser, cdp.send("SystemInfo.getProcessInfo"))
             finally:
                 try:
-                    cdp.detach()
+                    _cdp_call(browser, cdp.detach())
                 except Exception:  # pragma: no cover — detach rarely fails
                     logger.debug("CDP detach failed", exc_info=True)
             for proc in info.get("processInfo", []):

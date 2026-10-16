@@ -29,7 +29,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
@@ -149,7 +149,7 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
 
     def _register_tab(self, tab_id: str, chat_id: str, title: str) -> None:
         """Register a tab exactly like ``_cmd_run`` does."""
-        self.server._vscode_server._registry_update_tab(
+        self.server._agent_server._registry_update_tab(
             tab_id, chat_id=chat_id, title=title, create=True,
         )
 

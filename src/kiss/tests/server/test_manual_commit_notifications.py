@@ -16,10 +16,10 @@ commit must:
   on success or the failure reason with ``severity: "error"``).
 - Emit NO ``autocommit_progress`` transcript events, and mark its
   ``autocommit_done`` event ``manual: True`` so a SUCCESS adds no
-  transcript text (the webview suppresses it) while a FAILURE still
-  shows its reason in the chat webview.
+  transcript text (the chat page suppresses it) while a FAILURE still
+  shows its reason in the chat.
 
-These tests drive the real ``VSCodeServer._cmd_autocommit_action``
+These tests drive the real ``AgentServer._cmd_autocommit_action``
 against on-disk git repositories; only the billed LLM call inside the
 commit-message helper is replaced by a module-level recording override
 (the same pattern as ``test_merge_autocommit_lifecycle.py``).
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 
 
@@ -57,7 +57,7 @@ class _ManualCommitHarness(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         _init_repo(self.tmpdir)
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
@@ -196,7 +196,7 @@ class TestManualCommitFailure(_ManualCommitHarness):
 
         assert done["success"] is False
         assert done["committed"] is False
-        # A failed manual commit is NOT silent: the webview renders the
+        # A failed manual commit is NOT silent: the chat page renders the
         # reason of any non-successful manual event in the chat, so the
         # event must still carry the reason alongside the manual flag.
         assert done["manual"] is True

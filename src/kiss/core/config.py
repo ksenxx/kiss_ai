@@ -65,7 +65,7 @@ DEFAULT_MAX_BUDGET = 100.0
 
 This is the single source of truth for that number.  It backs both
 :attr:`Config.max_budget` (the default for channel-agent command-line
-runs) and ``vscode_config.DEFAULTS['max_budget']`` (what the settings
+runs) and ``user_config.DEFAULTS['max_budget']`` (what the settings
 panel shows and what daemon-launched tasks read), which used to carry
 two different literals — 200.0 here and 100 there — so a fresh install
 disagreed with itself depending on which entry point the user reached
@@ -430,8 +430,8 @@ class Config(BaseModel):
             "Maximum budget in USD for a single agent run, defaulting to "
             "DEFAULT_MAX_BUDGET. Only consumed as the "
             "default for channel-agent command-line runs (and kept in sync from "
-            "the VS Code settings; daemon-launched tasks read max_budget from "
-            "the VS Code config directly); KISSAgent and RelentlessAgent do NOT "
+            "the settings panel; daemon-launched tasks read max_budget from "
+            "the config directly); KISSAgent and RelentlessAgent do NOT "
             "consult this field — they use their own defaults (10.0 USD and "
             "kiss.agents.sorcar.relentless_agent.DEFAULT_MAX_BUDGET, 200.0 USD, "
             "respectively; that is a different constant from this module's "

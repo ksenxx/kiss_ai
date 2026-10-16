@@ -45,7 +45,7 @@ from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server import agent_state
 from kiss.server.merge_flow import _MergeFlowMixin
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -345,7 +345,7 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
     def setup_method(self) -> None:
         self.home = IsolatedKissHome(prefix="kiss-merge-stop-")
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.home.repo)
 
     def teardown_method(self) -> None:
@@ -449,7 +449,7 @@ class TestCommitAndMergeConflictEndToEnd(unittest.TestCase):
         self._calls_lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:
@@ -565,7 +565,7 @@ class TestCommitAndMergeConflictEndToEnd(unittest.TestCase):
             e for e in self.printer.captured
             if e.get("type") == "new_tab" and e.get("task_id") == merge_row["id"]
         ]
-        # The resolver hangs off the tab the webviews show its parent
+        # The resolver hangs off the tab the chat pages show its parent
         # under, and is a side channel: the daemon replays the finished
         # child as ``subagentDone`` instead of re-opening its tab on
         # every reconnect (no fan-out panel of the parent owns it).

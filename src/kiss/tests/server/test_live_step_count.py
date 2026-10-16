@@ -9,7 +9,7 @@ Verifies that ``_get_history()`` includes the in-progress executor's
 accumulated from completed sessions, which stays 0 during the first
 (and typically only) session.
 
-No mocks — uses real ``VSCodeServer`` / ``AgentState`` instances.
+No mocks — uses real ``AgentServer`` / ``AgentState`` instances.
 """
 
 from __future__ import annotations
@@ -23,13 +23,13 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """Create a VSCodeServer that captures all broadcasts."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """Create a AgentServer that captures all broadcasts."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
 

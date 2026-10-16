@@ -4,7 +4,7 @@
 # add your name here
 """E2E: the live session monitor never shows a torn usage triple.
 
-Round-4 fix.  ``VSCodeServer._overlay_live_metrics`` (the live-metrics
+Round-4 fix.  ``AgentServer._overlay_live_metrics`` (the live-metrics
 overlay of the history/session monitor) read ``total_tokens_used``,
 ``budget_used`` and ``total_steps`` as three separate property reads on
 a running ``RelentlessAgent``.  Each such property read sums the
@@ -17,7 +17,7 @@ The fix routes the overlay through :func:`task_runner._subtask_metrics`
 (one coherent ``usage_snapshot()`` call on ledger-bearing agents, the
 same per-attribute fallback as before on plain agent-shaped objects).
 
-Real ``VSCodeServer``, a real ``ChatSorcarAgent`` with the real
+Real ``AgentServer``, a real ``ChatSorcarAgent`` with the real
 usage ledger, and a real writer thread performing the production
 single-record attribution; no mocks.  Every attribution writes the
 fixed ratio 100 tokens : 0.5 USD : 1 step, so ANY coherent prefix of
@@ -49,7 +49,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _WRITES = 4000
 """Attributions the writer thread performs (bounds the ledger sums)."""
@@ -76,7 +76,7 @@ class TestMonitorUsageSnapshot:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_overlay_never_tears_across_concurrent_attribution(self) -> None:
-        server = VSCodeServer()
+        server = AgentServer()
         agent = ChatSorcarAgent("monitor snapshot agent")
         agent_state.register(agent_state.AgentState(
             "7", agent=agent, tab_id="tab-snap", server_owned=True,
@@ -159,7 +159,7 @@ class TestRunningRowIncludesExecutorSpend:
         TestMonitorUsageSnapshot.teardown_method(self)  # type: ignore[arg-type]
 
     def test_overlay_adds_the_in_flight_executor(self) -> None:
-        server = VSCodeServer()
+        server = AgentServer()
         agent = ChatSorcarAgent("running row agent")
         agent._attribute_usage(0.5, 20, 1)  # banked by an earlier session
         executor = KISSAgent("session executor")

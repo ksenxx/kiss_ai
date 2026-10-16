@@ -17,16 +17,28 @@ import os
 import random
 import socket
 import ssl
+import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import ClientConnection
+from websockets.sync.client import connect as ws_connect
 
 from kiss.agents.sorcar import machines as mach
+from kiss.core import tls_certs
+from kiss.core.file_lock import exclusive_file_lock
+from kiss.server import sidebar_panels
+from kiss.server.web_server import _get_local_ips
+from kiss.tests.conftest import posix_only
 from kiss.tests.local_ws import make_test_tls
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
@@ -138,18 +150,22 @@ def test_ssh_addresses_are_recognised_normalised_and_named() -> None:
     assert mach.ssh_command("ksen@[::1]:22")[-1] == "ksen@::1"
     assert mach.Machine("b", ssh="ksen@box").address() == "ssh ksen@box"
     assert mach.Machine("b", "https://h:1").address() == "https://h:1"
-    assert mach.REMOTE_ENDPOINT_COMMAND == (
+    assert mach.ENROLL_COMMAND == (
         "sh -c 'for d in \"$KISS_HOME\" \"$HOME/" + mach.HOME_DIR + "\" \"$HOME\"/.*; do "
         'case "$d" in ""|*/.|*/..) continue;; esac; '
-        'if [ -f "$d/sorcar-local.json" ]; then cat "$d/sorcar-local.json"; '
-        'cat "$d/remote-url.json" 2>/dev/null; exit 0; fi; done; '
+        'if [ -f "$d/sorcar-local.json" ]; then '
+        '[ -d "$d/tls/trusted-clients" ] || { '
+        'echo "its daemon predates certificate enrollment: upgrade it" >&2; exit 3; }; '
+        'cat > "$d/tls/trusted-clients/.NAME.$$.tmp" && '
+        'mv -f "$d/tls/trusted-clients/.NAME.$$.tmp" "$d/tls/trusted-clients/NAME.pem" '
+        '|| exit 2; cat "$d/sorcar-local.json"; echo; '
+        'c=$(sed -n "s/^ *\\"ca\\": *\\"\\(.*\\)\\",*$/\\1/p" "$d/sorcar-local.json"); '
+        'cat "${c:-$d/tls/ca.pem}"; exit 0; fi; done; '
         "echo \"no $HOME/.*/sorcar-local.json\" >&2; exit 1'"
     )
-    assert "!" not in mach.REMOTE_ENDPOINT_COMMAND  # csh expands history inside quotes
-    assert mach._decode_two('{"a": 1}\n{"b": 2}\n') == ({"a": 1}, {"b": 2})
-    assert mach._decode_two('{"a": 1}') == ({"a": 1}, {})
-    assert mach._decode_two('{"a": 1} [1, 2] {"c": 3}') == ({"a": 1}, {})
-    assert mach._decode_two("junk") == ({}, {}) and mach._decode_two("") == ({}, {})
+    assert "!" not in mach.ENROLL_COMMAND  # csh expands history inside quotes
+    assert mach.ssh_host("ksen@127.0.0.1:2222") == "127.0.0.1"
+    assert mach.ssh_host("ksen@[::1]") == "::1"
 
 
 def test_registry_round_trip_and_corrupt_file() -> None:
@@ -318,7 +334,9 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
     # An already expired deadline fails even when the reply is buffered.
     assert link._ws is not None
-    link._ws.send(json.dumps({"type": "ping"}))
+    # (A raw frame on the link's socket must carry the machine's password
+    # like the link's own frames do, or the daemon closes the socket.)
+    link._ws.send(json.dumps({"type": "ping", "password": "secret-1"}))
     time.sleep(0.3)
     with pytest.raises(mach.MachineError, match="no pong within 0s"):
         link.request({"type": "ping"}, "pong", timeout=0.0)
@@ -348,7 +366,7 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     wrong = mach.Machine("wrong", remote.url, "secret-1")
     unrelated_cert, _key, _ca = make_test_tls(tmp_path)
     wrong.cert_file().write_text(unrelated_cert.read_text(), encoding="utf-8")
-    assert "unreachable" in mach.machine_status(wrong)
+    assert "refused the TLS handshake" in mach.machine_status(wrong)
     # A missing or unreadable pin is a machine error too, never an exception.
     os.unlink(wrong.cert_file())
     assert "no usable pinned certificate" in mach.machine_status(wrong)
@@ -463,8 +481,38 @@ def sshd(remote: RemoteDaemon, tmp_path_factory: pytest.TempPathFactory) -> Iter
     server.stop()
 
 
-def _endpoint_token(daemon: RemoteDaemon) -> str:
-    return str(json.loads((daemon.home / "sorcar-local.json").read_text(encoding="utf-8"))["token"])
+def _lan_ip() -> str:
+    """Return an address of this host that is not loopback ('' when it has none)."""
+    ips = sorted(_get_local_ips())
+    return ips[0] if ips else ""
+
+
+@pytest.fixture(scope="module")
+def lan_remote(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RemoteDaemon]:
+    """A daemon with no password (localhost-only) bound on every address of the host."""
+    if not _lan_ip():
+        pytest.skip("this host has no LAN address")
+    daemon = start_remote_daemon(
+        tmp_path_factory.mktemp("lan-home"), host="0.0.0.0",
+        seed=[{"chat_id": "lan", "task": "lan alpha"}, {"chat_id": "lan", "task": "lan beta"}],
+    )
+    yield daemon
+    daemon.stop()
+
+
+@pytest.fixture(scope="module")
+def lan_sshd(
+    lan_remote: RemoteDaemon, tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[SshServer]:
+    """An sshd on the LAN address whose logins see the LAN daemon's home as KISS_HOME."""
+    if not SSHD:
+        pytest.skip("no sshd on this host")
+    server = start_sshd(tmp_path_factory.mktemp("lan-sshd"), lan_remote.home, host=_lan_ip())
+    env = pytest.MonkeyPatch()
+    env.setenv(mach.SSH_CONFIG_ENV, str(server.config))
+    yield server
+    env.undo()
+    server.stop()
 
 
 def _pong(stream: ClientConnection) -> bool:
@@ -478,224 +526,361 @@ def _pong(stream: ClientConnection) -> bool:
     return False
 
 
+def _trusted_files(daemon: RemoteDaemon) -> list[Path]:
+    return sorted((daemon.home / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).glob("*.pem"))
+
+
+def _local_ca_pem() -> str:
+    return (mach.kiss_home() / "tls" / tls_certs.CA_CERT_FILE).read_text(encoding="utf-8")
+
+
+def _http_status(url: str, client_cert: tuple[Path, Path] | None) -> int:
+    """GET *url* (its certificate unverified), with the client certificate if given."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+    if client_cert is not None:
+        ctx.load_cert_chain(*map(str, client_cert))
+    try:
+        with urllib.request.urlopen(url, timeout=10, context=ctx) as resp:
+            return int(resp.status)
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def _tunnel_peer_port(link: mach.MachineLink) -> int:
+    """Return the port the cached socket of *link* is connected to."""
+    assert link._ws is not None
+    return int(link._ws.socket.getpeername()[1])
+
+
+def _wait_for_status(url: str, client_cert: tuple[Path, Path] | None, status: int) -> int:
+    """GET *url* until it answers *status* (the daemon polls its enrolled CAs) or 15 s pass."""
+    deadline = time.monotonic() + 15.0
+    while (code := _http_status(url, client_cert)) != status and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return code
+
+
 @needs_sshd
-def test_ssh_machine_tunnels_the_daemon_port_and_logs_in_with_its_token(
-    remote: RemoteDaemon, remote_leaf: RemoteDaemon, sshd: SshServer,
+def test_ssh_enrollment_tunnels_the_daemon_port_and_the_client_certificate_is_admitted(
+    lan_remote: RemoteDaemon, lan_sshd: SshServer, remote_leaf: RemoteDaemon,
 ) -> None:
-    """``add user@host`` needs no password: the tunnel carries the remote's local token."""
-    machine = mach.add_machine("", sshd.login)
-    assert machine == mach.Machine("127.0.0.1", ssh=sshd.login)
+    """``add user@host`` enrolls this daemon's CA over ssh; the link then dials an ssh forward.
+
+    The link's socket is connected to the tunnel's loopback port, not
+    to the LAN address, and the tunnel is shared by every link to the
+    login.  The daemon has no remote password, so a peer on the LAN
+    address is refused unless it presents a certificate of an enrolled
+    CA: a direct request with the client certificate is admitted, the
+    same request without it (a URL machine, or a plain HTTP request)
+    is not, and deleting the CA's file on the machine revokes the
+    certificate (the tunnelled link, a loopback peer there, stays).
+    """
+    lan = _lan_ip()
+    machine = mach.add_machine("", lan_sshd.login)
+    assert machine == mach.Machine(lan, f"https://{lan}:{lan_remote.port}", ssh=lan_sshd.login)
     assert mach.load_machines() == [machine]
     assert machine.cert_file().read_text(encoding="utf-8") == (
-        remote.home / "tls" / "ca.pem"
+        lan_remote.home / "tls" / "ca.pem"
     ).read_text(encoding="utf-8")
-    assert not list(machine.cert_file().parent.glob(".127.0.0.1.pem.*"))
+    assert not list(machine.cert_file().parent.glob(f".{lan}.pem.*"))
+    cert_path, key_path = mach.client_cert_pair()
+    assert cert_path.name == "client.pem" and key_path.name == "client-key.pem"
+    assert tls_certs.enrolled_client_ca(
+        x509.load_pem_x509_certificate(cert_path.read_bytes()).public_bytes(Encoding.DER),
+        lan_remote.home / "tls" / tls_certs.TRUSTED_CLIENTS_DIR,
+    ) == _trusted_files(lan_remote)[0].stem
+    (trusted,) = _trusted_files(lan_remote)
+    assert trusted.read_text(encoding="utf-8") == _local_ca_pem()
+    assert trusted.stem == tls_certs.ca_label(mach.kiss_home() / "tls" / "ca.pem")
+    assert not list(trusted.parent.glob(".*.tmp"))
 
     page = mach.fetch_history(machine, "", "", 50)
-    assert _titles(page) == ["shared task", "remote beta", "remote alpha"]
-    link = mach.link_for(machine)
-    assert link.tunnel is not None and link.tunnel.is_open()
-    assert {r["machine"] for r in page.rows} == {"127.0.0.1"}
-    assert {r["machine_url"] for r in page.rows} == {link.tunnel.web_url}
-    assert link.tunnel.url.startswith("https://127.0.0.1:") and link.tunnel.url != remote.url
-    published = json.loads((remote.home / "remote-url.json").read_text(encoding="utf-8"))
-    assert link.tunnel.web_url == (
-        published.get("tunnel") or (published.get("lan") or [link.tunnel.url])[0]
-    )
-    assert link.tunnel.token == _endpoint_token(remote)
-    assert "-L" in link.tunnel.command and link.tunnel.command[-1] == mach.TUNNEL_COMMAND
-    assert link.tunnel.log_file().exists()
-    assert link.base_url() == link.tunnel.url  # an open tunnel is reused
+    assert _titles(page) == ["lan beta", "lan alpha"]
+    assert {r["machine"] for r in page.rows} == {lan}
+    assert {r["machine_url"] for r in page.rows} == {machine.url}
     assert mach.machine_status(machine) == "reachable"
-    # The merge works like for any other machine.
+    _row, row = sidebar_panels._machine_row(machine)
+    assert row["port"] == lan_remote.port and row["ip"] == lan and row["status"] == "reachable"
+    link = mach.link_for(machine)
+    tunnel = mach._tunnels[lan_sshd.login]
+    assert tunnel.alive() and tunnel.remote_port == lan_remote.port
+    assert _tunnel_peer_port(link) == tunnel.local_port != lan_remote.port
+    stream = link.open_connection()
+    assert _pong(stream)
+    assert int(stream.socket.getpeername()[1]) == tunnel.local_port
+    stream.close()
+    assert mach._tunnels == {lan_sshd.login: tunnel}  # one forward per login
+    assert _wait_for_status(machine.url + "/ca.crt", (cert_path, key_path), 200) == 200
+    assert _http_status(machine.url + "/ca.crt", None) == 403
+    # An enrolled peer must still open with an auth frame (any content).
+    ctx = ssl.create_default_context(cafile=str(machine.cert_file()))
+    ctx.check_hostname = False
+    ctx.load_cert_chain(str(cert_path), str(key_path))
+    for first in (json.dumps({"type": "ping"}), "not json"):
+        with ws_connect(mach.ws_url(machine.url), ssl=ctx, open_timeout=10) as raw:
+            raw.send(first)
+            assert json.loads(raw.recv(timeout=10)) == {
+                "type": "error", "code": "auth_failed",
+                "text": "The first frame must be an auth frame.",
+            }
+            with pytest.raises(ConnectionClosed):
+                raw.recv(timeout=10)
+    with ws_connect(mach.ws_url(machine.url), ssl=ctx, open_timeout=10) as raw:
+        raw.send(json.dumps({"type": "auth"}))  # no password, no token
+        assert json.loads(raw.recv(timeout=10)) == {"type": "auth_ok", "local": True}
+
+    # The certificate is the credential: the same daemon registered by
+    # URL without a password is refused (no password is set there).
+    plain = mach.Machine("plain", url=machine.url)
+    plain_link = mach.MachineLink(plain, cert_file=machine.cert_file())
+    with pytest.raises(mach.MachineError, match=r"refused the connection: .*403$"):
+        plain_link.request({"type": "ping"}, "pong")
+    plain_link.close()
+
+    # Enrolling again (an explicit name, the ssh:// spelling) rewrites
+    # the same file; the merge works like for any other machine.
+    box = mach.add_machine("box", "ssh://" + lan_sshd.login)
+    assert box == mach.Machine("box", machine.url, ssh=lan_sshd.login)
+    assert _trusted_files(lan_remote) == [trusted]
     leaf = mach.add_machine("leaf", remote_leaf.url)
-    merged = mach.merged_history(mach.HistoryPage(), [machine, leaf], "", "", 0, 50)
-    assert set(_titles(merged)) == {"shared task", "remote beta", "remote alpha", "leaf task"}
-    assert mach.MachineLink(leaf).base_url() == remote_leaf.url
+    merged = mach.merged_history(mach.HistoryPage(), [box, leaf], "", "", 0, 50)
+    assert set(_titles(merged)) == {"lan alpha", "lan beta", "leaf task"}
 
-    # Evicted from the cache, the link is retired: a caller that fetched
-    # it just before cannot re-open a tunnel nothing would close.
-    tunnel_url = link.tunnel.url
+    # Enrolling again restarted the tunnel (the registry changed); the
+    # links to "box" and to the machine's default name share it.
+    assert lan_sshd.login in mach._tunnels and mach._tunnels[lan_sshd.login] is not tunnel
+    assert _titles(mach.fetch_history(box, "alpha", "", 50)) == ["lan alpha"]
+    assert _tunnel_peer_port(mach.link_for(box)) == mach._tunnels[lan_sshd.login].local_port
+
+    # Revoked on the machine: a direct connection with the certificate
+    # is refused at once; the tunnelled link (a loopback peer on the
+    # machine, admitted by the ssh login) is unaffected.
+    trusted.unlink()
+    assert _http_status(machine.url + "/ca.crt", (cert_path, key_path)) == 403
+    assert _titles(mach.fetch_history(box, "beta", "", 50)) == ["lan beta"]
     mach.close_links()
-    assert not link.tunnel.is_open()
-    assert link.tunnel.url == tunnel_url and link.tunnel.token  # still describe the last tunnel
-    with pytest.raises(mach.MachineError, match="registry changed"):
-        link.request({"type": "ping"}, "pong")
-    with pytest.raises(mach.MachineError, match="registry changed"):
-        link.base_url()
-    assert not link.tunnel.is_open() and mach.link_for(machine) is not link
-    assert mach.remove_machine("127.0.0.1") is True
-    assert not machine.cert_file().exists() and not link.tunnel.log_file().exists()
-
-    # An explicit name and the ssh:// spelling.
-    box = mach.add_machine("box", "ssh://" + sshd.login)
-    assert box == mach.Machine("box", ssh=sshd.login)
-    assert _titles(mach.fetch_history(box, "alpha", "", 50)) == ["remote alpha"]
+    assert mach._tunnels == {}
+    assert _titles(mach.fetch_history(box, "", "", 50)) == ["lan beta", "lan alpha"]
+    assert mach.add_machine("box", lan_sshd.login) == box  # enrolled again
+    assert _trusted_files(lan_remote) == [trusted]
+    assert mach.machine_status(box) == "reachable"
+    assert mach.remove_machine("box") is True and not box.cert_file().exists()
+    assert mach._tunnels == {}
     mach.close_links()
 
 
 @needs_sshd
-def test_ssh_machine_failures_are_reported_and_store_nothing(
+def test_ssh_enrollment_failures_are_reported_and_store_nothing(
     remote: RemoteDaemon, sshd: SshServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused login, a closed port, a missing daemon or ssh: a clear error, no entry."""
+    """A refused login, a closed port, a missing or old daemon, no ssh: a clear error, no entry."""
+    user = sshd.login.split("@")[0]
     with pytest.raises(mach.MachineError, match=r"ssh nobody-x@.* failed: .*Permission denied"):
         mach.add_machine("", f"nobody-x@127.0.0.1:{sshd.port}")
     with pytest.raises(mach.MachineError, match=r"ssh .* failed: .*refused"):
-        mach.add_machine("", f"{sshd.login.split('@')[0]}@127.0.0.1:{_closed_port()}")
+        mach.add_machine("", f"{user}@127.0.0.1:{_closed_port()}")
     assert mach.load_machines() == []
     assert not list((mach.kiss_home() / mach.MACHINE_CERTS_DIR).glob("127.0.0.1.*"))
     assert not list((mach.kiss_home() / mach.MACHINE_CERTS_DIR).glob(".127.0.0.1.*"))
 
-    # A machine with no running daemon: its endpoint file is missing or junk.
+    # A machine with no running daemon, one whose daemon predates
+    # enrollment, one whose endpoint file is junk, one whose daemon port
+    # is closed.
     nothing = tmp_path / "nothing"
     nothing.mkdir()
     idle = start_sshd(sshd.config.parent, nothing)
+    monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
     try:
-        with pytest.raises(mach.MachineError, match="no Sorcar daemon is running on"):
+        with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*"):
             mach.add_machine("", idle.login)
-        (nothing / "sorcar-local.json").write_text("junk", encoding="utf-8")
-        with pytest.raises(mach.MachineError, match="no Sorcar daemon is running on"):
+        endpoint = nothing / "sorcar-local.json"
+        endpoint.write_text("junk", encoding="utf-8")
+        with pytest.raises(mach.MachineError, match="cannot enroll on .*: its daemon predates"):
             mach.add_machine("", idle.login)
-        (nothing / "sorcar-local.json").write_text(
-            json.dumps({"url": "wss://127.0.0.1:1/ws", "token": ""}), encoding="utf-8",
-        )
-        with pytest.raises(mach.MachineError, match="no Sorcar daemon is running on"):
+        trusted = nothing / "tls" / tls_certs.TRUSTED_CLIENTS_DIR
+        trusted.mkdir(parents=True)
+        (nothing / "tls" / "ca.pem").write_text(_local_ca_pem(), encoding="utf-8")
+        with pytest.raises(mach.MachineError, match="did not answer the enrollment as a Sorcar"):
             mach.add_machine("", idle.login)
-        # A daemon whose file is fine but whose port is closed: the tunnel
-        # comes up, the daemon behind it is unreachable.
-        (nothing / "sorcar-local.json").write_text(
-            json.dumps({"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "t"}),
-            encoding="utf-8",
-        )
-        with pytest.raises(mach.MachineError, match="Cannot reach https://127.0.0.1:"):
+        assert [p.name for p in trusted.iterdir()] == [
+            tls_certs.ca_label(mach.kiss_home() / "tls" / "ca.pem") + ".pem",
+        ]
+        endpoint.write_text(json.dumps({"url": "wss://127.0.0.1/ws", "token": "t"}), "utf-8")
+        with pytest.raises(mach.MachineError, match="did not answer the enrollment as a Sorcar"):
             mach.add_machine("", idle.login)
-        # The web UI link of an SSH machine: the daemon's published public
-        # URL, else its first LAN URL, else the tunnel itself.
-        (nothing / "sorcar-local.json").write_text(
-            json.dumps({"url": f"wss://127.0.0.1:{remote.port}/ws",
-                        "token": _endpoint_token(remote)}),
-            encoding="utf-8",
+        (nothing / "tls" / "ca.pem").unlink()
+        endpoint.write_text(json.dumps({"url": "wss://127.0.0.1:1/ws", "token": "t"}), "utf-8")
+        with pytest.raises(mach.MachineError, match="did not answer the enrollment as a Sorcar"):
+            mach.add_machine("", idle.login)
+        (nothing / "tls" / "ca.pem").write_text(_local_ca_pem(), encoding="utf-8")
+        endpoint.write_text(
+            json.dumps({"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "t"}), "utf-8",
         )
-        tunnel = mach.SshTunnel(mach.Machine("idle", ssh=idle.login))
-        for published, expected in (
-            ({"tunnel": "https://x.trycloudflare.com", "lan": ["https://10.0.0.5:8787"]},
-             "https://x.trycloudflare.com"),
-            ({"local": "https://localhost:8787", "lan": ["https://10.0.0.5:8787"]},
-             "https://10.0.0.5:8787"),
-            ({"local": "https://localhost:8787", "lan": []}, ""),
-            (None, ""),
-        ):
-            url_file = nothing / "remote-url.json"
-            if published is None:
-                url_file.unlink()
-            else:
-                url_file.write_text(json.dumps(published), encoding="utf-8")
-            tunnel.close()
-            tunnel.open()
-            assert tunnel.web_url == (expected or tunnel.url)
-        assert tunnel.token == _endpoint_token(remote)
-        assert f"127.0.0.1:{tunnel.url.rsplit(':', 1)[1]}:127.0.0.1:{remote.port}" in tunnel.command
-        tunnel.close()
-        # The forward targets the host the daemon listens on, IPv6 included.
-        (nothing / "sorcar-local.json").write_text(
-            json.dumps({"url": f"wss://[::1]:{remote.port}/ws", "token": "t"}),
-            encoding="utf-8",
-        )
-        tunnel.open()
-        assert f"127.0.0.1:{tunnel.url.rsplit(':', 1)[1]}:[::1]:{remote.port}" in tunnel.command
-        with pytest.raises(mach.MachineError, match="Cannot reach"):  # nothing on ::1
-            mach.pin_certificate(tunnel.url)
-        tunnel.close()
+        started = time.monotonic()
+        with pytest.raises(mach.MachineError, match=r"is unreachable: .*refused"):
+            mach.add_machine("", idle.login)
+        assert 2.0 <= time.monotonic() - started < 20.0  # retried until ENROLL_TIMEOUT
+        # A directory the login cannot write to.
+        trusted.chmod(0o500)
+        if os.access(trusted, os.W_OK):
+            pytest.skip("running as root: the directory stays writable")
+        try:
+            with pytest.raises(mach.MachineError, match="cannot store this daemon's CA on"):
+                mach.add_machine("", idle.login)
+        finally:
+            trusted.chmod(0o700)
     finally:
         idle.stop()
     assert mach.load_machines() == []
+    assert not list((mach.kiss_home() / mach.MACHINE_CERTS_DIR).glob("*127.0.0.1*"))
 
-    # The cached link backs off after a failure: no ssh login is retried
-    # before DOWN_BACKOFF, and the same message is reported.
-    bad = mach.Machine("bad", ssh=f"nobody-x@127.0.0.1:{sshd.port}")
-    assert "Permission denied" in mach.machine_status(bad)
-    link = mach.link_for(bad)
-    with pytest.raises(mach.MachineError, match="Permission denied"):
-        mach.fetch_history(bad, "", "", 50)
+    # A machine registered before enrollment existed (no URL) says so;
+    # the cached link backs off after a failure and reports the same.
+    old = mach.Machine("old", ssh=sshd.login)
+    mach.save_machines([old])
+    assert mach.machine_status(old) == (
+        f"old (ssh {sshd.login}) was registered before certificate enrollment; "
+        f"run /machine add old {sshd.login} again"
+    )
+    _row, row = sidebar_panels._machine_row(old)
+    assert row["port"] == 0 and row["ip"] == "127.0.0.1" and "registered before" in row["error"]
+    link = mach.link_for(old)
     assert link._retry_at > time.monotonic()
     started = time.monotonic()
-    with pytest.raises(mach.MachineError, match="Permission denied"):
-        link.base_url()
-    with pytest.raises(mach.MachineError, match="Permission denied"):
-        mach.fetch_history(bad, "", "", 50)
+    with pytest.raises(mach.MachineError, match="registered before certificate enrollment"):
+        mach.fetch_history(old, "", "", 50)
     assert time.monotonic() - started < 0.5
 
-    # ssh slower than the budget, and no ssh at all.
-    tunnel = mach.SshTunnel(bad)
+    # The TLS directory locked by another writer: no client certificate.
+    box = mach.add_machine("box", sshd.login)
+    mach.close_links()
+    monkeypatch.setattr(mach, "TLS_LOCK_TIMEOUT", 0.2)
+    with exclusive_file_lock(mach.kiss_home() / "tls" / tls_certs.TLS_LOCK_FILE):
+        with pytest.raises(mach.MachineError, match="cannot issue the client certificate"):
+            mach.client_cert_pair()
+        assert "no usable client certificate: cannot issue" in mach.machine_status(box)
+    assert mach.machine_status(box) == "reachable"
+    mach.close_links()
+
+    # ssh slower than the budget, an ssh that cannot be asked, no ssh at all.
     with pytest.raises(mach.MachineError, match="did not answer in time"):
-        tunnel.open(timeout=0.0)
-    assert not tunnel.is_open()
+        mach.enroll_over_ssh(sshd.login, timeout=0.0)
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(tmp_path / "no-such-config"))
+    assert mach.ssh_host("ksen@box.example.org") == "box.example.org"
     monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
     with pytest.raises(mach.MachineError, match="ssh is not installed"):
-        tunnel.open()
-    # Not covered: ``ssh -L`` logging in but never binding the local
-    # port ("did not forward port ... within"); OpenSSH binds it before
-    # the session is up, so only a fake ssh could produce that.
+        mach.add_machine("", sshd.login)
+    assert mach.ssh_host("ksen@[::1]:22") == "::1"
 
 
 @needs_sshd
-def test_ssh_machine_finds_the_daemon_whatever_its_brand_home(
+def test_ssh_enrollment_pins_an_explicit_certificate_and_resolves_aliases(
+    remote_leaf: RemoteDaemon, sshd: SshServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon started with ``--certfile`` is pinned by what its endpoint names; aliases resolve.
+
+    The endpoint file's ``ca`` is the CA beside the explicit certificate
+    (or the certificate itself), not ``tls/ca.pem``, which such a daemon
+    need not have.  An ssh config alias is logged into as typed and
+    registered at the host it resolves to; the machine is then found by
+    its name, by that host and by the alias.
+    """
+    server = start_sshd(sshd.config.parent, remote_leaf.home)
+    config = tmp_path / "ssh_config"
+    config.write_text(
+        sshd.config.read_text(encoding="utf-8")
+        + f"Host leaf-alias\n  HostName 127.0.0.1\n  Port {server.port}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(config))
+    user = sshd.login.split("@")[0]
+    try:
+        assert not (remote_leaf.home / "tls" / "ca.pem").exists()
+        assert mach.ssh_host(f"{user}@leaf-alias") == "127.0.0.1"
+        machine = mach.add_machine("", f"{user}@leaf-alias")
+        assert machine == mach.Machine("leaf-alias", remote_leaf.url, ssh=f"{user}@leaf-alias")
+        endpoint = json.loads((remote_leaf.home / "sorcar-local.json").read_text("utf-8"))
+        assert machine.cert_file().read_bytes() == Path(endpoint["ca"]).read_bytes()
+        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["leaf task"]
+        assert mach.find_machine("leaf-alias") == machine
+        assert mach.find_machine("127.0.0.1") == machine
+        custom = mach.add_machine("custom", f"{user}@leaf-alias")
+        mach.remove_machine("leaf-alias")
+        assert mach.find_machine("leaf-alias") == custom  # by the login's host
+        assert mach.find_machine("127.0.0.1") == custom  # by the URL's host
+        assert mach.machine_hosts(custom) == {"127.0.0.1", "leaf-alias"}
+        assert mach.find_machine("elsewhere") is None
+    finally:
+        mach.close_links()
+        server.stop()
+
+
+@needs_sshd
+def test_ssh_enrollment_finds_the_daemon_whatever_its_brand_home(
     remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
 ) -> None:
-    """The endpoint is read from ``$KISS_HOME``, else ``~/<local brand>``, else any ``~/.*``.
+    """The daemon is found under ``$KISS_HOME``, else ``~/<local brand>``, else any ``~/.*``.
 
     A remote re-installed under another brand moves its state directory
-    (``~/.kiss`` to ``~/.s10s`` or back); a registered machine must stay
-    reachable through such a change without any remote configuration.
+    (``~/.kiss`` to ``~/.s10s`` or back); enrollment must find the
+    running daemon through such a change without any remote
+    configuration.
     """
     home = tmp_path / "home"
     home.mkdir()
     (home / ".s10s").symlink_to(remote.home)  # another brand's daemon, its endpoint file live
-    stale = {"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "stale"}
     missing = tmp_path / "missing"
     # ``~/.`` and ``~/..`` are not brand homes: neither file is ever read.
     for decoy in (home / "sorcar-local.json", tmp_path / "sorcar-local.json"):
         decoy.write_text(json.dumps({"url": "wss://127.0.0.1:1/ws", "token": "decoy"}), "utf-8")
+    # A stale brand home: an endpoint file of a daemon that is gone, a
+    # trusted-clients directory and a CA of its own.
+    stale = home / mach.HOME_DIR
+    (stale / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
+    stale_ca = "-----BEGIN CERTIFICATE-----\nstale\n-----END CERTIFICATE-----\n"
+    (stale / "tls" / "ca.pem").write_text(stale_ca, encoding="utf-8")
+    stale_port = _closed_port()
 
-    def endpoint_via(remote_home: Path | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def enroll_via(remote_home: Path | None) -> tuple[str, str]:
         server = start_sshd(sshd.config.parent, remote_home, home=home)
         try:
-            tunnel = mach.SshTunnel(mach.Machine("brand", ssh=server.login))
-            return tunnel._read_endpoint(time.monotonic() + mach.SSH_TIMEOUT)
+            return mach.enroll_over_ssh(server.login)
         finally:
             server.stop()
 
-    published = json.loads((remote.home / "remote-url.json").read_text(encoding="utf-8"))
-    live = (json.loads((remote.home / "sorcar-local.json").read_text("utf-8")), published)
-    # No KISS_HOME and no ~/<local brand>: the other brand's directory is found,
-    # its published URLs with it; a KISS_HOME naming no endpoint file is skipped.
-    assert endpoint_via(None) == live
-    assert endpoint_via(missing) == live
+    live = (remote.url, (remote.home / "tls" / "ca.pem").read_text(encoding="utf-8"))
+    # No KISS_HOME and no ~/<local brand> endpoint: the other brand's
+    # directory is found; a KISS_HOME naming no endpoint file is skipped.
+    assert enroll_via(None) == live
+    assert enroll_via(missing) == live
     # The local brand's home wins over other brands' directories.
-    (home / mach.HOME_DIR).mkdir()
-    (home / mach.HOME_DIR / "sorcar-local.json").write_text(json.dumps(stale), encoding="utf-8")
-    assert endpoint_via(None) == (stale, {})
+    (stale / "sorcar-local.json").write_text(
+        json.dumps({"url": f"wss://127.0.0.1:{stale_port}/ws", "token": "stale"}), "utf-8",
+    )
+    assert enroll_via(None) == (f"https://127.0.0.1:{stale_port}", stale_ca)
+    assert [p.name for p in (stale / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).iterdir()] == [
+        tls_certs.ca_label(mach.kiss_home() / "tls" / "ca.pem") + ".pem",
+    ]
     # KISS_HOME wins over both.
-    assert endpoint_via(remote.home) == live
+    assert enroll_via(remote.home) == live
     # A one-letter brand home (brand.py allows any name but "." and "..") is found too.
-    (home / mach.HOME_DIR / "sorcar-local.json").unlink()
+    (stale / "sorcar-local.json").unlink()
     (home / ".s10s").rename(home / ".x")
-    assert endpoint_via(None) == live
+    assert enroll_via(None) == live
     # A home with no endpoint file anywhere: the usual error, naming what was searched.
     (home / ".x").unlink()
     with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*/\.\*/"):
-        endpoint_via(None)
-    # End to end: the machine registered while the remote was one brand
-    # keeps working after it moved to the other.
+        enroll_via(None)
+    # End to end: ssh discovery is a one-time step of the registration;
+    # the link does not depend on it afterwards.
     (home / ".s10s").symlink_to(remote.home)
     server = start_sshd(sshd.config.parent, None, home=home)
     try:
         machine = mach.add_machine("brand", server.login)
+        assert machine.url == remote.url and machine.ssh == server.login
         assert _titles(mach.fetch_history(machine, "alpha", "", 50)) == ["remote alpha"]
         (home / ".s10s").unlink()
-        (home / mach.HOME_DIR).rmdir()
-        (home / mach.HOME_DIR).symlink_to(remote.home)
         mach.close_links()
         assert mach.machine_status(machine) == "reachable"
     finally:
@@ -704,120 +889,46 @@ def test_ssh_machine_finds_the_daemon_whatever_its_brand_home(
 
 
 @needs_sshd
-def test_ssh_machine_recovers_from_a_daemon_restart_and_a_dead_tunnel(
+def test_ssh_machine_survives_a_daemon_restart_on_the_same_port(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A restarted daemon (new port, new token) and a killed ssh are found again."""
-    home = tmp_path / "remote-home"
-    daemon = start_remote_daemon(home, password="pw", seed=[{"chat_id": "c", "task": "one"}])
-    server = start_sshd(tmp_path / "sshd", home)
-    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(server.config))
-    try:
-        machine = mach.add_machine("box", server.login)
-        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["one"]
-        link = mach.link_for(machine)
-        assert link.tunnel is not None
-        first_url, first_token = link.tunnel.url, link.tunnel.token
+    """The enrolled CA lives on the machine's disk: a restarted daemon admits the link again.
 
-        daemon.stop()
-        with pytest.raises(mach.MachineError, match="did not answer|unreachable"):
-            mach.fetch_history(machine, "", "", 50)
-        assert not link.tunnel.is_open()  # closed with the failure: re-read on retry
-        daemon = start_remote_daemon(
-            home, password="pw", seed=[{"chat_id": "c", "task": "two"}],
-        )
-        assert _endpoint_token(daemon) != first_token
-        link._retry_at = 0.0  # the backoff has expired
-        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
-        assert link.tunnel.token == _endpoint_token(daemon)
-        assert link.tunnel.url != first_url
-        assert mach.fetch_history(machine, "", "", 50).rows[0]["machine_url"] == link.tunnel.url
-
-        # The ssh process dies (network blip): the next request re-opens
-        # the tunnel at once, with a new socket.
-        assert link.tunnel.process is not None
-        link.tunnel.process.kill()
-        link.tunnel.process.wait()
-        assert not link.tunnel.is_open()
-        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
-        assert link.tunnel.is_open()
-    finally:
-        mach.close_links()
-        daemon.stop()
-        server.stop()
-
-
-@needs_sshd
-def test_ssh_machine_retries_at_once_when_the_tunnel_token_is_stale(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A daemon restarted on the same port under a living tunnel is found without a backoff.
-
-    The ``ssh`` forward connects on demand, so it outlives the
-    daemon it points at; the token the link read when it opened the
-    tunnel is then stale and the restarted daemon answers
-    ``auth_required``.  The link re-reads the endpoint file and
-    authenticates again right away, whether a stream
-    (:meth:`MachineLink.open_connection`) or a request runs into the
-    stale token first, and a request socket cached from before the
-    restart is dropped with the old tunnel.  A token the daemon
-    rejects twice (the file itself is wrong) still backs off.
+    A daemon restarted on another port is at another address: the
+    machine is unreachable until registered again (which enrolls the
+    same CA file once more and records the new port).
     """
     home = tmp_path / "remote-home"
     daemon = start_remote_daemon(home, password="pw", seed=[{"chat_id": "c", "task": "one"}])
     server = start_sshd(tmp_path / "sshd", home)
     monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(server.config))
-    endpoint_file = home / "sorcar-local.json"
     try:
         machine = mach.add_machine("box", server.login)
+        assert machine == mach.Machine("box", daemon.url, ssh=server.login)
         assert _titles(mach.fetch_history(machine, "", "", 50)) == ["one"]
         link = mach.link_for(machine)
-        assert link.tunnel is not None and link.tunnel.process is not None
-        first_ssh, first_token = link.tunnel.process.pid, link.tunnel.token
-        assert first_token == _endpoint_token(daemon)
-
         port = daemon.port
         daemon.stop()
+        with pytest.raises(mach.MachineError, match="did not answer|unreachable"):
+            mach.fetch_history(machine, "", "", 50)
         daemon = start_remote_daemon(
             home, password="pw", seed=[{"chat_id": "c", "task": "two"}], port=port,
         )
-        assert daemon.port == port and _endpoint_token(daemon) != first_token
-        assert link.tunnel.is_open()  # the forward survived the restart
-
-        # A stream (a tab on the machine) runs into the stale token
-        # first: it gets a socket on a new tunnel, without a backoff.
-        started = time.monotonic()
-        stream = link.open_connection()
-        assert time.monotonic() - started < mach.DOWN_BACKOFF
-        assert link._retry_at == 0.0  # no backoff was started
-        assert link.tunnel.token == _endpoint_token(daemon)
-        assert link.tunnel.process is not None and link.tunnel.process.pid != first_ssh
-        assert _pong(stream)
-        # The request socket cached before the restart went with the
-        # old tunnel: the next request connects anew instead of failing
-        # on it (and closing the new tunnel under the stream).
+        link._retry_at = 0.0  # the backoff has expired
         assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
-        assert link._retry_at == 0.0
-        assert _pong(stream)
-        stream.close()
-        assert mach.fetch_history(machine, "", "", 50).rows[0]["machine_url"] == link.tunnel.url
+        assert mach.fetch_history(machine, "", "", 50).rows[0]["machine_url"] == machine.url
 
-        # A token the file itself gets wrong is rejected twice: the
-        # second rejection backs off like any failure.
-        endpoint = json.loads(endpoint_file.read_text(encoding="utf-8"))
-        endpoint_file.write_text(json.dumps(endpoint | {"token": "0" * 64}), encoding="utf-8")
-        link.close()
-        with pytest.raises(mach.MachineError, match="rejected the password"):
-            mach.fetch_history(machine, "", "", 50)
-        assert link._retry_at > time.monotonic()
-        assert not link.tunnel.is_open()
-        with pytest.raises(mach.MachineError, match="rejected the password"):
-            mach.fetch_history(machine, "", "", 50)  # within the backoff: not retried
-
-        # The file is right again: the backoff over, the link recovers.
-        endpoint_file.write_text(json.dumps(endpoint), encoding="utf-8")
+        daemon.stop()
+        daemon = start_remote_daemon(home, password="pw", seed=[{"chat_id": "c", "task": "three"}])
+        if daemon.port == port:
+            pytest.skip("the OS handed the restarted daemon the same port")
         link._retry_at = 0.0
-        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
+        with pytest.raises(mach.MachineError, match="unreachable"):
+            mach.fetch_history(machine, "", "", 50)
+        again = mach.add_machine("box", server.login)
+        assert again == mach.Machine("box", daemon.url, ssh=server.login)
+        assert _titles(mach.fetch_history(again, "", "", 50)) == ["three", "two", "one"]
+        assert len(_trusted_files(daemon)) == 1
     finally:
         mach.close_links()
         daemon.stop()
@@ -825,29 +936,163 @@ def test_ssh_machine_retries_at_once_when_the_tunnel_token_is_stale(
 
 
 @needs_sshd
-def test_ssh_tunnel_ignores_connection_multiplexing(
-    sshd: SshServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_ssh_tunnel_reaches_a_daemon_whose_address_is_unreachable(
+    remote: RemoteDaemon, sshd: SshServer,
 ) -> None:
-    """With ControlMaster in the user's config the tunnel is still its own process."""
-    control = tmp_path / "control"
-    control.mkdir()
-    config = tmp_path / "ssh_config"
-    config.write_text(
-        sshd.config.read_text(encoding="utf-8")
-        + f"  ControlMaster auto\n  ControlPath {control}/%C\n  ControlPersist 60\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(config))
-    machine = mach.Machine("mux", ssh=sshd.login)
-    pinning = mach.MachineLink(machine)
-    machine.cert_file().write_text(mach.pin_certificate(pinning.base_url()), encoding="utf-8")
-    pinning.close()
-    assert pinning.tunnel is not None and not pinning.tunnel.is_open()
-    link = mach.link_for(machine)
+    """The daemon port is only reached through ssh: a blackhole URL host still answers.
+
+    The machine's URL names ``192.0.2.1`` (TEST-NET, nothing routes
+    there): a direct dial would hang, the forward to ``127.0.0.1:port``
+    on the ssh host answers.  One tunnel serves every request and every
+    link to the login; it is opened again after its ssh process died,
+    and closed by ``close_links``.
+    """
+    enrolled = mach.add_machine("near", sshd.login)
+    far = mach.Machine("far", f"https://192.0.2.1:{remote.port}", ssh=sshd.login)
+    far.cert_file().write_bytes(enrolled.cert_file().read_bytes())
+    mach.save_machines([enrolled, far])
+    assert mach._tunnels == {}  # the registry changed: every tunnel was closed
     try:
-        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
-        assert link.tunnel is not None and link.tunnel.is_open()
-        assert list(control.iterdir()) == []  # no master socket was created
+        assert mach.machine_status(far) == "reachable"
+        tunnel = mach._tunnels[sshd.login]
+        assert tunnel.process is not None and tunnel.alive()
+        pid = tunnel.process.pid
+        link = mach.link_for(far)
+        assert _titles(mach.fetch_history(link.machine, "alpha", "", 50)) == ["remote alpha"]
+        assert _tunnel_peer_port(link) == tunnel.local_port
+        assert _titles(mach.fetch_history(enrolled, "beta", "", 50)) == ["remote beta"]
+        assert _tunnel_peer_port(mach.link_for(enrolled)) == tunnel.local_port
+        assert mach._tunnels == {sshd.login: tunnel} and tunnel.process.pid == pid  # reused
+
+        tunnel.process.kill()
+        tunnel.process.wait()
+        assert not tunnel.alive()
+        assert _titles(mach.fetch_history(far, "shared", "", 50)) == ["shared task"]
+        assert tunnel.process is not None and tunnel.process.pid != pid and tunnel.alive()
+        assert _tunnel_peer_port(link) == tunnel.local_port
     finally:
         mach.close_links()
-        machine.cert_file().unlink(missing_ok=True)
+    assert mach._tunnels == {} and tunnel.process is None and not tunnel.alive()
+
+
+_FAKE_SSH = '''#!__PYTHON__
+"""Stand-in for ssh: ``-G`` names a blackhole host, ``-N -L`` relays to the daemon,
+a command runs locally with KISS_HOME set, FAKE_SSH_FAIL refuses the forward."""
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+args = sys.argv[1:]
+if "-G" in args:
+    print("hostname 192.0.2.1")
+    sys.exit(0)
+if "-N" not in args:
+    env = dict(os.environ, KISS_HOME=os.environ["FAKE_SSH_HOME"])
+    sys.exit(subprocess.run(args[-1], shell=True, env=env).returncode)
+_host, local, _rhost, remote = args[args.index("-L") + 1].split(":")
+if os.environ.get("FAKE_SSH_FAIL"):
+    sys.stderr.write(f"bind [127.0.0.1]:{local}: Address already in use\\n"
+                     "Could not request local forwarding.\\n")
+    sys.exit(255)
+if os.environ.get("FAKE_SSH_HANG"):
+    time.sleep(60)
+
+
+def pump(src, dst):
+    try:
+        while chunk := src.recv(65536):
+            dst.sendall(chunk)
+    except OSError:
+        pass
+    finally:
+        for s in (src, dst):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+server = socket.socket()
+server.bind(("127.0.0.1", int(local)))
+server.listen()
+while True:
+    client, _ = server.accept()
+    try:
+        upstream = socket.create_connection(("127.0.0.1", int(remote)))
+    except OSError:
+        client.close()
+        continue
+    threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
+    threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+'''
+
+
+@posix_only(
+    "the fake ssh is a shebang script on PATH: Windows resolves ``ssh`` to "
+    "System32's ssh.exe whatever PATH says, and runs its command through cmd.exe"
+)
+def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ssh`` on PATH that relays ``-L`` to a local daemon carries the whole link.
+
+    The fake ssh reports a blackhole host, so the registered URL is
+    unreachable directly; enrollment and every request go through it.
+    A forward that fails is reported with ssh's last stderr line, one
+    that never opens the port times out, and a missing ``ssh`` is
+    named.
+    """
+    daemon = start_remote_daemon(
+        tmp_path / "home", password="pw", seed=[{"chat_id": "c", "task": "one"}],
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "ssh"
+    script.write_text(_FAKE_SSH.replace("__PYTHON__", sys.executable), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_SSH_HOME", str(daemon.home))
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(tmp_path / "no-such-config"))
+    login = "ksen@far.example.org"
+    try:
+        machine = mach.add_machine("far", login)
+        assert machine == mach.Machine("far", f"https://192.0.2.1:{daemon.port}", ssh=login)
+        assert len(_trusted_files(daemon)) == 1
+        link = mach.link_for(machine)
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        tunnel = mach._tunnels[login]
+        assert tunnel.process is not None and tunnel.remote_port == daemon.port
+        pid = tunnel.process.pid
+        assert _tunnel_peer_port(link) == tunnel.local_port
+        assert _titles(mach.fetch_history(machine, "", "", 50)) == ["one"]
+        assert tunnel.process.pid == pid  # reused across requests
+        assert mach.machine_status(machine) == "reachable" and tunnel.process.pid == pid
+
+        tunnel.process.kill()
+        tunnel.process.wait()
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        assert tunnel.process is not None and tunnel.process.pid != pid and tunnel.alive()
+
+        monkeypatch.setenv("FAKE_SSH_FAIL", "1")
+        tunnel.close()
+        assert mach.machine_status(machine) == (
+            f"far (ssh {login}) is unreachable: ssh {login} cannot forward its daemon port "
+            f"{daemon.port}: Could not request local forwarding."
+        )
+        monkeypatch.delenv("FAKE_SSH_FAIL")
+        monkeypatch.setenv("FAKE_SSH_HANG", "1")
+        with pytest.raises(mach.MachineError, match="did not open the port forward in time"):
+            mach.SshTunnel(login, daemon.port).open(timeout=1.0)
+        monkeypatch.delenv("FAKE_SSH_HANG")
+        assert mach.machine_status(machine) == "reachable"
+        assert mach.remove_machine("far") is True
+        assert mach._tunnels == {}
+        monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+        with pytest.raises(mach.MachineError, match="ssh is not installed on this machine"):
+            mach.SshTunnel(login, daemon.port).open(timeout=1.0)
+    finally:
+        mach.close_links()
+        daemon.stop()

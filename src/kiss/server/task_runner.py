@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Task-runner mixin for the VS Code server.
+"""Task-runner mixin for the agent server.
 
 Implements the background-thread task lifecycle: ``_run_task`` (status
 broadcasts) and ``_run_task_inner`` (agent invocation, presenting a
@@ -253,7 +253,7 @@ def _stop_requested(state: AgentState) -> bool:
 def _ensure_agent(state: AgentState) -> ChatSorcarAgent:
     """Under ``STATE_LOCK``: *state*'s agent, created on its first run."""
     if state.agent is None:
-        state.agent = ChatSorcarAgent("Sorcar VS Code")
+        state.agent = ChatSorcarAgent("Sorcar")
     return state.agent
 
 
@@ -1412,13 +1412,15 @@ class _TaskRunnerMixin:
         task_id: str | None,
         tab_id: str,
         model: str,
+        parent_tab_id: str,
     ) -> None:
         """Broadcast ``subagentDone`` for a finished ``run_agent`` child.
 
         The completion signal of a daemon-dispatched sub-agent (a run
         submitted with ``parentTaskId``):
         every tab watching the child's task stream — subscribed via
-        ``resumeSession`` after the child's ``new_tab`` broadcast —
+        ``resumeSession`` after the child's ``new_tab`` broadcast, or
+        still opening it under the derived ``{parent}__sub_{task}`` id —
         stops its running indicator and gets the user's model pick
         back.  Best-effort UI signalling: never raises.
 
@@ -1432,9 +1434,13 @@ class _TaskRunnerMixin:
                 synthetic tab id.
             model: The model the run was launched with, restored into
                 the watching tabs' pickers.
+            parent_tab_id: The ``parentTabId`` of the dispatch, as its
+                ``new_tab`` named it.
         """
         try:
-            _notify_subagent_done(self.printer, task_id, tab_id, model or "")
+            _notify_subagent_done(
+                self.printer, task_id, tab_id, model or "", parent_tab_id,
+            )
         except Exception:
             logger.debug("subagentDone broadcast failed", exc_info=True)
 
@@ -1451,7 +1457,7 @@ class _TaskRunnerMixin:
 
         Emitted before the slow pre-run steps (worktree creation,
         chat-context loading, model/tool setup) so
-        the chat webview shows the submitted prompt and the system
+        the chat page shows the submitted prompt and the system
         prompt right away.  The events are broadcast-only (``taskId:
         ""`` — never recorded or persisted) and flagged ``early`` so
         the frontend replaces them in place once the authoritative
@@ -1742,7 +1748,13 @@ class _TaskRunnerMixin:
         # task's result is the SEA's ``description()`` text, or the
         # diagnostic when the script is broken or lacks the getter.
         # Returning here is safe — ``_run_task``'s ``finally`` still
-        # broadcasts ``status running:False``.
+        # broadcasts ``status running:False``.  The SEA's code runs
+        # on this thread and the loader folds every raise into its
+        # diagnostic (``help``) or report (``check``) — a Stop's
+        # injected interrupt included — so a stop requested meanwhile
+        # is honoured here, as after the worktree retire below: a
+        # cancellation ``_run_task`` acknowledges, never a persisted
+        # help row quoting the interrupt.
         if isinstance(display_prompt, str) and display_prompt:
             try:
                 help_text = help_text_if_command(display_prompt)
@@ -1750,6 +1762,8 @@ class _TaskRunnerMixin:
             except SeaError as exc:
                 help_text, help_ok = str(exc), False
             if help_text is not None:
+                if locked_call(self._state_lock, _stop_requested, state):
+                    raise KeyboardInterrupt("Stopped during /xxx help")
                 self._finish_sea_help_task(
                     state,
                     prompt=display_prompt,
@@ -1763,7 +1777,7 @@ class _TaskRunnerMixin:
                 return
 
         from kiss.core.models.model_info import custom_model_config
-        from kiss.core.vscode_config import build_model_config, load_config
+        from kiss.core.user_config import build_model_config, load_config
 
         # The run's model configuration, resolved ONCE for the
         # classifier and the run: the client-sent ``modelConfig``,
@@ -2196,7 +2210,7 @@ class _TaskRunnerMixin:
                         # the end-of-run signal below covers only
                         # the LAST row.
                         self._broadcast_dispatch_subagent_done(
-                            task_history_id, "", model,
+                            task_history_id, "", model, parent_tab_id,
                         )
                     self._persist_subtask_row(
                         state,
@@ -2376,7 +2390,7 @@ class _TaskRunnerMixin:
                         # viewer list is read from outlives the
                         # cleanup by design.)
                         self._broadcast_dispatch_subagent_done(
-                            hist_id, tab_id, model,
+                            hist_id, tab_id, model, parent_tab_id,
                         )
                         subagent_done_sent = True
                     self.printer.cleanup_task(hist_id)
@@ -2417,7 +2431,7 @@ class _TaskRunnerMixin:
                         # completion signal: send it here so the
                         # watching sub-agent tab still stops spinning.
                         self._broadcast_dispatch_subagent_done(
-                            task_history_id, tab_id, model,
+                            task_history_id, tab_id, model, parent_tab_id,
                         )
                     try:
                         self.printer.cleanup_task(task_history_id)
@@ -2704,7 +2718,7 @@ class _TaskRunnerMixin:
         """Subscribe every tab that has *chat_id* open to a new task's stream.
 
         Invariant: when a task is running on a chat, every tab — in
-        any VS Code window or remote browser window — that has that
+        any browser window — that has that
         chat open must see the task's events streaming live.  Tabs
         that open the chat WHILE the task is already running are
         handled by ``_replay_session`` → ``_attach_viewer_to_running_chat``;

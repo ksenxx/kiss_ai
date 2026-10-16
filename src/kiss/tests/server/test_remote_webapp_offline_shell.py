@@ -260,14 +260,14 @@ _UI_STATE_JS = r"""
 
 _ACTIVE_TAB_ID_JS = "window._testApi.getActiveTabId()"
 
-# Ids of every open tab in the webview's `tabs` array (mirrored from the
+# Ids of every open tab in the chat page's `tabs` array (mirrored from the
 # daemon registry).  Chats have no DOM entry of their own any more: only
 # the chat on screen and its sub-agents are rendered, on the group strip.
 _CHAT_TAB_IDS_JS = "window._testApi.openTabs().map(t => t.id)"
 
 # Open a tab in the shared registry through the shim (as main.js would).
 _OPEN_TAB_JS = (
-    "window.acquireVsCodeApi().postMessage("
+    "window.acquireTransport().postMessage("
     "{type: 'openTab', tabId: '%s', title: '%s'})"
 )
 

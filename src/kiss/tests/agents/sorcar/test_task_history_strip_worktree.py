@@ -101,7 +101,7 @@ class TestChatSorcarAgentBuildExtraStripsWorktree(unittest.TestCase):
     def test_build_extra_payload_strips_worktree(self) -> None:
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-abc-12345678"
         payload = agent._build_extra_payload(
             model="claude-opus-4-7",
@@ -115,7 +115,7 @@ class TestChatSorcarAgentBuildExtraStripsWorktree(unittest.TestCase):
     def test_build_extra_payload_passthrough_non_worktree(self) -> None:
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         payload = agent._build_extra_payload(
             model="claude-opus-4-7",
             work_dir="/Users/alice/proj",
@@ -157,7 +157,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         """End-to-end check via the agent's own payload builder."""
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         wt = "/Users/alice/proj/.kiss-worktrees/kiss_wt-abc-12345678"
         payload = agent._build_extra_payload(
             model="claude-opus-4-7",
@@ -179,7 +179,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         """A non-worktree ``work_dir`` must persist unchanged."""
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         plain = "/Users/alice/proj"
         payload = agent._build_extra_payload(
             model="claude-opus-4-7",

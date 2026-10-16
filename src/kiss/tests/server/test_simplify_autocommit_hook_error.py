@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import run_git
 
@@ -62,7 +62,7 @@ class TestManualCommitReportsHookOutput(unittest.TestCase):
         hook.write_text(f"#!/bin/sh\necho '{_HOOK_REASON}' >&2\nexit 1\n")
         hook.chmod(hook.stat().st_mode | 0o111)
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
         orig_broadcast = self.server.printer.broadcast

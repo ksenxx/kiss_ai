@@ -30,7 +30,7 @@ CURRENT thread's own claim (the ``_emit_pending_worktree`` caller).
 
 Everything here is real: a real git repository, a real linked worktree
 created by ``ChatSorcarAgent``, real ``run`` / ``worktreeAction``
-commands dispatched through ``VSCodeServer._handle_command``, real
+commands dispatched through ``AgentServer._handle_command``, real
 threads.  Only the LLM call is replaced by a deterministic stub
 function (no mocks), and the racing threads are parked at natural
 seams via wrappers that delegate to the real methods — the same
@@ -51,7 +51,7 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo, kiss_wt_branches
 
@@ -77,7 +77,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         _persistence._db_conn = None
 
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
         self.server.work_dir = self.repo
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
@@ -158,7 +158,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         self._wait_task_end(tab_id, before)
         state = agent_state.find_by_tab(tab_id)
         assert state is not None
-        agent = state.agent or ChatSorcarAgent("Sorcar VS Code")
+        agent = state.agent or ChatSorcarAgent("Sorcar")
         assert not agent._wt_pending, "the empty worktree is discarded post-task"
         agent._enter_work_dir(self.repo)
         assert agent.create_worktree().startswith("Created worktree")

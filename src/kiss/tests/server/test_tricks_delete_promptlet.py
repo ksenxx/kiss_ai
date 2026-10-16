@@ -174,9 +174,9 @@ class TestDeleteMyInjectionTrick(_TricksHome):
         self.assertIsNone(tricks.delete_my_injection_trick(r"Use C:\*.txt globs"))
         self.assertEqual(self.user_text(), tricks.DEFAULT_MY_INJECTION)
 
-    def test_crlf_body_from_the_vscode_page_matches_the_lf_section(self) -> None:
-        # The VS Code page lists a CRLF file's bodies with their CRLFs
-        # (SorcarTab.ts keeps them); this module's parser reads them as
+    def test_crlf_body_from_the_chat_page_matches_the_lf_section(self) -> None:
+        # A chat page may send a CRLF file's bodies with their CRLFs
+        # intact; this module's parser reads them as
         # LF, so the delete must accept either spelling.
         self.user_file.write_bytes(
             b"## Trick\r\n\r\nFirst line\r\nSecond line\r\n\r\n## Trick\r\n\r\nKeep.\r\n"

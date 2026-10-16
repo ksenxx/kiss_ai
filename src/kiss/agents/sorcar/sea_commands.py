@@ -743,10 +743,7 @@ def declared_settings(seas: list[BaseSea]) -> dict[str, Any]:
     Raises:
         SeaError: When a ``settings`` method raises or returns no dict.
     """
-    settings: dict[str, Any] = {}
-    for method in _chain(seas, "settings"):
-        settings = _check_dict(_label(method), _call(method, settings))
-    return settings
+    return _fold(seas, "settings", {}, _check_dict)
 
 
 def own_settings(sea: BaseSea) -> dict[str, Any]:

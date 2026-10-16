@@ -162,8 +162,8 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
 
         This simulates the restart behavior: the old server is stopped,
         a new server is started on the same port, and the new server
-        responds to HTTP requests.  This mirrors what restartKissWebDaemon
-        does in the VS Code extension (kill old process, start new one).
+        responds to HTTP requests.  This mirrors what ``install.sh``
+        does on a daemon restart (kill old process, start new one).
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))

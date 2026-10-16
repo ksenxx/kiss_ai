@@ -6,7 +6,7 @@
 
 Covers :mod:`kiss.server.file_index` (scanning rules, mtime-pruned
 rescans, ranking, persistence, the registry's root resolution and
-worker) and its wiring into ``VSCodeServer`` (``getFiles`` replies,
+worker) and its wiring into ``AgentServer`` (``getFiles`` replies,
 request tokens, post-task refresh, ``setWorkDir`` pre-warming).
 Every test drives real directories on disk; nothing is mocked.
 """
@@ -36,7 +36,7 @@ from kiss.server.file_index import (
     FileIndexRegistry,
     FileView,
 )
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 from kiss.tests.server.conftest import touch
 
@@ -495,10 +495,10 @@ class TestRegistry:
 
 
 class _Server:
-    """A ``VSCodeServer`` with a recording printer and a private registry."""
+    """A ``AgentServer`` with a recording printer and a private registry."""
 
     def __init__(self, tmp_path: Path, home: Path, work_dir: str) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = work_dir
         self.server._file_index.stop()
         self.server._file_index = _registry(tmp_path, home)

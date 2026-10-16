@@ -1298,7 +1298,7 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
             channel_main,
         )
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-        from kiss.core.vscode_config import _refresh_config
+        from kiss.core.user_config import _refresh_config
 
         # ``channel_main`` imports the isolated key store into
         # ``DEFAULT_CONFIG``; re-sync it from the restored environment.

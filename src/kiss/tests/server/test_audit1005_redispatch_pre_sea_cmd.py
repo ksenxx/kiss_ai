@@ -19,7 +19,7 @@ prompt the user typed.
 The fix snapshots the command before the SEA pipeline touches it and
 re-dispatches from that snapshot.
 
-Harness: a real ``VSCodeServer`` with a real ``JsonPrinter`` subclass
+Harness: a real ``AgentServer`` with a real ``JsonPrinter`` subclass
 that submits the late prompt through the REAL ``_cmd_run`` the moment
 the run's ``status running:true`` is broadcast (the worker thread is
 installed, so the prompt is queued and never drained), a user-level
@@ -42,7 +42,7 @@ import pytest
 from kiss.agents.sorcar import sea_commands
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
@@ -75,7 +75,7 @@ class _LatePromptPrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[dict[str, Any]] = []
-        self.server: VSCodeServer | None = None
+        self.server: AgentServer | None = None
         self.late_prompt = ""
         self._submitted = False
 
@@ -146,7 +146,7 @@ def test_followup_after_slash_run_is_a_plain_run(
     """The re-dispatched follow-up runs the user's prompt, not the SEA again."""
     marker = _isolate
     printer = _LatePromptPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     printer.server = server
     late = "and now a plain follow-up"
     printer.late_prompt = late

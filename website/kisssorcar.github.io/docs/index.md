@@ -6,8 +6,8 @@
 
 - [Overview](overview.md) — What KISS Sorcar is, the name, and how it compares to Claude Code and Cursor
 - [Terminal-Bench 2.0 Benchmark](benchmarks.md) — KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 tasks and seven models (75.6% vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5, the 59 unsampled tasks, caveats, and how to reproduce
-- [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
-- [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
+- [Installation](installation.md) — One-line installer, install from a checkout, Docker, pipx/uv, API-key configuration, updating
+- [Client Interfaces](cli.md) — The `kiss-web` daemon, web/mobile app, Python client API, and the `sorcar` terminal command
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, GitWorktreeOps
 - [Supported Models](models.md) — 695-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
@@ -35,11 +35,11 @@ pipx install kiss-agent-framework
 # Set at least one model API key
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, GEMINI_API_KEY, ...
 
-# Start the daemon that serves the VS Code extension and the web app
+# Start the daemon that serves the web app (the full installer registers it as a user service)
 kiss-web
 ```
 
-Then open the KISS Sorcar sidebar in VS Code, or open the remote web app URL shown in the Settings panel. From Python:
+Then open the web app at <http://127.0.0.1:8787>, or the remote web app URL shown in its Settings panel. From Python:
 
 ```python
 from kiss.server import sorcar

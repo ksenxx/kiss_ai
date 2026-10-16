@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Backend ``isDone`` regression tests extracted from
-``kiss.tests.agents.vscode.test_subagent_history_tab_icon``.
+``kiss.tests.webapp.test_subagent_history_tab_icon``.
 
 ``_replay_session`` consults the task-id-keyed registry
 :mod:`kiss.server.agent_state` (via ``_subagent_is_done``) to decide
@@ -11,7 +11,7 @@ whether a sub-agent tab reopened from history is still running or
 already done; the result is broadcast as ``isDone`` on
 ``openSubagentTab``.  Moved here because the dependency closure is
 kiss.agents.sorcar (persistence) + kiss.server only; the static
-``media/main.js`` handler checks stayed behind in tests/agents/vscode.
+``media/main.js`` handler checks stayed behind in tests/webapp.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ import threading
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 

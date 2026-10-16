@@ -24,7 +24,7 @@ from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
 
 
@@ -39,8 +39,8 @@ class TestViewerTabResolvesToSubagent:
     def teardown_method(self) -> None:
         clear_agent_states()
 
-    def _make_server(self) -> tuple[VSCodeServer, list[dict[str, Any]]]:
-        server = VSCodeServer()
+    def _make_server(self) -> tuple[AgentServer, list[dict[str, Any]]]:
+        server = AgentServer()
         events: list[dict[str, Any]] = []
         lock = threading.Lock()
 
@@ -52,7 +52,7 @@ class TestViewerTabResolvesToSubagent:
         return server, events
 
     def _register_subagent(
-        self, server: VSCodeServer, *, task_id: str, viewer_tab: str,
+        self, server: AgentServer, *, task_id: str, viewer_tab: str,
     ) -> tuple[agent_state.AgentState, agent_state.AgentState]:
         """Register a live parent task and a live sub-agent state under
         its task id, and subscribe *viewer_tab* to the sub-agent's task

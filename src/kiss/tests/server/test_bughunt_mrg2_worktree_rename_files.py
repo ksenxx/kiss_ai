@@ -29,7 +29,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -56,7 +56,7 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
         _git(self.repo, "add", "old.txt")
         _git(self.repo, "commit", "-q", "-m", "initial")
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]

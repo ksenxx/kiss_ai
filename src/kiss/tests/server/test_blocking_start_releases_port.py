@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from kiss.agents.sorcar import local_endpoint
-from kiss.core.vscode_config import save_config
+from kiss.core.user_config import save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server.conftest import find_free_port

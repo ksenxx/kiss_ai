@@ -4,19 +4,18 @@
 # add your name here
 """End-to-end tests for the ``shareChat`` / ``shareChatTasks`` API.
 
-The chat webview's share button first sends ``shareChatTasks``: the
+The chat page's share button first sends ``shareChatTasks``: the
 daemon answers with a ``share_tasks`` reply carrying the persisted
-transcripts of ALL of the chat's tasks (oldest first) — the webview's
+transcripts of ALL of the chat's tasks (oldest first) — the page's
 own DOM holds only the one task the session replay repainted.  The
-webview assembles those transcripts (plus the live screen) into one
+page assembles those transcripts (plus the live screen) into one
 page body and sends it back via ``shareChat``; the daemon wraps it
 into a standalone page
 (``kiss.server.web_server._build_share_page``) and writes it to
 ``<workDir>/reports/chat-<title-slug>-<chatId>.html``.  These tests drive the REAL
 production path — a live :class:`RemoteAccessServer` dispatcher over a
-real local WSS connection, exactly how the VS Code extension host
-forwards the webview's commands, and over real remote WSS exactly like
-the remote webapp — against a real history database, and assert on the
+real local WSS connection, and over real remote WSS exactly like
+the chat page — against a real history database, and assert on the
 ``share_tasks`` / ``share_done`` replies and on the page written to
 disk.
 """
@@ -41,7 +40,7 @@ from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _SHARE_TASKS_MAX_REPLY_BYTES,
@@ -54,7 +53,7 @@ _PASSWORD = "share-chat-test-password"
 
 
 class _LocalServerTestCase(unittest.TestCase):
-    """Harness: a live local-channel dispatcher exactly like the extension's."""
+    """Harness: a live local-channel dispatcher over the daemon's local endpoint."""
 
     def setUp(self) -> None:
         # ignore_cleanup_errors: the server's worker threads keep their
@@ -159,13 +158,13 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         # The transcript body travels verbatim.
         self.assertIn(self.BODY, page)
         self.assertIn("<title>My chat</title>", page)
-        # Self-contained: the webview stylesheet, the highlight.js
+        # Self-contained: the chat page stylesheet, the highlight.js
         # theme, the VS Code palette and the collapse script are all
         # inlined, so the page needs no server and no other file.
         self.assertIn(".ev.task-panel, .ev.user-msg {", page)  # main.css
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
-        self.assertIn("--vscode-editor-background: #1f1f1f", page)
+        self.assertIn("--theme-editor-background: #1f1f1f", page)
         self.assertIn("renderShareTabBar", page)  # share.js
         # share.js's click delegation — a marker that appears in the
         # script only, never in this test's transcript body.
@@ -186,7 +185,7 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         self.assertIn('<style id="hljs-style-light" media="not all">', page)
         # Light Modern variable overrides keyed off the toggled class.
         self.assertIn("html.light-theme,\n    body.remote-chat.light-theme {", page)
-        self.assertIn("--vscode-editor-background: #ffffff", page)
+        self.assertIn("--theme-editor-background: #ffffff", page)
         # share.js's toggle logic (markers that appear in the script
         # only, never in this test's transcript body).
         self.assertIn("kissShareTheme", page)
@@ -370,7 +369,7 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         # A task that fanned out two sub-agents, the first of which ran
         # a fan-out of its own: the reply's task entry must carry all
         # three transcripts (parents before children), so the shared
-        # page can open them as tabs like the live webview does.
+        # page can open them as tabs like the live chat page does.
         parent = self._seed("chat-sub", "parent task", "ls")
         sub_one = self._seed("chat-sub", "first sub task", "echo one")
         sub_two = self._seed("chat-sub", "second sub task", "echo two")
@@ -413,7 +412,7 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
 
     def test_task_id_narrows_the_reply_to_one_task(self) -> None:
         # A sub-agent tab's share: its row is not a chat task, so the
-        # webview names it by taskId and gets back exactly that task
+        # page names it by taskId and gets back exactly that task
         # and its own descendants — never the chat's other tasks.
         parent = self._seed("chat-one", "parent task", "ls")
         sub = self._seed("chat-one", "sub task", "echo sub")
@@ -545,7 +544,7 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
     ) -> None:
         # Two tasks whose payloads together exceed the reply budget but
         # fit it one at a time: the OLDER one must be dropped — the
-        # newest transcripts are the ones the webview cannot redraw
+        # newest transcripts are the ones the page cannot redraw
         # from its own DOM — and the reply must both fit the transport
         # frame and say it was truncated.
         self._seed_half_budget("chat-t", "old task")
@@ -613,6 +612,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
                 "title": "Remote chat",
                 "html": TestShareChatOverLocal.BODY,
                 "tabId": "tab-wss",
+                "password": _PASSWORD,
             }))
             while True:
                 event = json.loads(
@@ -657,6 +657,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
                 "type": "shareChatTasks",
                 "chatId": "wss-chat-2",
                 "tabId": "tab-wss-2",
+                "password": _PASSWORD,
             }))
             while True:
                 event = json.loads(

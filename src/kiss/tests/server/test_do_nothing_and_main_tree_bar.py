@@ -5,17 +5,17 @@
 """The "Do nothing" worktree action.
 
 The post-task flow is covered end to end, driving the real
-:class:`VSCodeServer` command handlers against a real git repository
+:class:`AgentServer` command handlers against a real git repository
 with only the LLM-backed pieces replaced by deterministic stubs (no
 mocks): a task whose agent isolated itself with ``create_worktree``
 and finished without ``commit_and_merge`` presents the Merge / Discard
-/ Do nothing bar.  The webview's third bar button sends
+/ Do nothing bar.  The chat page's third bar button sends
 ``worktreeAction`` with ``action: "nothing"``.  The daemon must detach
 from the pending worktree while leaving its branch, its directory, and
 any uncommitted changes in it untouched on disk, persist the
 preserve-for-review marker (so a future process's orphan reclaim never
 silently publishes the parked work), and answer with a successful
-``worktree_result`` carrying ``kept: True`` (so the VS Code host keeps
+``worktree_result`` carrying ``kept: True`` (so the chat page keeps
 its file-link fallback into the still-existing worktree).
 """
 
@@ -34,7 +34,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import init_repo, kiss_wt_branches, run_git
 
@@ -67,7 +67,7 @@ class _Base(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.server.work_dir = self.repo
         self.events: list[dict[str, Any]] = []
 

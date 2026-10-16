@@ -13,7 +13,7 @@ just SIGTERM'd and its port was still in ``TIME_WAIT``, racing the
 supervisor's respawn) the websockets library raised ``OSError`` with
 ``errno=EADDRINUSE`` straight out of ``asyncio.run`` in
 :meth:`RemoteAccessServer.start`, producing a full traceback on
-stderr.  The supervisor (launchd, the VS Code extension's respawn
+stderr.  The supervisor (launchd, the daemon's respawn
 loop) would then immediately respawn into the same OSError,
 producing a visible flap loop until the port finally freed.
 

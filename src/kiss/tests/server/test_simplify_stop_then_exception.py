@@ -41,7 +41,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _SlowResultPrinter(JsonPrinter):
@@ -62,7 +62,7 @@ class _SlowResultPrinter(JsonPrinter):
 class _StopThenRaiseAgent(ChatSorcarAgent):
     """Agent whose loop presses Stop and then raises a plain exception."""
 
-    server: VSCodeServer
+    server: AgentServer
     tab_id: str
     task_id: str = ""
 
@@ -85,8 +85,8 @@ def test_exception_with_pending_stop_yields_one_result() -> None:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     tab_id = "stop-then-raise-tab"
     printer = _SlowResultPrinter()
-    server = VSCodeServer(printer=printer)
-    agent = _StopThenRaiseAgent("Sorcar VS Code")
+    server = AgentServer(printer=printer)
+    agent = _StopThenRaiseAgent("Sorcar")
     agent.server = server
     agent.tab_id = tab_id
     # ``_cmd_run`` installs the stop event and the thread before start.

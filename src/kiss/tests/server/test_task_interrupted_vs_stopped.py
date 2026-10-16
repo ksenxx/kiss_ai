@@ -7,7 +7,7 @@
 Production failure (task 3025 in the bundled ``history.db``): a task was
 running in its worker thread (step 3 of 100) when ``kiss-web`` received a
 routine restart ``SIGTERM`` — a daemon / LaunchAgent restart triggered by
-an in-progress KISS Sorcar extension update.  The graceful-shutdown path
+an in-progress KISS Sorcar update.  The graceful-shutdown path
 (:meth:`RemoteAccessServer._stop_active_agent_tasks`) injects a
 ``KeyboardInterrupt`` into the worker exactly like the user clicking
 "Stop".  Both paths were therefore indistinguishable and the row was
@@ -49,7 +49,7 @@ def _make_remote_server() -> Any:
     """Build a :class:`RemoteAccessServer` with no tunnel / sockets bound.
 
     Tests must build the remote server FIRST and then run their task
-    through ``remote._vscode_server`` so the worker registers into the
+    through ``remote._agent_server`` so the worker registers into the
     same process-global ``agent_state`` registry the shutdown helper
     later scans — exactly as in production where a single server owns
     both.
@@ -65,7 +65,7 @@ def _make_remote_server() -> Any:
     )
 
 
-def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
+def _start_blocked_worker(agent_server: Any, tab_id: str) -> tuple[Any, str]:
     """Start a worker whose stub agent blocks in a non-cooperative sleep.
 
     Mirrors a real agent wedged inside an LLM API call: it registers a
@@ -74,14 +74,14 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
     can break it.
 
     Args:
-        vscode: The :class:`VSCodeServer` that owns the worker.
+        agent_server: The :class:`AgentServer` that owns the worker.
         tab_id: The tab id to run under.
 
     Returns:
         ``(worker_thread, task_id)`` once the worker is inside the agent
         run and ``is_task_active`` has been set.
     """
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = AgentState(
         f"pre-{tab_id}",
         agent=agent,
@@ -121,7 +121,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
     agent.run = fake_run  # type: ignore[method-assign, assignment]
 
     worker = threading.Thread(
-        target=vscode._run_task,
+        target=agent_server._run_task,
         args=({
             "type": "run",
             "prompt": f"cancel-while-running-{tab_id}",
@@ -190,8 +190,8 @@ class TestTaskInterruptedVsStopped(TestCase):
         """
         tab_id = "interrupt-shutdown-1"
         remote = _make_remote_server()
-        vscode = remote._vscode_server
-        worker, task_id = _start_blocked_worker(vscode, tab_id)
+        agent_server = remote._agent_server
+        worker, task_id = _start_blocked_worker(agent_server, tab_id)
 
         remote._stop_active_agent_tasks(timeout=12.0)
         worker.join(timeout=5)
@@ -217,10 +217,10 @@ class TestTaskInterruptedVsStopped(TestCase):
         """
         tab_id = "interrupt-userstop-1"
         remote = _make_remote_server()
-        vscode = remote._vscode_server
-        worker, task_id = _start_blocked_worker(vscode, tab_id)
+        agent_server = remote._agent_server
+        worker, task_id = _start_blocked_worker(agent_server, tab_id)
 
-        vscode._stop_task(tab_id)
+        agent_server._stop_task(tab_id)
         worker.join(timeout=10)
         assert not worker.is_alive(), "manual stop left the worker running"
 

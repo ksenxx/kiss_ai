@@ -12,7 +12,7 @@ trust store knew its issuer) and the LAN IP was not in its SAN.  These
 tests exercise the real files, the real ``ssl`` module and a live
 ``RemoteAccessServer``:
 
-* :mod:`kiss.server.tls_certs` — CA + server certificate generation, the
+* :mod:`kiss.core.tls_certs` — CA + server certificate generation, the
   browser constraints (SAN, serverAuth EKU, <= 825-day validity), and
   every re-issue trigger (missing, expiring, wrong CA, mismatched key,
   missing LAN IP, unusable CA).
@@ -57,9 +57,10 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core import tls_certs
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.file_lock import lock_exclusive
-from kiss.server import tls_certs, tls_trust
+from kiss.server import tls_trust
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import IS_WINDOWS
@@ -246,7 +247,7 @@ class TestTlsCerts(TestCase):
         other = self.tls_dir.parent / "other"
         tls_certs.ensure_local_tls_pair(other, [])
         self.ca_key.write_bytes((other / tls_certs.CA_KEY_FILE).read_bytes())
-        with self.assertLogs("kiss.server.tls_certs", level="WARNING") as logs:
+        with self.assertLogs("kiss.core.tls_certs", level="WARNING") as logs:
             tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         self.assertIn("kiss-web --trust-ca", "\n".join(logs.output))
         self.assertNotEqual(self.ca.read_bytes(), old_ca)
@@ -561,7 +562,7 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         server._ssl_context = saved_ctx
 
         # The remote_url payload and the URL file advertise the local CA
-        # so the webview shows the trust hint.
+        # so the chat page shows the trust hint.
         self.assertTrue(server._serves_local_ca)
         server._write_url_file_sync(None)
         self.assertTrue(json.loads((self.tmp / "remote-url.json").read_text())["localCa"])

@@ -22,7 +22,7 @@ real ``CapturePrinter`` (``JsonPrinter``) whose ``start_recording``
 raises; the run whose bookkeeping is checked is a real
 ``ChatSorcarAgent.run`` whose ``super().run`` resolves to a
 ``SorcarAgent`` subclass that reports usage without a live model (the
-same MRO pattern ``test_replay_events_outside_webview.py`` uses).
+same MRO pattern ``test_replay_events_outside_chat.py`` uses).
 """
 
 from __future__ import annotations

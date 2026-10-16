@@ -599,7 +599,7 @@ def run(
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
     Connects to the ``kiss-web`` daemon's local WSS endpoint, sends
-    the same ``run`` command a chat webview would, streams the task's
+    the same ``run`` command a chat page would, streams the task's
     events, and returns once the daemon reports the task finished.
 
     Args:
@@ -630,7 +630,7 @@ def run(
             itself under an unrelated task.
         parent_tab_id: Frontend tab id of the calling task's tab,
             forwarded on the sub-agent's ``new_tab`` broadcast so the
-            webview knows which tab spawned it (nested placement and
+            chat page knows which tab spawned it (nested placement and
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
             headless ``run_parallel`` fan-out.  No SEA setting.

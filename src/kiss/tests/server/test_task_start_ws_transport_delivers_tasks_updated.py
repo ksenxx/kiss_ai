@@ -12,26 +12,26 @@ printer's ``broadcast`` method in-process and asserts a
 ``tasks_updated`` event is observed.  That proves the agent CALLS
 ``broadcast`` correctly, but it does NOT prove the broadcast
 actually reaches the WS / UDS transport layer that every connected
-webview client subscribes to.
+chat client subscribes to.
 
 This test closes that gap: it patches the printer's
 ``_send_to_ws_clients`` (the SINGLE chokepoint through which every
-frame leaves the daemon for any connected webview) and asserts a
+frame leaves the daemon for any connected client) and asserts a
 ``tasks_updated`` JSON frame is queued for transmission to clients
 BEFORE the agent body finishes.  If this assertion fails, the
-History sidebar in a real browser/VS Code window would NOT receive
+History sidebar in a real browser window would NOT receive
 the refresh trigger — which is the user-visible bug.
 
 Test flow
 ---------
-1. Real ``VSCodeServer`` with its real ``WebPrinter``.
+1. Real ``AgentServer`` with its real ``WebPrinter``.
 2. Patch ``WebPrinter._send_to_ws_clients`` to capture every frame
    it is asked to send to WS / UDS clients.
 3. Patch the underlying ``SorcarAgent.run`` (one level above
    ``ChatSorcarAgent.run``) with a blocking fake so the test can
    observe the in-flight state precisely.
-4. Drive ``VSCodeServer._handle_command({"type": "run", ...})``
-   exactly as the production webview-submit path does.
+4. Drive ``AgentServer._handle_command({"type": "run", ...})``
+   exactly as the production chat-page submit path does.
 5. Wait until the patched parent ``run`` is entered, then assert a
    ``tasks_updated`` frame is present in the captured set with
    ``taskId == ""`` (the global-broadcast convention).
@@ -50,7 +50,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
 from kiss.tests.server.conftest import (
     init_repo,
@@ -94,7 +94,7 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         init_repo(self.tmpdir)
 
         self.printer = WebPrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.captured_frames: list[str] = []
         self.captured_lock = threading.Lock()
 
@@ -167,7 +167,7 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         assert tasks_updated, (
             "No ``tasks_updated`` frame was queued for WS/UDS delivery "
             "while the task was running.  The History sidebar in real "
-            "browser / VS Code windows would not refresh until the task "
+            "browser windows would not refresh until the task "
             "ENDS, which is the user-visible bug.  Captured frame types "
             f"so far: {[e.get('type') for e in events]}"
         )

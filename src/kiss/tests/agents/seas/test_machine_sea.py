@@ -18,22 +18,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import yaml
 
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.machine import machine_sea as sea
 from kiss.agents.seas.machine.machine_sea import MachineSea
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    tool_call_body,
-)
+from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 
@@ -128,17 +122,17 @@ def test_tools_add_list_and_remove_against_a_real_daemon(remote: RemoteDaemon) -
 def test_tools_add_an_ssh_machine_without_a_password(
     remote: RemoteDaemon, sshd: SshServer,
 ) -> None:
-    """``add user@host`` tunnels the daemon port over SSH; the host names the machine."""
+    """``add user@host`` enrolls this daemon over SSH; the host names the machine."""
     assert sea.machine_add("", sshd.login) == (
-        f"Registered machine '127.0.0.1' at ssh {sshd.login}."
+        f"Registered machine '127.0.0.1' at ssh {sshd.login} ({remote.url})."
     )
-    assert mach.load_machines() == [mach.Machine("127.0.0.1", ssh=sshd.login)]
-    assert sea.machine_list() == f"127.0.0.1  ssh {sshd.login}  reachable"
+    assert mach.load_machines() == [mach.Machine("127.0.0.1", remote.url, ssh=sshd.login)]
+    assert sea.machine_list() == f"127.0.0.1  ssh {sshd.login} ({remote.url})  reachable"
     rows = mach.fetch_history(mach.load_machines()[0], "", "", 10).rows
     assert [r["title"] for r in rows] == ["remote work"]
     mach.close_links()
     assert sea.machine_add("", f"nobody-x@127.0.0.1:{sshd.port}").startswith(
-        f"Not registered: 127.0.0.1: ssh nobody-x@127.0.0.1:{sshd.port} failed: "
+        f"Not registered: ssh nobody-x@127.0.0.1:{sshd.port} failed: "
     )
     assert sea.machine_remove("127.0.0.1") == "Removed machine '127.0.0.1'."
     assert mach.load_machines() == []
@@ -155,30 +149,12 @@ def test_agent_lists_the_machines_and_finishes_with_the_text(
         finish_body(expected, prompt_tokens=400),
     ]
     run = sea_commands.evaluate_sea([MachineSea()], "list")
-    settings = run.settings
     assert run.tools_hook is not None and run.system_prompt_hook is not None
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("machine-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=4,
-            max_budget=settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            system_prompt_hook=run.system_prompt_hook,
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     assert parsed["success"] is True
     assert parsed["summary"] == expected
 
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 2, [list(r) for r in requests]
+    assert len(agentic) == 2
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"finish", "machine_add", "machine_remove", "machine_list"}, names
@@ -195,7 +171,7 @@ def test_agent_adds_an_ssh_machine_from_the_short_request(
     remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
 ) -> None:
     """``add user@host`` reaches ``machine_add`` with an empty name and no password."""
-    expected = f"<p>Registered machine '127.0.0.1' at ssh {sshd.login}.</p>"
+    expected = f"<p>Registered machine '127.0.0.1' at ssh {sshd.login} ({remote.url}).</p>"
     script = [
         tool_call_body(
             "machine_add", {"name": "", "address": sshd.login, "password": ""},
@@ -204,30 +180,11 @@ def test_agent_adds_an_ssh_machine_from_the_short_request(
         finish_body(expected, prompt_tokens=400),
     ]
     run = sea_commands.evaluate_sea([MachineSea()], f"add {sshd.login}")
-    settings = run.settings
     assert run.tools_hook is not None and run.system_prompt_hook is not None
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("machine-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=4,
-            max_budget=settings["max_budget"],
-            model_config={"base_url": url, "api_key": "local"},
-            tools_hook=run.tools_hook,
-            tool_profile=settings["tool_profile"],
-            system_prompt_hook=run.system_prompt_hook,
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     assert parsed["success"] is True and parsed["summary"] == expected
-    assert mach.load_machines() == [mach.Machine("127.0.0.1", ssh=sshd.login)]
-    agentic = [r for r in requests if r.get("tools")]
+    assert mach.load_machines() == [mach.Machine("127.0.0.1", remote.url, ssh=sshd.login)]
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
     assert str(tool_results[0]["content"]).startswith(
-        f"Registered machine '127.0.0.1' at ssh {sshd.login}.\n"
+        f"Registered machine '127.0.0.1' at ssh {sshd.login} ({remote.url}).\n"
     )
-    mach.close_links()

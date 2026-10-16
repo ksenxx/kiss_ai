@@ -4,8 +4,8 @@
 # add your name here
 """The server-canonical shared tab registry.
 
-Every connected client (VS Code chat webviews and remote web apps)
-mirrors the same set of chat tabs.  The daemon owns the canonical,
+Every connected client (every browser tab of the web app) mirrors
+the same set of chat tabs.  The daemon owns the canonical,
 ordered tab list; clients never persist a tab set of their own — they
 reconcile against the full ``tabs_state`` snapshot the daemon
 broadcasts after every mutation.
@@ -19,8 +19,8 @@ the same chat.
 
 Only top-level chat tabs live here.  Sub-agent tabs are derived state
 (recreated on every client from ``openSubagentTab`` broadcasts and
-session replays) and content tabs are client-local stand-ins for the
-VS Code editor, so neither is registered.
+session replays) and content tabs (files, directories, terminals)
+are client-local, so neither is registered.
 
 The registry persists to ``KISS_HOME/tabs.json`` with atomic writes
 (unique sibling temp file + ``os.replace``, via
@@ -33,7 +33,7 @@ Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (the
 WSS port bind), and a server embedded in another process that
 shares the KISS home — the channel launcher's private-endpoint daemon —
 owns a private registry file instead
-(``VSCodeServer.use_private_tab_registry``).  A thread lock therefore
+(``AgentServer.use_private_tab_registry``).  A thread lock therefore
 suffices for the registry's in-memory readers and writers; the unique
 temp name is belt-and-braces for a sibling instance (a test next to a
 live daemon) that the lock cannot see.
@@ -104,8 +104,7 @@ def _clean_work_dir(value: Any) -> str:
     A filesystem root (``/``, ``C:\\`` — see
     :func:`kiss.core.utils.is_root_dir`) is never a legitimate tab
     work dir; one can only have been stamped by a client whose cwd
-    degenerated to the root (a no-folder Dock-launched VS Code
-    window).  Mapping it to ``""`` both refuses to adopt new roots
+    degenerated to the root.  Mapping it to ``""`` both refuses to adopt new roots
     and HEALS entries already persisted in ``tabs.json`` on the next
     load, so an old poisoned tab stops rooting its tasks and
     ``@``-mention file scans at the whole disk.
@@ -226,7 +225,7 @@ class TabRegistry:
         # clipped title, or a HEALED root work dir.  Do NOT write here:
         # construction alone must never touch the file, because a
         # non-owner also constructs on the canonical path (the embedded
-        # launcher's server builds its ``VSCodeServer`` before swapping
+        # launcher's server builds its ``AgentServer`` before swapping
         # in its private registry), and a load-time write from it would
         # race the owning daemon.  Remember the pending heal instead;
         # the owner persists it on its first mutation or, failing that,
@@ -440,14 +439,14 @@ class TabRegistry:
         """Retire a rowless token AND read the clock, atomically.
 
         The linearization step of the DEFERRED close disposal
-        (``VSCodeServer._dispose_if_closed``): its claim must both
+        (``AgentServer._dispose_if_closed``): its claim must both
         retire any pending capacity-replay stamp (exactly as the
         immediate busy close does, so a replay stamped before the
         claim stands down at its commit) and draw a clock observation
         that orders the claim's out-of-lock teardown against later
         publications (a replay stamped after the claim owns the tab —
         the teardown stands down via
-        ``VSCodeServer._tab_reopened_since``).  Doing both in ONE
+        ``AgentServer._tab_reopened_since``).  Doing both in ONE
         locked section closes the seam a two-call sequence would
         leave: a stamp landing between a separate retire and clock
         read would be neither retired nor newer than the observation,
@@ -566,7 +565,7 @@ class TabRegistry:
         One atomic registry observation combining
         :meth:`republished_since` (a publication stamped a newer
         generation) with row presence (a token-0 duplicate close's
-        observation gap — see ``VSCodeServer._tab_reopened_since``).
+        observation gap — see ``AgentServer._tab_reopened_since``).
         Two separate calls would leave a seam: a rowless publication
         landing between them is neither newer than the split
         generation read nor visible as a row, so a stale cleanup could
@@ -667,7 +666,7 @@ class TabRegistry:
         :meth:`reopened_since` closes that gap by also answering
         ``True`` while the tab is PRESENT in the registry (presence
         after an absent-close is always a later republication) — see
-        ``VSCodeServer._tab_reopened_since``.
+        ``AgentServer._tab_reopened_since``.
 
         Returns:
             The current generation counter (``0`` on a registry that

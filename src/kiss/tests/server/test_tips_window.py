@@ -4,10 +4,9 @@
 # add your name here
 """End-to-end tests for the fresh-install Tips window (Python side).
 
-The chat webview template ``media/chat.html`` is shared between the
-VS Code extension (``SorcarTab.buildChatHtml``) and the remote webapp
-(``web_server._build_html``), so the remote builder must also
-substitute the ``{{TIPS_JSON}}`` / ``{{TIPS_SRC}}`` placeholders.
+The chat page template ``media/chat.html`` is filled in by
+``web_server._build_html``, which must substitute the
+``{{TIPS_JSON}}`` / ``{{TIPS_SRC}}`` placeholders.
 
 Contract locked in here:
 

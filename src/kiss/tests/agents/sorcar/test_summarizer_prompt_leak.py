@@ -17,7 +17,7 @@ parent's printer. Two things went wrong with its events:
   ``1ae49939d2a34039b72e8234eed52b02`` in ``~/.kiss/history.db``).
 * The summarizer used the built-in plain-text ``finish(result)``, so
   its terminal ``result`` event carried the HTML summary as bare
-  ``text`` with no ``summary`` / ``is_continue`` keys; the chat webview
+  ``text`` with no ``summary`` / ``is_continue`` keys; the chat page
   escaped it, showing ``<h3>``/``<ol>`` literally (observed in task
   ``ab25a870`` in ``~/.s10s/history.db``), unlike the end-of-task
   result panel which comes from the structured ``finish``.
@@ -337,7 +337,7 @@ def _summarizer_result_events(base_url: str) -> list[dict[str, Any]]:
         base_url: The local OpenAI-protocol server's base URL.
 
     Returns:
-        list[dict]: The ``result`` events the webview would receive, in
+        list[dict]: The ``result`` events the chat page would receive, in
         order (the summarizer's, then the merged end-of-task failure).
     """
     from kiss.server.json_printer import JsonPrinter
@@ -377,7 +377,7 @@ def _assert_structured_continuation(results: list[dict[str, Any]]) -> None:
     assert cont["success"] is False
     assert cont["summary"] == _SUMMARY_HTML, cont
     assert "<h3>summary-from-test</h3>" in cont["text"]
-    # Every result event the webview gets must be parseable: a
+    # Every result event the chat page gets must be parseable: a
     # bare-text result (the old summarizer finish) is rendered escaped.
     assert all("summary" in e for e in results), results
     # The merged end-of-task result repeats the session summary as
@@ -391,7 +391,7 @@ def _assert_structured_continuation(results: list[dict[str, Any]]) -> None:
 class TestSummarizerResultEventIsStructured:
     """The summarizer's ``result`` event renders as a continuation panel.
 
-    ``createResultPanel`` in the chat webview renders ``summary`` as
+    ``createResultPanel`` on the chat page renders ``summary`` as
     markup and prepends "Status: Continue" for ``is_continue``; an
     event with only ``text`` is escaped into a ``<pre>`` block, which
     is how the summarizer's HTML used to show its tags literally.

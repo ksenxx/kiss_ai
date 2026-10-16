@@ -41,7 +41,7 @@ from pathlib import Path
 import pytest
 
 import kiss.server.web_server as ws_mod
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _TUNNEL_BACKOFF_INITIAL,
     _TUNNEL_BACKOFF_MAX,
@@ -301,7 +301,7 @@ class TestSuccessfulRestartResetsBackoff(unittest.IsolatedAsyncioTestCase):
         srv._tunnel_proc = None
         srv._tunnel_failure_count = 3
         srv._tunnel_next_retry = 0.0
-        srv._local_url = "https://localhost:8787"
+        srv._local_url = "http://localhost:8787"
         try:
             await srv._check_and_restart_tunnel()
             self.assertEqual(srv._tunnel_failure_count, 0)

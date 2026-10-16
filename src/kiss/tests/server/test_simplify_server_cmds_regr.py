@@ -19,7 +19,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as persistence
 from kiss.server.commands import _parse_int
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer, _extra_for_replay
+from kiss.server.server import AgentServer, _extra_for_replay
 
 
 class _CapturePrinter(JsonPrinter):
@@ -39,9 +39,9 @@ class _CapturePrinter(JsonPrinter):
         self.cleaned_tabs.append(tab_id)
 
 
-def _make_server() -> tuple[VSCodeServer, _CapturePrinter]:
+def _make_server() -> tuple[AgentServer, _CapturePrinter]:
     printer = _CapturePrinter()
-    return VSCodeServer(printer=printer), printer
+    return AgentServer(printer=printer), printer
 
 
 
@@ -206,7 +206,7 @@ def test_replay_session_with_plain_printer_lacking_cleanup_tab() -> None:
     printer = _MinimalPrinter()
     if hasattr(JsonPrinter, "cleanup_tab"):
         pass
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     printer.events.clear()
     server._replay_session("no-such-chat-" + uuid.uuid4().hex, tab_id="tabZ")
     # The registry snapshot and the idle status (see the missing-chat

@@ -41,7 +41,7 @@ def test_port_comes_from_the_child_endpoint_record(tmp_path: Path) -> None:
         assert endpoint.pid == remote.pid
         if os.name != "nt":
             assert remote.pid == remote.process.pid
-        assert endpoint.url == f"wss://127.0.0.1:{remote.port}/ws"
+        assert endpoint.url == f"ws://127.0.0.1:{remote.port}/ws"
         with socket.create_connection(("127.0.0.1", remote.port), timeout=5):
             pass
     finally:

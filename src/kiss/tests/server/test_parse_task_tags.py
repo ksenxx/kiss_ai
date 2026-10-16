@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for parse_task_tags and multi-task execution in the VS Code server.
+"""Tests for parse_task_tags and multi-task execution in the daemon.
 
 Tests cover all branches of ``parse_task_tags`` and verify that the
 multi-task loop in ``_run_task_inner`` correctly parses subtasks and

@@ -35,7 +35,7 @@ import wave
 from collections.abc import Iterator
 from typing import Any
 
-from kiss.server.voice_wake import (
+from kiss.server.speech import (
     RETRY_EXTRA_TAIL_SECONDS,
     SAMPLE_RATE,
     TRAILING_SILENCE_KEEP_SECONDS,

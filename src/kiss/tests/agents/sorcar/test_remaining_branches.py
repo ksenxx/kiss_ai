@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for remaining uncovered branches in sorcar/ and vscode/ modules.
+"""Integration tests for remaining uncovered branches in sorcar/ and server/ modules.
 
 No mocks, patches, fakes, or test doubles. All tests use real objects.
 """

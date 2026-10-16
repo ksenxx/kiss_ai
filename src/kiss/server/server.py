@@ -2,17 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""VS Code extension backend server for Sorcar agent.
+"""Backend server for the Sorcar agent (``AgentServer``).
 
 The per-command handlers, task-runner, worktree flow and
 autocomplete logic live in sibling mixin modules.  This file keeps the
 per-tab state accessors, the command dispatcher, and the history /
 chat / commit-message helpers.
 
-``VSCodeServer`` is consumed by :class:`RemoteAccessServer`
+``AgentServer`` is consumed by :class:`RemoteAccessServer`
 (:mod:`kiss.server.web_server`), which owns the actual I/O transport
-(one WSS endpoint: token-authenticated for the local VS Code
-extension, password-authenticated for remote browsers) and instantiates a
+(one WSS endpoint: token-authenticated for local Python clients,
+password-authenticated for remote browsers) and instantiates a
 :class:`WebPrinter` whose ``broadcast`` method fans events out to
 every connected client.  No stdin/stdout transport remains: the old
 per-tab subprocess model has been fully replaced by the single
@@ -34,8 +34,6 @@ from typing import Any, cast
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar._concurrency import locked_call
-from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.machines import (
     LOCAL_MACHINE,
     HistoryPage,
@@ -91,7 +89,7 @@ from kiss.server.task_update import mark_legacy_updates_as_side_channels
 from kiss.server.terminal_tab import TerminalService
 
 __all__ = [
-    "VSCodeServer",
+    "AgentServer",
     "parse_task_tags",
 ]
 
@@ -281,9 +279,9 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
 #: persistence loader is not enough on its own.
 MAX_REPLAY_EVENT_TEXT_CHARS = 200_000
 #: Budget, in serialized bytes, for the events of one replay frame.
-#: The VS Code client drops its socket above 64 MiB (wsClient.ts
-#: ``DEFAULT_MAX_MESSAGE_BYTES``) and a laptop on a tunnel must not
-#: pull hundreds of megabytes per reconnect; beyond the budget the
+#: A client drops its socket above 64 MiB (``_MAX_LINE_BYTES``) and a
+#: laptop on a tunnel must not pull hundreds of megabytes per
+#: reconnect; beyond the budget the
 #: oldest events are left out and a note says so.
 MAX_REPLAY_FRAME_BYTES = 16 * 1024 * 1024
 _REPLAY_DELTA_TYPES = frozenset({"thinking_delta", "text_delta", "system_output"})
@@ -426,8 +424,8 @@ def _prewarm_task_dependencies() -> None:
     between its ``task_history`` row allocation and the agent's first
     event: ``KISSAgent._reset`` imports the concrete model class (and
     its provider SDK) on demand, and ``_run_task_inner`` loads the
-    VS Code config module lazily.  Importing them here — on a
-    background daemon thread started from ``VSCodeServer.__init__`` —
+    config module lazily.  Importing them here — on a
+    background daemon thread started from ``AgentServer.__init__`` —
     moves that cost to server startup, where nobody is waiting on it.
 
     Best-effort: a missing optional SDK or an import error must never
@@ -440,7 +438,7 @@ def _prewarm_task_dependencies() -> None:
         "kiss.core.models.openai_compatible_model",
         "kiss.core.models.openai_compatible_model2",
         "kiss.core.models.gemini_model",
-        "kiss.core.vscode_config",
+        "kiss.core.user_config",
     ):
         try:
             importlib.import_module(mod)
@@ -454,13 +452,13 @@ def _prewarm_task_dependencies() -> None:
         logger.debug("Prewarm of the model registry failed", exc_info=True)
 
 
-class VSCodeServer(
+class AgentServer(
     _CommandsMixin,
     _TaskRunnerMixin,
     _MergeFlowMixin,
     _AutocompleteMixin,
 ):
-    """Backend server for VS Code extension."""
+    """Backend server behind the daemon's one WSS endpoint."""
 
     _orphan_sweep_thread: threading.Thread | None = None
 
@@ -481,7 +479,7 @@ class VSCodeServer(
                     del agent_state.agent_states[task_id]
             if still_running:
                 logger.warning(
-                    "New VSCodeServer kept %d live task(s) registered; "
+                    "New AgentServer kept %d live task(s) registered; "
                     "their rows are exempt from the orphan sweep: %s",
                     len(still_running),
                     ", ".join(sorted(still_running)),
@@ -522,16 +520,6 @@ class VSCodeServer(
         # The remote webapp's terminal tabs: one pty shell each, owned
         # by the connection that opened it (``terminalOpen``).
         self.terminals = TerminalService(self.printer)
-        # The printer's local talk bookkeeping only knows which
-        # connection addressed which tab and whether a chat webview is
-        # attached; whether a tab is SHOWN by a local webview is decided
-        # at talk time by ``_local_tab_shown`` from the canonical facts
-        # (duck-typed: only the daemon's ``WebPrinter`` has the hook).
-        # The bound method reads ``self.tab_registry`` on every call,
-        # so ``use_private_tab_registry`` swaps are honoured.
-        install_visibility = getattr(self.printer, "set_local_tab_visibility", None)
-        if install_visibility is not None:
-            install_visibility(self._local_tab_shown)
         self._tab_chat_views: dict[str, str] = {}
         # Running sub-agent tabs the user closed by hand; see
         # ``_remember_closed_subagent_tab``.
@@ -542,7 +530,6 @@ class VSCodeServer(
         self._tab_chat_views.update(self.tab_registry.bindings())
         self._tab_opened_task_ids: dict[str, str] = {}
         self._tab_models: dict[str, str] = {}
-        self._commit_msg_tabs: set[str] = set()
         self._autocommit_tabs: set[str] = set()
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
@@ -589,68 +576,6 @@ class VSCodeServer(
         """
         self.tab_registry = TabRegistry(path)
         self._tab_chat_views = dict(self.tab_registry.bindings())
-
-    def _local_tab_shown(
-        self, tab_id: str, interested: bool, webview_attached: bool,
-    ) -> bool:
-        """Decide whether a local webview shows *tab_id* right now.
-
-        The rule behind ``WebPrinter.shown_local_tabs`` — the
-        daemon-native talk playback decision.  It is evaluated at talk
-        time from the canonical facts instead of from bookkeeping that
-        mirrors them, which is what makes the decision immune to the
-        interleavings of a close with a re-registration, a ``ready``
-        sync or a ``resumeSession`` reopen: no copy exists that could
-        go stale.  *tab_id* is always a talk target, i.e. a tab the
-        printer currently has subscribed to a live task.
-
-        * A tab listed in the canonical registry is shown by EVERY
-          attached chat webview (clients mirror the whole registry
-          from ``tabs_state``), so it counts as soon as a webview is
-          attached — per-connection interest is irrelevant, which is
-          why a prune racing a reopen cannot hide the reopened tab.
-        * Otherwise some local peer must have addressed the tab
-          (*interested*).  If the tab runs a task of its own — a
-          ``run_agent`` dispatch's ``api-…`` tab, a ``run_parallel``
-          child's synthetic tab, a placeholder the registry refused at
-          its cap, or a registry tab with no webview attached whose
-          headless owner (``daemon_client.run``) is still connected —
-          it counts while that state is not ``frontend_closed``, the
-          flag every close path (``_close_tab``, displacement, the
-          deferred ``_dispose_if_closed``) raises and every reopen
-          (``_replay_session``) clears.
-        * A tab with no state of its own is a VIEWER of another tab's
-          task (a sub-agent tab the client opened for a running child,
-          a tab resuming a running chat before its registry
-          publication lands): being a talk target proves it is still
-          subscribed, and closing a viewer unsubscribes it
-          (``_teardown_tab_resources`` → ``cleanup_tab``), so it counts
-          unless it is a registry tab that no webview shows.
-
-        Args:
-            tab_id: The frontend tab identifier a talk event targets.
-            interested: Some local connection addressed *tab_id*.
-            webview_attached: Some local connection hosts a chat webview.
-        """
-        in_registry = self.tab_registry.has_tab(tab_id)
-        if in_registry and webview_attached:
-            return True
-        if not interested:
-            return False
-        # On the task thread (a ``talk`` broadcast): ``locked_call``,
-        # never ``with`` (see ``kiss.core.locked``).
-        shown = locked_call(self._state_lock, self._tab_state_shown_locked, tab_id)
-        if shown is not None:
-            return shown
-        return not in_registry
-
-    @staticmethod
-    def _tab_state_shown_locked(tab_id: str) -> bool | None:
-        """Under ``_state_lock``: whether *tab_id*'s own state is open; ``None`` without one."""
-        state = agent_state.find_by_tab(tab_id)
-        if state is None:
-            return None
-        return not state.frontend_closed
 
     @staticmethod
     def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
@@ -718,7 +643,7 @@ class VSCodeServer(
         """Discard per-connection autocomplete state for a closed connection.
 
         Called by :class:`RemoteAccessServer` when a client connection
-        (one per VS Code window / browser tab) goes away, so the
+        (one per browser tab) goes away, so the
         per-connection active-file snapshots and autocomplete sequence
         counters do not accumulate forever in a long-lived daemon.
 
@@ -806,7 +731,6 @@ class VSCodeServer(
             task_id=task_id, create=create,
         )
         for old_tab_id, removal_token in displaced:
-            self._prune_local_tab(old_tab_id)
             self._drop_tab_state(old_tab_id, removal_token=removal_token)
         if changed:
             self._broadcast_tabs_state()
@@ -865,7 +789,7 @@ class VSCodeServer(
         return self._tab_models.get(tab_id, "") or self._default_model
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
-        """Dispatch a command from VS Code to the appropriate handler."""
+        """Dispatch a client command to the appropriate handler."""
         for field in ("tabId", "workDir", "connId"):
             value = cmd.get(field)
             if value is not None and not isinstance(value, str):
@@ -884,10 +808,10 @@ class VSCodeServer(
     def _refresh_default_model(self, valid: set[str] | None = None) -> None:
         """Re-read the persisted last model and adopt it as the default.
 
-        ``kiss-web`` can outlive VS Code windows.  A fresh VS Code
-        activation asks this long-lived daemon for ``getModels``; if
-        the user selected a different model in a previous window
-        session, that choice is persisted in ``config.json`` and must
+        ``kiss-web`` can outlive its clients.  A fresh page load asks
+        this long-lived daemon for ``getModels``; if the user selected
+        a different model in a previous session, that choice is
+        persisted in ``config.json`` and must
         take precedence over this process's stale in-memory default.
 
         The persisted value is read INSIDE ``_state_lock`` (an RLock,
@@ -947,7 +871,7 @@ class VSCodeServer(
                 }
             )
 
-        from kiss.core.vscode_config import (
+        from kiss.core.user_config import (
             _parse_custom_headers,
             get_custom_model_entry,
             load_config,
@@ -1126,9 +1050,9 @@ class VSCodeServer(
         remote machine.
 
         The reply is stamped with the requesting connection's
-        ``conn_id`` (when non-empty) so it reaches only the VS Code
-        window / browser tab that asked — one window's history search
-        must not repaint another window's history panel.
+        ``conn_id`` (when non-empty) so it reaches only the browser
+        tab that asked — one tab's history search must not repaint
+        another tab's history panel.
         """
         running_task_ids = self._get_running_task_ids()
         registered = load_machines()
@@ -1268,13 +1192,13 @@ class VSCodeServer(
         The same list as the chat header's working-directory drop-down:
         the daemon's current working directory first, then every
         directory adopted before (``config.json`` ``recent_work_dirs``,
-        :func:`kiss.core.vscode_config.recent_work_dirs`), most recently
+        :func:`kiss.core.user_config.recent_work_dirs`), most recently
         adopted first.  Directories that no longer exist are left out,
         except the current one, which is the one in use.  The directories
         the history merely ran in (sub-agent worktrees, cron run
         directories) are not offered: a filter on those would be noise.
         """
-        from kiss.core.vscode_config import recent_work_dirs
+        from kiss.core.user_config import recent_work_dirs
 
         paths = [
             str(entry["path"])
@@ -1334,25 +1258,7 @@ class VSCodeServer(
                 state.frontend_closed = True
         removal_token = self.tab_registry.close_tab(tab_id)
         if removal_token:
-            # Registry tab: prune its local interest (hygiene) and
-            # broadcast.  The prune is not the playback decision —
-            # ``_local_tab_shown`` decides registry tabs from the
-            # registry plus "a webview is attached" — so a prune that
-            # lands after a concurrent reopen's re-registration cannot
-            # hide the reopened tab, and a stale re-registration after
-            # it cannot resurrect the closed one.  Prune BEFORE the
-            # broadcast so a client that sees the snapshot never
-            # observes stale bookkeeping.
-            self._prune_local_tab(tab_id)
             self._broadcast_tabs_state()
-        # No prune for a tab the registry did not list (a sub-agent
-        # viewer, a ``run_agent`` ``api-…`` tab, a duplicate close):
-        # interest IS part of the decision for those, and a stale
-        # duplicate close landing inside a reopen would otherwise strip
-        # the reopened tab's interest.  ``_drop_tab_state`` below
-        # retires such a tab through its agent state (``frontend_closed``)
-        # or its subscriptions (``cleanup_tab``); the interest entry
-        # itself is reconciled by the connection's next ``ready``.
         # The removal token lets the cleanup tail stand down when a
         # later publication (a concurrent ``resumeSession`` reopen)
         # has legitimately taken the tab over.  A close that found the
@@ -1373,27 +1279,6 @@ class VSCodeServer(
             tab_id,
             removal_token=removal_token or self.tab_registry.clock(),
         )
-
-    def _prune_local_tab(self, tab_id: str) -> None:
-        """Drop a registry-removed tab from the local interest sets.
-
-        Bookkeeping hygiene for a tab the registry just removed (close
-        or displacement): it bounds the interest a long-lived
-        connection accumulates as the user opens and closes tabs.  The
-        playback decision for registry tabs does not depend on
-        interest — see :meth:`_local_tab_shown` — so the prune can
-        never hide a concurrently reopened tab.  Never called for tabs
-        outside the registry, whose interest is part of the decision.
-        Duck-typed like ``cleanup_tab``: only the daemon's
-        :class:`~kiss.server.web_server.WebPrinter` tracks local
-        tabs.
-
-        Args:
-            tab_id: The frontend tab identifier removed from clients.
-        """
-        prune = getattr(self.printer, "prune_local_tab", None)
-        if prune is not None:
-            prune(tab_id)
 
     def _tab_reopened_since(self, tab_id: str, token: int) -> bool:
         """True when *tab_id* was legitimately reopened after *token*.
@@ -2214,7 +2099,7 @@ class VSCodeServer(
         if no_row and rebound_state is None:
             # Nothing to replay and nothing running: say so, or the
             # client keeps waiting for a replay that never comes
-            # (the webview holds a registry chat open until its
+            # (the page holds a registry chat open until its
             # state is known, see ``statusKnown`` in main.js).
             self.printer.broadcast({
                 "type": "status", "running": False, "tabId": tab_id,
@@ -2390,7 +2275,7 @@ class VSCodeServer(
         sub-agent currently being opened on *sub_tab_id*.
 
         Used to populate ``parent_tab_id`` on the ``openSubagentTab``
-        broadcast so the webview can record the parent → child
+        broadcast so the page can record the parent → child
         relationship that drives cascade-close (see ``closeTab`` in
         media/main.js, which walks ``parentTabId`` chains).  A blank
         return value breaks that cascade, so this helper tries every
@@ -2398,7 +2283,7 @@ class VSCodeServer(
 
         Lookup order:
 
-        0. **Tab-id suffix match.**  Every webview names a sub-agent's
+        0. **Tab-id suffix match.**  Every chat page names a sub-agent's
            tab ``f"{parent_tab_id}__sub_{task_id}"`` after the parent
            tab it was spawned under (``subagentTabIdFor`` in
            media/main.js), so a *sub_tab_id* ending in
@@ -2549,7 +2434,7 @@ class VSCodeServer(
         (``f"{parent_tab_id}__sub_{sub_task_id}"``) so that clicking
         the same parent task twice in a row updates the existing
         sub-agent tabs in place instead of stacking duplicates — the
-        webview's ``openSubagentTab`` handler is idempotent on
+        page's ``openSubagentTab`` handler is idempotent on
         ``tab_id``.
 
         ``isDone`` is decided by :func:`_subagent_is_done`: presence in
@@ -2885,7 +2770,7 @@ class VSCodeServer(
 
         ``attached: true`` marks the broadcast as a viewer catching up
         on a run already going (a reload's replay, a history open) as
-        opposed to a run starting: the webview gives a STARTING run
+        opposed to a run starting: the page gives a STARTING run
         the window (``main.js`` ``showChatForRun``) and must not do so
         for a replay.
 
@@ -3022,66 +2907,3 @@ class VSCodeServer(
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
-
-    def _generate_commit_message(
-        self,
-        tab_id: str = "",
-        *,
-        work_dir: str = "",
-    ) -> None:
-        """Generate a git commit message from current changes.
-
-        Args:
-            tab_id: Frontend tab id that requested the message; stamped
-                on every emitted ``commitMessage`` event so the
-                printer's "system event" routing forwards the message
-                only to the originating tab.
-            work_dir: The tab's working directory.  Preferred over the
-                daemon-wide ``self.work_dir`` because the shared
-                ``kiss-web`` daemon may have been launched from (or
-                synced to) a different — possibly non-git — folder than
-                the window that owns this tab, which would otherwise
-                yield a misleading "Not a git repository." error.  Falls
-                back to ``self.work_dir`` when empty.
-        """
-        work_dir = work_dir or self.work_dir
-        try:
-            if GitWorktreeOps.discover_repo(Path(work_dir)) is None:
-                self.printer.broadcast(
-                    {
-                        "type": "commitMessage",
-                        "message": "",
-                        "error": "Not a git repository.",
-                        "tabId": tab_id,
-                    }
-                )
-                return
-            diff_text = GitWorktreeOps.staged_diff(Path(work_dir))
-            if not diff_text:  # pragma: no branch — LLM API required for else
-                self.printer.broadcast(
-                    {
-                        "type": "commitMessage",
-                        "message": "",
-                        "error": "No staged changes found. Stage files with 'git add' first.",
-                        "tabId": tab_id,
-                    }
-                )
-                return
-            msg = generate_commit_message_from_diff(diff_text)  # pragma: no cover
-            self.printer.broadcast(
-                {
-                    "type": "commitMessage",
-                    "message": msg,
-                    "tabId": tab_id,
-                }
-            )  # pragma: no cover
-        except Exception:  # pragma: no cover — LLM API error handler
-            logger.debug("Commit message generation failed", exc_info=True)
-            self.printer.broadcast(
-                {
-                    "type": "commitMessage",
-                    "message": "",
-                    "error": "Failed to generate",
-                    "tabId": tab_id,
-                }
-            )

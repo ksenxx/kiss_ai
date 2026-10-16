@@ -51,7 +51,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_ENV
-from kiss.core import vscode_config as vc
+from kiss.core import user_config as vc
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
@@ -191,7 +191,7 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         self.reader, self.writer = await open_local_connection(self.server)
         added = await self._ask({
             "type": "machineAction", "action": "add", "name": "box",
-            "address": self.remote.url, "password": "pw-remote",
+            "address": self.remote.url, "machinePassword": "pw-remote",
         }, "machines")
         self.assertEqual(added["error"], "")
 
@@ -237,7 +237,7 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         return [str(s["title"]) for s in reply["sessions"]]
 
     async def _delegate(self, tab: str, late: bool = False) -> tuple[list[dict[str, Any]], str]:
-        """Run the delegating task on *tab*; answer the relayed ``new_tab`` as a webview does.
+        """Run the delegating task on *tab*; answer the relayed ``new_tab`` as a chat page does.
 
         With *late*, a surface connects while the sub-agent runs and
         what it was told is kept in ``self.late`` (see :meth:`_late_surface`).

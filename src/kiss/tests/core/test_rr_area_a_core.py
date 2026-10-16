@@ -30,9 +30,9 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
+import kiss.core.user_config as user_config
 from kiss.core.kiss_agent import _is_retryable_error
-from kiss.core.vscode_config import DEFAULTS, apply_config_to_env
+from kiss.core.user_config import DEFAULTS, apply_config_to_env
 from kiss.tests.conftest import posix_only
 
 
@@ -136,7 +136,7 @@ class TestApplyConfigToEnv:
 
 _SAVER_SCRIPT = """
 import sys
-from kiss.core.vscode_config import save_api_key
+from kiss.core.user_config import save_api_key
 
 key_name, key_value = sys.argv[1], sys.argv[2]
 save_api_key(key_name, key_value)
@@ -279,9 +279,9 @@ class TestSaveApiKeyToShellCrossProcessRace:
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
         monkeypatch.setenv("SHELL", "/bin/bash")
-        monkeypatch.setitem(vars(vscode_config), "CONFIG_DIR", fake_home / ".kiss")
+        monkeypatch.setitem(vars(user_config), "CONFIG_DIR", fake_home / ".kiss")
         monkeypatch.setitem(
-            vars(vscode_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
+            vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
         )
         keys = [f"ZAI_API_KEY_{i}" for i in range(8)]
         for key in keys:
@@ -289,7 +289,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
 
         threads = [
             threading.Thread(
-                target=vscode_config.save_api_key, args=(key, f"tv-{key}"),
+                target=user_config.save_api_key, args=(key, f"tv-{key}"),
             )
             for key in keys
         ]

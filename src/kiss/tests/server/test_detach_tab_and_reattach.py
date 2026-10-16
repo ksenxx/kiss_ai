@@ -48,13 +48,13 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer whose broadcasts go into an in-memory list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict]]:
+    """Create a AgentServer whose broadcasts go into an in-memory list."""
+    server = AgentServer()
     events: list[dict] = []
     lock = threading.Lock()
 
@@ -78,7 +78,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 
 def _start_fake_running_task(
-    server: VSCodeServer, tab_id: str, chat_id: str,
+    server: AgentServer, tab_id: str, chat_id: str,
     task_id: str | None = None,
 ) -> tuple[threading.Event, threading.Event, threading.Thread]:
     """Install a fake task thread on ``tab_id`` that emits one event,
@@ -95,7 +95,7 @@ def _start_fake_running_task(
     task_key = str(task_id) if task_id is not None else tab_id
     state = AgentState(
         task_key,
-        agent=ChatSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar"),
         chat_id=chat_id,
         tab_id=tab_id,
         server_owned=True,

@@ -12,8 +12,8 @@ the page is put in front of the user instead.  :func:`open_for_user`
 tries, in order:
 
 1. The Browser tab.  Inside the kiss-web daemon the machine's browser is
-   streamed as a tab on every KISS surface (the web app and the VS Code
-   extension, see :mod:`kiss.server.browser_tab`); the daemon registers
+   streamed as a tab in every browser (see
+   :mod:`kiss.server.browser_tab`); the daemon registers
    its opener with :func:`set_browser_tab_opener`, and the page opens
    there with every surface switched to it.  The user is looking at the
    page already, so the agent must NOT tell them to open a URL.
@@ -388,8 +388,8 @@ def browser_handoff_note(url: str, opened_in: str) -> str:
     """
     if opened_in == BROWSER_TAB:
         return (
-            f"{url} is now open in the Browser tab that every KISS surface (web app and "
-            "VS Code) has just switched to, so the user is already looking at it. Tell "
+            f"{url} is now open in the Browser tab that every KISS web app page "
+            "has just switched to, so the user is already looking at it. Tell "
             "the user what to do on that page and do NOT ask them to open a URL or "
             "give them this URL to open; only if the user says they cannot see the "
             "page, show it with ask_user_question()."

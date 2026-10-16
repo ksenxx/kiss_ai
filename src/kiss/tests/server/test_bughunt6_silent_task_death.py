@@ -39,7 +39,7 @@ from typing import Any, cast
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 _END_EVENT_TYPES = ("result", "task_done", "task_error", "task_stopped")
 
@@ -51,7 +51,7 @@ class TestSilentTaskDeath(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt6-silent-")
         self.work_dir = str(Path(self.tmpdir) / "wd")
         Path(self.work_dir).mkdir()
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 

@@ -10,8 +10,6 @@ drives these three commands: the Explorer view lists folders with
 working tree with ``gitStatus`` and the commit graph with ``gitLog``.
 Every test here talks to a REAL :class:`RemoteAccessServer` over real
 ``wss://`` and to a REAL git repository built in a temp dir — no mocks.
-The local-client drop gate (a VS Code window never shows these views)
-is driven over a real local WSS connection.
 """
 
 from __future__ import annotations
@@ -33,7 +31,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server.explorer import (
     DIR_LISTING_MAX_ENTRIES,
     GIT_LOG_DEFAULT_LIMIT,
@@ -47,7 +45,6 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
 )
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -689,46 +686,6 @@ class TestGitLog:
         )
         assert status["changes"] == []
         assert status["branch"] == "main"
-
-
-class TestLocalDropGate:
-    """A VS Code window (local client) never gets a reply to these commands."""
-
-    def test_locally_delivered_commands_are_dropped(self, harness) -> None:
-        async def _probe() -> list[dict]:
-            reader, writer = await open_local_connection(harness.server)
-            try:
-                for cmd in (
-                    {"type": "listDir", "tabId": "u-1"},
-                    {"type": "gitStatus", "tabId": "u-1"},
-                    {"type": "gitLog", "tabId": "u-1"},
-                    # Positive control, sent LAST: getInputHistory IS
-                    # answered locally (inputHistory).  Its reply
-                    # arriving proves the three commands before it were
-                    # processed — and dropped — rather than still queued.
-                    {"type": "getInputHistory", "tabId": "u-1"},
-                ):
-                    writer.write((json.dumps(cmd) + "\n").encode())
-                await writer.drain()
-                got: list[dict] = []
-                deadline = asyncio.get_event_loop().time() + 15
-                while asyncio.get_event_loop().time() < deadline:
-                    line = await asyncio.wait_for(reader.readline(), 15)
-                    if not line:
-                        break
-                    ev = json.loads(line)
-                    got.append(ev)
-                    if ev.get("type") == "inputHistory":
-                        break
-                return got
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        events = harness.run(_probe())
-        types = [e.get("type") for e in events]
-        assert "inputHistory" in types, events
-        assert not set(types) & {"dirListing", "gitStatus", "gitLog"}, events
 
 
 class TestParsers:

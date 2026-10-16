@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Load the tips shown by the chat webview.
+"""Load the tips shown by the chat page.
 
 Parses the bundled ``src/kiss/TIPS.md`` into a list of markdown tip
 strings, one per ``# Tip`` section, and reads the "don't show tips
@@ -10,7 +10,7 @@ again" marker.  The daemon is the only reader: the remote webapp
 builder (``web_server._build_html``) injects :func:`tips_data` as
 ``window.__TIPS__`` at page load, and the ``ready`` handler sends the
 same dict as a ``tipsData`` event to every (re)connecting client, so
-the VS Code extension paints tips without parsing anything itself.
+the page paints tips without parsing anything itself.
 
 The file path can be overridden via the ``KISS_TIPS_PATH`` environment
 variable, which the test suite uses to pin deterministic tips.
@@ -35,8 +35,7 @@ def tips_disabled() -> bool:
     """Whether the user opted out of the tips window on any surface.
 
     The marker ``$KISS_HOME/TIPS_DISABLED`` is written by the daemon's
-    ``tipsOptOut`` API, which both the VS Code webview and the remote
-    webapp call, so one choice holds everywhere.
+    ``tipsOptOut`` API, so one choice holds in every browser.
     """
     return (kiss_home() / TIPS_OPT_OUT_MARKER).exists()
 
@@ -60,7 +59,7 @@ def read_tips() -> list[str]:
     is the markdown text up to the next such line (or EOF), trimmed.
     Text before the first ``# Tip`` line and tips with empty bodies
     are skipped.  Returns ``[]`` when the file is missing or
-    unreadable (graceful degradation — the chat webview simply shows
+    unreadable (graceful degradation — the chat page simply shows
     no tips window).  Brand placeholders such as ``{{PRODUCT_NAME}}``
     are filled from ``kiss.core.brand`` first.
     """

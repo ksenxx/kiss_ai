@@ -77,7 +77,7 @@ def decisions_tool_available() -> bool:
         is configured and :data:`DEFAULT_DECISIONS_MODEL` is a decisions
         catalog entry.
     """
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     if not load_config().get("classify_with_decisions", True):
         return False

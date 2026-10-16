@@ -2,28 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Property-based / fuzzing tests for every subprocess and shell
-command path in ``src/kiss/agents/vscode/``.
+"""Property-based / fuzzing tests for the subprocess and shell
+command paths the daemon runs on behalf of the chat page.
 
 These tests are the regression net for the H1, H3, H8 fixes
-(DependencyInstaller shell-injection hardening, RC file shell-quoting,
+(shell-injection hardening of the installer, RC file shell-quoting,
 exact ``pkill -x`` rather than the substring-match ``-f`` flag).
 
 Strategy
 --------
 Every command path that takes user-controlled data — paths,
 environment variables, RC values, file names, queries — is fuzzed
-either:
-
-  1. *Behaviourally*, by feeding many random shell-metacharacter
-     payloads through the real code path and asserting no
-     command-substitution fires (e.g. no marker file is created), and
-
-  2. *Structurally*, by source-grepping the TypeScript files for any
-     pattern that interpolates a non-constant variable into a shell
-     string passed to ``execSync`` / ``execPromise``.  This catches new
-     regressions introduced by future edits, even though we have no
-     TypeScript runtime in the test harness.
+*behaviourally*, by feeding many random shell-metacharacter payloads
+through the real code path and asserting no command-substitution fires
+(e.g. no marker file is created).
 
 Each test class corresponds to one subprocess/shell call site.  The
 fuzzers use a fixed RNG seed for reproducibility but cover enough of

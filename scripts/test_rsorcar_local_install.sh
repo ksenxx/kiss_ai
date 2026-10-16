@@ -8,7 +8,7 @@
 # heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in the
 # checkout is a recorder, so the test observes the final step:
 #   * rsorcar runs install.sh on the LOCAL machine, non-interactively and
-#     without launching an editor, after printing the deploy summary,
+#     without opening the webapp, after printing the deploy summary,
 #   * when started from a linked git worktree, it runs the MAIN repository's
 #     install.sh (a worktree is reclaimed after its task, and install.sh
 #     points the persistent launchers at its own directory),
@@ -159,9 +159,13 @@ case "\$cmd" in
     *'printf %s "\$HOME"'*) printf '%s' "$fix/rhome" ;;
     'python3 - "\$HOME/.kiss"'*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # legacy database-name probe and rename (fed legacy_task_db.py)
     'python3 - '*) cat >/dev/null; echo 0 ;;                  # running-task probe
-    REMOTE_DIR=*) cat >/dev/null; echo "SORCAR_PUBLIC_URL=$FAKE_URL" ;;
+    REMOTE_DIR=*)                               # the remote install (steps 5-7): keep the shipped password as remote_config.py does
+        cat >/dev/null
+        pw="\$(printf '%s\n' "\$cmd" | sed -n "s/.*PASSWORD='\([^']*\)'.*/\1/p" | head -1)"
+        printf '{"remote_password": "%s"}\n' "\$pw" > "$fix/rhome/.kiss/config.json"
+        echo "SORCAR_PUBLIC_URL=$FAKE_URL" ;;
     *remote-url.json*) echo "$FAKE_URL" ;;
-    *remote_password*) echo "$FAKE_PW" ;;
+    *'config.json'*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # step 9's password re-read, run for real
     *'git log -1'*) printf 'abc123 fake commit\n0\n' ;;
     *'url.https://github.com/.insteadOf'*) bash -c "\$cmd" ;;   # step 8's rewrite, run for real (test 1d)
     *install-ssh-identity.sh*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # the real remote half, fed the tar stream
@@ -196,6 +200,7 @@ run_rsorcar() {
     local fix="$1" rsorcar="$2"
     HOME="$fix/home" KISS_HOME='' PATH="$fix/bin:$PATH" \
     SORCAR_NO_BROWSER=1 SORCAR_SKIP_GITHUB_AUTH="${SORCAR_SKIP_GITHUB_AUTH:-1}" \
+    SORCAR_PASSWORD="$FAKE_PW" \
         bash "$rsorcar" user@fakehost 2>&1
 }
 
@@ -265,7 +270,7 @@ grep -qx 'args=--non-interactive' "$WORK/ok/install-marker.txt" \
     || fail "local install.sh not run with --non-interactive: $(cat "$WORK/ok/install-marker.txt")"
 grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
     || fail "local install.sh not run with KISS_SKIP_LAUNCH=1"
-pass "rsorcar runs install.sh locally, non-interactively, no editor launch"
+pass "rsorcar runs install.sh locally, non-interactively, no webapp launch"
 
 # Step 2, by default: the private key stays home, the agent is forwarded.
 RSSH="$WORK/ok/rhome/.ssh"

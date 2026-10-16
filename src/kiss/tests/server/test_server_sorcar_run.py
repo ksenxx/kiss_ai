@@ -34,7 +34,7 @@ import yaml
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import init_repo
@@ -87,11 +87,11 @@ class SorcarRunApiTest(unittest.TestCase):
         _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
         self._saved_config_override = (
-            vars(vscode_config).get("CONFIG_DIR"),
-            vars(vscode_config).get("CONFIG_PATH"),
+            vars(user_config).get("CONFIG_DIR"),
+            vars(user_config).get("CONFIG_PATH"),
         )
-        vscode_config.CONFIG_DIR = kiss_dir
-        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        user_config.CONFIG_DIR = kiss_dir
+        user_config.CONFIG_PATH = kiss_dir / "config.json"
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
@@ -155,15 +155,15 @@ class SorcarRunApiTest(unittest.TestCase):
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
-            if "CONFIG_DIR" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_DIR")
+            if "CONFIG_DIR" in vars(user_config):
+                delattr(user_config, "CONFIG_DIR")
         else:
-            vscode_config.CONFIG_DIR = saved_dir
+            user_config.CONFIG_DIR = saved_dir
         if saved_path is None:
-            if "CONFIG_PATH" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_PATH")
+            if "CONFIG_PATH" in vars(user_config):
+                delattr(user_config, "CONFIG_PATH")
         else:
-            vscode_config.CONFIG_PATH = saved_path
+            user_config.CONFIG_PATH = saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_success_returns_summary_cost_tokens_steps(self) -> None:
@@ -1132,7 +1132,7 @@ class SorcarRunApiTest(unittest.TestCase):
         the persisted ``False``, and an explicit ``use_web_tools=True``
         on the same daemon must beat the persisted setting.
         """
-        vscode_config.save_config({"use_web_browser": False})
+        user_config.save_config({"use_web_browser": False})
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -1182,7 +1182,7 @@ class SorcarRunApiTest(unittest.TestCase):
         the hard gates: basic tools on, no Docker, an API model, no
         caller ``system_instruction``).
         """
-        vscode_config.save_config({"use_memory": False})
+        user_config.save_config({"use_memory": False})
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -1476,9 +1476,9 @@ class SorcarRunApiTest(unittest.TestCase):
                 state for state in agent_state.snapshot()
                 if state.tab_id.startswith("api-")
             ]
-            with self.server._vscode_server._state_lock:
+            with self.server._agent_server._state_lock:
                 api_views = [
-                    tab for tab in self.server._vscode_server._tab_chat_views
+                    tab for tab in self.server._agent_server._tab_chat_views
                     if tab.startswith("api-")
                 ]
             if not api_states and not api_views:
@@ -1510,7 +1510,7 @@ class SorcarRunApiTest(unittest.TestCase):
             # (run() closes it on exit).
             captured["tabs"] = [
                 dict(entry)
-                for entry in self.server._vscode_server.tab_registry.snapshot()
+                for entry in self.server._agent_server.tab_registry.snapshot()
                 if entry["tabId"].startswith("api-")
             ]
             raw = "success: true\nis_continue: false\nsummary: ok\n"
@@ -1570,7 +1570,7 @@ class SorcarRunApiTest(unittest.TestCase):
             # (both run on this worker thread before the agent runs).
             captured["tabs"] = [
                 dict(entry)
-                for entry in self.server._vscode_server.tab_registry.snapshot()
+                for entry in self.server._agent_server.tab_registry.snapshot()
                 if entry["tabId"].startswith("api-")
             ]
             raw = "success: true\nis_continue: false\nsummary: ok\n"
@@ -1626,7 +1626,7 @@ class SorcarRunApiTest(unittest.TestCase):
             self_agent.total_steps = 1
             captured["tabs"] = [
                 dict(entry)
-                for entry in self.server._vscode_server.tab_registry.snapshot()
+                for entry in self.server._agent_server.tab_registry.snapshot()
                 if entry["tabId"].startswith("api-")
             ]
             raw = "success: true\nis_continue: false\nsummary: ok\n"

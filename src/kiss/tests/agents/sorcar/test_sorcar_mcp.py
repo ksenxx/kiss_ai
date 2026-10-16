@@ -91,11 +91,11 @@ def _stdio_config(tmp_path: Path, name: str = "testsrv") -> MCPServerConfig:
 def mcp_permission_rules() -> object:
     """Write ``mcp_permissions`` rules to the real config and restore.
 
-    ``vscode_config.CONFIG_PATH`` is bound at import time to the
+    ``user_config.CONFIG_PATH`` is bound at import time to the
     session-level ``KISS_HOME`` set by conftest.py, so in-process
     permission tests must write there (and restore afterwards).
     """
-    from kiss.core.vscode_config import CONFIG_PATH
+    from kiss.core.user_config import CONFIG_PATH
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     original = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None

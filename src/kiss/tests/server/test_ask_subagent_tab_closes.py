@@ -17,7 +17,7 @@ client, and it must not come back:
 2. finished before a client attached (the answer came back faster
    than the client's ``resumeSession``): the child's replay must close
    the tab, not re-open it as a finished sub-agent tab;
-3. parent replay (every webview ``ready``, reload, reconnect, history
+3. parent replay (every client ``ready``, reload, reconnect, history
    click re-announces the parent's persisted sub-agent rows): a
    finished ``/ask`` child must be announced as closed, never as an
    open finished tab.  ``run_parallel`` / ``run_agent`` children keep
@@ -225,7 +225,7 @@ class AskSubagentTabClosesTest(DaemonLocalHarness):
             )
 
             # 2. Parent replay while the parent still runs (a reload of
-            #    the webview): the finished child is announced closed.
+            #    the chat page): the finished child is announced closed.
             parent_sub_tab = f"{PARENT_TAB_ID}__sub_{child_task_id}"
             self._send_from_viewer({
                 "type": "resumeSession",

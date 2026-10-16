@@ -235,7 +235,7 @@ def main(argv: list[str]) -> None:
     # (the Muse-auth ``KISS_MUSE_AUTH`` opt-out, API keys) before any
     # Muse-mode check or credential migration, exactly like
     # ``channel_main()``.
-    from kiss.core.vscode_config import load_api_keys, load_api_keys_readonly
+    from kiss.core.user_config import load_api_keys, load_api_keys_readonly
 
     # A read-only $KISS_HOME (the store's lock file cannot be
     # created) must neither stop the CLI nor drop a canonical

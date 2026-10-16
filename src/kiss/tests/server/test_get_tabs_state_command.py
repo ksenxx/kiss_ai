@@ -4,14 +4,13 @@
 # add your name here
 """End-to-end tests for the ``getTabsState`` daemon command.
 
-The VS Code extension host's long-lived controller sends
-``getTabsState`` on every daemon (re)connect.  The daemon otherwise
-broadcasts ``tabs_state`` only after registry mutations and webview
-``ready`` syncs, so a host with no open chat webview (editor-tabs
-mode with all panels closed) would have no baseline snapshot: the
-next remote-client mutation would be the FIRST snapshot it ever sees,
-and a host reconnecting after an outage would never learn of tabs
-created while it was away.
+A long-lived client sends ``getTabsState`` on every daemon
+(re)connect.  The daemon otherwise broadcasts ``tabs_state`` only
+after registry mutations and chat-page ``ready`` syncs, so a client
+that connects without a ``ready`` handshake would have no baseline
+snapshot: the next remote-client mutation would be the FIRST snapshot
+it ever sees, and a client reconnecting after an outage would never
+learn of tabs created while it was away.
 
 Driven against a real :class:`RemoteAccessServer` over real ``wss://``
 connections (no mocks).
@@ -39,8 +38,8 @@ class TestGetTabsState(TabMirroringBase):
             await self._wait_for_snapshot_with(ws_a, present={"tab-a1"}),
         )
 
-        # Client B (the extension host controller) connects WITHOUT a
-        # webview `ready` handshake and asks for the baseline.
+        # Client B (a long-lived controller) connects WITHOUT a
+        # chat-page `ready` handshake and asks for the baseline.
         ws_b = await self._connect_ok()
         await self._send(ws_b, {"type": "getTabsState"})
         snap_b = await self._wait_for_snapshot_with(ws_b, present={"tab-a1"})

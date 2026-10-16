@@ -7,7 +7,7 @@ its tab-state bookkeeping symmetric with the row-found path.
 
 When ``resumeSession`` arrives before the task's ``task_history`` row
 has been written (the writer race the branch itself documents — a tab
-that started a task and is immediately closed+reopened, or a VS Code
+that started a task and is immediately closed+reopened, or a page
 reload replaying restored tabs), ``_replay_session`` takes an early
 ``return`` after re-subscribing the tab to a live agent's stream.  That
 early branch must still perform the state updates the normal
@@ -37,7 +37,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 class _ReplayNoRowBase(unittest.TestCase):
@@ -52,7 +52,7 @@ class _ReplayNoRowBase(unittest.TestCase):
         th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
 
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
 
@@ -75,7 +75,7 @@ class _ReplayNoRowBase(unittest.TestCase):
         self, tab_id: str, chat_id: str, task_id: str,
     ) -> agent_state.AgentState:
         """Register a live running task the way ``_cmd_run`` leaves it."""
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._last_task_id = task_id
         state = agent_state.AgentState(
             task_id,

@@ -4,7 +4,7 @@
 # add your name here
 """Live end-to-end test: mid-task ``set_model`` must not leak globally.
 
-Reproduces the chat-webview scenario with REAL LLM calls (no mocks):
+Reproduces the chat-page scenario with REAL LLM calls (no mocks):
 
 1. The user picks model A in the model picker (``_cmd_select_model`` —
    this is the only action allowed to persist the global ``last_model``
@@ -17,7 +17,7 @@ Reproduces the chat-webview scenario with REAL LLM calls (no mocks):
    ``last_model``, the daemon-wide ``_default_model`` (what the picker
    shows), and the tab's model in ``_tab_models`` — must all still be
    model A.
-4. Task 2 is submitted the way the chat webview does it (the frontend
+4. Task 2 is submitted the way the chat page does it (the frontend
    sends the picker's current model, which mirrors the daemon's
    ``_default_model``); the agent that executes task 2 must run on
    model A, not on the model B that task 1's agent switched itself to.
@@ -37,12 +37,12 @@ from typing import Any
 
 import pytest
 
-import kiss.core.vscode_config as vscode_config
+import kiss.core.user_config as user_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
@@ -67,16 +67,16 @@ TASK_2_PROMPT = (
 
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Path) -> Any:
-    """Redirect VS Code config writes to a per-test temp directory."""
-    orig_dir = vscode_config.CONFIG_DIR
-    orig_path = vscode_config.CONFIG_PATH
+    """Redirect config writes to a per-test temp directory."""
+    orig_dir = user_config.CONFIG_DIR
+    orig_path = user_config.CONFIG_PATH
     test_dir = tmp_path / ".kiss"
     test_dir.mkdir()
-    vscode_config.CONFIG_DIR = test_dir
-    vscode_config.CONFIG_PATH = test_dir / "config.json"
+    user_config.CONFIG_DIR = test_dir
+    user_config.CONFIG_PATH = test_dir / "config.json"
     yield
-    vscode_config.CONFIG_DIR = orig_dir
-    vscode_config.CONFIG_PATH = orig_path
+    user_config.CONFIG_DIR = orig_dir
+    user_config.CONFIG_PATH = orig_path
 
 
 @pytest.fixture(autouse=True)
@@ -104,9 +104,9 @@ def _persisted_task_models() -> list[str]:
     return [str(model or "") for (model,) in rows]
 
 
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
-    """Spin up a real :class:`VSCodeServer` whose broadcasts land in a list."""
-    server = VSCodeServer()
+def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
+    """Spin up a real :class:`AgentServer` whose broadcasts land in a list."""
+    server = AgentServer()
     events: list[dict[str, Any]] = []
     lock = threading.Lock()
     original_broadcast = server.printer.broadcast
@@ -167,7 +167,7 @@ class _ModelSampler:
 
 @requires_anthropic_api_key
 @requires_gemini_api_key
-class TestSetModelDoesNotLeakIntoNextWebviewTask:
+class TestSetModelDoesNotLeakIntoNextChatPageTask:
     """Mid-task ``set_model`` must never change the picker/global model."""
 
     def setup_method(self) -> None:
@@ -178,7 +178,7 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
 
     @pytest.mark.slow
     def test_next_task_runs_on_picker_model(self, tmp_path: Any) -> None:
-        """Task 2 in the same chat webview runs on the picker's model A."""
+        """Task 2 in the same chat page runs on the picker's model A."""
         available = get_available_models()
         assert MODEL_A in available, f"{MODEL_A} not available"
         assert MODEL_B in available, f"{MODEL_B} not available"
@@ -242,7 +242,7 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
         assert MODEL_B not in samples2, (
             f"task 2 ran on {MODEL_B}, which task 1's set_model "
             "switched to — the mid-task model change leaked into the "
-            "next task in the same chat webview"
+            "next task in the same chat page"
         )
 
         persisted = _persisted_task_models()[len(baseline):]
@@ -256,12 +256,12 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
 class TestSetModelDoesNotLeakIntoPersistedTaskModel:
     """Direct ``ChatSorcarAgent.run`` (CLI / remote / sub-agent path).
 
-    Unlike webview tasks (which pass ``_skip_persistence=True`` and let
+    Unlike chat-page tasks (which pass ``_skip_persistence=True`` and let
     the daemon's task runner persist the launch-time model),
     ``ChatSorcarAgent.run`` persists the task's model itself in its
     ``finally`` block.  A mid-task ``set_model`` mutates
     ``self.model_name``, and that mutated name must NOT be recorded as
-    the task's model — the recorded model is what the chat webview's
+    the task's model — the recorded model is what the chat page's
     History sidebar shows and what any global consumer reads.
     """
 

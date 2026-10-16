@@ -21,7 +21,7 @@ F8  (obsolete) ``diff_merge._write_base_copy`` was removed together
 F9  ``autocomplete._ghost_suffix`` behaviour for the three completion
     kinds actually produced by ``_complete_many`` (guards the removal of
     the unreachable ``else`` arm).
-F12 ``vscode_config.sanitize_config`` must reject boolean values for
+F12 ``user_config.sanitize_config`` must reject boolean values for
     numeric keys (``max_budget: true`` used to become ``1.0``).
 F17 ``file_index.FileIndex.scan`` must treat root-anchored ``.gitignore``
     entries like ``/build`` as matching at the repo root only, not at

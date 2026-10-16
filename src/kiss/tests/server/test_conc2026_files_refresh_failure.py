@@ -49,7 +49,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.file_index import FileIndex, FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     nproc_limit_lowered_to_one,
     thread_start_can_be_starved,
@@ -119,7 +119,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         _persistence._db_conn = None
 
         self.printer = MemoryPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
         self.server.work_dir = self.work_dir
         self.server._file_index.stop()
         self.registry = FileIndexRegistry(

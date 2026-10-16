@@ -13,22 +13,37 @@ Later connections verify the chain against that file only (hostname
 verification is off: a daemon's auto-generated certificate names its
 LAN addresses, not necessarily the public one the user typed).
 
-A machine registered as ``user@host`` (an *SSH machine*) is reached
-through an SSH tunnel instead of a public address and needs no
-password: :class:`SshTunnel` reads the remote daemon's endpoint file
-(``~/<brand home>/sorcar-local.json``: its loopback port and per-start
-local token; see :data:`REMOTE_ENDPOINT_COMMAND` for how that home is
-found whatever the remote's brand) with ``ssh user@host sh -c ...``,
-forwards a free local
-port to that loopback port with ``ssh -L`` and the link
-authenticates through the tunnel with the token, which the remote
-daemon accepts from a loopback peer whatever its ``remote_password``.
-The ``ssh`` client's own configuration applies (``~/.ssh/config``
-aliases, keys, agent), or the file named by ``$KISS_SSH_CONFIG``; the
-login must work non-interactively (``BatchMode``), land in a POSIX
-shell (the endpoint is read with ``sh -c``, so a Windows host whose
-OpenSSH logs in to PowerShell cannot be an SSH machine) and an unknown
-host key is accepted on first use.
+A machine registered as ``user@host`` (an *SSH machine*) needs no
+password: it is enrolled once over ssh and reached through an ssh
+port-forward afterwards with a client certificate (mutual TLS).
+:func:`enroll_over_ssh` runs one ``ssh user@host sh -c ...`` login
+(:data:`ENROLL_COMMAND`) that copies this daemon's local CA
+(``$KISS_HOME/tls/ca.pem``) into the remote daemon's
+``tls/trusted-clients/`` directory (found under ``~/<brand home>``
+whatever the remote's brand) and prints back the remote's endpoint
+file (its daemon port) and its own CA.  The machine is then registered
+at ``https://host:port`` (what the user sees) with that CA pinned.
+Every connection goes through one ``ssh -N -L`` forward per login
+(:class:`SshTunnel`, kept for the daemon's lifetime and reopened when
+it dies) from a local loopback port to ``127.0.0.1:port`` on the
+machine, so its daemon port need not be reachable from here (cloud
+firewalls rarely open it; the ssh port is), and presents this daemon's
+client certificate (``$KISS_HOME/tls/client.pem``, issued by its CA,
+see :func:`client_cert_pair`), which the remote daemon admits like its
+own local token whatever its remote password: the daemon sniffs the
+first byte of every connection, so TLS through the forward is served
+like a direct TLS connection.  The ``ssh`` client's own configuration
+applies (``~/.ssh/config`` aliases, keys, agent), or the file named by
+``$KISS_SSH_CONFIG``; the login must work non-interactively
+(``BatchMode``), allow TCP forwarding, land in a POSIX shell (a
+Windows host whose OpenSSH logs in to PowerShell cannot be an SSH
+machine) and an unknown host key is accepted on first use.  The remote
+daemon must understand enrollment (it has a ``trusted-clients``
+directory).  The ssh login is the credential that matters: a link
+arrives on the machine as a loopback peer, admitted like a local
+browser whatever its certificate, so revoking a machine is removing
+its ssh access there; deleting its ``trusted-clients`` file only
+refuses the certificate on direct (non-loopback) connections.
 
 :func:`merged_history` is what the daemon's ``getHistory`` handler uses
 to show the tasks of every machine in the CHATS panel: it asks each
@@ -63,17 +78,19 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 from urllib.parse import urlsplit
 
-from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus, InvalidURI
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, send
+from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
-from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.file_lock import exclusive_file_lock, lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -93,28 +110,51 @@ LINK_PING_INTERVAL = 20.0
 LINK_PING_TIMEOUT = 20.0
 """Seconds a keepalive ping may go unanswered before the socket counts as dead."""
 SSH_TIMEOUT = 30.0
-"""Seconds the two ``ssh`` logins that open an SSH machine's tunnel may take together."""
+"""Seconds an ``ssh`` login (the enrollment, opening a port-forward) may take."""
+ENROLL_TIMEOUT = 30.0
+"""Seconds :func:`add_machine` waits for the enrolled machine's first handshake.
+
+The remote daemon admits the new CA within a few seconds of the file
+landing (it polls its ``trusted-clients`` directory); the first
+handshakes are refused until then and tried again."""
 SSH_CONFIG_ENV = "KISS_SSH_CONFIG"
 """Environment variable naming an ``ssh`` config file to use instead of the user's."""
-REMOTE_ENDPOINT_COMMAND = (
+TLS_LOCK_TIMEOUT = 10.0
+"""Seconds to wait for the TLS directory's lock when issuing the client certificate."""
+_TRUSTED = f"tls/{tls_certs.TRUSTED_CLIENTS_DIR}"
+ENROLL_COMMAND = (
     "sh -c '"
     f'for d in "$KISS_HOME" "$HOME/{HOME_DIR}" "$HOME"/.*; do '
     'case "$d" in ""|*/.|*/..) continue;; esac; '
     f'if [ -f "$d/{LOCAL_ENDPOINT_FILE}" ]; then '
-    f'cat "$d/{LOCAL_ENDPOINT_FILE}"; cat "$d/remote-url.json" 2>/dev/null; exit 0; '
+    f'[ -d "$d/{_TRUSTED}" ] || {{ '
+    'echo "its daemon predates certificate enrollment: upgrade it" >&2; exit 3; }; '
+    f'cat > "$d/{_TRUSTED}/.NAME.$$.tmp" && mv -f "$d/{_TRUSTED}/.NAME.$$.tmp" '
+    f'"$d/{_TRUSTED}/NAME.pem" || exit 2; '
+    f'cat "$d/{LOCAL_ENDPOINT_FILE}"; echo; '
+    f'c=$(sed -n "s/^ *\\"ca\\": *\\"\\(.*\\)\\",*$/\\1/p" "$d/{LOCAL_ENDPOINT_FILE}"); '
+    f'cat "${{c:-$d/tls/{tls_certs.CA_CERT_FILE}}}"; exit 0; '
     "fi; done; "
     f'echo "no $HOME/.*/{LOCAL_ENDPOINT_FILE}" >&2; exit 1\''
 )
-"""Remote command printing the daemon's endpoint file, then its published URLs if any.
+"""Remote command enrolling the CA on stdin as ``trusted-clients/NAME.pem``.
 
-Both files are read from the first directory holding an endpoint file
-among ``$KISS_HOME``, the local brand's home (``~/.kiss``) and every
-other ``~/.*``: the remote daemon's brand (hence its state directory)
-may differ from the local one and may change when it is re-installed,
-and a stopped daemon removes its endpoint file, so the file found is
-the running daemon's.  The login shell only sees a single-quoted
-string, so the command avoids ``!`` (csh expands history even in
-quotes); ``.`` and ``..`` are skipped by the ``case``."""
+``NAME`` is replaced by :func:`enroll_over_ssh`.  The daemon's home is
+the first directory holding an endpoint file among ``$KISS_HOME``, the
+local brand's home (``~/.kiss``) and every other ``~/.*``: the remote
+daemon's brand (hence its state directory) may differ from the local
+one and may change when it is re-installed, and a stopped daemon
+removes its endpoint file, so the home found is the running daemon's.
+A daemon without a ``trusted-clients`` directory predates enrollment
+(exit 3).  The CA is staged under the shell's pid and renamed so the
+daemon never reads a half-written file and two enrollments at once do
+not share a staging file.  Then the endpoint file (the daemon port)
+and the certificate to pin are printed, separated by a newline: the
+file named by the endpoint's ``ca`` (the daemon's local CA, or the
+certificate it was started with), else ``tls/ca.pem``.  The login
+shell only sees a single-quoted string, so the command avoids ``!``
+(csh expands history even in quotes); ``.`` and ``..`` are skipped by
+the ``case``."""
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 
@@ -129,10 +169,13 @@ class Machine:
 
     Attributes:
         name: Short label shown in the CHATS panel (``[A-Za-z0-9._-]``).
-        url: ``https://host:port`` of the remote ``kiss-web``; empty for
-            an SSH machine, whose address is a tunnel opened on demand.
-        password: Its ``remote_password``; empty for an SSH machine and
-            for a daemon reached through a tunnel the user opened.
+        url: ``https://host:port`` of the remote ``kiss-web``: as
+            registered for a URL machine, the ssh host and the daemon
+            port learnt at enrollment for an SSH machine (empty for an
+            SSH machine registered before enrollment existed, which
+            must be registered again).
+        password: Its remote password; empty for an SSH machine
+            (its client certificate is its credential).
         ssh: ``user@host[:port]`` of an SSH machine, empty otherwise.
     """
 
@@ -195,9 +238,26 @@ def load_machines() -> list[Machine]:
 
 def machine_host(machine: Machine) -> str:
     """Return the host of *machine*'s address (the URL's hostname, or the SSH login's)."""
-    text = machine.url or "ssh://" + machine.ssh
+    return _hostname(machine.url or "ssh://" + machine.ssh)
+
+
+def machine_hosts(machine: Machine) -> set[str]:
+    """Return every host *machine* is known by: its URL's and, for an SSH machine, its login's.
+
+    The two differ when the login names an ssh config alias that
+    enrollment resolved (:func:`ssh_host`) into the URL.
+    """
+    hosts = {machine_host(machine)}
+    if machine.ssh:
+        hosts.add(_hostname("ssh://" + machine.ssh))
+    hosts.discard("")
+    return hosts
+
+
+def _hostname(url: str) -> str:
+    """Return the hostname of *url* ('' when it has none or is malformed)."""
     try:
-        return urlsplit(text).hostname or ""
+        return urlsplit(url).hostname or ""
     except ValueError:
         return ""
 
@@ -254,9 +314,9 @@ def find_machine(name_or_host: str) -> Machine | None:
     """Return the registered machine called *name_or_host*, or the one at that host.
 
     A host (a name or an IP address, an IPv6 one with or without
-    brackets) matches the hostname of an HTTPS machine's URL or the
-    host of an SSH machine's ``user@host`` login; a name wins over a
-    host.  ``None`` when no machine matches.
+    brackets) matches the hostname of a machine's URL or the host of an
+    SSH machine's ``user@host`` login (:func:`machine_hosts`); a name
+    wins over a host.  ``None`` when no machine matches.
     """
     text = name_or_host.strip()
     host = text.strip("[]").lower()
@@ -265,7 +325,7 @@ def find_machine(name_or_host: str) -> Machine | None:
         if machine.name == text:
             return machine
     for machine in machines:
-        if host and machine_host(machine).lower() == host:
+        if host and host in {h.lower() for h in machine_hosts(machine)}:
             return machine
     return None
 
@@ -360,18 +420,20 @@ def default_name(address: str) -> str:
 def ssh_command(ssh: str, *options: str, command: str = "") -> list[str]:
     """Return the ``ssh`` command line logging into *ssh* (``user@host[:port]``).
 
-    *options* go before the destination, *command* (if any) after it.
-    Key-based, non-interactive login only (``BatchMode``); an unknown
-    host key is accepted and remembered on first use; the user's ssh
-    configuration applies unless ``$KISS_SSH_CONFIG`` names another,
-    except connection multiplexing (``ControlMaster``), which is off so
-    that the tunnel is a process of its own that ends with the daemon.
+    *options* go first (``ssh`` keeps the first value it sees of an
+    option, so an ``-o`` among them overrides a default below), the
+    destination after them, *command* (if any) last.  Key-based,
+    non-interactive login only (``BatchMode``); an unknown host key is
+    accepted and remembered on first use; the user's ssh configuration
+    applies unless ``$KISS_SSH_CONFIG`` names another, except
+    connection multiplexing (``ControlMaster``), which is off so that
+    no master process outlives the login.
     """
     parts = urlsplit("ssh://" + ssh)
     cmd = [
-        "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+        "ssh", *options, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
-        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", *options,
+        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "LogLevel=ERROR",
     ]
     config = os.environ.get(SSH_CONFIG_ENV)
     if config:
@@ -420,16 +482,21 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
 
     *address* is ``https://host:port`` (``host[:port]``) with the
     daemon's *password*, or ``user@host[:port]`` for an SSH machine
-    (*password* unused: the tunnel authenticates with the remote's
-    local token).  An empty *name* defaults to the host.  Pins the
-    daemon's certificate to a staging file, authenticates once through
-    it, and only then publishes the pin and the registry entry, so a
-    wrong address or password changes nothing (an existing machine of
-    that name keeps its pin and entry).
+    (*password* unused): this daemon is then enrolled on the machine
+    over ssh (:func:`enroll_over_ssh`), which yields the machine's
+    URL (its host and daemon port, reached through an ssh port-forward
+    from then on, see :func:`tunnel_port`) and its CA.  An empty *name*
+    defaults to the host.  Pins the daemon's certificate to a staging
+    file, authenticates once through it (an SSH machine admits the
+    client certificate within a few seconds of enrollment, so its
+    handshake is retried for up to
+    :data:`ENROLL_TIMEOUT` seconds), and only then publishes the pin
+    and the registry entry, so a wrong address or password changes
+    nothing (an existing machine of that name keeps its pin and entry).
 
     Raises:
-        MachineError: On a bad name or address, an unreachable daemon
-            or a rejected password.
+        MachineError: On a bad name or address, an unreachable daemon,
+            a failed enrollment or a rejected password.
     """
     name = name or default_name(address)
     if not _NAME_RE.match(name):
@@ -437,21 +504,23 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
             f"'{name}' is not a valid machine name: letters, digits, '.', '_' and '-' only"
         )
     if is_ssh_address(address):
-        machine = Machine(name=name, ssh=normalize_ssh(address))
+        ssh = normalize_ssh(address)
+        url, pem = enroll_over_ssh(ssh)
+        machine = Machine(name=name, url=url, ssh=ssh)
+        deadline = time.monotonic() + ENROLL_TIMEOUT
     else:
         machine = Machine(name=name, url=normalize_url(address), password=password)
+        pem = pin_certificate(machine.url)
+        deadline = time.monotonic()
     cert = machine.cert_file()
     cert.parent.mkdir(parents=True, exist_ok=True)
     staged = cert.with_name(f".{cert.name}.{os.getpid()}.{secrets.token_hex(4)}.new")
-    link = MachineLink(machine, cert_file=staged)
+    staged.write_text(pem, encoding="utf-8")
     try:
-        staged.write_text(pin_certificate(link.base_url()), encoding="utf-8")
-        link.request({"type": "ping"}, "pong")
+        _first_handshake(machine, staged, deadline)
     except MachineError:
         staged.unlink(missing_ok=True)
         raise
-    finally:
-        link.close()
     with registry_lock():
         os.replace(staged, cert)
         machines = [m for m in load_machines() if m.name != name]
@@ -468,8 +537,7 @@ def remove_machine(name: str) -> bool:
         if len(kept) == len(machines):
             return False
         save_machines(kept)
-        for suffix in (".pem", ".ssh.log"):
-            (kiss_home() / MACHINE_CERTS_DIR / f"{name}{suffix}").unlink(missing_ok=True)
+        (kiss_home() / MACHINE_CERTS_DIR / f"{name}.pem").unlink(missing_ok=True)
     return True
 
 
@@ -485,233 +553,312 @@ def machine_status(machine: Machine) -> str:
         link.close()
 
 
-def _free_port() -> int:
-    """Return a loopback TCP port that is free right now."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
+def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None:
+    """Ping *machine* through *cert_file* until it answers or *deadline* passes.
 
+    A failed attempt is tried again a second later on a fresh link (a
+    link backs off for :data:`DOWN_BACKOFF` seconds after a failure);
+    the last error is raised once the monotonic *deadline* has passed.
 
-TUNNEL_READY = "sorcar-tunnel-ready"
-"""What :data:`TUNNEL_COMMAND` prints once ``ssh`` has bound the tunnel's local port."""
-
-TUNNEL_COMMAND = f"echo {TUNNEL_READY}; exec cat"
-"""The remote command of an :class:`SshTunnel`'s ``ssh``: it keeps the session (and so the
-forward) up until the local end of the session's stdin closes, i.e. until :meth:`SshTunnel.close`
-or the end of this process."""
-
-
-def _watch_for_ready(stdout: IO[bytes], ready: threading.Event) -> None:
-    """Set *ready* when :data:`TUNNEL_READY` arrives on *stdout*; return at its EOF.
-
-    Runs on a daemon thread of :meth:`SshTunnel._forwarding`; the
-    session's stdout carries nothing after the ready line (``cat``
-    echoes a stdin nobody writes), so the thread is done once it is
-    seen or ``ssh`` exits.
+    Raises:
+        MachineError: The last attempt's error.
     """
-    for line in stdout:
-        if TUNNEL_READY.encode() in line:
-            ready.set()
+    while True:
+        link = MachineLink(machine, cert_file=cert_file)
+        try:
+            link.request({"type": "ping"}, "pong")
             return
+        except MachineError:
+            if time.monotonic() >= deadline:
+                raise
+        finally:
+            link.close()
+        time.sleep(1.0)
+
+
+def client_cert_pair() -> tuple[Path, Path]:
+    """Return this daemon's client certificate and key, issuing them when needed.
+
+    ``$KISS_HOME/tls/client.pem`` and ``client-key.pem``, signed by
+    the local CA (:func:`kiss.core.tls_certs.ensure_local_client_pair`,
+    which generates the CA too when the daemon never ran), under the
+    TLS directory's lock shared with the daemon's own certificate
+    renewals.
+
+    Raises:
+        MachineError: When the lock is not free within
+            :data:`TLS_LOCK_TIMEOUT` seconds.
+    """
+    tls_dir = kiss_home() / "tls"
+    try:
+        with exclusive_file_lock(tls_dir / tls_certs.TLS_LOCK_FILE, timeout=TLS_LOCK_TIMEOUT):
+            return tls_certs.ensure_local_client_pair(tls_dir)
+    except (TimeoutError, OSError) as exc:
+        raise MachineError(f"cannot issue the client certificate in {tls_dir}: {exc}") from exc
+
+
+def ssh_host(ssh: str) -> str:
+    """Return the host name ``ssh`` (``user@host[:port]``) actually connects to.
+
+    ``ssh -G`` prints the effective configuration, so an alias of the
+    user's ssh config resolves to its ``HostName``; the host as typed
+    when ssh cannot be asked.
+    """
+    typed = urlsplit("ssh://" + ssh).hostname or ""
+    try:
+        run = subprocess.run(
+            ssh_command(ssh, "-G"), stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=10.0, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return typed
+    for line in run.stdout.decode("utf-8", "replace").splitlines():
+        key, _, value = line.partition(" ")
+        if key == "hostname" and value.strip():
+            return value.strip()
+    return typed
+
+
+def enroll_over_ssh(ssh: str, timeout: float = SSH_TIMEOUT) -> tuple[str, str]:
+    """Enroll this daemon's CA on the SSH machine *ssh*; return its URL and CA.
+
+    One ``ssh`` login runs :data:`ENROLL_COMMAND` with the local CA on
+    its stdin, which stores it under the daemon's
+    ``tls/trusted-clients/`` as ``<this host>-<CA fingerprint>.pem``
+    (:func:`kiss.core.tls_certs.ca_label`: enrolling again is
+    harmless, a regenerated CA lands as a new file) and prints the
+    daemon's endpoint file and its CA.
+
+    Args:
+        ssh: ``user@host[:port]``.
+        timeout: Seconds the login may take.
+
+    Returns:
+        ``(url, ca_pem)``: ``https://<host>:<daemon port>``, the host
+        being what ssh connects to (:func:`ssh_host`), and the PEM
+        certificate to pin for it.  The URL names the machine on
+        screen; connections reach the port through an ssh forward
+        (:func:`tunnel_port`), so the machine need not expose it.
+
+    Raises:
+        MachineError: When ``ssh`` is missing or fails, no daemon runs
+            on the machine, its daemon predates enrollment, or the
+            reply is not a daemon's.
+    """
+    ca_cert_path = client_cert_pair()[0].with_name(tls_certs.CA_CERT_FILE)
+    command = ENROLL_COMMAND.replace("NAME", tls_certs.ca_label(ca_cert_path))
+    try:
+        run = subprocess.run(
+            ssh_command(ssh, command=command), input=ca_cert_path.read_bytes(),
+            capture_output=True, timeout=timeout, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise MachineError("ssh is not installed on this machine") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MachineError(f"ssh {ssh} did not answer in time") from exc
+    if run.returncode != 0:
+        message = {
+            1: f"no Sorcar daemon is running on {ssh} (cannot find its {LOCAL_ENDPOINT_FILE})",
+            2: f"cannot store this daemon's CA on {ssh}",
+            3: f"cannot enroll on {ssh}",
+        }.get(run.returncode, f"ssh {ssh} failed")
+        raise MachineError(_with_last_line(message, run.stderr))
+    marker = "-----BEGIN CERTIFICATE-----"
+    endpoint_text, found, ca_rest = run.stdout.decode("utf-8", "replace").partition(marker)
+    try:
+        endpoint = json.loads(endpoint_text)
+        port = urlsplit(endpoint["url"]).port
+    except (ValueError, KeyError, TypeError):
+        port = None
+    if not found or not port:
+        raise MachineError(f"{ssh} did not answer the enrollment as a Sorcar daemon")
+    return f"https://{_bracketed(ssh_host(ssh))}:{port}", marker + ca_rest
+
+
+def _with_last_line(message: str, stderr: bytes) -> str:
+    """Return *message* followed by the last line of *stderr*, if any."""
+    lines = stderr.decode("utf-8", "replace").strip().splitlines()
+    return f"{message}: {lines[-1]}" if lines else message
 
 
 class SshTunnel:
-    """An ``ssh -L`` forward of an SSH machine's daemon port, plus its token.
+    """An ``ssh -N -L`` port-forward from a local loopback port to an SSH machine's daemon.
 
-    :meth:`open` reads the remote endpoint file (the daemon's loopback
-    port and local token) and its published URLs, starts ``ssh -L
-    127.0.0.1:<free port>:127.0.0.1:<daemon port> ... <TUNNEL_COMMAND>``
-    and waits for the command's :data:`TUNNEL_READY` line, which ``ssh``
-    (``ExitOnForwardFailure``) only runs once it has bound the local
-    port; :attr:`url`, :attr:`token` and :attr:`web_url` describe the
-    tunnel last opened (they stay readable after :meth:`close`, for
-    rows fetched through it).  The ``ssh`` process lives until
-    :meth:`close` (or the daemon exits); its messages go to
-    ``$KISS_HOME/machines/<name>.ssh.log``.
+    :meth:`open` starts ``ssh -N -L 127.0.0.1:<local>:127.0.0.1:<remote>
+    user@host`` (through :func:`ssh_command`) and waits until the local
+    port accepts connections; :meth:`alive` says whether the ssh process
+    still runs and the port still answers; :meth:`close` ends the
+    process.  :func:`tunnel_port` keeps one tunnel per ``ssh`` login
+    and re-opens a dead one on the next connection.
     """
 
-    def __init__(self, machine: Machine) -> None:
-        self.machine = machine
+    def __init__(self, ssh: str, remote_port: int) -> None:
+        self.ssh = ssh
+        self.remote_port = remote_port
+        self.local_port = 0
         self.process: subprocess.Popen[bytes] | None = None
-        self.url = ""
-        """``https://127.0.0.1:<local port>`` of the tunnel last opened (empty before)."""
-        self.token = ""
-        """The remote daemon's local token read when the tunnel was opened."""
-        self.web_url = ""
-        """Where a browser reaches the remote web UI: the daemon's public (cloudflared)
-        URL, else its first LAN URL, else the tunnel's :attr:`url` (this host only)."""
-        self.command: list[str] = []
-        """The ``ssh -L ...`` command line last started."""
+        self._lock = threading.Lock()
+        self._last_line = ""
 
-    def is_open(self) -> bool:
-        """Return True while the ``ssh`` process is running."""
-        return self.process is not None and self.process.poll() is None
+    def alive(self) -> bool:
+        """Return whether the ssh process runs and its local port accepts a connection."""
+        return (
+            self.process is not None and self.process.poll() is None
+            and _port_accepts(self.local_port)
+        )
 
-    def log_file(self) -> Path:
-        """Return the file the ``ssh`` process writes its messages to."""
-        return kiss_home() / MACHINE_CERTS_DIR / f"{self.machine.name}.ssh.log"
-
-    def open(self, timeout: float = SSH_TIMEOUT) -> None:
-        """Start the tunnel unless it is up, within *timeout* seconds.
+    def open(self, timeout: float = SSH_TIMEOUT) -> int:
+        """Start the forward when it is not alive; return the local port.
 
         Raises:
-            MachineError: When ``ssh`` is missing, the login fails, no
-                daemon endpoint file exists on the machine or the
-                forward does not come up in time.
+            MachineError: When ``ssh`` is missing, exits (its last
+                stderr line is quoted) or does not open the port within
+                *timeout* seconds.
         """
-        if self.is_open():
-            return
-        self.close()
-        deadline = time.monotonic() + timeout
-        endpoint, published = self._read_endpoint(deadline)
-        listener = urlsplit(endpoint["url"])
-        remote_host = _bracketed(listener.hostname or "127.0.0.1")
-        remote_port = listener.port or DEFAULT_PORT
-        log = self.log_file()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with open(log, "wb") as handle:
-            # The port is free when picked and bound by ssh after the
-            # login: when something else (another tunnel opening at the
-            # same time) takes it in between, ssh exits on "Address
-            # already in use" and one more port is tried.
-            for retry in (True, False):
-                local_port = _free_port()
-                self.command = ssh_command(
-                    self.machine.ssh, "-T", "-o", "ExitOnForwardFailure=yes",
-                    "-L", f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
-                    command=TUNNEL_COMMAND,
-                )
+        with self._lock:
+            if self.alive():
+                return self.local_port
+            self._kill()
+            self.local_port = _free_port()
+            forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
+            cmd = ssh_command(
+                self.ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3", "-L", forward,
+            )
+            self._last_line = ""
+            try:
                 self.process = subprocess.Popen(
-                    self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=handle, start_new_session=True,
+                    cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
-                if self._forwarding(remote_port, deadline, timeout):
-                    break
-                if not retry or b"Address already in use" not in log.read_bytes():
-                    raise self._failed(f"ssh {self.machine.ssh} failed", log.read_bytes())
-        self.url = f"https://127.0.0.1:{local_port}"
-        self.token = endpoint["token"]
-        lan = published.get("lan")
-        self.web_url = str(
-            published.get("tunnel")
-            or (lan[0] if isinstance(lan, list) and lan and lan[0] else "")
-            or self.url
-        )
-
-    def _forwarding(self, remote_port: int, deadline: float, timeout: float) -> bool:
-        """Wait until ``ssh`` prints :data:`TUNNEL_READY`, i.e. has bound the local port.
-
-        Connecting to the port would not prove that: another listener
-        may hold it while ``ssh`` is still logging in, and ``ssh`` then
-        exits on the bind.  Returns False when the ``ssh`` process
-        exited first (its log says why).  A thread reads the pipe:
-        ``select`` takes only sockets on Windows.
-
-        Raises:
-            MachineError: When the forward is still not up at *deadline*.
-        """
-        assert self.process is not None and self.process.stdout is not None
-        ready = threading.Event()
-        reader = threading.Thread(
-            target=_watch_for_ready, args=(self.process.stdout, ready), daemon=True,
-        )
-        reader.start()
-        while reader.is_alive() and time.monotonic() < deadline:
-            reader.join(0.5)
-        if ready.is_set():
-            return True
-        if not reader.is_alive():  # the session ended (its errors are in the log): ssh exits
-            return False
-        raise self._failed(
-            f"ssh {self.machine.ssh} did not forward port {remote_port} "
-            f"within {timeout:g}s", self.log_file().read_bytes(),
-        )
-
-    def _read_endpoint(self, deadline: float) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Return the remote endpoint file's content and its published URLs (``{}`` if none).
-
-        Raises:
-            MachineError: When ``ssh`` is missing, the login fails or
-                the endpoint file is missing or not a daemon's.
-        """
-        cmd = ssh_command(self.machine.ssh, command=REMOTE_ENDPOINT_COMMAND)
-        try:
-            run = subprocess.run(
-                cmd, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=_remaining(deadline), check=False,
+            except OSError as exc:
+                raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
+            reader = threading.Thread(
+                target=self._read_stderr, args=(self.process,), daemon=True,
+                name=f"ssh-tunnel-stderr {self.ssh}",
             )
-        except FileNotFoundError as exc:
-            raise MachineError("ssh is not installed on this machine") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise MachineError(f"ssh {self.machine.ssh} did not answer in time") from exc
-        if run.returncode == 255:
-            raise self._failed(f"ssh {self.machine.ssh} failed", run.stderr)
-        endpoint, published = _decode_two(run.stdout.decode("utf-8", "replace"))
-        if (
-            not isinstance(endpoint.get("url"), str)
-            or not isinstance(endpoint.get("token"), str)
-            or not endpoint["token"]
-        ):
-            raise self._failed(
-                f"no Sorcar daemon is running on {self.machine.ssh} "
-                f"(cannot read its {LOCAL_ENDPOINT_FILE})", run.stderr,
-            )
-        return endpoint, published
+            reader.start()
+            deadline = time.monotonic() + timeout
+            while True:
+                if self.process.poll() is not None:
+                    reader.join(timeout=2.0)
+                    message = f"ssh {self.ssh} cannot forward its daemon port {self.remote_port}"
+                    raise MachineError(
+                        f"{message}: {self._last_line}" if self._last_line else message
+                    )
+                if _port_accepts(self.local_port):
+                    return self.local_port
+                if time.monotonic() >= deadline:
+                    self._kill()
+                    raise MachineError(f"ssh {self.ssh} did not open the port forward in time")
+                time.sleep(0.05)
 
-    def _failed(self, message: str, stderr: bytes) -> MachineError:
-        """Return a :class:`MachineError` of *message* and ssh's last line, tunnel closed."""
-        self.close()
-        lines = stderr.decode("utf-8", "replace").strip().splitlines()
-        return MachineError(f"{message}: {lines[-1]}" if lines else message)
+    def _read_stderr(self, process: subprocess.Popen[bytes]) -> None:
+        """Keep the last stderr line of *process* (and keep its pipe from filling up)."""
+        assert process.stderr is not None
+        for raw in process.stderr:
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                self._last_line = line
 
     def close(self) -> None:
-        """Stop the ``ssh`` process, if any (the address and token stay readable)."""
+        """Kill the ssh process, if any, and forget the port."""
+        with self._lock:
+            self._kill()
+
+    def _kill(self) -> None:
+        """Kill the ssh process, if any, and forget the port (under the lock)."""
         if self.process is not None:
             if self.process.poll() is None:
                 self.process.kill()
             self.process.wait()
-            assert self.process.stdin is not None and self.process.stdout is not None
-            self.process.stdin.close()
-            self.process.stdout.close()
             self.process = None
+        self.local_port = 0
 
 
-def _decode_two(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Decode up to two concatenated JSON objects in *text* (``{}`` for a missing or bad one)."""
-    objects: list[dict[str, Any]] = []
-    rest = text.lstrip()
-    while rest and len(objects) < 2:
-        try:
-            value, end = json.JSONDecoder().raw_decode(rest)
-        except ValueError:
-            break
-        objects.append(value if isinstance(value, dict) else {})
-        rest = rest[end:].lstrip()
-    objects += [{}] * (2 - len(objects))
-    return objects[0], objects[1]
+def _free_port() -> int:
+    """Return a loopback port that is free right now."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _port_accepts(port: int) -> bool:
+    """Return whether ``127.0.0.1:port`` accepts a TCP connection."""
+    if not port:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
+_tunnels: dict[str, SshTunnel] = {}
+_tunnels_lock = threading.Lock()
+
+
+def tunnel_port(ssh: str, remote_port: int) -> int:
+    """Return the local port forwarding to ``127.0.0.1:remote_port`` on *ssh*.
+
+    One :class:`SshTunnel` per login is kept for the daemon's lifetime:
+    it is reused while alive and opened again (on a fresh local port)
+    once its ssh process died or its remote port changed (the machine
+    was registered again after its daemon moved).
+
+    The forward is opened outside ``_tunnels_lock`` (an ``ssh`` login
+    takes seconds and must not hold up the other machines' tunnels), so
+    :func:`close_tunnels` may have dropped the tunnel meanwhile: a
+    forward opened on a tunnel the cache no longer holds would have no
+    one to close it, so it is closed here and the caller is told to
+    try again, as a retired :class:`MachineLink` tells it.
+
+    Raises:
+        MachineError: When the forward cannot be opened (see
+            :meth:`SshTunnel.open`) or the registry changed while it
+            was opening.
+    """
+    with _tunnels_lock:
+        tunnel = _tunnels.get(ssh)
+        if tunnel is None or tunnel.remote_port != remote_port:
+            if tunnel is not None:
+                tunnel.close()
+            tunnel = _tunnels[ssh] = SshTunnel(ssh, remote_port)
+    # Test hook (no-op in production): widens the window between the
+    # lookup and the open so the close_tunnels race is deterministic
+    # under KISS_RACE_DELAY.
+    _race_delay()
+    port = tunnel.open()
+    with _tunnels_lock:
+        if _tunnels.get(ssh) is tunnel:
+            return port
+    tunnel.close()
+    raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
+
+
+def close_tunnels() -> None:
+    """Close and forget every ssh port-forward (after a registry change, at exit)."""
+    with _tunnels_lock:
+        tunnels = list(_tunnels.values())
+        _tunnels.clear()
+    for tunnel in tunnels:
+        tunnel.close()
 
 
 class MachineLink:
     """One persistent, authenticated WebSocket to a remote daemon.
 
-    Connects lazily on the first :meth:`request` (for an SSH machine,
-    opening its :class:`SshTunnel` first), re-connects after a failure
-    and serialises requests, so the daemon keeps one socket per machine
-    across CHATS refreshes.  After a failure the link reports the
-    machine down without trying again for :data:`DOWN_BACKOFF` seconds,
-    so an offline machine does not add a connection timeout to every
-    CHATS refresh and a rejected password is not retried often enough
-    to trip the remote daemon's brute-force lockout.  One exception: an
-    SSH machine whose daemon rejects the tunnel's token has usually
-    just restarted on the same port with a new token (the ``ssh``
-    forward survives that), so the link reads the endpoint file again
-    and retries once at once before it backs off.
+    Connects lazily on the first :meth:`request`, re-connects after a
+    failure and serialises requests, so the daemon keeps one socket per
+    machine across CHATS refreshes.  After a failure the link reports
+    the machine down without trying again for :data:`DOWN_BACKOFF`
+    seconds, so an offline machine does not add a connection timeout
+    to every CHATS refresh and a rejected password is not retried
+    often enough to trip the remote daemon's brute-force lockout.
     """
 
     def __init__(self, machine: Machine, cert_file: Path | None = None) -> None:
         self.machine = machine
-        self.tunnel = SshTunnel(machine) if machine.ssh else None
         self._cert_file = cert_file if cert_file is not None else machine.cert_file()
         self._ws: ClientConnection | None = None
         self._lock = threading.Lock()
@@ -720,19 +867,6 @@ class MachineLink:
         self._last_error = ""
         self._retired = False
 
-    def base_url(self) -> str:
-        """Return the ``https://host:port`` the link talks to, opening the tunnel if needed.
-
-        Raises:
-            MachineError: When an SSH machine's tunnel cannot be opened
-                (the link then backs off like after any failure).
-        """
-        if self.tunnel is None:
-            return self.machine.url
-        with self._lock:
-            self._open_tunnel()
-            return self.tunnel.url
-
     def _check_available(self) -> None:
         """Raise the error a retired or backed-off link answers with, if any."""
         if self._retired:
@@ -740,49 +874,23 @@ class MachineLink:
         if time.monotonic() < self._retry_at:
             raise MachineError(self._last_error)
 
-    def _open_tunnel(self) -> None:
-        """Open the SSH tunnel unless it is up; a failure starts the backoff."""
-        assert self.tunnel is not None
-        self._check_available()
-        try:
-            self.tunnel.open()
-        except MachineError as exc:
-            raise self._fail(f"{self.machine.name}: {exc}") from exc
-
-    def _ensure_tunnel(self) -> None:
-        """Open an SSH machine's tunnel when it is down, dropping the socket that died with it."""
-        if self.tunnel is not None and not self.tunnel.is_open():
-            self._drop()
-            self._open_tunnel()
-
     def _fail(self, message: str) -> MachineError:
-        """Record *message* as the link's failure, start the backoff, return the error.
-
-        An SSH machine's tunnel is closed too: the next attempt reads the
-        endpoint file again, so a daemon restarted on the machine (new
-        port, new token) is found without any registry change.
-        """
+        """Record *message* as the link's failure, start the backoff, return the error."""
         self._retry_at = time.monotonic() + DOWN_BACKOFF
         self._last_error = message
-        if self.tunnel is not None:
-            self.tunnel.close()
         return MachineError(message)
 
-    def _connect(
-        self, timeout: float, stream: bool = False, retry: bool = True,
-    ) -> ClientConnection:
+    def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:
         """Open and authenticate the socket within *timeout* seconds.
 
-        An SSH machine (tunnel already open) is authenticated with its
-        local token, any other with the registered password.  When the
-        daemon rejects the token and *retry* is true, the request
-        socket (dead with its tunnel) is dropped, the tunnel is closed
-        and opened again (which reads the endpoint file afresh, on the
-        tunnel's own :data:`SSH_TIMEOUT` budget, as when a request
-        opens it) and the handshake is tried once more, on a budget of
-        its own: the token is stale when the daemon restarted on the
-        same port under the living tunnel.  A second rejection backs
-        off like any other failure.  The
+        The socket is TLS with the machine's pinned certificate as the
+        only trust anchor.  An SSH machine is dialled at the local end
+        of its ssh port-forward (:func:`tunnel_port`, opened here when
+        it is not up) and authenticated by this daemon's client
+        certificate (:func:`client_cert_pair`), which the remote daemon
+        admits once this daemon's CA is enrolled there; any other
+        machine is dialled directly and authenticated by the registered
+        password sent in the ``auth`` frame.  The
         shared request socket (*stream* false) announces itself as a
         daemon link (``"link": true`` in its ``auth`` frame): the
         daemon answers its requests but leaves it out of the task-event
@@ -804,25 +912,42 @@ class MachineLink:
         frames the reader paused after four idle minutes, stopped
         handling the pongs of this socket's own keepalive pings, and
         the keepalive closed the socket ("keepalive ping timeout").
-        The next request then failed and, on an SSH machine, closed
-        the tunnel under every running tab's stream.  The queued
-        frames cost a few bytes each and :meth:`request` drains them.
-        A stream socket reads continuously and keeps the default.
+        The next request then failed.  The queued frames cost a few
+        bytes each and :meth:`request` drains them.  A stream socket
+        reads continuously and keeps the default.
         """
         machine = self.machine
         where = f"{machine.name} ({machine.address()})"
         self._check_available()
         deadline = time.monotonic() + timeout
+        enroll_again = (
+            f"; run /machine add {machine.name} {machine.ssh} again" if machine.ssh else ""
+        )
+        if not machine.url:
+            raise self._fail(f"{where} was registered before certificate enrollment{enroll_again}")
         try:
             ctx = ssl.create_default_context(cafile=str(self._cert_file))
         except (OSError, ssl.SSLError) as exc:
             raise self._fail(f"{where} has no usable pinned certificate: {exc}") from exc
+        url, forward_refused = machine.url, ""
+        if machine.ssh:
+            try:
+                ctx.load_cert_chain(*map(str, client_cert_pair()))
+            except (OSError, ssl.SSLError, MachineError) as exc:
+                raise self._fail(f"{where}: no usable client certificate: {exc}") from exc
+            remote_port = urlsplit(machine.url).port or DEFAULT_PORT
+            try:
+                url = f"https://127.0.0.1:{tunnel_port(machine.ssh, remote_port)}"
+            except MachineError as exc:
+                raise self._fail(f"{where} is unreachable: {exc}") from exc
+            # ssh drops a forwarded connection (EOF or reset) when
+            # nothing listens on the daemon port of the machine.
+            forward_refused = (
+                f"{where} is unreachable: port {remote_port} on the machine "
+                "refused the forwarded connection"
+            )
         ctx.check_hostname = False
-        auth: dict[str, Any] = {"type": "auth", "link": not stream}
-        if self.tunnel is not None:
-            url, auth["token"] = self.tunnel.url, self.tunnel.token
-        else:
-            url, auth["password"] = machine.url, machine.password
+        auth = {"type": "auth", "link": not stream, "password": machine.password}
         try:
             ws = _ws_connect(
                 ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
@@ -830,7 +955,15 @@ class MachineLink:
                 max_queue=16 if stream else None,
                 ping_interval=LINK_PING_INTERVAL, ping_timeout=LINK_PING_TIMEOUT,
             )
-        except (OSError, InvalidHandshake, InvalidURI, ssl.SSLError) as exc:
+        except ssl.SSLError as exc:
+            if forward_refused and isinstance(exc, ssl.SSLEOFError):
+                raise self._fail(forward_refused) from exc
+            raise self._fail(f"{where} refused the TLS handshake: {exc}{enroll_again}") from exc
+        except InvalidStatus as exc:  # 403: no password set there and no trusted certificate
+            raise self._fail(f"{where} refused the connection: {exc}{enroll_again}") from exc
+        except (OSError, InvalidHandshake, InvalidURI) as exc:
+            if forward_refused and isinstance(exc, ConnectionResetError):
+                raise self._fail(forward_refused) from exc
             raise self._fail(f"{where} is unreachable: {exc}") from exc
         try:
             send(ws, json.dumps(auth), timeout=_remaining(deadline))
@@ -841,15 +974,11 @@ class MachineLink:
         if isinstance(reply, dict) and reply.get("type") == "auth_ok":
             return ws
         ws.close()
-        if not (isinstance(reply, dict) and reply.get("type") == "auth_required"):
-            raise self._fail(f"{where} refused the connection: {reply!r}")
-        if self.tunnel is None or not retry:
+        if machine.ssh:
+            raise self._fail(f"{where} does not trust this daemon's certificate{enroll_again}")
+        if isinstance(reply, dict) and reply.get("type") == "auth_required":
             raise self._fail(f"{where} rejected the password")
-        logger.info("%s rejected the tunnel's token: reading its endpoint file again", where)
-        self._drop()
-        self.tunnel.close()
-        self._open_tunnel()
-        return self._connect(timeout, stream, retry=False)
+        raise self._fail(f"{where} refused the connection: {reply!r}")
 
     def request(
         self, cmd: dict[str, Any], reply_type: str, timeout: float = REQUEST_TIMEOUT,
@@ -861,23 +990,19 @@ class MachineLink:
         other frames the daemon pushes meanwhile are skipped.  *timeout*
         bounds the wait for the reply, however many frames arrive or
         are already buffered; connecting first, when the socket is not
-        up, has a budget of *timeout* of its own, and the SSH tunnel of
-        an SSH machine, when it has to be (re)opened first, its own
-        :data:`SSH_TIMEOUT`.
+        up, has a budget of *timeout* of its own.
 
         A socket kept from an earlier request may have died meanwhile
         (the daemon restarted, a network blip, its idle keepalive
         failed): the request is then sent again over a fresh socket
         before the machine counts as down, so a stale socket alone
-        never starts the back-off nor, on an SSH machine, closes the
-        tunnel that the running tabs' streams share.
+        never starts the back-off.
 
         Raises:
             MachineError: When the daemon is unreachable, rejects the
                 password, or does not answer within *timeout* seconds.
         """
         with self._lock:
-            self._ensure_tunnel()
             kept = self._ws is not None
             if self._ws is None:
                 self._ws = self._connect(timeout)
@@ -923,10 +1048,13 @@ class MachineLink:
             # deadline, and one stuck under this lock (the daemon
             # stopped reading) would wedge every later request to
             # the machine, and the link's close at exit.
-            send(
-                self._ws, json.dumps(cmd | {"generation": generation}),
-                timeout=_remaining(deadline),
-            )
+            # A password-authenticated link repeats the password in
+            # every frame: the daemon checks it on each command.  An
+            # SSH machine's link (client certificate) sends none.
+            frame = cmd | {"generation": generation}
+            if self.machine.password:
+                frame["password"] = self.machine.password
+            send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"no {reply_type} within {timeout:g}s")
@@ -957,37 +1085,32 @@ class MachineLink:
         A stream (a chat tab running on the machine, see
         :mod:`kiss.server.remote_tabs`) relays frames for as long as it
         lives, so it cannot take turns on the socket :meth:`request`
-        shares; an SSH machine's tunnel is shared.  Unlike that socket
-        it is an ordinary peer of the daemon (it needs the tab's task
-        events).  The caller owns the returned socket and closes it.
+        shares.  Unlike that socket it is an ordinary peer of the daemon
+        (it needs the tab's task events).  The caller owns the returned
+        socket and closes it.
 
         Raises:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
         with self._lock:
-            self._ensure_tunnel()
             return self._connect(timeout, stream=True)
 
     def close(self) -> None:
-        """Close the socket and the tunnel; the next :meth:`request` re-connects."""
+        """Close the socket; the next :meth:`request` re-connects."""
         with self._lock:
             self._drop()
-            if self.tunnel is not None:
-                self.tunnel.close()
 
     def retire(self) -> None:
         """Close for good: every later :meth:`request` fails instead of re-connecting.
 
         Waits for a request in flight to finish.  Used when the link
         leaves the daemon-wide cache, so a caller that fetched it just
-        before cannot re-open a tunnel nothing closes any more.
+        before cannot re-open a socket nothing closes any more.
         """
         with self._lock:
             self._retired = True
             self._drop()
-            if self.tunnel is not None:
-                self.tunnel.close()
 
 
 def _remaining(deadline: float) -> float:
@@ -1010,12 +1133,17 @@ def link_for(machine: Machine) -> MachineLink:
 
 
 def close_links() -> None:
-    """Retire and forget every cached link and tunnel (after a registry change, at exit)."""
+    """Retire and forget every cached link and ssh tunnel (after a registry change, at exit).
+
+    A machine registered again gets a fresh tunnel (its daemon port may
+    have changed), a removed one leaves no ssh process behind.
+    """
     with _links_lock:
         links = list(_links.values())
         _links.clear()
     for link in links:
         link.retire()
+    close_tunnels()
 
 
 atexit.register(close_links)
@@ -1058,8 +1186,8 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
     reply), asking for the machine's own rows only (``machine:
     LOCAL_MACHINE``) so two daemons registered with each other do not
     query each other without end, and stamps every row with ``machine``
-    (the name) and ``machine_url`` (the registered URL, or an SSH
-    machine's :attr:`SshTunnel.web_url`).  The page's date range is
+    (the name) and ``machine_url`` (the machine's URL).  The page's
+    date range is
     the remote history's.  The reply's ``localMachine`` is the
     machine's own host name (:func:`note_host`).
 
@@ -1074,11 +1202,10 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
             "machine": LOCAL_MACHINE,
         }, "history")
         note_host(machine, reply.get("localMachine"))
-        url = link.tunnel.web_url if link.tunnel is not None else machine.url
         rows = [s for s in reply.get("sessions") or [] if isinstance(s, dict)]
         for session in rows:
             session["machine"] = machine.name
-            session["machine_url"] = url
+            session["machine_url"] = machine.url
         page.rows.extend(rows)
         date_range = reply.get("dateRange")
         if isinstance(date_range, dict):
@@ -1141,8 +1268,14 @@ def merged_history(
 
 
 def _history_order(session: dict[str, Any]) -> tuple[bool, float]:
-    """Sort key of the merged list: running tasks first, then newest first."""
-    return bool(session.get("is_running")), float(session.get("timestamp") or 0.0)
+    """Sort key of the merged list: running tasks first, then latest completed first.
+
+    The completion time is ``endTs`` (epoch ms) when set, else the launch
+    ``timestamp`` (epoch seconds), the same key the local list sorts by.
+    """
+    end_ms = float(session.get("endTs") or 0)
+    done = end_ms / 1000.0 if end_ms > 0 else float(session.get("timestamp") or 0.0)
+    return bool(session.get("is_running")), done
 
 
 def _ranked_order(

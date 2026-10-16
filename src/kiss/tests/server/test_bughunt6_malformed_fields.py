@@ -6,8 +6,8 @@
 
 The websocket/UDS receive loops wrap the WHOLE ``async for`` in one
 ``try``, so any exception escaping
-:meth:`VSCodeServer._handle_command` kills the ENTIRE client
-connection (one VS Code window / browser tab).  Iteration 3 fixed
+:meth:`AgentServer._handle_command` kills the ENTIRE client
+connection (one browser tab).  Iteration 3 fixed
 this class for an unhashable ``type`` and four unguarded ``int()``
 fields, but every handler that uses ``tabId``/``workDir`` as a dict
 key — or forwards other fields to SQLite — still raised on non-string
@@ -57,7 +57,7 @@ import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +67,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     payloads in these tests must not persist ``last_model``/config
     values into the process-shared KISS_HOME and pollute later tests."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.core.vscode_config as vc
+    import kiss.core.user_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()
@@ -106,7 +106,7 @@ class TestMalformedFields(unittest.TestCase):
     """Malformed payloads must never raise out of ``_handle_command``."""
 
     def setUp(self) -> None:
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
 
         def capture(event: dict[str, Any]) -> None:
@@ -161,9 +161,6 @@ class TestMalformedFields(unittest.TestCase):
         )
         self.server._handle_command(
             {"type": "getFiles", "prefix": "x", "workDir": [1]},
-        )
-        self.server._handle_command(
-            {"type": "generateCommitMessage", "tabId": "t1", "workDir": [1]},
         )
 
     def test_record_file_usage_nonstring_path_does_not_raise(self) -> None:

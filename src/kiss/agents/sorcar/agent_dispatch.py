@@ -1117,7 +1117,7 @@ def dispatch_command(
     parent_task_id = _persisted_task_id(parent_agent)
     parent_tab_id = ""
     if parent_task_id:
-        # The tab the webviews show the caller under (its own tab id,
+        # The tab the chat pages show the caller under (its own tab id,
         # or — when the caller is itself a sub-agent — its
         # ``{parent}__sub_{task}`` tab).  A persisted task id
         # proves the caller is a ``ChatSorcarAgent``, which always has

@@ -25,7 +25,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _register_wt_state(
@@ -145,9 +145,9 @@ class TestBug56ConflictCheckBaselineValidation:
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         GitWorktreeOps.save_baseline_commit(repo, branch, bogus)
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -189,9 +189,9 @@ class TestBug56ConflictCheckBaselineValidation:
             cwd=repo, capture_output=True,
         )
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -219,9 +219,9 @@ class TestBug56ConflictCheckBaselineValidation:
 
         _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
 
-        server = VSCodeServer()
+        server = AgentServer()
         server.work_dir = str(repo)
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,

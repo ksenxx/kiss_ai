@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for event timestamp stamping (``ts`` field).
 
-The chat webview (VS Code extension and remote web app) renders a
+The chat page renders a
 compact human-readable timestamp badge in every event panel's title,
 to the left of the Copy button.  For that to work, every broadcast
 event must carry a ``ts`` field (ms since the epoch) stamped at

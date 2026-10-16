@@ -40,7 +40,7 @@ from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.models import openai_compatible_model as oai
 from kiss.core.models.stream_abort import StreamAbortWatchdog
-from kiss.core.vscode_config import _config_lock, save_config
+from kiss.core.user_config import _config_lock, save_config
 from kiss.tests.server.test_audit1013_printer_lock_injection import _hammer, _lock_is_free
 
 

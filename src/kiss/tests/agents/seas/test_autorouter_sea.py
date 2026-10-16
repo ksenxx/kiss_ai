@@ -31,14 +31,13 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
-from kiss.server import agent_state
+from kiss.tests.agents.seas.conftest import git, registered, run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
+from kiss.tests.server.conftest import init_repo
 
 _SEA_PATH = Path(autorouter_sea.__file__).resolve()
 _TOOL_NAMES = {
@@ -343,7 +342,6 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     run = sea_commands.evaluate_sea(
         [AutorouterSea()], "add a --json flag to the export command"
     )
-    settings = run.settings
     script = [
         tool_call_body("pick_model", {"tier": "medium"}, prompt_tokens=500),
         tool_call_body(
@@ -359,33 +357,12 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         finish_body(f"<p>routed to {model}</p>", prompt_tokens=700),
     ]
     agent = ChatSorcarAgent("autorouter-sea-test")
-    state = agent_state.AgentState(
-        "autorouter-sea-test", agent=agent, task_thread=threading.current_thread()
-    )
-    agent_state.register(state)
-    try:
-        with serve(script) as (url, requests):
-            result = agent.run(
-                prompt_template=run.prompt,
-                model_name=MODEL,
-                work_dir=str(tmp_path),
-                max_steps=5,
-                max_budget=1.0,
-                model_config={"base_url": url, "api_key": "local"},
-                system_prompt_hook=run.system_prompt_hook,
-                tools_hook=run.tools_hook,
-                web_tools=settings["use_web_tools"],
-                use_memory=settings["use_memory"],
-                verbose=False,
-            )
-    finally:
-        agent_state.unregister("autorouter-sea-test", state)
-    parsed = yaml.safe_load(result)
+    with registered(agent, "autorouter-sea-test"):
+        parsed, agentic = run_sea(run, script, tmp_path, max_steps=5, agent=agent)
     assert parsed["success"] is True
     assert model in parsed["summary"]
 
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 3, [list(r) for r in requests]
+    assert len(agentic) == 3
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert _TOOL_NAMES <= names, names
@@ -514,16 +491,13 @@ def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
 
 def test_kiss_checkout_resolves_a_linked_worktree_to_its_owning_checkout(tmp_path: Path) -> None:
     """A task worktree (``.git`` file) is discarded later, so the durable checkout is returned."""
-    import subprocess
-
     repo = tmp_path / "repo"
+    init_repo(repo)
     (repo / autorouter_sea.RSI7D_SEA_RELATIVE).parent.mkdir(parents=True)
     (repo / autorouter_sea.RSI7D_SEA_RELATIVE).write_text("", encoding="utf-8")
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t", "PATH": __import__("os").environ["PATH"]}
-    for args in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "seas"],
-                 ["worktree", "add", "-q", str(tmp_path / "wt")]):
-        subprocess.run(["git", *args], cwd=repo, env=env, check=True)
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "seas")
+    git(repo, "worktree", "add", "-q", str(tmp_path / "wt"))
     worktree = tmp_path / "wt"
     assert (worktree / ".git").is_file()
     assert autorouter_sea.kiss_checkout(str(worktree / "src")) == str(repo.resolve())

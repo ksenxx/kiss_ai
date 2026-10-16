@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import socket
 import stat
 import sys
 import time
@@ -35,6 +34,7 @@ from kiss.agents.third_party_agents.webhook.webhook_sea import (
     WebhookChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
 _AUTH_TRIO = {"check_webhook_auth", "authenticate_webhook", "clear_webhook_auth"}
 _SECRET = "test-secret-123"
@@ -385,25 +385,6 @@ def test_poll_messages_filters_other_routes() -> None:
         backend.disconnect()
 
 
-def _raw_post_status(port: int, path: str, headers: dict[str, str], body: bytes = b"") -> int:
-    """POST over a raw socket (allows malformed/missing Content-Length).
-
-    Headers are sent as latin-1 so a test can put a real non-ASCII byte
-    such as ``²`` on the wire, exactly as an HTTP client would.
-    """
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        lines = [f"POST {path} HTTP/1.1", f"Host: 127.0.0.1:{port}", "Connection: close"]
-        lines.extend(f"{k}: {v}" for k, v in headers.items())
-        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body)
-        data = b""
-        while b"\r\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        return int(data.split(b" ", 2)[1])
-
-
 def _write_delivery_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str) -> str:
     """Create a real importable delivery module on sys.path; return its name."""
     name = f"webhook_delivery_target_{uuid.uuid4().hex}"
@@ -479,10 +460,10 @@ def test_malformed_content_length_rejected_without_read() -> None:
     backend, base = _start_backend(name="cl", secret=_SECRET, kind="github")
     try:
         port = backend._bound_port
-        assert _raw_post_status(port, "/hook/cl", {"Content-Length": "-1"}) == 400
-        assert _raw_post_status(port, "/hook/cl", {"Content-Length": "nope"}) == 400
-        assert _raw_post_status(port, "/hook/cl", {"Content-Length": "+1"}, b"x") == 400
-        assert _raw_post_status(port, "/hook/cl", {}) == 411
+        assert raw_post_status(port, "Content-Length: -1\r\n", "/hook/cl") == 400
+        assert raw_post_status(port, "Content-Length: nope\r\n", "/hook/cl") == 400
+        assert raw_post_status(port, "Content-Length: +1\r\n", "/hook/cl", b"x") == 400
+        assert raw_post_status(port, "", "/hook/cl") == 411
         assert backend.poll_messages("cl", "0")[0] == []
 
         body = b'{"after": "malformed"}'
@@ -656,8 +637,8 @@ def test_unicode_digit_and_overlong_content_length_rejected() -> None:
     backend, base = _start_backend(name="cl2", secret=_SECRET, kind="github")
     try:
         port = backend._bound_port
-        assert _raw_post_status(port, "/hook/cl2", {"Content-Length": "\u00b2"}) == 400
-        assert _raw_post_status(port, "/hook/cl2", {"Content-Length": "9" * 5000}) == 400
+        assert raw_post_status(port, "Content-Length: \u00b2\r\n", "/hook/cl2") == 400
+        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n", "/hook/cl2") == 400
         body = json.dumps({"event": "ok"}).encode()
         resp = requests.post(
             f"{base}/hook/cl2", data=body, headers=_github_headers(body), timeout=10

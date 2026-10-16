@@ -2,22 +2,21 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression: after VS Code is closed and relaunched, submitting a new
+"""Regression: after a daemon restart and a page reload, submitting a new
 task to a restored tab must continue the tab's prior chat session — the
 agent must receive the "Previous tasks and results" preamble built from
 the tasks that ran in that chat before the restart.
 
 Reproduces the following bug:
 
-1. User runs a task in a VS Code tab.  The tab's frontend state records
+1. User runs a task in a chat tab.  The tab's frontend state records
    ``backendChatId = X`` and the daemon persists the task under
    ``chat_id = X``.
-2. User closes VS Code (which stops the daemon).
-3. User relaunches VS Code.  The webview restores its tabs from
-   ``vscode.getState()`` and posts a ``ready`` message whose
-   ``restoredTabs`` array names ``{tabId=T, chatId=X}``.  The
-   extension replays this as a ``resumeSession`` command to the freshly
-   started daemon.
+2. The daemon is stopped.
+3. The daemon is started again and the page is reloaded.  The page
+   restores its tabs from persisted state and posts a ``ready`` message
+   whose ``restoredTabs`` array names ``{tabId=T, chatId=X}``, which
+   reaches the freshly started daemon as a ``resumeSession`` command.
 4. The daemon's ``_replay_session`` handles ``resumeSession`` by
    recording ``_tab_chat_views[T] = X``.  After a cold daemon restart
    no agent state exists yet, so *only* ``_tab_chat_views`` gets the
@@ -29,8 +28,8 @@ Reproduces the following bug:
    ``_load_chat_context`` for the FRESH uuid, finds nothing, and sends
    the LLM an empty preamble — the previous conversation is lost.
 
-The end-to-end test drives the real :class:`VSCodeServer` through
-``_handle_command`` exactly as the extension layer would, from a cold
+The end-to-end test drives the real :class:`AgentServer` through
+``_handle_command`` exactly as the daemon's dispatcher would, from a cold
 start.  Only :meth:`SorcarAgent.__mro__[1].run` (the grandparent's
 plain ``run``) is stubbed so we can capture the augmented prompt that
 :meth:`ChatSorcarAgent.build_chat_prompt` produced and inspect the
@@ -56,7 +55,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     init_repo,
     redirect_persistence,
@@ -147,7 +146,7 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
         agent_state.agent_states.clear()
         self.addCleanup(agent_state.agent_states.clear)
 
-        server = VSCodeServer()
+        server = AgentServer()
 
         captured_prompts: list[str] = []
         done = threading.Event()

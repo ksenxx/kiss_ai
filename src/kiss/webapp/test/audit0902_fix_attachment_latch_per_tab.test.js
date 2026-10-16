@@ -1,0 +1,163 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// End-to-end (JSDOM) test for review-vscode.md #10: sendMessage() parked a
+// submit behind the module-global `awaitingAttachments` latch while an
+// attachment was still converting.  Attachments -- and their conversion
+// promises -- are per tab (saveCurrentTab stores `tab.attachments`), so the
+// latch set by tab A's pending HEIC made tab B's Enter return silently:
+// B's prompt (and its own, already-decoded photo) were never sent.
+//
+// Tab A pastes a HEIC whose decode is parked on a createImageBitmap the
+// test controls (JSDOM has no image decoder, so the test supplies the
+// browser API the page would normally get), types a prompt and presses
+// Enter.  Tab B pastes a PNG, types a prompt and presses Enter twice: the
+// first Enter must submit once its own attachment has landed and the
+// second must be deduplicated within B only.  Finally A's decode fails:
+// A's parked submit is dropped (its photo is gone), A's latch clears, and a
+// later Enter in A sends.
+
+'use strict';
+
+const assert = require('assert');
+const {
+  makePage,
+  paste,
+  typeAndEnter,
+  submits,
+  settle,
+  failDecode,
+} = require('./attachment_helpers');
+
+// Chat tabs have no row of their own any more: the Chats panel's pick
+// (switchToTab) is how the user gets back to a chat.
+function clickTab(win, tabId) {
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} is still there`,
+  );
+  win._testApi.switchToTab(tabId);
+}
+
+async function main() {
+  // The sourceURL is what the .coverage.js gate of this suite keys on.
+  const {win, posted, decodes} = makePage('audit0902-attachlatch-main.js');
+  win._testApi.endLaunch();
+  const tabA = win._testApi.getActiveTabId();
+
+  // Tab A: a camera HEIC, parked in the decoder.
+  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
+    type: 'image/heic',
+  });
+  paste(win, heic);
+  await settle(() => decodes.length >= 1);
+  assert.strictEqual(decodes.length, 1, 'the HEIC reached the decoder');
+  typeAndEnter(win, 'prompt for A');
+  assert.strictEqual(submits(posted).length, 0, 'A waits for its photo');
+
+  // Tab B: a PNG (base64 via FileReader, no decode needed), Enter twice.
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  assert.notStrictEqual(tabB, tabA);
+  const png = new win.File([new Uint8Array([137, 80, 78, 71])], 'shot.png', {
+    type: 'image/png',
+  });
+  paste(win, png);
+  typeAndEnter(win, 'prompt for B');
+  typeAndEnter(win, 'prompt for B');
+  await settle(() => submits(posted).some(m => m.tabId === tabB));
+  const fromB = submits(posted).filter(m => m.tabId === tabB);
+  assert.strictEqual(
+    fromB.length,
+    1,
+    `tab B's Enter was ${fromB.length === 0 ? 'silently dropped while tab A waited for its HEIC' : 'submitted more than once'} (${fromB.length} submits)`,
+  );
+  assert.strictEqual(fromB[0].prompt, 'prompt for B');
+  assert.strictEqual(fromB[0].attachments.length, 1, 'B sent its photo');
+  assert.strictEqual(fromB[0].attachments[0].name, 'shot.png');
+  assert.strictEqual(submits(posted).length, 1, 'A still waits');
+
+  // A's decode fails: its parked submit is dropped (the photo is gone,
+  // sending without it is the silent loss to avoid), never sent for B.
+  await failDecode(decodes, 0, 'undecodable HEIC');
+  assert.strictEqual(submits(posted).length, 1, 'no submit from A yet');
+
+  // Back on A: the latch must be clear, so a plain Enter sends.
+  clickTab(win, tabA);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+  const chips = win.document.getElementById('file-chips');
+  assert.match(
+    chips.textContent,
+    /undecodable HEIC/,
+    'A shows why its photo was dropped',
+  );
+  typeAndEnter(win, 'prompt for A again');
+  await settle(() => submits(posted).some(m => m.tabId === tabA));
+  const fromA = submits(posted).filter(m => m.tabId === tabA);
+  assert.strictEqual(
+    fromA.length,
+    1,
+    `A could not send after the wait (${fromA.length})`,
+  );
+  assert.strictEqual(fromA[0].prompt, 'prompt for A again');
+  assert.strictEqual(fromA[0].attachments.length, 0);
+
+  // Switching tabs during the wait abandons the submit (it no longer
+  // matches what the user sees) but keeps the tab's attachment for later.
+  win._testApi.createNewTab();
+  const tabC = win._testApi.getActiveTabId();
+  const png3 = new win.File([new Uint8Array([137, 80, 78, 71, 1])], 'c.png', {
+    type: 'image/png',
+  });
+  paste(win, png3);
+  typeAndEnter(win, 'prompt for C');
+  clickTab(win, tabA);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+  await settle();
+  assert.strictEqual(
+    submits(posted).filter(m => m.tabId === tabC).length,
+    0,
+    'a submit whose tab was switched away from must not be sent',
+  );
+  clickTab(win, tabC);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabC);
+  typeAndEnter(win, 'prompt for C again');
+  await settle(() => submits(posted).some(m => m.tabId === tabC));
+  const fromC = submits(posted).filter(m => m.tabId === tabC);
+  assert.strictEqual(fromC.length, 1, 'C sends once its user is back');
+  assert.strictEqual(fromC[0].attachments.length, 1, 'C kept its photo');
+  assert.strictEqual(fromC[0].attachments[0].name, 'c.png');
+  clickTab(win, tabA);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+
+  // Same-tab deduplication still holds with a pending attachment: a burst
+  // of Enters while a photo is still being read submits exactly once.
+  const png2 = new win.File([new Uint8Array([137, 80, 78, 71, 13])], 'b.png', {
+    type: 'image/png',
+  });
+  paste(win, png2);
+  typeAndEnter(win, 'burst');
+  typeAndEnter(win, 'burst');
+  typeAndEnter(win, 'burst');
+  await settle(() => submits(posted).some(m => m.prompt === 'burst'));
+  const bursts = submits(posted).filter(m => m.prompt === 'burst');
+  assert.strictEqual(
+    bursts.length,
+    1,
+    `a burst of Enters in one tab submitted ${bursts.length} times`,
+  );
+  assert.strictEqual(bursts[0].tabId, tabA);
+  assert.strictEqual(bursts[0].attachments.length, 1);
+  assert.strictEqual(bursts[0].attachments[0].name, 'b.png');
+  win.close();
+  console.log(
+    'audit0902_fix_attachment_latch_per_tab: all tests passed',
+  );
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

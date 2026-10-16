@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for 100% branch coverage of sorcar/ and vscode/ modules.
+"""Integration tests for 100% branch coverage of sorcar/ and server/ modules.
 
 No mocks, patches, fakes, or test doubles. All tests use real objects.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _git(tmpdir: str, *args: str) -> None:
@@ -32,7 +32,7 @@ class TestUserAnswerDrain:
         """Pre-filling a task queue before userAnswer should drain stale item."""
         import queue as queue_mod
 
-        server = VSCodeServer()
+        server = AgentServer()
         q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
         q.put("stale")
         state = agent_state.AgentState(
@@ -55,7 +55,7 @@ class TestResumeSessionWithTask:
 
     def test_resume_session_with_task(self) -> None:
         """resumeSession with a non-empty chatId calls _replay_session."""
-        server = VSCodeServer()
+        server = AgentServer()
         events: list[dict[str, object]] = []
         orig = server.printer.broadcast
 
@@ -93,7 +93,7 @@ class TestReplaySessionWithEvents:
             for ev in test_events:
                 th._append_chat_event(ev, task_id=task_id)
 
-            server = VSCodeServer()
+            server = AgentServer()
             captured: list[dict[str, object]] = []
             orig_broadcast = server.printer.broadcast
 
@@ -126,7 +126,7 @@ class TestAwaitUserResponseLoop:
         """Answer arriving after first timeout iteration covers loop branch."""
         import queue as queue_mod
 
-        server = VSCodeServer()
+        server = AgentServer()
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
         server.printer._thread_local.task_id = "42"
@@ -158,7 +158,7 @@ class TestRunTaskDrain:
 
     def test_run_task_creates_fresh_queue(self) -> None:
         """Each task gets a fresh user_answer queue (RC8 fix)."""
-        server = VSCodeServer()
+        server = AgentServer()
         captured: list[dict[str, object]] = []
         orig = server.printer.broadcast
 

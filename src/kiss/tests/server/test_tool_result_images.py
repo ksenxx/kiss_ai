@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests: images a tool call generated are embedded on its
-``tool_result`` event so the chat webview can render them inline in the
+``tool_result`` event so the chat page can render them inline in the
 corresponding event panel.
 
 ``JsonPrinter._collect_result_images`` scans the tool's return text

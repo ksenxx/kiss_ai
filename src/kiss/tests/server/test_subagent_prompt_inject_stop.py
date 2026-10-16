@@ -27,8 +27,8 @@ allocated via ``_add_task``, real task-keyed
 :class:`kiss.server.agent_state.AgentState` registrations mirroring a
 ``run_agent`` sub-task (a ``parent_task_id``, a
 ``{parent_tab}__sub_{task_id}`` tab id and its own stop event), a
-real :class:`WebPrinter` and a real :class:`VSCodeServer` dispatching
-the same commands the webview posts.  No mocks, patches, or test
+real :class:`WebPrinter` and a real :class:`AgentServer` dispatching
+the same commands the chat page posts.  No mocks, patches, or test
 doubles.
 """
 
@@ -46,7 +46,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import WebPrinter
 
 
@@ -69,7 +69,7 @@ class _Harness:
 
     def __init__(self) -> None:
         self.printer = WebPrinter()
-        self.server = VSCodeServer(self.printer)
+        self.server = AgentServer(self.printer)
 
         self.parent = ChatSorcarAgent("Parent")
         parent_task_id, chat_id = _add_task("parent task")
@@ -358,7 +358,7 @@ class TestSubagentPromptInjection:
 class TestBusyRunConversion:
     """A stale ``run``/submit on a busy tab is queued AND persisted.
 
-    A reopened webview can believe a tab is idle (before the resume's
+    A reloaded chat page can believe a tab is idle (before the resume's
     ``status running:true`` arrives) and send typed text as a
     ``submit`` (→ ``run``) instead of ``appendUserMessage``.
     ``_cmd_run`` converts it into a queued follow-up; its echoed
@@ -578,7 +578,7 @@ class TestWebPrinterTargetedEventGuard:
 class TestAskAnswerEvent:
     """The ``/ask`` reply lands in the OWNER task's recording and rows.
 
-    ``VSCodeServer._broadcast_ask_answer`` (the side-channel worker's
+    ``AgentServer._broadcast_ask_answer`` (the side-channel worker's
     last act) broadcasts a ``tabId`` + ``taskId`` stamped
     ``ask_answer`` event through the real :class:`WebPrinter`: like
     the ``/ask`` prompt echo, it must be recorded into the owner

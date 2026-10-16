@@ -10,7 +10,7 @@ the result panel must show ``Status: Continue`` instead of ``Status: FAILED``.
 
 This is verified end-to-end:
   * The Python side (``JsonPrinter._broadcast_result``) must include
-    the parsed ``is_continue`` flag in the broadcast event so the webview
+    the parsed ``is_continue`` flag in the broadcast event so the chat page
     can distinguish it from a hard failure.
   * The JavaScript renderer (``media/main.js``) must render
     ``Status: Continue`` when ``is_continue`` is true on the event.

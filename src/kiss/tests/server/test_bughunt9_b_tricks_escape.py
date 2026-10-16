@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 

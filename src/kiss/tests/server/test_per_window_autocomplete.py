@@ -6,10 +6,10 @@
 
 Follow-up to the per-window ``work_dir`` isolation
 (``test_per_window_work_dir.py``): the daemon's remaining
-window-global autocomplete state in :class:`VSCodeServer` is now keyed
+window-global autocomplete state in :class:`AgentServer` is now keyed
 by the ``connId`` that the server API dispatcher
 (``kiss.server.sorcar.ServerApi.dispatch``) stamps on every command
-(one connection == one VS Code window):
+(one connection == one browser window):
 
 * ``_last_active_file`` / ``_last_active_content`` — the fallback
   snapshot of the window's active editor used when a ``complete``
@@ -22,7 +22,7 @@ by the ``connId`` that the server API dispatcher
 
 These tests start a daemon with a temporary endpoint file (not the
 production ``~/.kiss/sorcar-local.json``) and open two real local
-client connections that simulate two VS Code windows.
+client connections that simulate two browser windows.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
-    """Two local connections (= two VS Code windows) sharing one daemon."""
+    """Two local connections (= two browser windows) sharing one daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -82,7 +82,7 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
     async def _connect(
         self,
     ) -> tuple[Any, Any]:
-        """Open one local connection (simulates one VS Code window)."""
+        """Open one local connection (simulates one browser window)."""
         reader, writer = await open_local_connection(
             self.server, limit=16 * 1024 * 1024,
         )
@@ -285,7 +285,7 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
         })
         await self._drain_until(reader_a, self._ghost_for("epsilonq_tok"))
 
-        vss = self.server._vscode_server
+        vss = self.server._agent_server
         with vss._state_lock:
             self.assertEqual(len(vss._last_active_file), 1)
             self.assertEqual(len(vss._complete_seq_latest), 1)

@@ -10,7 +10,7 @@ event by the **thread-local** ``task_id`` set on the agent's thread.
 Commit ``763941a6`` moved the Bash tool's output draining onto a daemon
 reader thread and invoked ``stream_callback`` from that thread — a
 thread with no thread-local ``task_id``.  The consequences in the
-chat webview were:
+chat page were:
 
 * ``system_output`` events carried no ``taskId``, so ``WebPrinter``
   treated them as *global system events* and broadcast them verbatim

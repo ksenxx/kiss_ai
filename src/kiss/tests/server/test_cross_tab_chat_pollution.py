@@ -36,7 +36,7 @@ user is viewing.
 
 These tests use the real :class:`WebPrinter` (no mocks of the
 broadcast/fan-out/subscription logic) and the real
-:class:`VSCodeServer` task lifecycle.
+:class:`AgentServer` task lifecycle.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
 
 _CONTENT_EVENT_TYPES = frozenset({
@@ -83,10 +83,10 @@ class _CapturingWebPrinter(WebPrinter):
             self.sent.append(json.loads(data))
 
 
-def _make_server() -> tuple[VSCodeServer, _CapturingWebPrinter]:
-    """Build a real VSCodeServer backed by a capturing WebPrinter."""
+def _make_server() -> tuple[AgentServer, _CapturingWebPrinter]:
+    """Build a real AgentServer backed by a capturing WebPrinter."""
     printer = _CapturingWebPrinter()
-    server = VSCodeServer(printer=printer)
+    server = AgentServer(printer=printer)
     return server, printer
 
 

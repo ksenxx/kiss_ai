@@ -37,7 +37,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_task_chain_context
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     make_recording_server,
     patch_sorcar_parent_run,
@@ -82,7 +82,7 @@ class _PromptCapture:
         return f"success: true\nsummary: {summary}\n"
 
 
-def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
+def _run_and_wait(server: AgentServer, tab_id: str, prompt: str,
                   work_dir: str) -> None:
     server._handle_command({
         "type": "run", "prompt": prompt,
@@ -127,7 +127,7 @@ def _seed_chain(
     return out
 
 
-def _open_by_task_id(server: VSCodeServer, tab_id: str, chat_id: str,
+def _open_by_task_id(server: AgentServer, tab_id: str, chat_id: str,
                      task_id: str) -> None:
     """Simulate the frontend opening a fresh tab for a history task."""
     server._handle_command({"type": "newChat", "tabId": tab_id})

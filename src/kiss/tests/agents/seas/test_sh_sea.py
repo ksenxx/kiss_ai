@@ -28,6 +28,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
+from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -109,31 +110,14 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
         finish_body("<pre>sh-sea-output 42</pre>", prompt_tokens=600),
     ]
     run = sea_commands.evaluate_sea([ShSea()], command)
-    settings = run.settings
     assert run.prompt == command
     # ``tools`` is not overridden: the staged tools hook is the identity.
     assert run.tools_hook([print]) == [print]
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("sh-sea-test")
-        result = agent.run(
-            prompt_template=run.prompt,
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=4,
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=run.system_prompt_hook,
-            tool_profile=settings["tool_profile"],
-            web_tools=settings["use_web_tools"],
-            use_memory=settings["use_memory"],
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     assert parsed["success"] is True
     assert "sh-sea-output 42" in parsed["summary"]
 
-    agentic = _tool_requests(requests)
-    assert len(agentic) == 2, [list(r) for r in requests]
+    assert len(agentic) == 2
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish"}, names

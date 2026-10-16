@@ -2,21 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration test: changing the VS Code workspace folder must
+"""Integration test: changing the chat page's working folder must
 update the agent's working directory.
 
-The VS Code extension calls ``vscode.workspace.workspaceFolders``
-inside its ``_getWorkDir()`` helper and passes the resulting path on
-every ``run`` command, but commands that don't carry an explicit
+The chat page passes its current working folder on every ``run``
+command, but commands that don't carry an explicit
 ``workDir`` — notably autocomplete (``getFiles``), commit-message
-generation, and worktree actions — read ``VSCodeServer.work_dir``,
+generation, and worktree actions — read ``AgentServer.work_dir``,
 which was captured once from ``KISS_WORKDIR``/``os.getcwd()`` at
 process start.  Without a ``setWorkDir`` command the daemon never
 notices that the user switched folders, so file autocomplete and
 related commands keep using the stale init value.
 
 These tests reproduce that mismatch and verify the ``setWorkDir``
-handler keeps ``server.work_dir`` synchronised with the active VS Code
+handler keeps ``server.work_dir`` synchronised with the active
 folder, pre-warms the ``@``-mention file index of a newly adopted
 folder (``_file_index.ensure``), and queues nothing for an empty or
 unchanged folder.  Every server gets a private
@@ -38,7 +37,7 @@ from typing import Any
 import pytest
 
 from kiss.server.file_index import FileIndex, FileIndexRegistry
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 
 
 def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -53,7 +52,7 @@ def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
 
 @pytest.fixture()
 def two_workspaces() -> Iterator[tuple[str, str]]:
-    """Create two temp dirs simulating two VS Code workspace folders.
+    """Create two temp dirs simulating two working folders.
 
     Folder A contains ``alpha.txt`` only; folder B contains
     ``beta.txt`` only.  Each folder's basename uniquely identifies
@@ -72,7 +71,7 @@ def two_workspaces() -> Iterator[tuple[str, str]]:
 
 
 class _Servers:
-    """Build ``VSCodeServer`` instances with private file-index registries.
+    """Build ``AgentServer`` instances with private file-index registries.
 
     Every registry is rooted in the test's temp dir (``home`` and cache
     dir) and stopped at teardown so no worker outlives the test.
@@ -82,9 +81,9 @@ class _Servers:
         self.tmp_path = tmp_path
         self.registries: list[FileIndexRegistry] = []
 
-    def make(self, work_dir: str, printer: Any = None) -> VSCodeServer:
+    def make(self, work_dir: str, printer: Any = None) -> AgentServer:
         """Return a server pinned to *work_dir* with a private registry."""
-        server = VSCodeServer(printer=printer) if printer is not None else VSCodeServer()
+        server = AgentServer(printer=printer) if printer is not None else AgentServer()
         server.work_dir = work_dir
         server._file_index.stop()
         registry = FileIndexRegistry(
@@ -94,7 +93,7 @@ class _Servers:
         self.registries.append(registry)
         return server
 
-    def drain(self, server: VSCodeServer) -> None:
+    def drain(self, server: AgentServer) -> None:
         """Block until every build queued so far on the server's registry ran.
 
         The registry's single worker serves jobs in FIFO order, so a
@@ -120,7 +119,7 @@ def servers(tmp_path: Path) -> Iterator[_Servers]:
         factory.stop_all()
 
 
-def _index_of(server: VSCodeServer, work_dir: str) -> FileIndex | None:
+def _index_of(server: AgentServer, work_dir: str) -> FileIndex | None:
     """Return the index object currently serving *work_dir*, if any."""
     registry = server._file_index
     root, _ = registry.root_for(work_dir)
@@ -128,7 +127,7 @@ def _index_of(server: VSCodeServer, work_dir: str) -> FileIndex | None:
         return registry._indexes.get(root)
 
 
-def _build(server: VSCodeServer, work_dir: str) -> FileIndex:
+def _build(server: AgentServer, work_dir: str) -> FileIndex:
     """Index *work_dir* on the server's registry and return the index."""
     done = threading.Event()
     server._file_index.ensure(work_dir, done.set)
@@ -138,7 +137,7 @@ def _build(server: VSCodeServer, work_dir: str) -> FileIndex:
     return index
 
 
-def _capture_files_events(server: VSCodeServer) -> list[dict[str, Any]]:
+def _capture_files_events(server: AgentServer) -> list[dict[str, Any]]:
     """Install a printer wrapper that captures every ``files`` event."""
     captured: list[dict[str, Any]] = []
     lock = threading.Lock()
@@ -163,7 +162,7 @@ def test_set_work_dir_updates_field_and_prewarms_the_index(
     """``setWorkDir`` must update ``work_dir``, drop the connection's
     active-file snapshot, and start indexing the new folder.
 
-    The bug: ``VSCodeServer.work_dir`` is captured once at __init__
+    The bug: ``AgentServer.work_dir`` is captured once at __init__
     from ``KISS_WORKDIR``/``getcwd()`` and never refreshed.  Once
     ``_last_active_file`` / ``_last_active_content`` are populated
     against folder A, those values must be discarded the moment the
@@ -294,9 +293,9 @@ def test_set_work_dir_syncs_web_printer_work_dir(
 
     The remote server's ``WebPrinter`` fills ``cfg["work_dir"]`` in
     global ``configData`` events from its own ``work_dir`` attribute.
-    The handler only updated ``VSCodeServer.work_dir`` before, so a
+    The handler only updated ``AgentServer.work_dir`` before, so a
     browser client kept seeing the folder the daemon was launched with
-    after the user opened a new folder in VS Code.  After the fix the
+    after the user picked a new folder on the chat page.  After the fix the
     printer's ``work_dir`` tracks the active folder and the next
     ``configData`` reports folder B.
     """
@@ -325,8 +324,8 @@ def test_set_work_dir_registered_in_handlers() -> None:
     """The dispatch table must include ``setWorkDir``.
 
     Without this entry the unknown-command branch would broadcast a
-    user-visible ``error`` event every time the extension pushes the
-    current workspace folder.
+    user-visible ``error`` event every time the chat page pushes the
+    current working folder.
     """
     from kiss.server.commands import _CommandsMixin
 

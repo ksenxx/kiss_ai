@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests: a replay snapshot and a live event never interleave.
 
-The webview REPLACES a tab's transcript when a ``task_events`` replay
+The chat page REPLACES a tab's transcript when a ``task_events`` replay
 arrives, and appends every live event.  A replay of a running task is
 built from the printer's in-memory recording, while a live task event
 is recorded and then fanned out to the task's subscribed tabs.  When
@@ -201,7 +201,7 @@ class TestReplayBoundary(TabMirroringBase):
     async def test_1a_event_recorded_before_snapshot_renders_once(self) -> None:
         """Recorded before B's snapshot, fanned out after: shown once."""
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         ws_b, conn_b = await self._connect_b()
         paused = threading.Event()
@@ -250,7 +250,7 @@ class TestReplayBoundary(TabMirroringBase):
     async def test_1b_event_after_snapshot_is_not_wiped(self) -> None:
         """Recorded after B's snapshot, before its replay: not lost."""
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         await asyncio.to_thread(self._emit_delta, task_id, "HEAD ")
         ws_b, conn_b = await self._connect_b()
@@ -297,7 +297,7 @@ class TestReplayBoundary(TabMirroringBase):
     ) -> None:
         """A viewer attaching between record and copies sees one result."""
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         tmp = Path(self.tmpdir)
         work_dir = tmp / "wd"
         work_dir.mkdir()
@@ -431,7 +431,7 @@ class TestReplayBoundary(TabMirroringBase):
         """
         assert self.server is not None
         printer = self.server._printer
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         await asyncio.to_thread(self._emit_delta, task_id, "HEAD ")
         ws_b, conn_b = await self._connect_b()
@@ -477,7 +477,7 @@ class TestReplayBoundary(TabMirroringBase):
         once; B gets it after its replay, exactly once.
         """
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         for _ in range(2000):
             await asyncio.to_thread(self._emit_delta, task_id, "h")
@@ -537,7 +537,7 @@ class TestReplayBoundary(TabMirroringBase):
         """
         assert self.server is not None
         printer = self.server._printer
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         await asyncio.to_thread(self._emit_delta, task_id, "HEAD ")
         ws_b, conn_b = await self._connect_b()
@@ -715,7 +715,7 @@ class TestReplayBoundary(TabMirroringBase):
         """A ``KeyboardInterrupt`` right after *func* returns in B's replay
         reservation must not leave B's connection blocked forever."""
         assert self.server is not None
-        vs = self.server._vscode_server
+        vs = self.server._agent_server
         task_id, chat_id = await self._running_task_viewed_by_a()
         ws_b, conn_b = await self._connect_b()
         interrupted: list[bool] = []
@@ -891,11 +891,11 @@ def test_intermediate_subtask_cleaned_up_when_its_persistence_fails() -> None:
         url_file=os.path.join(tmp, "url.json"),
         local_endpoint_file=os.path.join(tmp, "sorcar-local.json"),
     )
-    vscode = remote._vscode_server
-    printer = vscode.printer
+    agent_server = remote._agent_server
+    printer = agent_server.printer
     agent_state.agent_states.clear()
     tab_id = "rb5-subtask-cleanup"
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = AgentState(
         f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
         stop_event=threading.Event(),
@@ -932,7 +932,7 @@ def test_intermediate_subtask_cleaned_up_when_its_persistence_fails() -> None:
 
     agent.run = fake_run  # type: ignore[method-assign, assignment]
     worker = threading.Thread(
-        target=vscode._run_task,
+        target=agent_server._run_task,
         args=({
             "type": "run",
             "prompt": "<task>first part</task><task>second part</task>",

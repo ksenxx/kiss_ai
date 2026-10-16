@@ -112,7 +112,7 @@ class TestLocalEndpointPublication(IsolatedAsyncioTestCase):
                 assert mode == 0o600, f"endpoint file mode {oct(mode)}"
             endpoint = local_endpoint.read_endpoint(endpoint_file)
             assert endpoint is not None
-            assert endpoint.url == f"wss://127.0.0.1:{server.port}/ws"
+            assert endpoint.url == f"ws://127.0.0.1:{server.port}/ws"
             assert endpoint.token == server.local_token
             assert endpoint.pid == os.getpid()
             assert server.port != 0, "OS-picked port not recorded"

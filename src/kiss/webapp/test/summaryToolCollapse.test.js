@@ -1,0 +1,736 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const {makePage, send} = require('./simplify2_harness');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+
+const DESC =
+  'The agent explored the repository layout and read the main entry ' +
+  'points. It located the tool-registration code in the agent module. ' +
+  'It then ran the existing test suite to establish a green baseline. ' +
+  'Next it drafted the new feature behind a flag. It wired the flag ' +
+  'into the CLI. Finally it re-ran the impacted tests and they passed.';
+
+function injectCss(win) {
+  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const styleEl = win.document.createElement('style');
+  styleEl.textContent = css;
+  win.document.head.appendChild(styleEl);
+}
+
+function sendToolPanels(win, n, offset) {
+  const start = offset || 0;
+  for (let i = start; i < start + n; i++) {
+    send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
+    send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
+  }
+}
+
+function output(win) {
+  return win.document.getElementById('output');
+}
+
+function summaryPanels(win) {
+  return Array.from(output(win).querySelectorAll('.tc.tc-summary'));
+}
+
+function topLevel(win) {
+  return Array.from(output(win).children).filter(el => el.id !== 'welcome');
+}
+
+function testSummaryPanelCreatedAndCollapsed() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'do the thing'});
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 1, 'one summary panel must render');
+  const p = panels[0];
+  assert.ok(
+    p.classList.contains('collapsed'),
+    'summary panel must auto-collapse when it renders',
+  );
+  const hdr = p.querySelector('.tc-h');
+  assert.ok(hdr, 'summary panel must have a .tc-h header');
+  assert.ok(
+    (hdr.textContent || '').includes('summary'),
+    'header must name the summary tool',
+  );
+  win.close();
+  console.log('  ok - summary tool_call renders a collapsed .tc-summary');
+}
+
+function testDescriptionIsDirectChildWithFullText() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 1);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const desc = p.querySelector(':scope > .tc-summary-desc');
+  assert.ok(
+    desc,
+    'description must render in a .tc-summary-desc DIRECT child of the ' +
+      'panel (so the collapsed-state CSS can keep it visible)',
+  );
+  assert.strictEqual(
+    desc.textContent,
+    DESC,
+    'the FULL description text must be present, untruncated',
+  );
+  win.close();
+  console.log('  ok - full description rendered in .tc-summary-desc');
+}
+
+function testNestsAllPanelsBackToPromptInOrder() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 7);
+  send(win, {type: 'thinking_start'});
+  send(win, {type: 'thinking_delta', text: 'pondering...'});
+  send(win, {type: 'thinking_end'});
+  const before = topLevel(win);
+  // The summary recounts these steps, so it adopts their Thoughts
+  // panel along with the tool panels (the one automatic fold a
+  // Thoughts panel takes part in).
+  const thoughts = before.filter(el => el.classList.contains('llm-panel'));
+  assert.strictEqual(thoughts.length, 1, 'the run rendered one Thoughts panel');
+  // The run's first summary folds the Prompt panel too.
+  const expectNested = before;
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const sub = p.querySelector(':scope > .summary-sub');
+  assert.ok(sub, 'summary panel must have a .summary-sub container');
+  const nested = Array.from(sub.children);
+  assert.strictEqual(
+    nested.length,
+    9,
+    'the Prompt, ALL 7 tool panels since the beginning and the Thoughts ' +
+      'panel must nest (not just the last 6) — got ' +
+      nested.length,
+  );
+  for (let i = 0; i < expectNested.length; i++) {
+    assert.strictEqual(
+      nested[i],
+      expectNested[i],
+      'nested panel ' + i + ' must be the original panel, in order',
+    );
+  }
+  assert.strictEqual(
+    nested[nested.length - 1],
+    thoughts[0],
+    'the Thoughts panel is adopted by the summary, in its place',
+  );
+  const after = topLevel(win);
+  assert.strictEqual(after.length, 1, 'top level must be: the summary panel');
+  assert.strictEqual(after[0], p, 'summary panel is the only child');
+  win.close();
+  console.log('  ok - ALL panels, the prompt included, nest; Thoughts included, order kept');
+}
+
+function testAdjacentTaskIsBoundarySystemPromptIsNot() {
+  const {win} = makePage();
+  const O = output(win);
+  const adj = win.document.createElement('div');
+  adj.className = 'adjacent-task';
+  O.appendChild(adj);
+  send(win, {type: 'system_prompt', text: 'be careful'});
+  const sys = O.querySelector('.ev.system-prompt');
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
+  assert.strictEqual(
+    nested.length,
+    3,
+    'the System Prompt nests; nesting stops before the .adjacent-task block',
+  );
+  assert.strictEqual(nested[0], sys, 'the System Prompt heads the digest');
+  assert.strictEqual(adj.parentElement, O, 'the adjacent task stays put');
+  assert.strictEqual(adj.nextElementSibling, p, 'right before the summary');
+  win.close();
+  console.log('  ok - .adjacent-task is a boundary; .system-prompt folds under the summary');
+}
+
+function testWelcomeBlockNeverAdopted() {
+  const {win} = makePage();
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
+  assert.strictEqual(nested.length, 2, 'only the 2 tool panels nest');
+  const welcome = win.document.getElementById('welcome');
+  assert.strictEqual(
+    welcome.parentElement,
+    output(win),
+    'the #welcome block must never be swallowed by a summary panel',
+  );
+  win.close();
+  console.log('  ok - non-panel elements (#welcome) are a hard boundary');
+}
+
+function testNoPrecedingPanels() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const sub = p.querySelector(':scope > .summary-sub');
+  const nested = sub ? Array.from(sub.children) : [];
+  assert.strictEqual(nested.length, 1, 'only the prompt nests right after it');
+  assert.ok(nested[0].classList.contains('prompt'));
+  assert.ok(p.classList.contains('collapsed'), 'still collapses');
+  win.close();
+  console.log('  ok - summary right after prompt nests just the prompt');
+}
+
+function testEmptyDescription() {
+  const {win} = makePage();
+  sendToolPanels(win, 1);
+  send(win, {type: 'tool_call', name: 'summary'});
+  const p = summaryPanels(win)[0];
+  const desc = p.querySelector(':scope > .tc-summary-desc');
+  assert.ok(desc, 'desc element renders even without a description');
+  assert.strictEqual(desc.textContent, '');
+  win.close();
+  console.log('  ok - missing description handled');
+}
+
+function testDescriptionFullyVisibleWhileCollapsedViaCss() {
+  const {win} = makePage();
+  injectCss(win);
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 6);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  assert.ok(p.classList.contains('collapsed'));
+  const desc = p.querySelector(':scope > .tc-summary-desc');
+  const st = win.getComputedStyle(desc);
+  assert.notStrictEqual(
+    st.getPropertyValue('display').trim(),
+    'none',
+    'description must stay VISIBLE while the summary panel is collapsed',
+  );
+  assert.notStrictEqual(
+    st.getPropertyValue('white-space').trim(),
+    'nowrap',
+    'description must wrap (not be clipped to one line)',
+  );
+  assert.notStrictEqual(
+    st.getPropertyValue('text-overflow').trim(),
+    'ellipsis',
+    'description must not be ellipsised',
+  );
+  const sub = p.querySelector(':scope > .summary-sub');
+  assert.strictEqual(
+    win.getComputedStyle(sub).getPropertyValue('display').trim(),
+    'none',
+    'nested sub-panels must hide while the summary panel is collapsed',
+  );
+  win.close();
+  console.log('  ok - collapsed summary keeps description visible (CSS)');
+}
+
+function testCollapsePreviewSuppressedForSummary() {
+  const {win} = makePage();
+  sendToolPanels(win, 6);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const prev = p.querySelector('.tc-h .collapse-preview');
+  assert.ok(prev, 'addCollapse still installs the preview span');
+  assert.strictEqual(
+    (prev.textContent || '').trim(),
+    '',
+    'the ellipsised header preview must stay empty for summary panels ' +
+      '(the description is already fully visible below the header)',
+  );
+  win.close();
+  console.log('  ok - header collapse-preview suppressed for summary');
+}
+
+function testHeaderClickTogglesAndKeepsChildren() {
+  const {win} = makePage();
+  sendToolPanels(win, 6);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const hdr = p.querySelector('.tc-h');
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    !p.classList.contains('collapsed'),
+    'clicking the header must expand the summary panel',
+  );
+  let nested = p.querySelector(':scope > .summary-sub').children;
+  assert.strictEqual(nested.length, 6, 'children survive the expand');
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    p.classList.contains('collapsed'),
+    'clicking again re-collapses the panel',
+  );
+  nested = p.querySelector(':scope > .summary-sub').children;
+  assert.strictEqual(nested.length, 6, 'children survive the re-collapse');
+  const prev = p.querySelector('.tc-h .collapse-preview');
+  assert.strictEqual(
+    (prev.textContent || '').trim(),
+    '',
+    're-collapsing must not fill the truncated header preview',
+  );
+  win.close();
+  console.log('  ok - header click toggles collapse, children preserved');
+}
+
+function testSecondSummaryStopsAtEarlierSummaryBoundary() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 8);
+  send(win, {type: 'tool_call', name: 'summary', description: 'first. ' + DESC});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  sendToolPanels(win, 2, 100);
+  send(win, {type: 'tool_call', name: 'summary', description: 'second. ' + DESC});
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 2, 'both summary panels exist');
+  const second = panels.filter(
+    x => x.querySelector(':scope > .tc-summary-desc').textContent.startsWith('second'),
+  )[0];
+  const first = panels.filter(x => x !== second)[0];
+  const nested = Array.from(
+    second.querySelector(':scope > .summary-sub').children,
+  );
+  assert.strictEqual(
+    nested.length,
+    2,
+    'the second summary must adopt exactly the 2 panels emitted after ' +
+      'the first summary — got ' +
+      nested.length,
+  );
+  assert.ok(
+    nested.indexOf(first) === -1,
+    'a later summary must NOT swallow the earlier summary panel',
+  );
+  assert.strictEqual(
+    first.parentElement,
+    output(win),
+    'the earlier summary panel stays a top-level sibling',
+  );
+  assert.strictEqual(
+    first.querySelector(':scope > .summary-sub').children.length,
+    9,
+    'the earlier summary keeps its own 9 nested panels (prompt + 8 tools)',
+  );
+  const after = topLevel(win);
+  assert.strictEqual(after.length, 2, 'two summary digests');
+  win.close();
+  console.log('  ok - a later summary stops at the earlier summary');
+}
+
+function testSummaryImmediatelyAfterSummaryNestsNothing() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 3);
+  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 2);
+  const second = panels[1];
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    0,
+    'a summary right after another summary nests nothing',
+  );
+  assert.ok(second.classList.contains('collapsed'), 'still collapses');
+  win.close();
+  console.log('  ok - back-to-back summaries nest nothing');
+}
+
+function testManyPanelsBetweenSummariesAllNest() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  sendToolPanels(win, 9, 200);
+  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
+  const panels = summaryPanels(win);
+  const second = panels[1];
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    9,
+    'ALL 9 panels since the previous summary must nest',
+  );
+  const after = topLevel(win);
+  assert.strictEqual(
+    after.length,
+    2,
+    'no stranded panels: first summary (with the prompt) + second summary',
+  );
+  win.close();
+  console.log('  ok - all 9 panels between summaries nest (no 6 cap)');
+}
+
+function testToolResultLandsInsideCollapsedSummaryPanel() {
+  const {win} = makePage();
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  const p = summaryPanels(win)[0];
+  assert.ok(
+    p.querySelector('.bash-panel'),
+    'the summary tool_result output must land inside the summary panel',
+  );
+  assert.ok(
+    p.classList.contains('collapsed'),
+    'the tool_result must not un-collapse the summary panel',
+  );
+  win.close();
+  console.log('  ok - summary tool_result targets the collapsed panel');
+}
+
+function testNonSummaryToolCallUnaffected() {
+  const {win} = makePage();
+  // The daemon announces a running task before streaming its events;
+  // a finished task's panels fold as they land (applyChevronState).
+  send(win, {type: 'status', running: true});
+  sendToolPanels(win, 7);
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'ls',
+    description: 'list',
+  });
+  const O = output(win);
+  const last = O.lastElementChild;
+  assert.ok(!last.classList.contains('tc-summary'));
+  assert.ok(
+    !last.querySelector('.summary-sub'),
+    'non-summary tools must never adopt preceding panels',
+  );
+  // Every tool call's panel starts folded (the header shows the call);
+  // what sets the summary apart is the adoption above, not the fold.
+  assert.ok(
+    last.classList.contains('collapsed'),
+    'a tool-call panel starts folded',
+  );
+  assert.strictEqual(summaryPanels(win).length, 0);
+  win.close();
+  console.log('  ok - non-summary tool_call rendering unchanged');
+}
+
+function testReplayPathNestsAndCollapses() {
+  const {win} = makePage();
+  const events = [{type: 'prompt', text: 'replayed task'}];
+  for (let i = 0; i < 7; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: DESC});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  events.push({
+    type: 'result',
+    text: 'done',
+    summary: 'done',
+    success: true,
+  });
+  send(win, {
+    type: 'task_events',
+    task: 'replayed task',
+    task_id: 42,
+    events: events,
+  });
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 1, 'replay renders the summary panel');
+  const p = panels[0];
+  assert.ok(p.classList.contains('collapsed'), 'replayed panel collapses');
+  const nested = p.querySelector(':scope > .summary-sub').children;
+  assert.strictEqual(
+    nested.length,
+    8,
+    'replay nests the prompt and ALL panels since the beginning, like ' +
+      'the live stream',
+  );
+  assert.strictEqual(
+    p.querySelector(':scope > .tc-summary-desc').textContent,
+    DESC,
+    'replayed description is fully preserved',
+  );
+  win.close();
+  console.log('  ok - history replay (task_events) path behaves the same');
+}
+
+function isDisplayed(win, el) {
+  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
+      return false;
+    if (n.id === 'output') break;
+  }
+  return true;
+}
+
+function replayCompletedSummaryTask(win) {
+  const events = [{type: 'prompt', text: 'replayed task'}];
+  for (let i = 0; i < 7; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: DESC});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  // One plain panel after the summary: adopted by nothing, it is what
+  // the finished-task digest folds.
+  events.push({type: 'tool_call', name: 'Read', path: '/tmp/after'});
+  events.push({type: 'tool_result', name: 'Read', content: 'after'});
+  events.push({type: 'result', text: 'done', summary: 'done', success: true});
+  send(win, {
+    type: 'task_events',
+    task: 'replayed task',
+    task_id: 42,
+    events: events,
+  });
+}
+
+/**
+ * The replay of a finished task folds every panel into one collapsed
+ * Trajectory panel; open it, as the user would, and return it.
+ */
+function openTrajectory(win) {
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(traj, 'the finished task replays with a Trajectory panel');
+  assert.ok(traj.classList.contains('collapsed'), 'collapsed at first');
+  traj
+    .querySelector(':scope > .trajectory-h')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
+  assert.ok(!traj.classList.contains('collapsed'), 'the header click opens it');
+  return traj;
+}
+
+function testReplayedSummaryStaysVisibleInsideTrajectory() {
+  const {win} = makePage();
+  injectCss(win);
+  replayCompletedSummaryTask(win);
+  const p = summaryPanels(win)[0];
+  assert.ok(p, 'summary panel replays');
+  assert.ok(
+    p.classList.contains('collapsed'),
+    'the replayed summary panel stays in its collapsed digest state',
+  );
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(
+    traj && traj.contains(p) && isDisplayed(win, traj) && !isDisplayed(win, p),
+    'the summary panel sits behind the collapsed Trajectory of the ' +
+      'finished task',
+  );
+  openTrajectory(win);
+  assert.ok(
+    isDisplayed(win, p),
+    'the summary panel (and all its ancestors) is displayed once the ' +
+      'Trajectory is opened',
+  );
+  const desc = p.querySelector(':scope > .tc-summary-desc');
+  assert.ok(
+    isDisplayed(win, desc),
+    'the description must be fully visible after replay',
+  );
+  const plainTc = Array.from(
+    traj.querySelectorAll(':scope > .trajectory-sub > .tc:not(.tc-summary)'),
+  );
+  assert.ok(plainTc.length > 0, 'the Trajectory holds the plain panels');
+  assert.ok(
+    plainTc.every(
+      el => el.classList.contains('collapsed') && isDisplayed(win, el),
+    ),
+    'non-summary panels of a replayed task are folded inside the ' +
+      'Trajectory, shown when it is open',
+  );
+  win.close();
+  console.log('  ok - replayed summary and plain panels sit in the Trajectory');
+}
+
+function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
+  const {win} = makePage();
+  injectCss(win);
+  replayCompletedSummaryTask(win);
+  openTrajectory(win);
+  const p = summaryPanels(win)[0];
+  const hdr = p.querySelector('.tc-h');
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(!p.classList.contains('collapsed'), 'header click expands');
+  const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
+  assert.strictEqual(nested.length, 8, 'the prompt and 7 tool panels');
+  for (const el of nested) {
+    assert.ok(
+      isDisplayed(win, el),
+      'every adopted panel must be visible once the summary is expanded',
+    );
+  }
+  win.close();
+  console.log('  ok - adopted panels reveal after manual expand post-replay');
+}
+
+function testAdoptedPanelKeepsOwnCollapsePreview() {
+  const {win} = makePage();
+  injectCss(win);
+  send(win, {type: 'status', running: true});
+  sendToolPanels(win, 6);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const hdr = p.querySelector(':scope > .tc-h');
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  // The newest adopted tool panel: every tool panel starts folded,
+  // and this one keeps its own header preview inside the summary.
+  const nestedPanel = p.querySelector(
+    ':scope > .summary-sub > .tc:last-of-type',
+  );
+  assert.ok(
+    nestedPanel.classList.contains('collapsed'),
+    'precondition: the adopted panel starts folded',
+  );
+  const nestedHdr = nestedPanel.querySelector(':scope > .tc-h');
+  const nestedPrev = nestedHdr.querySelector('.collapse-preview');
+  assert.ok(
+    (nestedPrev.textContent || '').length > 0,
+    'a collapsed adopted panel fills its own header preview',
+  );
+  assert.notStrictEqual(
+    win.getComputedStyle(nestedPrev).getPropertyValue('display').trim(),
+    'none',
+    'the adopted panel preview must stay visible (only the summary ' +
+      "panel's OWN preview is suppressed)",
+  );
+  const ownPrev = hdr.querySelector('.collapse-preview');
+  assert.strictEqual(
+    win.getComputedStyle(ownPrev).getPropertyValue('display').trim(),
+    'none',
+    "the summary panel's own header preview stays suppressed",
+  );
+  win.close();
+  console.log('  ok - adopted panel keeps its own collapse preview');
+}
+
+function testReplayWithTwoSummariesSegmentsCorrectly() {
+  const {win} = makePage();
+  const events = [{type: 'prompt', text: 'replayed task'}];
+  for (let i = 0; i < 8; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/a' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: 'first'});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  for (let i = 0; i < 3; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/b' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'y' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: 'second'});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  events.push({type: 'result', text: 'done', summary: 'done', success: true});
+  send(win, {
+    type: 'task_events',
+    task: 'replayed task',
+    task_id: 43,
+    events: events,
+  });
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 2, 'both summaries replay');
+  const first = panels[0];
+  const second = panels[1];
+  assert.strictEqual(
+    first.querySelector(':scope > .summary-sub').children.length,
+    9,
+    'first replayed summary adopts the prompt and its full 8-panel segment',
+  );
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    3,
+    'second replayed summary adopts only the 3 panels after the first',
+  );
+  assert.ok(
+    !second.contains(first),
+    'the second replayed summary must not swallow the first',
+  );
+  win.close();
+  console.log('  ok - replay with two summaries segments correctly');
+}
+
+function testRcResultPanelIsBoundary() {
+  const {win} = makePage();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 2);
+  send(win, {type: 'result', text: 'partial', summary: 'partial'});
+  sendToolPanels(win, 2, 50);
+  send(win, {type: 'tool_call', name: 'summary', description: DESC});
+  const p = summaryPanels(win)[0];
+  const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
+  assert.strictEqual(
+    nested.length,
+    2,
+    'adoption must stop at the .rc result panel — got ' + nested.length,
+  );
+  const rc = output(win).querySelector('.rc');
+  assert.ok(rc, 'the result panel exists');
+  assert.ok(
+    !p.contains(rc),
+    'a result (.rc) panel must never be swallowed by a summary',
+  );
+  win.close();
+  console.log('  ok - .rc result panels are a boundary');
+}
+
+function runTests() {
+  testSummaryPanelCreatedAndCollapsed();
+  testDescriptionIsDirectChildWithFullText();
+  testNestsAllPanelsBackToPromptInOrder();
+  testAdjacentTaskIsBoundarySystemPromptIsNot();
+  testWelcomeBlockNeverAdopted();
+  testNoPrecedingPanels();
+  testEmptyDescription();
+  testDescriptionFullyVisibleWhileCollapsedViaCss();
+  testCollapsePreviewSuppressedForSummary();
+  testHeaderClickTogglesAndKeepsChildren();
+  testSecondSummaryStopsAtEarlierSummaryBoundary();
+  testSummaryImmediatelyAfterSummaryNestsNothing();
+  testManyPanelsBetweenSummariesAllNest();
+  testToolResultLandsInsideCollapsedSummaryPanel();
+  testNonSummaryToolCallUnaffected();
+  testReplayPathNestsAndCollapses();
+  testReplayedSummaryStaysVisibleInsideTrajectory();
+  testAdoptedPanelsRevealAfterManualExpandPostReplay();
+  testAdoptedPanelKeepsOwnCollapsePreview();
+  testReplayWithTwoSummariesSegmentsCorrectly();
+  testRcResultPanelIsBoundary();
+}
+
+try {
+  runTests();
+  console.log('\n21 passed, 0 failed');
+  process.exit(0);
+} catch (err) {
+  console.error('FAIL:', err && err.stack ? err.stack : err);
+  process.exit(1);
+}

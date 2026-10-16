@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server import voice_wake
+from kiss.server import speech
 from kiss.tests.conftest import _seed_voice_models
 
 
@@ -25,11 +25,11 @@ def test_real_cache_entries_are_linked_individually(tmp_path: Path) -> None:
     """Each model dir and archive becomes a symlink; lock files are skipped."""
     real_home = tmp_path / "real"
     real_models = real_home / "models"
-    (real_models / voice_wake.MODEL_NAME).mkdir(parents=True)
-    (real_models / voice_wake.MODEL_NAME / "README").write_text("model\n")
-    archive = real_models / f"{voice_wake.MODEL_NAME}.tar.gz"
+    (real_models / speech.MODEL_NAME).mkdir(parents=True)
+    (real_models / speech.MODEL_NAME / "README").write_text("model\n")
+    archive = real_models / f"{speech.MODEL_NAME}.tar.gz"
     archive.write_bytes(b"archive")
-    (real_models / f".{voice_wake.MODEL_NAME}.lock").write_text("")
+    (real_models / f".{speech.MODEL_NAME}.lock").write_text("")
     test_home = tmp_path / "test_home"
     test_home.mkdir()
 
@@ -37,13 +37,13 @@ def test_real_cache_entries_are_linked_individually(tmp_path: Path) -> None:
 
     seeded = test_home / "models"
     assert sorted(p.name for p in seeded.iterdir()) == [
-        voice_wake.MODEL_NAME,
+        speech.MODEL_NAME,
         archive.name,
     ]
     assert all(p.is_symlink() for p in seeded.iterdir())
     # The product's own checks see a complete model and a cached archive.
-    assert voice_wake._ensure_downloaded_model(seeded, voice_wake.MODEL_NAME) == (
-        seeded / voice_wake.MODEL_NAME
+    assert speech._ensure_downloaded_model(seeded, speech.MODEL_NAME) == (
+        seeded / speech.MODEL_NAME
     )
     assert (seeded / archive.name).is_file()
     assert (seeded / archive.name).read_bytes() == b"archive"
@@ -58,13 +58,13 @@ def test_real_cache_entries_are_linked_individually(tmp_path: Path) -> None:
 def test_relative_real_home_links_resolve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A relative pre-override ``KISS_HOME`` still yields working links."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "rel_home" / "models" / voice_wake.MODEL_NAME).mkdir(parents=True)
+    (tmp_path / "rel_home" / "models" / speech.MODEL_NAME).mkdir(parents=True)
     test_home = tmp_path / "test_home"
     test_home.mkdir()
 
     _seed_voice_models(str(test_home), Path("rel_home"))
 
-    link = test_home / "models" / voice_wake.MODEL_NAME
+    link = test_home / "models" / speech.MODEL_NAME
     assert link.is_symlink()
     assert link.is_dir()
     assert Path(os.readlink(link)).is_absolute()

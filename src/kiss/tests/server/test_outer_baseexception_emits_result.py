@@ -7,7 +7,7 @@
 Symptom: the user runs a long task that completes meaningful work
 (e.g. the agent finishes a ``finish(is_continue=True, success=False,
 summary="...")`` paused continuation and persists a deliverable
-file), but the VS Code chat panel renders the task outcome as
+file), but the chat page renders the task outcome as
 ``"(no result)"`` even though a real result summary was computed and
 persisted in ``task_history``.
 
@@ -26,7 +26,7 @@ it never broadcasts a ``type: result`` event — only the cleanup
 ``task_error`` / ``task_interrupted``), which is NOT a ``result``
 event.
 
-Consequence: the webview (``main.js:1939``) reads the result text
+Consequence: the chat page (``main.js:1939``) reads the result text
 from a ``type: result`` event and falls back to ``"(no result)"``
 when none was received, masking the real summary persisted in
 ``task_history.result``.
@@ -67,9 +67,9 @@ class _CustomBaseException(BaseException):
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _drive_run_task_with_base_exception(
@@ -95,7 +95,7 @@ def _drive_run_task_with_base_exception(
 
     server.printer.broadcast = capture  # type: ignore[assignment]
 
-    agent = ChatSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar")
     state = AgentState(
         f"state-{tab_id}",
         agent=agent,
@@ -167,7 +167,7 @@ class TestOuterBaseExceptionEmitsResult(TestCase):
 
         Before the fix the outer ``except BaseException`` block
         recomputes ``result_summary`` but never broadcasts
-        ``type: result``, so the VS Code webview displays
+        ``type: result``, so the chat page displays
         ``"(no result)"`` instead of the recovered summary.
         """
         events = _drive_run_task_with_base_exception(
@@ -178,7 +178,7 @@ class TestOuterBaseExceptionEmitsResult(TestCase):
         result_events = [e for e in events if e.get("type") == "result"]
         assert result_events, (
             "outer BaseException path did not broadcast a `type: result` "
-            "event; the VS Code webview will fall back to `(no result)` "
+            "event; the chat page will fall back to `(no result)` "
             f"in main.js. Broadcast types observed: "
             f"{[e.get('type') for e in events]!r}"
         )

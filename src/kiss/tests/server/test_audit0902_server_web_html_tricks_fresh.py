@@ -8,11 +8,11 @@
 and served those bytes for every later ``GET /``.  The page embeds
 ``window.__TRICKS__`` (the Inject-instruction panel's list), so a user
 who edits ``~/.kiss/MY_INJECTION.md`` while the daemon runs saw the
-OLD list in the remote webapp until the daemon restarted — while the
+OLD list in the chat page until the daemon restarted — while the
 same daemon's ghost-text ``trick`` completions (``tricks.read_tricks``
-is re-read on every keystroke) and the VS Code webview (which rebuilds
-the page per tab) already offered the NEW trick.  Two surfaces of one
-list disagreeing is exactly the stale-cache inconsistency this pins:
+is re-read on every keystroke) already offered the NEW trick.  Two
+views of one list disagreeing is exactly the stale-cache inconsistency
+this pins:
 after the file changes, the next page load must carry the new trick,
 and the page must agree with the daemon's own completion source.
 """
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
@@ -95,7 +95,7 @@ class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
 
     def _daemon_trick_completions(self, query: str) -> list[str]:
         printer = _RecordingPrinter()
-        backend = self.server._vscode_server
+        backend = self.server._agent_server
         saved = backend.printer
         backend.printer = printer  # type: ignore[assignment]
         try:

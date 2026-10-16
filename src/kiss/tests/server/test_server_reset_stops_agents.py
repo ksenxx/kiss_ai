@@ -17,7 +17,7 @@ Unlike the in-process tests in ``test_server_reset.py`` (which replace
 the self-``SIGTERM`` with a recorder), this test spawns a **real**
 ``RemoteAccessServer.start()`` daemon in a child process, starts a real
 in-flight agent worker thread inside it, drives the very same
-``serverReset`` command a webview OK click produces over the real local
+``serverReset`` command a chat-page OK click produces over the real local
 WSS endpoint, and lets the real ``SIGTERM`` → graceful loop-shutdown →
 shutdown-``finally`` machinery run to completion.
 
@@ -94,9 +94,9 @@ server = RemoteAccessServer(
 
 from kiss.server import agent_state
 
-vscode = server._vscode_server
+agent_server = server._agent_server
 tab_id = "reset-e2e-tab"
-agent = ChatSorcarAgent("Sorcar VS Code")
+agent = ChatSorcarAgent("Sorcar")
 agent_state.register(
     agent_state.AgentState(
         "reset-e2e-prekey",
@@ -153,7 +153,7 @@ agent.run = fake_run
 # _resolve_run_state finds the pre-registered state via find_by_tab and
 # installs stop_event / user_answer_queue / task_thread itself.
 worker = threading.Thread(
-    target=vscode._run_task,
+    target=agent_server._run_task,
     args=({
         "type": "run",
         "prompt": "reset-server-e2e",
@@ -263,7 +263,7 @@ class TestServerResetStopsRunningAgents(TestCase):
         self._wait_for(task_id_file.exists, 30.0, "task row to be registered")
 
     def _send_server_reset(self) -> None:
-        """Drive EXACTLY what the webview OK button produces.
+        """Drive EXACTLY what the chat page's OK button produces.
 
         Sends a ``serverReset`` command on the daemon's local WSS endpoint
         and waits for the ``server-reset-restarting`` acknowledgement.

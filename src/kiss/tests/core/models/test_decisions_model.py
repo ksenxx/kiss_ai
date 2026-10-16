@@ -341,14 +341,14 @@ def test_token_counts_default_to_zero_for_odd_responses() -> None:
 
 
 def test_catalog_flags_jev_as_decisions_only() -> None:
-    """Both Jev catalog entries are decisions models and nothing else."""
-    for name in (JEV, "openrouter/typesafe/jev-1.13"):
+    """All Jev catalog entries are decisions models and nothing else."""
+    for name in (JEV, "openrouter/typesafe/jev-1.13", "openrouter/typesafe/jev-1.14"):
         info = MODEL_INFO[name]
         assert info.is_decisions_supported is True
         assert (info.is_generation_supported, info.is_function_calling_supported) == (False, False)
         assert info.is_embedding_supported is False
         assert (info.context_length, info.input_price_per_1M, info.output_price_per_1M) == (
-            64000,
+            262144,
             0.042,
             0.0,
         )

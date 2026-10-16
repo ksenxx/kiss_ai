@@ -15,12 +15,13 @@ coverage gaps) cannot silently change it:
   paths, and the raw ``HEAD`` 200/empty-body health-check reply from
   ``_HeadAwareServerConnection``.  (The exact ``/media/`` static
   file-bytes/MIME check reads the real media asset, so it lives in
-  ``kiss.tests.agents.vscode.test_simplification_lockdown_web_server``.)
-* Silent dropping of VS Code-only webview commands
-  (``notificationAction``, ``sizeReport``) on a live server connection,
-  contrasted with the ``Unknown command`` error broadcast for genuinely
-  unknown commands.
-* ``translate_webview_command``: pass-through of normal commands and
+  ``kiss.tests.webapp.test_simplification_lockdown_web_server``.)
+* A local ``openFile`` of a missing file answers with a
+  ``fileContent`` carrying ``error`` and never an ``error`` event,
+  contrasted with
+  the ``Unknown command`` error broadcast for genuinely unknown
+  commands.
+* ``translate_client_command``: pass-through of normal commands and
   the legacy ``resumeSession`` ``id`` -> ``chatId`` rename.
 * ``_version_tuple`` / ``_compare_versions`` ordering semantics (guards
   the planned collapse into a single ``_is_newer`` helper).
@@ -42,7 +43,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.server.sorcar import translate_webview_command
+from kiss.server.sorcar import translate_client_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
@@ -185,32 +186,26 @@ class TestHttpEndpointMatrix(_ServerTestBase):
         self.assertIn('class="remote-chat light-theme"', html)
 
 
-class TestVscodeOnlyCommandsDropped(_ServerTestBase):
-    """VS Code-only webview commands must be silently dropped."""
+class TestClientOnlyCommandsDropped(_ServerTestBase):
+    """Client-only commands (such as ``openFile``) must be silently dropped."""
 
-    async def test_vscode_only_commands_dropped_unknown_command_errors(
+    async def test_local_open_file_no_error_unknown_command_errors(
         self,
     ) -> None:
-        """``notificationAction``/``sizeReport``/local ``openFile``
-        produce no ``error`` event; an unknown command produces exactly
-        the ``Unknown command`` error broadcast.
+        """A local ``openFile`` produces no ``error`` event; an unknown
+        command produces exactly the ``Unknown command`` error broadcast.
 
         Commands on one connection are dispatched strictly in order, so
-        any (erroneous) broadcast caused by the VS Code-only commands
-        would arrive before the unknown-command error sentinel.
-        ``openFile`` is served to local (VS Code) clients too (the
-        daemon resolves file links for every surface and answers a
-        VS Code window with ``openResolvedFile``, carrying its own
-        ``error`` field for a missing file); it must never surface as
-        an ``error`` event.
+        any (erroneous) broadcast caused by ``openFile`` would arrive
+        before the unknown-command error sentinel.  The daemon answers
+        with a ``fileContent`` carrying its own ``error`` field for a
+        missing file; it must never surface as an ``error`` event.
         """
         reader, writer = await open_local_connection(
             self.server, limit=16 * 1024 * 1024,
         )
         try:
             for cmd in (
-                {"type": "notificationAction", "action": "openTab"},
-                {"type": "sizeReport", "width": 100, "height": 100},
                 {"type": "openFile", "path": "/tmp/nonexistent.txt"},
                 {"type": "unknownCmdLockdownXyz"},
             ):
@@ -233,8 +228,6 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
             )
             for msg in seen:
                 text = str(msg.get("text", ""))
-                self.assertNotIn("notificationAction", text)
-                self.assertNotIn("sizeReport", text)
                 self.assertNotIn("openFile", text)
         finally:
             writer.close()
@@ -242,20 +235,20 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
                 await writer.wait_closed()
 
 
-class TestWebviewCommandTranslation(unittest.TestCase):
-    """Lock down ``translate_webview_command`` translations."""
+class TestClientCommandTranslation(unittest.TestCase):
+    """Lock down ``translate_client_command`` translations."""
 
     def test_normal_command_passes_through_unchanged(self) -> None:
-        """A regular webview command is returned unchanged."""
+        """A regular client command is returned unchanged."""
         cmd = {"type": "userAnswer", "answer": "yes", "tabId": "t1"}
         self.assertEqual(
-            translate_webview_command(dict(cmd)),
+            translate_client_command(dict(cmd)),
             cmd,
         )
 
     def test_resume_session_id_renamed_to_chat_id(self) -> None:
         """Legacy ``resumeSession`` ``id`` is renamed to ``chatId``."""
-        out = translate_webview_command(
+        out = translate_client_command(
             {"type": "resumeSession", "id": "abc123", "tabId": "t2"},
         )
         self.assertEqual(
@@ -267,7 +260,7 @@ class TestWebviewCommandTranslation(unittest.TestCase):
     def test_resume_session_with_chat_id_untouched(self) -> None:
         """``resumeSession`` already carrying ``chatId`` is not modified."""
         cmd = {"type": "resumeSession", "id": "old", "chatId": "new"}
-        self.assertEqual(translate_webview_command(dict(cmd)), cmd)
+        self.assertEqual(translate_client_command(dict(cmd)), cmd)
 
 
 class TestVersionComparison(unittest.TestCase):

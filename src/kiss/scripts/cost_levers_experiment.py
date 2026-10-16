@@ -79,7 +79,7 @@ READ_TASK = (
     "Using only the Read tool (no Bash), describe the module structure of these "
     "three files in at most 12 bullet points total, then call finish: "
     "src/kiss/agents/sorcar/sorcar_agent.py, src/kiss/agents/sorcar/persistence.py, "
-    "src/kiss/agents/vscode/media/main.js. Read each file at most twice."
+    "src/kiss/webapp/media/main.js. Read each file at most twice."
 )
 REVIEW_TASK = (
     "Review src/kiss/core/context_compaction.py for bugs. Read the file with the "

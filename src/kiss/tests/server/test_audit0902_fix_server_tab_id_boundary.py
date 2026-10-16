@@ -32,7 +32,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import open_local_connection
@@ -98,7 +98,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             return {st.tab_id for st in agent_state.agent_states.values()}
 
     def _assert_no_backend_trace(self) -> None:
-        backend = self.server._vscode_server
+        backend = self.server._agent_server
         self.assertEqual(self._tab_ids_with_state(), set())
         self.assertFalse(backend.tab_registry.has_tab(CANON_TAB))
         self.assertNotIn(RAW_TAB, backend._tab_chat_views)
@@ -140,8 +140,8 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             self.assertEqual(clear["tabId"], CANON_TAB)
             await self._wait_task_threads_dead()
             self.assertEqual(self._tab_ids_with_state(), {CANON_TAB})
-            self.assertIn(CANON_TAB, self.server._vscode_server._tab_chat_views)
-            self.assertNotIn(RAW_TAB, self.server._vscode_server._tab_chat_views)
+            self.assertIn(CANON_TAB, self.server._agent_server._tab_chat_views)
+            self.assertNotIn(RAW_TAB, self.server._agent_server._tab_chat_views)
 
             # Close with the canonical id every client actually shows.
             await ws.send(json.dumps({"type": "closeTab", "tabId": CANON_TAB}))
@@ -205,7 +205,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             return line.decode("utf-8")
 
         try:
-            # A chat webview announces ``ready`` before anything else;
+            # A chat page announces ``ready`` before anything else;
             # the daemon answers with the (empty) registry snapshot.
             writer.write(
                 (json.dumps({"type": "ready", "tabId": "placeholder"}) + "\n")
@@ -228,13 +228,9 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
                 }
             # ONE connection's interest set holds the opened tab,
             # keyed by the canonical id (the padded spelling never
-            # reaches the bookkeeping), and the talk fan-out counts
-            # the tab as shown by the attached local webview.
+            # reaches the bookkeeping).
             self.assertEqual(
                 list(local_tabs.values()), [{"placeholder", CANON_TAB}],
-            )
-            self.assertEqual(
-                printer.shown_local_tabs([CANON_TAB]), {CANON_TAB},
             )
 
             writer.write(
@@ -244,13 +240,6 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             await writer.drain()
             tabs = await self._recv_until(recv, "tabs_state")
             self.assertEqual(tabs["tabs"], [])
-            # The close prunes the interest entry and, decisively,
-            # removes the tab from the registry: the fan-out no longer
-            # counts it as shown.
-            with printer._ws_lock:
-                interest = [set(t) for t in printer._local_tab_sets.values()]
-            self.assertEqual(interest, [{"placeholder"}])
-            self.assertEqual(printer.shown_local_tabs([CANON_TAB]), set())
         finally:
             writer.close()
             await writer.wait_closed()

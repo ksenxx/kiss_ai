@@ -4,7 +4,7 @@
 # add your name here
 """The launch phase line ("Classifying task…") around a task launch.
 
-A full-chain run: ``VSCodeServer._run_task`` with the classifier ON,
+A full-chain run: ``AgentServer._run_task`` with the classifier ON,
 a stand-in model endpoint answering the classifier call and the
 agent's turn, an isolated ``~/.kiss`` and a real git repo.  While the
 classifier (a blocking model round trip) is out the user sees
@@ -28,7 +28,7 @@ from kiss.agents.sorcar.task_classifier import (
 )
 from kiss.core import config as config_module
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -94,7 +94,7 @@ class TestLaunchPhases(unittest.TestCase):
         self._lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
+        self.server = AgentServer(printer=self.printer)
         self.server.work_dir = str(self.repo)
 
     def tearDown(self) -> None:

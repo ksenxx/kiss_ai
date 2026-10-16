@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ast
 import json
-import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -26,13 +25,8 @@ import pytest
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.seas.rsi7d import sea_tuning
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.persistence import (
-    _add_task,
-    _append_chat_event,
-    _flush_chat_events,
-    _save_task_result,
-)
 from kiss.core.tool_verdict import ALLOW, refuse
+from kiss.tests.agents.seas.conftest import fake_checkout, git, persist_task, registered
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
@@ -87,9 +81,7 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: Non
     ``export_sea_evals`` and the acceptance test read every persisted
     ``tunedemo`` run, so the test starts with none (``empty_history``).
     """
-    seas = tmp_path / "src" / "kiss" / "agents" / "seas"
-    (seas / "tunedemo").mkdir(parents=True)
-    (seas / "tunedemo" / "tunedemo_sea.py").write_text(DEMO_SEA, encoding="utf-8")
+    seas = fake_checkout(tmp_path, {"tunedemo": DEMO_SEA})
     (seas.parents[1] / "SYSTEM.md").write_text("You are a test Sorcar.\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     log = sea._change_log()
@@ -102,10 +94,9 @@ def persist_run(
     task: str, result: str, success: bool, cost: float, duration_s: float, **extra: Any
 ) -> str:
     """Persist a finished ``demo`` run (the daemon records the SEA in the ``sea`` column)."""
+    text = f"success: {'true' if success else 'false'}\nsummary: {result}"
     now_ms = int(time.time() * 1000)
-    payload: dict[str, Any] = {
-        "model": "model-a",
-        "work_dir": "/work/dir",
+    columns: dict[str, Any] = {
         "sea": "tunedemo",
         "startTs": now_ms - int(duration_s * 1000),
         "endTs": now_ms,
@@ -114,12 +105,7 @@ def persist_run(
         "tokens": 1000,
         **extra,
     }
-    task_id, _chat = _add_task(task, extra=payload)
-    text = f"success: {'true' if success else 'false'}\nsummary: {result}"
-    _append_chat_event({"type": "result", "text": text}, task_id=task_id)
-    _flush_chat_events(task_id)
-    _save_task_result(text, task_id=task_id)
-    return task_id
+    return persist_task(task, [{"type": "result", "text": text}], text, **columns)
 
 
 # --- pure functions -------------------------------------------------------
@@ -793,7 +779,7 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
     # --show-toplevel``, which looks at parent directories too), so make
     # the fixture a real repository rooted at its top.
     root = checkout.parents[3]
-    assert subprocess.run(["git", "init", "-q", str(root)], check=False).returncode == 0
+    git(root, "init", "-q")
     daemon = _EditingDaemon(path)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     try:
@@ -957,21 +943,11 @@ class Sea(BaseSea):
 def test_own_task_id_reads_the_persisted_id() -> None:
     """The change log names the rsi7d task by the id ``ChatSorcarAgent`` persists
     (``last_task_id``), found through ``current_agent`` on the task thread."""
-    import threading
-
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-    from kiss.server import agent_state
 
     assert sea._own_task_id() == ""
     agent = ChatSorcarAgent("rsi7d-tuning-test")
     agent._last_task_id = "persisted-rsi7d-task"
-    state = agent_state.AgentState(
-        "rsi7d-tuning-test", agent=agent, task_thread=threading.current_thread(),
-        is_task_active=True,
-    )
-    agent_state.register(state)
-    try:
+    with registered(agent, "rsi7d-tuning-test", is_task_active=True):
         assert agent.last_task_id == "persisted-rsi7d-task"
         assert sea._own_task_id() == "persisted-rsi7d-task"
-    finally:
-        agent_state.unregister(state.task_id, state)

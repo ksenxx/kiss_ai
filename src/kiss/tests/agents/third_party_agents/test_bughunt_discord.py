@@ -20,7 +20,6 @@ the actual HTTP traffic the backend produces:
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -28,22 +27,15 @@ import pytest
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend, _config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 
-class _DiscordHandler(BaseHTTPRequestHandler):
+class _DiscordHandler(RecordingHandler):
     """Serves Discord-shaped JSON responses and records requests."""
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        pass
-
-    def _respond(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
     def _record(self, body: Any = None) -> None:
         parts = urlsplit(self.path)
@@ -56,17 +48,17 @@ class _DiscordHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # noqa: N802
         self._record()
         path = urlsplit(self.path).path
         if path == "/users/@me":
-            self._respond(200, {"id": "BOT1", "username": "bot", "discriminator": "0001"})
+            self._json(200, {"id": "BOT1", "username": "bot", "discriminator": "0001"})
         elif path == "/users/@me/guilds":
-            self._respond(200, [{"id": "G1", "name": "guild"}])
+            self._json(200, [{"id": "G1", "name": "guild"}])
         elif path == "/guilds/G1/channels":
-            self._respond(200, [{"id": "111", "name": "general", "type": 0}])
+            self._json(200, [{"id": "111", "name": "general", "type": 0}])
         elif path == "/channels/111/messages":
-            self._respond(
+            self._json(
                 200,
                 [
                     {
@@ -84,22 +76,22 @@ class _DiscordHandler(BaseHTTPRequestHandler):
                 ],
             )
         else:
-            self._respond(404, {"message": "404: Not Found", "code": 0})
+            self._json(404, {"message": "404: Not Found", "code": 0})
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b""
         body = json.loads(raw) if raw else None
         self._record(body)
         path = urlsplit(self.path).path
         if path.startswith("/channels/") and path.endswith("/messages"):
-            self._respond(200, {"id": "M1", "channel_id": path.split("/")[2]})
+            self._json(200, {"id": "M1", "channel_id": path.split("/")[2]})
         else:
-            self._respond(404, {"message": "404: Not Found", "code": 0})
+            self._json(404, {"message": "404: Not Found", "code": 0})
 
-    def do_DELETE(self) -> None:
+    def do_DELETE(self) -> None:  # noqa: N802
         self._record()
-        self._respond(403, {"message": "Missing Permissions", "code": 50013})
+        self._json(403, {"message": "Missing Permissions", "code": 50013})
 
 
 @pytest.fixture(scope="class")

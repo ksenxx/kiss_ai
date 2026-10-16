@@ -61,6 +61,7 @@ from kiss.agents.sorcar.relentless_agent import (
     _OFFSET_PUBLISH_LOCK,
     RelentlessAgent,
     _session_usage,
+    publish_usage_offsets,
     resolve_work_dir,
 )
 from kiss.agents.sorcar.sea_commands import model_sea
@@ -355,7 +356,7 @@ def _memory_settings() -> tuple[bool, Path]:
     """Return whether persistent agent memory is enabled and where it lives.
 
     The toggle is the ``use_memory`` key of ``$KISS_HOME/config.json`` (see
-    :data:`kiss.core.vscode_config.DEFAULTS`, default on).  The
+    :data:`kiss.core.user_config.DEFAULTS`, default on).  The
     ``KISS_USE_MEMORY`` environment variable, when non-empty, wins over
     the stored value — ``0``/``false``/``no``/``off`` (any case) disable,
     anything else enables — so one process or test can flip memory
@@ -369,7 +370,7 @@ def _memory_settings() -> tuple[bool, Path]:
         :class:`kiss.core.memoryfield.pages.MemoryDir`).
     """
     from kiss.core.config import kiss_home
-    from kiss.core.vscode_config import load_config
+    from kiss.core.user_config import load_config
 
     cfg = load_config()
     env = os.environ.get("KISS_USE_MEMORY", "").strip().lower()
@@ -501,7 +502,7 @@ def auto_commit_changes(
             commit message (or its fallback) under a ``Result:``
             heading, or ``None`` when unavailable.
         notify_fn: Optional UI callback invoked at two life-cycle
-            points so the chat webview can render toasts:
+            points so the chat page can render toasts:
 
             - ``notify_fn("generating", "")`` immediately before
               *message_fn* runs (typically a slow LLM call) so the
@@ -513,7 +514,7 @@ def auto_commit_changes(
 
             Both hooks are SKIPPED when there is nothing to commit
             (no staged diff after the initial ``stage_all``), so the
-            webview never sees a misleading "Generating commit
+            chat page never sees a misleading "Generating commit
             message" toast without a follow-up.  When
             ``commit_staged`` returns ``False`` after *message_fn*
             (e.g. a pre-commit hook rejected the commit),
@@ -546,7 +547,7 @@ def auto_commit_changes(
     else:
         # Terminal notification for the failure path: without it the
         # sticky "Generating commit message" toast (emitted above)
-        # would linger in the webview forever after e.g. a pre-commit
+        # would linger in the chat page forever after e.g. a pre-commit
         # hook rejection.
         _safe_notify(notify_fn, "failed", "")
     return committed
@@ -555,7 +556,7 @@ def auto_commit_changes(
 def _commit_subject(message: str) -> str:
     """Return the first non-empty line of a commit *message*.
 
-    Used as the subject the chat webview renders inside the
+    Used as the subject the chat page renders inside the
     "Committed <subject>" toast.  Falls back to an empty string when
     the message has no printable line (defensive: in practice the
     fallback message always starts with ``kiss:``).
@@ -649,15 +650,28 @@ def _broadcast_subagent_done(
 
 
 def _notify_subagent_done(
-    printer: Any, sub_task_id: str | None, sub_tab_id: str, model: str = "",
+    printer: Any,
+    sub_task_id: str | None,
+    sub_tab_id: str,
+    model: str = "",
+    parent_tab_id: str = "",
 ) -> None:
     """Broadcast ``subagentDone`` to every tab watching a finished sub-agent.
 
     The targets are the tabs subscribed to *sub_task_id* through the
-    printer's fan-out registry plus the sub-agent's own synthetic
-    *sub_tab_id*.  An empty *sub_task_id* (no ``task_history`` row was
-    allocated, so no ``new_tab`` was ever broadcast) fans out to the
-    synthetic tab only.  Shared by ``run_parallel`` children, ``run_agent``
+    printer's fan-out registry, the tab every surface opened for the
+    sub-agent on its ``new_tab`` — the derived
+    ``{parent_tab_id or 'task'}__sub_{sub_task_id}`` — and the
+    sub-agent's own synthetic *sub_tab_id*.  The derived id matters
+    for a surface whose ``resumeSession`` has not reached the daemon
+    when the child ends (a slow page, a remote machine's stream): it
+    is not a registered viewer yet, and without this signal it would
+    only learn ``isDone`` from the later ``openSubagentTab`` reply,
+    which marks the tab finished but never closes it — out of sync
+    with the surfaces that did receive ``subagentDone``.  An empty
+    *sub_task_id* (no ``task_history`` row was allocated, so no
+    ``new_tab`` was ever broadcast) fans out to the synthetic tab
+    only.  Shared by ``run_parallel`` children, ``run_agent``
     dispatches, the merge agent and the task-update agent.
 
     Args:
@@ -666,6 +680,9 @@ def _notify_subagent_done(
         sub_tab_id: The sub-agent's synthetic tab id (may be empty).
         model: The model the sub-agent was launched with, restored into
             the watching tabs' pickers.
+        parent_tab_id: The ``parent_tab_id`` the sub-agent's ``new_tab``
+            named (its ``_subagent_info["parent_tab_id"]``); empty for
+            a parentless sub-agent, whose tab is ``task__sub_…``.
     """
     viewer_ids: list[str] = []
     fanout = getattr(printer, "_fanout_targets", None)
@@ -673,8 +690,12 @@ def _notify_subagent_done(
         found = fanout(sub_task_id)
         if isinstance(found, list):
             viewer_ids = [v for v in found if v]
-    if sub_tab_id and sub_tab_id not in viewer_ids:
-        viewer_ids.append(sub_tab_id)
+    extra = [sub_tab_id]
+    if sub_task_id:
+        extra.insert(0, f"{parent_tab_id or 'task'}__sub_{sub_task_id}")
+    for tab in extra:
+        if tab and tab not in viewer_ids:
+            viewer_ids.append(tab)
     _broadcast_subagent_done(printer, viewer_ids, model)
 
 
@@ -705,8 +726,8 @@ def subagent_parent_tab_id_of(parent_agent: Any) -> str:
     ``parent_tab_id``; it is :meth:`SorcarAgent._subagent_parent_tab_id`
     when the parent has it, else the parent's raw ``_tab_id`` (a
     duck-typed parent).  A parent that is itself a sub-agent carries a
-    synthetic ``_tab_id`` no webview has, so stamping that raw id
-    would make every surface drop the child's ``new_tab``.
+    synthetic ``_tab_id`` no chat page has, so stamping that raw id
+    would make every client drop the child's ``new_tab``.
 
     Args:
         parent_agent: The agent spawning the child.
@@ -842,7 +863,7 @@ def _attribute_sub_usage(
             # session-start rebase (``_set_printer_offsets``) also takes,
             # so publishes land in snapshot order and the offsets never
             # decrease.
-            locked_call(_OFFSET_PUBLISH_LOCK, _publish_usage_offsets, agent, printer)
+            locked_call(_OFFSET_PUBLISH_LOCK, publish_usage_offsets, agent, printer)
         except Exception:
             pass
 
@@ -859,31 +880,6 @@ def _first_cleanup_error(
     """
     logger.warning("run cleanup step %s raised", step, exc_info=True)
     return exc if first is None else first
-
-
-def _publish_usage_offsets(agent: Any, printer: Any) -> None:
-    """Publish *agent*'s usage totals as *printer*'s offsets (lock held).
-
-    Args:
-        agent: The agent whose ledger totals are published.
-        printer: Its printer.
-    """
-    # One coherent triple (see _agent_usage): separate property
-    # reads could tear across a concurrent snapshot publish.
-    budget_total, tokens_total, steps_total = _agent_usage(agent)
-    # The offsets belong to the PARENT's task.  This runs on
-    # whatever thread finished the child (a fan-out's tool
-    # thread, but also the ``/update`` worker or a server
-    # thread), so a thread-keyed setter would file them under
-    # that thread's task; name the parent's task when it has one.
-    task_id = str(getattr(agent, "last_task_id", "") or "")
-    set_offsets = getattr(printer, "set_usage_offsets", None)
-    if task_id and callable(set_offsets):
-        set_offsets(task_id, budget_total, tokens_total, steps_total)
-    else:
-        printer.budget_offset = budget_total
-        printer.tokens_offset = tokens_total
-        printer.steps_offset = steps_total
 
 
 def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
@@ -1193,7 +1189,7 @@ class SorcarAgent(RelentlessAgent):
         itself a sub-agent (nested ``run_parallel``, or a ``run_agent``
         dispatch), its ``_tab_id`` is a synthetic id — the fan-out's
         invented one, or the daemon dispatch's ``api-…`` id — which no
-        webview has opened.  Every webview opens a sub-agent's tab
+        chat page has opened.  Every chat page opens a sub-agent's tab
         under the deterministic id ``{parent_tab_id}__sub_{task_id}``
         (``subagentTabIdFor`` in ``media/main.js``; ``task`` stands in
         for a missing parent), and the daemon replays it under the
@@ -1686,9 +1682,9 @@ class SorcarAgent(RelentlessAgent):
         if decisions_tool_available():
             tools.append(make_decide_tool(self))
         # No-op tool letting the model periodically condense its recent
-        # activity.  Chat-webview runs react to the persisted
+        # activity.  Chat-page runs react to the persisted
         # ``tool_call`` event by nesting and collapsing the preceding
-        # event panels (see ``media/main.js``); outside a webview the
+        # event panels (see ``media/main.js``); outside a chat page the
         # call is a harmless no-op.  The every-N-steps cadence is
         # requested by the SYSTEM.md instructions and this tool's
         # docstring only — there is no mechanical enforcement.
@@ -3123,7 +3119,7 @@ class SorcarAgent(RelentlessAgent):
     def _broadcast_commit_notification(
         self, notification_id: str, stage: str, subject: str,
     ) -> None:
-        """Broadcast a commit life-cycle notification to the webview.
+        """Broadcast a commit life-cycle notification to the chat page.
 
         Hook used by :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`.
         Silently no-ops when no printer with a ``broadcast`` method is
@@ -3131,7 +3127,7 @@ class SorcarAgent(RelentlessAgent):
 
         Args:
             notification_id: Toast id shared across the stages of ONE
-                commit, so the webview updates the toast in place.
+                commit, so the chat page updates the toast in place.
             stage: ``"generating"``, ``"committed"`` or ``"failed"``.
             subject: First non-empty line of the commit message (the
                 toast body for ``"committed"``).
@@ -3750,7 +3746,7 @@ class SorcarAgent(RelentlessAgent):
         return not self._wts
 
     def new_chat(self) -> None:
-        """Start afresh (VS Code's 'Clear'), preserving any pending worktree.
+        """Start afresh (the chat page's 'Clear'), preserving any pending worktree.
 
         The warning the preserve sets is flushed to the attached printer
         now: if the user never runs another task on this agent, no later
@@ -4029,8 +4025,8 @@ def main() -> None:
     exactly one of two required, mutually exclusive options: ``-t
     TASK`` runs the given string, and ``-f FILE`` runs the file's
     content as the task.  The agent works in ``$KISS_WORKDIR`` —
-    exported by the ``~/.local/bin/sorcar`` wrapper the VS Code
-    extension installs, so the agent acts on the directory the user
+    exported by the ``~/.local/bin/sorcar`` wrapper the installer
+    writes, so the agent acts on the directory the user
     invoked ``sorcar`` from — falling back to the current directory.
     Exits with status 0 when the agent reports success and 1 otherwise.
     """

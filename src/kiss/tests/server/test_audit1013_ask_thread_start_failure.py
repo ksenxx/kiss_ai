@@ -17,7 +17,7 @@ viewer, recorded into the running task's in-memory recording (so a
 
 The whole scenario runs in a child Python process, from ``_child_main``
 below, against the real delivery path: a real :class:`RemoteAccessServer`
-on a loopback endpoint, a real webview-like local client, a real
+on a loopback endpoint, a real chat-page-like local client, a real
 ``run`` command that starts a real ``ChatSorcarAgent`` task, and the
 ``/ask`` line typed through the real ``appendUserMessage`` command.
 The only replaced piece is the model boundary (``SorcarAgent``'s base
@@ -54,7 +54,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import make_test_tls, open_local_connection
@@ -164,8 +164,8 @@ def _child_main() -> None:
     _persistence._KISS_DIR = kiss_dir
     _persistence._DB_PATH = kiss_dir / "history.db"
     _persistence._db_conn = None
-    vscode_config.CONFIG_DIR = kiss_dir
-    vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+    user_config.CONFIG_DIR = kiss_dir
+    user_config.CONFIG_PATH = kiss_dir / "config.json"
     cast(Any, SorcarAgent.__mro__[1]).run = _blocking_model_boundary
 
     loop = asyncio.new_event_loop()
@@ -221,7 +221,7 @@ def _child_main() -> None:
     live_index = received.index(live)
     echo = _find(received, "prompt", before_ask)
 
-    # Replay of the still-running task: what a webview reload does.
+    # Replay of the still-running task: what a page reload does.
     before_replay = len(received)
     _run_on(loop, _send(writer, {
         "type": "resumeSession", "taskId": task_id, "tabId": TAB_ID,

@@ -7,15 +7,16 @@ Cloudflare URL.
 
 Wherever the server reports the active (Cloudflare tunnel) URL — the
 ``remote_url`` WebSocket broadcast rendered by the settings panel and
-the welcome page, and the ``~/.kiss/remote-url.json`` file polled by
-the VS Code extension — it must also report the ``https://127.0.0.1:PORT``
-URL for the local machine and the ``https://<lan-ip>:PORT`` URLs for
-other devices on the LAN.
+the welcome page, and the ``~/.kiss/remote-url.json`` file written
+by the daemon — it must also report the ``http://127.0.0.1:PORT``
+URL for the local machine (plain HTTP: loopback traffic never leaves
+the machine) and the ``https://<lan-ip>:PORT`` URLs for other devices
+on the LAN.
 
 LAN URLs are advertised only when a LAN client could actually connect:
 the server must be bound to a non-loopback host AND a
-``remote_password`` must be configured (``_process_request`` answers
-non-loopback peers 403 when the password is empty).
+``remote_password`` must be configured (``_process_request``
+answers non-loopback peers 403 when the password is empty).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _IP_CHANGE_DEBOUNCE_TICKS,
     _URL_FILE,
@@ -49,36 +50,36 @@ class TestSaveUrlFileLocalLan(TestCase):
             url_file = Path(td) / "remote-url.json"
             _save_url_file(
                 url_file,
-                "https://localhost:9999",
+                "http://localhost:9999",
                 "https://x.trycloudflare.com",
-                "https://127.0.0.1:9999",
+                "http://127.0.0.1:9999",
                 ["https://192.168.1.5:9999"],
             )
             data = json.loads(url_file.read_text())
-            self.assertEqual(data["local"], "https://localhost:9999")
+            self.assertEqual(data["local"], "http://localhost:9999")
             self.assertEqual(data["tunnel"], "https://x.trycloudflare.com")
-            self.assertEqual(data["loopback"], "https://127.0.0.1:9999")
+            self.assertEqual(data["loopback"], "http://127.0.0.1:9999")
             self.assertEqual(data["lan"], ["https://192.168.1.5:9999"])
 
     def test_optional_fields_omitted(self) -> None:
         """Absent tunnel/loopback/lan leave their keys out (legacy shape)."""
         with tempfile.TemporaryDirectory() as td:
             url_file = Path(td) / "remote-url.json"
-            _save_url_file(url_file, "https://localhost:9999")
+            _save_url_file(url_file, "http://localhost:9999")
             data = json.loads(url_file.read_text())
-            self.assertEqual(data, {"local": "https://localhost:9999"})
+            self.assertEqual(data, {"local": "http://localhost:9999"})
 
     def test_empty_lan_list_omitted(self) -> None:
         """An empty LAN list must not create an empty ``lan`` key."""
         with tempfile.TemporaryDirectory() as td:
             url_file = Path(td) / "remote-url.json"
             _save_url_file(
-                url_file, "https://localhost:9999", None,
-                "https://127.0.0.1:9999", [],
+                url_file, "http://localhost:9999", None,
+                "http://127.0.0.1:9999", [],
             )
             data = json.loads(url_file.read_text())
             self.assertNotIn("lan", data)
-            self.assertEqual(data["loopback"], "https://127.0.0.1:9999")
+            self.assertEqual(data["loopback"], "http://127.0.0.1:9999")
 
 
 class _LiveServerCase(IsolatedAsyncioTestCase):
@@ -120,6 +121,10 @@ class _LiveServerCase(IsolatedAsyncioTestCase):
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         assert resp["type"] == "auth_ok", resp
 
+    async def _send(self, ws: Any, cmd: dict[str, Any]) -> None:
+        """Send *cmd* with the password every frame of a password client carries."""
+        await ws.send(json.dumps({**cmd, "password": self.password}))
+
     async def _recv_remote_url(self, ws: Any) -> dict[str, Any]:
         """Read events until a ``remote_url`` event arrives."""
         for _ in range(10):
@@ -141,19 +146,19 @@ class TestLoopbackOnlyServer(_LiveServerCase):
             f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
-            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
+            await self._send(ws, {"type": "getWelcomeInfo"})
             ev = await self._recv_remote_url(ws)
             self.assertEqual(ev["url"], "https://lan-test.trycloudflare.com")
             self.assertEqual(
-                ev["loopbackUrl"], f"https://127.0.0.1:{self.port}"
+                ev["loopbackUrl"], f"http://127.0.0.1:{self.port}"
             )
             self.assertEqual(ev["lanUrls"], [])
 
     async def test_url_file_has_loopback_no_lan(self) -> None:
         """Startup writes loopback; lan is omitted on a loopback bind."""
         data = json.loads(_URL_FILE.read_text())
-        self.assertEqual(data["local"], f"https://localhost:{self.port}")
-        self.assertEqual(data["loopback"], f"https://127.0.0.1:{self.port}")
+        self.assertEqual(data["local"], f"http://localhost:{self.port}")
+        self.assertEqual(data["loopback"], f"http://127.0.0.1:{self.port}")
         self.assertNotIn("lan", data)
 
     async def test_watchdog_rewrite_keeps_loopback(self) -> None:
@@ -161,7 +166,7 @@ class TestLoopbackOnlyServer(_LiveServerCase):
         _URL_FILE.unlink()
         self.server._watchdog_check_url_file()
         data = json.loads(_URL_FILE.read_text())
-        self.assertEqual(data["loopback"], f"https://127.0.0.1:{self.port}")
+        self.assertEqual(data["loopback"], f"http://127.0.0.1:{self.port}")
 
     async def test_localhost_host_string_also_gated(self) -> None:
         """A host given as the name ``localhost`` yields no LAN URLs."""
@@ -190,18 +195,18 @@ class TestLanCapableServer(_LiveServerCase):
             f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
-            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
+            await self._send(ws, {"type": "getWelcomeInfo"})
             ev = await self._recv_remote_url(ws)
             self.assertEqual(ev["url"], "https://lan-test.trycloudflare.com")
             self.assertEqual(
-                ev["loopbackUrl"], f"https://127.0.0.1:{self.port}"
+                ev["loopbackUrl"], f"http://127.0.0.1:{self.port}"
             )
             self.assertEqual(ev["lanUrls"], self._expected_lan())
 
     async def test_url_file_has_lan_when_ips_exist(self) -> None:
         """Startup writes the lan list when the host has routable IPs."""
         data = json.loads(_URL_FILE.read_text())
-        self.assertEqual(data["loopback"], f"https://127.0.0.1:{self.port}")
+        self.assertEqual(data["loopback"], f"http://127.0.0.1:{self.port}")
         expected = self._expected_lan()
         if expected:
             self.assertEqual(data["lan"], expected)
@@ -266,7 +271,6 @@ class TestLanCapableServer(_LiveServerCase):
             self.assertEqual(self.server._last_ips, new_ips)
             ev = await self._recv_remote_url(ws)
             self.assertEqual(ev["url"], "https://republish.trycloudflare.com")
-            self.assertTrue(ev["tunnelActive"])
             self.assertEqual(
                 ev["lanUrls"], [f"https://192.168.77.2:{self.port}"]
             )

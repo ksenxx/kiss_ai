@@ -21,9 +21,10 @@ Fix
 ``__init__`` no longer builds the SSL context at all — it stores the
 certfile/keyfile paths and defers the work.  ``_bind_listeners`` builds
 the context on a worker thread (``asyncio.to_thread(_create_ssl_context,
-...)``), binds the WSS listener, and only then publishes the local
-endpoint file that same-machine clients (the VS Code extension,
-``run_agent``) read.
+...)``), hands it to every connection of the listener it then binds
+(which serves TLS and, to loopback peers, plain ``ws://`` on one port),
+and only then publishes the local endpoint file that same-machine
+clients (the ``sorcar`` CLI, ``run_agent``) read.
 
 This is an end-to-end test: it monkey-patches
 ``kiss.server.web_server._create_ssl_context`` to add a deterministic
@@ -181,7 +182,7 @@ class SslBuildOffLoopTest(IsolatedAsyncioTestCase):
             mode = stat.S_IMODE(self.endpoint_file.stat().st_mode)
             assert mode == 0o600, f"endpoint file mode {oct(mode)}, expected 0o600"
         data = json.loads(self.endpoint_file.read_text())
-        assert data["url"] == f"wss://127.0.0.1:{self.server.port}/ws"
+        assert data["url"] == f"ws://127.0.0.1:{self.server.port}/ws"
         assert data["token"] == self.server.local_token
 
         reader, writer = await open_local_connection(self.server)

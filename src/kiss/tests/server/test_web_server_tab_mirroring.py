@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the server-canonical shared tab registry.
 
-Every connected client — VS Code webviews and remote web apps — must
+Every connected client — every open chat page, local or remote — must
 show the SAME set of tabs with the same titles, order and chat
 bindings.  The daemon owns the canonical tab registry, mutates it on
 ``openTab`` / ``closeTab`` / ``run`` / ``resumeSession`` / ``ready``
@@ -42,7 +42,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vc
+import kiss.core.user_config as vc
 from kiss.server import agent_state
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import (
@@ -591,7 +591,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         """[3] A run from ANY origin mirrors the task-panel text.
 
         The common server-side run path must broadcast ``setTaskText``
-        so VS Code-originated runs behave exactly like remote-web
+        so ``run``-originated tasks behave exactly like remote-web
         ``submit`` ones.
         """
         ws_a = await self._connect_ok()

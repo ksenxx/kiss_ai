@@ -14,7 +14,7 @@ One transient event carries this, ``modelPick``, whose ``source`` says
 what the model means: ``"agent"`` while the agent has the picker, and
 ``"restore"`` when it gives it back.
 
-These tests drive the real daemon: a real :class:`VSCodeServer`, the
+These tests drive the real daemon: a real :class:`AgentServer`, the
 real task pipeline with a real agent, and the real ``JsonPrinter``
 broadcast routing (via :class:`MemoryPrinter`, which mirrors it).
 """
@@ -30,14 +30,14 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-import kiss.core.vscode_config as vscode_config
+import kiss.core.user_config as user_config
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
 from kiss.core.models.model_info import get_available_models
 from kiss.core.models.model_info import model as model_factory
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo
 
@@ -276,7 +276,7 @@ class TestSubagentPickerHandback(unittest.TestCase):
 
 
 class _ServerTestCase(unittest.TestCase):
-    """Base: a real ``VSCodeServer`` on an isolated DB / config / repo."""
+    """Base: a real ``AgentServer`` on an isolated DB / config / repo."""
 
     def setUp(self) -> None:
         models = get_available_models()
@@ -295,13 +295,13 @@ class _ServerTestCase(unittest.TestCase):
         th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         self._saved_config = (
-            vars(vscode_config).get("CONFIG_DIR"),
-            vars(vscode_config).get("CONFIG_PATH"),
+            vars(user_config).get("CONFIG_DIR"),
+            vars(user_config).get("CONFIG_PATH"),
         )
-        vscode_config.CONFIG_DIR = kiss_dir
-        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
+        user_config.CONFIG_DIR = kiss_dir
+        user_config.CONFIG_PATH = kiss_dir / "config.json"
         init_repo(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
         real_broadcast = self.server.printer.broadcast
@@ -322,13 +322,13 @@ class _ServerTestCase(unittest.TestCase):
         # The module resolves these lazily when unset, so an absent
         # original must be deleted rather than pinned to a stale value.
         if saved_dir is None:
-            del vscode_config.CONFIG_DIR
+            del user_config.CONFIG_DIR
         else:
-            vscode_config.CONFIG_DIR = saved_dir
+            user_config.CONFIG_DIR = saved_dir
         if saved_path is None:
-            del vscode_config.CONFIG_PATH
+            del user_config.CONFIG_PATH
         else:
-            vscode_config.CONFIG_PATH = saved_path
+            user_config.CONFIG_PATH = saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def picks(self) -> list[dict[str, Any]]:

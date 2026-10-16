@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for remaining uncovered branches in sorcar/ and vscode/.
+"""Integration tests for remaining uncovered branches in sorcar/ and server/.
 
 Targets:
   persistence.py: lines 125→129, 380→385, 403→404

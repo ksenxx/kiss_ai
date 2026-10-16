@@ -44,16 +44,16 @@ rinfo() { printf '\033[0;36m[%s]\033[0m %s\n' "$(hostname -s 2>/dev/null || host
 # --- The local endpoint ---------------------------------------------------------
 code=""
 for _ in $(seq 1 "$LOCAL_TRIES"); do
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$PORT/" 2>/dev/null || true)"
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null || true)"
     [ "$code" = "200" ] && break
     sleep 1
 done
 if [ "$code" != "200" ]; then
-    echo "ERROR: kiss-web did not answer on https://127.0.0.1:$PORT" >&2
+    echo "ERROR: kiss-web did not answer on http://127.0.0.1:$PORT" >&2
     tail -20 "$LOG_FILE" >&2 2>/dev/null || true
     exit 1
 fi
-rinfo "kiss-web answers on https://127.0.0.1:$PORT"
+rinfo "kiss-web answers on http://127.0.0.1:$PORT"
 
 # --- The public URL -------------------------------------------------------------
 # The file is rewritten if the tunnel is replaced, so it is re-read on every

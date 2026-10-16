@@ -36,7 +36,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.core import vscode_config
+from kiss.core import user_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, run_git
@@ -116,11 +116,11 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         persistence._DB_PATH = self.home / "history.db"
         persistence._db_conn = None
         self._saved_cfg = (
-            getattr(vscode_config, "CONFIG_DIR", None),
-            getattr(vscode_config, "CONFIG_PATH", None),
+            getattr(user_config, "CONFIG_DIR", None),
+            getattr(user_config, "CONFIG_PATH", None),
         )
-        vscode_config.CONFIG_DIR = self.home  # type: ignore[attr-defined]
-        vscode_config.CONFIG_PATH = self.home / "config.json"  # type: ignore[attr-defined]
+        user_config.CONFIG_DIR = self.home  # type: ignore[attr-defined]
+        user_config.CONFIG_PATH = self.home / "config.json"  # type: ignore[attr-defined]
         (self.home / "config.json").write_text(
             json.dumps({}),
             encoding="utf-8",
@@ -140,7 +140,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
             ("CONFIG_DIR", "CONFIG_PATH"), self._saved_cfg, strict=True,
         ):
             if value is not None:
-                setattr(vscode_config, name, value)
+                setattr(user_config, name, value)
         if self._saved_env is None:
             os.environ.pop("KISS_HOME", None)
         else:
@@ -178,7 +178,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
         assert GitWorktreeOps.save_original_branch(self.repo, branch, "main")
         (wt_dir / _MERGED_FILE).write_text("agent work\n", encoding="utf-8")
-        agent = ChatSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar")
         agent._wt = GitWorktree(
             repo_root=self.repo,
             branch=branch,
@@ -224,7 +224,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
         def _merge() -> None:
             try:
-                self.server._vscode_server._handle_command(command)
+                self.server._agent_server._handle_command(command)
             finally:
                 merge_returned.set()
 

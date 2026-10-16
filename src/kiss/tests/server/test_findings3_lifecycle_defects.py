@@ -37,7 +37,7 @@ S3-14  (verification) ``JsonPrinter.cleanup_task`` prunes the task's
        subscriber set after a linger period instead of retaining it
        for the tab's whole lifetime.
 
-The tests use real threads, a real ``VSCodeServer``, a real
+The tests use real threads, a real ``AgentServer``, a real
 ``JsonPrinter``, and a real temporary SQLite database.  The only
 harness device is the repo-standard parent-run proxy (also used by
 ``test_task_start_refreshes_history.py``) that lets the FULL production
@@ -61,7 +61,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer, _subagent_is_done
+from kiss.server.server import AgentServer, _subagent_is_done
 from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
@@ -92,7 +92,7 @@ class TestStartupWindowInput(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.tab_id = "s305-tab"
         self.release = threading.Event()
         worker = threading.Thread(target=self.release.wait, daemon=True)
@@ -182,7 +182,7 @@ class TestSubagentDoneConsistency(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.task_id = "s309-task-row-id"
         self.release = threading.Event()
 
@@ -270,7 +270,7 @@ class TestFollowupSinglePersistence(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.printer = self.server.printer
         self.delivered: list[dict[str, object]] = []
         original_broadcast = self.printer.broadcast
@@ -380,7 +380,7 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
         init_repo(self.tmpdir)
-        self.server = VSCodeServer()
+        self.server = AgentServer()
         self.blocker = _CompletingParentRun()
         self.original_run = self.blocker.install()
         self.tab_id = "s307-tab"
@@ -451,7 +451,7 @@ class TestSubscriberLingerPrune(unittest.TestCase):
     """S3-14 (verification): finished tasks must not leak subscribers."""
 
     def test_subscribers_are_pruned_after_linger(self) -> None:
-        server = VSCodeServer()
+        server = AgentServer()
         printer = server.printer
         printer.subscribe_tab("s314-task", "s314-tab")
         with printer._lock:

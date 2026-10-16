@@ -25,7 +25,7 @@ import unittest
 
 import pytest
 
-from kiss.server.server import VSCodeServer
+from kiss.server.server import AgentServer
 from kiss.tests.conftest import (
     nproc_limit_lowered_to_one,
     thread_start_can_be_starved,
@@ -40,7 +40,7 @@ class TestAutocompleteWorkerSpawnFailure(unittest.TestCase):
         if not thread_start_can_be_starved():
             pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
         printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
+        server = AgentServer(printer=printer)
         with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
             server._ensure_complete_worker()
         self.assertIsNone(

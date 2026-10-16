@@ -4,13 +4,11 @@
 # add your name here
 """End-to-end tests for the "Remind me later" update snooze.
 
-The sticky "update available" toast in the sidebar webview and the
-remote webapp is driven by the daemon's ``update_available``
-broadcast.  A ``snoozeUpdate`` client command records a 24-hour
-snooze in ``$KISS_HOME/.update-check.json`` — the SAME cache file the
-VS Code extension host's ``UpdateChecker.js`` uses — and the daemon
-rebroadcasts with ``snoozed: true`` so every client's toast
-disappears and stays away across window reloads until the snooze
+The sticky "update available" toast in the remote webapp is driven by
+the daemon's ``update_available`` broadcast.  A ``snoozeUpdate`` client
+command records a 24-hour snooze in ``$KISS_HOME/.update-check.json``
+and the daemon rebroadcasts with ``snoozed: true`` so every client's
+toast disappears and stays away across page reloads until the snooze
 expires or a NEWER release ships.
 
 These tests reuse the real-server harness of
@@ -161,25 +159,8 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
         finally:
             await self._close(writer2)
 
-    async def test_snooze_preserves_extension_cooldown_fields(self) -> None:
-        """The extension's fetch-cooldown fields survive the snooze write."""
-        self._write_cache({"lastCheckMs": 123456, "lastLatest": "2099.1.0"})
-        reader, writer = await self._connect_local()
-        try:
-            await self._send_ready(writer, "tab-snooze-3")
-            await self._wait_for_event(reader, "update_available")
-            await self._snooze(writer, "2099.1.1")
-            await self._wait_for_snoozed(reader, True)
-        finally:
-            await self._close(writer)
-        cache = json.loads(self._cache_path().read_text(encoding="utf-8"))
-        self.assertEqual(cache["lastCheckMs"], 123456)
-        self.assertEqual(cache["lastLatest"], "2099.1.0")
-        self.assertEqual(cache["snoozedLatest"], "2099.1.1")
-
-    async def test_snooze_without_latest_falls_back_to_cache(self) -> None:
-        """A version-less snooze uses the cache's last known latest."""
-        self._write_cache({"lastCheckMs": 1, "lastLatest": "2099.1.1"})
+    async def test_snooze_without_latest_falls_back_to_fetched(self) -> None:
+        """A version-less snooze uses the latest version the daemon fetched."""
         reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-snooze-4")
@@ -194,15 +175,12 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
         self.assertEqual(cache["snoozedLatest"], "2099.1.1")
 
 
-class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
-    """A snooze written by the extension host silences the daemon toast."""
+class TestSnoozedStateFromCacheFile(_SnoozeTestBase):
+    """A snooze already on disk silences the daemon toast at startup."""
 
-    async def test_extension_written_snooze_is_honored(self) -> None:
-        """Clicking "Remind me later" on the native popup gates the toast."""
-        # UpdateChecker.js's snoozeUpdateNotification wrote this file.
+    async def test_cached_snooze_is_honored(self) -> None:
+        """A snooze recorded by an earlier daemon run gates the toast."""
         self._write_cache({
-            "lastCheckMs": 1,
-            "lastLatest": "2099.1.1",
             "snoozeUntilMs": int(time.time() * 1000) + _DAY_MS,
             "snoozedLatest": "2099.1.1",
         })
@@ -218,8 +196,6 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
     async def test_expired_snooze_resurfaces_toast(self) -> None:
         """After 24 hours the toast comes back."""
         self._write_cache({
-            "lastCheckMs": 1,
-            "lastLatest": "2099.1.1",
             "snoozeUntilMs": int(time.time() * 1000) - 1,
             "snoozedLatest": "2099.1.1",
         })
@@ -235,8 +211,6 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
     async def test_newer_release_breaks_through_snooze(self) -> None:
         """A release newer than the snoozed one must notify anyway."""
         self._write_cache({
-            "lastCheckMs": 1,
-            "lastLatest": "2099.1.0",
             "snoozeUntilMs": int(time.time() * 1000) + _DAY_MS,
             "snoozedLatest": "2099.1.0",  # older than PyPI's 2099.1.1
         })
@@ -262,8 +236,6 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
         finally:
             await self._close(writer)
         cache = json.loads(self._cache_path().read_text(encoding="utf-8"))
-        self.assertEqual(cache["lastCheckMs"], 0)
-        self.assertEqual(cache["lastLatest"], "")
         self.assertEqual(cache["snoozedLatest"], "2099.1.1")
 
 
@@ -286,11 +258,8 @@ class TestSnoozeHelperBranches(_SnoozeTestBase):
         })
         self.assertTrue(ws._is_update_snoozed("2099.1.1"))
 
-    async def test_record_snooze_ignores_malformed_prior_fields(self) -> None:
-        self._write_cache({"lastCheckMs": "x", "lastLatest": 5})
+    async def test_version_less_snooze_suppresses_everything(self) -> None:
         ws._record_update_snooze("")
         cache = json.loads(self._cache_path().read_text(encoding="utf-8"))
-        self.assertEqual(cache["lastCheckMs"], 0)
-        self.assertEqual(cache["lastLatest"], "")
         self.assertEqual(cache["snoozedLatest"], "")
         self.assertTrue(ws._is_update_snoozed("2099.1.1"))

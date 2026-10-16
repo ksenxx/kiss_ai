@@ -10,15 +10,13 @@ connection only, the pty follows ``resize``, the shell's exit code
 arrives as ``terminalExit``, a tab that was closed hangs its shell up
 (and kills one that ignores the hang-up), a dropped connection keeps the
 shell for a re-attach until the grace period runs out, and ``shutdown``
-reaps everything.  The last class drives the daemon's command catalog
-over a real local connection to show that a VS Code window (which has
-its own terminal) cannot start a shell.
+reaps everything.
 
 The Windows branch of ``open`` (no :mod:`pty`) and a shell spawn that
 raises cannot be reached on the Linux hosts these tests run on without
 replacing module globals, so they are not exercised here.  The browser
 half (xterm.js, the "..." menu item, the tab) is covered by
-``tests/agents/vscode/test_remote_terminal_tab.py``.
+``tests/webapp/test_remote_terminal_tab.py``.
 
 The service runs the developer's ``$SHELL`` as an interactive login
 shell, dotfiles included (a ``cd`` in ``~/.zshrc`` moves it out of the
@@ -29,16 +27,11 @@ with ``%``, not ``$``).  The tests therefore point ``SHELL`` at
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
-import json
 import os
 import shutil
 import sys
-import tempfile
 import threading
 import time
-import unittest
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +40,6 @@ import pytest
 from kiss.core.processes import find_bash
 from kiss.server import terminal_tab
 from kiss.server.terminal_tab import TerminalService, default_shell
-from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.local_ws import open_local_connection
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
@@ -397,66 +388,3 @@ def test_shutdown_reaps_every_shell(tmp_path: Path) -> None:
     assert svc.session_count() == 0
     assert len(printer.of_type("terminalExit")) == 2
     svc.shutdown()  # nothing left: returns at once
-
-
-class TestTerminalCommandsFromAVsCodeWindow(unittest.TestCase):
-    """The daemon drops terminal commands that arrive over the local
-    (VS Code) connection: that window has its own integrated terminal."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.loop = asyncio.new_event_loop()
-        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
-        self.loop_thread.start()
-        self.server = RemoteAccessServer(
-            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
-            url_file=os.path.join(self.tmp.name, "remote-url.json"),
-            work_dir=self.tmp.name,
-        )
-        asyncio.run_coroutine_threadsafe(
-            self.server.start_private_async(), self.loop,
-        ).result(timeout=30)
-
-    def tearDown(self) -> None:
-        concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
-            timeout=30,
-        )
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.loop_thread.join(timeout=5)
-        self.loop.close()
-        self.tmp.cleanup()
-
-    def test_local_terminal_commands_are_dropped(self) -> None:
-        async def _talk() -> list[str]:
-            reader, writer = await open_local_connection(self.server)
-            seen: list[str] = []
-            try:
-                for cmd in (
-                    {"type": "terminalOpen", "tab_id": "t1", "cols": 80, "rows": 24},
-                    {"type": "terminalInput", "tab_id": "t1", "data": "echo hi\n"},
-                    {"type": "terminalResize", "tab_id": "t1", "cols": 10, "rows": 10},
-                    {"type": "terminalClose", "tab_id": "t1"},
-                    # A reply-bearing command proves the four above were
-                    # processed (in order) before we look.
-                    {"type": "bogusCommand", "tabId": "t1"},
-                ):
-                    writer.write(json.dumps(cmd).encode() + b"\n")
-                await writer.drain()
-                while True:
-                    line = await asyncio.wait_for(reader.readline(), timeout=10)
-                    if not line:
-                        break
-                    event = json.loads(line)
-                    seen.append(event.get("type", ""))
-                    if event.get("type") == "error":
-                        break
-            finally:
-                writer.close()
-                await writer.wait_closed()
-            return seen
-
-        seen = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(timeout=20)
-        self.assertIn("error", seen)
-        self.assertEqual(self.server._vscode_server.terminals.session_count(), 0)
-        self.assertFalse({"terminalOpened", "terminalError", "terminalData"} & set(seen))

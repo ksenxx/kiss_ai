@@ -138,7 +138,7 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.reader, self.writer = await open_local_connection(self.server)
         added = await self._ask({
             "type": "machineAction", "action": "add", "name": "box",
-            "address": self.remote.url, "password": "pw-remote",
+            "address": self.remote.url, "machinePassword": "pw-remote",
         }, "machines")
         self.assertEqual(added["error"], "")
 
@@ -369,7 +369,7 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
                 continue
             seen.append(msg)
             if msg.get("type") == "new_tab" and not resumed:
-                # What every webview does on new_tab: open a sub-agent tab
+                # What every chat page does on new_tab: open a sub-agent tab
                 # and ask for its transcript.
                 self.assertEqual(msg["parent_tab_id"], tab)
                 resumed = True

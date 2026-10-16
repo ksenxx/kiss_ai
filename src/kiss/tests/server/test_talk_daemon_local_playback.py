@@ -2,22 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: the daemon plays talk clips for local VS Code webviews.
+"""E2E tests: the daemon plays talk clips for headless local clients.
 
-Regression tests for the "alien" talk voice: the ``talk`` tool ships a
-natural GPT-synthesized MP3 inside the broadcast event, but a VS Code
-chat webview cannot reliably play it — Chromium's autoplay policy
-rejects ``Audio.play()`` in a webview unless the user interacted with
-it seconds earlier (microsoft/vscode#197937 / #178642, closed as not
-actionable), so the webview silently fell back to the robotic Web
-Speech system voice.  The daemon now plays the clip natively on its
-own machine's speakers whenever a local webview tab is subscribed
-and stamps every same-machine copy ``muted``.
+The ``talk`` tool ships a GPT-synthesized MP3 inside the broadcast event.
+A browser plays it itself, but a local client of the daemon's own
+machine (a ``sorcar`` CLI or ``daemon_client`` run) has no player, so
+the daemon plays the clip on its own speakers whenever such a client
+addressed the talk's tab, and stays silent when only browsers did.
 
 These tests run a REAL ``RemoteAccessServer`` and REAL token-bearing
-local WSS client connections (no mocks), mirroring
-``test_talk_double_playback.py``; the daemon's audio player is a REAL
-child process substituted via ``KISS_SORCAR_PLAY_CMD`` whose marker
+local WSS client connections (no mocks); the daemon's audio player is a
+REAL child process substituted via ``KISS_SORCAR_PLAY_CMD`` whose marker
 files carry the exact bytes it played.
 """
 
@@ -65,7 +60,7 @@ def _talk_event(
 
 
 class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
-    """The daemon plays talk clips for local webview tabs."""
+    """The daemon plays talk clips for headless local clients."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -108,16 +103,14 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
     async def _connect(
         self, tab_id: str
     ) -> tuple[LocalReader, LocalWriter]:
-        """Open one local client showing the canonical tab *tab_id*.
+        """Open one local client addressing the canonical tab *tab_id*.
 
-        The tab is created in the shared tab registry first — as any
-        run on it would do before emitting a talk — because the daemon
-        plays natively only for tabs a local webview SHOWS: a registry
-        tab is shown by every attached chat webview, and the ``ready``
-        this client announces next is what attaches it.
+        The tab is created in the shared tab registry first, as any run
+        on it would do before emitting a talk; the ``ready`` this client
+        announces next is what records its interest in the tab.
         """
-        self.server._vscode_server.tab_registry.update_tab(
-            tab_id, title="webview chat", create=True,
+        self.server._agent_server.tab_registry.update_tab(
+            tab_id, title="cli run", create=True,
         )
         reader, writer = await open_local_connection(
             self.server, limit=16 * 1024 * 1024
@@ -129,13 +122,13 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
             writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
         # The server handles ``ready`` on its own task; a talk broadcast
-        # before that lands sees no attached webview and leaves the copy
-        # unmuted.  Wait for the attachment the way the fan-out reads it.
+        # before that sees no interested local client.  Wait the way the
+        # fan-out reads the interest.
         deadline = asyncio.get_event_loop().time() + 5.0
-        while tab_id not in self.server._printer.shown_local_tabs([tab_id]):
+        while not self.server._printer._local_client_addressed({tab_id}):
             self.assertLess(
                 asyncio.get_event_loop().time(), deadline,
-                "daemon never attached the webview client",
+                "daemon never recorded the local client's tab",
             )
             await asyncio.sleep(0.01)
         return reader, writer
@@ -177,108 +170,76 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         markers = sorted(self.marker_dir.glob("*.json"))
         return [json.loads(m.read_text()) for m in markers]
 
-    async def test_daemon_plays_clip_and_mutes_local_webview(self) -> None:
-        """THE ALIEN-VOICE BUG: local webview must not speech-fallback.
+    async def test_daemon_plays_clip_for_local_client(self) -> None:
+        """A local client addressed the tab: the daemon plays the clip.
 
-        With a clip in the event and a local webview subscribed,
-        the daemon must play the clip natively (byte-exact) and mute
-        the webview's copy — an unmuted copy makes the webview attempt
-        ``Audio.play()``, get autoplay-rejected, and read the text with
-        the robotic Web Speech voice instead.
+        The client still receives its copy of the event (byte-exact
+        clip in the marker file proves the daemon played the same clip).
         """
-        web_tab = "webtab-" + uuid.uuid4().hex[:8]
-        web_reader, web_writer = await self._connect(web_tab)
-        self.server._printer.subscribe_tab(self.task_id, web_tab)
+        cli_tab = "cli-" + uuid.uuid4().hex[:8]
+        reader, writer = await self._connect(cli_tab)
+        self.server._printer.subscribe_tab(self.task_id, cli_tab)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-1", with_clip=True)
         )
 
-        talks = await self._collect_talks(web_reader, 1)
-        self.assertEqual(len(talks), 1, "webview never got the talk copy")
-        self.assertEqual(talks[0]["tabId"], web_tab)
-        self.assertTrue(
-            talks[0].get("muted"),
-            "local webview copy must be muted when the daemon plays the "
-            "clip — an unmuted copy falls back to the robotic Web Speech "
-            "voice (the alien-voice bug)",
-        )
+        talks = await self._collect_talks(reader, 1)
+        self.assertEqual(len(talks), 1, "local client never got the talk copy")
+        self.assertEqual(talks[0]["tabId"], cli_tab)
         markers = await asyncio.to_thread(self._wait_markers, 1)
-        self.assertEqual(
-            len(markers), 1, "daemon never played the clip natively"
-        )
+        self.assertEqual(len(markers), 1, "daemon never played the clip natively")
         played = base64.b64decode(markers[0]["audio_b64"])
         self.assertEqual(played, MP3_BYTES, "clip bytes were corrupted")
-        web_writer.close()
+        writer.close()
 
-    async def test_remote_web_tab_keeps_playable_copy(self) -> None:
-        """A remote WSS tab is another device; its copy stays playable."""
-        web_tab = "webtab-" + uuid.uuid4().hex[:8]
-        remote_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
-        web_reader, web_writer = await self._connect(web_tab)
-        self.server._printer.subscribe_tab(self.task_id, web_tab)
-        self.server._printer.subscribe_tab(self.task_id, remote_tab)
-
-        self.server._printer.broadcast(
-            _talk_event(self.task_id, "talk-daemon-3", with_clip=True)
-        )
-
-        talks = await self._collect_talks(web_reader, 2)
-        by_tab = {t["tabId"]: t for t in talks}
-        self.assertIn(web_tab, by_tab)
-        self.assertIn(remote_tab, by_tab)
-        self.assertTrue(by_tab[web_tab].get("muted"))
-        self.assertFalse(
-            by_tab[remote_tab].get("muted"),
-            "the remote device's copy must stay playable there",
-        )
-        web_writer.close()
-
-    async def test_clipless_talk_keeps_webview_copy_playable(self) -> None:
-        """No clip → nothing to play natively; the webview still speaks."""
-        web_tab = "webtab-" + uuid.uuid4().hex[:8]
-        web_reader, web_writer = await self._connect(web_tab)
-        self.server._printer.subscribe_tab(self.task_id, web_tab)
+    async def test_clipless_talk_spawns_no_player(self) -> None:
+        """No clip: nothing to play natively; the event still fans out."""
+        cli_tab = "cli-" + uuid.uuid4().hex[:8]
+        reader, writer = await self._connect(cli_tab)
+        self.server._printer.subscribe_tab(self.task_id, cli_tab)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-4", with_clip=False)
         )
 
-        talks = await self._collect_talks(web_reader, 1)
+        talks = await self._collect_talks(reader, 1)
         self.assertEqual(len(talks), 1)
-        self.assertFalse(
-            talks[0].get("muted"),
-            "a clipless talk must keep the webview copy playable so the "
-            "Web Speech fallback can still read the text aloud",
-        )
         await asyncio.sleep(0.3)
         self.assertEqual(
             len(list(self.marker_dir.glob("*.json"))),
             0,
             "the daemon must not spawn a player for a clipless talk",
         )
-        web_writer.close()
+        writer.close()
 
     async def test_remote_only_subscribers_skip_daemon_playback(self) -> None:
-        """Only remote tabs subscribed → daemon speakers stay silent."""
+        """Only browser tabs subscribed: the daemon's speakers stay silent.
+
+        The observer is a local client that addressed no tab (it sent a
+        bare ``ready``), so it receives every event copy without
+        counting as an interested client of the talk's tab.
+        """
         remote_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
-        probe_tab = "probe-" + uuid.uuid4().hex[:8]
-        probe_reader, probe_writer = await self._connect(probe_tab)
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024
+        )
+        writer.write((json.dumps({"type": "ready"}) + "\n").encode("utf-8"))
+        await writer.drain()
         self.server._printer.subscribe_tab(self.task_id, remote_tab)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-5", with_clip=True)
         )
 
-        talks = await self._collect_talks(probe_reader, 1)
+        talks = await self._collect_talks(reader, 1)
         self.assertEqual(len(talks), 1)
         self.assertEqual(talks[0]["tabId"], remote_tab)
-        self.assertFalse(talks[0].get("muted"))
         await asyncio.sleep(0.3)
         self.assertEqual(
             len(list(self.marker_dir.glob("*.json"))),
             0,
-            "no local webview tab is subscribed, so the daemon must not "
+            "no local client addressed the tab, so the daemon must not "
             "play the clip on its own speakers",
         )
-        probe_writer.close()
+        writer.close()

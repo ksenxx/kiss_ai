@@ -13,7 +13,7 @@ F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the tab
     branch the tree is already on.
 F13 ``file_index.FileIndex.scan`` must enforce its ``_SCAN_FILES_CAP``
     entry cap for directory entries too, not only for files.
-F20 the ``vscode_config`` key migration must not import a forged API
+F20 the ``user_config`` key migration must not import a forged API
     key from a multi-line environment-variable value (line-based
     ``env`` parsing); it must use NUL-separated ``env -0`` records.
 
@@ -88,7 +88,7 @@ class _Host(_MergeFlowMixin):
     """Concrete merge-flow host with the server state the mixin expects.
 
     Implements the same ``_dispose_if_closed`` contract as
-    ``VSCodeServer`` against the real task-keyed
+    ``AgentServer`` against the real task-keyed
     ``kiss.server.agent_state`` registry.
     """
 

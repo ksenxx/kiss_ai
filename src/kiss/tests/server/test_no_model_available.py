@@ -25,9 +25,9 @@ from kiss.server import agent_state
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.server.server import VSCodeServer
+    from kiss.server.server import AgentServer
 
-    return VSCodeServer()
+    return AgentServer()
 
 
 def _register_tab_state(task_id: str, tab_id: str, agent: ChatSorcarAgent) -> Any:
@@ -99,7 +99,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "no-model-test-1"
-            agent = ChatSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar")
 
             run_called = False
 
@@ -167,7 +167,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "model-ok-test-1"
-            agent = ChatSorcarAgent("Sorcar VS Code")
+            agent = ChatSorcarAgent("Sorcar")
 
             run_called = False
 
