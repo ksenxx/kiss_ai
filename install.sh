@@ -7,7 +7,8 @@
 #
 # What ends up on the machine:
 #
-#   ~/.kiss/kiss/                 the app directory (``$KISS_HOME/kiss``)
+#   ~/.kiss/kiss/                 the app directory: $KISS_HOME/<its name without
+#                                 the dot> (~/.s10s/s10s for a brand home)
 #     pyproject.toml, uv.lock     the project uv builds the venv from
 #     src/kiss/**/*.pyc           the KISS Sorcar library, byte-compiled;
 #                                 the ``.py`` sources are not installed
@@ -34,8 +35,10 @@
 #         post-install hooks, or the home the existing service runs
 #         from); start the kiss-web daemon -- the brand's app, not the
 #         stock one, when there is a brand home: the one the service
-#         runs from, else the first one installed -- then open the webapp in a
-#         browser and, for a VS Code user, retire the VS Code extension:
+#         runs from, else the first one installed -- then open the webapp as
+#         a standalone app (kiss-app: a desktop launcher plus a Chromium
+#         app-mode window; the browser when that is not possible) and,
+#         for a VS Code user, retire the VS Code extension:
 #         uninstall it, open the notice that VS Code is no longer
 #         supported in their VS Code window, print it, and have the web
 #         app show it (see "Retire the VS Code extension" below).
@@ -49,7 +52,9 @@
 #   ./install.sh --non-interactive  every question takes its default answer
 #
 # Environment:
-#   KISS_HOME            state directory (default ~/.kiss); the app goes in $KISS_HOME/kiss
+#   KISS_HOME            state directory (default ~/.kiss); the app goes in
+#                        $KISS_HOME/<name without the leading dot> (~/.s10s/s10s),
+#                        $KISS_HOME/kiss when the name has no leading dot
 #   KISS_NONINTERACTIVE  same as --non-interactive
 #   KISS_SKIP_LAUNCH     do not start kiss-web or open the webapp
 #   KISS_WEB_PORT        port of the kiss-web daemon (default 8787)
@@ -372,15 +377,56 @@ USER_PWD="$(daemon_work_dir)"
 # run is).  Line 1 is this script's pid, line 2 the step text.  The EXIT
 # trap below removes the file when the install ends.
 PROGRESS_FILE="$KISS_HOME_DIR/.install-progress"
-# Where the app is installed: the ``kiss`` directory of the state
-# directory, ~/.kiss/kiss for stock KISS Sorcar.  Everything the runtime
-# needs lives here (project files, byte-compiled library, SEAs, frontend,
-# venv); ``~/.kiss/kiss_ai`` next to it is the checkout the curl
-# bootstrap clones and is not touched.
-APP_DIR="$KISS_HOME_DIR/kiss"
+# Where the app is installed: the directory of the state directory named
+# after it without the leading dot, ~/.kiss/kiss for stock KISS Sorcar
+# and ~/.s10s/s10s for a brand whose home is ~/.s10s (a state directory
+# not named that way, KISS_HOME=/opt/sorcar, keeps the stock name,
+# /opt/sorcar/kiss).  Everything the runtime needs lives here (project
+# files, byte-compiled library, SEAs, frontend, venv); ``~/.kiss/kiss_ai``
+# next to it is the checkout the curl bootstrap clones and is not touched.
+app_dir_of() {
+    # Print the app directory of state directory $1.
+    local name="${1%/}"
+    name="${name##*/}"
+    case "$name" in
+        ..) echo "$1/kiss" ;;
+        .?*) echo "$1/${name#.}" ;;
+        *) echo "$1/kiss" ;;
+    esac
+}
+APP_DIR="$(app_dir_of "$KISS_HOME_DIR")"
+# Every failure of this run, one line each (``warn``, ``fail`` and the
+# EXIT trap), for the daemon that runs afterwards: kiss-web shows the
+# file's lines as a notification in the web app (see
+# kiss/server/install_problems.py).  A run starts afresh; a run with no
+# failure leaves no file, so a previous run's problems are not reported
+# again once an update succeeds.
+PROBLEMS_FILE="$KISS_HOME_DIR/.install-problems"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$KISS_HOME_DIR"
+rm -f "$PROBLEMS_FILE"
 export PATH="$BIN_DIR:$PATH"
+
+# BEGIN: kiss-install-problems  (tests extract this block verbatim)
+record_problem() {
+    # Append failure $1 to PROBLEMS_FILE (best effort: an unwritable state
+    # directory must not fail the install).
+    [ -n "${PROBLEMS_FILE:-}" ] || return 0
+    printf '%s\n' "$1" >> "$PROBLEMS_FILE" 2>/dev/null || true
+}
+warn() {
+    # Print "   WARNING: $*" and record it; the install carries on.
+    echo "   WARNING: $*"
+    record_problem "WARNING: $*"
+}
+fail() {
+    # Print "   ERROR: $*", record it and stop the install.
+    echo "   ERROR: $*"
+    record_problem "ERROR: $*"
+    FAILED=1
+    exit 1
+}
+# END: kiss-install-problems
 
 # ---------------------------------------------------------------------------
 # Signal handling (as in install.sh)
@@ -453,22 +499,38 @@ handle_interrupt() {
 # in step [5/5] closes that terminal, first writing ``\x03`` (Ctrl+C) to
 # the PTY (caught by ``handle_interrupt`` above) and then closing the PTY
 # (SIGHUP).  Without this trap the SIGHUP kills bash mid-step.
-# ``2>/dev/null`` swallows EBADF/ENXIO from the closed PTY; ``|| true``
-# keeps ``set -e`` from killing the script if the re-route itself fails.
+# Every fd still on the dead PTY is moved off it: stdin to /dev/null and
+# the saved terminal (fd 3, the password box's) to /dev/null as well,
+# because once the terminal's shell has exited the PTY is revoked and
+# any use of it fails with EBADF (macOS) or EIO: a child started with
+# that stdin dies at once (``kiss-app`` in step [5/5]: ``Fatal Python
+# error: init_sys_streams``), and ``echo >&3`` fails, which ``set -e``
+# turns into a failed install.  ``TERMINAL_GONE`` tells the end of the
+# script that the password box had nowhere to go.  ``|| true`` keeps
+# ``set -e`` from killing the script if the re-route itself fails.
+# BEGIN: kiss-hup-trap  (tests extract this block verbatim)
+TERMINAL_GONE=0
 handle_hup() {
-    exec >>"$LOG_FILE" 2>&1 || true
+    exec </dev/null >>"$LOG_FILE" 2>&1 3>/dev/null || true
+    if [ "$TERMINAL_GONE" = 1 ]; then
+        return 0
+    fi
+    TERMINAL_GONE=1
     echo ""
     echo "   ⚠ Controlling terminal closed (SIGHUP) — continuing with"
     echo "      output redirected to $LOG_FILE only."
 }
-trap handle_interrupt INT TERM
 trap handle_hup HUP
+# END: kiss-hup-trap
+trap handle_interrupt INT TERM
 
 # Print a step banner and publish the step to PROGRESS_FILE (see there).
 # Publishing is best-effort: an unwritable $KISS_HOME must not fail the
 # install.
+CURRENT_STEP="starting"
 report_step() {
     echo ">>> $1"
+    CURRENT_STEP="$1"
     publish_step "$1"
 }
 publish_step() {
@@ -481,7 +543,20 @@ publish_step() {
 # holds, if any (acquire_kiss_web_restart_lock below); released here so an
 # aborted run does not leave the daemon locked out of restarting.
 KISS_WEB_RESTART_LOCK_HELD=""
-trap 'rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"; [ -z "$KISS_WEB_RESTART_LOCK_HELD" ] || release_kiss_web_restart_lock "$KISS_WEB_RESTART_LOCK_HELD"' EXIT
+# BEGIN: kiss-exit-trap  (tests extract this block verbatim)
+on_exit() {
+    # The EXIT trap: a run that stops with a status (``set -e`` on an
+    # unexpected failure, an abort) that ``fail`` did not already record
+    # is recorded with the step it was in.
+    local rc=$1
+    if [ "$rc" -ne 0 ] && [ -z "${FAILED:-}" ]; then
+        record_problem "ERROR: the install stopped with status $rc during: $CURRENT_STEP"
+    fi
+    rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"
+    [ -z "$KISS_WEB_RESTART_LOCK_HELD" ] || release_kiss_web_restart_lock "$KISS_WEB_RESTART_LOCK_HELD"
+}
+trap 'on_exit $?' EXIT
+# END: kiss-exit-trap
 
 # Run "$@" while printing a heartbeat every HEARTBEAT_INTERVAL seconds so
 # the user can tell the install is still working.  Without this ``uv sync``
@@ -612,17 +687,16 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
     Darwin|Linux) ;;
-    *)  echo "ERROR: Unsupported OS: $OS"; exit 1 ;;
+    *)  fail "Unsupported OS: $OS" ;;
 esac
 
 case "$ARCH" in
     x86_64|aarch64|arm64) ;;
-    *)  echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
+    *)  fail "Unsupported architecture: $ARCH" ;;
 esac
 
 if ! command -v curl &>/dev/null; then
-    echo "ERROR: curl is required but not found. Please install curl first."
-    exit 1
+    fail "curl is required but not found. Please install curl first."
 fi
 
 # Make Homebrew visible even when this script runs detached from a login
@@ -679,7 +753,7 @@ ensure_homebrew() {
     if command -v brew &>/dev/null; then
         echo "   Homebrew installed at $(command -v brew)"
     else
-        echo "   WARNING: Homebrew install did not complete; continuing without it."
+        warn "Homebrew install did not complete; continuing without it."
     fi
 }
 
@@ -732,7 +806,7 @@ add_local_bin_to_shell_rc() {
     if mkdir -p "$(dirname "$rc")" && echo "$line" >> "$rc"; then
         echo "   Added ~/.local/bin to PATH in $rc"
     else
-        echo "   WARNING: could not add ~/.local/bin to PATH in $rc"
+        warn "could not add ~/.local/bin to PATH in $rc"
     fi
 }
 
@@ -754,11 +828,11 @@ install_cloudflared() {
             return 0
         fi
         url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$arch.tgz"
-        curl -fsSL "$url" | tar xzf - -C "$bin_dir" || echo "   WARNING: cloudflared download failed; the web app will have no public URL"
+        curl -fsSL "$url" | tar xzf - -C "$bin_dir" || warn "cloudflared download failed; the web app will have no public URL"
     else
         url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
         curl -fsSL -o "$bin_dir/cloudflared" "$url" \
-            || { rm -f "$bin_dir/cloudflared"; echo "   WARNING: cloudflared download failed; the web app will have no public URL"; }
+            || { rm -f "$bin_dir/cloudflared"; warn "cloudflared download failed; the web app will have no public URL"; }
     fi
     [ -f "$bin_dir/cloudflared" ] && chmod 755 "$bin_dir/cloudflared"
     return 0
@@ -982,9 +1056,10 @@ restart_kiss_web_launch_agent() {
             if [ "$waited" -ge "${KISS_WEB_DRAIN_TIMEOUT:-30}" ]; then
                 # Fail closed: keep the registration launchd still holds (the plist it read,
                 # not the one just written) and restart its process.
-                echo "   WARNING: the old kiss-web has not exited after ${waited}s; restarting it in place."
+                warn "the old kiss-web has not exited after ${waited}s; restarting it in place."
                 stop_stray_kiss_web
-                launchctl kickstart -k "$service" || echo "   WARNING: launchctl kickstart failed"
+                launchctl kickstart -k "$service" || warn "launchctl kickstart failed"
+                KISS_WEB_OLD_RUNTIME=1
                 return 0
             fi
             sleep 1
@@ -1004,13 +1079,13 @@ restart_kiss_web_launch_agent() {
         # The legacy loader registers (and re-enables) the plist too.
         launchctl load -w "$plist" 2>/dev/null || true
         if ! launchctl print "$service" &>/dev/null; then
-            echo "   WARNING: launchctl could not register $plist; run 'launchctl bootstrap $domain $plist' by hand."
+            warn "launchctl could not register $plist; run 'launchctl bootstrap $domain $plist' by hand."
             return 0
         fi
     fi
     # RunAtLoad already started the service with the bootstrap; this
     # starts it if that did not happen and is a no-op when it is running.
-    launchctl kickstart "$service" || echo "   WARNING: launchctl kickstart failed"
+    launchctl kickstart "$service" || warn "launchctl kickstart failed"
 }
 
 xml_escape() {
@@ -1210,7 +1285,7 @@ retire_vscode_extension() {
     # the notice names what the user saw in VS Code, as the web app's
     # notice from that daemon does.
     if [ -n "${RESTART_HOME:-}" ]; then
-        product="$(brand_field product_name "$RESTART_HOME/kiss/src/kiss/webapp/media/brand.json")"
+        product="$(brand_field product_name "$(app_dir_of "$RESTART_HOME")/src/kiss/webapp/media/brand.json")"
         product="${product:-$BRAND_PRODUCT_NAME}"
     fi
     [ -z "$(vscode_extension_dirs)" ] || had_extension=1
@@ -1231,7 +1306,8 @@ retire_vscode_extension() {
         fi
         echo ""
         echo "Use the web app instead: $url"
-        echo "It is in your browser after every update, and the sorcar CLI is unchanged."
+        echo "It opens in its own window after every update (a launcher is in your"
+        echo "applications menu), and the sorcar CLI is unchanged."
     } > "$notice_file"
     if vscode_window_reachable; then
         # The first CLI; no ``| head`` (its early exit would SIGPIPE the
@@ -1261,6 +1337,58 @@ print_vscode_notice() {
     print_box "${lines[@]}" >&3
     print_box "${lines[@]}" >> "$LOG_FILE"
     publish_step "${lines[*]}"
+}
+
+# The app directory kiss-web was confirmed to run from by
+# restart_kiss_web_locked (empty when the restart was deferred or failed,
+# or when launchd restarted the old registration instead:
+# KISS_WEB_OLD_RUNTIME, restart_kiss_web_launch_agent).
+KISS_WEB_SERVES=""
+KISS_WEB_OLD_RUNTIME=""
+
+retire_legacy_app_dir() {
+    # Remove the installer's files from $1/kiss, the app directory of
+    # state directory $1 from before the app was named after its home
+    # (~/.s10s/kiss, now ~/.s10s/s10s), once kiss-web runs from the new
+    # one, $2.  Anything else in it (a task's .kiss.artifacts, say) is
+    # left to the user.  Nothing to do for the stock ~/.kiss/kiss.
+    local legacy="$1/kiss" app="$2"
+    [ "$legacy" != "$app" ] && [ ! -L "$legacy" ] && [ -d "$legacy/src/kiss" ] \
+        && [ ! -e "$legacy/.git" ] || return 0
+    if [ "$KISS_WEB_SERVES" != "$app" ]; then
+        echo "   The old app directory $legacy is removed once kiss-web runs from $app."
+        return 0
+    fi
+    rm -rf "$legacy/src" "$legacy/.venv" "$legacy/pyproject.toml" "$legacy/uv.lock" \
+        "$legacy/README.md" "$legacy/LICENSE" "$legacy/.python-version"
+    if rmdir "$legacy" 2>/dev/null; then
+        echo "   Removed the old app directory $legacy (the app is in $app now)."
+    else
+        echo "   Removed the old app from $legacy (the app is in $app now); what else it holds is yours to remove."
+    fi
+}
+
+absorb_problems() {
+    # Take over the problems a nested pass recorded in brand home $1,
+    # each line prefixed with the home, so the daemon this run starts
+    # reports them (that home's daemon may never run).
+    local file="$1/.install-problems" line
+    [ -s "$file" ] || return 0
+    while IFS= read -r line; do
+        [ -z "$line" ] || record_problem "$(home_relative "$1"): $line"
+    done < "$file"
+    rm -f "$file"
+}
+
+move_problems_to() {
+    # Record this run's problems in state directory $1 from now on, the
+    # ones so far included.
+    local file="$1/.install-problems"
+    [ "$file" = "$PROBLEMS_FILE" ] && return 0
+    if [ -s "$PROBLEMS_FILE" ]; then
+        { cat "$PROBLEMS_FILE" >> "$file" && rm -f "$PROBLEMS_FILE"; } 2>/dev/null || true
+    fi
+    PROBLEMS_FILE="$file"
 }
 
 start_kiss_web_daemon() {
@@ -1294,6 +1422,7 @@ restart_kiss_web_locked() {
     if [ "$(cat "$home/.kiss-web.fingerprint" 2>/dev/null)" = "$fingerprint" ] \
         && [ -f "$endpoint" ] && kiss_web_port_open; then
         echo "   kiss-web already serves this runtime; leaving it running."
+        KISS_WEB_SERVES="$project"
         return 0
     fi
     # A brand switch or another KISS_HOME moves the state directory, so
@@ -1341,7 +1470,7 @@ restart_kiss_web_locked() {
         # stop client keeps the stop blocking until the old daemon is gone.
         (trap '' HUP; exec systemctl --user stop kiss-web.service 2>/dev/null) || true
         stop_stray_kiss_web
-        systemctl --user start kiss-web.service || echo "   WARNING: systemctl start failed"
+        systemctl --user start kiss-web.service || warn "systemctl start failed"
         loginctl enable-linger "$(id -un)" 2>/dev/null || true
     else
         echo "   Starting kiss-web as a detached background process..."
@@ -1358,13 +1487,14 @@ restart_kiss_web_locked() {
             echo "$fingerprint" > "$home/.kiss-web.fingerprint"
             rm -f "$stamp" "$home/.kiss-web.restart-pending"
             echo "   kiss-web is up (${waited}s): http://localhost:$KISS_WEB_PORT"
+            [ -n "$KISS_WEB_OLD_RUNTIME" ] || KISS_WEB_SERVES="$project"
             return 0
         fi
         sleep 1
         waited=$((waited + 1))
     done
     rm -f "$stamp"
-    echo "   WARNING: kiss-web did not come up within ${waited}s; see $home/kiss-web-stderr.log"
+    warn "kiss-web did not come up within ${waited}s; see $home/kiss-web-stderr.log"
 }
 # END: kiss-runtime-setup
 
@@ -1445,6 +1575,7 @@ copy_app_files() {
     count="$(wc -l < "$list" | tr -d ' ')"
     if [ "$count" -eq 0 ]; then
         echo "   ERROR: no files to install found under $PROJECT_DIR/src/kiss"
+        record_problem "ERROR: no files to install found under $PROJECT_DIR/src/kiss"
         rm -f "$list"
         return 1
     fi
@@ -1517,7 +1648,7 @@ install_sorcar_cli() {
             && chmod 755 "$BIN_DIR/sorcar.tmp" && mv -f "$BIN_DIR/sorcar.tmp" "$BIN_DIR/sorcar"; then
         echo "   Installed the sorcar CLI at $BIN_DIR/sorcar"
     else
-        echo "   WARNING: could not install the sorcar CLI at $BIN_DIR/sorcar"
+        warn "could not install the sorcar CLI at $BIN_DIR/sorcar"
     fi
     add_local_bin_to_shell_rc
 }
@@ -1529,7 +1660,7 @@ install_repo_script_launcher() {
     local name="$1"
     local target="$PROJECT_DIR/$name"
     if [ ! -f "$target" ]; then
-        echo "   WARNING: $target not found — skipping $name launcher."
+        warn "$target not found — skipping $name launcher."
         return 0
     fi
     {
@@ -1547,13 +1678,13 @@ install_playwright_chromium() {
     # Playwright's Chromium for the browser tools, through uv ($1).
     echo "   Installing Playwright Chromium..."
     if ! run_with_heartbeat "playwright install" "$1" run --directory "$APP_DIR" python -m playwright install chromium; then
-        echo "   WARNING: Playwright Chromium install failed; run '$APP_DIR/.venv/bin/python -m playwright install chromium' later."
+        warn "Playwright Chromium install failed; run '$APP_DIR/.venv/bin/python -m playwright install chromium' later."
     elif [ "$(uname -s)" = "Linux" ]; then
         # Chromium's system libraries need root (install-deps calls sudo
         # itself); only try when that cannot stall on a password prompt.
         if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
             (cd "$APP_DIR" && "$1" run python -m playwright install-deps chromium) \
-                || echo "   WARNING: Chromium system libraries not installed (playwright install-deps failed)."
+                || warn "Chromium system libraries not installed (playwright install-deps failed)."
         else
             echo "   Chromium system libraries: run 'sudo $APP_DIR/.venv/bin/python -m playwright install-deps chromium' if the browser fails to start."
         fi
@@ -1594,8 +1725,7 @@ fi
     echo ""
 
     if [ ! -d "$PROJECT_DIR/src/kiss" ]; then
-        echo "ERROR: $PROJECT_DIR/src/kiss not found; run this script from a KISS Sorcar checkout."
-        exit 1
+        fail "$PROJECT_DIR/src/kiss not found; run this script from a KISS Sorcar checkout."
     fi
 
     if [ "$OS" = "Darwin" ]; then
@@ -1613,20 +1743,17 @@ fi
 
     report_step "[2/5] Building the Python environment..."
     if ! UV="$(ensure_uv)"; then
-        echo "   ERROR: uv is not available and could not be installed (https://astral.sh/uv)."
-        exit 1
+        fail "uv is not available and could not be installed (https://astral.sh/uv)."
     fi
     echo "   Using uv at $UV"
     if ! build_app_venv "$UV"; then
-        echo "   ERROR: uv sync failed in $APP_DIR"
-        exit 1
+        fail "uv sync failed in $APP_DIR"
     fi
     echo ""
 
     report_step "[3/5] Byte-compiling the library..."
     if ! compile_app_library; then
-        echo "   ERROR: byte-compiling $APP_DIR/src failed"
-        exit 1
+        fail "byte-compiling $APP_DIR/src failed"
     fi
     echo ""
 
@@ -1650,7 +1777,7 @@ fi
         cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
         echo "   Copied MODEL_INFO.json to $MODEL_INFO_DST"
     else
-        echo "   WARNING: $MODEL_INFO_SRC not found; skipped the $KISS_HOME_DIR copy"
+        warn "$MODEL_INFO_SRC not found; skipped the $KISS_HOME_DIR copy"
     fi
 
     # Post-install hooks: every executable in $KISS_HOME_DIR/post-install.d/
@@ -1665,7 +1792,7 @@ fi
         hook_rc=0
         KISS_HOME="$KISS_HOME_DIR" KISS_APP_DIR="$APP_DIR" "$hook" < /dev/null || hook_rc=$?
         if [ "$hook_rc" != 0 ]; then
-            echo "   WARNING: post-install hook $hook exited with status $hook_rc"
+            warn "post-install hook $hook exited with status $hook_rc"
         fi
     done
 
@@ -1677,7 +1804,7 @@ fi
     # password.  It is also shown in the box at the end of this script.
     PREVIOUS_PASSWORD="$(stored_remote_password "$KISS_HOME_DIR" "$APP_DIR")"
     REMOTE_PASSWORD="$(KISS_HOME="$KISS_HOME_DIR" "$APP_DIR/.venv/bin/python" -m kiss.core.remote_password 9>&-)" \
-        || { REMOTE_PASSWORD=""; echo "   WARNING: could not set the remote-access password."; }
+        || { REMOTE_PASSWORD=""; warn "could not set the remote-access password."; }
     if [ -z "$REMOTE_PASSWORD" ]; then
         :
     elif [ "$REMOTE_PASSWORD" = "$PREVIOUS_PASSWORD" ] && [ -n "${_KISS_BRAND_PASS:-}" ]; then
@@ -1692,13 +1819,13 @@ fi
 
     # Other brand homes.  A white-label brand (Seamless Loop, say) keeps
     # its own state directory ~/.<brand> with its own app copy in
-    # ~/.<brand>/kiss and a post-install hook that re-brands it, and its
+    # ~/.<brand>/<brand> and a post-install hook that re-brands it, and its
     # kiss-web service runs from there (KISS_HOME in the unit/plist).
     # Installing only into $KISS_HOME_DIR would leave that app stale and
     # the restart below would switch the daemon to this one: so this
     # checkout is installed into every other brand home as well, by a
-    # nested non-interactive run of this script -- steps 1-5 into
-    # $home/kiss, that home's MODEL_INFO.json, hooks and password.
+    # nested non-interactive run of this script -- steps 1-5 into that
+    # home's app directory, its MODEL_INFO.json, hooks and password.
     # ``_KISS_BRAND_PASS`` makes the nested run skip this discovery (no
     # recursion), the password box and the VS Code notice;
     # KISS_SKIP_LAUNCH keeps it from touching the daemon or a browser.  A
@@ -1725,13 +1852,14 @@ fi
                 echo "   Installed into brand home $brand_home"
                 [ -n "$first_brand_home" ] || first_brand_home="$brand_home"
             else
-                echo "   WARNING: the install into brand home $brand_home failed (status $?); this install carries on."
+                warn "the install into brand home $brand_home failed (status $?); this install carries on."
             fi
+            absorb_problems "$brand_home"
         done < <(other_brand_homes)
         service_home="$(service_kiss_home | head -n 1)"
         service_home="${service_home%/}"
         if [ -n "$service_home" ] && [ "$service_home" != "${KISS_HOME_DIR%/}" ] \
-            && [ -x "$service_home/kiss/.venv/bin/kiss-web" ]; then
+            && [ -x "$(app_dir_of "$service_home")/.venv/bin/kiss-web" ]; then
             RESTART_HOME="$service_home"
             RESTART_WHY="The kiss-web service runs from brand home $RESTART_HOME; restarting that app."
         elif [ "${KISS_HOME_DIR%/}" = "$HOME/.kiss" ] && [ -n "$first_brand_home" ]; then
@@ -1743,20 +1871,26 @@ fi
     # The web app's "VS Code extension removed" notice, from the home of
     # the daemon this run (re)starts; a nested brand pass starts none.
     [ -n "${_KISS_BRAND_PASS:-}" ] || flag_vscode_retired "${RESTART_HOME:-$KISS_HOME_DIR}"
+    # So are this run's problems: recorded from here on, and the ones so
+    # far moved, into that home, before its daemon comes up and reads them.
+    [ -z "$RESTART_HOME" ] || move_problems_to "$RESTART_HOME"
 
     # The daemon serves the directory this script was run from (see
     # daemon_work_dir).
     if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
         if [ -n "$RESTART_HOME" ]; then
             echo "   $RESTART_WHY"
+            restart_app="$(app_dir_of "$RESTART_HOME")"
             # That home's password is the one the restarted daemon asks for.
-            brand_password="$(stored_remote_password "$RESTART_HOME" "$RESTART_HOME/kiss")"
+            brand_password="$(stored_remote_password "$RESTART_HOME" "$restart_app")"
             [ -z "$brand_password" ] || REMOTE_PASSWORD="$brand_password"
-            KISS_HOME="$RESTART_HOME" start_kiss_web_daemon "$RESTART_HOME/kiss" "$USER_PWD" \
-                || echo "   WARNING: kiss-web was not restarted; start it with '$RESTART_HOME/kiss/.venv/bin/kiss-web'."
+            KISS_HOME="$RESTART_HOME" start_kiss_web_daemon "$restart_app" "$USER_PWD" \
+                || warn "kiss-web was not restarted; start it with '$restart_app/.venv/bin/kiss-web'."
+            retire_legacy_app_dir "$RESTART_HOME" "$restart_app"
         else
             start_kiss_web_daemon "$APP_DIR" "$USER_PWD" \
-                || echo "   WARNING: kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+                || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+            retire_legacy_app_dir "$KISS_HOME_DIR" "$APP_DIR"
         fi
     else
         echo "   KISS_SKIP_LAUNCH set; not starting the kiss-web daemon."
@@ -1793,6 +1927,14 @@ print_box() {
 print_password_box() {
     # The remote-access password ($1) framed in ``*``, on the terminal (fd 3,
     # the stdout saved before the log tee) so it never lands in the log.
+    # With the terminal gone (``handle_hup``) there is nowhere to show it
+    # but the log, which must not have it: say where to find it instead.
+    if [ "$TERMINAL_GONE" = 1 ]; then
+        echo ""
+        echo "The remote-access password was not shown because the terminal closed;"
+        echo "it is in the web app's Settings."
+        return 0
+    fi
     print_box "Remote access password:  $1" \
         "Type it in the web app on another device; it is also shown in Settings." >&3
 }
@@ -1833,11 +1975,15 @@ open_in_browser() {
 # ---------------------------------------------------------------------------
 # Step [5/5] started the kiss-web daemon (or left a healthy one running).
 # Wait for the daemon's URL file, then open the Local URL
-# (http://127.0.0.1:PORT, plain HTTP on loopback) in the default
-# browser.  On a remote machine
-# (an SSH session, or Linux without a display) there is no browser to
-# open here, so the cloudflared URL is printed for the user to open on
-# their own device.  ``KISS_SKIP_LAUNCH`` skips this too.
+# (http://127.0.0.1:PORT, plain HTTP on loopback) as a standalone app
+# window: kiss-app (next to kiss-web in the app's venv) registers the
+# desktop launcher, opens the webapp in a Chromium app-mode window and
+# then shows the launcher's folder in the file manager, so the user
+# sees where the app is.  Without kiss-app, or if it fails, the URL
+# opens in the default browser.  On a remote machine (an SSH session, or Linux without a
+# display) there is no window to open here, so the cloudflared URL is
+# printed for the user to open on their own device.
+# ``KISS_SKIP_LAUNCH`` skips this too.
 [ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Waiting for the kiss-web daemon to open the webapp..."
 # BEGIN: kiss-open-webapp
 KISS_WEBAPP_WAIT_SECS="${KISS_WEBAPP_WAIT_SECS:-120}"
@@ -1858,6 +2004,20 @@ find_kiss_web() {
     return 1
 }
 
+find_kiss_app() {
+    # The kiss-app of the daemon serving state directory $1: the one in
+    # that home's app venv (a brand's app when a brand daemon was
+    # restarted), else the one next to kiss-web $2.
+    local candidate
+    for candidate in "$(app_dir_of "$1")/.venv/bin/kiss-app" "${2%/*}/kiss-app"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 url_file_field() {
     # Print the string value of key $2 in the daemon's remote-url.json ($1),
     # a flat object written with one ``"key": "value"`` pair per line.
@@ -1865,9 +2025,12 @@ url_file_field() {
 }
 
 open_webapp() {
-    # The URL file of the daemon that was (re)started: the brand home's
-    # when the daemon is a brand's (RESTART_HOME, step [5/5]).
-    local url_file="${RESTART_HOME:-${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}}/remote-url.json"
+    # The state directory of the daemon that was (re)started: the brand
+    # home when the daemon is a brand's (RESTART_HOME, step [5/5]).  Its
+    # URL file names the webapp; its kiss-app, run with that home, owns
+    # the window's profile and the desktop launcher.
+    local app_home="${RESTART_HOME:-${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}}"
+    local url_file="$app_home/remote-url.json"
     local remote=0 kiss_web="" tunnel="" loopback="" waited=0
     machine_is_remote && remote=1
     echo ""
@@ -1909,6 +2072,29 @@ open_webapp() {
         loopback="${loopback/localhost/127.0.0.1}"
     fi
     echo ""
+    local kiss_app
+    kiss_app="$(find_kiss_app "$app_home" "$kiss_web" || true)"
+    if [ -n "$kiss_app" ]; then
+        echo "Opening the webapp in its own window at $loopback"
+        local launcher=1
+        KISS_HOME="$app_home" "$kiss_app" --install-launcher || {
+            launcher=0
+            warn "The desktop launcher was not installed; start the app with 'KISS_HOME=$app_home $kiss_app'."
+        }
+        # kiss-app starts the browser detached and returns once it is
+        # up; non-zero means no Chromium-family browser, or one that
+        # died at once (no display, say).
+        if KISS_HOME="$app_home" "$kiss_app" --url "$loopback" --wait 0; then
+            # After the window: the launcher's folder in the file
+            # manager (Finder on macOS), so the user sees where the
+            # app is and can pin it.
+            [ "$launcher" = 0 ] \
+                || KISS_HOME="$app_home" "$kiss_app" --reveal-launcher \
+                || warn "Could not show the desktop launcher's folder."
+            return 0
+        fi
+        warn "The standalone window did not open; using the browser instead."
+    fi
     echo "Opening the webapp at $loopback"
     if ! open_in_browser "$loopback"; then
         echo "   Could not open a browser; open the URL above yourself."

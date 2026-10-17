@@ -7,21 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function runParallelPanel(win) {
-  const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
-  for (const h of headers) {
-    const txt = (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim();
-    if (txt.startsWith('run_parallel')) return h.closest('.ev.tc');
-  }
-  return null;
-}
-
-function subagentTabEls(win) {
-  return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
-  );
-}
+const {runParallelPanel, subagentTabEls} = require('./subagent_tab_helpers');
 
 function activeTabEl(win) {
   return win.document.querySelector('#tab-list .chat-tab.active');

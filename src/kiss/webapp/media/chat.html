@@ -7,6 +7,10 @@
   <link href="{{STYLE_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
   <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="{{ICON_SVG_HREF}}">
+  <link rel="icon" type="image/png" sizes="512x512" href="{{ICON_PNG_HREF}}">
+  <link rel="apple-touch-icon" href="{{ICON_PNG_HREF}}">
+  <link rel="manifest" href="/manifest.webmanifest">
   <title>{{PAGE_TITLE}}</title>
   {{HEAD_STYLE}}
 </head>
@@ -136,9 +140,23 @@
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
                   <span class="more-item-label">Terminal</span>
                 </button>
+                <!-- Appearance: #theme-btn flips between the light and
+                     dark palettes (its label names the mode it switches
+                     TO), #contrast-btn flips between the low- and
+                     high-contrast variants the same way, and
+                     #theme-auto-btn picks the palette by the time of day
+                     on this device.  main.js fills the labels. -->
                 <button id="theme-btn" class="more-menu-item" role="menuitem">
                   <span class="more-item-icon"></span>
-                  <span class="more-item-label">Switch theme</span>
+                  <span class="more-item-label">Dark mode</span>
+                </button>
+                <button id="contrast-btn" class="more-menu-item" role="menuitem">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></span>
+                  <span class="more-item-label">High contrast</span>
+                </button>
+                <button id="theme-auto-btn" class="more-menu-item" role="menuitemcheckbox" aria-checked="false" data-tooltip="Light by day, dark by night (7 pm to 7 am on this device's clock)">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+                  <span class="more-item-label">Auto mode</span>
                 </button>
                 <button id="settings-btn" class="more-menu-item" role="menuitem" data-tooltip="Settings" aria-label="Settings">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
@@ -510,6 +528,11 @@
       <button id="settings-panel-close" aria-label="Close settings">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">{{PRODUCT_NAME}} Configuration{{VERSION_SUFFIX}}</div>
+        <!-- Which machine's settings the form shows: the chat header's
+             machine when it is a registered remote machine (main.js
+             forwards the form's loads and saves there), hidden for
+             this daemon. -->
+        <div id="settings-machine" class="settings-machine" hidden></div>
         <div id="remote-url"></div>
         <div id="config-form">
           <!-- remote_password: the plaintext remote access password
@@ -569,10 +592,10 @@
           </div>
 
           <div class="config-divider"></div>
-          <!-- Collapsible subpanels (API Keys, Custom Models): same
-               toggle pattern as the history panel's Filters drawer;
-               main.js re-collapses both every time the settings panel
-               opens, so they always START collapsed. -->
+          <!-- Collapsible subpanels (API Keys, Custom Models, Bedrock):
+               same toggle pattern as the history panel's Filters drawer;
+               main.js re-collapses all of them every time the settings
+               panel opens, so they always START collapsed. -->
           <div class="config-subpanel" id="api-keys-subpanel">
             <button type="button" id="api-keys-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="api-keys-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>API Keys</span></button>
             <div id="api-keys-body" class="config-subpanel-body" hidden>
@@ -600,23 +623,6 @@
           <label class="config-label">Gemini API Key (NOT RECOMMENDED)
             <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
-          <!-- Amazon Bedrock (bedrock/ Claude models): a bearer token
-               OR an access key pair; the region picks the endpoint. -->
-          <label class="config-label">Amazon Bedrock API Key (bearer token)
-            <input type="password" autocomplete="off" id="cfg-key-AWS_BEARER_TOKEN_BEDROCK" placeholder="Enter Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)">
-          </label>
-          <label class="config-label">AWS Access Key ID (Bedrock, if no bearer token)
-            <input type="password" autocomplete="off" id="cfg-key-AWS_ACCESS_KEY_ID" placeholder="AKIA...">
-          </label>
-          <label class="config-label">AWS Secret Access Key (Bedrock)
-            <input type="password" autocomplete="off" id="cfg-key-AWS_SECRET_ACCESS_KEY" placeholder="Enter AWS secret access key">
-          </label>
-          <label class="config-label">AWS Session Token (Bedrock, temporary credentials only)
-            <input type="password" autocomplete="off" id="cfg-key-AWS_SESSION_TOKEN" placeholder="Enter AWS session token">
-          </label>
-          <label class="config-label">AWS Region (Bedrock)
-            <input type="text" autocomplete="off" id="cfg-key-AWS_REGION" placeholder="us-east-1">
-          </label>
             </div>
           </div>
           <div class="config-subpanel" id="custom-models-subpanel">
@@ -640,6 +646,28 @@
             <button type="button" id="custom-model-cancel-btn" class="config-update-btn" style="display:none;">Cancel</button>
           </div>
           <div id="custom-models-list"></div>
+            </div>
+          </div>
+          <div class="config-subpanel" id="bedrock-subpanel">
+            <button type="button" id="bedrock-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="bedrock-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Bedrock</span></button>
+            <div id="bedrock-body" class="config-subpanel-body" hidden>
+          <!-- Amazon Bedrock (bedrock/ Claude models): a bearer token
+               OR an access key pair; the region picks the endpoint. -->
+          <label class="config-label">Amazon Bedrock API Key (bearer token)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_BEARER_TOKEN_BEDROCK" placeholder="Enter Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)">
+          </label>
+          <label class="config-label">AWS Access Key ID (Bedrock, if no bearer token)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_ACCESS_KEY_ID" placeholder="AKIA...">
+          </label>
+          <label class="config-label">AWS Secret Access Key (Bedrock)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_SECRET_ACCESS_KEY" placeholder="Enter AWS secret access key">
+          </label>
+          <label class="config-label">AWS Session Token (Bedrock, temporary credentials only)
+            <input type="password" autocomplete="off" id="cfg-key-AWS_SESSION_TOKEN" placeholder="Enter AWS session token">
+          </label>
+          <label class="config-label">AWS Region (Bedrock)
+            <input type="text" autocomplete="off" id="cfg-key-AWS_REGION" placeholder="us-east-1">
+          </label>
             </div>
           </div>
         </div>

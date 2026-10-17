@@ -51,7 +51,6 @@ import pytest
 from websockets.asyncio.client import connect
 
 from kiss.core import tls_certs
-from kiss.core.tls_certs import cert_needs_renewal
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import (
@@ -234,25 +233,15 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
             f"CA lifetime {ca_lifetime.days}d is too short; expected ~10y",
         )
 
-    def test_needs_renewal_helper_detects_expired(self) -> None:
-        """``cert_needs_renewal`` returns True for an expired cert."""
-        cert_path = self._tmp / "cert.pem"
-        key_path = self._tmp / "key.pem"
-        _write_expired_cert(cert_path, key_path)
-        self.assertTrue(cert_needs_renewal(cert_path))
-
-    def test_needs_renewal_helper_negative(self) -> None:
-        """A freshly-issued cert does not need renewal."""
-        cert_path = self._tmp / "cert.pem"
-        key_path = self._tmp / "key.pem"
-        _generate_self_signed_cert(cert_path, key_path)
-        self.assertFalse(cert_needs_renewal(cert_path))
-
-    def test_needs_renewal_helper_handles_corrupt_cert(self) -> None:
-        """A corrupt cert is treated as needing renewal."""
+    def test_create_ssl_context_regenerates_corrupt_cert(self) -> None:
+        """A corrupt cert is replaced by a loadable, long-lived one."""
         cert_path = self._tmp / "cert.pem"
         cert_path.write_bytes(b"this is not a valid PEM certificate")
-        self.assertTrue(cert_needs_renewal(cert_path))
+
+        ctx = _create_ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+        self.assertFalse(tls_certs._expiring(tls_certs._load_certificate(cert_path)))
 
     def test_create_ssl_context_regenerates_expired_cert(self) -> None:
         """Calling ``_create_ssl_context`` on an expired cert regenerates it."""
@@ -269,7 +258,7 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
             old_bytes, new_bytes,
             "Expired cert should have been regenerated",
         )
-        self.assertFalse(cert_needs_renewal(cert_path))
+        self.assertFalse(tls_certs._expiring(tls_certs._load_certificate(cert_path)))
 
 
 def _write_expired_cert(cert_path: Path, key_path: Path) -> None:

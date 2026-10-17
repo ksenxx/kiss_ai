@@ -15,10 +15,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
 class BridgeServer(RecordingServer):
@@ -29,26 +32,16 @@ class BridgeServer(RecordingServer):
         self.response_body: dict[str, Any] = {}
 
 
-class _BridgeHandler(BaseHTTPRequestHandler):
+class _BridgeHandler(RecordingHandler):
     def do_GET(self) -> None:  # noqa: N802
-        self.send_response(405)
-        self.end_headers()
-        self.wfile.write(b"Method not allowed\n")
+        self._reply(405, "Method not allowed\n", "text/plain")
 
     def do_POST(self) -> None:  # noqa: N802
         server = cast(BridgeServer, self.server)
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         server.requests.append({"path": self.path, "json": body})
-        payload = json.dumps(server.response_body).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
+        self._json(200, server.response_body)
 
 
 @contextmanager

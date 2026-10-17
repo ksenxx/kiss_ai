@@ -12,6 +12,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {sleep} = require('./simplify2_harness');
+const {waitForSocket} = require('./transport_page_helpers');
 
 const MEDIA = path.resolve(__dirname, '..', 'media');
 const shimJs = fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf-8');
@@ -73,18 +75,6 @@ function fail(msg, err) {
   console.error('  FAIL -', msg);
   if (err) console.error('       ', err.message || err);
   process.exit(1);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForSocket(sockets, count) {
-  const deadline = Date.now() + 20000;
-  while (sockets.length < count) {
-    if (Date.now() > deadline) throw new Error(`socket ${count} never opened`);
-    await sleep(20);
-  }
 }
 
 async function run() {

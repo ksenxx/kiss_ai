@@ -1,8 +1,11 @@
 #!/bin/bash
-# End-to-end test for the exclude.json filtering in scripts/release.sh.
+# End-to-end test for the public history built by scripts/release.sh.
 # Run: bash scripts/test_release_exclude.sh
 # Builds a scratch repo + bare "public" remote, sources release.sh functions,
-# and verifies excluded paths never reach the public repo.
+# and verifies that excluded paths never reach the public repo, that public
+# main consists of "Release X" commits only (no development commits), that
+# release_needed publishes exactly when the public tip is not that chain with
+# origin's current tree, and that a public repo of another shape is converted.
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,25 +59,39 @@ git diff --quiet && git diff --cached --quiet || fail "working tree/index modifi
 [[ -f secrets/key.txt ]] || fail "secrets/key.txt removed from working tree"
 pass "real index and working tree untouched"
 
-# --- Test 3: create_public_commit + verify + push; clone has history, no secrets ---
-create_public_commit "$(git rev-parse HEAD)"
+# --- Test 3: create_public_commit + verify + push; clone has one release
+# commit, no development commits and no secrets ---
+git remote add public "$WORK/public.git"
+PUBLIC_REPO_URL="$WORK/public.git"
+PUBLIC_REPO_SSH="$WORK/public.git"
+create_public_commit "$(git rev-parse HEAD)" 1.0.0 ""
 verify_no_excluded_paths "$PUBLIC_COMMIT" || fail "verify_no_excluded_paths rejected clean commit"
 verify_no_excluded_paths_in_history "$PUBLIC_COMMIT" ||
     fail "verify_no_excluded_paths_in_history rejected clean history"
-[[ "$PUBLIC_COMMIT" == "$FILTERED_HEAD" ]] || fail "public commit is not the filtered history tip"
 [[ "$PUBLIC_COMMIT" != "$(git rev-parse HEAD)" ]] || fail "public commit is origin's own commit"
-git remote add public "$WORK/public.git"
-git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
+[[ -z "$(commit_parents "$PUBLIC_COMMIT")" ]] || fail "first release commit is not a root commit"
+[[ "$(git log -1 --format=%s "$PUBLIC_COMMIT")" == "Release 1.0.0" ]] ||
+    fail "release commit has the wrong subject: $(git log -1 --format=%s "$PUBLIC_COMMIT")"
+FIRST_RELEASE="$PUBLIC_COMMIT"
+TAG_OBJECT=$(release_tag v1.0.0 1.0.0 "$PUBLIC_COMMIT")
+push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$TAG_OBJECT" "" > /dev/null ||
+    fail "first release into the empty public repo failed"
 git clone -q "$WORK/public.git" "$WORK/clone"
 [[ -f "$WORK/clone/keep/app.py" ]] || fail "keep/app.py missing in public clone"
 [[ -e "$WORK/clone/secrets" ]] && fail "secrets/ present in public clone"
 [[ -e "$WORK/clone/private_notes.md" ]] && fail "private_notes.md present in public clone"
 [[ -e "$WORK/clone/scripts/exclude.json" ]] && fail "exclude.json present in public clone"
-git -C "$WORK/clone" log --format='%s' | grep -qx "initial" ||
-    fail "development commit 'initial' missing from public history"
+[[ "$(git -C "$WORK/clone" log --format='%s')" == "Release 1.0.0" ]] ||
+    fail "public history is not exactly the release commit: $(git -C "$WORK/clone" log --format='%s')"
+[[ "$(git -C "$WORK/public.git" cat-file -t refs/tags/v1.0.0)" == "tag" ]] ||
+    fail "release tag missing or not annotated"
+[[ "$(git -C "$WORK/public.git" rev-parse 'v1.0.0^{commit}')" == "$PUBLIC_COMMIT" ]] ||
+    fail "release tag does not point at the release commit"
+git rev-parse --verify --quiet refs/tags/v1.0.0 > /dev/null &&
+    fail "release_tag created a local tag ref"
 git diff --quiet && git diff --cached --quiet || fail "create_public_commit touched the real index"
 [[ -z "$(git status --porcelain)" ]] || fail "create_public_commit left the working tree dirty"
-pass "public clone carries the filtered development history and no excluded paths"
+pass "public clone holds exactly one release commit and no excluded paths"
 
 # --- Test 4: excluded blobs are not even reachable in the public object db ---
 SECRET_BLOB=$(git rev-parse HEAD:secrets/key.txt)
@@ -83,8 +100,8 @@ if git -C "$WORK/public.git" cat-file -e "$SECRET_BLOB" 2>/dev/null; then
 fi
 pass "secret blob objects absent from public object database"
 
-# --- Test 5: second release publishes every dev commit; secrets-only commits
-# are pruned and secrets stay out of the whole public history ---
+# --- Test 5: second release adds one release commit on top of the first;
+# development commits stay private and secrets stay out of the whole history ---
 echo "only secret" > secrets/only.txt
 git add -A
 git commit -q -m "secrets only"
@@ -92,155 +109,203 @@ echo "v2" >> keep/app.py
 echo "new secret" > secrets/key2.txt
 git add -A
 git commit -q -m "second"
-create_public_commit "$(git rev-parse HEAD)"
+create_public_commit "$(git rev-parse HEAD)" 1.0.1 "$FIRST_RELEASE"
 verify_no_excluded_paths "$PUBLIC_COMMIT" || fail "verify rejected second commit"
 verify_no_excluded_paths_in_history "$PUBLIC_COMMIT" || fail "verify rejected second history"
-git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
-[[ "$PUBLIC_COMMIT" == "$FILTERED_HEAD" ]] || fail "second public commit is not the filtered tip"
-# initial + second survive; "secrets only" (excluded content only) is pruned.
-[[ "$(git -C "$WORK/public.git" rev-list --count main)" == "2" ]] ||
-    fail "public main should hold 2 dev commits, got $(git -C "$WORK/public.git" rev-list --count main)"
-for subject in "initial" "second"; do
-    git -C "$WORK/public.git" log --format='%s' main | grep -qx "$subject" ||
-        fail "development commit '$subject' missing from public history"
+[[ "$(commit_parents "$PUBLIC_COMMIT")" == "$FIRST_RELEASE" ]] ||
+    fail "second release commit is not parented on the first"
+TAG_OBJECT=$(release_tag v1.0.1 1.0.1 "$PUBLIC_COMMIT")
+push_public_snapshot "$PUBLIC_COMMIT" v1.0.1 "$TAG_OBJECT" "$FIRST_RELEASE" > /dev/null ||
+    fail "second release push failed"
+[[ "$(git -C "$WORK/public.git" log --format='%s' main)" == $'Release 1.0.1\nRelease 1.0.0' ]] ||
+    fail "public main is not the two release commits: $(git -C "$WORK/public.git" log --format='%s' main)"
+for c in $(git -C "$WORK/public.git" rev-list --all); do
+    git -C "$WORK/public.git" ls-tree -r --name-only "$c" | grep -q "secrets" && fail "secrets in public commit $c"
 done
-git -C "$WORK/public.git" log --format='%s' main | grep -qx "secrets only" &&
-    fail "commit whose only content was excluded paths survived in public history"
-for c in $(git -C "$WORK/public.git" rev-list main); do
-    git -C "$WORK/public.git" ls-tree -r --name-only "$c" | grep -q "secrets" && fail "secrets in public history commit $c"
-done
-pass "second release republishes the filtered history with no secrets anywhere"
+pass "second release appends one release commit; no development commits, no secrets"
 
-# --- Test 6: sync check equivalence — filtered tree of HEAD == public tree ---
+# --- Test 6: sync check equivalence: filtered tree of HEAD == public tree ---
 PUB_TREE=$(git -C "$WORK/public.git" rev-parse 'main^{tree}')
 [[ "$(filtered_tree HEAD)" == "$PUB_TREE" ]] ||
     fail "filtered tree of HEAD != public tree (sync check would misfire)"
 pass "in-sync detection: filtered tree matches the public tree after release"
 
-# --- Test 6e: release_needed drives the step-3 decision ---
+# --- Test 6e: build_release_chain + release_needed drive the step-3 decision ---
+fetch_public_refs > /dev/null
 PUBLIC_MAIN=$(git -C "$WORK/public.git" rev-parse main)
-# Rebuilding the filtered history must yield the same shas (deterministic
-# rewrite), or the in-sync check below could never hold across releases.
-build_filtered_history "$(git rev-parse HEAD)" > /dev/null
-if release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN" >/dev/null; then
-    fail "release_needed wants a release although kiss_ai already has this history"
+build_release_chain > /dev/null || fail "build_release_chain failed on a release-only public repo"
+[[ "$RELEASE_CHAIN_TIP" == "$PUBLIC_MAIN" ]] ||
+    fail "release-only public main was not recognised as the chain tip"
+[[ ${#RETAG_REFSPECS[@]} -eq 0 && ${#RETAG_LEASES[@]} -eq 0 ]] ||
+    fail "release-only public repo would have its tags re-pointed"
+if release_needed "$(filtered_tree HEAD)" "$PUBLIC_MAIN" >/dev/null; then
+    fail "release_needed wants a release although kiss_ai already has this tree"
 fi
-pass "release_needed: in sync (same history published) -> nothing to release"
+pass "release_needed: in sync (release-only history, same tree) -> nothing to release"
 
-# The tip shape of earlier releases: a "Release X.Y.Z" commit (it used to add
-# the packaged VS Code extension) on top of the very same filtered history.
-# The source is current, but the tip is not the rewritten head: re-release so
-# the extra commit disappears from public main.
-LEGACY=$(git commit-tree "$(filtered_tree HEAD)" -p "$FILTERED_HEAD" -m "Release 1.2.4")
-OUT=$(release_needed "$FILTERED_HEAD" "$LEGACY") ||
-    fail "release_needed skipped a public main topped by an old-style release commit"
-echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
-    fail "old-style tip reason not reported: $OUT"
-pass "release_needed: same source under an old-style release tip -> release"
+# A release tag moved back onto a development commit rebuilds to the very same
+# release commit (release_commit is deterministic), so the chain tip still
+# equals public main; the pending re-pointing alone must trigger a release.
+git update-ref "${PUBLIC_TAG_NS}/v1.0.1" "$(git rev-parse HEAD)"
+build_release_chain > /dev/null
+[[ "$RELEASE_CHAIN_TIP" == "$PUBLIC_MAIN" && ${#RETAG_REFSPECS[@]} -eq 1 ]] ||
+    fail "setup: moved tag was expected to rebuild to the published commit with one retag"
+OUT=$(release_needed "$(filtered_tree HEAD)" "$PUBLIC_MAIN") ||
+    fail "release_needed skipped a release tag that points at a development commit"
+echo "$OUT" | grep -q "1 kiss_ai release tag(s) do not point at release-only commits" ||
+    fail "pending re-pointing reason not reported: $OUT"
+fetch_public_refs > /dev/null
+build_release_chain > /dev/null
+[[ ${#RETAG_REFSPECS[@]} -eq 0 ]] || fail "setup: public tags were expected to be restored"
+pass "release_needed: a release tag off the chain -> release (tag gets re-pointed)"
 
-# History-only changes leave origin's tree identical but must still be
-# published: a change plus its revert, and an intentionally empty commit
-# (which --prune-empty auto preserves).
+# History-only changes (a change plus its revert, an empty commit) leave the
+# tree identical; a release-only public repo has nothing to publish for them.
 echo "temp" >> keep/app.py
 git add -A && git commit -q -m "tempchange"
 git revert --no-edit HEAD > /dev/null
 git commit -q --allow-empty -m "empty note"
-[[ "$(filtered_tree HEAD)" == "$(git rev-parse "${FILTERED_HEAD}^{tree}")" ]] ||
+[[ "$(filtered_tree HEAD)" == "$PUB_TREE" ]] ||
     fail "setup: history-only commits were expected to leave the tree unchanged"
-build_filtered_history "$(git rev-parse HEAD)" > /dev/null
-OUT=$(release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN") ||
-    fail "release_needed skipped history-only commits (tree unchanged)"
-echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
-    fail "history-only reason not reported: $OUT"
-create_public_commit "$(git rev-parse HEAD)" > /dev/null
-git push -q public "$PUBLIC_COMMIT:refs/heads/main" --force
-for subject in "tempchange" 'Revert "tempchange"' "empty note"; do
-    git -C "$WORK/public.git" log --format='%s' main | grep -qFx "$subject" ||
-        fail "history-only commit '$subject' missing from public history"
-done
-PUBLIC_MAIN=$(git -C "$WORK/public.git" rev-parse main)
-if release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN" >/dev/null; then
-    fail "release_needed not in sync right after publishing the history-only commits"
+if release_needed "$(filtered_tree HEAD)" "$PUBLIC_MAIN" >/dev/null; then
+    fail "release_needed wants a release for history-only commits (tree unchanged)"
 fi
-pass "release_needed: history-only commits (revert pair, empty commit) are released"
+pass "release_needed: history-only commits (revert pair, empty commit) -> nothing to release"
 
 echo "v3" >> keep/app.py
 git add -A && git commit -q -m "third"
-build_filtered_history "$(git rev-parse HEAD)" > /dev/null
-OUT=$(release_needed "$FILTERED_HEAD" "$PUBLIC_MAIN") ||
+OUT=$(release_needed "$(filtered_tree HEAD)" "$PUBLIC_MAIN") ||
     fail "release_needed missed a source change"
 echo "$OUT" | grep -q "Origin differs" || fail "source-change reason not reported: $OUT"
 pass "release_needed: source changed -> release"
 
-# A squashed snapshot (the pre-history-publication release shape): current
-# tree, but parented on another snapshot instead of being the rewritten
-# development history. It must be re-released so the history gets published.
-OLD_SNAP=$(git commit-tree "$(filtered_tree HEAD^)" -m "Release 0.0.1")
-SQUASHED=$(git commit-tree "$(filtered_tree HEAD)" -p "$OLD_SNAP" -m "Release 0.0.2")
-OUT=$(release_needed "$FILTERED_HEAD" "$SQUASHED") ||
-    fail "release_needed kept a squashed-snapshot main"
-echo "$OUT" | grep -q "has the current source but not the filtered development history" ||
-    fail "squashed-snapshot reason not reported: $OUT"
-pass "release_needed: squashed snapshot main -> release (history gets published)"
+# A public main that is not the release chain (development history, or a
+# snapshot outside the chain) must be replaced even when its tree is current.
+STRAY=$(git commit-tree "$(filtered_tree HEAD)" -p "$PUBLIC_MAIN" -m "Release 9.9.9")
+OUT=$(release_needed "$(filtered_tree HEAD)" "$STRAY") ||
+    fail "release_needed kept a main outside the release chain"
+echo "$OUT" | grep -q "not the release-only history" || fail "chain reason not reported: $OUT"
+OUT=$(release_needed "$(filtered_tree HEAD)" "$(git rev-parse HEAD)") ||
+    fail "release_needed kept a main made of development commits"
+echo "$OUT" | grep -q "not the release-only history" || fail "chain reason not reported: $OUT"
+pass "release_needed: main outside the release chain -> release"
 
 # A public tip that cannot be inspected (a sha this repo does not have) is
 # released rather than skipped.
-OUT=$(release_needed "$FILTERED_HEAD" "0000000000000000000000000000000000000000") ||
+OUT=$(release_needed "$(filtered_tree HEAD)" "0000000000000000000000000000000000000000") ||
     fail "release_needed kept an uninspectable public tip"
 echo "$OUT" | grep -q "cannot be inspected" || fail "uninspectable reason not reported: $OUT"
 pass "release_needed: uninspectable public tip -> release"
 
 git reset -q --hard HEAD^
 
-# --- Test 7: tagging the filtered commit works ---
-git tag -a "v1.2.4-test" -m "Release 1.2.4" "$PUBLIC_COMMIT"
-git push -q public "v1.2.4-test"
-git -C "$WORK/public.git" rev-parse "v1.2.4-test^{commit}" >/dev/null || fail "tag not on public"
-pass "tag points at filtered commit and pushes to public"
-
-# --- Test 7b: a squashed pre-history-publication main is replaced by the full
-# filtered development history in one leased, atomic, non-fast-forward push ---
-PUBLIC_REPO_URL="$WORK/public.git"
-PUBLIC_REPO_SSH="$WORK/public.git"
-OLD_SNAP2=$(git commit-tree "$(filtered_tree HEAD^)" -m "Release 0.1.0")
-SQUASHED2=$(git commit-tree "$(filtered_tree HEAD)" -p "$OLD_SNAP2" -m "Release 0.2.0")
-git push -q public "+$SQUASHED2:refs/heads/main"
-build_filtered_history "$(git rev-parse HEAD)" > /dev/null
-release_needed "$FILTERED_HEAD" "$SQUASHED2" >/dev/null ||
-    fail "release_needed skipped the migration off squashed snapshots"
-create_public_commit "$(git rev-parse HEAD)" > /dev/null
-git tag -a "v2.0.0-mig" -m "Release 2.0.0" "$PUBLIC_COMMIT"
-push_public_snapshot "$PUBLIC_COMMIT" "v2.0.0-mig" "$SQUASHED2" > /dev/null ||
-    fail "migration push (non-fast-forward, leased) failed"
-[[ "$(git -C "$WORK/public.git" rev-parse main)" == "$PUBLIC_COMMIT" ]] ||
-    fail "public main was not replaced by the filtered history"
-git -C "$WORK/public.git" log --format='%s' main | grep -qx "initial" ||
-    fail "development history missing after the migration push"
-git -C "$WORK/public.git" log --format='%s' main | grep -qx "Release 0.2.0" &&
-    fail "squashed snapshot still reachable from public main"
-pass "squashed main is replaced by the filtered development history under a lease"
-
-# --- Test 7c: the very first release goes into an empty public repo through
-# push_public_snapshot with an empty expected-main lease ---
-git init -q -b main --bare "$WORK/fresh.git"
-git remote add freshpub "$WORK/fresh.git"
+# --- Test 7: a public repo in the legacy shape (main = development history,
+# release tags on development commits) is converted into the release-only
+# chain: one "Release X" commit per tag in version order, every tag
+# re-pointed, in one leased atomic push together with the new release ---
+git init -q -b main --bare "$WORK/legacy.git"
+git remote add legacypub "$WORK/legacy.git"
 OLD_PUBLIC_REMOTE="$PUBLIC_REMOTE"
-PUBLIC_REMOTE=freshpub
-PUBLIC_REPO_URL="$WORK/fresh.git"
-PUBLIC_REPO_SSH="$WORK/fresh.git"
-git tag -a "v2.0.0-first" -m "Release 2.0.0" "$PUBLIC_COMMIT"
-push_public_snapshot "$PUBLIC_COMMIT" "v2.0.0-first" "" > /dev/null ||
-    fail "first release into an empty public repo failed"
-[[ "$(git -C "$WORK/fresh.git" rev-parse main)" == "$PUBLIC_COMMIT" ]] ||
-    fail "first release did not create main in the empty public repo"
-[[ "$(git -C "$WORK/fresh.git" cat-file -t refs/tags/v2.0.0-first)" == "tag" ]] ||
-    fail "first release did not publish its annotated tag"
-git -C "$WORK/fresh.git" log --format='%s' main | grep -qx "initial" ||
-    fail "first release did not publish the development history"
+PUBLIC_REMOTE=legacypub
+PUBLIC_REPO_URL="$WORK/legacy.git"
+PUBLIC_REPO_SSH="$WORK/legacy.git"
+INITIAL=$(git rev-list --max-parents=0 HEAD)
+SECOND=$(git rev-parse HEAD~3)
+[[ "$(git log -1 --format=%s "$SECOND")" == "second" ]] || fail "setup: HEAD~3 is not 'second'"
+git push -q legacypub "+$(git rev-parse HEAD):refs/heads/main" \
+    "+$INITIAL:refs/tags/v0.9.0" "+$SECOND:refs/tags/v0.10.0" "+$FIRST_RELEASE:refs/tags/experimental"
+# Filtered trees are what the release commits must hold; a secret-only commit
+# ("secrets only", HEAD~4) is simply never a release.
+fetch_public_refs > /dev/null
+build_release_chain > "$WORK/chain.log" || fail "build_release_chain failed on the legacy repo: $(cat "$WORK/chain.log")"
+grep -q "2 public release tag(s) do not point at release-only commits yet" "$WORK/chain.log" ||
+    fail "re-pointing of the legacy tags not announced: $(cat "$WORK/chain.log")"
+[[ ${#RETAG_LEASES[@]} -eq 2 && ${#RETAG_REFSPECS[@]} -eq 2 ]] ||
+    fail "expected 2 re-pointed tags, got ${#RETAG_LEASES[@]} leases / ${#RETAG_REFSPECS[@]} refspecs"
+[[ "${RETAG_LEASES[0]}" == "--force-with-lease=refs/tags/v0.9.0:$INITIAL" ]] ||
+    fail "lease for v0.9.0 is wrong: ${RETAG_LEASES[0]}"
+[[ "${RETAG_LEASES[1]}" == "--force-with-lease=refs/tags/v0.10.0:$SECOND" ]] ||
+    fail "tags are not ordered by version (v0.10.0 must follow v0.9.0): ${RETAG_LEASES[1]}"
+[[ "$(git log -1 --format=%s "$RELEASE_CHAIN_TIP")" == "Release 0.10.0" ]] ||
+    fail "chain tip is not Release 0.10.0: $(git log -1 --format=%s "$RELEASE_CHAIN_TIP")"
+[[ "$(git rev-parse "${RELEASE_CHAIN_TIP}^{tree}")" == "$(filtered_tree "$SECOND")" ]] ||
+    fail "rebuilt release commit does not hold the tag's filtered tree"
+[[ "$(git log -1 --format='%an <%ae> %ad' --date=raw "$RELEASE_CHAIN_TIP")" == \
+    "$(git log -1 --format='%an <%ae> %ad' --date=raw "$SECOND")" ]] ||
+    fail "rebuilt release commit did not keep the released commit's author and date"
+OUT=$(release_needed "$(filtered_tree HEAD)" "$(git rev-parse HEAD)") ||
+    fail "release_needed skipped the conversion of a legacy public repo"
+echo "$OUT" | grep -q "not the release-only history" || fail "legacy reason not reported: $OUT"
+# Rebuilding is deterministic: the same inputs give the same commit ids.
+REBUILT_TIP="$RELEASE_CHAIN_TIP"
+build_release_chain > /dev/null
+[[ "$RELEASE_CHAIN_TIP" == "$REBUILT_TIP" ]] || fail "rebuilding the chain changed its commit ids"
+
+create_public_commit "$(git rev-parse HEAD)" 0.11.0 "$RELEASE_CHAIN_TIP" > /dev/null
+TAG_OBJECT=$(release_tag v0.11.0 0.11.0 "$PUBLIC_COMMIT")
+push_public_snapshot "$PUBLIC_COMMIT" v0.11.0 "$TAG_OBJECT" "$(git rev-parse HEAD)" \
+    "${RETAG_LEASES[@]}" "${RETAG_REFSPECS[@]}" > /dev/null ||
+    fail "conversion push (non-fast-forward, leased, with re-pointed tags) failed"
+[[ "$(git -C "$WORK/legacy.git" rev-parse main)" == "$PUBLIC_COMMIT" ]] ||
+    fail "public main was not replaced by the release chain"
+[[ "$(git -C "$WORK/legacy.git" log --format='%s' main)" == $'Release 0.11.0\nRelease 0.10.0\nRelease 0.9.0' ]] ||
+    fail "public main is not the release chain: $(git -C "$WORK/legacy.git" log --format='%s' main)"
+[[ "$(git -C "$WORK/legacy.git" rev-parse 'v0.9.0^{commit}')" == "$(git -C "$WORK/legacy.git" rev-parse 'main~2')" ]] ||
+    fail "v0.9.0 was not re-pointed to its release commit"
+[[ "$(git -C "$WORK/legacy.git" rev-parse 'v0.10.0^{commit}')" == "$(git -C "$WORK/legacy.git" rev-parse 'main~1')" ]] ||
+    fail "v0.10.0 was not re-pointed to its release commit"
+for t in v0.9.0 v0.10.0 v0.11.0; do
+    [[ "$(git -C "$WORK/legacy.git" cat-file -t "refs/tags/$t")" == "tag" ]] ||
+        fail "$t is not an annotated tag after the conversion"
+    [[ "$(git -C "$WORK/legacy.git" cat-file tag "refs/tags/$t" | tail -1)" == "Release ${t#v}" ]] ||
+        fail "$t has the wrong tag message"
+done
+[[ "$(git -C "$WORK/legacy.git" rev-parse experimental)" == "$FIRST_RELEASE" ]] ||
+    fail "a non-release tag was touched by the conversion"
+for c in $INITIAL $SECOND; do
+    git -C "$WORK/legacy.git" rev-list main --tags=v\* | grep -q "$c" &&
+        fail "development commit $c is still reachable from main or a release tag"
+done
+[[ -z "$(git -C "$WORK/legacy.git" ls-tree -r --name-only 'v0.9.0^{tree}' | grep secrets)" ]] ||
+    fail "re-pointed v0.9.0 still carries secrets"
+pass "legacy public repo converted to the release-only chain with re-pointed tags"
+
+# The converted repo is in sync: the chain rebuilds to its own commits and
+# nothing is left to release.
+fetch_public_refs > /dev/null
+build_release_chain > /dev/null
+[[ "$RELEASE_CHAIN_TIP" == "$PUBLIC_COMMIT" && ${#RETAG_REFSPECS[@]} -eq 0 ]] ||
+    fail "converted repo is not recognised as release-only (tip $RELEASE_CHAIN_TIP, ${#RETAG_REFSPECS[@]} retags)"
+if release_needed "$(filtered_tree HEAD)" "$PUBLIC_COMMIT" > /dev/null; then
+    fail "release_needed wants another release right after the conversion"
+fi
+pass "converted repo is recognised as in sync (conversion is idempotent)"
+
+# A tag that moved on the public repo since the fetch fails its lease and
+# aborts the whole push: main, the new tag and the other re-pointed tags.
+git push -q legacypub "+$INITIAL:refs/tags/v0.8.0"
+fetch_public_refs > /dev/null
+build_release_chain > /dev/null
+# v0.8.0 sorts first, so it becomes the new root and the whole chain (3 tags)
+# is rebuilt behind it.
+[[ ${#RETAG_REFSPECS[@]} -eq 4 ]] || fail "expected the whole chain to be rebuilt behind v0.8.0, got ${#RETAG_REFSPECS[@]} re-pointed tags"
+git push -q legacypub "+$SECOND:refs/tags/v0.8.0"
+create_public_commit "$(git rev-parse HEAD)" 0.12.0 "$RELEASE_CHAIN_TIP" > /dev/null
+TAG_OBJECT=$(release_tag v0.12.0 0.12.0 "$PUBLIC_COMMIT")
+if push_public_snapshot "$PUBLIC_COMMIT" v0.12.0 "$TAG_OBJECT" "$(git -C "$WORK/legacy.git" rev-parse main)" \
+    "${RETAG_LEASES[@]}" "${RETAG_REFSPECS[@]}" > "$WORK/stale.log" 2>&1; then
+    fail "a tag moved since the fetch was overwritten"
+fi
+[[ "$(git -C "$WORK/legacy.git" rev-parse v0.8.0)" == "$SECOND" ]] || fail "moved tag was clobbered"
+[[ "$(git -C "$WORK/legacy.git" log --format='%s' main)" == $'Release 0.11.0\nRelease 0.10.0\nRelease 0.9.0' ]] ||
+    fail "main changed although the push was rejected"
+git -C "$WORK/legacy.git" rev-parse --verify --quiet refs/tags/v0.12.0 > /dev/null &&
+    fail "new tag published although the push was rejected"
+pass "a release tag moved since the fetch aborts the whole atomic push"
+
 PUBLIC_REMOTE="$OLD_PUBLIC_REMOTE"
 PUBLIC_REPO_URL="$WORK/public.git"
 PUBLIC_REPO_SSH="$WORK/public.git"
-pass "first release into an empty public repo publishes history, main and tag"
 
 # --- Test 8: missing exclude.json is a hard error (no fail-open) ---
 git rm -q scripts/exclude.json
@@ -250,15 +315,17 @@ if OUT=$(filtered_tree HEAD 2>&1); then
 fi
 pass "missing exclude.json is a hard error (no fail-open)"
 
-# --- Test 9: empty list => full tree, and history is published as is ---
+# --- Test 9: empty list => full tree, still published as a release commit ---
 mkdir -p scripts
 echo "[]" > scripts/exclude.json
 git add scripts/exclude.json && git commit -q -m "empty exclude"
 [[ "$(filtered_tree HEAD)" == "$(git rev-parse 'HEAD^{tree}')" ]] || fail "empty exclude list changed tree"
-build_filtered_history "$(git rev-parse HEAD)" > /dev/null
-[[ "$FILTERED_HEAD" == "$(git rev-parse HEAD)" ]] ||
-    fail "empty exclude list rewrote history instead of publishing origin's commits as is"
-pass "empty exclude list keeps full tree and origin history unrewritten"
+create_public_commit "$(git rev-parse HEAD)" 3.0.0 "" > /dev/null
+[[ "$PUBLIC_COMMIT" != "$(git rev-parse HEAD)" ]] ||
+    fail "empty exclude list published origin's own commit instead of a release commit"
+[[ "$(git rev-parse "${PUBLIC_COMMIT}^{tree}")" == "$(git rev-parse 'HEAD^{tree}')" ]] ||
+    fail "release commit with an empty exclude list does not hold the full tree"
+pass "empty exclude list keeps the full tree in a release commit"
 
 # --- Test 10: malformed JSON fails loudly ---
 echo "{ not json" > scripts/exclude.json

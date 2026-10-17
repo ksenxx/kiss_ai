@@ -14,13 +14,16 @@
 #    kiss_ai repo's existing history (drops commits whose only content was
 #    excluded paths, re-points tags, pushes atomically under a lease per ref);
 #    a no-op when that history is already clean
-# 3. Check if origin is ahead of kiss_ai repo
+# 3. Check if origin is ahead of kiss_ai repo, whose main must consist of one
+#    "Release X.Y.Z" commit per release and nothing else (no development
+#    commits); a main of any other shape is replaced
 # 4. If ahead, bump version in _version.py, README.md, SYSTEM.md
 # 5. Commit changes with "Version bumped"
 # 6. Push to origin
-# 7. Push the full development history to the kiss_ai repo, rewritten so that
-#    paths listed in scripts/exclude.json never existed in any commit, and tag
-#    its tip with the version
+# 7. Push one "Release X.Y.Z" commit holding origin's tree minus the paths
+#    listed in scripts/exclude.json, parented on the previous release commit,
+#    as the kiss_ai repo's main, and tag it with the version; every earlier
+#    release tag is re-pointed to its release commit when it is not one yet
 # 8. Create GitHub release
 # 9. Publish to PyPI
 # 10. Run ./install.sh so this machine ends up running the version it just
@@ -64,11 +67,6 @@ PUBLIC_TAG_NS="refs/kiss-public-tags"
 # neither branches nor tags (GitHub's read-only refs/pull/*). Each run fetches
 # into its own child namespace and deletes it again once scanned.
 PUBLIC_OTHER_NS="refs/kiss-public-other"
-# Local ref holding the rewritten development history that the public repo's
-# main is built from: every commit of origin's current branch with the excluded
-# paths stripped (see build_filtered_history). Kept between releases so the
-# rewritten objects stay reachable and the next fetch of them is incremental.
-FILTERED_REF="refs/kiss-filtered/main"
 
 # Colors for output
 RED='\033[0;31m'
@@ -302,16 +300,19 @@ filtered_tree() {
         return 1
     fi
     if [[ -n "$paths" ]]; then
+        # :(literal) treats each path verbatim - no glob/wildcard expansion -
+        # so an entry like "foo[1]" cannot accidentally remove "foo1". One
+        # git rm for all paths: this runs once per public release tag.
+        local pathspecs=()
         while IFS= read -r path; do
-            # :(literal) treats the path verbatim - no glob/wildcard expansion -
-            # so an entry like "foo[1]" cannot accidentally remove "foo1".
-            if ! GIT_INDEX_FILE="$tmp_index" \
-                git rm -r -f -q --cached --ignore-unmatch -- ":(literal)$path" >/dev/null; then
-                print_error "Failed to exclude '$path' from public tree" >&2
-                rm -f "$tmp_index"
-                return 1
-            fi
+            pathspecs+=(":(literal)$path")
         done <<< "$paths"
+        if ! GIT_INDEX_FILE="$tmp_index" \
+            git rm -r -f -q --cached --ignore-unmatch -- "${pathspecs[@]}" >/dev/null; then
+            print_error "Failed to exclude the paths of $EXCLUDE_FILE from public tree" >&2
+            rm -f "$tmp_index"
+            return 1
+        fi
     fi
     GIT_INDEX_FILE="$tmp_index" git write-tree
     local status=$?
@@ -319,124 +320,144 @@ filtered_tree() {
     return $status
 }
 
-# Decide whether <filtered-head> (origin's HEAD rewritten by
-# build_filtered_history so the excluded paths never existed) must be published
-# as the public repo's main, whose tip is <public-head>. Public main IS the
-# rewritten development history, so the repo is in sync exactly when its tip
-# is the rewritten head. Comparing commit ids - not merely trees - releases
-# history-only changes (a change plus its revert, an intentionally empty
-# commit) and replaces a pre-history-publication squashed snapshot, or the
-# "Release X.Y.Z" tip commits of earlier releases, whose source is otherwise
-# current with the full filtered history. A public tip that cannot be
-# inspected counts as needing a release rather than being skipped silently.
-# Returns 1 when there is nothing to release.
+# Print "<tag> <object-id>" for every public tag named v<version>, oldest
+# version first: the release tags whose snapshots make up the release-only
+# history. Tags with any other name are not releases and are left alone.
+public_release_tags() {
+    public_tags | grep '^v[0-9][0-9.]* ' | sort -V
+}
+
+# Print the parent commit ids of <commit>, space-separated ("" for a root).
+commit_parents() {
+    git rev-list --parents -n 1 "$1" | cut -s -d' ' -f2-
+}
+
+# Print the id of a "Release <version>" commit holding <tree> on top of
+# <parent> ("" for the first release). Author, committer and dates are copied
+# from <source-commit> (the released commit, or the previously published commit
+# a release-only history is rebuilt from), so the same inputs always yield the
+# same commit id and build_release_chain can recognise its own work.
+release_commit() {
+    local version="$1" tree="$2" parent="$3" source_commit="$4"
+    local ident=() line parent_args=()
+    while IFS= read -r line; do
+        ident+=("$line")
+    done < <(git log -1 --date=raw "$source_commit" --format='GIT_AUTHOR_NAME=%an
+GIT_AUTHOR_EMAIL=%ae
+GIT_AUTHOR_DATE=%ad
+GIT_COMMITTER_NAME=%cn
+GIT_COMMITTER_EMAIL=%ce
+GIT_COMMITTER_DATE=%cd')
+    if [[ ${#ident[@]} -ne 6 ]]; then
+        print_error "Cannot read the author and committer of $source_commit" >&2
+        return 1
+    fi
+    if [[ -n "$parent" ]]; then
+        parent_args=(-p "$parent")
+    fi
+    env "${ident[@]}" git commit-tree "$tree" "${parent_args[@]}" -m "Release $version"
+}
+
+# Print the id of an annotated tag object <tag> ("Release <version>") pointing
+# at release commit <commit>, tagged by that commit's committer. Only the
+# object is created - no local ref - so pushing it is the only side effect.
+release_tag() {
+    local tag="$1" version="$2" commit="$3" tagger
+    tagger=$(git cat-file commit "$commit" |
+        awk '/^$/ { exit } /^committer / { sub(/^committer /, ""); print; exit }')
+    printf 'object %s\ntype commit\ntag %s\ntagger %s\n\nRelease %s\n' \
+        "$commit" "$tag" "$tagger" "$version" | git mktag
+}
+
+# Succeed when <commit> is the "Release <version>" commit holding <tree> on top
+# of <parent> ("" for a root): the shape every commit of public main must have.
+release_commit_shape_ok() {
+    local commit="$1" tree="$2" parent="$3" version="$4"
+    [[ "$(git rev-parse "${commit}^{tree}")" == "$tree" &&
+        "$(commit_parents "$commit")" == "$parent" &&
+        "$(git log -1 --format=%s "$commit")" == "Release $version" ]]
+}
+
+# Build the history that the public repo's main must consist of: one
+# "Release <version>" commit per public release tag, oldest first, each holding
+# the tagged tree minus the excluded paths and parented on the previous release
+# commit - nothing else is ever reachable from public main. A tagged commit
+# that already has exactly that shape is reused as is, so a public repo that is
+# already in this form rebuilds to its own commits, and because release_commit
+# is deterministic so does any rebuilt chain. Sets:
+#   RELEASE_CHAIN_TIP  the newest release commit ("" when there is no release tag)
+#   RETAG_LEASES       --force-with-lease arguments, one per tag whose commit
+#                      was replaced, pinned to the tag's current public object
+#   RETAG_REFSPECS     the matching "<tag object>:refs/tags/<tag>" refspecs
+build_release_chain() {
+    local tag oid version commit tree parent=""
+    RELEASE_CHAIN_TIP=""
+    RETAG_LEASES=()
+    RETAG_REFSPECS=()
+    while read -r tag oid; do
+        version="${tag#v}"
+        if ! commit=$(git rev-parse --verify --quiet "${oid}^{commit}"); then
+            print_error "Public tag $tag does not point at a commit" >&2
+            return 1
+        fi
+        tree=$(filtered_tree "$commit") || return 1
+        if release_commit_shape_ok "$commit" "$tree" "$parent" "$version"; then
+            parent="$commit"
+            continue
+        fi
+        parent=$(release_commit "$version" "$tree" "$parent" "$commit") || return 1
+        RETAG_LEASES+=("--force-with-lease=refs/tags/${tag}:${oid}")
+        RETAG_REFSPECS+=("$(release_tag "$tag" "$version" "$parent"):refs/tags/${tag}")
+    done < <(public_release_tags)
+    RELEASE_CHAIN_TIP="$parent"
+    if [[ ${#RETAG_REFSPECS[@]} -gt 0 ]]; then
+        print_info "${#RETAG_REFSPECS[@]} public release tag(s) do not point at release-only commits yet and will be re-pointed"
+    fi
+}
+
+# Decide whether origin's HEAD, whose tree minus the excluded paths is
+# <filtered-tree>, must be published to the public repo, whose main tip is
+# <public-head>. Nothing is to release exactly when public main already IS the
+# release-only history (build_release_chain's tip), every release tag points
+# at its commit of that history (a tag moved back onto a development commit
+# rebuilds to the very same release commit, so the tip alone cannot tell), and
+# that tip holds <filtered-tree>. Comparing trees, not commits, means a change
+# plus its revert publishes nothing; a main of any other shape (development
+# history, a squashed snapshot outside the chain) is replaced. A public tip
+# that cannot be inspected counts as needing a release rather than being
+# skipped silently. Returns 1 when there is nothing to release.
 release_needed() {
-    local filtered_head="$1" public_head="$2" public_commit
+    local filtered_tree="$1" public_head="$2" public_commit
     if ! public_commit=$(git rev-parse --verify --quiet "${public_head}^{commit}"); then
         print_info "kiss_ai main cannot be inspected - proceeding with release"
         return 0
     fi
-    if [[ "$public_commit" != "$(git rev-parse "${filtered_head}^{commit}")" ]]; then
-        if [[ "$(git rev-parse "${public_head}^{tree}")" == "$(git rev-parse "${filtered_head}^{tree}")" ]]; then
-            print_info "kiss_ai main has the current source but not the filtered development history - proceeding with release"
-        else
-            print_info "Origin differs from kiss_ai - proceeding with release"
-        fi
+    if [[ "$public_commit" != "$RELEASE_CHAIN_TIP" ]]; then
+        print_info "kiss_ai main is not the release-only history - proceeding with release"
+        return 0
+    fi
+    if [[ ${#RETAG_REFSPECS[@]} -gt 0 ]]; then
+        print_info "${#RETAG_REFSPECS[@]} kiss_ai release tag(s) do not point at release-only commits - proceeding with release"
+        return 0
+    fi
+    if [[ "$(git rev-parse "${public_commit}^{tree}")" != "$filtered_tree" ]]; then
+        print_info "Origin differs from kiss_ai - proceeding with release"
         return 0
     fi
     return 1
 }
 
-# Rewrite the full history of <source-commit> so that the paths listed in
-# $EXCLUDE_FILE never existed in any commit: every commit keeps its author,
-# dates and message (except that commit-hash references inside messages are
-# remapped to the rewritten shas) but loses the excluded paths, commits whose
-# only content was excluded paths are dropped (their children re-parented on
-# the nearest surviving ancestor), and the result is stored under
-# $FILTERED_REF. Sets FILTERED_HEAD to the rewritten tip. The rewrite runs
-# git-filter-repo in a throwaway bare repo, exactly like purge_public_history,
-# so this checkout is never touched. For a given git-filter-repo version the
-# rewrite is deterministic, so unchanged history rewrites to the same shas and
-# consecutive public mains share their commits; should the tool ever rewrite
-# differently, release_needed merely triggers one extra release that replaces
-# public main with an equivalent rewritten history.
-build_filtered_history() {
-    local source_commit="$1"
-    local paths mirror_dir mirror_repo leaks
-    if ! paths=$(read_exclude_paths); then
-        print_error "Failed to read $EXCLUDE_FILE - aborting"
-        return 1
-    fi
-    if [[ -z "$paths" ]]; then
-        FILTERED_HEAD=$(git rev-parse --verify "${source_commit}^{commit}") || return 1
-        git update-ref "$FILTERED_REF" "$FILTERED_HEAD"
-        print_info "Nothing to exclude - publishing origin history as is"
-        return 0
-    fi
-
-    if ! resolve_filter_repo; then
-        print_error "git-filter-repo is required to publish filtered history but was not found"
-        print_info "Install it with: uv tool install git-filter-repo (or brew install git-filter-repo)"
-        return 1
-    fi
-
-    mirror_dir=$(mktemp -d)
-    mirror_repo="$mirror_dir/filtered.git"
-    if ! git init --quiet --bare "$mirror_repo" ||
-        ! git push --quiet "$mirror_repo" "+${source_commit}:refs/heads/main"; then
-        print_error "Failed to stage origin history for filtering"
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-
-    local filter_args=(--force --invert-paths --prune-empty auto) name
-    while IFS= read -r name; do
-        filter_args+=(--path "$name")
-    done <<< "$paths"
-    if ! (cd "$mirror_repo" && "${FILTER_REPO_CMD[@]}" "${filter_args[@]}" >/dev/null); then
-        print_error "git-filter-repo failed to filter origin history"
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-
-    if ! git -C "$mirror_repo" rev-parse --verify --quiet refs/heads/main >/dev/null; then
-        print_error "Every commit of origin's history consists of excluded paths only"
-        print_error "Nothing would be left to publish - shorten $EXCLUDE_FILE"
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-    if ! leaks=$(excluded_paths_in_history "$mirror_repo" refs/heads/main); then
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-    if [[ -n "$leaks" ]]; then
-        print_error "Filtering left excluded paths in the rewritten history - aborting:"
-        printf '%s\n' "$leaks" | head -20
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-
-    if ! git fetch --quiet --no-tags "$mirror_repo" "+refs/heads/main:${FILTERED_REF}"; then
-        print_error "Failed to fetch the filtered history from the staging repo"
-        rm -rf "$mirror_dir"
-        return 1
-    fi
-    rm -rf "$mirror_dir"
-    FILTERED_HEAD=$(git rev-parse --verify "$FILTERED_REF") || return 1
-    print_info "Filtered $(git rev-list --count "$source_commit") origin commit(s) into $(git rev-list --count "$FILTERED_HEAD") public commit(s), tip $FILTERED_HEAD"
-}
-
-# Create the commit published as the public repo's main: the full development
-# history of <source-commit> rewritten so the excluded paths never existed
-# (build_filtered_history). The tip is a rewritten commit - never one of
-# origin's own - so excluded content is never reachable from public history
-# while every development commit (message, author, dates) is. Sets
-# PUBLIC_COMMIT to the tip sha.
+# Create the commit published as the public repo's new main: a
+# "Release <version>" commit holding <source-commit>'s tree minus the excluded
+# paths, parented on <parent> (the previous release commit, "" for the first
+# release) - never on origin's own commits, so only release commits are ever
+# reachable from public history and excluded content never is. Sets
+# PUBLIC_COMMIT.
 create_public_commit() {
-    local source_commit="$1"
-    build_filtered_history "$source_commit" || return 1
-    PUBLIC_COMMIT="$FILTERED_HEAD"
-    print_info "Public main will be $PUBLIC_COMMIT (filtered history of $source_commit)"
+    local source_commit="$1" version="$2" parent="$3" tree
+    tree=$(filtered_tree "$source_commit") || return 1
+    PUBLIC_COMMIT=$(release_commit "$version" "$tree" "$parent" "$source_commit") || return 1
+    print_info "Created public release commit $PUBLIC_COMMIT (snapshot of $source_commit)"
 }
 
 # Fail if any excluded path is still present in <commit>'s tree. Matches each
@@ -469,10 +490,10 @@ verify_no_excluded_paths() {
     print_info "Verified: no excluded paths present in public commit"
 }
 
-# Fail if any commit reachable from <commit> contains an excluded path. The
-# public repo receives the whole filtered development history, so checking the
-# tip's tree alone (verify_no_excluded_paths) is not enough: a path must not
-# appear in any ancestor either.
+# Fail if any commit reachable from <commit> contains an excluded path. The new
+# release commit sits on the chain of all earlier release commits, so checking
+# the tip's tree alone (verify_no_excluded_paths) is not enough: a path must
+# not appear in any earlier release either.
 verify_no_excluded_paths_in_history() {
     local commit="$1" leaks
     if ! leaks=$(excluded_paths_in_history "$(pwd)" "$commit"); then
@@ -744,15 +765,19 @@ verify_public_history_clean() {
     print_info "Verified: no excluded paths in any kiss_ai branch or tag"
 }
 
-# Publish <commit> (with its whole filtered history) as the public repo's main
-# branch and <tag> as its tag in one atomic push, leased on main still being at
-# <expected-main> ("" when the public repo has no main yet) and on <tag> not
-# existing yet. The lease doubles as the force that replacing a squashed
-# pre-history-publication main (a non-fast-forward update) needs. Anything pushed to the
-# public repo since fetch_public_refs therefore aborts the release instead of
-# being silently overwritten, and a rejected ref leaves the repo untouched.
+# Publish release <commit> (with the chain of earlier release commits below it)
+# as the public repo's main branch and tag object <tag-object> as its tag
+# <tag> in one atomic push, leased on main still being at <expected-main> (""
+# when the public repo has no main yet) and on <tag> not existing yet. Any
+# further arguments are build_release_chain's RETAG_LEASES followed by its
+# RETAG_REFSPECS, re-pointing earlier release tags in the same push. The
+# leases double as the force that replacing a main of another shape (a
+# non-fast-forward update) needs. Anything pushed to the public repo since
+# fetch_public_refs therefore aborts the release instead of being silently
+# overwritten, and a rejected ref leaves the repo untouched.
 push_public_snapshot() {
-    local commit="$1" tag="$2" expected_main="$3" public_url
+    local commit="$1" tag="$2" tag_object="$3" expected_main="$4" public_url
+    shift 4
     if ! public_url=$(public_push_url); then
         return 1
     fi
@@ -760,12 +785,9 @@ push_public_snapshot() {
     if ! git push --atomic "$public_url" \
         "--force-with-lease=refs/heads/main:${expected_main}" \
         "--force-with-lease=refs/tags/${tag}:" \
-        "${commit}:refs/heads/main" "refs/tags/${tag}:refs/tags/${tag}"; then
+        "$@" "${commit}:refs/heads/main" "${tag_object}:refs/tags/${tag}"; then
         print_error "Failed to publish $tag to $public_url - nothing was changed"
         print_info "A rejected lease means kiss_ai moved since this release started; rerun the release"
-        # Nothing was published, so the tag must not linger locally either: it
-        # would otherwise block a retry of this very version.
-        git tag -d "$tag" > /dev/null 2>&1 || true
         return 1
     fi
     verify_public_history_clean
@@ -938,21 +960,17 @@ main() {
     ORIGIN_HEAD=$(git rev-parse HEAD)
     PUBLIC_HEAD=$(git rev-parse --verify --quiet "${PUBLIC_BRANCH_NS}/main" || echo "")
 
-    # Build the filtered development history up front: a broken exclude.json
-    # or a missing git-filter-repo aborts the release here, before any side
-    # effects (set -e catches the failure), and release_needed can compare the
-    # public tip's parent against the rewritten head itself, so history-only
-    # changes (a change plus its revert, an intentionally empty commit) are
-    # released even though they leave origin's tree unchanged.
-    build_filtered_history "$ORIGIN_HEAD"
+    # Filter origin's tree and rebuild the release-only history up front: a
+    # broken exclude.json aborts the release here, before any side effects
+    # (set -e catches the failure), and release_needed can check that public
+    # main IS that history (one "Release X.Y.Z" commit per release, nothing
+    # else) rather than development commits or a snapshot outside the chain.
+    FILTERED_ORIGIN_TREE=$(filtered_tree "$ORIGIN_HEAD")
+    build_release_chain
 
-    # The public repo holds the filtered development history (excluded paths
-    # stripped from every commit) and nothing else, so release_needed checks
-    # that its tip IS the rewritten head rather than a squashed snapshot or an
-    # older release's tip.
     if [[ -z "$PUBLIC_HEAD" ]]; then
         print_info "Public repo has no main branch yet - will create it"
-    elif ! release_needed "$FILTERED_HEAD" "$PUBLIC_HEAD"; then
+    elif ! release_needed "$FILTERED_ORIGIN_TREE" "$PUBLIC_HEAD"; then
         print_info "kiss_ai already matches origin (minus excluded paths) - nothing to release"
         # Even with nothing to publish, finish by installing this checkout
         # locally (see run_local_install); the EXIT trap restores the stash.
@@ -995,17 +1013,24 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 7: Push the filtered development history to the kiss_ai repo: origin's
-    # history rewritten by git-filter-repo so that paths listed in
-    # scripts/exclude.json never existed in any commit. Every development commit
-    # is public, none of the excluded content is reachable.
-    print_step "Pushing development history to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE)..."
-    create_public_commit "$(git rev-parse HEAD)"
+    # Step 7: Push one "Release $VERSION" commit to the kiss_ai repo: origin's
+    # tree minus the paths listed in scripts/exclude.json, parented on the
+    # previous release commit. Public main is that chain of release commits
+    # and nothing else; development commits and excluded content are never
+    # reachable from it. Earlier release tags that still point at commits of
+    # another shape are re-pointed to their release commits in the same push.
+    print_step "Pushing release $VERSION to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE)..."
+    create_public_commit "$(git rev-parse HEAD)" "$VERSION" "$RELEASE_CHAIN_TIP"
     verify_no_excluded_paths "$PUBLIC_COMMIT"
     verify_no_excluded_paths_in_history "$PUBLIC_COMMIT"
-    git tag -a "$TAG_NAME" -m "Release $VERSION" "$PUBLIC_COMMIT"
-    push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$PUBLIC_HEAD"
-    print_info "Pushed filtered history and tag $TAG_NAME to kiss_ai repo"
+    TAG_OBJECT=$(release_tag "$TAG_NAME" "$VERSION" "$PUBLIC_COMMIT")
+    push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$TAG_OBJECT" "$PUBLIC_HEAD" \
+        "${RETAG_LEASES[@]}" "${RETAG_REFSPECS[@]}"
+    print_info "Pushed release commit and tag $TAG_NAME to kiss_ai repo"
+    if [[ ${#RETAG_REFSPECS[@]} -gt 0 ]]; then
+        print_warn "Re-pointed ${#RETAG_REFSPECS[@]} earlier release tag(s) to release-only commits;"
+        print_warn "clones must 'git fetch --tags --force' (install.sh does), and GitHub's source archives for those tags changed"
+    fi
 
     # Step 8: Create GitHub release
     print_step "Creating GitHub release..."

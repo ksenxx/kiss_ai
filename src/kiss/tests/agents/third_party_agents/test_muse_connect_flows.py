@@ -20,7 +20,6 @@ import json
 import os
 import threading
 import time
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -64,7 +63,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 _MS_TENANT = "contoso.onmicrosoft.com"
@@ -163,13 +166,10 @@ class _AuthServer(RecordingServer):
         return body
 
 
-class _AuthHandler(BaseHTTPRequestHandler):
+class _AuthHandler(RecordingHandler):
     """Request handler for :class:`_AuthServer`."""
 
     server: Any
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
     def _json(self, status: int, body: Any) -> None:
         if urlsplit(
@@ -178,16 +178,10 @@ class _AuthHandler(BaseHTTPRequestHandler):
             "Accept", ""
         ):
             # GitHub's real default: form-encoded unless JSON is requested.
-            data = urlencode({k: str(v) for k, v in body.items()}).encode()
-            content_type = "application/x-www-form-urlencoded"
+            form = urlencode({k: str(v) for k, v in body.items()})
+            self._reply(status, form, "application/x-www-form-urlencoded")
         else:
-            data = json.dumps(body).encode()
-            content_type = "application/json"
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+            super()._json(status, body)
 
     def _form(self) -> dict[str, str]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -458,21 +452,10 @@ class _NextcloudServer(RecordingServer):
         self.flows[token] = True
 
 
-class _NextcloudHandler(BaseHTTPRequestHandler):
+class _NextcloudHandler(RecordingHandler):
     """Request handler for :class:`_NextcloudServer`."""
 
     server: Any
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
-
-    def _json(self, status: int, body: Any) -> None:
-        data = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         """Serve ``/index.php/login/v2`` and ``/login/v2/poll``."""
