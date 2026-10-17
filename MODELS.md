@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **785 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **790 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedrock model or inference-profile id>` (`bedrock/us.anthropic.claude-opus-4-6-v1:0`, `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`, with the same `-low`/`-medium`/`-high`/`-max` effort suffixes as the `claude-*` entries) and configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`. The catalog does not list Bedrock ids (they differ per model and region); a `bedrock/` name is priced and sized as the `claude-*` entry behind it, and adding it under Settings → Custom Models (name only, no endpoint) puts it in the model picker from the next daemon start.
 
@@ -12,16 +12,16 @@ The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedro
 | Together AI | 104 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 428 |
+| OpenRouter | 433 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **750** generation-capable models
-- **588** function-calling-capable models
+- **753** generation-capable models
+- **591** function-calling-capable models
 - **7** embedding models
-- **21** decision models
+- **23** decision models
 
 Full model list:
 
@@ -392,7 +392,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (428)</strong></summary>
+<summary><strong>OpenRouter (433)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -453,6 +453,8 @@ Full model list:
 - `openrouter/deepseek/deepseek-v4-pro`
 - `openrouter/deepseek/deepseek-v4-pro-0813`
 - `openrouter/deepseek/deepseek-v4.1-flash`
+- `openrouter/deepseek/deepseek-v4.1-flash-1017`
+- `openrouter/elorian/glimpse`
 - `openrouter/fireworks/ember-1`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
@@ -658,7 +660,8 @@ Full model list:
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
-- `openrouter/perplexity/pplx-decider-v1.1-27b`
+- `openrouter/perplexity/pplx-decider-flash-v1.2`
+- `openrouter/perplexity/pplx-decider-v1.2`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`
@@ -710,6 +713,7 @@ Full model list:
 - `openrouter/qwen/qwen3.8-max-0902`
 - `openrouter/qwen/qwen3.8-max-prime`
 - `openrouter/qwen/qwen3.8-omni-flash`
+- `openrouter/reflection/beam-1.0-501b-a23b`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
 - `openrouter/relace/relace-apply-3`
@@ -816,6 +820,7 @@ Full model list:
 - `openrouter/~openai/gpt-terra-latest-low`
 - `openrouter/~openai/gpt-terra-latest-medium`
 - `openrouter/~openai/gpt-terra-latest-xhigh`
+- `openrouter/~perplexity/pplx-decider-flash-latest`
 - `openrouter/~perplexity/pplx-decider-latest`
 - `openrouter/~typesafe/jev-latest`
 - `openrouter/~unbiased/pareto-latest`

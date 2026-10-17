@@ -7,12 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function subagentTabEls(win) {
-  return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
-  );
-}
+const {subagentTabEls} = require('./subagent_tab_helpers');
 
 function activeTabEl(win) {
   return win.document.querySelector('#tab-list .chat-tab.active');

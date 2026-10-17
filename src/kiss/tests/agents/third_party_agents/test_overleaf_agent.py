@@ -28,7 +28,6 @@ import subprocess
 import sys
 from email.parser import BytesParser
 from email.policy import HTTP
-from http.server import BaseHTTPRequestHandler
 from io import BufferedIOBase
 from pathlib import Path
 from typing import Any
@@ -46,7 +45,7 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _normalize_cookie,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
-from kiss.tests.agents.third_party_agents.recording_http import serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
 
 _COOKIE = "s%3Aabc123.sig"
 _GIT_TOKEN = "olp_gittoken"
@@ -245,27 +244,24 @@ class _OverleafServer(ThreadedHTTPServer):
     contents: dict[str, bytes]
 
 
-class _OverleafHandler(BaseHTTPRequestHandler):
+class _OverleafHandler(RecordingHandler):
     """Emulates the Overleaf web app, real-time service, and Git bridge."""
 
     server: Any
 
-    def log_message(self, format: str, *args: Any) -> None:
-        """Silence per-request logging."""
-
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Handle GET."""
         self._handle("GET")
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Handle POST."""
         self._handle("POST")
 
-    def do_PUT(self) -> None:
+    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Handle PUT."""
         self._handle("PUT")
 
-    def do_DELETE(self) -> None:
+    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Handle DELETE."""
         self._handle("DELETE")
 

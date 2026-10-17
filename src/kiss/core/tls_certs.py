@@ -343,20 +343,9 @@ def _issue_leaf(
     _write_certificate(cert_path, cert)
 
 
-def cert_needs_renewal(
-    cert_path: Path, threshold_days: int = RENEWAL_THRESHOLD_DAYS,
-) -> bool:
-    """Return True if *cert_path* is unreadable, expired or expires soon.
-
-    Args:
-        cert_path: PEM certificate to inspect.
-        threshold_days: Remaining validity below which renewal is due.
-    """
-    try:
-        not_after = _load_certificate(cert_path).not_valid_after_utc
-    except Exception:
-        return True
-    return not_after - _now() <= datetime.timedelta(days=threshold_days)
+def _expiring(cert: x509.Certificate) -> bool:
+    """Return True when *cert* has expired or expires within :data:`RENEWAL_THRESHOLD_DAYS`."""
+    return cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS)
 
 
 def _ca_pair_is_usable(ca_cert_path: Path, ca_key_path: Path) -> bool:
@@ -368,9 +357,7 @@ def _ca_pair_is_usable(ca_cert_path: Path, ca_key_path: Path) -> bool:
         key = _load_private_key(ca_key_path)
     except Exception:
         return False
-    if cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS):
-        return False
-    return cert.public_key() == key.public_key()
+    return not _expiring(cert) and cert.public_key() == key.public_key()
 
 
 def server_cert_is_current(
@@ -420,9 +407,9 @@ def _current_leaf(cert_path: Path, key_path: Path, ca_cert_path: Path) -> x509.C
         cert.verify_directly_issued_by(_load_certificate(ca_cert_path))
     except Exception:
         return None
-    if cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS):
+    if _expiring(cert) or cert.public_key() != key.public_key():
         return None
-    return cert if cert.public_key() == key.public_key() else None
+    return cert
 
 
 def _ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:

@@ -17,6 +17,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {sleep} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -107,10 +108,6 @@ async function openView(page) {
 /** Objects from the page realm have another Object prototype. */
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function testOpenFitAndResize() {

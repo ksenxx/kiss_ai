@@ -1195,9 +1195,10 @@ def test_failed_ssh_re_registration_keeps_the_shared_forward_and_its_streams(
     """
     daemon = start_remote_daemon(tmp_path / "home", password="pw")
     _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
-    monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
     login = "ksen@box.example.org"
     try:
+        # The real ENROLL_TIMEOUT: the daemon admits the new CA at its
+        # next TRUSTED_CLIENTS_POLL (2 s), later than that on a loaded host.
         machine = mach.add_machine("box", login)
         link = mach.link_for(machine)
         stream = link.open_connection()
@@ -1208,6 +1209,7 @@ def test_failed_ssh_re_registration_keeps_the_shared_forward_and_its_streams(
 
         # The machine's daemon now answers the enrollment with a CA that
         # did not issue its certificate: same port, wrong pin.
+        monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
         wrong = tmp_path / "wrong"
         (wrong / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
         (wrong / mach.LOCAL_ENDPOINT_FILE).write_text(json.dumps({

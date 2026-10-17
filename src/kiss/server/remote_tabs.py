@@ -112,6 +112,11 @@ class RemoteTab(MachineStream):
             and frames addressed to its ``{parent}__sub_{task_id}`` tab
             are relayed before any client resumed it
             (:meth:`_owns_sub_tab`).
+        announced: By task id, the tab ``{parent}__sub_{task_id}`` the
+            surfaces opened on a relayed ``new_tab`` and no client has
+            resumed yet (a resume maps the tab, an ``openSubagentTab``
+            adopts it, its ``subagentDone`` ends it): a stream lost
+            meanwhile ends those tabs too, or they would spin for good.
         subagent: Whether the bound tab's run is a sub-agent run of a
             task of this daemon (a forwarded ``run`` with a
             ``parentTaskId``): the ``new_tab`` the remote announces
@@ -155,6 +160,7 @@ class RemoteTab(MachineStream):
         self.tab_id = tab_id
         self.tab_ids: set[str] = {tab_id}
         self.task_ids: set[str] = set()
+        self.announced: dict[str, str] = {}
         self.subagent = subagent
         self.task_id = ""
         self.pending_spawns: dict[str, str] = {}
@@ -189,6 +195,7 @@ class RemoteTab(MachineStream):
             if kind == "new_tab" and self._owns_sub_tab(parent):
                 if msg.get("task_id"):
                     self.task_ids.add(str(msg["task_id"]))
+                    self.announced[str(msg["task_id"])] = _sub_tab_id(msg)
             elif kind == "new_tab" and self.subagent:
                 # The remote announces every sub-agent run to every
                 # client, this stream's own among those of its
@@ -202,6 +209,7 @@ class RemoteTab(MachineStream):
                     to = None
                 elif spawned == self.task_id:
                     self.task_ids.add(spawned)
+                    self.announced[spawned] = _sub_tab_id(msg)
                     self.spawn = text
                 else:
                     to = None
@@ -213,6 +221,7 @@ class RemoteTab(MachineStream):
                 # sub-agent: its transcript follows).
                 if sub_tab not in self.tab_ids:
                     self.tab_ids.add(sub_tab)
+                    self.announced.pop(_sub_task_id(sub_tab), None)
                     adopt = sub_tab
                 if self.replay_sinks.get(sub_tab):
                     to = [self.replay_sinks[sub_tab][0]]
@@ -221,7 +230,7 @@ class RemoteTab(MachineStream):
                     to = [conn]
                     self.replay_sinks.setdefault(sub_tab, []).append(conn)
             elif kind == "subagentDone" and self._owns_sub_tab(sub_tab):
-                pass
+                self.announced.pop(_sub_task_id(sub_tab), None)
             elif msg.get("tabId") in self.tab_ids:
                 tab_id = str(msg["tabId"])
                 if tab_id == self.tab_id and not self.chat_id and msg.get("chat_id"):
@@ -267,10 +276,7 @@ class RemoteTab(MachineStream):
         every client, so the stream relays them too, or the surfaces
         would never open the nested tabs.
         """
-        if tab_id in self.tab_ids:
-            return True
-        _parent, sep, task_id = tab_id.rpartition("__sub_")
-        return bool(sep) and task_id in self.task_ids
+        return tab_id in self.tab_ids or _sub_task_id(tab_id) in self.task_ids
 
     def _own_run_frame(self, kind: Any, msg: dict[str, Any]) -> str:
         """Note what a frame of the bound tab tells about the sub-agent run (under ``lock``).
@@ -296,6 +302,7 @@ class RemoteTab(MachineStream):
         self.pending_spawns.clear()
         if spawn:
             self.task_ids.add(self.task_id)
+            self.announced[self.task_id] = _sub_tab_id(json.loads(spawn))
             self.spawn = spawn
         return spawn
 
@@ -369,11 +376,18 @@ class RemoteTabs:
         return True
 
     def _forward(self, tab: RemoteTab, tab_id: str, cmd: dict[str, Any]) -> None:
-        """Send *cmd* down *tab*'s stream; a lost stream fails the command on *tab_id*."""
+        """Send *cmd* down *tab*'s stream; a lost stream fails the command on a sub-agent *tab_id*.
+
+        A failed send ends the stream, whose relay thread then runs
+        :meth:`dropped` as lost: that refuses the run on the root tab
+        and ends its sub-agent tabs, so only a command of a sub-agent
+        tab (which gets no refusal there) is answered here.
+        """
         try:
             tab.send(cmd)
         except MachineError as exc:
-            self._backend._agent_server._refuse_run(tab_id, str(exc))
+            if tab_id != tab.tab_id:
+                self._backend._agent_server._refuse_run(tab_id, str(exc))
 
     def _bind(
         self, tab_id: str, machine_name: str, cmd: dict[str, Any], title: str,
@@ -426,7 +440,8 @@ class RemoteTabs:
                         lost = tab.retired  # dropped before it could be registered
                     if not lost:
                         if winner is not None:
-                            displaced = self._retire(winner)
+                            self._retire(winner)
+                            displaced = winner
                         self._tabs[tab_id] = tab
             # Closed outside the lock: a close handshake can wait on the
             # peer (up to the socket's close timeout), and the other
@@ -464,15 +479,22 @@ class RemoteTabs:
             self._announce(tab_id, machine.name)
         return tab
 
-    def _retire(self, tab: RemoteTab) -> RemoteTab:
-        """Take a stream out of service (under the lock): its frames dropped, its tabs unmapped."""
+    def _retire(self, tab: RemoteTab) -> list[str]:
+        """Take a stream out of service (under the lock): its frames dropped, its tabs unmapped.
+
+        Returns:
+            The tab ids the stream was mapped to until now, then the
+            tabs of the sub-agents it announced that no client resumed
+            (``announced``) and no other stream has since mapped.
+        """
         with tab.lock:
             tab.retired = True
             tab_ids = list(tab.tab_ids)
-        for tid in tab_ids:
-            if self._tabs.get(tid) is tab:
-                del self._tabs[tid]
-        return tab
+            announced = list(tab.announced.values())
+        unmapped = [tid for tid in tab_ids if self._tabs.get(tid) is tab]
+        for tid in unmapped:
+            del self._tabs[tid]
+        return unmapped + [tid for tid in announced if tid not in self._tabs]
 
     def _unbind(self, tab_id: str, forward_close: bool = False) -> None:
         """Take *tab_id* off its stream: a bound tab's stream closes, a sub-agent tab leaves it.
@@ -557,6 +579,7 @@ class RemoteTabs:
                 with tab.lock:
                     tab.tab_ids.add(tab_id)
                     tab.task_ids.add(task_id)
+                    tab.announced.pop(task_id, None)
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
         if unbind:
             self._unbind(tab_id)
@@ -615,18 +638,29 @@ class RemoteTabs:
     def dropped(self, tab: RemoteTab, lost: bool) -> None:
         """A stream ended: forget its tabs, and when it was *lost* end the tab's task.
 
-        A stream already retired (replaced, unbound) is nobody's loss.
+        The sub-agent tabs the stream relayed end too (``subagentDone``,
+        as a sub-agent running here ends), the ones a client resumed
+        and the ones only announced so far (``announced``: the surfaces
+        opened them on the ``new_tab``): the sub-agent may still run
+        on the machine, but no surface of this daemon can reach it any
+        more, and nothing else would ever stop their spinners.  A stream
+        already retired (replaced, unbound) is nobody's loss.
         """
         with self._lock:
             # Retired even when not (or no longer) registered: a stream
             # lost while _bind is still about to register it must not be
             # installed; _bind checks the flag.
             registered = self._tabs.get(tab.tab_id) is tab
-            self._retire(tab)
+            tab_ids = self._retire(tab)
         if lost and registered:
             self._backend._agent_server._refuse_run(
                 tab.tab_id, f"lost the connection to {tab.machine.name}",
             )
+            for sub_tab_id in tab_ids:
+                if sub_tab_id != tab.tab_id:
+                    self.deliver("", json.dumps(
+                        {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
+                    ))
             self._announce(tab.tab_id, "")
 
     def close_all(self) -> None:
@@ -642,3 +676,17 @@ class RemoteTabs:
 def _tab_machine_frame(tab_id: str, machine_name: str) -> str:
     """The ``tabMachine`` frame announcing *tab_id*'s binding."""
     return json.dumps({"type": "tabMachine", "tabId": tab_id, "machine": machine_name})
+
+
+def _sub_tab_id(new_tab: dict[str, Any]) -> str:
+    """The tab the surfaces open for the sub-agent a ``new_tab`` frame announces.
+
+    ``{parent_tab_id}__sub_{task_id}``, as the webapp derives it (and
+    as the daemon names a sub-agent's tab when it replays its chat).
+    """
+    return f"{new_tab.get('parent_tab_id') or 'task'}__sub_{new_tab.get('task_id') or ''}"
+
+
+def _sub_task_id(tab_id: str) -> str:
+    """The task id a ``{parent}__sub_{task_id}`` tab id names ("" for any other id)."""
+    return tab_id.rpartition("__sub_")[2] if "__sub_" in tab_id else ""

@@ -134,7 +134,12 @@ def test_machine_pick_lists_the_machines_directories(
     page = _open(browser, harness)
     try:
         # This daemon's directories first (its working directory, then
-        # "Choose ...").
+        # "Choose ..."); the list arrives after the page, in its own message.
+        page.wait_for_function(
+            "(dir) => document.querySelector('#chat-workdir option')?.value === dir",
+            arg=str(harness.work_dir),
+            timeout=15000,
+        )
         local = page.evaluate(WORKDIR_OPTIONS)
         assert local[0] == str(harness.work_dir) and local[-1] == ""
         page.select_option("#chat-machine", "box")
@@ -262,6 +267,12 @@ def test_phone_layout_keeps_machine_and_workdir_at_the_top(
         for x, y, w, h in (machine, workdir):
             assert w > 0 and h > 0 and y >= 0 and y + h <= header[3]
             assert x >= 0 and x + w <= 390
-        assert machine[0] + machine[2] <= workdir[0]
+        # The machine select is as wide as its widest option (the local
+        # machine's name among them): the directory shares its row when
+        # that leaves it at least half of the row, else it moves whole
+        # onto a second line (main.css, ``@media (width < 900px)``).
+        same_row = machine[0] + machine[2] <= workdir[0]
+        second_line = workdir[1] >= machine[1] + machine[3]
+        assert same_row or second_line, rects
     finally:
         page.context.close()

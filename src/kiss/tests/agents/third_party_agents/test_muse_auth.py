@@ -45,7 +45,6 @@ import socket
 import sys
 import time
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +72,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     recording_server,
     serve_recording,
@@ -102,7 +102,7 @@ def _google_info(token: str) -> dict[str, str]:
     }
 
 
-class _ApiHandler(BaseHTTPRequestHandler):
+class _ApiHandler(RecordingHandler):
     """Emulated REST API recording every request's method/path/auth."""
 
     server: Any
@@ -118,12 +118,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
                 "body": body.decode("utf-8", errors="replace"),
             }
         )
-        payload = json.dumps({"ok": True, "path": self.path}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._json(200, {"ok": True, "path": self.path})
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a GET request."""
@@ -144,9 +139,6 @@ class _ApiHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a DELETE request."""
         self._serve()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 @pytest.fixture()
@@ -767,7 +759,7 @@ def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: Record
     # handler, which stores all headers it receives).
 
 
-class _RedirectHandler(BaseHTTPRequestHandler):
+class _RedirectHandler(RecordingHandler):
     """Emulated API that 302-redirects /start to a final location."""
 
     server: Any
@@ -783,15 +775,7 @@ class _RedirectHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        payload = json.dumps({"ok": True, "final": True}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
+        self._json(200, {"ok": True, "final": True})
 
 
 class _RedirectServer(RecordingServer):

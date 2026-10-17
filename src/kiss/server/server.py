@@ -1120,6 +1120,7 @@ class AgentServer(
                     ("tokens", int, 0),
                     ("cost", float, 0.0),
                     ("steps", int, 0),
+                    ("max_budget", float, 0.0),
                 ):
                     try:
                         session[key] = cast(extra_obj.get(key, default) or default)

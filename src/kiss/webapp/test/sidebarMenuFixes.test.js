@@ -26,6 +26,17 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {
+  send,
+  sleep,
+  click,
+  rightClick,
+  key,
+  byId,
+  showSection,
+  ofType,
+  all,
+} = require('./ui_antipattern_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -130,69 +141,14 @@ function answerPrompt(win, id, value) {
   key(win, input, 'Enter');
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 const WD = '/ws/repo';
 
 function pinWorkspace(win) {
   send(win, {type: 'configData', config: {work_dir: WD}});
 }
 
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function rightClick(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
-}
-
-function key(win, el, name, extra) {
-  el.dispatchEvent(
-    new win.KeyboardEvent(
-      'keydown',
-      Object.assign({key: name, bubbles: true, cancelable: true}, extra || {}),
-    ),
-  );
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-/**
- * Bring a workspace section of the task-info panel (meta-explorer /
- * meta-scm) on screen: expand it if it is collapsed.  An expanded
- * section is already live (the workspace pin loads it).
- */
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
-}
-
-function rows(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
-}
-
 function menuItem(win, label) {
-  return rows(win, '#sidebar-context-menu .tree-ctx-item').find(
+  return all(win, '#sidebar-context-menu .tree-ctx-item').find(
     el => el.querySelector('.tree-ctx-label').textContent === label,
   );
 }
@@ -283,7 +239,7 @@ function openScm(win, posted) {
       },
     ],
   });
-  return rows(win, '#scm-graph .scm-commit').find(
+  return all(win, '#scm-graph .scm-commit').find(
     el => el.querySelector('.scm-commit-subject').textContent === 'Title line',
   );
 }
@@ -317,7 +273,7 @@ async function main() {
       ],
     });
     assert.strictEqual(
-      rows(win, '.explorer-row[data-explorer-path="' + WD + '/a.txt"]').length,
+      all(win, '.explorer-row[data-explorer-path="' + WD + '/a.txt"]').length,
       1,
       'BUG: the entry being renamed was listed twice',
     );
@@ -329,7 +285,7 @@ async function main() {
     );
     assert.strictEqual(input.selectionStart, 2);
     assert.strictEqual(input.selectionEnd, 5);
-    assert.strictEqual(rows(win, '.explorer-row.is-file').length, 3);
+    assert.strictEqual(all(win, '.explorer-row.is-file').length, 3);
     await sleep(5);
     assert.strictEqual(
       ofType(posted, 'fsAction').length,
@@ -349,7 +305,7 @@ async function main() {
     // Escape cancels: one row, the old name, nothing sent.
     key(win, input, 'Escape');
     assert.strictEqual(
-      rows(win, '.explorer-row[data-explorer-path="' + WD + '/a.txt"]').length,
+      all(win, '.explorer-row[data-explorer-path="' + WD + '/a.txt"]').length,
       1,
     );
     assert.strictEqual(
@@ -877,7 +833,7 @@ async function main() {
       row,
       'BUG: the focused row lost focus',
     );
-    const stops = rows(win, '.explorer-row').filter(r => r.tabIndex === 0);
+    const stops = all(win, '.explorer-row').filter(r => r.tabIndex === 0);
     assert.strictEqual(stops.length, 1, 'exactly one tab stop in the tree');
     assert.strictEqual(stops[0], row);
   });

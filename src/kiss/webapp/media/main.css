@@ -281,6 +281,24 @@ body {
   white-space: pre-wrap;
 }
 
+/* "Do not show this" under a notice that offers it: a small checkbox
+   row, muted like the progress line, the whole label clickable. */
+.kiss-notification-opt-out {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  margin-top: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.kiss-notification-opt-out-box {
+  margin: 0;
+  cursor: pointer;
+}
+
 .kiss-notification-progress-message {
   color: var(--dim);
   font-size: var(--fs-sm);
@@ -459,6 +477,17 @@ body {
 #chat-machine-wrap { flex-shrink: 0; }
 
 #chat-workdir-wrap { flex: 0 1 auto; }
+
+/* Phone widths: both drop-downs stay on screen whatever their
+   lengths.  The working directory claims half the row (its flex
+   basis; the path ellipsizes) and grows into what the machine name
+   leaves; when that name leaves it less than half, it moves whole
+   onto a second line instead of shrinking to its chevron. */
+@media (width < 900px) {
+  #chat-header { flex-wrap: wrap; row-gap: 0; }
+  #chat-machine-wrap { max-width: 100%; }
+  #chat-workdir-wrap { flex: 1 1 50%; }
+}
 
 #chat-machine,
 #chat-workdir {
@@ -1063,6 +1092,13 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: var(--space-3); }
 
 #remote-url { width: 100%; margin-bottom: var(--space-2-5); }
+
+/* "Settings of <machine>": the settings sheet is for the chat
+   header's remote machine (see renderSettingsMachine in main.js). */
+.settings-machine {
+  width: 100%; margin-bottom: var(--space-2-5);
+  font-size: var(--fs-base); font-weight: 600; color: var(--green);
+}
 
 .remote-url-bar {
   display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1);
@@ -1800,8 +1836,19 @@ body.content-tab-open #send-btn { display: none !important; }
 .more-item-icon svg { width: 16px; height: 16px; }
 .more-item-label { overflow: hidden; text-overflow: ellipsis; }
 
-#theme-btn { display: none; }
-body.remote-chat #theme-btn { display: flex; }
+#theme-btn, #contrast-btn, #theme-auto-btn { display: none; }
+
+body.remote-chat #theme-btn,
+body.remote-chat #contrast-btn,
+body.remote-chat #theme-auto-btn { display: flex; }
+
+/* The "Auto mode" item is a checkbox item: it reads as the current
+   choice (accent text, bold) while the palette follows the clock. */
+
+#theme-auto-btn.checked {
+  color: var(--accent);
+  font-weight: 600;
+}
 
 #terminal-btn { display: none; }
 body.remote-chat #terminal-btn { display: flex; }
@@ -2648,6 +2695,14 @@ button.app-row-main .app-state { color: var(--accent); }
 #meta-overlay.open,
 #settings-overlay.open,
 #tricks-overlay.open { opacity: 1; pointer-events: auto; }
+
+/* A remote machine's settings sheet (renderSettingsMachine in main.js):
+   this daemon's URLs and its Update / Reset Server / Update Models
+   buttons act here, not on that machine, so they are not offered. */
+#settings-panel.for-machine #remote-url,
+#settings-panel.for-machine #cfg-update-btn,
+#settings-panel.for-machine #cfg-server-reset-btn,
+#settings-panel.for-machine #cfg-update-models-btn { display: none; }
 
 /* The settings panel: a centered dialog. No entry animation — it is
    display-toggled, never slid in from an edge. */
@@ -4128,12 +4183,9 @@ button.app-row-main .app-state { color: var(--accent); }
   outline: none;
 }
 
-/* The pencil shows on hover or focus like the other row actions. */
-.history-chat-header .history-chat-rename { opacity: 0; }
-
-.history-chat-header:hover .history-chat-rename,
-.history-chat-header:focus-within .history-chat-rename { opacity: 0.45; }
-.history-chat-header .history-chat-rename:hover { opacity: 0.9; }
+/* The pencil is always on show (the generic .sidebar-item-edit opacity),
+   not only while the header is hovered or focused: on a touch screen
+   there is no hover, and a hidden control is not discoverable. */
 
 /* The action strip under the title, a line of its own like a task
    panel's (.running-item > .sidebar-item-actions): the "Show details"
@@ -4285,6 +4337,16 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .running-item-workspace {
+  flex-basis: 100%;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The row's machine / max budget / agent line, under the workspace line. */
+.running-item-settings {
   flex-basis: 100%;
   font-size: var(--fs-sm);
   color: color-mix(in srgb, var(--fg) 55%, transparent);

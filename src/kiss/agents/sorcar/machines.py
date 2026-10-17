@@ -86,7 +86,7 @@ from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, send
+from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, recv_auth_reply, send
 from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
@@ -584,10 +584,10 @@ def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None
                     raise
             finally:
                 link.close()
+            time.sleep(1.0)
     finally:
         if tunnel is not None:
             tunnel.close()
-        time.sleep(1.0)
 
 
 def client_cert_pair() -> tuple[Path, Path]:
@@ -1015,7 +1015,7 @@ class MachineLink:
             raise self._fail(f"{where} is unreachable: {exc}") from exc
         try:
             send(ws, json.dumps(auth), timeout=_remaining(deadline))
-            reply = json.loads(ws.recv(timeout=_remaining(deadline)))
+            reply = recv_auth_reply(ws, timeout=_remaining(deadline))
         except (ConnectionClosed, OSError, ValueError) as exc:
             ws.close()
             raise self._fail(f"{where} did not complete the handshake: {exc}") from exc
@@ -1030,12 +1030,19 @@ class MachineLink:
 
     def request(
         self, cmd: dict[str, Any], reply_type: str, timeout: float = REQUEST_TIMEOUT,
+        *, errors: bool = False,
     ) -> dict[str, Any]:
         """Send *cmd* and return the first *reply_type* event answering it.
 
         The command is stamped with a fresh ``generation``; a reply that
         echoes a ``generation`` must echo this one (``history`` does),
-        other frames the daemon pushes meanwhile are skipped.  *timeout*
+        frames already buffered from before the command are discarded
+        and other frames the daemon pushes meanwhile are skipped.  With
+        *errors*, an ``error`` frame answering the command (a refused
+        custom-model name, say) comes back as a *reply_type* reply
+        carrying its text as ``error`` instead of being skipped; a
+        wrong-password refusal is a :class:`MachineError` either way.
+        *timeout*
         bounds the wait for the reply, however many frames arrive or
         are already buffered; connecting first, when the socket is not
         up, has a budget of *timeout* of its own for the handshake
@@ -1052,10 +1059,12 @@ class MachineLink:
             MachineError: When the daemon is unreachable, rejects the
                 password, or does not answer within *timeout* seconds.
         """
-        return locked_call(self._lock, self._request_locked, cmd, reply_type, timeout)
+        return locked_call(
+            self._lock, self._request_locked, cmd, reply_type, timeout, errors,
+        )
 
     def _request_locked(
-        self, cmd: dict[str, Any], reply_type: str, timeout: float,
+        self, cmd: dict[str, Any], reply_type: str, timeout: float, errors: bool,
     ) -> dict[str, Any]:
         """:meth:`request`'s body, under the lock."""
         kept = self._ws is not None
@@ -1063,7 +1072,7 @@ class MachineLink:
             self._ws = self._connect(timeout)
         deadline = time.monotonic() + timeout
         try:
-            return self._exchange(cmd, reply_type, deadline, timeout)
+            return self._exchange(cmd, reply_type, deadline, timeout, errors)
         except ConnectionClosed as exc:
             if not kept:
                 self._drop()
@@ -1074,7 +1083,7 @@ class MachineLink:
             self._drop()
             self._ws = self._connect(_remaining(deadline))
             try:
-                return self._exchange(cmd, reply_type, deadline, timeout)
+                return self._exchange(cmd, reply_type, deadline, timeout, errors)
             except ConnectionClosed as again:
                 self._drop()
                 raise self._fail(
@@ -1083,11 +1092,12 @@ class MachineLink:
 
     def _exchange(
         self, cmd: dict[str, Any], reply_type: str, deadline: float, timeout: float,
+        errors: bool,
     ) -> dict[str, Any]:
         """Send *cmd* on the open socket and return its *reply_type* answer (under the lock).
 
         *deadline* bounds the exchange (*timeout* only names the budget
-        in the error).
+        in the error); *errors* is :meth:`request`'s.
 
         Raises:
             ConnectionClosed: When the socket closed before the answer
@@ -1109,21 +1119,60 @@ class MachineLink:
             frame = cmd | {"generation": generation}
             if self.machine.password:
                 frame["password"] = self.machine.password
+            # Frames the daemon pushed since the last request (a
+            # ``myModelsData`` broadcast for another client's edit,
+            # say) are stale: drained first, they can neither pass for
+            # this request's answer nor delay it.
+            self._drain_buffered(deadline)
             send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"no {reply_type} within {timeout:g}s")
                 msg = json.loads(self._ws.recv(timeout=_remaining(deadline)))
-                if not isinstance(msg, dict) or msg.get("type") != reply_type:
+                if not isinstance(msg, dict):
                     continue
                 if "generation" in msg and msg["generation"] != generation:
                     continue
-                return msg
+                if msg.get("type") == reply_type:
+                    return msg
+                if msg.get("type") != "error":
+                    continue
+                # The daemon rejects the frame's password (changed on
+                # the machine since the link was made): the link is
+                # down, as at connect time.
+                if msg.get("code") == "auth_failed":
+                    self._drop()
+                    raise self._fail(
+                        f"{self.machine.name} ({self.machine.address()}) rejected the password"
+                    )
+                # The daemon refused the command (a rejected custom
+                # model name, say): for a caller that asked for it,
+                # that is the answer, as a reply of the expected type
+                # carrying the ``error``, not a timeout that would
+                # count the machine as down.
+                if errors:
+                    return {"type": reply_type, "error": str(msg.get("text") or "error")}
         except (TimeoutError, ValueError, OSError) as exc:
             self._drop()
             raise self._fail(
                 f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
             ) from exc
+
+    def _drain_buffered(self, deadline: float) -> None:
+        """Discard the frames already received on the open socket (under the lock).
+
+        Bounded by *deadline* but never fails on it: a budget already
+        spent (a reconnect that used it up, a caller's zero *timeout*)
+        leaves the frames in place and lets :meth:`_exchange` report
+        the accurate ``no <reply> within <N>s`` instead of blaming a
+        backlog that may not exist.
+        """
+        assert self._ws is not None
+        while time.monotonic() < deadline:
+            try:
+                self._ws.recv(timeout=0)
+            except TimeoutError:
+                return
 
     def _drop(self) -> None:
         """Close and forget the socket (no error is recorded)."""

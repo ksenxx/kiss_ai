@@ -43,7 +43,6 @@ import gzip
 import json
 import socket
 import threading
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +82,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -100,7 +100,7 @@ _REAL_BRAVE_KEY = "brave-real-secret-key"
 _GZIP_PATH = "/api/admin.analytics.getFile"
 
 
-class _ApiHandler(BaseHTTPRequestHandler):
+class _ApiHandler(RecordingHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
     server: Any
@@ -174,9 +174,6 @@ class _ApiHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a DELETE request."""
         self._serve()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 class _ApiServer(RecordingServer):
