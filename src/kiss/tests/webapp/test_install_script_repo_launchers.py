@@ -52,13 +52,19 @@ echo "ARGS=$*"
 
 
 def extract_launcher_function() -> str:
-    """Return the ``install_repo_script_launcher`` function body from install.sh."""
+    """Return the ``install_repo_script_launcher`` function body from install.sh,
+    preceded by the ``kiss-install-problems`` block (its ``warn``)."""
     text = INSTALL_SCRIPT.read_text()
     match = re.search(
         r"^install_repo_script_launcher\(\) \{\n.*?^\}$", text, re.MULTILINE | re.DOTALL
     )
     assert match, "install_repo_script_launcher() not found in install.sh"
-    return match.group(0)
+    problems = re.search(
+        r"^# BEGIN: kiss-install-problems.*?^# END: kiss-install-problems\n",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    assert problems, "kiss-install-problems block not found in install.sh"
+    return problems.group(0) + match.group(0)
 
 
 def run_launcher_install(tmp_path: Path, name: str) -> tuple[Path, Path, str]:

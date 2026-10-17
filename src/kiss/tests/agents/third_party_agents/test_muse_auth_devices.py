@@ -58,7 +58,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +95,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -107,7 +107,7 @@ _REAL_NTFY_TOKEN = "tk_real_ntfy_secret"
 _REAL_GOVEE_KEY = "govee-real-secret"
 
 
-class _DeviceApiHandler(BaseHTTPRequestHandler):
+class _DeviceApiHandler(RecordingHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
     server: Any
@@ -225,9 +225,6 @@ class _DeviceApiHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a PUT request."""
         self._serve()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 class _DeviceApiServer(RecordingServer):

@@ -604,6 +604,24 @@
       if (cancel) cancel.click();
       else removeNotification(id);
     });
+    if (ev.dontShowAgain) {
+      // "Do not show this": ticking it tells the daemon to retire the
+      // notice for good (every browser of this daemon), which answers
+      // with a close for the toast; this window drops it at once.
+      const optOut = document.createElement('label');
+      optOut.className = 'kiss-notification-opt-out';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.className = 'kiss-notification-opt-out-box';
+      box.addEventListener('change', () => {
+        if (!box.checked) return;
+        api.send({type: 'dismissNotice', id: String(id)});
+        removeNotification(id);
+      });
+      optOut.appendChild(box);
+      optOut.appendChild(document.createTextNode(' Do not show this'));
+      content.appendChild(optOut);
+    }
     body.appendChild(icon);
     body.appendChild(content);
     body.appendChild(closeBtn);
@@ -1638,11 +1656,20 @@
     refreshSidebarDataViews(false);
   }
 
-  // Light / dark theme toggle.  Light (VS Code's Light Modern palette)
-  // is the default and is what the server renders (body.light-theme);
-  // "dark" is Dark Modern (see remote-codex.css).  The choice is
-  // persisted in localStorage.
+  // Appearance.  The theme mode is 'light' (VS Code's Light Modern
+  // palette, the default and what the server renders: body.light-theme),
+  // 'dark' (Dark Modern, see remote-codex.css) or 'auto' (light by day,
+  // dark by night on this device's clock).  The contrast is 'low' (the
+  // default) or 'high' (body.high-contrast: the Cursor-style
+  // high-contrast palettes web_server.py inlines).  Both are persisted
+  // in localStorage.
   const REMOTE_THEME_KEY = 'kissRemoteTheme';
+  const REMOTE_CONTRAST_KEY = 'kissRemoteContrast';
+  // Auto mode is dark from AUTO_DARK_FROM_HOUR up to (not including)
+  // AUTO_LIGHT_FROM_HOUR, local time.
+  const AUTO_DARK_FROM_HOUR = 19;
+  const AUTO_LIGHT_FROM_HOUR = 7;
+  const AUTO_THEME_CHECK_MS = 60 * 1000;
 
   const THEME_SUN_SVG =
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
@@ -1650,23 +1677,93 @@
   const THEME_MOON_SVG =
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 
-  function getSavedRemoteTheme() {
+  /**
+   * A saved appearance choice, or `fallback` when nothing valid is
+   * saved or localStorage is unavailable.
+   * @param {string} key REMOTE_THEME_KEY or REMOTE_CONTRAST_KEY.
+   * @param {Array<string>} valid The values the key may hold.
+   * @param {string} fallback The default.
+   * @returns {string}
+   */
+  function readAppearance(key, valid, fallback) {
     try {
-      return localStorage.getItem(REMOTE_THEME_KEY) === 'dark'
-        ? 'dark'
-        : 'light';
+      const saved = localStorage.getItem(key);
+      return valid.includes(saved) ? saved : fallback;
     } catch (_e) {
-      return 'light';
+      return fallback;
     }
   }
 
-  // The button shows the theme it switches TO: a sun while in dark
-  // mode, a moon while in light mode.  The button is the "..." overflow
-  // menu's #theme-btn item, so the icon goes in its icon span and the
-  // label in its text span.
+  // The current choices, read once from storage: a page whose storage
+  // refuses writes (private browsing) still switches for the session.
+  const appearance = {
+    theme: readAppearance(REMOTE_THEME_KEY, ['light', 'dark', 'auto'], 'light'),
+    contrast: readAppearance(REMOTE_CONTRAST_KEY, ['low', 'high'], 'low'),
+  };
+
+  /**
+   * The theme mode in force: 'light', 'dark' or 'auto'.
+   * @returns {string}
+   */
+  function getSavedRemoteTheme() {
+    return appearance.theme;
+  }
+
+  /**
+   * The contrast in force: 'high' or 'low'.
+   * @returns {string}
+   */
+  function getSavedRemoteContrast() {
+    return appearance.contrast;
+  }
+
+  /**
+   * Adopt an appearance choice and remember it; private browsing may
+   * refuse the write, in which case the choice lasts the session.
+   * @param {string} key REMOTE_THEME_KEY or REMOTE_CONTRAST_KEY.
+   * @param {string} value The value to save.
+   */
+  function saveAppearance(key, value) {
+    if (key === REMOTE_THEME_KEY) appearance.theme = value;
+    else appearance.contrast = value;
+    try {
+      localStorage.setItem(key, value);
+    } catch (_e) {
+      /* private browsing: the choice simply won't persist */
+    }
+  }
+
+  /**
+   * The palette auto mode shows at local hour `hour` (0-23): dark from
+   * 7 pm up to 7 am, light otherwise.
+   * @param {number} hour The hour of the day on this device.
+   * @returns {string} 'light' or 'dark'.
+   */
+  function autoThemeForHour(hour) {
+    return hour >= AUTO_DARK_FROM_HOUR || hour < AUTO_LIGHT_FROM_HOUR
+      ? 'dark'
+      : 'light';
+  }
+
+  /**
+   * The palette ('light' or 'dark') a theme mode shows right now.
+   * @param {string} mode 'light', 'dark' or 'auto'.
+   * @returns {string}
+   */
+  function resolveRemoteTheme(mode) {
+    if (mode === 'auto') return autoThemeForHour(new Date().getHours());
+    return mode === 'dark' ? 'dark' : 'light';
+  }
+
+  // The theme item names the palette it switches TO: "Dark mode" with
+  // a moon while the page is light, "Light mode" with a sun while it
+  // is dark.  The contrast item does the same ("High contrast" while
+  // low, "Low contrast" while high), and the auto item is checked
+  // while auto mode is on.  All three are "..." overflow-menu items,
+  // so the icon goes in the icon span and the label in the text span.
   function updateThemeButton(btn) {
     const light = document.body.classList.contains('light-theme');
-    const label = light ? 'Switch to dark mode' : 'Switch to light mode';
+    const label = light ? 'Dark mode' : 'Light mode';
     const icon = btn.querySelector('.more-item-icon');
     const text = btn.querySelector('.more-item-label');
     if (icon) icon.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
@@ -1674,6 +1771,31 @@
     if (text) text.textContent = label;
     btn.title = label;
     btn.setAttribute('aria-label', label);
+  }
+
+  function updateContrastButton(btn) {
+    const high = document.body.classList.contains('high-contrast');
+    const label = high ? 'Low contrast' : 'High contrast';
+    const text = btn.querySelector('.more-item-label');
+    if (text) text.textContent = label;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+
+  function updateAutoThemeButton(btn) {
+    const auto = getSavedRemoteTheme() === 'auto';
+    btn.setAttribute('aria-checked', auto ? 'true' : 'false');
+    btn.classList.toggle('checked', auto);
+  }
+
+  /** Refresh the three appearance items of the "..." menu. */
+  function updateAppearanceButtons() {
+    const themeBtn = document.getElementById('theme-btn');
+    if (themeBtn) updateThemeButton(themeBtn);
+    const contrastBtn = document.getElementById('contrast-btn');
+    if (contrastBtn) updateContrastButton(contrastBtn);
+    const autoBtn = document.getElementById('theme-auto-btn');
+    if (autoBtn) updateAutoThemeButton(autoBtn);
   }
 
   /**
@@ -1691,11 +1813,21 @@
     }
   }
 
-  function applyRemoteTheme(theme) {
+  /**
+   * Show a theme mode and the saved contrast: 'light' and 'dark' paint
+   * that palette, 'auto' the one for the current hour.
+   * @param {string} mode 'light', 'dark' or 'auto'.
+   */
+  function applyRemoteTheme(mode) {
+    const theme = resolveRemoteTheme(mode);
     document.body.classList.toggle('light-theme', theme === 'light');
+    document.body.classList.toggle(
+      'high-contrast',
+      getSavedRemoteContrast() === 'high',
+    );
     setHljsTheme(theme);
-    const btn = document.getElementById('theme-btn');
-    if (btn) updateThemeButton(btn);
+    updateAppearanceButtons();
+    syncAutoThemeTimer();
     // Monaco's theme is global: one call recolours every open editor.
     if (window.monaco && window.monaco.editor) {
       applyContentMonacoTheme(window.monaco);
@@ -1761,16 +1893,56 @@
     return name;
   }
 
+  /** Pin the palette opposite to the one on screen (leaves auto mode). */
   function toggleRemoteTheme() {
     const next = document.body.classList.contains('light-theme')
       ? 'dark'
       : 'light';
-    try {
-      localStorage.setItem(REMOTE_THEME_KEY, next);
-    } catch (_e) {
-      /* private browsing: theme simply won't persist */
-    }
+    saveAppearance(REMOTE_THEME_KEY, next);
     applyRemoteTheme(next);
+  }
+
+  /** Flip between the low- and high-contrast variants of the palette. */
+  function toggleRemoteContrast() {
+    const next = document.body.classList.contains('high-contrast')
+      ? 'low'
+      : 'high';
+    saveAppearance(REMOTE_CONTRAST_KEY, next);
+    applyRemoteTheme(getSavedRemoteTheme());
+  }
+
+  /** Follow the time of day: light from 7 am, dark from 7 pm. */
+  function enableAutoRemoteTheme() {
+    saveAppearance(REMOTE_THEME_KEY, 'auto');
+    applyRemoteTheme('auto');
+  }
+
+  /**
+   * Repaint when auto mode's palette for the current hour differs from
+   * the one on screen; runs every minute while auto mode is on so an
+   * open page flips at 7 am and 7 pm.
+   */
+  function refreshAutoRemoteTheme() {
+    if (getSavedRemoteTheme() !== 'auto') return;
+    const light = document.body.classList.contains('light-theme');
+    if ((resolveRemoteTheme('auto') === 'light') !== light) {
+      applyRemoteTheme('auto');
+    }
+  }
+
+  // The minute check runs only while auto mode is on: a permanent
+  // interval would keep a page's host process (a jsdom test) alive.
+  let autoThemeTimer = null;
+
+  /** Start the minute check when auto mode is on, stop it otherwise. */
+  function syncAutoThemeTimer() {
+    const auto = getSavedRemoteTheme() === 'auto';
+    if (auto && autoThemeTimer === null) {
+      autoThemeTimer = setInterval(refreshAutoRemoteTheme, AUTO_THEME_CHECK_MS);
+    } else if (!auto && autoThemeTimer !== null) {
+      clearInterval(autoThemeTimer);
+      autoThemeTimer = null;
+    }
   }
 
   // Arrow-key navigation for the tablist (WAI-ARIA tabs pattern,
@@ -2288,11 +2460,7 @@
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
-      forgetPendingFileLinks(id);
-      tabMachines.delete(id);
-      tabMachinePicked.delete(id);
-      tabBoundMachines.delete(id);
-      discardReadyReports(id);
+      forgetClosedTabState(id);
       if (!fromServer) {
         armCloseShield(id);
         api.closeTab({tabId: id});
@@ -2319,8 +2487,44 @@
     persistTabState();
   }
 
+  /**
+   * Forget the per-tab state of a chat tab that closed here (closeTab)
+   * or on another surface (reconcileTabs): its pending file links, its
+   * machine pick and binding (both maps are persisted) and the ready
+   * reports it had not delivered.
+   * @param {string} id The closed tab's id.
+   */
+  function forgetClosedTabState(id) {
+    forgetPendingFileLinks(id);
+    tabMachines.delete(id);
+    tabMachinePicked.delete(id);
+    tabBoundMachines.delete(id);
+    discardReadyReports(id);
+  }
+
   let contentArea = null;
   let _monacoPromise = null;
+
+  /**
+   * Append a hidden holder for a content tab's view (a file, the
+   * browser, the terminal) to the content area and record it on the
+   * tab.
+   * @param {object} tab The content tab.
+   * @param {string} [extraClass] A class naming the view's kind.
+   * @returns {HTMLElement} The holder.
+   */
+  function newContentViewEl(tab, extraClass) {
+    const area = ensureContentArea();
+    const el = document.createElement('div');
+    el.className = extraClass
+      ? 'content-tab-view ' + extraClass
+      : 'content-tab-view';
+    el.dataset.tabId = tab.id;
+    el.style.display = 'none';
+    area.appendChild(el);
+    tab.contentViewEl = el;
+    return el;
+  }
 
   function ensureContentArea() {
     if (contentArea) return contentArea;
@@ -2708,13 +2912,7 @@
       tab.browserMachine = machine;
       tab.contentPath = ev.url || '';
       tabs.push(tab);
-      const area = ensureContentArea();
-      const holder = document.createElement('div');
-      holder.className = 'content-tab-view browser-tab-view';
-      holder.dataset.tabId = tab.id;
-      holder.style.display = 'none';
-      area.appendChild(holder);
-      tab.contentViewEl = holder;
+      const holder = newContentViewEl(tab, 'browser-tab-view');
       tab.browserView = window.BrowserTabView.create(tab.id, {
         send: msg =>
           api.send(onMachine(msg, msg.type === 'browserOpen' ? machine : '')),
@@ -2820,13 +3018,7 @@
     tab.ownerBrowseWorkDir = owner ? tabBrowseWorkDir(owner.id) : '';
     const workDir = machine ? machineDirs(machine).workDir : sidebarWorkDir();
     tabs.push(tab);
-    const area = ensureContentArea();
-    const holder = document.createElement('div');
-    holder.className = 'content-tab-view terminal-tab-view';
-    holder.dataset.tabId = tab.id;
-    holder.style.display = 'none';
-    area.appendChild(holder);
-    tab.contentViewEl = holder;
+    const holder = newContentViewEl(tab, 'terminal-tab-view');
     tab.terminalView = window.TerminalTabView.create(tab.id, {
       send: msg => api.send(msg),
       workDir: workDir,
@@ -4462,16 +4654,11 @@
   }
 
   function renderContentView(tab, ev) {
-    const area = ensureContentArea();
     // A reload replaces edited text with the file on disk: the tab
     // strip's dirty dot goes with it.
     setContentTabDirty(tab, false);
     disposeTabContentView(tab);
-    const view = document.createElement('div');
-    view.className = 'content-tab-view';
-    view.style.display = 'none';
-    area.appendChild(view);
-    tab.contentViewEl = view;
+    const view = newContentViewEl(tab);
     // Not a file on disk (a commit's patch, search results, a folder
     // listing): never "the file open in the editor" (editorContext).
     tab.contentNotAFile = ev.isVirtual === true || ev.isDirectory === true;
@@ -5520,15 +5707,7 @@
     // Only chat tabs and their sub-agent descendants are removed here
     // (content tabs are never in the registry and carry no
     // parentTabId), so there is no editor to dispose.
-    removedIds.forEach(id => {
-      forgetPendingFileLinks(id);
-      // A tab closed on another surface forgets its machine pick, as a
-      // tab closed here does (closeTab): both maps are persisted.
-      tabMachines.delete(id);
-      tabMachinePicked.delete(id);
-      tabBoundMachines.delete(id);
-      discardReadyReports(id);
-    });
+    removedIds.forEach(forgetClosedTabState);
     tabs = next;
     if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
     tabs.forEach(t => {
@@ -18094,6 +18273,19 @@
         break;
       // modelpick-coverage:end
       case 'configData':
+        // A registered machine's config, forwarded for the settings
+        // sheet open for that machine: it fills the form and nothing
+        // else (this daemon's working directory, status bar and
+        // recent directories are its own).
+        if (ev.forwarded) {
+          // A refusal is shown even once the sheet has closed: the
+          // save a close sent may be what the machine refused.
+          if (ev.error) notifySettingsMachineError(ev);
+          else if (replyIsForSettings(ev)) {
+            populateConfigForm(ev.config || {}, ev.apiKeys || {});
+          }
+          break;
+        }
         // The daemon stamps the server's machine name into every
         // configData reply; it names the machine the agent runs ON
         // (which may be remote), so it sits in the status bar.
@@ -18105,7 +18297,13 @@
           localMachineName = ev.machine;
           renderChatMachine();
         }
-        populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        applyLocalConfig(ev.config || {});
+        // While the sheet shows another machine's settings, a later
+        // configData reply of this daemon's (a reconnect's `ready`, a
+        // save's echo) must not repaint the form.
+        if (replyIsForSettings(ev)) {
+          populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        }
         if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
           setRecentWorkDirs(ev.config.recent_work_dirs);
         }
@@ -18119,6 +18317,14 @@
         }
         break;
       case 'myModelsData':
+        // The Custom Models list belongs to the machine the settings
+        // sheet is for: another machine's list (or this daemon's while
+        // the sheet shows a remote machine) is not painted.
+        if (ev.forwarded && ev.error) {
+          notifySettingsMachineError(ev);
+          break;
+        }
+        if (!replyIsForSettings(ev)) break;
         myModels = Array.isArray(ev.models) ? ev.models : [];
         // The edited model vanished (deleted from another window, or
         // renamed by this very edit's save): drop the edit state so the
@@ -20762,7 +20968,7 @@
     // Close the drawer so the transcript's autocommit_done line is
     // visible instead of hidden behind the opaque settings sheet.  Only
     // an open sheet: closing flushes the config form (repopulated by
-    // every configData poll) as a full saveConfig, which a closed sheet
+    // every configData reply) as a full saveConfig, which a closed sheet
     // must not post.
     if (settingsPanel && settingsPanel.classList.contains('open')) {
       closeSettingsPanel();
@@ -21324,6 +21530,14 @@
     const themeBtn = document.getElementById('theme-btn');
     if (themeBtn) {
       themeBtn.addEventListener('click', toggleRemoteTheme);
+    }
+    const contrastBtn = document.getElementById('contrast-btn');
+    if (contrastBtn) {
+      contrastBtn.addEventListener('click', toggleRemoteContrast);
+    }
+    const themeAutoBtn = document.getElementById('theme-auto-btn');
+    if (themeAutoBtn) {
+      themeAutoBtn.addEventListener('click', enableAutoRemoteTheme);
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
@@ -24808,6 +25022,30 @@
         info.appendChild(workspace);
       }
 
+      // The TASK INFO panel's machine, Max budget and Agent rows, as
+      // one line: the machine the task ran on (this daemon's name for
+      // its own rows), the budget the task was given and the agent
+      // (SEA, tool profile, timeout, pinned settings) it ran as.
+      const settingsParts = [];
+      const rowMachine = sessionMachine(s)
+        ? machineLabel(sessionMachine(s))
+        : localMachineName;
+      if (rowMachine) settingsParts.push('machine ' + rowMachine);
+      const rowBudget = finiteBudget(s.max_budget);
+      if (rowBudget !== null && rowBudget > 0) {
+        settingsParts.push('max budget $' + rowBudget.toFixed(2));
+      }
+      const agentText = metaAgentText(s);
+      if (agentText !== '\u2014') settingsParts.push('agent ' + agentText);
+      if (settingsParts.length > 0) {
+        const settingsLine = document.createElement('span');
+        settingsLine.className = 'running-item-settings';
+        const text = settingsParts.join(' • ');
+        settingsLine.textContent = text;
+        settingsLine.title = text;
+        info.appendChild(settingsLine);
+      }
+
       const chatId = typeof s.id === 'string' ? s.id : '';
       const taskIdRaw = s.task_id;
       const taskIdStr =
@@ -25304,7 +25542,67 @@
     const data = configFormPopulated
       ? collectConfigForm()
       : collectConfigForm(edited);
-    api.saveConfig({...data});
+    api.saveConfig(settingsCommand(data));
+  }
+
+  // The registered machine whose settings the open settings sheet
+  // shows and saves ('' = this daemon): the chat header's machine when
+  // the sheet opened.  Every settings command (getConfig, saveConfig
+  // and the custom-model ones) carries it, and the server forwards the
+  // command to that machine's daemon and stamps the reply with it.
+  let settingsMachine = '';
+
+  /**
+   * A settings command's payload for the machine the sheet is for.
+   * @param {object} data The command's fields.
+   * @returns {object} `data`, plus `machine` for a remote machine.
+   */
+  function settingsCommand(data) {
+    return settingsMachine ? {...data, machine: settingsMachine} : {...data};
+  }
+
+  /**
+   * Whether a configData / myModelsData reply belongs to the settings
+   * sheet: this daemon's own reply while the sheet is for this daemon,
+   * or a forwarded reply from the sheet's machine.
+   * @param {object} ev The reply event.
+   * @returns {boolean}
+   */
+  function replyIsForSettings(ev) {
+    return ev.forwarded
+      ? !!settingsMachine && ev.machine === settingsMachine
+      : !settingsMachine;
+  }
+
+  /**
+   * Say that the sheet's machine did not answer a settings command
+   * (unregistered, unreachable, or it rejected a save).
+   * @param {object} ev The forwarded reply carrying `error`.
+   */
+  function notifySettingsMachineError(ev) {
+    updateNotification({
+      id: 'settings-machine-error',
+      message: machineLabel(ev.machine) + ': ' + ev.error,
+      severity: 'error',
+    });
+  }
+
+  /**
+   * Name the sheet's machine in its heading, or hide the line.  A
+   * remote machine's sheet also hides what only concerns this daemon:
+   * its URLs and the Update / Reset Server / Update Models buttons
+   * (settings-panel.for-machine, main.css), which act here.
+   */
+  function renderSettingsMachine() {
+    if (settingsPanel) {
+      settingsPanel.classList.toggle('for-machine', !!settingsMachine);
+    }
+    const line = document.getElementById('settings-machine');
+    if (!line) return;
+    line.hidden = !settingsMachine;
+    line.textContent = settingsMachine
+      ? 'Settings of ' + machineLabel(settingsMachine)
+      : '';
   }
 
   function closeSidebar(force) {
@@ -25481,11 +25779,53 @@
     );
     configFormPopulated = false;
     settingsEditedFields.clear();
-    // The API Keys / Custom Models subpanels START collapsed on every
-    // open; only an explicit click on their header expands them.
+    // The API Keys / Custom Models / Bedrock subpanels START collapsed
+    // on every open; only an explicit click on their header expands them.
     collapseConfigSubpanels();
-    api.getConfig();
-    api.getMyModels();
+    // The sheet is for the machine the chat header shows.  Another
+    // machine's values must not stay on show as this machine's until
+    // its reply arrives: the form would present the other machine's
+    // password and API keys under this machine's heading, and an Edit
+    // of one of its custom-model rows would post that model's endpoint
+    // and key to this machine.
+    const previousMachine = settingsMachine;
+    settingsMachine = activeMachine();
+    renderSettingsMachine();
+    if (previousMachine !== settingsMachine) {
+      cancelCustomModelEdit();
+      clearConfigForm();
+      myModels = [];
+      renderCustomModels();
+    }
+    api.getConfig(settingsCommand({}));
+    api.getMyModels(settingsCommand({}));
+  }
+
+  /**
+   * Blank the settings form's text boxes (the fields collectConfigForm
+   * reads), so what the sheet shows until its machine answers is
+   * nothing rather than another machine's values.  The form is then
+   * unpopulated: a close saves only the boxes the user types into
+   * afterwards; the run toggles keep their state (a checkbox has no
+   * blank).
+   */
+  function clearConfigForm() {
+    configFormPopulated = false;
+    const ids = [
+      'cfg-max-budget',
+      'cfg-remote-password',
+      'cfg-custom-endpoint',
+      'cfg-custom-api-key',
+      'cfg-custom-headers',
+    ].concat(FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k));
+    ids.forEach(id => {
+      const node = document.getElementById(id);
+      if (node) node.value = '';
+    });
+    // No authoritative custom-endpoint values are known for this
+    // machine yet: a cancelled model edit must not restore the previous
+    // machine's endpoint and key.
+    lastCustomCfgValues = null;
   }
 
   function closeSettingsPanel() {
@@ -25514,6 +25854,23 @@
     settingsEditedFields.clear();
     setSettingsUpdateStatus('', false);
     setPanelOpen(settingsPanel, settingsOverlay, false);
+    if (settingsMachine) {
+      // The form and the custom-model list showed another machine's
+      // values: paint this daemon's back.  The run toggles come back
+      // at once (a submit before the reply must carry this daemon's
+      // settings, not the other machine's), the rest with the reply;
+      // until then the form is blank, so a quick reopen for this
+      // daemon does not show the other machine's values as its own.
+      settingsMachine = '';
+      renderSettingsMachine();
+      clearConfigForm();
+      myModels = [];
+      renderCustomModels();
+      if (webToolsToggleBtn) webToolsToggleBtn.checked = localUseWebBrowser;
+      if (memoryToggleBtn) memoryToggleBtn.checked = localUseMemory;
+      api.getConfig();
+      api.getMyModels();
+    }
   }
 
   function openTricksPanel() {
@@ -25912,12 +26269,13 @@
     setupPasswordToggle(btn.id, inputId, noun);
   }
 
-  // ---- Collapsible settings subpanels (API Keys, Custom Models) ----
+  // ---- Collapsible settings subpanels (API Keys, Custom Models, Bedrock) ----
 
   // toggle-button id / body id of every collapsible settings subpanel.
   const CONFIG_SUBPANELS = [
     ['api-keys-toggle', 'api-keys-body'],
     ['custom-models-toggle', 'custom-models-body'],
+    ['bedrock-toggle', 'bedrock-body'],
   ];
 
   /**
@@ -26056,8 +26414,8 @@
    * value back (and stays marked edited). A box the user never touched
    * gets the LATEST configData value — not the snapshot, which may
    * predate this panel open's config reply — and its accidental
-   * edited-mark (typing during the model edit) is dropped, so later
-   * configData polls repaint it and a close flushes authoritative
+   * edited-mark (typing during the model edit) is dropped, so a later
+   * configData reply repaints it and a close flushes authoritative
    * values instead of stale ones.
    */
   function cancelCustomModelEdit() {
@@ -26150,11 +26508,11 @@
     };
     if (customModelEditName !== null) {
       msg.originalName = customModelEditName;
-      api.saveMyModel(msg);
+      api.saveMyModel(settingsCommand(msg));
       cancelCustomModelEdit();
       return;
     }
-    api.saveMyModel(msg);
+    api.saveMyModel(settingsCommand(msg));
     // The entry is added; a stale name left behind would make the next
     // Add silently overwrite it. The endpoint / key / headers boxes
     // keep what the user typed — they are also the config form's
@@ -26225,7 +26583,7 @@
       ariaLabel: 'Delete ' + model.name,
       onConfirm: () => {
         if (model.name === customModelEditName) cancelCustomModelEdit();
-        api.deleteMyModel({name: model.name});
+        api.deleteMyModel(settingsCommand({name: model.name}));
       },
     });
     del.delBtn.type = 'button';
@@ -26280,17 +26638,12 @@
   // password masking or reveal toggle (setupSecretInput).
   const PLAIN_TEXT_KEY_IDS = ['AWS_REGION'];
 
-  function populateConfigForm(cfg, apiKeys) {
-    const el = id => document.getElementById(id);
-    const setValue = (id, value) => {
-      const node = el(id);
-      if (!node || settingsEditedFields.has(id)) return;
-      node.value = value;
-    };
-    const setChecked = (node, checked) => {
-      if (!node || settingsEditedFields.has(node.id)) return;
-      node.checked = checked;
-    };
+  /**
+   * Adopt this daemon's config values that live outside the settings
+   * form: its working directory and its budget default.
+   * @param {object} cfg The `config` of this daemon's configData reply.
+   */
+  function applyLocalConfig(cfg) {
     // The working directory is not a settings field: it is the daemon's
     // one global value (every task on every surface runs in it), chosen
     // in the chat header's drop-down or the remote Explorer.  The
@@ -26304,17 +26657,45 @@
       refreshSidebarDataViews(false);
       renderChatWorkDir();
     }
+    // The docked task-info panel's Workdir / Max budget items fall
+    // back to these config values while the visible task has no
+    // task_settings of its own, so a config change repaints them.
+    configMaxBudget = finiteBudget(cfg.max_budget);
+    updateMetaTaskDetails(metaShownSettings);
+    // This daemon's run toggles, restored when a remote machine's
+    // settings sheet (which showed that machine's) closes.
+    localUseWebBrowser = cfg.use_web_browser !== false;
+    localUseMemory = cfg.use_memory !== false;
+  }
+
+  // This daemon's "Use web tools" / "Use persistent memory" settings
+  // (the same defaults as user_config.DEFAULTS until its config arrives).
+  let localUseWebBrowser = true;
+  let localUseMemory = true;
+
+  /**
+   * Fill the settings form from a configData reply (this daemon's, or
+   * the forwarded one of the machine the sheet is for).
+   * @param {object} cfg The reply's `config`.
+   * @param {object} apiKeys The reply's `apiKeys`.
+   */
+  function populateConfigForm(cfg, apiKeys) {
+    const el = id => document.getElementById(id);
+    const setValue = (id, value) => {
+      const node = el(id);
+      if (!node || settingsEditedFields.has(id)) return;
+      node.value = value;
+    };
+    const setChecked = (node, checked) => {
+      if (!node || settingsEditedFields.has(node.id)) return;
+      node.checked = checked;
+    };
     // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
     // read by `user_config.DEFAULTS`), and `load_config()` seeds every
     // reply from it, so an effective value is always in `configData`.
     // A copy of the number here could only ever drift away from it, so
     // the box shows what the daemon sent and nothing when it sent none.
     if (cfg.max_budget != null) setValue('cfg-max-budget', cfg.max_budget);
-    // The docked task-info panel's Workdir / Max budget items fall
-    // back to these config values while the visible task has no
-    // task_settings of its own, so a config change repaints them.
-    configMaxBudget = finiteBudget(cfg.max_budget);
-    updateMetaTaskDetails(metaShownSettings);
     // Initialize the run toggles from the persisted config instead of
     // leaving whatever hardcoded `checked` state chat.html shipped with,
     // so a fresh session reflects the user's saved preference.  Missing keys default to true, the
@@ -26336,7 +26717,8 @@
     };
     // While a Custom Models edit has the boxes loaded with a model's
     // values (a programmatic write, so settingsEditedFields does not
-    // guard it), the 2-second configData poll must not repaint them.
+    // guard it), a later configData reply (a reconnect's `ready`, a
+    // save's echo) must not repaint them.
     if (customModelEditName === null) {
       setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
       setValue('cfg-custom-api-key', cfg.custom_api_key || '');

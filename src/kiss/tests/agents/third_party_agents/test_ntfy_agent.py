@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -30,7 +29,7 @@ from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     _config,
 )
 from kiss.core.config import kiss_home
-from kiss.tests.agents.third_party_agents.recording_http import start_serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
 
 
 class _NtfyEmulator:
@@ -49,8 +48,8 @@ class _NtfyEmulator:
         self._lock = threading.Lock()
         emulator = self
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
+        class Handler(RecordingHandler):
+            def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
                 topic = self.path.strip("/")
                 emulator.auth_headers.append(self.headers.get("Authorization", ""))
                 length = int(self.headers.get("Content-Length", 0))
@@ -72,13 +71,9 @@ class _NtfyEmulator:
                         "tags": tags,
                     }
                     emulator.messages.setdefault(topic, []).append(msg)
-                payload = json.dumps(msg).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(payload)
+                self._json(200, msg)
 
-            def do_GET(self) -> None:
+            def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
                 emulator.auth_headers.append(self.headers.get("Authorization", ""))
                 parsed = urlparse(self.path)
                 topic = parsed.path.strip("/").removesuffix("/json")
@@ -93,14 +88,7 @@ class _NtfyEmulator:
                     stored = [m for m in stored if m["time"] > int(since)]
                 lines = [json.dumps({"id": "open1", "time": 0, "event": "open", "topic": topic})]
                 lines.extend(json.dumps(m) for m in stored)
-                payload = ("\n".join(lines) + "\n").encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/x-ndjson")
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *args: Any) -> None:  # type: ignore[override]
-                pass
+                self._reply(200, "\n".join(lines) + "\n", "application/x-ndjson")
 
         self.server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"

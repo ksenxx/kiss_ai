@@ -29,7 +29,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM, VirtualConsole} = require('jsdom');
-const {runParallelPanel, subagentTabEls} = require('./subagent_tab_helpers');
+const {
+  runParallelPanel,
+  subagentTabEls,
+  togglePanel,
+} = require('./subagent_tab_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -147,13 +151,6 @@ function makePage(quiet) {
 
 function summaryPanel(win) {
   return win.document.querySelector('#output .ev.tc.tc-summary');
-}
-
-function togglePanel(win, panel, drain) {
-  panel
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  if (drain) drain();
 }
 
 /**

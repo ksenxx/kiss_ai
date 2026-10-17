@@ -32,7 +32,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -64,7 +63,7 @@ from kiss.core.browser_handoff import (
     portal_handoff,
     set_browser_tab_opener,
 )
-from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
 from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
@@ -412,10 +411,13 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_
         threading.Thread(target=lambda: results.append(open_for_user(url))) for _ in range(2)
     ]
     threads[0].start()
-    _wait_until(lambda: len(slow.urls) == 1)
+    assert wait_until(lambda: len(slow.urls) == 1, timeout=10.0), "condition not met in time"
     threads[1].start()  # arrives while the first launch is in flight
     # ... and blocks on the guard's condition until that launch settles.
-    _wait_until(lambda: len(_browser_handoff._lock._waiters) == 1)  # type: ignore[attr-defined]
+    assert wait_until(
+        lambda: len(_browser_handoff._lock._waiters) == 1,  # type: ignore[attr-defined]
+        timeout=10.0,
+    ), "condition not met in time"
     assert results == []  # the second caller is waiting, not guessing
     gate.set()
     for thread in threads:
@@ -434,20 +436,14 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_
         threading.Thread(target=lambda: results.append(open_for_user(other))) for _ in range(2)
     ]
     threads[0].start()
-    _wait_until(lambda: slow.urls.count(other) == 1)
+    assert wait_until(lambda: slow.urls.count(other) == 1, timeout=10.0), (
+        "condition not met in time"
+    )
     threads[1].start()
     gate.set()
     for thread in threads:
         thread.join(15)
     assert results == [BROWSER_TAB, BROWSER_TAB] and slow.urls.count(other) == 1
-
-
-def _wait_until(condition: Any, timeout: float = 10.0) -> None:
-    """Poll *condition* until it is true (fails the test after *timeout* seconds)."""
-    deadline = time.monotonic() + timeout
-    while not condition():
-        assert time.monotonic() < deadline, "condition not met in time"
-        time.sleep(0.01)
 
 
 def test_handoff_notes_match_where_the_page_went() -> None:

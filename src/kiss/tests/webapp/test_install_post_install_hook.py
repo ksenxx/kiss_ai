@@ -33,7 +33,8 @@ _INSTALL_SH = Path(__file__).resolve().parents[4] / "install.sh"
 
 
 def _extract_hook_loop() -> str:
-    """The ``for hook in "$KISS_HOME_DIR"/post-install.d/* ... done`` loop."""
+    """The ``for hook in "$KISS_HOME_DIR"/post-install.d/* ... done`` loop,
+    preceded by the ``kiss-install-problems`` block (its ``warn``)."""
     text = _INSTALL_SH.read_text(encoding="utf-8")
     match = re.search(
         r'^( *)for hook in "\$KISS_HOME_DIR"/post-install\.d/\*; do\n.*?^\1done\n',
@@ -41,7 +42,11 @@ def _extract_hook_loop() -> str:
         re.S | re.M,
     )
     assert match, "install.sh lost its post-install hook loop"
-    return textwrap.dedent(match.group(0))
+    problems = re.search(
+        r"^# BEGIN: kiss-install-problems.*?^# END: kiss-install-problems\n", text, re.S | re.M
+    )
+    assert problems, "install.sh lost its kiss-install-problems block"
+    return problems.group(0) + textwrap.dedent(match.group(0))
 
 
 def _run_hooks(kiss_home: Path, app_dir: Path) -> subprocess.CompletedProcess[str]:

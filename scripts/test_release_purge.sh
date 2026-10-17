@@ -625,13 +625,16 @@ PARENT=$(git rev-parse "${PUBLIC_BRANCH_NS}/main")
 echo "release change" >> app.py
 git add -A
 git commit -q -m "release commit"
-create_public_commit "$(git rev-parse HEAD)" > /dev/null
-git tag -a v1.0.0 -m "Release 1.0.0" "$PUBLIC_COMMIT"
-push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$PARENT" > /dev/null ||
+# No public release tag yet, so the release commit is the root of the chain.
+build_release_chain > /dev/null || fail "build_release_chain failed"
+[[ -z "$RELEASE_CHAIN_TIP" ]] || fail "a repo without release tags has a chain tip"
+create_public_commit "$(git rev-parse HEAD)" 1.0.0 "$RELEASE_CHAIN_TIP" > /dev/null
+TAG_OBJECT=$(release_tag v1.0.0 1.0.0 "$PUBLIC_COMMIT")
+push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$TAG_OBJECT" "$PARENT" > /dev/null ||
     fail "publishing a release snapshot failed"
 [[ "$(git -C "$PUB" rev-parse main)" == "$PUBLIC_COMMIT" ]] || fail "main was not published"
-git -C "$PUB" log --format='%s' main | grep -qx "release commit" ||
-    fail "development commit missing from published history"
+[[ "$(git -C "$PUB" log --format='%s' main)" == "Release 1.0.0" ]] ||
+    fail "public main is not the release commit alone: $(git -C "$PUB" log --format='%s' main)"
 [[ "$(git -C "$PUB" cat-file -t refs/tags/v1.0.0)" == "tag" ]] ||
     fail "release tag missing or not annotated"
 [[ -z "$(commits_containing "$PUB" reports)" ]] || fail "release push published excluded paths"
@@ -639,12 +642,15 @@ pass "release snapshot and its tag are published in one atomic push"
 
 # Re-using a published tag for different content must be refused, not moved.
 BEFORE_TAG=$(git -C "$PUB" rev-parse refs/tags/v1.0.0)
+fetch_public_refs > /dev/null
+build_release_chain > /dev/null
+[[ "$RELEASE_CHAIN_TIP" == "$PUBLIC_COMMIT" ]] || fail "published release not recognised as the chain tip"
 echo "sneaky change" >> app.py
 git add -A
 git commit -q -m "sneaky commit"
-create_public_commit "$(git rev-parse HEAD)" > /dev/null
-git tag -f -a v1.0.0 -m "Release 1.0.0 again" "$PUBLIC_COMMIT" > /dev/null
-if push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$(git -C "$PUB" rev-parse main)" \
+create_public_commit "$(git rev-parse HEAD)" 1.0.0 "$RELEASE_CHAIN_TIP" > /dev/null
+TAG_OBJECT=$(release_tag v1.0.0 1.0.0 "$PUBLIC_COMMIT")
+if push_public_snapshot "$PUBLIC_COMMIT" v1.0.0 "$TAG_OBJECT" "$(git -C "$PUB" rev-parse main)" \
     > "$WORK/snapshot2.log" 2>&1; then
     fail "an existing public tag was overwritten"
 fi
@@ -665,16 +671,15 @@ CONCURRENT_HEAD=$(git -C "$PUB" rev-parse main)
 echo "later change" >> app.py
 git add -A
 git commit -q -m "later release commit"
-create_public_commit "$(git rev-parse HEAD)" > /dev/null
-git tag -a v1.0.1 -m "Release 1.0.1" "$PUBLIC_COMMIT"
-if push_public_snapshot "$PUBLIC_COMMIT" v1.0.1 "$PARENT" > "$WORK/snapshot3.log" 2>&1; then
+create_public_commit "$(git rev-parse HEAD)" 1.0.1 "$RELEASE_CHAIN_TIP" > /dev/null
+TAG_OBJECT=$(release_tag v1.0.1 1.0.1 "$PUBLIC_COMMIT")
+if push_public_snapshot "$PUBLIC_COMMIT" v1.0.1 "$TAG_OBJECT" "$RELEASE_CHAIN_TIP" \
+    > "$WORK/snapshot3.log" 2>&1; then
     fail "release push overwrote a concurrent push"
 fi
 [[ "$(git -C "$PUB" rev-parse main)" == "$CONCURRENT_HEAD" ]] || fail "concurrent commit clobbered"
 git -C "$PUB" rev-parse --verify --quiet refs/tags/v1.0.1 > /dev/null &&
     fail "tag was published although the branch update was rejected"
-git rev-parse --verify --quiet refs/tags/v1.0.1 > /dev/null &&
-    fail "the unpublished release tag was left behind locally"
 pass "a concurrent push aborts the release push without publishing branch or tag"
 
 echo

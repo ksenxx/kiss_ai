@@ -137,14 +137,17 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
         timeout: Seconds to keep polling.
 
     Returns:
-        True as soon as the predicate holds, False when the timeout expires first.
+        True as soon as the predicate holds (it is checked once more after
+        the deadline, so a condition met during the last sleep counts),
+        False when the timeout expires first.
     """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         if predicate():
             return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
-    return False
 
 
 def auth_tools(agent: Any) -> dict[str, Any]:

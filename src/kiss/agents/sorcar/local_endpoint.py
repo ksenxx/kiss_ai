@@ -30,6 +30,7 @@ import os
 import secrets
 import ssl
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -272,7 +273,7 @@ def connect(
         ) from exc
     try:
         send(ws, json.dumps({"type": "auth", "token": endpoint.token}), timeout=open_timeout)
-        reply = json.loads(ws.recv(timeout=open_timeout))
+        reply = recv_auth_reply(ws, timeout=open_timeout)
     except (ConnectionError, ConnectionClosed, TimeoutError, ValueError) as exc:
         ws.close()
         raise ConnectionError(
@@ -325,3 +326,31 @@ def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
         )
     if failure:
         raise failure[0]
+
+
+def recv_auth_reply(ws: ClientConnection, *, timeout: float) -> object:
+    """Return the daemon's answer to the ``auth`` frame just sent on *ws*.
+
+    The daemon's watchdog pushes a ``{"type": "heartbeat"}`` frame at
+    every open socket on each tick, and a tick that lands between the
+    WebSocket handshake and the daemon's ``auth_ok`` queues a heartbeat
+    ahead of it.  Those frames are skipped (as the browser transport
+    does); the first other frame, decoded from JSON, is the answer.
+
+    Args:
+        ws: The connection the ``auth`` frame was sent on.
+        timeout: Seconds allowed for the answer, heartbeats included.
+
+    Raises:
+        TimeoutError: When no answer arrives within *timeout* seconds.
+        ConnectionClosed: When the daemon closed the connection.
+        ValueError: When a frame is not JSON.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:  # a stream of heartbeats must not extend the budget
+            raise TimeoutError(f"no answer to the auth frame within {timeout}s")
+        reply = json.loads(ws.recv(timeout=remaining))
+        if not (isinstance(reply, dict) and reply.get("type") == "heartbeat"):
+            return reply

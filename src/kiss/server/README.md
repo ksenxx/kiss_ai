@@ -739,7 +739,9 @@ own frames have told its task id, since the remote announces every
 sub-agent run to every client) under the caller's tab, so every
 surface here opens the nested sub-agent tab,
 streams its transcript (a forwarded `resumeSession`) and closes it on
-the relayed `subagentDone`; a surface connecting while it runs gets
+the relayed `subagentDone` (a link lost meanwhile ends those tabs
+with a `subagentDone` of its own, so none spins for good); a surface
+connecting while it runs gets
 the same `new_tab` from `RemoteTabs.replay_to`.  The result's `ran:`
 line ends with `machine=<name>`; an unregistered name or host is
 refused with the registered names before anything runs.
@@ -1737,7 +1739,9 @@ class TaskResult:
   `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
   command, and the task-info panel's Task update is the same agent
   run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
-  that will finish it), `/bestrouter` (runs a task on
+  that will finish it; its `settings()` fixes the routing session's model to
+  `autorouter_sea.ROUTER_MODEL`, `openrouter/moonshotai/kimi-k3`, with
+  `auto_classify` off and `use_web_tools` and `use_memory` on), `/bestrouter` (runs a task on
   `claude-fable-5-1` and has `gpt-6-astra` review it), the hidden
   `coding` SEA (unattended coding in a Docker container for benchmark
   trials; its `settings()` is `{"hidden": True}`, so there is no
@@ -1805,9 +1809,18 @@ class TaskResult:
   show the machine's working directory and repository, and a file
   opened from them is read and saved there: every workspace command
   (`listDir`, `gitStatus`, `gitLog`, `gitShow`, `gitAction`,
-  `fsAction`, `openFile`, `saveFile`) stamped `machine` is forwarded to
+  `fsAction`, `openFile`, `saveFile`, `checkPaths`) stamped `machine` is forwarded to
   the machine's daemon over the link and its reply, stamped `machine`,
-  sent back -- `sidebar_panels.MACHINE_WORKSPACE_REPLIES`; a daemon's
+  sent back -- `sidebar_panels.MACHINE_WORKSPACE_REPLIES`; the
+  settings sheet opens for the machine too, so its commands
+  (`getConfig`, `saveConfig`, `getMyModels`, `saveMyModel`,
+  `deleteMyModel` -- `sidebar_panels.MACHINE_SETTINGS_REPLIES`) stamped
+  `machine` are forwarded the same way, their replies stamped `machine`
+  and `forwarded`, a machine's `error` frame coming back as the reply's
+  `error`, and a `saveConfig` that changes a password-registered
+  machine's remote password to another non-empty one re-registers the
+  machine with it (an emptied password is not adopted);
+  a daemon's
   link is never a local client of the machine, whatever token it
   presents, so the machine answers these as it would a browser), the chat header's machine drop-down
   offers it (a machine registered by its address is shown by the host

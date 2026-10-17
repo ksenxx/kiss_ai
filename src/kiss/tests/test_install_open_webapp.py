@@ -6,20 +6,24 @@
 
 The ``kiss-open-webapp`` block of ``install.sh`` waits for the kiss-web
 daemon (started by step [5/5]) and then opens the Local URL
-(``http://127.0.0.1:PORT``, plain HTTP on loopback) in the default
-browser, or prints the cloudflared URL when the machine is remote (an
-SSH session, or Linux without a display).  ``kiss-web`` itself is only
-located (for the hint printed on timeout), never run.
+(``http://127.0.0.1:PORT``, plain HTTP on loopback) as a standalone app
+window through ``kiss-app`` (next to ``kiss-web`` in the app's venv:
+desktop launcher first, then the window), in the default browser when
+there is no ``kiss-app`` or it finds no browser, or prints the
+cloudflared URL when the machine is remote (an SSH session, or Linux
+without a display).  ``kiss-web`` itself is only located (for the hint
+printed on timeout), never run.
 
 The block (together with the ``kiss-browser-helpers`` block it relies
 on) is extracted verbatim and run under ``bash -euo pipefail`` against a
-temp ``HOME`` / ``KISS_HOME`` with stub ``kiss-web``, ``xdg-open`` and
-``open`` executables that log their arguments.
+temp ``HOME`` / ``KISS_HOME`` with stub ``kiss-web``, ``kiss-app``,
+``xdg-open`` and ``open`` executables that log their arguments.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -43,10 +47,27 @@ def install_sh_block(name: str) -> str:
     return text[start:end]
 
 
+def install_sh_function(name: str) -> str:
+    """Return the top-level shell function *name* of install.sh (``name() {`` ... ``}``)."""
+    text = (_REPO / "install.sh").read_text(encoding="utf-8")
+    match = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL)
+    assert match is not None, f"install.sh has no function {name}"
+    return match.group(0)
+
+
 def _open_webapp_block() -> str:
     # The block uses machine_is_remote / open_in_browser from the shared
-    # helpers block that precedes it in install.sh.
-    return install_sh_block("kiss-browser-helpers") + "\n" + install_sh_block("kiss-open-webapp")
+    # helpers block that precedes it in install.sh, app_dir_of (the app
+    # of a state directory) and warn (kiss-install-problems: a warning
+    # is printed and recorded for the web app's notification).
+    return "\n".join(
+        [
+            install_sh_function("app_dir_of"),
+            install_sh_block("kiss-install-problems"),
+            install_sh_block("kiss-browser-helpers"),
+            install_sh_block("kiss-open-webapp"),
+        ]
+    )
 
 
 def _write_stub(path: Path, log: Path) -> None:
@@ -95,6 +116,44 @@ class _Sandbox:
 
     def stub_browser(self, name: str) -> None:
         _write_stub(self.bin / name, self.browser_log)
+
+    def stub_kiss_app(self, *, fail_on: str = "", where: Path | None = None) -> Path:
+        """A ``kiss-app`` (next to the stub kiss-web, or at *where*) that logs its calls.
+
+        Each line of the log is ``<KISS_HOME>: <arguments>``.  It exits 1
+        for the invocation whose first argument is *fail_on*
+        (``--install-launcher`` or ``--url``), 0 otherwise.
+        """
+        path = where or self.bin / "kiss-app"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.kiss_app_log = self.home / "kiss-app.log"
+        path.write_text(
+            "#!/bin/bash\n"
+            f'printf "%s: %s\\n" "${{KISS_HOME:-unset}}" "$*" >> "{self.kiss_app_log}"\n'
+            f'[ "$1" != "{fail_on}" ] || exit 1\nexit 0\n',
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def expected_kiss_app_calls(
+        self, kiss_home: Path | None = None, *, revealed: bool = True
+    ) -> list[str]:
+        """The launcher install, the window open and (*revealed*) the launcher's folder.
+
+        All for *kiss_home* (default: ~/.kiss).  The folder is shown only
+        after both the launcher and the window succeeded.
+        """
+        home = kiss_home or self.kiss_home
+        calls = [f"{home}: --install-launcher", f"{home}: --url {_LOOPBACK} --wait 0"]
+        if revealed:
+            calls.append(f"{home}: --reveal-launcher")
+        return calls
+
+    def kiss_app_calls(self) -> list[str]:
+        if not self.kiss_app_log.exists():
+            return []
+        return self.kiss_app_log.read_text(encoding="utf-8").splitlines()
 
     def kiss_web_calls(self) -> list[str]:
         if not self.kiss_web_log.exists():
@@ -287,3 +346,158 @@ def test_kiss_skip_launch_skips_the_step(tmp_path: Path) -> None:
     assert sb.kiss_web_calls() == []
     assert sb.browser_calls() == []
     assert "Waiting for the kiss-web daemon" not in proc.stdout
+
+
+def test_kiss_app_installs_the_launcher_and_opens_the_window(tmp_path: Path) -> None:
+    """With kiss-app beside kiss-web: launcher registered, window opened, no browser used."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    kiss_app = sb.stub_kiss_app()
+    sb.stub_browser("xdg-open")
+    sb.url_file.write_text(
+        _url_json(local="http://localhost:8787", tunnel=_TUNNEL, loopback=_LOOPBACK),
+    )
+    proc = sb.run(env={"DISPLAY": ":0"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_web_calls() == []
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls()
+    assert sb.browser_calls() == []
+    assert f"Opening the webapp in its own window at {_LOOPBACK}" in proc.stdout
+    assert "Opening the webapp at" not in proc.stdout
+    assert str(kiss_app) not in proc.stdout
+
+
+def test_kiss_app_in_the_app_venv_on_macos(tmp_path: Path) -> None:
+    """kiss-app is found next to the venv's kiss-web; ``open`` is not used."""
+    sb = _Sandbox(tmp_path)
+    venv_bin = sb.app_dir / ".venv" / "bin"
+    sb.stub_kiss_web(where=venv_bin / "kiss-web")
+    sb.bin = venv_bin
+    sb.stub_kiss_app()
+    sb.bin = tmp_path / "bin"
+    sb.stub_browser("open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(os_name="Darwin")
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls()
+    assert sb.browser_calls() == []
+
+
+def test_kiss_app_without_a_browser_falls_back_to_the_default_browser(tmp_path: Path) -> None:
+    """kiss-app exiting non-zero on ``--url`` means no window: xdg-open gets the URL."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app(fail_on="--url")
+    sb.stub_browser("xdg-open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(env={"DISPLAY": ":0"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls(revealed=False)
+    assert sb.browser_calls() == [_LOOPBACK]
+    warning = "   WARNING: The standalone window did not open; using the browser instead."
+    assert warning in proc.stdout
+    assert f"Opening the webapp at {_LOOPBACK}" in proc.stdout
+
+
+def test_launcher_failure_is_reported_but_the_window_still_opens(tmp_path: Path) -> None:
+    """A failed ``--install-launcher`` prints how to start the app; the window opens anyway."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    kiss_app = sb.stub_kiss_app(fail_on="--install-launcher")
+    sb.stub_browser("xdg-open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(env={"DISPLAY": ":0"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls(revealed=False)
+    assert sb.browser_calls() == []
+    hint = (
+        "   WARNING: The desktop launcher was not installed; start the app with "
+        f"'KISS_HOME={sb.kiss_home} {kiss_app}'."
+    )
+    assert hint in proc.stdout
+
+
+def test_reveal_failure_is_a_warning_only(tmp_path: Path) -> None:
+    """A failed ``--reveal-launcher`` (no file manager) is reported; the install still succeeds."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app(fail_on="--reveal-launcher")
+    sb.stub_browser("xdg-open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(env={"DISPLAY": ":0"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls()
+    assert sb.browser_calls() == []
+    assert "   WARNING: Could not show the desktop launcher's folder." in proc.stdout
+
+
+def test_remote_machine_never_runs_kiss_app(tmp_path: Path) -> None:
+    """Over SSH there is no display for a window: only the tunnel URL is printed."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app()
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK, tunnel=_TUNNEL))
+    proc = sb.run(env={"DISPLAY": ":0", "SSH_CONNECTION": "1.2.3.4 1 5.6.7.8 22"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == []
+    assert _TUNNEL in proc.stdout
+
+
+def test_restarted_brand_daemon_gets_its_own_kiss_app_and_home(tmp_path: Path) -> None:
+    """A stock install that restarted a brand's daemon opens that brand's app for its home.
+
+    ``RESTART_HOME`` names the brand home (``~/.s10s``): its URL file is
+    read, the ``kiss-app`` of its app venv (``~/.s10s/s10s``) runs with
+    ``KISS_HOME`` set to it, and the stock app next to kiss-web is left
+    alone.
+    """
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app()  # the stock one, next to kiss-web
+    sb.stub_browser("xdg-open")
+    brand_home = sb.home / ".s10s"
+    brand_app = sb.stub_kiss_app(where=brand_home / "s10s" / ".venv" / "bin" / "kiss-app")
+    # Make the two stubs distinguishable: the brand's logs its own path too.
+    brand_app.write_text(
+        brand_app.read_text(encoding="utf-8").replace('"$*"', '"brand $*"'), encoding="utf-8"
+    )
+    (brand_home / "remote-url.json").write_text(_url_json(loopback="http://127.0.0.1:9999"))
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))  # the stock daemon's, not used
+    proc = sb.run(env={"DISPLAY": ":0"}, prelude=f'RESTART_HOME="{brand_home}"')
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == [
+        f"{brand_home}: brand --install-launcher",
+        f"{brand_home}: brand --url http://127.0.0.1:9999 --wait 0",
+        f"{brand_home}: brand --reveal-launcher",
+    ]
+    assert sb.browser_calls() == []
+    assert "Opening the webapp in its own window at http://127.0.0.1:9999" in proc.stdout
+
+
+def test_custom_kiss_home_is_passed_to_kiss_app(tmp_path: Path) -> None:
+    """``KISS_HOME`` of the install (not the brand default) is the home kiss-app runs for."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app()
+    custom = tmp_path / "custom-home"
+    custom.mkdir()
+    (custom / "remote-url.json").write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(env={"DISPLAY": ":0", "KISS_HOME": str(custom)})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls(custom)
+
+
+def test_failures_are_recorded_for_the_web_app_notification(tmp_path: Path) -> None:
+    """Launcher and window failures are warnings: printed and appended to PROBLEMS_FILE."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app(fail_on="--url")
+    sb.stub_browser("xdg-open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    problems = tmp_path / "problems.txt"
+    proc = sb.run(env={"DISPLAY": ":0"}, prelude=f'PROBLEMS_FILE="{problems}"')
+    assert proc.returncode == 0, proc.stderr
+    assert problems.read_text(encoding="utf-8") == (
+        "WARNING: The standalone window did not open; using the browser instead.\n"
+    )
+    assert sb.browser_calls() == [_LOOPBACK]

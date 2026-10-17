@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
@@ -434,19 +435,110 @@ def machine_workspace_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         when the machine is not registered or unreachable.
     """
     reply_type = MACHINE_WORKSPACE_REPLIES[str(cmd["type"])]
+    refused: dict[str, Any] = {k: cmd[k] for k in ("path", "token", "tabId") if k in cmd}
+    if reply_type == "dirListing":
+        refused["entries"] = []
+    return _machine_reply(name, cmd, reply_type, refused)
+
+
+MACHINE_SETTINGS_REPLIES: dict[str, str] = {
+    "getConfig": "configData",
+    "saveConfig": "configData",
+    "getMyModels": "myModelsData",
+    "saveMyModel": "myModelsData",
+    "deleteMyModel": "myModelsData",
+}
+"""The settings commands a registered machine answers for the settings sheet, by reply type.
+
+The remote webapp's settings sheet opens for the machine the chat
+header shows: each of these commands, when it carries ``machine``, is
+forwarded to that machine's daemon (:func:`machine_settings_reply`),
+so the form shows and saves that machine's config, API keys and custom
+models instead of this daemon's.
+"""
+
+
+def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the settings command *cmd* to registered machine *name* and return its reply.
+
+    *cmd* is one of :data:`MACHINE_SETTINGS_REPLIES`; it is sent to the
+    machine's daemon minus ``machine`` and this daemon's ``connId``.
+    The reply comes back stamped ``machine`` and ``forwarded`` so the
+    client can tell it from this daemon's own ``configData`` (whose
+    ``machine`` is this daemon's host name).
+
+    Returns:
+        The machine's reply, or one of the expected type carrying the
+        ``error`` when the machine is not registered, unreachable, or
+        rejected a save (its daemon then answers with an ``error``
+        frame instead, which the link does not wait for).
+    """
+    reply_type = MACHINE_SETTINGS_REPLIES[str(cmd["type"])]
+    reply = _machine_reply(name, cmd, reply_type, {}, errors=True)
+    reply["forwarded"] = True
+    return reply
+
+
+MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
+    **dict.fromkeys(MACHINE_WORKSPACE_REPLIES, machine_workspace_reply),
+    **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
+}
+"""Every command a registered machine answers when it carries ``machine``, by its forwarder."""
+
+
+def _machine_reply(
+    name: str, cmd: dict[str, Any], reply_type: str, refused: dict[str, Any],
+    *, errors: bool = False,
+) -> dict[str, Any]:
+    """Forward *cmd* to registered machine *name* and return its *reply_type* reply.
+
+    The command goes to the machine's daemon minus ``machine`` and this
+    daemon's ``connId``; *errors* is passed to
+    :meth:`~kiss.agents.sorcar.machines.MachineLink.request`.  A
+    ``saveConfig`` reply re-registers the machine with the remote
+    password it reports (:func:`_adopt_machine_password`).
+
+    Returns:
+        The machine's reply, or *refused* completed with the
+        ``type`` and the ``error`` when the machine is not registered
+        or unreachable; either stamped ``machine``.
+    """
     forwarded = {k: v for k, v in cmd.items() if k not in ("machine", "connId")}
     machine = machines.find_machine(name)
     try:
         if machine is None:
             raise machines.MachineError(f"no machine named {name!r}")
-        reply = machines.link_for(machine).request(forwarded, reply_type)
+        reply = machines.link_for(machine).request(forwarded, reply_type, errors=errors)
+        if cmd["type"] == "saveConfig":
+            _adopt_machine_password(machine, reply)
     except machines.MachineError as exc:
-        reply = {k: cmd[k] for k in ("path", "token", "tabId") if k in cmd}
-        reply.update({"type": reply_type, "error": str(exc)})
-        if reply_type == "dirListing":
-            reply["entries"] = []
+        reply = {**refused, "type": reply_type, "error": str(exc)}
     reply["machine"] = name
     return reply
+
+
+def _adopt_machine_password(machine: machines.Machine, reply: dict[str, Any]) -> None:
+    """Re-register *machine* with the remote password its ``saveConfig`` *reply* reports.
+
+    A password-authenticated machine whose settings sheet changed its
+    remote password would reject this daemon's next frame: the registry
+    entry takes the new password (which also drops the cached link, so
+    the next request authenticates with it).  An SSH machine (no
+    password here) and an unchanged or emptied password leave the
+    registry alone.
+    """
+    config = reply.get("config")
+    password = config.get("remote_password") if isinstance(config, dict) else None
+    if not machine.password or not isinstance(password, str) or not password:
+        return
+    if password == machine.password:
+        return
+    with machines.registry_lock():
+        registry = machines.load_machines()
+        for entry in registry:
+            if entry.name == machine.name:
+                entry.password = password
+        machines.save_machines(registry)
 
 
 def recommendations_report() -> dict[str, Any]:

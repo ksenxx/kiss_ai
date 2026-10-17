@@ -24,9 +24,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -38,19 +36,20 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
     _TelegramBot,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 from kiss.tests.conftest import IS_WINDOWS
 
 VALID_TOKEN = "123456:VALID-TOKEN"
 
 
-class _BotApiHandler(BaseHTTPRequestHandler):
+class _BotApiHandler(RecordingHandler):
     """Minimal Telegram Bot API emulator recording every request."""
 
     server: RecordingServer  # type: ignore[assignment]
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence the default stderr access log."""
 
     def do_POST(self) -> None:  # noqa: N802
         """Answer ``/bot<token>/<method>`` like api.telegram.org would."""
@@ -67,9 +66,9 @@ class _BotApiHandler(BaseHTTPRequestHandler):
             }
         )
         if token != VALID_TOKEN:
-            self._reply(401, {"ok": False, "description": "Unauthorized"})
+            self._json(401, {"ok": False, "description": "Unauthorized"})
         elif method == "getMe":
-            self._reply(
+            self._json(
                 200,
                 {
                     "ok": True,
@@ -77,25 +76,15 @@ class _BotApiHandler(BaseHTTPRequestHandler):
                 },
             )
         elif method in ("sendMessage", "sendPhoto"):
-            self._reply(200, {"ok": True, "result": {"message_id": 77}})
+            self._json(200, {"ok": True, "result": {"message_id": 77}})
         elif method == "badJson":
-            self._reply_raw(200, b"<html>not json</html>")
+            self._reply(200, "<html>not json</html>")
         elif method == "errorObject":
-            self._reply(500, {"error": {"message": "boom"}})
+            self._json(500, {"error": {"message": "boom"}})
         elif method == "listBody":
-            self._reply_raw(200, b"[]")
+            self._reply(200, "[]")
         else:
-            self._reply(404, {"ok": False, "description": "Not Found"})
-
-    def _reply(self, status: int, payload: dict[str, Any]) -> None:
-        self._reply_raw(status, json.dumps(payload).encode())
-
-    def _reply_raw(self, status: int, raw: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+            self._json(404, {"ok": False, "description": "Not Found"})
 
 
 @pytest.fixture

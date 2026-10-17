@@ -25,7 +25,12 @@ import os
 import time
 from pathlib import Path
 
-from kiss.server.vscode_retired import NOTICE_DAYS, NOTICE_ID, VSCODE_RETIRED_FLAG
+from kiss.server.install_problems import NOTICE_DAYS
+from kiss.server.vscode_retired import (
+    NOTICE_ID,
+    VSCODE_RETIRED_DISMISSED,
+    VSCODE_RETIRED_FLAG,
+)
 from kiss.tests.local_ws import LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
@@ -117,6 +122,61 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         self.assertEqual(self._notices(await self._ready_events()), [])
         # Touched again by a later install, it is fresh again.
         flag.write_text("2026-10-15T00:00:00Z\n")
+        self.assertEqual(len(self._notices(await self._ready_events())), 1)
+
+    async def test_notice_offers_do_not_show_this(self) -> None:
+        (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-15T00:00:00Z\n")
+        notice = self._notices(await self._ready_events())[0]
+        self.assertIs(notice["dontShowAgain"], True)
+
+    async def test_dismiss_notice_closes_everywhere_and_for_good(self) -> None:
+        (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-15T00:00:00Z\n")
+        # Two windows see the toast.
+        reader_a, writer_a = await self._connect_local()
+        self._writers.append(writer_a)
+        await self._send_ready(writer_a, "tab-a")
+        await self._wait_for_event(reader_a, "tabs_state")
+        reader_b, writer_b = await self._connect_local()
+        self._writers.append(writer_b)
+        await self._send_ready(writer_b, "tab-b")
+        await self._wait_for_event(reader_b, "tabs_state")
+        # Window A ticks "Do not show this".
+        writer_a.write(
+            json.dumps({"type": "dismissNotice", "id": NOTICE_ID}).encode("utf-8") + b"\n"
+        )
+        await writer_a.drain()
+        # Both windows get the close for that toast...
+        for reader in (reader_a, reader_b):
+            close = await self._wait_for_event(reader, "notification")
+            close.pop("ts", None)
+            self.assertEqual(close, {"type": "notification", "id": NOTICE_ID, "close": True})
+        # ...the choice is on disk...
+        marker = self.home / VSCODE_RETIRED_DISMISSED
+        self.assertTrue(marker.is_file())
+        self.assertRegex(marker.read_text(), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$")
+        # ...and no later page gets the notice, even after a later
+        # install refreshes the flag.
+        self.assertEqual(self._notices(await self._ready_events()), [])
+        (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-16T00:00:00Z\n")
+        self.assertEqual(self._notices(await self._ready_events()), [])
+
+    async def test_dismiss_notice_ignores_other_ids(self) -> None:
+        (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-15T00:00:00Z\n")
+        reader, writer = await self._connect_local()
+        self._writers.append(writer)
+        await self._send_ready(writer, "tab-x")
+        await self._wait_for_event(reader, "tabs_state")
+        writer.write(
+            json.dumps({"type": "dismissNotice", "id": "install-problems"}).encode("utf-8")
+            + b"\n"
+        )
+        await writer.drain()
+        # No marker, no close: the next ping answer arrives first.
+        writer.write(json.dumps({"type": "ping"}).encode("utf-8") + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        self.assertNotEqual(json.loads(line.decode("utf-8")).get("type"), "notification")
+        self.assertFalse((self.home / VSCODE_RETIRED_DISMISSED).exists())
         self.assertEqual(len(self._notices(await self._ready_events())), 1)
 
     async def _run_update(self, marker: Path, stamp: str) -> str:

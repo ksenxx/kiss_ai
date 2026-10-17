@@ -49,7 +49,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -92,7 +91,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _REAL_MM_TOKEN = "mm-real-secret"
 _REAL_TWITCH_TOKEN = "twitch-real-secret"
@@ -103,7 +106,7 @@ _REAL_BB_PASSWORD = "bb-real-secret"
 _REAL_SYNO_TOKEN = "syno-real-secret"
 
 
-class _MessagingApiHandler(BaseHTTPRequestHandler):
+class _MessagingApiHandler(RecordingHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
     server: Any
@@ -305,9 +308,6 @@ class _MessagingApiHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a PUT request."""
         self._serve()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 class _MessagingApiServer(RecordingServer):

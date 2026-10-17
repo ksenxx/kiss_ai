@@ -6,97 +6,14 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const {JSDOM} = require('jsdom');
+const {makePreloadedPage, send, waitFor} = require('./simplify2_harness');
 
 const PRELOADED_TAB_ID = 'tab-server-reset-test';
-
-function makeDomPage() {
-  const mediaDir = path.join(__dirname, '..', 'media');
-  let html = fs.readFileSync(path.join(mediaDir, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state = {
-    tabs: [
-      {
-        title: 'new chat',
-        chatId: PRELOADED_TAB_ID,
-        backendChatId: '',
-        parentTabId: '',
-      },
-    ],
-    activeTabIndex: 0,
-    chatId: PRELOADED_TAB_ID,
-  };
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'panelCopy.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  vm.runInContext(
-    fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
-    dom.getInternalVMContext(),
-  );
-  // The daemon's canonical tab snapshot (tabs are server-owned now);
-  // combined with the persisted chatId above it restores the selection.
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {
-        type: 'tabs_state',
-        tabs: [
-          {tabId: PRELOADED_TAB_ID, chatId: '', title: 'new chat',
-           workDir: ''},
-        ],
-      },
-    }),
-  );
-  return {win, posted, close: () => win.close()};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
 
 function click(el) {
   el.dispatchEvent(
     new el.ownerDocument.defaultView.MouseEvent('click', {bubbles: true}),
   );
-}
-
-async function waitFor(predicate, message) {
-  for (let i = 0; i < 100; i++) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise(r => setTimeout(r, 20));
-  }
-  throw new Error(message || 'waitFor timed out');
 }
 
 function isFloatingModalOpen(win) {
@@ -106,7 +23,7 @@ function isFloatingModalOpen(win) {
 
 async function runTests() {
   {
-    const wv = makeDomPage();
+    const wv = makePreloadedPage(PRELOADED_TAB_ID);
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
       assert.ok(btn, 'settings panel must expose #cfg-server-reset-btn');
@@ -133,7 +50,7 @@ async function runTests() {
   }
 
   {
-    const wv = makeDomPage();
+    const wv = makePreloadedPage(PRELOADED_TAB_ID);
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
       send(wv.win, {
@@ -192,7 +109,7 @@ async function runTests() {
   }
 
   {
-    const wv = makeDomPage();
+    const wv = makePreloadedPage(PRELOADED_TAB_ID);
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
       send(wv.win, {
@@ -224,7 +141,7 @@ async function runTests() {
   }
 
   {
-    const wv = makeDomPage();
+    const wv = makePreloadedPage(PRELOADED_TAB_ID);
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
       send(wv.win, {

@@ -69,6 +69,7 @@
     'serverReset',
     'voiceTranscribe',
     'tipsOptOut',
+    'dismissNotice',
     'browserOpen',
     'browserClose',
     'browserNavigate',

@@ -26,43 +26,17 @@
 // driving a fake WebSocket), so the frames the daemon would see are
 // exactly the ones the assertions inspect.
 
-/* global require, __dirname, console */
+/* global require, console */
 
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-const {readShimJs, installFakeWebSocket} = require('./transport_page_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
-function chatHtml() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  return html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-}
-
-function newDom() {
-  const dom = new JSDOM(chatHtml(), {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  return win;
-}
-
-function loadPageScripts(win) {
-  for (const f of ['panelCopy.js', 'api.js', 'main.js']) {
-    win.eval(fs.readFileSync(path.join(MEDIA, f), 'utf8'));
-  }
-}
+const {
+  newDom,
+  loadPageScripts,
+  readShimJs,
+  installFakeWebSocket,
+} = require('./transport_page_helpers');
 
 // ---------------------------------------------------------------------------
 // the webapp, running the real media/transport.js

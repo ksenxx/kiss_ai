@@ -24,13 +24,11 @@ from __future__ import annotations
 import base64
 import errno
 import hashlib
-import json
 import socket
 import threading
 import time
 import uuid
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
@@ -47,14 +45,15 @@ from kiss.agents.third_party_agents._device_auth import (
     _loopback_step,
     consent_instructions,
 )
-from kiss.tests.agents.third_party_agents.recording_http import serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
+from kiss.tests.conftest import find_free_port
 
 # ---------------------------------------------------------------------------
 # Local token endpoint
 # ---------------------------------------------------------------------------
 
 
-class _TokenHandler(BaseHTTPRequestHandler):
+class _TokenHandler(RecordingHandler):
     """Records every POSTed form and answers with the configured reply."""
 
     def do_POST(self) -> None:  # noqa: N802 - http.server naming
@@ -63,15 +62,7 @@ class _TokenHandler(BaseHTTPRequestHandler):
         server = cast(_TokenServer, self.server)
         server.forms.append(form)
         status, body = server.reply
-        payload = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence per-request logging."""
+        self._json(status, body)
 
 
 class _TokenServer(ThreadedHTTPServer):
@@ -106,12 +97,6 @@ def service() -> Iterator[str]:
         ConsentSession.cancel_active(name)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def _port(session: LoopbackPkceSession) -> int:
     """Return the loopback port a session's redirect URI is bound to."""
     return int(urlsplit(session.redirect_uri).port or 80)
@@ -135,7 +120,7 @@ def _start(
         authorize_url=f"{server.base}/authorize", token_url=f"{server.base}/token"
     )
     for attempt in range(5):
-        chosen = _free_port() if port is None else port
+        chosen = find_free_port() if port is None else port
         try:
             session = LoopbackPkceSession(
                 service,

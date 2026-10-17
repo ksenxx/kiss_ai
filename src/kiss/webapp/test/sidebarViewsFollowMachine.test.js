@@ -28,6 +28,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {waitFor} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const openWindows = [];
@@ -240,18 +241,6 @@ function saveButton(win) {
   const view = all(win, '.content-tab-view').find(v => v.style.display !== 'none');
   assert.ok(view, 'a content tab view is shown');
   return view.querySelector('.content-save-btn');
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-async function waitFor(predicate, message) {
-  const start = Date.now();
-  while (!predicate()) {
-    if (Date.now() - start >= 2000) throw new Error(message);
-    await sleep(10);
-  }
 }
 
 async function testTheExplorerShowsTheMachinesFolder() {

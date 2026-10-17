@@ -61,6 +61,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import start_serving
 from kiss.tests.server.parallel_agent_harness import (
     _PROVIDER_KEYS,
@@ -611,10 +612,10 @@ class TestLaunchViaApi(_ApiLaunchBase):
             # The daemon registers B's task before its worker reaches
             # the workspace guard: wait for that, so the absence check
             # below is about a launch that IS in progress.
-            deadline = time.monotonic() + 30
-            while len(agent_state.snapshot()) < 2 and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert len(agent_state.snapshot()) == 2, "B's task was never admitted"
+            assert wait_until(lambda: len(agent_state.snapshot()) >= 2, timeout=30), (
+                "B's task was never admitted"
+            )
+            assert len(agent_state.snapshot()) == 2
             # B uses a DIFFERENT workspace: it must wait for A instead
             # of overwriting the env var A's daemon-side tools()
             # reads — that would load the wrong account's credentials.

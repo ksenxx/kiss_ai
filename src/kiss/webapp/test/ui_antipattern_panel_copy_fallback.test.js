@@ -15,13 +15,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {waitFor} = require('./simplify2_harness');
+const {sleep, waitFor} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
 
 // Every page built; closed at the end so the buttons' 1.5 s flash timers
 // do not keep node alive after the last assertion.

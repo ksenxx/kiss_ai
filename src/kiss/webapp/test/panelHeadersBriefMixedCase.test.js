@@ -22,46 +22,19 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const harness = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
+/** The harness page with main.css applied; `win.__posted` is its ledger. */
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(styleEl);
+  const {win, posted} = harness.makePage();
+  harness.loadMainCss(win);
   win.__posted = posted;
   return win;
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
+const send = harness.send;
 
 function readyTabId(win) {
   const ready = win.__posted.find(m => m.type === 'ready');

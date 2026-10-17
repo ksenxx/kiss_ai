@@ -62,7 +62,14 @@ def _model_info_copy_block(text: str) -> str:
         "install.sh no longer contains the MODEL_INFO_SRC=... copy block "
         "that refreshes $KISS_HOME/MODEL_INFO.json on every install"
     )
-    return f"{setup.group(0)}{home_dir.group(0)}\nmkdir -p \"$KISS_HOME_DIR\"\n{m.group(0)}"
+    problems = re.search(
+        r"^# BEGIN: kiss-install-problems.*?^# END: kiss-install-problems\n", text, re.S | re.M
+    )
+    assert problems is not None, "install.sh lost its kiss-install-problems block (warn)"
+    return (
+        f"{setup.group(0)}{home_dir.group(0)}\nmkdir -p \"$KISS_HOME_DIR\"\n"
+        f"{problems.group(0)}{m.group(0)}"
+    )
 
 
 def test_install_sh_copies_model_info_json_for_real(tmp_path: Path) -> None:

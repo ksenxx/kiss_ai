@@ -12,13 +12,16 @@ actual wire behavior with no mocks or test doubles.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 
 class _MattermostServer(RecordingServer):
@@ -27,10 +30,10 @@ class _MattermostServer(RecordingServer):
     response_status = 200
 
 
-class _RecordingHandler(BaseHTTPRequestHandler):
+class _RecordingHandler(RecordingHandler):
     """Records request method/path/body/headers and replies with a set status."""
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Record the POST request and respond with the configured status."""
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode() if length else ""
@@ -39,15 +42,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             {"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)}
         )
         status = server.response_status
-        payload = json.dumps({"status": "OK" if status == 200 else "error"}).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        """Silence request logging."""
+        self._json(status, {"status": "OK" if status == 200 else "error"})
 
 
 @pytest.fixture()

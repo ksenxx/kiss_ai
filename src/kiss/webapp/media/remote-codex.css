@@ -134,6 +134,24 @@ body.remote-chat {
   color: var(--fg);
 }
 
+/* High contrast (the "..." menu's High contrast item, body.high-contrast):
+   web_server.py swaps the --theme-* palette for the Cursor-style
+   high-contrast one; here the translucent tints that would wash out
+   on it become solid lines and full-strength text, as VS Code's
+   high-contrast themes do (borders instead of shading). */
+body.remote-chat.high-contrast {
+  --panel-line: var(--border);
+  --border-hover: var(--fg);
+  --accent-line: var(--accent);
+  --scrollbar-thumb: var(--theme-scrollbarSlider-background);
+  --scrollbar-thumb-hover: var(--fg);
+}
+
+body.remote-chat.high-contrast .more-menu-item,
+body.remote-chat.high-contrast .more-menu-item:hover:not(:disabled) {
+  color: var(--fg);
+}
+
 /* The tab rows: VS Code's editor-group header colours — a darker
    band, dim inactive pills, the active pill in the editor background
    with the accent line on its top edge.  #content-tab-bar is the
@@ -556,6 +574,7 @@ body.remote-chat .running-item-metrics {
 }
 
 body.remote-chat .running-item-workspace,
+body.remote-chat .running-item-settings,
 body.remote-chat .running-item-ids {
   color: var(--faint);
 }
@@ -590,12 +609,14 @@ body.remote-chat .running-item-info {
 
 body.remote-chat .running-item-info .running-item-metrics,
 body.remote-chat .running-item-info .running-item-workspace,
+body.remote-chat .running-item-info .running-item-settings,
 body.remote-chat .running-item-info .running-item-ids {
   white-space: normal;
   overflow: visible;
 }
 
 body.remote-chat .running-item-workspace::before,
+body.remote-chat .running-item-settings::before,
 body.remote-chat .running-item-ids::before {
   content: " • ";
 }

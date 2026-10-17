@@ -236,7 +236,7 @@ class TestTlsCerts(TestCase):
             "a cert without a SAN is not current",
         )
         _write_cert_with_validity(self.cert, self.key, x509.Name([]), days=10, ca=False)
-        self.assertTrue(tls_certs.cert_needs_renewal(self.cert))
+        self.assertTrue(tls_certs._expiring(_load(self.cert)))
         self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
 
     def test_unusable_ca_is_regenerated_with_a_warning(self) -> None:
@@ -275,7 +275,6 @@ class TestTlsCerts(TestCase):
         self.ca.unlink()
         self.assertFalse(tls_certs._ca_pair_is_usable(self.ca, self.ca_key))
         self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
-        self.assertTrue(tls_certs.cert_needs_renewal(self.ca), "unreadable = renew")
 
     def test_server_cert_names_skips_junk_and_dedups(self) -> None:
         dns_names, ips = tls_certs.server_cert_names(

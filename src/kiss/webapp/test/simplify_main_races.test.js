@@ -25,6 +25,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {waitFor} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -48,15 +49,6 @@ function tabsState(win, entries) {
 function lastOfType(posted, type) {
   const all = h.ofType(posted, type);
   return all[all.length - 1];
-}
-
-async function waitFor(predicate, message) {
-  for (let i = 0; i < 200; i++) {
-    const v = predicate();
-    if (v) return v;
-    await h.sleep(10);
-  }
-  throw new Error(message);
 }
 
 const FILE_PATH = '/shared/notes.txt';

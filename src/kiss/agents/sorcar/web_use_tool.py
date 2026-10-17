@@ -51,7 +51,7 @@ from kiss.agents.sorcar.useful_tools import (
     _stale_worktree_fallback,
 )
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.processes import SIGKILL
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
 
@@ -103,6 +103,18 @@ _CDP_CALL_TIMEOUT_SECS = _LIVE_PROBE_TIMEOUT_MS / 1000
 # and then blocks the input call forever; a watchdog kills Chromium at
 # this deadline so the pending call raises instead of hanging the task.
 _INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
+
+# Longest wait for another kiss process to finish its browser launch under
+# ``<profile>.lock`` (``WebUseTool._profile_lock``).  A legitimate holder
+# keeps it for one launch: Playwright's 30 s launch deadline, up to three
+# 3 s pid-capture round trips and the cleanup of stale ``_N`` profiles.
+# A bounded wait polls the lock in Python instead of blocking in one
+# kernel ``flock`` call, so a Stop reaches the task thread within 50 ms
+# while a holder wedged inside Playwright keeps the file.
+_PROFILE_LOCK_TIMEOUT_SECS = 120.0
+
+# Deadline for the one-time ``playwright install chromium`` download.
+_CHROMIUM_INSTALL_SECS = 900.0
 
 # How long ``go_to_url`` waits for a bot-protection interstitial (Cloudflare
 # "Just a moment...", Anubis) to clear on its own before reporting it.
@@ -395,6 +407,50 @@ def _rmtree_logged(path: str) -> None:
         logger.warning("Failed to remove profile directory %s", path, exc_info=True)
     if os.path.exists(path):  # pragma: no cover — partial deletion is rare
         logger.warning("Profile directory %s still exists after removal", path)
+
+
+def _install_chromium(
+    command: list[str] | None = None, timeout: float = _CHROMIUM_INSTALL_SECS
+) -> None:
+    """Install Playwright's Chromium with a Stop-interruptible wait.
+
+    ``Popen.wait(timeout=...)`` polls the child from Python in sleeps of
+    at most 50 ms, so a Stop injected into the task thread lands within
+    one of them; ``subprocess.run`` waits in one ``select`` call that
+    only output, the child's exit or the deadline ends, which deferred a
+    Stop for up to ``_CHROMIUM_INSTALL_SECS`` while a download stalled.
+    The installer runs in its own process group (Job Object on Windows)
+    and the whole group is killed when the wait ends early or times out:
+    the ``python -m playwright`` launcher only spawns the Node CLI that
+    does the download, so killing the launcher alone left that CLI
+    running and holding the browser-cache lock.  Output is discarded as
+    before (``capture_output`` never surfaced it).
+
+    Args:
+        command: The installer command; ``None`` installs Chromium with
+            the configured Playwright package.
+        timeout: Seconds the installer may run.
+
+    Raises:
+        RuntimeError: When the installer exits with a non-zero status.
+        subprocess.TimeoutExpired: When it outlives *timeout*.
+    """
+    if command is None:
+        command = [sys.executable, "-m", web_stealth.playwright_package(), "install", "chromium"]
+    installer = popen_process_group(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        installer.wait(timeout=timeout)
+    except BaseException:
+        # The launcher is alive or an unreaped zombie here, so its pid
+        # (the group id) cannot have been recycled.
+        try:
+            kill_process_group(installer.pid, SIGKILL)
+        except OSError:  # pragma: no cover — group already gone, or Windows taskkill failed
+            installer.kill()
+        installer.wait()
+        raise
+    if installer.returncode:
+        raise RuntimeError(f"{' '.join(command)} exited with status {installer.returncode}")
 
 
 def _read_lock_pid(
@@ -1013,12 +1069,7 @@ class WebUseTool:
                     raise
                 logger.info("Playwright Chromium not found, installing...")
                 self._close_browser_only()
-                subprocess.run(
-                    [sys.executable, "-m", web_stealth.playwright_package(), "install", "chromium"],
-                    check=True,
-                    capture_output=True,
-                    timeout=900,
-                )
+                _install_chromium()
                 self._launch_browser(launcher, kwargs)
         except Exception:  # pragma: no cover — Playwright init failure
             # Only the half-launched browser goes; the driver, the atexit
@@ -1100,6 +1151,13 @@ class WebUseTool:
         One lock file sits beside the base profile and therefore covers
         every escalation variant derived from it.
 
+        The wait is bounded by ``_PROFILE_LOCK_TIMEOUT_SECS`` so it polls
+        in Python, where a Stop injected into the task thread lands at
+        once; an unbounded wait sits in one kernel ``flock`` call that no
+        Stop can interrupt while a holder wedged in Playwright keeps the
+        file.  On timeout the ``TimeoutError`` (naming the lock file)
+        surfaces as the tool's ``Error <context>: ...`` string.
+
         Returns:
             A context manager holding the lock, or a no-op context
             manager when this tool uses no persistent profile or an
@@ -1108,7 +1166,9 @@ class WebUseTool:
         """
         if not self.user_data_dir or self._ephemeral:
             return nullcontext()
-        return exclusive_file_lock(Path(f"{self.user_data_dir}.lock"))
+        return exclusive_file_lock(
+            Path(f"{self.user_data_dir}.lock"), timeout=_PROFILE_LOCK_TIMEOUT_SECS
+        )
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self._ephemeral and self._ephemeral_dir is None:

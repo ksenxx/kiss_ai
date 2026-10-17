@@ -121,9 +121,12 @@ from kiss.core.remote_password import password_accepted
 from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
 from kiss.server import sidebar_panels
+from kiss.server.commands import broadcast_to_conn
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
 from kiss.server.tips import TIPS_OPT_OUT_MARKER
+from kiss.server.vscode_retired import NOTICE_ID as VSCODE_RETIRED_NOTICE_ID
+from kiss.server.vscode_retired import dismiss_vscode_retired_notice
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +363,7 @@ API: dict[str, ApiCommand] = _catalog(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
     ),
     ApiCommand("tipsOptOut", handler="tips_opt_out"),
+    ApiCommand("dismissNotice", required=("id",), handler="dismiss_notice"),
 )
 """Every command the daemon accepts, keyed by wire name.
 
@@ -790,6 +794,9 @@ class ServerApi:
            and a workspace command stamped ``machine`` (the Explorer,
            Source Control view, folder picker and file editor of such
            a tab: :data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`)
+           or a settings command stamped ``machine`` (the settings
+           sheet opened for the machine:
+           :data:`kiss.server.sidebar_panels.MACHINE_SETTINGS_REPLIES`)
            to the machine's daemon, answering the sender with its
            reply.
         7. Invokes the :class:`ServerApi` method named by the
@@ -846,14 +853,15 @@ class ServerApi:
         ):
             return
         # The Explorer, Source Control view, folder picker and file
-        # editor of such a tab browse the machine's working directory:
-        # a workspace command stamped ``machine`` is answered by that
+        # editor of such a tab browse the machine's working directory,
+        # and the settings sheet opened for the machine shows and saves
+        # its config, API keys and custom models: a workspace or
+        # settings command stamped ``machine`` is answered by that
         # machine's daemon.
         machine = str(cmd.get("machine") or "")
-        if machine and name in sidebar_panels.MACHINE_WORKSPACE_REPLIES:
-            reply = await asyncio.to_thread(
-                sidebar_panels.machine_workspace_reply, machine, cmd,
-            )
+        forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
+        if forwarder is not None:
+            reply = await asyncio.to_thread(forwarder, machine, cmd)
             await self._backend._reply_direct(ctx.endpoint, reply, name)
             return
         await getattr(self, handler)(cmd, ctx)
@@ -2001,6 +2009,28 @@ class ServerApi:
         """
         opt_out = cmd.get("optOut") is not False
         await asyncio.to_thread(_write_tips_opt_out_marker, opt_out)
+
+    async def dismiss_notice(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Service a toast's "Do not show this" checkbox.
+
+        Only the "VS Code extension removed" notice offers the box
+        today; its dismissal is a marker file under ``$KISS_HOME``, so
+        the choice holds in every browser of this daemon.  Every window
+        then gets a ``close`` for the toast.  An unknown id is ignored.
+
+        Args:
+            cmd: The ``dismissNotice`` command with the notification ``id``.
+            ctx: The transport context of the current call (unused —
+                the close must reach every window).
+        """
+        if cmd.get("id") != VSCODE_RETIRED_NOTICE_ID:
+            return
+        await asyncio.to_thread(dismiss_vscode_retired_notice)
+        broadcast_to_conn(
+            self._backend._printer,
+            {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
+            "",
+        )
 
     async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Arm (or cancel) an update that runs once no task is running.

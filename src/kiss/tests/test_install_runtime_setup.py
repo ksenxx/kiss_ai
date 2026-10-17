@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 from websockets.asyncio.server import ServerConnection
 
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import find_free_port, posix_only
 from kiss.tests.local_ws import fake_daemon
 
 pytestmark = posix_only("runs the runtime-setup block of install.sh under bash")
@@ -48,6 +48,8 @@ REPO = Path(__file__).resolve().parents[3]
 INSTALL = REPO / "install.sh"
 _BEGIN = "# BEGIN: kiss-runtime-setup"
 _END = "# END: kiss-runtime-setup"
+_PROBLEMS_BEGIN = "# BEGIN: kiss-install-problems"
+_PROBLEMS_END = "# END: kiss-install-problems"
 # Real utilities the block needs; everything else on PATH is a stub.
 _TOOLS = (
     "bash",
@@ -79,18 +81,21 @@ _TOOLS = (
 )
 
 
+def _block(src: str, begin_marker: str, end_marker: str) -> str:
+    """Return the verbatim block of ``install.sh`` between the two markers."""
+    assert begin_marker in src, f"install.sh missing '{begin_marker}'"
+    begin = src.index("\n", src.index(begin_marker)) + 1
+    return src[begin : src.index(end_marker, begin)]
+
+
 def _runtime_block() -> str:
-    """Return the verbatim ``kiss-runtime-setup`` block of ``install.sh``."""
+    """Return the verbatim ``kiss-runtime-setup`` block of ``install.sh``.
+
+    Preceded by the ``kiss-install-problems`` block (``warn``, ``fail``,
+    ``record_problem``), which the runtime block's restart logic calls.
+    """
     src = INSTALL.read_text(encoding="utf-8")
-    assert _BEGIN in src, f"install.sh missing '{_BEGIN}'"
-    begin = src.index("\n", src.index(_BEGIN)) + 1
-    return src[begin : src.index(_END, begin)]
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+    return _block(src, _PROBLEMS_BEGIN, _PROBLEMS_END) + _block(src, _BEGIN, _END)
 
 
 class Sandbox:
@@ -110,7 +115,7 @@ class Sandbox:
                 (self.tools / tool).symlink_to(real)
         self.calls = tmp_path / "calls.log"
         self.pids = tmp_path / "daemon.pids"
-        self.port = _free_port()
+        self.port = find_free_port()
         self.workdir = tmp_path / "work"
         self.workdir.mkdir()
 
@@ -887,13 +892,17 @@ def test_start_macos_kickstarts_in_place_when_the_old_daemon_never_exits(
     sandbox: Sandbox,
 ) -> None:
     """Fail closed: a registration launchd will not drop
-    is restarted (``kickstart -k``) rather than left booted out."""
+    is restarted (``kickstart -k``) rather than left booted out.  That
+    restarts the OLD program, so the daemon is not confirmed to run from
+    *project* (``KISS_WEB_SERVES`` stays empty: the old app directory
+    must not be retired)."""
     project = sandbox.project()
     sandbox.uname("Darwin", "arm64")
     _launchctl_stub(sandbox, drain_probes=None)
     (sandbox.root / "launchd.registered").write_text("registered", encoding="utf-8")
     res = sandbox.run(
-        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"\n'
+        'echo "serves=[$KISS_WEB_SERVES]"',
         env={"KISS_WEB_DRAIN_TIMEOUT": "2"},
     )
     assert res.returncode == 0, res.stderr
@@ -901,9 +910,29 @@ def test_start_macos_kickstarts_in_place_when_the_old_daemon_never_exits(
         "WARNING: the old kiss-web has not exited after 2s; restarting it in place." in res.stdout
     )
     assert "kiss-web is up" in res.stdout
+    assert "serves=[]" in res.stdout
     calls = sandbox.logged_calls()
     assert calls[-1] == f"launchctl kickstart -k gui/{os.getuid()}/com.kiss.web-server"
     assert not [c for c in calls if c.startswith("launchctl bootstrap ")]
+
+
+def test_start_confirms_the_app_the_daemon_runs_from(sandbox: Sandbox) -> None:
+    """A daemon that came up from *project* is confirmed (``KISS_WEB_SERVES``),
+    and so is one already serving that exact runtime."""
+    project = sandbox.project()
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox)
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"\n'
+        'echo "serves=[$KISS_WEB_SERVES]"\n'
+        'KISS_WEB_SERVES=""\n'
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"\n'
+        'echo "serves=[$KISS_WEB_SERVES]"'
+    )
+    assert res.returncode == 0, res.stderr
+    assert "kiss-web is up" in res.stdout
+    assert "kiss-web already serves this runtime; leaving it running." in res.stdout
+    assert res.stdout.count(f"serves=[{project}]") == 2
 
 
 def test_start_macos_without_kiss_home_omits_the_env_entry(sandbox: Sandbox) -> None:
@@ -1178,18 +1207,25 @@ def test_unit_escapes_a_trailing_newline(sandbox: Sandbox) -> None:
 
 
 def test_restart_lock_is_released_by_the_exit_trap_on_abort(sandbox: Sandbox) -> None:
-    """``install.sh``'s EXIT trap releases a held lock (Ctrl-C twice exits 130)."""
+    """``install.sh``'s EXIT trap releases a held lock (Ctrl-C twice exits 130).
+
+    The abort is also recorded for the web app's notice, with the step
+    it happened in.
+    """
     src = INSTALL.read_text(encoding="utf-8")
-    trap_line = next(
-        line for line in src.splitlines() if line.startswith('trap \'rm -f "$PROGRESS_FILE"')
-    )
-    assert "release_kiss_web_restart_lock" in trap_line
+    trap_block = _block(src, "# BEGIN: kiss-exit-trap", "# END: kiss-exit-trap")
+    assert "release_kiss_web_restart_lock" in trap_block
     lock = sandbox.home / ".kiss-web.restart.lock"
+    problems = sandbox.root / "problems"
     res = sandbox.run(
-        f'PROGRESS_FILE="{sandbox.root}/progress"\n{trap_line}\n'
+        f'PROGRESS_FILE="{sandbox.root}/progress"\nPROBLEMS_FILE="{problems}"\n'
+        f'CURRENT_STEP="[2/5] Building"\n{trap_block}\n'
         f'acquire_kiss_web_restart_lock "{lock}"\n'
         '[ -f "$KISS_WEB_RESTART_LOCK_HELD" ] && echo held\nexit 130\n'
     )
     assert res.returncode == 130
     assert res.stdout == "held\n"
     assert not lock.exists()
+    assert problems.read_text() == (
+        "ERROR: the install stopped with status 130 during: [2/5] Building\n"
+    )

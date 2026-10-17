@@ -32,7 +32,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {paste} = require('./attachment_helpers');
+const {paste, typeAndEnter, submits} = require('./attachment_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const SHORT_DEADLINE_MS = 300;
@@ -87,18 +87,6 @@ function makePage() {
     ) + '\n//# sourceURL=concaudit-f4-attach-deadline-main.js',
   );
   return {win, posted, decodeCount: () => decodes};
-}
-
-function typeAndEnter(win, text) {
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
-}
-
-function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
 }
 
 function delay(ms) {

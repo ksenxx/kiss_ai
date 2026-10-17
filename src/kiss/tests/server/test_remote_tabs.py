@@ -26,7 +26,8 @@ client on the local connection:
   sub-agent tab leaves the parent bound;
 * a ``submit`` naming an unknown machine or an unreachable machine is
   refused with ``status running:false`` and a ``prompt_refused`` error;
-* losing the remote daemon mid-binding ends the tab with an error.
+* losing the remote daemon mid-binding ends the tab with an error, and
+  the sub-agent tabs its stream relayed with ``subagentDone``.
 
 Not covered here: a ``closeTab`` or a second ``submit`` landing while
 the first connect is still in flight (``RemoteTabs._bind`` stands down
@@ -40,7 +41,7 @@ import asyncio
 import json
 import shutil
 import tempfile
-import time
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -60,11 +61,14 @@ class _FinishingModel(BaseHTTPRequestHandler):
 
     With ``parallel_on_first_call`` the first answer is a
     ``run_parallel`` of one sub-task instead (the sub-agent's own call,
-    the second one, is answered after a pause so a viewer can attach
-    while it runs); the counter is per test.
+    the second one, is answered after ``hold_sub_agent`` seconds, or
+    once ``released`` is set, so a viewer can attach while it runs);
+    the counter is per test.
     """
 
     parallel_on_first_call = False
+    hold_sub_agent = 2.0
+    released = threading.Event()
     calls = 0
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -80,7 +84,7 @@ class _FinishingModel(BaseHTTPRequestHandler):
             }
         else:
             if _FinishingModel.parallel_on_first_call and _FinishingModel.calls == 2:
-                time.sleep(2.0)
+                _FinishingModel.released.wait(_FinishingModel.hold_sub_agent)
             function = {
                 "name": "finish",
                 "arguments": json.dumps({"success": True, "summary_in_html": SUMMARY}),
@@ -98,13 +102,16 @@ class _FinishingModel(BaseHTTPRequestHandler):
                 "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
             }},
         ]
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        for chunk in chunks:
-            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-        self.wfile.write(b"data: [DONE]\n\n")
-        self.wfile.flush()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for chunk in chunks:
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except OSError:
+            pass  # the daemon was killed while its call was held
 
 
 class TestRemoteTabs(IsolatedAsyncioTestCase):
@@ -114,6 +121,8 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         mach.save_machines([])
         _FinishingModel.parallel_on_first_call = False
+        _FinishingModel.hold_sub_agent = 2.0
+        _FinishingModel.released = threading.Event()
         _FinishingModel.calls = 0
         self.model_port = find_free_port()
         self.model_server = HTTPServer(("127.0.0.1", self.model_port), _FinishingModel)
@@ -146,6 +155,7 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.writer.close()
         await self.server.stop_async()
         self.remote.stop()
+        _FinishingModel.released.set()  # a held call blocks the single-threaded server
         self.model_server.shutdown()
         await self.model_thread
         mach.save_machines([])
@@ -322,6 +332,86 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.remote.stop()
         error = await self._until("error", tab)
         self.assertIn("lost the connection to box", error["text"])
+        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
+
+    async def test_losing_the_machine_ends_its_sub_agent_tabs(self) -> None:
+        """A lost stream ends the sub-agent tabs it relayed, as a local run's end would.
+
+        The remote is killed while its sub-agent still runs (its model
+        call is held): nobody can send the sub-agent's ``subagentDone``
+        any more, so the daemon does, after the root tab's error, or
+        every surface would keep the sub-agent tab spinning for good.
+        """
+        _FinishingModel.parallel_on_first_call = True
+        _FinishingModel.hold_sub_agent = 60.0
+        tab = "tab-lost-parent"
+        child = f"{tab}__sub"
+        await self._submit(tab, "Fan out", "box")
+        for _ in range(400):
+            msg = await self._next()
+            if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
+                break
+        else:
+            raise AssertionError("the sub-agent's new_tab never arrived")
+        await self._send({"type": "resumeSession", "taskId": msg["task_id"], "tabId": child})
+        await self._until("task_events", child)
+        self.assertEqual(self.server._server_api.remote_tabs.machine_of(child), "box")
+        self.remote.stop()
+        # The unbinding (``tabMachine`` "") is the last thing the loss tells.
+        seen: list[dict[str, Any]] = []
+        for _ in range(400):
+            msg = await self._next()
+            seen.append(msg)
+            if msg.get("type") == "tabMachine" and msg.get("tabId") == tab:
+                self.assertEqual(msg["machine"], "")
+                break
+        else:
+            raise AssertionError("the tab was never unbound")
+        types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
+        self.assertIn(("subagentDone", child), types, "the sub-agent tab was ended")
+        errors = [m for m in seen if m.get("type") == "error" and m.get("tabId") == tab]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("lost the connection to box", errors[0]["text"])
+        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(self.server._server_api.remote_tabs.machine_of(child), "")
+
+    async def test_losing_the_machine_ends_a_sub_agent_tab_nobody_resumed_yet(self) -> None:
+        """A sub-agent tab only announced so far (``new_tab``) ends with a lost stream too.
+
+        The surfaces open the ``{parent}__sub_{task_id}`` tab on the
+        relayed ``new_tab`` and only then ask for its transcript; the
+        remote is killed in that window, before any ``resumeSession``
+        joined the tab to the stream, so the stream never mapped the
+        tab: the daemon must still end it, once, from the announcement
+        alone.
+        """
+        _FinishingModel.parallel_on_first_call = True
+        _FinishingModel.hold_sub_agent = 60.0
+        tab = "tab-lost-unresumed-parent"
+        await self._submit(tab, "Fan out", "box")
+        for _ in range(400):
+            msg = await self._next()
+            if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
+                break
+        else:
+            raise AssertionError("the sub-agent's new_tab never arrived")
+        child = f"{tab}__sub_{msg['task_id']}"
+        self.assertEqual(self.server._server_api.remote_tabs.machine_of(child), "")
+        self.remote.stop()
+        seen: list[dict[str, Any]] = []
+        for _ in range(400):
+            msg = await self._next()
+            seen.append(msg)
+            if msg.get("type") == "tabMachine" and msg.get("tabId") == tab:
+                self.assertEqual(msg["machine"], "")
+                break
+        else:
+            raise AssertionError("the tab was never unbound")
+        types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
+        self.assertEqual(types.count(("subagentDone", child)), 1, types)
+        errors = [m for m in seen if m.get("type") == "error" and m.get("tabId") == tab]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("lost the connection to box", errors[0]["text"])
         self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
 
     async def _late_surface(self, tab: str) -> dict[str, dict[str, Any]]:

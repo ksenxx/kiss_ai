@@ -296,18 +296,17 @@ class RemoteViews:
     ) -> bool:
         """Book *cmd* on *stream* and send *frame*, as one step; False when not booked.
 
-        The sender is told of a send that failed.
+        A send that fails ends the stream, whose relay thread then runs
+        :meth:`dropped` as lost: that tells the booked terminal owner,
+        opener or page viewers (the sender among them) once.
         """
-        error = ""
         with stream.send_lock:
             if not self._book(stream, name, tab_id, conn_id, cmd):
                 return False
             try:
                 stream.send(frame)
-            except MachineError as exc:
-                error = str(exc)
-        if error:
-            self._refuse(name, str(cmd.get("tab_id") or ""), conn_id, error)
+            except MachineError:
+                pass
         return True
 
     def _book(
