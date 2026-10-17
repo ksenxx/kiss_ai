@@ -19,21 +19,22 @@ now an explicit unsupported stub.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from importlib.util import find_spec
-from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
-class _SyncRecordingHandler(BaseHTTPRequestHandler):
+class _SyncRecordingHandler(RecordingHandler):
     """Records each sync request's query params and answers a minimal sync.
 
     Error modes (reset by the fixture): a request whose ``since`` equals
@@ -52,12 +53,10 @@ class _SyncRecordingHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         self.server.requests.append(params)
         if self.server.fail_all or params.get("since") == [type(self).REJECT_TOKEN]:
-            body = json.dumps({"errcode": "M_UNKNOWN", "error": "Unrecognised sync token"}).encode(
-                "utf-8"
-            )
-            self.send_response(400)
+            self._json(400, {"errcode": "M_UNKNOWN", "error": "Unrecognised sync token"})
         else:
-            body = json.dumps(
+            self._json(
+                200,
                 {
                     "next_batch": f"nb-{len(self.server.requests)}",
                     "rooms": {"join": {}, "invite": {}, "leave": {}},
@@ -66,16 +65,8 @@ class _SyncRecordingHandler(BaseHTTPRequestHandler):
                     "to_device": {"events": []},
                     "device_lists": {"changed": [], "left": []},
                     "device_one_time_keys_count": {},
-                }
-            ).encode("utf-8")
-            self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+                },
+            )
 
 
 class _SyncServer(RecordingServer):

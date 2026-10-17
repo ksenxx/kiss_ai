@@ -24,11 +24,14 @@ import json
 import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler
-from typing import Any, cast
+from typing import cast
 
 from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 
 
 class _MatrixClientCredentials:
@@ -52,7 +55,7 @@ class _MatrixServer(RecordingServer):
     reply_status = 200
 
 
-class _RecordingHandler(BaseHTTPRequestHandler):
+class _RecordingHandler(RecordingHandler):
     """HTTP handler that records every request and replies with a fixed status."""
 
     def _record_and_reply(self) -> None:
@@ -68,27 +71,19 @@ class _RecordingHandler(BaseHTTPRequestHandler):
                 "body": body,
             }
         )
-        self.send_response(server.reply_status)
-        payload = b"{}"
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._reply(server.reply_status, "{}")
 
-    def do_PUT(self) -> None:
+    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Record a PUT request and reply."""
         self._record_and_reply()
 
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Record a GET request and reply."""
         self._record_and_reply()
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Record a POST request and reply."""
         self._record_and_reply()
-
-    def log_message(self, format: str, *args: Any) -> None:
-        """Silence per-request logging."""
 
 
 @contextmanager

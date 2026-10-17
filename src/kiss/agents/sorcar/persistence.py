@@ -1023,9 +1023,13 @@ def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
             conn.interrupt()
         except sqlite3.Error:  # already closed behind the registry's back
             logger.debug("Exception caught", exc_info=True)
-        if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            continue  # busy: its owner closes it on its next _get_db()
+        # The acquire sits inside the try (the ``locked_call`` shape): a
+        # Stop injected right after it returns still reaches the
+        # ``finally``, which otherwise would leave another thread's
+        # connection lock held by this thread for good (gh-74174).
         try:
+            if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                continue  # busy: its owner closes it on its next _get_db()
             if not checkpointed:
                 # Fails with "interrupted" on a handle whose
                 # paused statement the interrupt above hit; the
@@ -1040,7 +1044,10 @@ def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
             except sqlite3.Error:
                 logger.debug("Exception caught", exc_info=True)
         finally:
-            conn.lock.release()
+            try:
+                conn.lock.release()
+            except RuntimeError:  # the acquire timed out, or never took effect
+                pass
         _drop_open_conn_locked(key)
     _db_conn = None
     _db_generation += 1

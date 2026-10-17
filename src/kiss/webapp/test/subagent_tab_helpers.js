@@ -28,11 +28,19 @@ function runParallelPanel(win) {
   return null;
 }
 
-/** Click *panel*'s header chevron (collapse or expand it). */
-function togglePanel(win, panel) {
+/**
+ * Click *panel*'s header chevron (collapse or expand it).
+ *
+ * @param {object} win The page window.
+ * @param {Element} panel The `.ev.tc` panel element.
+ * @param {Function} [drain] Called after the click, for pages on the real
+ *   transport that collect the frames the click sent.
+ */
+function togglePanel(win, panel, drain) {
   panel
     .querySelector('.tc-h')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  if (drain) drain();
 }
 
 /** The user clicks the close button of tab *tabId*. */

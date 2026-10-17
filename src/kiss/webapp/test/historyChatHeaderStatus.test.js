@@ -767,6 +767,13 @@ function testPencilEditsTheChatSummary() {
   const pencil = header(win, 'A').querySelector('.history-chat-rename');
   assert.ok(pencil, 'the header carries a pencil');
   assert.strictEqual(pencil.getAttribute('aria-label'), 'Edit the chat summary');
+  // The pencil is on show without the pointer over the header (a touch
+  // screen never hovers), at the muted level of every row action.
+  assert.strictEqual(
+    win.getComputedStyle(pencil).opacity,
+    '0.45',
+    'the pencil is visible while the header is not hovered',
+  );
 
   const tabsBefore = chatTabs(win).length;
   pencil.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));

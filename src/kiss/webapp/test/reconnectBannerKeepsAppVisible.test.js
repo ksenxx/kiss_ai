@@ -31,6 +31,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {sleep, waitFor} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -158,20 +159,6 @@ function askDraftsOf(getState) {
   return Object.keys(d)
     .sort()
     .map(id => [id, d[id].question, d[id].answer]);
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-async function waitFor(predicate, message, timeoutMs = 2000) {
-  const start = Date.now();
-  for (;;) {
-    const value = predicate();
-    if (value) return value;
-    if (Date.now() - start >= timeoutMs) throw new Error(message);
-    await sleep(10);
-  }
 }
 
 function testReconnectingKeepsAppVisibleUnderBanner() {

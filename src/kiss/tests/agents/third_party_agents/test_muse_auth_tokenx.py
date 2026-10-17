@@ -83,7 +83,6 @@ import json
 import os
 import threading
 import time
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -124,8 +123,10 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
+    wait_until,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -137,12 +138,12 @@ _MS_TENANT = "11111111-2222-3333-4444-555555555555"
 _MS_CLIENT_ID = "app-client-id-1"
 
 
-class _TokenXApiHandler(BaseHTTPRequestHandler):
+class _TokenXApiHandler(RecordingHandler):
     """Emulated Azure AD + Graph + Telegram APIs, recording every request."""
 
     server: Any
 
-    def _reply(self, status: int, payload: bytes, location: str = "") -> None:
+    def _send(self, status: int, payload: bytes, location: str = "") -> None:
         """Send one JSON (or redirect) response."""
         self.send_response(status)
         if location:
@@ -170,16 +171,16 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             if self.server.token_redirect_to:
                 # A redirecting token endpoint: the daemon must refuse
                 # to forward the secret-bearing POST body.
-                self._reply(307, b"", location=self.server.token_redirect_to)
+                self._send(307, b"", location=self.server.token_redirect_to)
                 return
             if self.server.token_error_echo:
                 # An endpoint reflecting the received secret in a
                 # reversible encoding inside its error field.
                 encoded = quote(form.get("client_secret", ""), safe="")
-                self._reply(400, json.dumps({"error": encoded}).encode())
+                self._send(400, json.dumps({"error": encoded}).encode())
                 return
             if form.get("client_secret") != _REAL_MS_SECRET:
-                self._reply(
+                self._send(
                     401,
                     json.dumps(
                         {"error": "invalid_client", "error_description": "AADSTS7000215"}
@@ -187,7 +188,7 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
                 )
                 return
             token = f"graph-tok-{len(self.server.token_requests)}"
-            self._reply(
+            self._send(
                 200,
                 json.dumps(
                     {
@@ -201,7 +202,7 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
         if "/v1.0/" in path:
             auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
             if not auth.startswith("Bearer graph-tok-") or self.server.graph_always_401:
-                self._reply(
+                self._send(
                     401, json.dumps({"error": {"code": "InvalidAuthenticationToken"}}).encode()
                 )
                 return
@@ -214,16 +215,16 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"bad gateway")
                 return
             if "bad" in path:
-                self._reply(400, json.dumps({"error": {"code": "BadRequest"}}).encode())
+                self._send(400, json.dumps({"error": {"code": "BadRequest"}}).encode())
                 return
             if self.command == "POST":
-                self._reply(200, json.dumps({"id": "M1"}).encode())
+                self._send(200, json.dumps({"id": "M1"}).encode())
                 return
-            self._reply(200, json.dumps({"value": [{"id": "T1", "displayName": "Team"}]}).encode())
+            self._send(200, json.dumps({"value": [{"id": "T1", "displayName": "Team"}]}).encode())
             return
         segments = [s for s in path.split("/") if s]
         if not (segments and segments[0].startswith("bot")):
-            self._reply(404, json.dumps({"ok": False, "description": "not found"}).encode())
+            self._send(404, json.dumps({"ok": False, "description": "not found"}).encode())
             return
         token = segments[0][3:]
         api_method = segments[1] if len(segments) > 1 else ""
@@ -231,29 +232,29 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             # Server-echoed absolute-path Location carrying the REAL
             # token: the boundary must scrub it to the surrogate and
             # re-inject only because the hop stays on the pinned origin.
-            self._reply(302, b"", location=f"/bot{_REAL_TG_TOKEN}/getMe")
+            self._send(302, b"", location=f"/bot{_REAL_TG_TOKEN}/getMe")
             return
         if api_method == "redirectRelative":
-            self._reply(302, b"", location="getMe")
+            self._send(302, b"", location="getMe")
             return
         if api_method == "redirectOffsite":
-            self._reply(302, b"", location=self.server.offsite_location)
+            self._send(302, b"", location=self.server.offsite_location)
             return
         if api_method == "redirectLowercase":
             # Absolute Location echoing the REAL token with a
             # lowercase percent escape for its colon (%3a).
-            self._reply(302, b"", location=self.server.lowercase_location)
+            self._send(302, b"", location=self.server.lowercase_location)
             return
         if api_method == "redirectOddEncoding":
             # Absolute Location echoing the token with a normally-safe
             # character percent-encoded (A -> %41): no whole-string
             # spelling matches, only a decoded per-segment comparison
             # catches it.
-            self._reply(302, b"", location=self.server.odd_location)
+            self._send(302, b"", location=self.server.odd_location)
             return
         if api_method == "echoBody":
             # An ordinary API error that reflects the request path.
-            self._reply(
+            self._send(
                 404,
                 json.dumps(
                     {"ok": False, "description": f"invalid request path {self.path}"}
@@ -275,23 +276,23 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
         if api_method == "oddChain1":
             # A chain longer than the five-hop limit whose terminal
             # Location echoes the token with a %41-encoded char.
-            self._reply(302, b"", location=f"/bot{token}/oddChain2")
+            self._send(302, b"", location=f"/bot{token}/oddChain2")
             return
         if api_method.startswith("oddChain"):
             hop = int(api_method[8:])
             odd = token.replace("A", "%41", 1)
             target = f"/bot{token}/oddChain{hop + 1}" if hop < 6 else f"/bot{odd}/getMe"
-            self._reply(302, b"", location=target)
+            self._send(302, b"", location=target)
             return
         if api_method.startswith("chain"):
             # chain1 .. chain6: a redirect chain longer than the
             # daemon's five-hop limit, echoing the real token.
             hop = int(api_method[5:])
             target = f"/bot{token}/chain{hop + 1}" if hop < 6 else f"/bot{token}/getMe"
-            self._reply(302, b"", location=target)
+            self._send(302, b"", location=target)
             return
         if token != _REAL_TG_TOKEN:
-            self._reply(
+            self._send(
                 401,
                 json.dumps(
                     {"ok": False, "error_code": 401, "description": "Unauthorized"}
@@ -299,10 +300,10 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             )
             return
         if api_method == "badJson" or (api_method == "getMe" and self.server.getme_nonjson):
-            self._reply(200, b"{not json")
+            self._send(200, b"{not json")
             return
         if api_method == "listJson":
-            self._reply(200, b"[]")
+            self._send(200, b"[]")
             return
         results: dict[str, Any] = {
             "getMe": {"id": 99, "is_bot": True, "username": "kissbot", "first_name": "KISS"},
@@ -338,7 +339,7 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             "forwardMessage": {"message_id": 15},
         }
         result = results.get(api_method, True)
-        self._reply(200, json.dumps({"ok": True, "result": result}).encode())
+        self._send(200, json.dumps({"ok": True, "result": result}).encode())
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a GET request."""
@@ -347,9 +348,6 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a POST request."""
         self._serve()
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
 
 
 class _TokenXApiServer(RecordingServer):
@@ -1807,10 +1805,7 @@ def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:
     teardown_muse_env()
     ensure_daemon()
     # Give the startup sweep a moment.
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and stale.exists():
-        time.sleep(0.05)
-    assert not stale.exists()
+    assert wait_until(lambda: not stale.exists(), timeout=5.0)
 
 
 def test_stale_boundary_surrogate_reports_reconnect(

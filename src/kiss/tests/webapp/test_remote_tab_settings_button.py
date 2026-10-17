@@ -81,11 +81,14 @@ def test_main_css_hides_theme_toggle_outside_remote() -> None:
     """The theme toggle is remote-webapp-only: main.css must hide
     ``#theme-btn`` by default and unhide it under ``body.remote-chat``."""
     css = MAIN_CSS.read_text(encoding="utf-8")
-    assert re.search(r"#theme-btn\s*\{\s*display:\s*none;", css), (
-        "#theme-btn must be hidden outside the remote webapp"
-    )
+    # The three appearance items (theme, contrast, auto) share the rules.
     assert re.search(
-        r"body\.remote-chat\s+#theme-btn\s*\{\s*display:\s*flex;", css
+        r"#theme-btn,\s*#contrast-btn,\s*#theme-auto-btn\s*\{\s*display:\s*none;", css
+    ), "#theme-btn must be hidden outside the remote webapp"
+    assert re.search(
+        r"body\.remote-chat\s+#theme-btn,\s*body\.remote-chat\s+#contrast-btn,\s*"
+        r"body\.remote-chat\s+#theme-auto-btn\s*\{\s*display:\s*flex;",
+        css,
     ), "#theme-btn must be shown on the remote webapp"
 
 

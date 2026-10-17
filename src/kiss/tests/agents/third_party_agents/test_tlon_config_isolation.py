@@ -24,15 +24,13 @@ No mocks or test doubles: a real in-process HTTP server plays the Urbit ship.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, _config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import recording_server
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, recording_server
 from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
     _CHANNEL_AGENTS,
 )
@@ -43,7 +41,7 @@ from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
 _TLON_INFO = next(ch for ch in _CHANNEL_AGENTS if ch["agent_class"] == "TlonAgent")
 
 
-class _ShipHandler(BaseHTTPRequestHandler):
+class _ShipHandler(RecordingHandler):
     """Minimal Urbit-ship-shaped handler: accepts /~/login."""
 
     def do_POST(self) -> None:  # noqa: N802
@@ -53,9 +51,6 @@ class _ShipHandler(BaseHTTPRequestHandler):
             self.rfile.read(length)
         self.send_response(204)
         self.end_headers()
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
 
 
 def test_channel_config_path_honours_kiss_home_lazily(

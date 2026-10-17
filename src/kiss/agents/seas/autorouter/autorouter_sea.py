@@ -269,24 +269,23 @@ time; escalate only on a verified failure. Take models, prices and availability 
 ## Protocol
 
 1. Split the task into units, each with a mechanical acceptance check (a test command,
-   `git diff --stat` on the expected files, a grep for the new symbol). Work without one
+   `git diff --stat`, a grep for the new symbol). Work without one
    stays in your own loop. Never route a single tool call.
 
 2. Classify each unit with `decide` (`state`: description, check, size, earlier failures).
    Ask `tier` (type `choice`; small = mechanical: read, grep, summarize, run tests,
-   rename, format, boilerplate; medium = clear-spec engineering: implement a spec, tests
+   rename, format; medium = clear-spec engineering: implement a spec, tests
    for existing code, known-cause bug, one-module refactor, small diff review; frontier =
    open-ended reasoning: root cause, cross-module design, security or concurrency review,
    final acceptance) and `guarded` (type `noul`: touches auth, secrets, payments, deletion,
    migrations, anything the user cannot undo, or decides whether the whole task is
-   complete). `guarded` >= 0.5 is frontier; `tier` confidence below 0.6 moves one tier up;
-   a unit that failed on a tier starts one tier higher with the failed model in `exclude`.
+   complete). `guarded` >= 0.5 is frontier; `tier` confidence below 0.6 moves one tier up.
    `decide` precedes every `pick_model`.
 
 3. Pick with `pick_model(tier, tokens_in, tokens_out, exclude)`; a sub-agent that reads a
    medium codebase and runs tests: about 200k in, 20k out. Then call
    `observed_call_costs(days, model)` once; skip a candidate whose observed mean cost per
-   call is over twice the estimate or far slower than its tier peers. `estimated_usd`
+   call is over twice the estimate or far slower than its peers. `estimated_usd`
    prices one call; a sub-agent re-reads its context every step, so budget about 50x.
    Delegate only raw fact gathering; an audit you would re-check yourself is frontier
    work. Dispatch with `run_agent(task=..., model=<picked>)`, one call per unit, never
@@ -306,11 +305,12 @@ time; escalate only on a verified failure. Take models, prices and availability 
    (never below the guarded floor); else ask the user first. A user-named reviewer share
    ("at most N% for reviewing") runs reviewers on small unless the diff is guarded.
 
-6. Verify with the acceptance check yourself, never with the sub-agent's summary. On
-   failure escalate one tier with the failure evidence in the new prompt and the failed
-   model in `exclude`, two for a reasoning failure (wrong approach, misunderstood spec).
-   Never retry the same tier or escalate more than twice per unit; stop and report on the
-   third failure.
+6. Verify with the acceptance check yourself, never with the sub-agent's summary; accept
+   a fact-gathering unit (mail, calendar, web) on the child's returned evidence, never by
+   re-running its backend yourself. On failure escalate one tier with the failure evidence
+   in the new prompt and the failed model in `exclude`, two for a reasoning failure (wrong
+   approach, misunderstood spec). Never retry the same tier or escalate more than twice per
+   unit; stop and report on the third failure.
 
 7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)`, and again
    after the check. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
@@ -331,7 +331,8 @@ in `exclude` even when `pick_model` ranks it first.
 - Never spawn a sub-agent for a shell command; run it inline (`run_commands_parallel`
   for many).
 - No dispatch means no `decide`, `observed_call_costs` or `estimate_cost`. Actual cost =
-  the last `Budget:` figure plus each child's `run_agent` result; never query
+  the last `Budget:` figure (children included; a unit's cost is the `Budget:` delta
+  across its `run_agent` call, which prints none); never query
   `~/{HOME_DIR}/history.db`.
 - No `rg`, `python` or brace expansion here: use `grep -RnE --include=` and `python3`.
 - A Google channel child (`gmail`, calendar, drive) stops after `check_*_auth` ok unless

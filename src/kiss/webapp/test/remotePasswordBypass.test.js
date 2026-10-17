@@ -9,6 +9,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM, VirtualConsole} = require('jsdom');
+const {sleep} = require('./simplify2_harness');
+const {waitForSocket} = require('./transport_page_helpers');
 
 const MEDIA = path.resolve(__dirname, '..', 'media');
 
@@ -145,21 +147,6 @@ function isVisible(el) {
 
 function tick() {
   return new Promise((resolve) => setTimeout(resolve, 5));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// The shim's reconnect backoff is 0.5-1 s for the first attempt and
-// doubles (with jitter) on every further one within a page, so wait
-// for the socket the backoff opens rather than a fixed delay.
-async function waitForSocket(sockets, count, maxMs = 20000) {
-  const deadline = Date.now() + maxMs;
-  while (sockets.length < count) {
-    if (Date.now() > deadline) throw new Error(`socket ${count} never opened`);
-    await sleep(20);
-  }
 }
 
 // Frames dispatched into the page arrive as jsdom objects whose

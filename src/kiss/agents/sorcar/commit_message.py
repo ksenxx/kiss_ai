@@ -54,53 +54,6 @@ def clean_llm_output(text: str) -> str:
     return s
 
 
-def _run_oneshot_llm(
-    agent_name: str,
-    prompt_template: str,
-    arguments: dict[str, str],
-    model: str,
-    fallback: str,
-    failure_log: str,
-) -> str:
-    """Run a single non-agentic LLM call and return the cleaned text.
-
-    Wraps the boilerplate shared by every short LLM helper here:
-    construct a
-    :class:`~kiss.core.kiss_agent.KISSAgent`, call ``run`` with
-    ``is_agentic=False`` and ``verbose=False``, clean the response,
-    and fall back to *fallback* on any exception or empty response.
-
-    Args:
-        agent_name: Display name for the underlying ``KISSAgent``
-            instance.
-        prompt_template: The prompt template passed to ``KISSAgent.run``.
-        arguments: Template-arguments dict passed to ``KISSAgent.run``.
-        model: The model name to use for generation.
-        fallback: Returned verbatim on any exception or empty
-            response.
-        failure_log: Message used for the ``logger.debug`` call on
-            exception (with ``exc_info=True``).
-
-    Returns:
-        Cleaned LLM output text, or *fallback* on failure.
-    """
-    from kiss.core.kiss_agent import KISSAgent
-
-    try:
-        agent = KISSAgent(agent_name)
-        raw = agent.run(
-            model_name=model,
-            prompt_template=prompt_template,
-            arguments=arguments,
-            is_agentic=False,
-            verbose=False,
-        )
-        return clean_llm_output(raw) or fallback
-    except Exception:
-        logger.debug(failure_log, exc_info=True)
-        return fallback
-
-
 def generate_commit_message_from_diff(
     diff_text: str,
     user_prompt: str | None = None,
@@ -195,19 +148,20 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: 
         f"multiple changes. {no_quote}Return ONLY the commit message text, "
         "no quotes or markdown fences.\n\n{context}"
     )
+    from kiss.core.kiss_agent import KISSAgent
+
     try:
-        model = get_fast_model()
+        raw = KISSAgent("Commit Message Generator").run(
+            model_name=get_fast_model(),
+            prompt_template=template,
+            arguments={"context": context},
+            is_agentic=False,
+            verbose=False,
+        )
+        return clean_llm_output(raw) or fallback
     except Exception:
-        logger.debug("Commit message model selection failed", exc_info=True)
+        logger.debug("Commit message generation failed", exc_info=True)
         return fallback
-    return _run_oneshot_llm(
-        agent_name="Commit Message Generator",
-        prompt_template=template,
-        arguments={"context": context},
-        model=model,
-        fallback=fallback,
-        failure_log="Commit message generation failed",
-    )
 
 
 def _append_user_prompt(message: str, user_prompt: str) -> str:

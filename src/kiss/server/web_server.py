@@ -126,6 +126,8 @@ from kiss.core.utils import (
 from kiss.server import agent_state
 from kiss.server import sorcar as sorcar_api
 from kiss.server.commands import broadcast_to_conn
+from kiss.server.install_problems import NOTICE_ID as INSTALL_PROBLEMS_NOTICE_ID
+from kiss.server.install_problems import install_problems_notice
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
@@ -3846,6 +3848,204 @@ _LIGHT_MODERN_CSS = (
 )
 """VS Code's "Light Modern" theme as ``--theme-*`` variables."""
 
+_DARK_HIGH_CONTRAST_CSS = (
+    # Cursor's "Cursor Dark High Contrast" workbench colours (the theme
+    # Cursor ships on VS Code's hc-black base): a near-black canvas,
+    # near-white text, solid light borders instead of shading, slate
+    # buttons and the Nord status hues.  Only the variables that differ
+    # from Dark Modern are listed; the rest fall through to it.
+    "      --theme-foreground: #f0f0f0;\n"
+    "      --theme-descriptionForeground: #f0f0f099;\n"
+    "      --theme-errorForeground: #ff0000;\n"
+    "      --theme-icon-foreground: #f0f0f0;\n"
+    "      --theme-focusBorder: #f0f0f0;\n"
+    "      --theme-editor-background: #0a0a0a;\n"
+    "      --theme-editor-foreground: #f0f0f0;\n"
+    "      --theme-editor-selectionBackground: #434c5e;\n"
+    "      --theme-editor-inactiveSelectionBackground: #40404099;\n"
+    "      --theme-editor-selectionHighlightBackground: #88c0d04d;\n"
+    "      --theme-editorLineNumber-foreground: #f0f0f099;\n"
+    "      --theme-editorLineNumber-activeForeground: #f0f0f0;\n"
+    "      --theme-editorWidget-background: #1a1a1a;\n"
+    "      --theme-editorWarning-foreground: #ebcb8b;\n"
+    "      --theme-editorGutter-addedBackground: #a3be8c;\n"
+    "      --theme-editorGutter-deletedBackground: #bf616a;\n"
+    "      --theme-editorGutter-modifiedBackground: #ebcb8b;\n"
+    "      --theme-sideBar-background: #0a0a0a;\n"
+    "      --theme-sideBar-border: #f0f0f066;\n"
+    "      --theme-panel-border: #f0f0f066;\n"
+    "      --theme-widget-border: #f0f0f0;\n"
+    "      --theme-widget-shadow: #00000000;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #0a0a0a;\n"
+    "      --theme-tab-activeBackground: #0a0a0a;\n"
+    "      --theme-tab-inactiveBackground: #0a0a0a;\n"
+    "      --theme-tab-activeForeground: #ffffff;\n"
+    "      --theme-tab-inactiveForeground: #f0f0f0bd;\n"
+    "      --theme-tab-activeBorderTop: #88c0d0;\n"
+    "      --theme-activityBar-foreground: #f0f0f0;\n"
+    "      --theme-activityBar-inactiveForeground: #f0f0f0bd;\n"
+    "      --theme-activityBar-activeBorder: #88c0d0;\n"
+    "      --theme-list-hoverBackground: #2a2a2a;\n"
+    "      --theme-list-activeSelectionBackground: #434c5e;\n"
+    "      --theme-list-inactiveSelectionBackground: #2a2a2a;\n"
+    "      --theme-input-background: #000000;\n"
+    "      --theme-input-foreground: #f0f0f0;\n"
+    "      --theme-input-border: #f0f0f0;\n"
+    "      --theme-input-placeholderForeground: #f0f0f099;\n"
+    "      --theme-dropdown-background: #000000;\n"
+    "      --theme-dropdown-border: #f0f0f0;\n"
+    "      --theme-button-background: #434c5e;\n"
+    "      --theme-button-foreground: #eceff4;\n"
+    "      --theme-button-hoverBackground: #4c566a;\n"
+    "      --theme-button-border: #f0f0f0;\n"
+    "      --theme-button-secondaryBackground: #000000;\n"
+    "      --theme-button-secondaryForeground: #f0f0f0;\n"
+    "      --theme-button-secondaryHoverBackground: #2a2a2a;\n"
+    "      --theme-badge-background: #88c0d0;\n"
+    "      --theme-badge-foreground: #000000;\n"
+    "      --theme-textLink-foreground: #88c0d0;\n"
+    "      --theme-textLink-activeForeground: #f0f0f0;\n"
+    "      --theme-textCodeBlock-background: #1a1a1a;\n"
+    "      --theme-textBlockQuote-background: #1a1a1a;\n"
+    "      --theme-textBlockQuote-border: #f0f0f0;\n"
+    "      --theme-textPreformat-foreground: #f0f0f0;\n"
+    "      --theme-textPreformat-background: #2a2a2a;\n"
+    "      --theme-menu-background: #0a0a0a;\n"
+    "      --theme-menu-selectionBackground: #434c5e;\n"
+    "      --theme-notifications-background: #0a0a0a;\n"
+    "      --theme-notifications-border: #f0f0f0;\n"
+    "      --theme-toolbar-hoverBackground: #2a2a2a;\n"
+    "      --theme-scrollbarSlider-background: #f0f0f066;\n"
+    "      --theme-terminal-foreground: #f0f0f0;\n"
+    "      --theme-terminal-ansiBlack: #2a2a2a;\n"
+    "      --theme-terminal-ansiRed: #bf616a;\n"
+    "      --theme-terminal-ansiGreen: #a3be8c;\n"
+    "      --theme-terminal-ansiYellow: #ebcb8b;\n"
+    "      --theme-terminal-ansiBlue: #81a1c1;\n"
+    "      --theme-terminal-ansiMagenta: #b48ead;\n"
+    "      --theme-terminal-ansiCyan: #88c0d0;\n"
+    "      --theme-terminal-ansiWhite: #f0f0f0;\n"
+    "      --theme-terminal-ansiBrightBlack: #f0f0f099;\n"
+    "      --theme-terminal-ansiBrightRed: #d08770;\n"
+    "      --theme-terminal-ansiBrightGreen: #a3be8c;\n"
+    "      --theme-terminal-ansiBrightYellow: #ebcb8b;\n"
+    "      --theme-terminal-ansiBrightBlue: #81a1c1;\n"
+    "      --theme-terminal-ansiBrightMagenta: #b48ead;\n"
+    "      --theme-terminal-ansiBrightCyan: #8fbcbb;\n"
+    "      --theme-terminal-ansiBrightWhite: #ffffff;\n"
+    "      --theme-charts-green: #a3be8c;\n"
+    "      --theme-charts-red: #ff5c5c;\n"
+    "      --theme-charts-yellow: #ebcb8b;\n"
+    "      --theme-charts-purple: #b48ead;\n"
+)
+"""Cursor's "Dark High Contrast" theme as ``--theme-*`` variables."""
+
+_LIGHT_HIGH_CONTRAST_CSS = (
+    # Cursor ships no light high-contrast theme, so this is Cursor
+    # Light's hues (its #0064b0 link blue, #007041 green, #be1744 red,
+    # #a46700 amber) on a pure white canvas with black text and solid
+    # dark borders, following VS Code's Light High Contrast conventions
+    # (#0f4a85 focus and contrast border).
+    "      --theme-foreground: #000000;\n"
+    "      --theme-descriptionForeground: #000000bd;\n"
+    "      --theme-errorForeground: #b5200d;\n"
+    "      --theme-icon-foreground: #000000;\n"
+    "      --theme-focusBorder: #0f4a85;\n"
+    "      --theme-editor-background: #ffffff;\n"
+    "      --theme-editor-foreground: #000000;\n"
+    "      --theme-editor-selectionBackground: #0f4a8540;\n"
+    "      --theme-editor-inactiveSelectionBackground: #0f4a8520;\n"
+    "      --theme-editor-selectionHighlightBackground: #0f4a8530;\n"
+    "      --theme-editorLineNumber-foreground: #000000bd;\n"
+    "      --theme-editorLineNumber-activeForeground: #000000;\n"
+    "      --theme-editorWidget-background: #ffffff;\n"
+    "      --theme-editorWarning-foreground: #a46700;\n"
+    "      --theme-editorGutter-addedBackground: #007041;\n"
+    "      --theme-editorGutter-deletedBackground: #be1744;\n"
+    "      --theme-editorGutter-modifiedBackground: #0064b0;\n"
+    "      --theme-sideBar-background: #ffffff;\n"
+    "      --theme-sideBar-border: #0f4a85;\n"
+    "      --theme-panel-border: #0f4a85;\n"
+    "      --theme-widget-border: #0f4a85;\n"
+    "      --theme-widget-shadow: #00000000;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #ffffff;\n"
+    "      --theme-tab-activeBackground: #ffffff;\n"
+    "      --theme-tab-inactiveBackground: #ffffff;\n"
+    "      --theme-tab-activeForeground: #000000;\n"
+    "      --theme-tab-inactiveForeground: #000000bd;\n"
+    "      --theme-tab-activeBorderTop: #0f4a85;\n"
+    "      --theme-activityBar-foreground: #000000;\n"
+    "      --theme-activityBar-inactiveForeground: #000000bd;\n"
+    "      --theme-activityBar-activeBorder: #0f4a85;\n"
+    "      --theme-list-hoverBackground: #0f4a851a;\n"
+    "      --theme-list-activeSelectionBackground: #0f4a8540;\n"
+    "      --theme-list-inactiveSelectionBackground: #0f4a8526;\n"
+    "      --theme-input-background: #ffffff;\n"
+    "      --theme-input-foreground: #000000;\n"
+    "      --theme-input-border: #0f4a85;\n"
+    "      --theme-input-placeholderForeground: #000000bd;\n"
+    "      --theme-dropdown-background: #ffffff;\n"
+    "      --theme-dropdown-border: #0f4a85;\n"
+    "      --theme-button-background: #0f4a85;\n"
+    "      --theme-button-foreground: #ffffff;\n"
+    "      --theme-button-hoverBackground: #0064b0;\n"
+    "      --theme-button-border: #0f4a85;\n"
+    "      --theme-button-secondaryBackground: #ffffff;\n"
+    "      --theme-button-secondaryForeground: #000000;\n"
+    "      --theme-button-secondaryHoverBackground: #0f4a851a;\n"
+    "      --theme-badge-background: #0f4a85;\n"
+    "      --theme-badge-foreground: #ffffff;\n"
+    "      --theme-textLink-foreground: #0064b0;\n"
+    "      --theme-textLink-activeForeground: #0f4a85;\n"
+    "      --theme-textCodeBlock-background: #ffffff;\n"
+    "      --theme-textBlockQuote-background: #ffffff;\n"
+    "      --theme-textBlockQuote-border: #0f4a85;\n"
+    "      --theme-textPreformat-foreground: #000000;\n"
+    "      --theme-textPreformat-background: #0f4a851a;\n"
+    "      --theme-menu-background: #ffffff;\n"
+    "      --theme-menu-selectionBackground: #0f4a85;\n"
+    "      --theme-notifications-background: #ffffff;\n"
+    "      --theme-notifications-border: #0f4a85;\n"
+    "      --theme-toolbar-hoverBackground: #0f4a8526;\n"
+    "      --theme-scrollbarSlider-background: #0f4a8580;\n"
+    "      --theme-terminal-foreground: #000000;\n"
+    "      --theme-terminal-ansiBlack: #000000;\n"
+    "      --theme-terminal-ansiRed: #be1744;\n"
+    "      --theme-terminal-ansiGreen: #007041;\n"
+    "      --theme-terminal-ansiYellow: #8b5700;\n"
+    "      --theme-terminal-ansiBlue: #0064b0;\n"
+    "      --theme-terminal-ansiMagenta: #92156a;\n"
+    "      --theme-terminal-ansiCyan: #176c74;\n"
+    "      --theme-terminal-ansiWhite: #555555;\n"
+    "      --theme-terminal-ansiBrightBlack: #4d4d4d;\n"
+    "      --theme-terminal-ansiBrightRed: #be1744;\n"
+    "      --theme-terminal-ansiBrightGreen: #007041;\n"
+    "      --theme-terminal-ansiBrightYellow: #8b5700;\n"
+    "      --theme-terminal-ansiBrightBlue: #0064b0;\n"
+    "      --theme-terminal-ansiBrightMagenta: #92156a;\n"
+    "      --theme-terminal-ansiBrightCyan: #176c74;\n"
+    "      --theme-terminal-ansiBrightWhite: #000000;\n"
+    "      --theme-charts-green: #007041;\n"
+    "      --theme-charts-red: #be1744;\n"
+    "      --theme-charts-yellow: #a46700;\n"
+    "      --theme-charts-purple: #5e2cbc;\n"
+)
+"""A light high-contrast palette in Cursor Light's hues as ``--theme-*`` variables."""
+
+_HIGH_CONTRAST_VARS_CSS = (
+    "html.high-contrast,\n"
+    "    body.remote-chat.high-contrast {\n" + _DARK_HIGH_CONTRAST_CSS + "    }\n"
+    "    html.light-theme.high-contrast,\n"
+    "    body.remote-chat.light-theme.high-contrast {\n"
+    + _LIGHT_HIGH_CONTRAST_CSS + "    }\n"
+)
+"""High-contrast overrides for the "High contrast" toggle of the ``...`` menu.
+
+The chat page inlines this block after :data:`_SHARE_PAGE_LIGHT_VARS_CSS`;
+``main.js`` toggles the ``high-contrast`` class on ``<body>`` next to
+``light-theme``, so each of the four combinations resolves to one palette.
+"""
+
 _THEME_VARS_CSS = (
     ":root {\n" + _FONT_VARS_CSS + _DARK_MODERN_CSS + "    }\n"
 )
@@ -4052,7 +4252,8 @@ def _build_html() -> str:
         "    body { background: var(--theme-editor-background, #1f1f1f);\n"
         "            color: var(--theme-editor-foreground, #cccccc); }\n"
         "    " + _THEME_VARS_CSS
-        + "    " + _SHARE_PAGE_LIGHT_VARS_CSS + "  </style>"
+        + "    " + _SHARE_PAGE_LIGHT_VARS_CSS
+        + "    " + _HIGH_CONTRAST_VARS_CSS + "  </style>"
     )
     auth_modal = (
         '    <div id="auth-modal" style="display:none;" role="dialog" '
@@ -4092,6 +4293,8 @@ def _build_html() -> str:
         ),
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
+        "ICON_SVG_HREF": _media_url("kiss-icon.svg"),
+        "ICON_PNG_HREF": _media_url("kiss-icon.png"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
         "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
         # Light Modern is the remote page's default theme: the body is
@@ -4165,6 +4368,35 @@ def _build_html() -> str:
 
 
 _ATTR_STRING_KEYS = frozenset({"BODY_CLASS_ATTR", "ENTERKEYHINT"})
+
+
+def _build_manifest() -> str:
+    """Return the web app manifest (``/manifest.webmanifest``) as JSON.
+
+    The manifest names the app after the brand and points at the brand
+    icons, so a browser's "install as app" and the standalone window
+    ``kiss-app`` opens (:mod:`kiss.server.standalone_app`) show the
+    product's name and icon rather than a generic page.  ``display:
+    standalone`` asks for a window without browser UI.
+    """
+    return json.dumps(
+        {
+            "name": PRODUCT_NAME,
+            "short_name": BRAND["short_name"],
+            "description": BRAND["tagline"],
+            "id": "/",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#ffffff",
+            "theme_color": "#ffffff",
+            "icons": [
+                {"src": _media_url("kiss-icon.png"), "sizes": "512x512", "type": "image/png"},
+                {"src": _media_url("kiss-icon.svg"), "sizes": "any", "type": "image/svg+xml"},
+            ],
+        },
+        indent=2,
+    )
 
 
 _MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
@@ -4844,6 +5076,11 @@ class RemoteAccessServer:
             return _http_response(
                 200, "text/javascript; charset=utf-8", sw_script.encode("utf-8"),
             )
+        if path == "/manifest.webmanifest":
+            manifest = await asyncio.to_thread(_build_manifest)
+            return _http_response(
+                200, "application/manifest+json; charset=utf-8", manifest.encode("utf-8"),
+            )
         if path in ("/trajectories", "/trajectories/"):
             return _http_response(
                 200,
@@ -5273,19 +5510,20 @@ class RemoteAccessServer:
     def _bootstrap_events(self) -> list[dict[str, Any]]:
         """The events a ``ready`` answers with: ``tricksData``,
         ``tipsData`` and, after an install that retired the VS Code
-        extension, its ``notification``.
+        extension or that ran into problems, its ``notification``.
 
         Reads ``MY_INJECTION.md``, the bundled promptlets and tips, the
-        opt-out marker and the ``.vscode-retired`` flag, so callers run
-        it off the event loop.
+        opt-out marker, the ``.vscode-retired`` flag and the
+        ``.install-problems`` file, so callers run it off the event
+        loop.
         """
         events: list[dict[str, Any]] = [
             {"type": "tricksData", **read_tricks_data()},
             {"type": "tipsData", **tips_data(_read_version())},
         ]
-        notice = vscode_retired_notice(self._loopback_url)
-        if notice is not None:
-            events.append(notice)
+        for notice in (vscode_retired_notice(self._loopback_url), install_problems_notice()):
+            if notice is not None:
+                events.append(notice)
         return events
 
     def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
@@ -5515,6 +5753,7 @@ class RemoteAccessServer:
         # poller itself disarms before calling here, so this never
         # cancels the running task.
         spawned = None
+        started = 0.0
         try:
             if await self._cancel_update_when_idle():
                 await self._broadcast_update_available()
@@ -5534,6 +5773,7 @@ class RemoteAccessServer:
                     f"(output: {self._update_log_path})"
                 ),
             }, conn_id)
+            started = time.time()
             spawned = await loop.run_in_executor(
                 None, self._spawn_update_script, script, conn_id,
             )
@@ -5549,7 +5789,7 @@ class RemoteAccessServer:
         if spawned is None:
             return
         self._update_watch_task = asyncio.create_task(
-            self._watch_update_exit(*spawned, conn_id),
+            self._watch_update_exit(*spawned, conn_id, started),
         )
 
     def _set_update_barrier(self, up: bool) -> None:
@@ -5746,32 +5986,57 @@ class RemoteAccessServer:
             return None
 
     async def _watch_update_exit(
-        self, proc: subprocess.Popen[bytes], log_offset: int, conn_id: str,
+        self, proc: subprocess.Popen[bytes], log_offset: int, conn_id: str, started: float,
     ) -> None:
-        """Report a failed installer to the window that started it.
+        """Report a failed or partly failed installer.
 
         Polls the detached installer (no executor thread is tied up for
         the minutes an install takes, and the daemon it may restart
-        never waits on it) and, on a non-zero exit, sends the
-        requesting connection an ``error``: the installer's own
-        refusal line when this run's slice of the update log holds one
-        (``install.sh`` lost the cross-process update lock to another
-        installer), otherwise a generic failure pointing at the log.
-        A clean exit reports nothing more.  Either way the installer
-        is gone once this returns, so the run-admission barrier raised
-        for it is lowered: a daemon the installer did not restart (a
-        failed or no-op update) must accept tasks again.
+        never waits on it).  The problems the run recorded in
+        ``$KISS_HOME/.install-problems`` (:mod:`kiss.server.install_problems`:
+        a failed hook or brand-home pass, a daemon that did not come
+        up, a ``uv sync`` error, ...) go to every window as the sticky
+        notification the restarted daemon would otherwise send with its
+        ``ready``; this daemon sends it only when the installer did not
+        restart it, since the watcher dies with the daemon.  A non-zero
+        exit that recorded nothing sends the requesting connection an
+        ``error``: the installer's own refusal line when this run's
+        slice of the update log holds one (``install.sh`` lost the
+        cross-process update lock to another installer), otherwise a
+        generic failure pointing at the log.  A clean exit that recorded
+        nothing closes the notification a previous run may have left on
+        the pages.  Either way the installer is gone once this returns,
+        so the run-admission barrier raised for it is lowered: a daemon
+        the installer did not restart (a failed or no-op update) must
+        accept tasks again.  Unless the barrier already belongs to the
+        NEXT installer: an Update click or the idle poller that lands
+        between this installer's exit and the poll that notices it
+        (:meth:`_update_in_progress` is already false then) raises the
+        barrier for its own installer, which this watcher must not
+        lower from under it; that installer's watcher lowers it.
 
         Args:
             proc: The installer started by :meth:`_spawn_update_script`.
             log_offset: Size of the update log when *proc* started,
                 i.e. where this run's output begins.
             conn_id: Requesting connection id (``""`` to broadcast).
+            started: When the installer was spawned (``time.time()``):
+                a problems file older than that is an earlier run's.
+                A second of slack covers file systems with whole-second
+                mtimes.
         """
         while proc.poll() is None:
             await asyncio.sleep(0.2)
-        self._set_update_barrier(False)
+        if not self._update_in_progress():
+            self._set_update_barrier(False)
+        notice = await asyncio.to_thread(install_problems_notice, since=started - 1.0)
+        if notice is not None:
+            self._broadcast_to_conn(notice, "")
+            return
         if proc.returncode == 0:
+            self._broadcast_to_conn(
+                {"type": "notification", "id": INSTALL_PROBLEMS_NOTICE_ID, "close": True}, "",
+            )
             return
         output = await asyncio.to_thread(
             _read_log_from, self._update_log_path, log_offset,
@@ -8527,16 +8792,26 @@ class RemoteAccessServer:
         and the heartbeat :data:`_WS_PING_TIMEOUT`.  Any failure
         aborts the transport, which ends the connection's handler;
         ``close()`` would wait for the same drain.
+
+        The heartbeat frame goes only to a socket the printer has
+        registered (:meth:`WebPrinter.add_client`, which runs after
+        ``auth_ok`` was written): a tick landing in the window between
+        the WebSocket handshake and ``auth_ok`` used to queue a
+        heartbeat ahead of the ``auth`` answer, which a client reading
+        one frame took for a refusal.  The protocol-level ping still
+        covers every connection, so an unauthenticated peer that went
+        away is still closed.
         """
         try:
             pong = await asyncio.wait_for(
                 ws.ping(), timeout=self._printer._send_timeout,
             )
             await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
-            await asyncio.wait_for(
-                self._endpoint_send(ws, _WS_HEARTBEAT_FRAME),
-                timeout=_WS_PING_TIMEOUT,
-            )
+            if ws in self._printer._pending_sends:
+                await asyncio.wait_for(
+                    self._endpoint_send(ws, _WS_HEARTBEAT_FRAME),
+                    timeout=_WS_PING_TIMEOUT,
+                )
         except Exception:
             transport = getattr(ws, "transport", None)
             if transport is not None:

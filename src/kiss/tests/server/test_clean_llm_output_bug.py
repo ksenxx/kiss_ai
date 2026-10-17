@@ -6,8 +6,8 @@
 
 Bug repro: ``clean_llm_output`` is documented to "Strip whitespace and
 surrounding quotes from LLM output", and is used by
-``_run_oneshot_llm`` to clean the raw text returned by the commit-message
-and follow-up-suggestion LLM helpers.  Real LLM responses routinely carry
+``_commit_message_from_llm`` to clean the raw text the commit-message
+model returns.  Real LLM responses routinely carry
 a trailing newline (and frequently wrap the answer in quotes), e.g.::
 
     "feat: add widget"\n

@@ -10,31 +10,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {newDom, waitFor} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-/** chat.html with its placeholders filled and its script tags stripped. */
-function chatHtml() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  return html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-}
-
-/** A fresh jsdom window on chat.html with no page script loaded yet. */
-function newDom() {
-  const dom = new JSDOM(chatHtml(), {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  return win;
-}
 
 /** Eval panelCopy.js, api.js and main.js into *win*, in that order. */
 function loadPageScripts(win) {
@@ -77,10 +55,27 @@ function installFakeWebSocket(win, sockets) {
   win.WebSocket = FakeWebSocket;
 }
 
+/**
+ * Wait until the fake WebSocket has opened *count* sockets.  The shim's
+ * reconnect backoff is 0.5-1 s for the first attempt and doubles (with
+ * jitter) on every further one within a page, so the socket a backoff
+ * opens is awaited (up to 20 s) rather than a fixed delay.
+ *
+ * @param {Array<object>} sockets The ledger `installFakeWebSocket` fills.
+ * @param {number} count How many sockets must have opened.
+ */
+async function waitForSocket(sockets, count) {
+  await waitFor(
+    () => sockets.length >= count,
+    `socket ${count} never opened`,
+    20000,
+  );
+}
+
 module.exports = {
-  chatHtml,
   newDom,
   loadPageScripts,
   readShimJs,
   installFakeWebSocket,
+  waitForSocket,
 };

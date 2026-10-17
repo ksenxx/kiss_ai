@@ -212,7 +212,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         unit.write_text(
             "[Service]\n"
             f"Environment=KISS_HOME={kiss_home}\n"
-            f"ExecStart={kiss_home}/kiss/.venv/bin/kiss-web\n"
+            f"ExecStart={kiss_home}/{kiss_home.name[1:]}/.venv/bin/kiss-web\n"
         )
 
     def _marks(self, name: str) -> list[str]:
@@ -256,7 +256,9 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertNotIn(".notabrand", out)
         for home in (brandx, brandy):
             self.assertIn(f"   Installed into brand home {home}", out)
-            self.assertTrue((home / "kiss" / "src" / "kiss" / "__init__.pyc").exists(), home)
+            # The app is named after its home: ~/.brandx/brandx.
+            self.assertTrue((home / home.name[1:] / "src" / "kiss" / "__init__.pyc").exists(), home)
+            self.assertFalse((home / "kiss").exists(), home)
             self.assertTrue((home / "MODEL_INFO.json").exists(), home)
             self.assertIn(
                 f'"remote_password": "pw-{home.name}"', (home / "config.json").read_text()
@@ -267,8 +269,8 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertEqual(
             sorted(self._marks("hooks")),
             sorted([
-                f"KISS_HOME={brandx} APP={brandx / 'kiss'}",
-                f"KISS_HOME={brandy} APP={brandy / 'kiss'}",
+                f"KISS_HOME={brandx} APP={brandx / 'brandx'}",
+                f"KISS_HOME={brandy} APP={brandy / 'brandy'}",
             ]),
         )
         # The service runs from ~/.brandx: that app is restarted, with its
@@ -278,7 +280,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         )
         self.assertEqual(
             self._daemon_starts(),
-            [f"KISS_HOME={brandx} APP={brandx / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
+            [f"KISS_HOME={brandx} APP={brandx / 'brandx' / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertIn("https://brandx.trycloudflare.com", out)
         self.assertIn("*  Remote access password:  pw-.brandx", out)
@@ -336,7 +338,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertIn(f"{NESTED_PASS}~/.plain...", out)
         self.assertEqual(
             self._daemon_starts(),
-            [f"KISS_HOME={plain} APP={plain / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
+            [f"KISS_HOME={plain} APP={plain / 'plain' / '.venv' / 'bin' / 'kiss-web'}"],
         )
 
     def test_brand_home_the_service_does_not_name_becomes_the_daemon(self) -> None:
@@ -361,9 +363,9 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         self.assertNotIn("The kiss-web service runs from brand home", out)
         self.assertEqual(
             self._daemon_starts(),
-            [f"KISS_HOME={brandx} APP={brandx / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
+            [f"KISS_HOME={brandx} APP={brandx / 'brandx' / '.venv' / 'bin' / 'kiss-web'}"],
         )
-        self.assertTrue((brandy / "kiss" / "src" / "kiss" / "__init__.pyc").exists())
+        self.assertTrue((brandy / "brandy" / "src" / "kiss" / "__init__.pyc").exists())
         self.assertTrue((self.home / ".kiss" / "kiss" / "src" / "kiss" / "__init__.pyc").exists())
         self.assertIn("https://brandx.trycloudflare.com", out)
         self.assertIn("*  Remote access password:  pw-.brandx", out)
@@ -383,11 +385,11 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         out = self._run({"KISS_HOME": str(custom)})
         self.assertEqual(out.count(NESTED_PASS), 1, out)
         self.assertIn(f"{NESTED_PASS}~/.brandx...", out)
-        self.assertTrue((brandx / "kiss" / "src" / "kiss" / "__init__.pyc").exists())
+        self.assertTrue((brandx / "brandx" / "src" / "kiss" / "__init__.pyc").exists())
         self.assertNotIn("is installed and branded", out)
         self.assertEqual(
             self._daemon_starts(),
-            [f"KISS_HOME={custom} APP={custom / 'kiss' / '.venv' / 'bin' / 'kiss-web'}"],
+            [f"KISS_HOME={custom} APP={custom / 'custom' / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertIn("https://custom.trycloudflare.com", out)
         self.assertIn("*  Remote access password:  pw-.custom", out)
@@ -396,7 +398,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         brandx = self._brand_home("brandx")
         # The nested pass fails at its app-files step: the brand home's
         # app directory is a file, so the copy into it cannot succeed.
-        (brandx / "kiss").write_text("not a directory\n")
+        (brandx / "brandx").write_text("not a directory\n")
         out = self._run({"KISS_SKIP_LAUNCH": "1"})
         self.assertIn(f"{NESTED_PASS}~/.brandx...", out)
         self.assertIn(f"WARNING: the install into brand home {brandx} failed (status ", out)
@@ -430,7 +432,7 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         })
         self.assertNotIn(NESTED_PASS, out)
         self.assertNotIn("brandy", out)
-        self.assertEqual(self._marks("hooks"), [f"KISS_HOME={brandx} APP={brandx / 'kiss'}"])
+        self.assertEqual(self._marks("hooks"), [f"KISS_HOME={brandx} APP={brandx / 'brandx'}"])
         self.assertIn(
             f"Set a new remote-access password for {brandx} (shown in its Settings).", out
         )

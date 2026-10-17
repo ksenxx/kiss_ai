@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import stat
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,11 +31,15 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     fake_composio,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    recording_server,
+)
 from kiss.tests.conftest import IS_WINDOWS
 
 
-class _ChatHandler(BaseHTTPRequestHandler):
+class _ChatHandler(RecordingHandler):
     """Serves spaces.list for the Composio-injected token, else 401."""
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
@@ -45,19 +48,12 @@ class _ChatHandler(BaseHTTPRequestHandler):
             {"path": self.path, "authorization": self.headers.get("Authorization")}
         )
         ok = self.headers.get("Authorization") == f"Bearer {TOKEN}"
-        body = json.dumps(
+        self._json(
+            200 if ok else 401,
             {"spaces": [{"name": "spaces/A", "displayName": "Team", "type": "ROOM"}]}
             if ok
-            else {"error": {"code": 401, "message": "Invalid Credentials"}}
-        ).encode()
-        self.send_response(200 if ok else 401)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
-        """Silence request logging."""
+            else {"error": {"code": 401, "message": "Invalid Credentials"}},
+        )
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")

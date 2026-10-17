@@ -33,6 +33,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     _process_running,
     setup_muse_env,
     teardown_muse_env,
+    wait_until,
 )
 
 
@@ -48,10 +49,7 @@ def test_daemon_exits_when_its_home_is_deleted(
 
         shutil.rmtree(isolated_kiss_home)
 
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and _process_running(pid):
-            time.sleep(0.05)
-        assert not _process_running(pid), (
+        assert wait_until(lambda: not _process_running(pid), timeout=10.0), (
             "the daemon kept running after its KISS_HOME was deleted"
         )
         assert not socket_path().exists(), "the daemon left its socket behind"

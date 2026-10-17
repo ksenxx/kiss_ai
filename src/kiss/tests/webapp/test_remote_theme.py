@@ -201,7 +201,11 @@ def test_remote_page_inlines_vscode_fonts_and_both_palettes() -> None:
     light_pos = page.index("body.remote-chat.light-theme {")
     assert root_pos < light_pos, "the light block must follow :root to win"
     assert page.count("--theme-editor-background: #1f1f1f;") == 1
-    assert page.count("--theme-editor-background: #ffffff;") == 1
+    # Light Modern and the light high-contrast palette both paint a
+    # white editor; each block is inlined once.
+    assert page.count("--theme-editor-background: #ffffff;") == 2
+    assert page.count("body.remote-chat.light-theme {") == 1
+    assert page.count("body.remote-chat.light-theme.high-contrast {") == 1
     assert "highlight-github" not in page
     # Light is the default theme, so the page ships light-themed markup
     # and main.js only has to swap in the dark sheet for dark-savers.

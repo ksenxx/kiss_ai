@@ -18,59 +18,9 @@
 // src/kiss/tests/server/test_save_config_remote_password.py.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const {JSDOM} = require('jsdom');
+const {makePreloadedPage, send} = require('./simplify2_harness');
 
 const TAB_ID = 'tab-remote-password-edit-test';
-
-function makeDomPage() {
-  const mediaDir = path.join(__dirname, '..', 'media');
-  let html = fs.readFileSync(path.join(mediaDir, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let state = {
-    tabs: [{title: 'new chat', chatId: TAB_ID, backendChatId: '', parentTabId: ''}],
-    activeTabIndex: 0,
-    chatId: TAB_ID,
-  };
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  for (const name of ['panelCopy.js', 'api.js', 'main.js']) {
-    vm.runInContext(
-      fs.readFileSync(path.join(mediaDir, name), 'utf8'),
-      dom.getInternalVMContext(),
-    );
-  }
-  send(win, {
-    type: 'tabs_state',
-    tabs: [{tabId: TAB_ID, chatId: '', title: 'new chat', workDir: ''}],
-  });
-  return {win, posted, close: () => win.close()};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
 
 function click(el) {
   el.dispatchEvent(
@@ -112,7 +62,7 @@ function lastSave(wv) {
 }
 
 function testBoxIsPlainAndEditable() {
-  const wv = makeDomPage();
+  const wv = makePreloadedPage(TAB_ID);
   openSettings(wv, 'Old-Password-1');
   const box = byId(wv.win, 'cfg-remote-password');
   assert.strictEqual(box.type, 'text', 'the password is shown in plain text');
@@ -141,7 +91,7 @@ function testBoxIsPlainAndEditable() {
 }
 
 function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
-  const wv = makeDomPage();
+  const wv = makePreloadedPage(TAB_ID);
   openSettings(wv, 'Old-Password-1');
   typeInto(wv.win, 'cfg-remote-password', '  New-Password-2  ');
   // The daemon re-pushes configData (another window saved something):
@@ -183,7 +133,7 @@ function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
 }
 
 function testClearingTheBoxSavesAnEmptyPassword() {
-  const wv = makeDomPage();
+  const wv = makePreloadedPage(TAB_ID);
   openSettings(wv, 'Old-Password-1');
   typeInto(wv.win, 'cfg-remote-password', '');
   closeSettings(wv);

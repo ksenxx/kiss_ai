@@ -371,6 +371,7 @@ module.exports = {
   rightClick,
   key,
   byId,
+  showSection,
   ofType,
   all,
   toast,

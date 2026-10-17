@@ -6,10 +6,12 @@
 
 Runs ``scripts/test_release_exclude.sh``, which builds a throwaway git
 repository with a real bare "public" remote, sources the functions of
-``scripts/release.sh``, and verifies that the history pushed to the public
-repo drops every path in ``scripts/exclude.json`` from every commit, that
-``release_needed`` publishes exactly when the public tip is not the filtered
-head, and that the leased push replaces older release shapes.
+``scripts/release.sh``, and verifies that public main consists of one
+"Release X" commit per release and nothing else (no development commits),
+that every path in ``scripts/exclude.json`` stays out of every public commit,
+that ``release_needed`` publishes exactly when the public tip is not that
+release chain holding origin's current tree, and that a public repo of
+another shape is converted by one leased atomic push that re-points its tags.
 """
 
 import subprocess

@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const {JSDOM} = require('jsdom');
+const {waitFor} = require('./simplify2_harness');
 
 function makeDomPage() {
   const mediaDir = path.join(__dirname, '..', 'media');
@@ -91,15 +92,6 @@ function latestTimer(wv, delay) {
     if (!timeout.cleared && timeout.delay === delay) return timeout;
   }
   return null;
-}
-
-async function waitFor(predicate, message) {
-  for (let i = 0; i < 100; i++) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise(r => setTimeout(r, 20));
-  }
-  throw new Error(message || 'waitFor timed out');
 }
 
 async function testStickyStateRefreshesAfterReusingNotificationId() {

@@ -18,19 +18,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness.js');
-const {paste} = require('./attachment_helpers');
-
-function typeAndEnter(win, text) {
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
-}
-
-function settle() {
-  return new Promise(resolve => setTimeout(resolve, 50));
-}
+const {paste, typeAndEnter, settle} = require('./attachment_helpers');
 
 async function main() {
   const {win, posted} = makePage();

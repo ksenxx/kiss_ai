@@ -658,7 +658,7 @@ function testRemoteControlOrderAndThemeAccessibility() {
   const role = assertFocusable(themeBtn, 'the theme toggle');
   assert.strictEqual(role, 'button', 'theme toggle must be a button');
   assert.ok(
-    (themeBtn.getAttribute('aria-label') || '').indexOf('Switch to') === 0,
+    /^(Dark|Light) mode$/.test(themeBtn.getAttribute('aria-label') || ''),
     'theme toggle must be named for screen readers',
   );
 

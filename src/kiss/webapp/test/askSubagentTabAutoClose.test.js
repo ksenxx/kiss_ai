@@ -28,6 +28,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {subagentTabEls} = require('./subagent_tab_helpers');
 
 const {send} = harness;
 
@@ -36,12 +37,6 @@ function makePage() {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
   return {win, posted, parentId: ready.tabId};
-}
-
-function subagentTabEls(win) {
-  return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
-  );
 }
 
 function askAnswerPanels(win) {

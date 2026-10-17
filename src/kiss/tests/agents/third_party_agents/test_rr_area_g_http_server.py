@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import socket
 import urllib.request
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
@@ -27,23 +26,17 @@ from kiss.agents.third_party_agents._backend_utils import (
     start_http_server,
     stop_http_server,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler
 
 logger = logging.getLogger(__name__)
 
 
-class _PingHandler(BaseHTTPRequestHandler):
+class _PingHandler(RecordingHandler):
     """Minimal handler answering every GET with 200 'pong'."""
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         """Answer 200 with a fixed body."""
-        body = b"pong"
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - http.server API
-        """Silence request logging."""
+        self._reply(200, "pong", "text/plain")
 
 
 def _blocked_port() -> tuple[socket.socket, int]:

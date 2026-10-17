@@ -36,6 +36,7 @@ from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
 
 
@@ -97,12 +98,7 @@ class _FakeIRCServer:
         self._conn.sendall(line.encode("utf-8") + b"\r\n")
 
     def wait_received(self, needle: str, timeout: float = 5.0) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if any(needle in line for line in self.received):
-                return True
-            time.sleep(0.05)
-        return False
+        return wait_until(lambda: any(needle in line for line in self.received), timeout)
 
     def close(self) -> None:
         with self._lock:
@@ -260,12 +256,8 @@ class _JSONResponder(RecordingHandler):
     body: bytes = b"{}"
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(type(self).body)
+        self._read_body()
+        self._reply(200, type(self).body.decode())
 
 
 class TestZaloBugs:
