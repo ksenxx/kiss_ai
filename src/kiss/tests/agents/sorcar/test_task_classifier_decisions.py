@@ -48,7 +48,6 @@ from kiss.agents.sorcar.task_classifier import (
     CLASSIFIER_DECISIONS_MIN_PROBABILITY,
     CLASSIFIER_DECISIONS_TIMEOUT_SECONDS,
     CLASSIFIER_TASK_MAX_CHARS,
-    ClassifierRun,
     TaskClassification,
     _decisions_model_config,
     cached_classification,
@@ -257,8 +256,8 @@ def test_memo_is_bound_to_the_decisions_endpoint(
     assert _cached_decision(task) is None
 
 
-def test_run_to_completion_models_are_classified_by_decisions(env: IsolatedKissHome) -> None:
-    """``cc/*`` and ``codex/*`` runs, skipped by the LLM classifier, get a Jev verdict."""
+def test_cli_models_are_classified_by_decisions(env: IsolatedKissHome) -> None:
+    """``cc/*`` and ``codex/*`` runs get a Jev verdict like any other model."""
     task = "kind:git_only push the branch"
     outcome = classify_task(task=task, model_name="cc/claude-fable-5")
     assert outcome.classification == TaskClassification(is_simple=True)
@@ -400,13 +399,6 @@ def test_both_classifiers_failing_yields_no_verdict(env: IsolatedKissHome) -> No
     assert outcome.classification is None
     assert outcome.steps == 2  # structured attempt + plain retry
     assert outcome.tokens_used == 104
-
-
-def test_run_to_completion_model_falls_back_to_skip(env: IsolatedKissHome) -> None:
-    """When Jev fails for a ``cc/*`` run, the LLM route's skip applies: no verdict, no call."""
-    outcome = classify_task(task="http-400 x", model_name="cc/claude-fable-5")
-    assert outcome == ClassifierRun(classification=None, budget_used=0.0, tokens_used=0, steps=0)
-    assert len(_JevHandler.requests) == 1
 
 
 # ---------------------------------------------------------------------------

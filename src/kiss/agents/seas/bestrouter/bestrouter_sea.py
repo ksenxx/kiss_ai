@@ -59,7 +59,31 @@ Working rules:
 - When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
   otherwise the 10th, 20th, ... call is refused.
 """
-"""The routing protocol added to the system prompt of every run."""
+"""The routing protocol added to the system prompt of every run.
+
+A module-level f-string so ``/rsi7d`` can tune it; routers derived from
+this one (``orbestrouter``) take it through :func:`routing_prompt`.
+"""
+
+
+def routing_prompt(router: str, primary: str, review: str) -> str:
+    """Return :data:`SYSTEM_PROMPT` for a derived router with its own worker and reviewer.
+
+    The heading names *router* and every mention of :data:`PRIMARY_MODEL`
+    and :data:`REVIEW_MODEL` becomes *primary* and *review*; the rules are
+    shared word for word.
+
+    Args:
+        router: The SEA's command name, shown in the heading
+            ``## Model routing protocol (<router>)``.
+        primary: Catalog name of the model that does every task.
+        review: Catalog name of the model that reviews the primary model's work.
+    """
+    return (
+        SYSTEM_PROMPT.replace("(bestrouter)", f"({router})", 1)
+        .replace(PRIMARY_MODEL, primary)
+        .replace(REVIEW_MODEL, review)
+    )
 
 
 class BestrouterSea(BaseSea):

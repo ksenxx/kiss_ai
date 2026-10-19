@@ -66,7 +66,7 @@ import yaml
 
 from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.daemon_client import TaskResult
-from kiss.agents.sorcar.fanout_guard import parse_tasks_json
+from kiss.agents.sorcar.fanout_guard import is_review_task, parse_tasks_json
 from kiss.agents.sorcar.machines import find_machine, is_local_machine, load_machines
 from kiss.agents.sorcar.run_config import (
     PROVENANCE_EXPLICIT,
@@ -374,10 +374,16 @@ def options_keyword_hint(unknown: dict[str, Any]) -> str:
         elif key in REMOVED_SETTINGS:
             lines.append(f"{key} was removed: {REMOVED_SETTINGS[key]}.")
         else:
-            close = difflib.get_close_matches(key, list(OPTION_TYPES), n=1, cutoff=0.7)
-            hint = f" Did you mean the option {close[0]!r}?" if close else ""
+            close = _closest_option(key)
+            hint = f" Did you mean the option {close!r}?" if close else ""
             lines.append(f"{key} is neither an argument nor an options key.{hint}")
     return "\n".join(lines)
+
+
+def _closest_option(key: str) -> str:
+    """Return the options key spelled closest to the unknown *key*, or ``""``."""
+    close = difflib.get_close_matches(key, list(OPTION_TYPES), n=1, cutoff=0.7)
+    return close[0] if close else ""
 
 
 def _parse_option(key: str, value: Any) -> Any:
@@ -402,8 +408,8 @@ def _parse_option(key: str, value: Any) -> Any:
             )
         if key in REMOVED_SETTINGS:
             raise ValueError(f"options key {key!r} was removed: {REMOVED_SETTINGS[key]}.")
-        close = difflib.get_close_matches(key, list(OPTION_TYPES), n=1, cutoff=0.7)
-        hint = f" Did you mean {close[0]!r}?" if close else ""
+        close = _closest_option(key)
+        hint = f" Did you mean {close!r}?" if close else ""
         raise ValueError(
             f"options has an unknown key {key!r}; known keys: {', '.join(OPTION_TYPES)}.{hint}"
         )
@@ -1109,7 +1115,6 @@ def dispatch_command(
     # Any child a reviewer dispatches carries the reviewer marker (see
     # kiss.agents.sorcar.fanout_guard) so it gets the same read-only
     # tool profile.
-    from kiss.agents.sorcar.fanout_guard import is_review_task
     from kiss.agents.sorcar.sorcar_agent import _persisted_task_id, subagent_parent_tab_id_of
 
     _is_rev = getattr(parent_agent, "_is_reviewer_subagent", None)
@@ -1158,6 +1163,9 @@ def dispatch_command(
         "parent_task_id": parent_task_id,
         "parent_tab_id": parent_tab_id,
         "parent_reviewer": parent_reviewer or is_review_task(prompt),
+        # A cron run's sub-tasks are cron rows too (an in-chat job's
+        # children carry no unattended text, so the flag travels).
+        "cron_job": cron_agent.is_cron_run(parent_agent),
         "model": model_name,
         "chat_id": options.chat_id,
         "system_prompt": options.system_prompt,

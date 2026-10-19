@@ -37,21 +37,12 @@ MODEL = "gpt-5.6-luna"
 
 def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
     """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
-    import docker
-
     from kiss.agents.seas.coding import coding_sea
 
     # The hook ends the trial when its container is gone, so the test needs a
     # live one; without a Docker daemon the liveness check is skipped.
-    container_name = "c"
-    live = None
-    try:
-        client = docker.from_env()
-        client.ping()
-        live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
-        container_name = live.id
-    except Exception:
-        pass
+    live = _live_container("python:3.11-slim", "true")
+    container_name = "c" if live is None else live.id
     try:
         config = tmp_path / "config.json"
         config.write_text(
@@ -194,27 +185,21 @@ def test_changed_definitions_and_test_paths() -> None:
 
 def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
     """Editing an existing source file appends the tests that mention the changed definitions."""
-    import docker
-
     from kiss.agents.seas.coding import coding_sea
 
-    try:
-        client = docker.from_env()
-        client.ping()
-    except Exception:
+    setup = (
+        "mkdir -p /repo/pkg /repo/tests && cd /repo && "
+        "printf 'class Field:\\n    def check(self):\\n        return 1\\n' > pkg/fields.py && "
+        "printf 'from pkg.fields import Field\\n\\ndef test_check():\\n"
+        "    assert Field().check() == 1\\n' > tests/test_fields.py && "
+        "printf 'def test_other():\\n    Field\\n    Field\\n    Field\\n' "
+        "> tests/test_other.py && "
+        "printf 'x = 1\\n' > tests/test_unrelated.py && printf 'Field\\n' > pkg/notes.txt"
+    )
+    live = _live_container("python:3.11-slim", setup)
+    if live is None:
         pytest.skip("Docker is not available")
-    live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
     try:
-        setup = (
-            "mkdir -p /repo/pkg /repo/tests && cd /repo && "
-            "printf 'class Field:\\n    def check(self):\\n        return 1\\n' > pkg/fields.py && "
-            "printf 'from pkg.fields import Field\\n\\ndef test_check():\\n"
-            "    assert Field().check() == 1\\n' > tests/test_fields.py && "
-            "printf 'def test_other():\\n    Field\\n    Field\\n    Field\\n' "
-            "> tests/test_other.py && "
-            "printf 'x = 1\\n' > tests/test_unrelated.py && printf 'Field\\n' > pkg/notes.txt"
-        )
-        assert live.exec_run(["sh", "-c", setup]).exit_code == 0
         config = tmp_path / "config.json"
         config.write_text(
             json.dumps(
@@ -464,14 +449,22 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert run.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
 
 
-def _live_container(image: str, setup: str) -> Any:
-    """A running container of *image* after *setup* ran in it, or ``None`` without Docker."""
+def _docker_client() -> Any:
+    """A Docker client that answered a ping, or ``None`` when no daemon is reachable."""
     import docker
 
     try:
         client = docker.from_env()
         client.ping()
     except Exception:
+        return None
+    return client
+
+
+def _live_container(image: str, setup: str) -> Any:
+    """A running container of *image* after *setup* ran in it, or ``None`` without Docker."""
+    client = _docker_client()
+    if client is None:
         return None
     live = client.containers.run(image, "sleep infinity", detach=True)
     try:
@@ -640,18 +633,12 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
 
 def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
     """A dead container or the root workdir disables the notes without disturbing the run."""
-    import docker
-
     from kiss.agents.seas.coding import coding_sea
 
     # Only a reachable daemon can report the container as gone; when the
     # daemon itself is down the liveness check treats that as a transient
     # hiccup and lets the trial go on (see ``ContainerHarness.container_alive``).
-    try:
-        docker.from_env().ping()
-        daemon_up = True
-    except Exception:
-        daemon_up = False
+    daemon_up = _docker_client() is not None
     for workdir in ("/app", "/"):
         config = tmp_path / f"config-{len(workdir)}.json"
         config.write_text(json.dumps({

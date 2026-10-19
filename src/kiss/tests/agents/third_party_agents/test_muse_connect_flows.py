@@ -58,10 +58,10 @@ from kiss.agents.third_party_agents.signal.signal_sea import _config as sg_confi
 from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
 from kiss.agents.third_party_agents.twitch.twitch_sea import _config as tw_config
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.conftest import FAKE_SIGNAL_LINK_CLI
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
-    teardown_muse_env,
+    loopback_policy,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -127,10 +127,6 @@ class _AuthServer(RecordingServer):
         self._counters: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def base(self) -> str:
-        """Return the emulator's base URL."""
-        return f"http://127.0.0.1:{self.server_port}"
-
     def next_id(self, prefix: str) -> str:
         """Return a fresh unique identifier."""
         with self._lock:
@@ -171,7 +167,7 @@ class _AuthHandler(RecordingHandler):
 
     server: Any
 
-    def _json(self, status: int, body: Any) -> None:
+    def _json(self, status: int, body: Any, content_type: str = "application/json") -> None:
         if urlsplit(
             self.path
         ).path == "/login/oauth/access_token" and "application/json" not in self.headers.get(
@@ -181,11 +177,10 @@ class _AuthHandler(RecordingHandler):
             form = urlencode({k: str(v) for k, v in body.items()})
             self._reply(status, form, "application/x-www-form-urlencoded")
         else:
-            super()._json(status, body)
+            super()._json(status, body, content_type)
 
     def _form(self) -> dict[str, str]:
-        length = int(self.headers.get("Content-Length") or 0)
-        self._raw_body = self.rfile.read(length).decode() if length else ""
+        self._raw_body = self._read_raw().decode()
         return {k: v[0] for k, v in parse_qs(self._raw_body).items()}
 
     def _record(self, form: dict[str, str]) -> None:
@@ -251,7 +246,7 @@ class _AuthHandler(RecordingHandler):
         self._json(201, {"client_id": client_id, **metadata})
 
     def _matrix_metadata(self) -> dict[str, Any]:
-        base = self.server.base()
+        base = self.server.base_url
         return {
             "issuer": f"{base}/mas/",
             "authorization_endpoint": f"{base}/mas/authorize",
@@ -281,11 +276,7 @@ class _AuthHandler(RecordingHandler):
             return
         if self.server.plain_text_device:
             data = b"<html>maintenance</html>"
-            self.send_response(503)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self._reply(503, data, "text/html")
             return
         code = self.server.next_id("device")
         self.server.devices[code] = _DeviceState(dialect, form.get(scope_key, ""))
@@ -359,11 +350,7 @@ class _AuthHandler(RecordingHandler):
             self.server.refresh_hook()
         if self.server.refresh_error == "plain":
             data = b"Bad Request"
-            self.send_response(self.server.refresh_status)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self._reply(self.server.refresh_status, data, "text/plain")
             return
         if self.server.refresh_error:
             self._json(self.server.refresh_status, {"error": self.server.refresh_error})
@@ -442,10 +429,6 @@ class _NextcloudServer(RecordingServer):
         self.reported_server = ""
         self.revoked: list[str] = []
 
-    def base(self) -> str:
-        """Return the emulator's base URL."""
-        return f"http://127.0.0.1:{self.server_port}"
-
     def grant(self) -> None:
         """Simulate the user clicking "Grant access" on the only open flow."""
         token = next(t for t, done in self.flows.items() if not done)
@@ -460,8 +443,7 @@ class _NextcloudHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         """Serve ``/index.php/login/v2`` and ``/login/v2/poll``."""
         path = urlsplit(self.path).path
-        length = int(self.headers.get("Content-Length") or 0)
-        form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
+        form = {k: v[0] for k, v in parse_qs(self._read_raw().decode()).items()}
         self.server.requests.append({"path": path, "headers": dict(self.headers), "form": form})
         if path == "/index.php/login/v2":
             if self.server.disabled:
@@ -469,22 +451,18 @@ class _NextcloudHandler(RecordingHandler):
                 return
             if self.server.plain_text:
                 data = b"<html>login page</html>"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                self._reply(200, data, "text/html")
                 return
             token = f"poll-{len(self.server.flows) + 1}"
             self.server.flows[token] = False
-            endpoint_base = self.server.base()
+            endpoint_base = self.server.base_url
             if self.server.foreign_endpoint:
                 endpoint_base = "http://nextcloud.evil.example"
             self._json(
                 200,
                 {
                     "poll": {"token": token, "endpoint": f"{endpoint_base}/login/v2/poll"},
-                    "login": f"{self.server.base()}/login/v2/flow/{token}",
+                    "login": f"{self.server.base_url}/login/v2/flow/{token}",
                 },
             )
         elif path == "/login/v2/poll":
@@ -501,7 +479,7 @@ class _NextcloudHandler(RecordingHandler):
             self._json(
                 200,
                 {
-                    "server": self.server.reported_server or self.server.base(),
+                    "server": self.server.reported_server or self.server.base_url,
                     "loginName": self.server.login_name,
                     "appPassword": app_password,
                 },
@@ -560,28 +538,13 @@ def nextcloud_server() -> Any:
     yield from serve_recording(_NextcloudHandler, _NextcloudServer)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon.
-
-    GitHub, Twitch and MS Teams have fixed cloud API hosts, so their
-    loopback emulators are reached through ``extra_hosts``; Nextcloud is
-    origin-bound at enrollment and needs no policy entry.
-    """
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "github": {"extra_hosts": ["127.0.0.1"]},
-            "twitch": {"extra_hosts": ["127.0.0.1"]},
-            "msteams": {"extra_hosts": ["127.0.0.1"]},
-            # Clearing a login-flow connection revokes the app password
-            # with a DELETE (a write) through the boundary.
-            "nextcloud": {"write": "allow"},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# GitHub, Twitch and MS Teams have fixed cloud API hosts, so their
+# loopback emulators are reached through ``extra_hosts``; Nextcloud is
+# origin-bound at enrollment and needs no host entry, but clearing a
+# login-flow connection revokes the app password with a DELETE (a
+# write) through the boundary.
+MUSE_POLICY = loopback_policy("github", "twitch", "msteams")
+MUSE_POLICY["services"]["nextcloud"] = {"write": "allow"}
 
 
 @pytest.fixture(autouse=True)
@@ -613,10 +576,10 @@ def test_github_device_flow_enrolls_bearer_and_connects(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """GitHub: consent_required → user approves → token validated and vaulted."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
 
     # No client ID anywhere: the setup error, and no network call.
@@ -681,12 +644,12 @@ def test_github_expiring_token_is_refreshed_by_daemon(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An expiring grant becomes an oauth2_refresh_token entry the daemon renews."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "env-app")
     auth_server.expiring = True
     auth_server.expires_in = 30  # inside the 60 s skew: refresh on first use
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     started = json.loads(tools["authenticate_github"](scope="repo"))
     assert started["status"] == "consent_required"
@@ -696,7 +659,7 @@ def test_github_expiring_token_is_refreshed_by_daemon(
     assert done["ok"] is True and done["login"] == "octocat"
     entry = _vault_entry("github")["authorized_user_info"]
     assert entry["kind"] == "oauth2_refresh_token"
-    assert entry["token_url"] == f"{auth_server.base()}/login/oauth/access_token"
+    assert entry["token_url"] == f"{auth_server.base_url}/login/oauth/access_token"
     assert entry["client_id"] == "env-app"
     assert "token_scope" not in entry
     # The /user validation used the freshly issued token directly (no
@@ -731,7 +694,7 @@ def test_github_denied_and_rejected_client(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Denied consent and a refused client ID report errors and enroll nothing."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     tools = auth_tools(agent)
@@ -764,10 +727,10 @@ def test_github_api_rejecting_new_token_rolls_back(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A token the API refuses is cleared again instead of staying enrolled."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     tools["authenticate_github"]()
     session = ConsentSession._active["github"]
@@ -791,10 +754,10 @@ def test_github_device_flow_legacy_mode(
 ) -> None:
     """With Muse-auth off the device-flow token lands in config.json."""
     assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     unauth = tools["check_github_auth"]()
     assert "finish_github_auth" in unauth and "github.com/login/device" in unauth
@@ -818,11 +781,11 @@ def test_twitch_device_code_grant_and_refresh(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Twitch: pre-filled activate link, scopes repeated on poll, daemon refresh."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
     auth_server.expiring = True
     auth_server.expires_in = 30
     agent = TwitchAgent()
-    agent._backend._helix_base = f"{auth_server.base()}/helix"
+    agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
     empty = tools["authenticate_twitch"]("  ")
     assert empty.startswith("client_id cannot be empty.")
@@ -850,7 +813,7 @@ def test_twitch_device_code_grant_and_refresh(
     assert polls[0]["scopes"] == auth_server.requests[0]["form"]["scopes"]
     entry = _vault_entry("twitch")["authorized_user_info"]
     assert entry["kind"] == "oauth2_refresh_token"
-    assert entry["token_url"] == f"{auth_server.base()}/oauth2/token"
+    assert entry["token_url"] == f"{auth_server.base_url}/oauth2/token"
     # The pre-store probe used the fresh token directly; the first
     # boundary read forces a refresh (30 s lifetime).
     assert auth_server.refreshes == 0
@@ -870,10 +833,10 @@ def test_twitch_slow_down_and_token_path(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A slow_down answer backs off; the direct access-token path still works."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
     auth_server.slow_down_once = True
     agent = TwitchAgent()
-    agent._backend._helix_base = f"{auth_server.base()}/helix"
+    agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
     tools["authenticate_twitch"]("cid1", scopes="clips:edit")
     session = ConsentSession._active["twitch"]
@@ -903,10 +866,10 @@ def test_twitch_legacy_mode_device_flow(
     isolated_kiss_home: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off the device-code access token is stored in config.json."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
     auth_server.expiring = True
     agent = TwitchAgent()
-    agent._backend._helix_base = f"{auth_server.base()}/helix"
+    agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
     assert json.loads(tools["authenticate_twitch"]("cid1"))["status"] == "consent_required"
     auth_server.approve()
@@ -929,11 +892,11 @@ def test_msteams_device_code_delegated_token(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MS Teams: device code → refresh-token entry with scope, probed via Graph."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     auth_server.expiring = True
     agent = MSTeamsAgent()
-    agent._backend._graph_base = f"{auth_server.base()}/v1.0"
+    agent._backend._graph_base = f"{auth_server.base_url}/v1.0"
     tools = auth_tools(agent)
     unauth = tools["check_msteams_auth"]()
     assert "microsoft.com/devicelogin" in unauth and "finish_msteams_auth" in unauth
@@ -962,7 +925,7 @@ def test_msteams_device_code_delegated_token(
     assert json.loads(ms_config.path.read_text()) == {"tenant_id": _MS_TENANT, "bot_id": "B1"}
     entry = _vault_entry("msteams")["authorized_user_info"]
     assert entry["kind"] == "oauth2_refresh_token"
-    assert entry["token_url"] == f"{auth_server.base()}/{_MS_TENANT}/oauth2/v2.0/token"
+    assert entry["token_url"] == f"{auth_server.base_url}/{_MS_TENANT}/oauth2/v2.0/token"
     assert entry["client_id"] == "app-1"
     assert entry["token_scope"] == device["form"]["scope"]
     assert agent._backend._access_token.startswith("muse-sgt.msteams.")
@@ -990,10 +953,10 @@ def test_msteams_device_code_requires_refresh_token_and_muse(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without offline_access (no refresh token) the sign-in is rejected."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     agent = MSTeamsAgent()
-    agent._backend._graph_base = f"{auth_server.base()}/v1.0"
+    agent._backend._graph_base = f"{auth_server.base_url}/v1.0"
     tools = auth_tools(agent)
     # With no tenant the multi-tenant "organizations" authority is used.
     assert json.loads(tools["authenticate_msteams"]())["status"] == "consent_required"
@@ -1018,7 +981,7 @@ def test_msteams_legacy_mode_rejects_device_code(
     isolated_kiss_home: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Legacy mode has no vault to refresh in; the tool says so and does nothing."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     agent = MSTeamsAgent()
     tools = auth_tools(agent)
@@ -1041,11 +1004,11 @@ def test_nextcloud_login_flow_v2_enrolls_app_password(
     assert "authenticate_nextcloud(url=...)" in unauth and "finish_nextcloud_auth" in unauth
     assert tools["authenticate_nextcloud"]("  ") == "url cannot be empty."
     assert json.loads(tools["authenticate_nextcloud"]("https://bad..host"))["ok"] is False
-    assert "together" in tools["authenticate_nextcloud"](nextcloud_server.base(), "alice")
+    assert "together" in tools["authenticate_nextcloud"](nextcloud_server.base_url, "alice")
 
-    started = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base() + "/"))
+    started = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url + "/"))
     assert started["status"] == "consent_required"
-    assert started["verification_uri"] == f"{nextcloud_server.base()}/login/v2/flow/poll-1"
+    assert started["verification_uri"] == f"{nextcloud_server.base_url}/login/v2/flow/poll-1"
     assert started["user_code"] == ""
     assert "enter the code" not in started["instructions"]
     assert nextcloud_server.requests[0]["headers"]["User-Agent"] == PRODUCT_NAME
@@ -1065,7 +1028,7 @@ def test_nextcloud_login_flow_v2_enrolls_app_password(
     }
     assert entry["hosts"] == [f"127.0.0.1:{nextcloud_server.server_port}"]
     assert json.loads(nc_config.path.read_text()) == {
-        "url": nextcloud_server.base(),
+        "url": nextcloud_server.base_url,
         "username": "alice@example.com",
         "login_flow": "true",
     }
@@ -1094,14 +1057,14 @@ def test_nextcloud_login_flow_failure_paths(
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
     nextcloud_server.disabled = True
-    refused = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base()))
+    refused = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url))
     assert refused == {
         "ok": False,
-        "error": f"{nextcloud_server.base()} did not offer Nextcloud Login Flow v2 (HTTP 404)",
+        "error": f"{nextcloud_server.base_url} did not offer Nextcloud Login Flow v2 (HTTP 404)",
     }
     nextcloud_server.disabled = False
     nextcloud_server.foreign_endpoint = True
-    foreign = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base()))
+    foreign = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url))
     assert foreign["ok"] is False and "another origin" in foreign["error"]
     assert "nextcloud" not in ConsentSession._active
     assert json.loads(tools["finish_nextcloud_auth"]()) == {
@@ -1111,9 +1074,9 @@ def test_nextcloud_login_flow_failure_paths(
     }
     # Starting a new flow cancels the previous pending one.
     nextcloud_server.foreign_endpoint = False
-    tools["authenticate_nextcloud"](nextcloud_server.base())
+    tools["authenticate_nextcloud"](nextcloud_server.base_url)
     first = ConsentSession._active["nextcloud"]
-    tools["authenticate_nextcloud"](nextcloud_server.base())
+    tools["authenticate_nextcloud"](nextcloud_server.base_url)
     second = ConsentSession._active["nextcloud"]
     assert first is not second and first._cancelled is True
     first._thread.join(timeout=3.0)
@@ -1121,10 +1084,10 @@ def test_nextcloud_login_flow_failure_paths(
     # Direct credentials still work (and reject a wrong app password).
     nextcloud_server.app_passwords["manual-pw"] = "bob"
     direct = json.loads(
-        tools["authenticate_nextcloud"](nextcloud_server.base(), "bob", "manual-pw")
+        tools["authenticate_nextcloud"](nextcloud_server.base_url, "bob", "manual-pw")
     )
     assert direct["ok"] is True
-    bad = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base(), "bob", "wrong"))
+    bad = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url, "bob", "wrong"))
     assert bad == {"ok": False, "error": "Authentication failed: HTTP 401, OCS statuscode 997"}
     # The rejected attempt left bob's working credential in place.
     assert vault_has_credentials("nextcloud")
@@ -1140,14 +1103,14 @@ def test_nextcloud_login_flow_legacy_mode(
     """With Muse-auth off the app password is written to config.json."""
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_nextcloud"](nextcloud_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url))["status"] == (
         "consent_required"
     )
     nextcloud_server.grant()
     done = _finish(tools["finish_nextcloud_auth"])
     assert done == {"ok": True, "message": "Nextcloud credentials saved."}
     assert json.loads(nc_config.path.read_text()) == {
-        "url": nextcloud_server.base(),
+        "url": nextcloud_server.base_url,
         "username": "alice@example.com",
         "password": "app-password-poll-1",
         "login_flow": "true",
@@ -1155,7 +1118,7 @@ def test_nextcloud_login_flow_legacy_mode(
     assert json.loads(tools["check_nextcloud_auth"]()) == {"ok": True, "room_count": 1}
     # A rejected app password (legacy) reports the failure and leaves
     # the working credential in place.
-    bad = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base(), "bob", "nope"))
+    bad = json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url, "bob", "nope"))
     assert bad == {"ok": False, "error": "Authentication failed: HTTP 401, OCS statuscode 997"}
     assert agent._is_authenticated() is True
     assert agent._backend._auth == ("alice@example.com", "app-password-poll-1")
@@ -1176,7 +1139,7 @@ def test_daemon_validates_refresh_token_entries(muse_env: Path, auth_server: _Au
     """The daemon refuses malformed or unpinned oauth2_refresh_token payloads."""
     good = {
         "kind": "oauth2_refresh_token",
-        "token_url": f"{auth_server.base()}/login/oauth/access_token",
+        "token_url": f"{auth_server.base_url}/login/oauth/access_token",
         "client_id": "app",
         "access_token": "a",
         "refresh_token": "r",
@@ -1209,7 +1172,7 @@ def test_daemon_validates_refresh_token_entries(muse_env: Path, auth_server: _Au
     handle = mint_surrogate("github")
     assert handle is not None
     resp = MuseBoundarySession("github").get(
-        f"{auth_server.base()}/user", headers={"Authorization": f"Bearer {handle.token}"}
+        f"{auth_server.base_url}/user", headers={"Authorization": f"Bearer {handle.token}"}
     )
     assert resp.status_code == 200 and auth_server.refreshes == 1
 
@@ -1220,8 +1183,8 @@ def test_daemon_validates_refresh_token_entries(muse_env: Path, auth_server: _Au
 def test_device_session_expiry_and_bounds(auth_server: _AuthServer) -> None:
     """A never-approved flow expires; announced lifetimes are clamped."""
     provider = DeviceFlowProvider(
-        device_url=f"{auth_server.base()}/login/device/code",
-        token_url=f"{auth_server.base()}/login/oauth/access_token",
+        device_url=f"{auth_server.base_url}/login/device/code",
+        token_url=f"{auth_server.base_url}/login/oauth/access_token",
     )
     session = DeviceFlowSession("github", provider, "app", "repo")
     # Shorten the deadline so the expiry branch runs quickly.
@@ -1311,13 +1274,13 @@ def test_daemon_refresh_edge_cases(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Tampered expiry strings, odd expires_in and non-rotating providers."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     auth_server.expiring = True
     auth_server.rotate = False
     auth_server.bad_expires_in = True
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     tools["authenticate_github"]()
     auth_server.approve()
@@ -1344,8 +1307,8 @@ def test_daemon_refresh_edge_cases(
 def test_device_flow_complete_uri_and_non_json_answers(auth_server: _AuthServer) -> None:
     """verification_uri_complete pre-fills the code (still shown); non-JSON = refusal."""
     provider = DeviceFlowProvider(
-        device_url=f"{auth_server.base()}/login/device/code",
-        token_url=f"{auth_server.base()}/login/oauth/access_token",
+        device_url=f"{auth_server.base_url}/login/device/code",
+        token_url=f"{auth_server.base_url}/login/oauth/access_token",
     )
     auth_server.complete_uri = True
     session = DeviceFlowSession("github", provider, "app", "repo")
@@ -1363,10 +1326,10 @@ def test_nextcloud_non_json_and_poll_error(nextcloud_server: _NextcloudServer) -
     """A non-JSON login answer is refused; a failing poll ends the session."""
     nextcloud_server.plain_text = True
     with pytest.raises(RuntimeError, match=r"did not offer Nextcloud Login Flow v2 \(HTTP 200\)"):
-        NextcloudLoginSession("nextcloud", nextcloud_server.base())
+        NextcloudLoginSession("nextcloud", nextcloud_server.base_url)
     nextcloud_server.plain_text = False
     nextcloud_server.poll_error = True
-    session = NextcloudLoginSession("nextcloud", nextcloud_server.base())
+    session = NextcloudLoginSession("nextcloud", nextcloud_server.base_url)
     session.register()
     session._thread.join(timeout=10.0)
     assert ConsentSession.finish("nextcloud") == (
@@ -1379,13 +1342,13 @@ def test_failure_paths_after_approval(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refused clients, missing sessions, vault refusals and API rejections."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     twitch = TwitchAgent()
-    twitch._backend._helix_base = f"{auth_server.base()}/helix"
+    twitch._backend._helix_base = f"{auth_server.base_url}/helix"
     tw_tools = auth_tools(twitch)
     ms_tools = auth_tools(MSTeamsAgent())
     assert json.loads(tw_tools["authenticate_twitch"]("rejected-client")) == {
@@ -1414,7 +1377,7 @@ def test_failure_paths_after_approval(
     # GitHub: a malformed token value fails the probe → no enrollment.
     auth_server.bad_access_token = True
     github = GitHubAgent()
-    github._backend._base_url = auth_server.base()
+    github._backend._base_url = auth_server.base_url
     gh_tools = auth_tools(github)
     gh_tools["authenticate_github"]()
     auth_server.approve()
@@ -1430,9 +1393,9 @@ def test_twitch_legacy_failure_paths(
     isolated_kiss_home: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Legacy mode reports API rejections and unreachable servers."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
     agent = TwitchAgent()
-    agent._backend._helix_base = f"{auth_server.base()}/helix"
+    agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
     bad = json.loads(tools["authenticate_twitch"]("cid1", "", "unknown-token"))
     assert bad["ok"] is False and "InvalidAuthenticationToken" in bad["error"]
@@ -1534,10 +1497,10 @@ def test_github_sign_in_never_disturbs_the_working_credential(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Starting, failing or superseding a sign-in leaves the current token intact."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     tools["authenticate_github"](read_only=True)
     auth_server.approve()
@@ -1581,14 +1544,14 @@ def test_device_polling_ignores_ambient_proxy_settings(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A proxy in the environment never sees the device code or the token."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
     agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base()
+    agent._backend._base_url = auth_server.base_url
     tools = auth_tools(agent)
     assert json.loads(tools["authenticate_github"]())["status"] == ("consent_required")
     auth_server.approve()
@@ -1600,12 +1563,12 @@ def test_msteams_graph_permission_verdicts_and_superseding(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A 401 from Graph rejects the token; 403 proves it; a new sign-in supersedes."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     auth_server.expiring = True
     auth_server.graph_status = 401
     agent = MSTeamsAgent()
-    agent._backend._graph_base = f"{auth_server.base()}/v1.0"
+    agent._backend._graph_base = f"{auth_server.base_url}/v1.0"
     tools = auth_tools(agent)
     assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == ("consent_required")
     auth_server.approve()
@@ -1633,9 +1596,9 @@ def test_twitch_token_supersedes_pending_sign_in(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A hand-supplied Twitch token cancels the pending device-code session."""
-    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
     agent = TwitchAgent()
-    agent._backend._helix_base = f"{auth_server.base()}/helix"
+    agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
     assert json.loads(tools["authenticate_twitch"]("cid1"))["status"] == "consent_required"
     pending = ConsentSession._active["twitch"]
@@ -1669,16 +1632,16 @@ def test_nextcloud_uses_the_server_url_the_login_flow_reports(
     muse_env: Path, nextcloud_server: _NextcloudServer
 ) -> None:
     """The credential is bound to the canonical server URL from the poll answer."""
-    nextcloud_server.reported_server = f"{nextcloud_server.base()}/cloud/"
+    nextcloud_server.reported_server = f"{nextcloud_server.base_url}/cloud/"
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_nextcloud"](nextcloud_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_nextcloud"](nextcloud_server.base_url))["status"] == (
         "consent_required"
     )
     nextcloud_server.grant()
     assert _finish(tools["finish_nextcloud_auth"])["ok"] is True
-    assert json.loads(nc_config.path.read_text())["url"] == f"{nextcloud_server.base()}/cloud"
-    assert agent._backend._url == f"{nextcloud_server.base()}/cloud"
+    assert json.loads(nc_config.path.read_text())["url"] == f"{nextcloud_server.base_url}/cloud"
+    assert agent._backend._url == f"{nextcloud_server.base_url}/cloud"
     assert json.loads(tools["check_nextcloud_auth"]()) == {"ok": True, "room_count": 1}
     room_reads = [r["path"] for r in nextcloud_server.requests if r["path"].endswith("/room")]
     assert room_reads and all(p.startswith("/cloud/ocs/") for p in room_reads)
@@ -1719,7 +1682,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     assert tools["authenticate_matrix"]("  ") == "homeserver_url cannot be empty."
     assert json.loads(tools["authenticate_matrix"]("not a url"))["ok"] is False
 
-    started = json.loads(tools["authenticate_matrix"](auth_server.base() + "/"))
+    started = json.loads(tools["authenticate_matrix"](auth_server.base_url + "/"))
     assert started["status"] == "consent_required"
     assert started["verification_uri"] == "https://account.example/link"
     assert started["user_code"] == "CODE-1"
@@ -1748,15 +1711,15 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     cfg = json.loads(mx_config.path.read_text())
     assert cfg["access_token"] == "access-1" and cfg["refresh_token"] == "refresh-1"
     assert cfg["oauth_client_id"] == "mas-client-1"
-    assert cfg["token_url"] == f"{auth_server.base()}/mas/oauth2/token"
-    assert cfg["revocation_url"] == f"{auth_server.base()}/mas/oauth2/revoke"
+    assert cfg["token_url"] == f"{auth_server.base_url}/mas/oauth2/token"
+    assert cfg["revocation_url"] == f"{auth_server.base_url}/mas/oauth2/revoke"
     assert "oauth_issuer" not in cfg
     assert cfg["device_id"] == device_id and cfg["user_id"] == "@alice:example.org"
     assert 200 < float(cfg["expires_at"]) - time.time() <= 300
 
     # The backend renews the short-lived token by itself before it expires.
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base(), cfg["access_token"])
+    backend._client = _MatrixCredentials(auth_server.base_url, cfg["access_token"])
     backend.refresh_if_needed()
     assert backend._client.access_token == "access-1" and auth_server.refreshes == 0
     cfg["expires_at"] = str(time.time() + 30)  # inside the skew
@@ -1781,7 +1744,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     assert float(renewed["expires_at"]) > time.time() + 200
 
     # Matrix spec: every authorisation flow registers the client anew.
-    assert json.loads(tools["authenticate_matrix"](auth_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     assert len(auth_server.matrix_registrations) == 2
@@ -1799,16 +1762,16 @@ def test_matrix_refresh_failures_follow_the_spec(
     """5xx/network → keep the old token and retry later; 4xx → logged out."""
     mx_config.save(
         {
-            "homeserver_url": auth_server.base(),
+            "homeserver_url": auth_server.base_url,
             "access_token": "old",
             "refresh_token": "refresh-x",
             "expires_at": "0",
-            "token_url": f"{auth_server.base()}/mas/oauth2/token",
+            "token_url": f"{auth_server.base_url}/mas/oauth2/token",
             "oauth_client_id": "mas-client-9",
         }
     )
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base(), "old")
+    backend._client = _MatrixCredentials(auth_server.base_url, "old")
     # The emulator refuses unknown refresh tokens with 400 invalid_grant.
     auth_server.refresh_error = "server_error"
     auth_server.refresh_status = 503
@@ -1824,7 +1787,7 @@ def test_matrix_refresh_failures_follow_the_spec(
     cfg["token_url"] = "http://127.0.0.1:9/token"
     mx_config.save(cfg)
     assert backend2._run(_noop()) == "ran"  # unreachable: session kept
-    cfg["token_url"] = f"{auth_server.base()}/mas/oauth2/token"
+    cfg["token_url"] = f"{auth_server.base_url}/mas/oauth2/token"
     mx_config.save(cfg)
     # A 4xx without a JSON body is still a logout, not a transient failure.
     auth_server.refresh_error = "plain"
@@ -1835,7 +1798,7 @@ def test_matrix_refresh_failures_follow_the_spec(
     with pytest.raises(RuntimeError, match=r"logged out \(invalid_grant\)"):
         backend._run(_noop())
     # A legacy (hand-supplied) token never refreshes.
-    mx_config.save({"homeserver_url": auth_server.base(), "access_token": "legacy"})
+    mx_config.save({"homeserver_url": auth_server.base_url, "access_token": "legacy"})
     assert backend._run(_noop()) == "ran"
     assert auth_server.refreshes == 3
 
@@ -1849,32 +1812,32 @@ def test_matrix_refresh_never_resurrects_a_cleared_or_replaced_session(
     auth_server.refresh_hook = lambda: mx_config.clear()
     mx_config.save(
         {
-            "homeserver_url": auth_server.base(),
+            "homeserver_url": auth_server.base_url,
             "access_token": "old",
             "refresh_token": "refresh-old",
             "expires_at": "0",
-            "token_url": f"{auth_server.base()}/mas/oauth2/token",
+            "token_url": f"{auth_server.base_url}/mas/oauth2/token",
             "oauth_client_id": "mas-client-9",
-            "revocation_url": f"{auth_server.base()}/mas/oauth2/revoke",
+            "revocation_url": f"{auth_server.base_url}/mas/oauth2/revoke",
         }
     )
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base(), "old")
+    backend._client = _MatrixCredentials(auth_server.base_url, "old")
     backend.refresh_if_needed()
     assert not mx_config.path.exists()
     assert backend._client.access_token == "old"
     assert auth_server.revoked == ["access-1"]
     # Replaced by a direct re-authentication mid-refresh: the new config stays.
     auth_server.refresh_tokens["refresh-old2"] = "urn:matrix:client:api:*"
-    replacement = {"homeserver_url": auth_server.base(), "access_token": "hand-supplied"}
+    replacement = {"homeserver_url": auth_server.base_url, "access_token": "hand-supplied"}
     auth_server.refresh_hook = lambda: mx_config.save(replacement)
     mx_config.save(
         {
-            "homeserver_url": auth_server.base(),
+            "homeserver_url": auth_server.base_url,
             "access_token": "old2",
             "refresh_token": "refresh-old2",
             "expires_at": "0",
-            "token_url": f"{auth_server.base()}/mas/oauth2/token",
+            "token_url": f"{auth_server.base_url}/mas/oauth2/token",
             "oauth_client_id": "mas-client-9",
         }
     )
@@ -1890,7 +1853,7 @@ def test_matrix_without_oauth_api_and_failure_paths(
     agent = MatrixAgent()
     tools = auth_tools(agent)
     auth_server.matrix_oauth = False
-    result = json.loads(tools["authenticate_matrix"](auth_server.base()))
+    result = json.loads(tools["authenticate_matrix"](auth_server.base_url))
     assert result["ok"] is False and "does not offer the Matrix OAuth 2.0 API" in result["error"]
     assert "access_token=..." in result["error"]
     down = json.loads(tools["authenticate_matrix"]("http://127.0.0.1:9"))
@@ -1899,7 +1862,7 @@ def test_matrix_without_oauth_api_and_failure_paths(
     assert "no sign-in in progress" in json.loads(tools["finish_matrix_auth"]())["error"]
 
     # The homeserver rejects the freshly issued token → nothing stored.
-    assert json.loads(tools["authenticate_matrix"](auth_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     auth_server.approve()
@@ -1913,7 +1876,7 @@ def test_matrix_without_oauth_api_and_failure_paths(
     assert not mx_config.path.exists()
 
     # Denied consent.
-    assert json.loads(tools["authenticate_matrix"](auth_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     auth_server.deny()
@@ -1925,7 +1888,7 @@ def test_matrix_without_oauth_api_and_failure_paths(
     # An insecure (http) revocation endpoint never receives a token.
     auth_server.matrix_insecure_revocation = True
     auth_server.expiring = True
-    assert json.loads(tools["authenticate_matrix"](auth_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     auth_server.approve()
@@ -1937,11 +1900,11 @@ def test_matrix_without_oauth_api_and_failure_paths(
 
     # A hand-supplied token supersedes a pending sign-in (legacy path; nio
     # is not installed here, so the pre-existing ImportError surfaces).
-    assert json.loads(tools["authenticate_matrix"](auth_server.base()))["status"] == (
+    assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     pending = ConsentSession._active["matrix"]
-    legacy = json.loads(tools["authenticate_matrix"](auth_server.base(), "tok"))
+    legacy = json.loads(tools["authenticate_matrix"](auth_server.base_url, "tok"))
     assert legacy["ok"] is False and "nio" in legacy["error"]
     assert pending._cancelled is True and "matrix" not in ConsentSession._active
     assert tools["clear_matrix_auth"]() == "Matrix authentication cleared."
@@ -1949,58 +1912,12 @@ def test_matrix_without_oauth_api_and_failure_paths(
 
 # ------------------------------------------------------------------- Signal
 
-# A Python program (not a shell script) so the same stand-in runs on
-# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
-_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
-# Scripted stand-in for signal-cli: ``link`` prints the provisioning URI,
-# waits for the phone (a marker file), then announces the linked account.
-import os
-import sys
-import time
-
-state_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-args = sys.argv[1:]
-
-
-def marker(name):
-    return os.path.exists(os.path.join(state_dir, name))
-
-
-if args[:1] == ["link"]:
-    if args[1:2] != ["-n"]:
-        print("expected -n", file=sys.stderr)
-        sys.exit(2)
-    with open(os.path.join(state_dir, "device-name"), "w") as fh:
-        fh.write(args[2] + "\\n")
-    if marker("no-uri"):
-        print("Failed to link", file=sys.stderr)
-        sys.exit(3)
-    print("sgnl://linkdevice?uuid=abc-123&pub_key=BQ%2Fkey", flush=True)
-    if marker("noisy"):
-        sys.stderr.write("x" * 2097152)
-        sys.stderr.flush()
-    while not marker("scanned"):
-        if marker("fail"):
-            print("Link request timed out", file=sys.stderr)
-            sys.exit(1)
-        time.sleep(0.1)
-    if not marker("silent"):
-        print("Associated with: +15550001111")
-    sys.exit(0)
-if args[:1] == ["listAccounts"]:
-    if marker("silent"):
-        print("Number: +15550009999")
-    sys.exit(0)
-print("unknown command " + " ".join(args[:1]), file=sys.stderr)
-sys.exit(4)
-"""
-
 
 @pytest.fixture()
 def fake_signal_cli(tmp_path: Path) -> Path:
     """Install the scripted signal-cli stand-in and return its path."""
     binary = tmp_path / "signal-cli"
-    install_cli_script(binary, _FAKE_SIGNAL_CLI)
+    install_cli_script(binary, FAKE_SIGNAL_LINK_CLI)
     return binary
 
 

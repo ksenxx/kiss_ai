@@ -78,7 +78,7 @@ class TestGitCommitCommandCatalog(unittest.TestCase):
 
     def test_in_server_api_catalog(self) -> None:
         self.assertIn("autocommitAction", API)
-        self.assertEqual(API["autocommitAction"].handler, "forward")
+        self.assertEqual(API["autocommitAction"].handler, "autocommit_action")
         self.assertEqual(API["autocommitAction"].required, ())
 
     def test_in_backend_dispatcher(self) -> None:
@@ -214,6 +214,32 @@ class TestGitCommitCommandEndToEnd(unittest.TestCase):
         self._dispatch()
         done = self._wait_done()
         self.assertTrue(done[0]["committed"], done[0])
+
+    def test_duplicate_click_is_refused_on_its_own_connection(self) -> None:
+        """A click that lost to an in-flight commit hears so, on its connection alone."""
+        (self.repo / "f.txt").write_text("one\ntwo\n")
+        with self.server._state_lock:
+            self.server._autocommit_tabs.add(self.tab_id)
+        try:
+            self.server._handle_command({
+                "type": "autocommitAction", "tabId": self.tab_id,
+                "workDir": str(self.repo), "connId": "conn-dup",
+            })
+            time.sleep(0.3)
+        finally:
+            with self.server._state_lock:
+                self.server._autocommit_tabs.discard(self.tab_id)
+        self.assertEqual(
+            self.events,
+            [{
+                "type": "autocommit_done", "success": False, "committed": False,
+                "message": "A Git Commit of this tab is already running.", "manual": True,
+                "tabId": self.tab_id, "connId": "conn-dup",
+            }],
+            "the refusal goes to the clicking connection; no toast is broadcast",
+        )
+        status = _git(self.repo, "status", "--porcelain", "-uall")
+        self.assertNotEqual(status.strip(), "", "the refused duplicate committed nothing")
 
 
 if __name__ == "__main__":

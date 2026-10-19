@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalk
 from kiss.agents.third_party_agents.synology import synology_sea as syno_mod
 from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -57,8 +58,7 @@ class _Handler(RecordingHandler):
     def _handle(self) -> None:
         srv = cast(_ResponderServer, self.server)
         parsed = urlsplit(self.path)
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         srv.requests.append(
             {
                 "method": self.command,
@@ -69,24 +69,9 @@ class _Handler(RecordingHandler):
             }
         )
         status, payload = srv.responder(self.command, parsed.path, parse_qs(parsed.query), body)
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._json(status, payload)
 
-    def do_GET(self) -> None:  # noqa: N802
-        self._handle()
-
-    def do_POST(self) -> None:  # noqa: N802
-        self._handle()
-
-    def do_PUT(self) -> None:  # noqa: N802
-        self._handle()
-
-    def do_DELETE(self) -> None:  # noqa: N802
-        self._handle()
+    do_GET = do_POST = do_PUT = do_DELETE = _handle  # noqa: N815
 
 
 _BB_MSG_PENDING = {
@@ -268,8 +253,9 @@ class TestNextcloudTalk:
         """authenticate_nextcloud must persist the rstripped URL."""
         self._server.responder = _nc_responder(_NC_MESSAGES)
         agent = nc_mod.NextcloudTalkAgent()
-        auth_tools = {t.__name__: t for t in agent._get_auth_tools()}
-        result = json.loads(auth_tools["authenticate_nextcloud"](self._url + "/", "bot", "pw"))
+        result = json.loads(
+            auth_tools(agent)["authenticate_nextcloud"](self._url + "/", "bot", "pw")
+        )
         assert result["ok"] is True
         saved = json.loads(nc_mod._config.path.read_text())
         assert saved["url"] == self._url

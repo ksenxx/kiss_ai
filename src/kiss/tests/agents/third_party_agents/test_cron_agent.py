@@ -48,11 +48,15 @@ from kiss.tests.agents.sorcar.test_cron_agent import (  # noqa: F401
 
 
 def test_delivery_error_notes() -> None:
-    job = _create(cron_job(
-        "create", name="multi", command="echo payload",
-        schedule="every 1m",
-        deliver="local,nosuchchannel:1,homeassistant:x,telegram:123",
-    ))
+    job = _create(
+        cron_job(
+            "create",
+            name="multi",
+            command="echo payload",
+            schedule="every 1m",
+            deliver="local,nosuchchannel:1,homeassistant:x,telegram:123",
+        )
+    )
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
     notes = load_jobs()[0]["last_delivery"]
@@ -87,7 +91,9 @@ sys.exit(0)
 
 
 def test_gateway_command_tick_is_silent_when_idle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     """The command ``gateway_command`` builds is a real, silent channel tick.
 

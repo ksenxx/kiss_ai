@@ -42,7 +42,7 @@ plain-language prompts work everywhere**:
    (`@` mentions attach files; the model picker and budget field sit next to the
    input).  The same page is served over a cloudflared tunnel — copy the URL and
    password from the Settings panel and open it on any phone, tablet, or browser.
-2. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Hey Sorcar,
+2. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Abracadabra,
    tell the eng Slack channel that the deploy is done."* You can also steer a running
    task by voice; Sorcar replies aloud in the language you spoke.
 3. **Your existing messaging apps.** Once a channel gateway is running (see
@@ -530,7 +530,7 @@ directly:
 
 ## Example prompts
 
-Everything below is a prompt you can type — or speak, with the wake word "Hey Sorcar, …" —
+Everything below is a prompt you can type — or speak, with the wake word "Abracadabra, …" —
 into any Sorcar chat surface (web/mobile app, a channel gateway, an
 OpenAI-compatible client).
 

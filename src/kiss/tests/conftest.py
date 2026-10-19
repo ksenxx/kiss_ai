@@ -91,6 +91,7 @@ suppress_error_dialogs()
 # monkeypatch.setenv("KISS_MUSE_AUTH", "1").
 os.environ["KISS_MUSE_AUTH"] = "0"
 
+
 def _seed_voice_models(test_home: str, real_home: Path) -> None:
     """Link the developer's downloaded voice models into the test home.
 
@@ -181,8 +182,7 @@ Path(_test_kiss_home, "TIPS_DISABLED").write_text("test session opt-out\n")
 # for ``#cfg-update-btn.has-update`` keep their marker.  The snooze
 # tests point KISS_HOME at a home of their own.
 Path(_test_kiss_home, ".update-check.json").write_text(
-    f'{{"snoozeUntilMs": {int(time.time() + 10 * 365 * 24 * 3600) * 1000},'
-    ' "snoozedLatest": ""}\n'
+    f'{{"snoozeUntilMs": {int(time.time() + 10 * 365 * 24 * 3600) * 1000}, "snoozedLatest": ""}}\n'
 )
 _th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
@@ -237,6 +237,42 @@ def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+AMBIENT_AWS_ENV_VARS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_CREDENTIAL_EXPIRATION",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CREDENTIAL_FILE",
+)
+"""Environment variables through which boto3's default credential chain
+finds AWS credentials without a config file."""
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_aws_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hide the developer's ambient AWS credentials from every test.
+
+    ``bedrock_credentials_configured()`` consults boto3's default chain, so
+    a real ``~/.aws`` profile, an exported key pair or an IRSA token would
+    make Bedrock models "configured" in any test that expects no provider
+    at all (default-model selection, the ``No model`` picker state).  The
+    chain's environment variables are unset and its three file locations
+    are pointed at files that do not exist; a test that needs an ambient
+    source sets the variables it wants on top of this.
+    """
+    for name in AMBIENT_AWS_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-aws-credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-aws-config"))
+    monkeypatch.setenv("BOTO_CONFIG", str(tmp_path / "no-boto-config"))
 
 
 @pytest.fixture
@@ -507,12 +543,14 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
     # ``sitecustomize.py`` in the stdlib directory, which would shadow
     # the fake's if the stdlib were searched before it.
     (directory / "cloudflared._pth").write_text(
-        ".\n" + "".join(f"{d}\n" for d in stdlib_dirs) + "import site\n", encoding="utf-8",
+        ".\n" + "".join(f"{d}\n" for d in stdlib_dirs) + "import site\n",
+        encoding="utf-8",
     )
     body_path = directory / "fake_cloudflared_body.py"
     body_path.write_text(body, encoding="utf-8")
     (directory / "sitecustomize.py").write_text(
-        _FAKE_CLOUDFLARED_WRAPPER.format(body_path=str(body_path)), encoding="utf-8",
+        _FAKE_CLOUDFLARED_WRAPPER.format(body_path=str(body_path)),
+        encoding="utf-8",
     )
     return fake
 
@@ -626,9 +664,7 @@ def _navigate_retrying_network_change(page, navigate: Callable[[], object], labe
                 return
             network_changed = any("net::ERR_NETWORK_CHANGED" in f for f in failures)
             if not network_changed or attempt == 2:
-                raise AssertionError(
-                    f"{label} ended on {page.url}; failed requests: {failures}"
-                )
+                raise AssertionError(f"{label} ended on {page.url}; failed requests: {failures}")
             time.sleep(1.0)
     finally:
         page.remove_listener("requestfailed", note_failed_navigation)
@@ -718,13 +754,15 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     instance = getattr(item, "instance", None)
     if isinstance(instance, unittest.TestCase):
         instance.tearDown = functools.partial(  # type: ignore[method-assign]
-            _tear_down_after_orphan_sweeps, instance.tearDown,
+            _tear_down_after_orphan_sweeps,
+            instance.tearDown,
         )
     if isinstance(instance, unittest.IsolatedAsyncioTestCase):
         # functools.partial of a coroutine function still satisfies
         # the inspect.iscoroutinefunction assert in _callAsync.
         instance.asyncTearDown = functools.partial(  # type: ignore[method-assign]
-            _async_tear_down_after_orphan_sweeps, instance.asyncTearDown,
+            _async_tear_down_after_orphan_sweeps,
+            instance.asyncTearDown,
         )
     try:
         yield
@@ -843,6 +881,8 @@ requires_moonshot_api_key = pytest.mark.skipif(
     not has_moonshot_api_key(),
     reason="MOONSHOT_API_KEY environment variable not set",
 )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Point ``AgentServer``'s default ``work_dir`` away from this repo.
@@ -879,6 +919,40 @@ def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     monkeypatch.setenv("KISS_WORKDIR", default_dir)
     yield
     shutil.rmtree(default_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def claude_live_billing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make a live ``cc/`` test bill whatever this host can pay with.
+
+    The subscription switch defaults to on, so the real ``claude`` CLI is
+    run without ``ANTHROPIC_API_KEY`` and needs a ``claude login``.  On a
+    host without that login the test falls back to the API key by turning
+    the switch off for its duration, and skips when there is no key either
+    (the ``live_cli`` contract: never fail on the developer's credentials).
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+    from kiss.core.models.claude_code_model import claude_auth_status
+
+    if claude_auth_status()["loggedIn"]:
+        return
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        pytest.skip("claude is not logged in and ANTHROPIC_API_KEY is not set")
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_codex_home(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``CODEX_HOME`` at a directory that does not exist.
+
+    ``codex/`` turns read the ``codex`` CLI's ``auth.json`` (default
+    ``~/.codex``) to refuse a saved API-key login while the subscription
+    switch is on.  Tests with a fake ``codex`` must not see the
+    developer's own login; tests marked ``live_cli`` spawn the real CLI
+    and keep the real home.  A test of the login check sets its own.
+    """
+    if request.node.get_closest_marker("live_cli") is None:
+        monkeypatch.setenv("CODEX_HOME", os.path.join(_test_kiss_home, "no-codex-home"))
 
 
 def _drop_redundant_config_overrides() -> None:
@@ -950,11 +1024,7 @@ def _isolated_shared_config() -> Iterator[None]:
     _drop_redundant_config_overrides()
     override_names = ("CONFIG_DIR", "CONFIG_PATH")
     module_dict = vars(user_config)
-    saved_overrides = {
-        name: module_dict[name]
-        for name in override_names
-        if name in module_dict
-    }
+    saved_overrides = {name: module_dict[name] for name in override_names if name in module_dict}
     # api_keys.env is the canonical API-key store, written by
     # ``save_api_key`` and the legacy-RC key migration inside
     # ``load_api_keys``.  Like ``config.json`` it lives in the

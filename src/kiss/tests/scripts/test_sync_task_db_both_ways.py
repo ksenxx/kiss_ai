@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -31,6 +32,7 @@ import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar import cron_agent
 from kiss.tests.conftest import posix_only
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -627,24 +629,78 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertEqual(sorted(_tasks(kept[0])), ["R1"])
         self.assertFalse((self.remote_kiss / "history.db-wal").exists())
 
-    def test_a_remote_whose_rows_cannot_be_taken_is_left_alone(self) -> None:
-        """Refusing beats replacing: the rows are still only on the server.
-
-        A remote whose ``task_history`` has a column this machine's does
-        not can be neither pulled from nor merged into.  Replacing it
-        would leave its tasks in a backup file and in neither History
-        panel, so the sync stops instead, changes nothing, and says so.
+    def test_a_remote_one_release_behind_is_merged_both_ways(self) -> None:
+        """The deploy syncs before it upgrades the remote, so the remote's
+        table is routinely a column or two behind this machine's.  Neither
+        pass refuses: the pull takes the remote's rows (the newer columns
+        take their defaults, ``is_cron`` worked out from the rows' traces),
+        and the push gives the remote the missing columns before adding
+        the rows -- the same ``ALTER TABLE`` the upgraded web app would run.
         """
         _make_db(self.local_db, ["L1"])
         _make_db(self.remote_db, ["R1"])
         con = sqlite3.connect(self.remote_db)
-        con.execute("ALTER TABLE task_history ADD COLUMN drifted TEXT")
+        (ddl,) = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'task_history'"
+        ).fetchone()
+        legacy_ddl = re.sub(r",\s*(?:--[^\n]*\n\s*)*is_cron INTEGER DEFAULT 0\s*\)", "\n)", ddl)
+        self.assertNotIn("is_cron", legacy_ddl)
+        con.executescript(f"DROP TABLE task_history; {legacy_ddl};")
+        con.execute(
+            "INSERT INTO task_history(id, timestamp, task, work_dir) VALUES"
+            " ('R1', 1.0, 'task R1', ''),"
+            " ('R-cron', 1.0, ?, '')",
+            (cron_agent.PROMPT_PREAMBLE + "check the mail",),
+        )
+        con.commit()
+        con.close()
+
+        result = self._sync(_LAPTOP, _SERVER)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("WARN", result.stdout)
+        self.assertEqual(_backups(self.remote_kiss), [])
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R-cron", "R1"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "R-cron", "R1"])
+        for path in (self.local_db, self.remote_db):
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            self.assertEqual(
+                dict(con.execute("SELECT id, is_cron FROM task_history").fetchall()),
+                {"L1": 0, "R1": 0, "R-cron": 1},
+                path,
+            )
+            con.close()
+
+    def test_a_remote_whose_rows_cannot_be_taken_is_left_alone(self) -> None:
+        """Refusing beats replacing: the rows are still only on the server.
+
+        A remote whose ``task_history`` has a column that cannot be added
+        to this machine's table (``NOT NULL`` without a default -- no
+        release adds such a column, so this is a database somebody
+        changed by hand) can be neither pulled from nor merged into.
+        Replacing it would leave its tasks in a backup file and in
+        neither History panel, so the sync stops instead, changes
+        nothing, and says so.
+        """
+        _make_db(self.local_db, ["L1"])
+        _make_db(self.remote_db, [])
+        con = sqlite3.connect(self.remote_db)
+        (ddl,) = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'task_history'"
+        ).fetchone()
+        drifted_ddl = ddl.rstrip().rstrip(")") + ",\n    drifted TEXT NOT NULL\n)"
+        con.executescript(f"DROP TABLE task_history; {drifted_ddl};")
+        con.execute(
+            "INSERT INTO task_history(id, timestamp, task, drifted)"
+            " VALUES ('R1', 1.0, 'task R1', 'x')"
+        )
         con.commit()
         con.close()
 
         result = self._sync(_LAPTOP, _SERVER)
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("NOT NULL column 'drifted' without a default", result.stderr)
         self.assertIn("Refusing to replace", result.stdout)
         self.assertEqual(sorted(_tasks(self.remote_db)), ["R1"])
         self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])

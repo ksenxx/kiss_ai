@@ -5,45 +5,437 @@
 
 """Codex model implementation — uses the ``codex`` CLI as an LLM backend.
 
-This lets you use OpenAI Codex models through a ChatGPT subscription at
-subsidized per-token pricing.  The model invokes
-``codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox``
-in single-shot mode and consumes the JSONL event stream emitted on stdout.
-Sandbox/approvals are bypassed because KISS is the outer agent and the user
-has already authorized KISS to act on their behalf; running codex in a
-read-only sandbox would prevent any file modifications the user requested.
+This lets you use OpenAI models through a ChatGPT subscription.  With
+``codex_use_subscription`` on (the default) the CLI runs in
+:func:`codex_cli_env` — the daemon's environment minus ``OPENAI_API_KEY``
+/ ``CODEX_API_KEY``, plus the panel's ``CODEX_ACCESS_TOKEN`` — so a turn
+bills the ChatGPT plan the user is logged in to (``codex login``) rather
+than API tokens, and a CLI logged in with an API key is refused.  Off,
+the CLI gets ``CODEX_API_KEY`` (the variable it actually reads) from the
+``OPENAI_API_KEY`` the rest of KISS uses.
 
-Codex is a full coding agent, so ``runs_task_to_completion`` (inherited
-from :class:`~kiss.core.models.model.CLITextModel`) is True:
-:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task — with the
-KISS system prompt appended after
-:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER` — in one
-``generate()`` call and returns its final output, instead of driving a
-turn-by-turn KISS tool loop.
+KISS drives Codex as a plain language model, not as a coding agent: the
+model invokes ``codex exec --json`` with every native tool switched off
+(:data:`CODEX_LOCKDOWN_ARGS` — read-only sandbox, no shell / exec / web
+search / sub-agents / apps / user config with its MCP servers / hooks /
+skills / AGENTS.md) and with KISS's system prompt, behind
+:data:`CODEX_INSTRUCTIONS_PREAMBLE`, installed through
+``model_instructions_file`` in place of Codex's built-in instructions.
 
-For direct (non-KISSAgent) agentic use, tool descriptions can still be
-injected into the prompt and the model's text output parsed for tool-call
-JSON via :meth:`CodexModel.generate_and_process_with_tools` — the same
-approach used by :class:`kiss.core.models.claude_code_model.ClaudeCodeModel`
-and by DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
+KISS-level tools reach the model two ways.  Within a ``KISSAgent`` step
+(:meth:`CodexModel.native_tools_exposed`) every tool but ``finish`` is
+served to Codex as the ``kiss`` MCP server
+(:mod:`kiss.core.models.codex_mcp_bridge`), so Codex calls them natively
+during the turn — as many as it likes — and each call runs in the KISS
+process through the agent's usual executor; the calls are replayed into
+the conversation afterwards so the next, ephemeral turn sees them in its
+transcript.  ``finish`` (and every tool, outside an agent step) uses the
+text-based ``tool_calls`` protocol
+(:meth:`CodexModel.generate_and_process_with_tools`), the same approach
+:class:`kiss.core.models.claude_code_model.ClaudeCodeModel` and DeepSeek
+R1 in :mod:`kiss.core.models.openai_compatible_model` use.  The JSONL
+event stream on stdout carries the answer and the usage.
 """
 
+import contextlib
+import functools
+import json
 import logging
 import os
+import re
 import shutil
-from collections.abc import Callable, Iterable
+import subprocess
+import tempfile
+import threading
+import uuid
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.codex_mcp_bridge import ServedCall, ToolBridge
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
     _iter_jsonl,
     _parse_text_based_tool_calls,
+    environ_without,
+    parse_binary_attachments,
 )
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
+
+
+def _served_call_text(call: ServedCall) -> str:
+    """Render a tool call Codex made over MCP as the assistant turn that made it.
+
+    Args:
+        call: The call as the bridge answered it.
+
+    Returns:
+        The call as a Python-style invocation, the way the agent's
+        trajectory records every tool call.
+    """
+    arguments = ", ".join(f"{key}={value!r}" for key, value in call.arguments.items())
+    return f"```python\n{call.name}({arguments})\n```"
+
+# ``codex exec`` flags that turn the coding agent into a bare model: the
+# user's ``config.toml`` (MCP servers, hooks, providers) is not loaded
+# (``--ignore-user-config``; auth.json still is), no command execution
+# (``shell_tool`` / ``unified_exec``), a read-only sandbox so the
+# ``apply_patch`` tool some models carry is rejected, no sub-agents
+# (``agents.enabled``), no web search, apps, plugins, hooks, memories,
+# image or browser tools, no skill descriptions
+# (``skills.max_context_tokens`` at its minimum) and no AGENTS.md
+# (``project_doc_max_bytes``).  Verified against codex-cli 0.163.
+# ``code_mode_host`` stays on: 0.163 routes MCP tool calls through it, so
+# switching it off would cut the ``kiss`` MCP server off too ("code-mode
+# host is disabled").  With the shell tools off, the host's JavaScript
+# cell reaches nothing but the same tools (no ``require``, ``fetch`` or
+# ``process``), so it widens nothing.
+# Known residual: the CLI has no switch for skill discovery (only per-skill
+# ``[[skills.config]]`` entries), so a ``$name`` in the conversation that
+# matches a skill installed on the machine (``~/.agents/skills``,
+# ``.agents/skills`` up the repo, ``/etc/codex/skills``) still appends
+# that SKILL.md to the request as extra text; it has no tools to act on.
+CODEX_LOCKDOWN_ARGS: tuple[str, ...] = (
+    "--ephemeral",
+    "--ignore-user-config",
+    "--sandbox", "read-only",
+    "-c", "agents.enabled=false",
+    "-c", 'web_search="disabled"',
+    "-c", "project_doc_max_bytes=0",
+    "-c", "skills.max_context_tokens=1",
+    "--disable", "shell_tool",
+    "--disable", "unified_exec",
+    "--disable", "apps",
+    "--disable", "plugins",
+    "--disable", "view_image",
+    "--disable", "sleep_tool",
+    "--disable", "skill_search",
+    "--disable", "image_generation",
+    "--disable", "computer_use",
+    "--disable", "browser_use",
+    "--disable", "goals",
+    "--disable", "hooks",
+    "--disable", "tool_suggest",
+    "--disable", "memories",
+)
+
+# Opens the instructions file every turn.  The model still sees Codex's
+# ``<environment_context>`` (cwd, approval policy, the read-only sandbox):
+# without this it refuses to write files through KISS's tools, believing
+# the sandbox applies to them.
+CODEX_INSTRUCTIONS_PREAMBLE = (
+    "You are a model inside the KISS agent framework. Codex's own tools are "
+    "disabled: the <environment_context> block (cwd, approval_policy, "
+    "sandbox_mode such as read-only, network_access) describes only those "
+    "disabled built-in tools and does NOT apply to the tools of the `kiss` "
+    "MCP server or to the tools described in this prompt. Those tools are "
+    "executed by KISS outside of Codex with full read and write access to "
+    "the file system, so use them freely for every file, shell and web "
+    "operation.\n\n"
+)
+
+# Added to the preamble while the KISS tools are served over MCP: the
+# text-based protocol below then describes ``finish`` alone.
+CODEX_MCP_TOOLS_NOTE = (
+    "Call the `kiss` MCP server's tools directly, as native tools, as often "
+    "as the task needs within one turn. Only the tools listed under "
+    "'Available Tools' below (`finish`) are called with the JSON "
+    "`tool_calls` block described there; emit that block at the end of your "
+    "answer when the task is complete.\n\n"
+)
+
+# How long Codex waits for one call to a KISS tool.  A KISS tool can run
+# for hours (``run_parallel``, a build under ``Bash``); the agent's Stop
+# button, not this timeout, is the way to end such a call early.
+CODEX_MCP_TOOL_TIMEOUT_SECONDS = 24 * 60 * 60
+
+# Credentials ``codex exec`` prefers over the ChatGPT login: with
+# ``CODEX_API_KEY`` in its environment a turn bills API tokens even when
+# the user is logged in to a plan (codex-rs/login/src/auth/manager.rs
+# ``load_auth``); older CLIs read ``OPENAI_API_KEY`` the same way.
+_API_KEY_ENV_VARS: tuple[str, ...] = ("OPENAI_API_KEY", "CODEX_API_KEY")
+
+SUBSCRIPTION_HINT = (
+    "Codex is set to bill your ChatGPT subscription (Settings > Codex): sign "
+    "in with ChatGPT from that panel (or run `codex login` on this machine), "
+    "paste a Codex access token there, or turn the switch off to use "
+    "OPENAI_API_KEY."
+)
+API_KEY_LOGIN_ERROR = (
+    "The codex CLI is logged in with an API key (`codex login --with-api-key`), "
+    "which would bill per token. Run `codex logout` and sign in with ChatGPT, "
+    "or turn the Codex subscription switch off."
+)
+
+
+def codex_api_key_login() -> bool:
+    """Report whether the ``codex`` CLI's saved login is an API key.
+
+    Reads ``auth.json`` under ``CODEX_HOME`` (default ``~/.codex``), the
+    file ``codex login`` writes: ``{"auth_mode": "apikey", "OPENAI_API_KEY":
+    ...}`` after ``codex login --with-api-key``, ``"auth_mode": "chatgpt"``
+    with ``tokens`` after a ChatGPT sign-in.  A file without ``auth_mode``
+    (older CLIs) counts as an API-key login whenever it holds a key: the
+    CLI picks a saved key over saved tokens.  A missing or unreadable file
+    is not an API-key login.  Cheap enough to run before every turn, so a
+    ``codex logout`` mid-session takes effect at once.
+
+    Returns:
+        ``True`` when a turn with the subscription switch on (which strips
+        the key variables) would still bill the saved API key per token.
+    """
+    home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+    try:
+        with open(os.path.join(home, "auth.json"), encoding="utf-8") as f:
+            auth = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(auth, dict):
+        return False
+    mode = auth.get("auth_mode")
+    if mode is not None:
+        return bool(mode == "apikey")
+    return bool(auth.get("OPENAI_API_KEY"))
+
+# Stderr lines of ``codex login status`` -> the panel's ``authMethod``.
+_LOGIN_STATUS_METHODS: tuple[tuple[str, str], ...] = (
+    ("Logged in using ChatGPT", "chatgpt"),
+    ("Logged in using an API key", "api_key"),
+    ("Logged in using personal access token", "access_token"),
+    ("Logged in using access token", "access_token"),
+    ("Logged in using workload identity", "workload_identity"),
+    ("Logged in using Amazon Bedrock", "bedrock"),
+)
+
+_ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_DEVICE_URL = re.compile(r"https://\S+")
+_DEVICE_CODE = re.compile(r"^[A-Z0-9]{4,}-[A-Z0-9]{4,}$")
+
+
+def codex_cli_env() -> dict[str, str]:
+    """Return the environment a ``codex/`` turn runs the CLI in.
+
+    With ``DEFAULT_CONFIG.codex_use_subscription`` on: a copy of
+    ``os.environ`` without :data:`_API_KEY_ENV_VARS`, so the CLI falls
+    through to the subscription credentials — ``CODEX_ACCESS_TOKEN`` (set
+    here from ``DEFAULT_CONFIG`` when the settings panel holds one) or
+    the ``codex login`` entry in ``~/.codex/auth.json``.  Off: the
+    daemon's environment with ``CODEX_API_KEY`` — the only key variable
+    this CLI reads — defaulted from ``OPENAI_API_KEY`` (environment or
+    settings panel), so the API key the rest of KISS uses bills the turn.
+
+    Returns:
+        The child environment.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    env = environ_without(_API_KEY_ENV_VARS if DEFAULT_CONFIG.codex_use_subscription else ())
+    if DEFAULT_CONFIG.codex_use_subscription:
+        if DEFAULT_CONFIG.CODEX_ACCESS_TOKEN:
+            env["CODEX_ACCESS_TOKEN"] = DEFAULT_CONFIG.CODEX_ACCESS_TOKEN
+    elif not env.get("CODEX_API_KEY"):
+        api_key = env.get("OPENAI_API_KEY") or DEFAULT_CONFIG.OPENAI_API_KEY
+        if api_key:
+            env["CODEX_API_KEY"] = api_key
+    return env
+
+
+def codex_auth_status(timeout: float = 30.0) -> dict[str, Any]:
+    """Report how the ``codex`` CLI would authenticate a ``codex/`` turn.
+
+    Runs ``codex login status`` in :func:`codex_cli_env` and
+    maps its one-line answer (printed on stderr) to ``loggedIn`` and
+    ``authMethod`` — ``chatgpt``, ``api_key``, ``access_token``,
+    ``workload_identity``, ``bedrock`` or ``none`` — plus ``installed``
+    (the CLI was found), ``useSubscription`` (the switch), ``hasToken``
+    (a ``CODEX_ACCESS_TOKEN`` is configured), ``detail`` (the CLI's own
+    line) and, when the CLI could not be run or answered something
+    unknown, ``error`` with the reason.  Never raises: the settings
+    panel shows whatever this returns.
+
+    Args:
+        timeout: Seconds to wait for the CLI.
+
+    Returns:
+        The status dict.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    status: dict[str, Any] = {
+        "installed": False,
+        "loggedIn": False,
+        "authMethod": "none",
+        "useSubscription": bool(DEFAULT_CONFIG.codex_use_subscription),
+        "hasToken": bool(DEFAULT_CONFIG.CODEX_ACCESS_TOKEN),
+    }
+    path = find_codex_executable()
+    if path is None:
+        status["error"] = "Codex CLI ('codex') not found on PATH."
+        return status
+    status["installed"] = True
+    try:
+        proc = _start_codex(path, "login", "status")
+    except OSError as e:
+        status["error"] = f"`codex login status` failed: {e}"
+        return status
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill(proc)
+        proc.communicate()  # reap the child and close its pipes
+        status["error"] = f"`codex login status` timed out after {timeout:g}s"
+        return status
+    detail = (stderr.strip() or stdout.strip())[:300]
+    status["detail"] = detail
+    for prefix, method in _LOGIN_STATUS_METHODS:
+        if detail.startswith(prefix):
+            status["loggedIn"] = True
+            status["authMethod"] = method
+            return status
+    if not detail.startswith("Not logged in"):
+        status["error"] = (
+            f"`codex login status` (exit {proc.returncode}) answered: "
+            f"{detail or '(nothing)'}"
+        )
+    return status
+
+
+# The device login whose CLI is still alive (polling for the user to
+# enter its code): the prompt it printed and the process, or ``None``.
+# ``_device_login_lock`` is held for the whole start of a login, so
+# calls serialise: the one made while another is waiting for its code
+# gets that code.
+_device_login_lock = threading.Lock()
+_device_login: "tuple[dict[str, Any], subprocess.Popen[str]] | None" = None
+
+
+def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, Any]:
+    """Start ``codex login --device-auth`` and return what the user must do.
+
+    The CLI prints a verification URL and a one-time code, then keeps
+    polling (for up to 15 minutes) until the user has entered the code
+    in a browser, at which point it stores the ChatGPT login in
+    ``~/.codex/auth.json``.  This returns as soon as the URL and code
+    appear — ``{"url": ..., "code": ...}`` — and leaves the CLI polling,
+    reaped by a daemon thread when it exits; the settings panel polls
+    :func:`codex_auth_status` to learn that the login completed.  On
+    failure it returns ``{"error": reason}`` instead.  Runs in
+    :func:`codex_cli_env` so no API key is involved.
+
+    One login at a time: while the CLI of an earlier call is still
+    alive, its code is the one the user can enter, so a call returns
+    that same prompt instead of starting a second CLI (another
+    surface's click, a retry); calls serialise, so one made while the
+    earlier CLI is still printing gets its code too.  A call with
+    *fresh* ends the earlier CLI and starts a new one.
+
+    Args:
+        timeout: Seconds to wait for the URL and code to appear.
+        fresh: Start a new CLI even while an earlier one is still alive.
+
+    Returns:
+        ``{"url", "code"}`` or ``{"error"}``.
+    """
+    global _device_login
+    with _device_login_lock:
+        if _device_login is not None:
+            prompt, proc = _device_login
+            if proc.poll() is None:
+                if not fresh:
+                    return dict(prompt)
+                _kill(proc)
+            _device_login = None
+        path = find_codex_executable()
+        if path is None:
+            return {"error": "Codex CLI ('codex') not found on PATH."}
+        try:
+            proc = _start_codex(path, "login", "--device-auth")
+        except OSError as e:
+            return {"error": f"`codex login --device-auth` failed to start: {e}"}
+        prompt = {}
+        expired = threading.Event()
+        timer = threading.Timer(timeout, _kill_expired, args=(proc, expired))
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = _ANSI_ESCAPES.sub("", raw).strip()
+                url = _DEVICE_URL.search(line)
+                if url and "url" not in prompt:
+                    prompt["url"] = url.group(0)
+                elif _DEVICE_CODE.match(line):
+                    prompt["code"] = line
+                if "url" in prompt and "code" in prompt:
+                    break
+        finally:
+            # cancel() does not say whether the timer fired first; once
+            # it is joined, ``expired`` is exact, so a CLI the timer
+            # killed just as its code arrived is never published.
+            timer.cancel()
+            timer.join()
+        if expired.is_set() or "url" not in prompt or "code" not in prompt:
+            _kill(proc)
+            _, stderr = proc.communicate()
+            within = f" within {timeout:g}s" if expired.is_set() else ""
+            return {
+                "error": f"`codex login --device-auth` printed no login code{within}: "
+                + (stderr.strip()[:300] or "(no output)")
+            }
+        _device_login = (prompt, proc)
+        threading.Thread(
+            target=_finish_device_login, args=(proc,), name="codex-device-login", daemon=True
+        ).start()
+        return dict(prompt)
+
+
+def _start_codex(path: str, *args: str) -> "subprocess.Popen[str]":
+    """Start ``codex *args`` in :func:`codex_cli_env` with piped output.
+
+    The child leads its own process group: the npm ``codex`` command is a
+    Node wrapper around the native binary, so killing the wrapper alone
+    would leave the binary (and the pipes) alive — see :func:`_kill`.
+    """
+    return popen_process_group(
+        [path, *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=codex_cli_env(),
+    )
+
+
+def _kill(proc: "subprocess.Popen[str]") -> None:
+    """Kill *proc* and every process in its group (the wrapped binary too)."""
+    try:
+        kill_process_group(proc.pid, SIGKILL)
+    except OSError:  # the group is already gone, or Windows could not end it
+        proc.kill()
+
+
+def _kill_expired(proc: "subprocess.Popen[str]", expired: threading.Event) -> None:
+    """Timer callback: record that the login wait expired, then kill the CLI."""
+    expired.set()
+    _kill(proc)
+
+
+def _finish_device_login(proc: "subprocess.Popen[str]") -> None:
+    """Wait for the device-login CLI to exit, log a failure and forget its prompt."""
+    global _device_login
+    _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        logger.warning(
+            "codex login --device-auth exited %s: %s", proc.returncode, stderr.strip()
+        )
+    with _device_login_lock:
+        if _device_login is not None and _device_login[1] is proc:
+            _device_login = None
 
 _UI_CANDIDATE_PATHS: tuple[str, ...] = (
     "/Applications/Codex.app/Contents/Resources/codex",
@@ -119,13 +511,17 @@ class CodexModel(CLITextModel):
     ``codex/default`` invokes the CLI without ``-m``, letting Codex use
     the model configured for the active ChatGPT account.
 
-    Tool calling is supported via text-based prompting: tool descriptions
+    Every turn runs ``codex exec`` locked down to a bare model
+    (:data:`CODEX_LOCKDOWN_ARGS`) with KISS's ``system_instruction`` as
+    its instructions file, in :func:`codex_cli_env`.  Tool
+    calling is supported via text-based prompting: tool descriptions
     are injected into the system prompt and the model's text output is
     parsed for JSON ``tool_calls`` blocks.  Embeddings are not available.
     """
 
     _cli_model_name = "CodexModel"
     _cli_logger = logger
+    serves_tools_natively = True
 
     def __init__(
         self,
@@ -140,9 +536,8 @@ class CodexModel(CLITextModel):
             model_name: Full model name including ``codex/`` prefix
                 (e.g. ``codex/gpt-5-codex``, ``codex/default``).
             model_config: Optional configuration. Recognised keys:
-                - ``system_instruction`` (str): Appended to the task prompt
-                  after ``CLI_SYSTEM_PROMPT_HEADER`` (the Codex CLI has no
-                  native system-prompt flag).
+                - ``system_instruction`` (str): Replaces Codex's built-in
+                  instructions for the turn (``model_instructions_file``).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed
                 text token.
@@ -158,24 +553,126 @@ class CodexModel(CLITextModel):
         self._cli_model = (
             model_name[len("codex/"):] if model_name.startswith("codex/") else model_name
         )
+        # The MCP bridge serving the agent's tools, set for the duration
+        # of a ``native_tools_exposed`` block.
+        self._tool_bridge: ToolBridge | None = None
 
-    def _build_cli_args(self) -> list[str]:
+    @contextlib.contextmanager
+    def native_tools_exposed(
+        self,
+        tools_schema: list[dict[str, Any]],
+        execute: Callable[[dict[str, Any]], tuple[str, str]],
+    ) -> Iterator[None]:
+        """Serve *tools_schema* to Codex as the ``kiss`` MCP server within the block.
+
+        Every ``codex exec`` turn run inside the block registers the
+        bridge (:meth:`ToolBridge.codex_args`), so Codex calls the tools
+        natively through *execute*; the calls it made are replayed into
+        the conversation when the turn ends (:meth:`generate`) — and once
+        more after the bridge has drained, for a call that was still
+        running when a turn failed — and the text-based tools prompt of
+        :meth:`generate_and_process_with_tools` then describes only the
+        tools *not* served here.
+
+        Args:
+            tools_schema: The tools in OpenAI function-calling layout.
+            execute: Runs one ``{"name", "arguments"}`` call and returns
+                ``(name, result_text)``; called on a bridge thread.
+        """
+        bridge = ToolBridge(tools_schema, functools.partial(self._execute_for_codex, execute))
+        try:
+            with bridge:
+                self._tool_bridge = bridge
+                try:
+                    yield
+                finally:
+                    self._tool_bridge = None
+        finally:
+            self._replay_served_calls(bridge)
+
+    def _execute_for_codex(
+        self, execute: Callable[[dict[str, Any]], tuple[str, str]], call: dict[str, Any]
+    ) -> tuple[str, str]:
+        """Run *call* through *execute* and return the result as text Codex can take.
+
+        A binary payload a tool embedded in its result (a screenshot) is
+        lifted out: the CLI has no way to show it, and the raw bytes
+        would only bloat the turn.  The conversation gets the usual
+        notice when the call is replayed.
+
+        Args:
+            execute: The agent's tool executor.
+            call: ``{"name": ..., "arguments": {...}}``.
+
+        Returns:
+            ``(name, result_text)``.
+        """
+        name, result = execute(call)
+        text, attachments = parse_binary_attachments(result)
+        if attachments:
+            text += (
+                f"\n\n[{len(attachments)} attachment(s) in this tool result could "
+                "not be shown to this model]"
+            )
+        return name, text
+
+    def _replay_served_calls(self, bridge: ToolBridge) -> None:
+        """Append the tools Codex called over MCP through *bridge* to the conversation.
+
+        The next, ephemeral turn only knows what its transcript says, so
+        each call and its result precede the answer there — also when
+        the turn failed and is retried: the calls did run.  The messages
+        take the ordinary tool-call shape (an assistant message with
+        ``tool_calls``, a ``tool`` message answering it), so the
+        conversation stays valid for an API model a later model switch
+        hands it to.
+
+        Args:
+            bridge: The bridge whose answered calls are taken.
+        """
+        for call in bridge.take_served():
+            self.conversation.append({"role": "assistant", "content": ""})
+            self._replace_last_assistant_with_tool_calls(
+                _served_call_text(call),
+                [{"id": f"call_{uuid.uuid4().hex[:8]}", "name": call.name,
+                  "arguments": call.arguments}],
+            )
+            self.add_function_results_to_conversation_and_return(
+                [(call.name, {"result": call.result})]
+            )
+
+    def _tool_call_in_flight(self) -> bool:
+        """Whether Codex is silent because a bridged KISS tool is still running."""
+        return self._tool_bridge is not None and self._tool_bridge.calls_in_flight > 0
+
+    def _tool_call_error(self) -> Exception | None:
+        """The fatal error a bridged KISS tool raised (a limit hit), ending the turn."""
+        return self._tool_bridge.error if self._tool_bridge is not None else None
+
+    def _build_cli_args(self, instructions_file: str) -> list[str]:
         """Build the ``codex exec`` CLI argument list.
+
+        Args:
+            instructions_file: Path of the file holding
+                :data:`CODEX_INSTRUCTIONS_PREAMBLE` and KISS's system
+                instruction, passed as ``model_instructions_file`` so it
+                replaces Codex's built-in prompt.
 
         Returns:
             List of CLI arguments.
         """
         cli = _find_codex_cli()
-        args = [
-            cli,
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-        ]
+        args = [cli, "exec", "--json", "--skip-git-repo-check", *CODEX_LOCKDOWN_ARGS]
+        args.extend(["-c", f"model_instructions_file={json.dumps(instructions_file)}"])
+        if self._tool_bridge is not None:
+            args.extend(self._tool_bridge.codex_args(CODEX_MCP_TOOL_TIMEOUT_SECONDS))
         if self._cli_model and self._cli_model != "default":
             args.extend(["-m", self._cli_model])
         return args
+
+    def _cli_env(self) -> dict[str, str] | None:
+        """The CLI's environment: :func:`codex_cli_env`."""
+        return codex_cli_env()
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Codex CLI.
@@ -193,29 +690,75 @@ class CodexModel(CLITextModel):
         Raises:
             KISSError: If the CLI could not be started, exited with a
                 failure status, or emitted a ``turn.failed`` / ``error``
-                event.
+                event — or, with the subscription switch on, is logged
+                in with an API key (:data:`API_KEY_LOGIN_ERROR`).  When
+                the switch is on, the
+                message ends with :data:`SUBSCRIPTION_HINT`.
             TimeoutError: If the CLI produced no complete turn before the
                 deadline.  Retryable, unlike ``KISSError``.
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
+        self._refuse_api_key_login()
         prompt = self._build_prompt()
-        args = self._build_cli_args()
-
-        with self._cli_turn(args, "Codex CLI") as proc:
-            proc.send_prompt(prompt)
-            content, result_json, error_message = self._parse_stream_events(
-                proc.lines()
-            )
-            if error_message is not None:
-                stderr = proc.stderr_text().strip()
-                raise KISSError(
-                    f"Codex CLI failed: {error_message}"
-                    + (f"\nstderr: {stderr}" if stderr else "")
+        preamble = CODEX_INSTRUCTIONS_PREAMBLE
+        if self._tool_bridge is not None:
+            preamble += CODEX_MCP_TOOLS_NOTE
+        fd, instructions_file = tempfile.mkstemp(prefix="kiss-codex-", suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(preamble + (self.system_instruction_text() or ""))
+        try:
+            args = self._build_cli_args(instructions_file)
+            with self._cli_turn(args, "Codex CLI") as proc:
+                proc.send_prompt(prompt)
+                content, result_json, error_message = self._parse_stream_events(
+                    proc.lines()
                 )
-            proc.raise_for_exit()
+                if error_message is not None:
+                    stderr = proc.stderr_text().strip()
+                    raise self._with_subscription_hint(
+                        KISSError(
+                            f"Codex CLI failed: {error_message}"
+                            + (f"\nstderr: {stderr}" if stderr else "")
+                        )
+                    )
+                proc.raise_for_exit()
+        finally:
+            os.unlink(instructions_file)
+            if self._tool_bridge is not None:
+                self._replay_served_calls(self._tool_bridge)
 
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
+
+    @staticmethod
+    def _refuse_api_key_login() -> None:
+        """Raise when the subscription switch is on but the CLI holds an API-key login.
+
+        ``codex exec`` would bill that key per token although the panel
+        promises subscription billing.  :func:`codex_api_key_login` reads
+        the CLI's ``auth.json``, so a stored ``codex login --with-api-key``
+        is the only way to hit this.  A configured ``CODEX_ACCESS_TOKEN``
+        is read by the CLI before the file, so it makes the saved key
+        moot; a missing login is left to the turn itself, whose failure
+        carries :data:`SUBSCRIPTION_HINT`.
+        """
+        from kiss.core.config import DEFAULT_CONFIG
+
+        if (
+            DEFAULT_CONFIG.codex_use_subscription
+            and not DEFAULT_CONFIG.CODEX_ACCESS_TOKEN
+            and codex_api_key_login()
+        ):
+            raise KISSError(f"{API_KEY_LOGIN_ERROR}\n{SUBSCRIPTION_HINT}")
+
+    @staticmethod
+    def _with_subscription_hint(error: KISSError) -> KISSError:
+        """Append :data:`SUBSCRIPTION_HINT` to *error* when the switch is on."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        if not DEFAULT_CONFIG.codex_use_subscription:
+            return error
+        return KISSError(f"{error}\n{SUBSCRIPTION_HINT}")
 
     def _parse_stream_events(
         self, lines: Iterable[str]
@@ -224,14 +767,6 @@ class CodexModel(CLITextModel):
 
         Recognised events:
             - ``thread.started``: records ``thread_id`` in the result.
-            - ``turn.started``: ignored.
-            - ``item.started`` with ``item.type == "command_execution"``:
-              the shell command is forwarded via the token callback wrapped
-              in a thinking start/end pair so the user sees real-time
-              progress instead of waiting silently.
-            - ``item.completed`` with ``item.type == "command_execution"``:
-              the aggregated output is forwarded via the token callback
-              wrapped in a thinking start/end pair.
             - ``item.completed`` with ``item.type == "agent_message"``:
               text is appended to *content* and forwarded via the token
               callback.
@@ -240,6 +775,9 @@ class CodexModel(CLITextModel):
               thinking start/end pair.
             - ``turn.completed``: ``usage`` is recorded in the result.
             - ``error`` / ``turn.failed``: collected into *error_message*.
+
+        Other events (``turn.started``, the start-up notices the locked
+        down CLI emits as ``item.type == "error"`` items) are ignored.
 
         Args:
             lines: An iterable of JSON strings (one event per line).
@@ -257,12 +795,6 @@ class CodexModel(CLITextModel):
 
             if event_type == "thread.started":
                 result_json["thread_id"] = event.get("thread_id", "")
-            elif event_type == "item.started":
-                item = event.get("item", {})
-                if item.get("type") == "command_execution":
-                    command = item.get("command", "")
-                    if command:
-                        self._emit_as_thinking(f"$ {command}\n")
             elif event_type == "item.completed":
                 item = event.get("item", {})
                 item_type = item.get("type")
@@ -272,10 +804,6 @@ class CodexModel(CLITextModel):
                     self._invoke_token_callback(text)
                 elif item_type == "agent_reasoning" and text:
                     self._emit_as_thinking(text)
-                elif item_type == "command_execution":
-                    output = item.get("aggregated_output", "")
-                    if output:
-                        self._emit_as_thinking(output)
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
             elif event_type in ("error", "turn.failed"):
@@ -296,12 +824,13 @@ class CodexModel(CLITextModel):
         """Generate with text-based tool calling via the Codex CLI.
 
         Tool descriptions are injected into ``system_instruction`` (which
-        ``_build_prompt`` appends to the task after
-        ``CLI_SYSTEM_PROMPT_HEADER``).  The model's text output is parsed
-        for JSON ``tool_calls`` blocks, which are returned to the framework
-        for execution.  The CLI itself still runs agentically (sandbox and
-        approvals bypassed), so its own native tools remain available
-        alongside the KISS-level text protocol.
+        :meth:`generate` hands to the CLI as its instructions file).  The
+        model's text output is parsed for JSON ``tool_calls`` blocks,
+        which are returned to the framework for execution; the CLI's own
+        tools are switched off.  Within a :meth:`native_tools_exposed`
+        block the tools served over MCP are left out of that prompt —
+        Codex calls them natively during the turn — so it describes only
+        the rest (``finish``).
 
         Thinking tokens stream to the callbacks as they arrive; the
         assistant text is held back and re-emitted once the turn ends,
@@ -315,7 +844,9 @@ class CodexModel(CLITextModel):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        with self._tools_prompt_installed(function_map):
+        served = self._tool_bridge.tool_names if self._tool_bridge is not None else frozenset()
+        text_tools = {name: fn for name, fn in function_map.items() if name not in served}
+        with self._tools_prompt_installed(text_tools):
             content, response = self.generate()
 
         function_calls = _parse_text_based_tool_calls(content)

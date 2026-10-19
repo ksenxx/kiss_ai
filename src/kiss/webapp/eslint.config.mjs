@@ -76,7 +76,6 @@ export default [
         crypto: "readonly",
         acquireTransport: "readonly",
         createSorcarApi: "readonly",
-        SORCAR_API_COMMANDS: "readonly",
         marked: "readonly",
         hljs: "readonly",
         NodeFilter: "readonly",

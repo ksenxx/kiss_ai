@@ -90,7 +90,7 @@ def _fresh_permission_state() -> Any:
     agents_md.agents_md_path().unlink(missing_ok=True)
 
 
-def _persist(prompt: str, **extra: object) -> str:
+def _persist(prompt: str, **extra: Any) -> str:
     """Persist a successful task row with the given columns; return its id."""
     return persist_task(prompt, (), "success: true\nsummary: done", **extra)
 

@@ -52,8 +52,22 @@ everything and fills one.  Every event belongs to a task row -- the
 ``events.task_id`` column references ``task_history`` -- so an event of
 a task SOURCE has no row for never travels.
 
-Both databases must have the same columns for the synced tables; a
-mismatch is refused rather than half-applied.
+The two databases need not be on the same release.  A release adds a
+column to a history table with ``ALTER TABLE ... ADD COLUMN`` when the
+daemon first opens an older database, and the two machines of a sync
+are routinely one release apart (the deploy that syncs them is what
+upgrades the remote one), so the merge reconciles the columns the way
+the daemon would: a column SOURCE has and TARGET lacks is added to
+TARGET with SOURCE's own declaration before the rows are inserted, and a
+column TARGET has and SOURCE lacks keeps its declared default for the
+incoming rows.  Where that default is only a guess for an older row --
+``is_cron`` is ``0`` by default, yet a row from before the column
+existed may well be a cron run -- the daemon's own backfill
+(``kiss/agents/sorcar/history_columns.py``) then works the value out
+from the traces the row carries, for the target's old rows when the
+column was just added and for the incoming rows when SOURCE did not
+carry it.  Only a column ``ADD COLUMN`` cannot express (a primary key,
+or ``NOT NULL`` without a default) is refused.
 
 Task ids are unique and a task row, once created, is never modified, so
 the sync never has to compare row contents: a task travels exactly when
@@ -75,9 +89,10 @@ finishes.  TARGET's rows for chats that received nothing are left as
 they are; a TARGET from before the table existed gets no chat rows.
 
 The remote side runs this very file through ``ssh <host> python3 -c
-...``: the script and the chat-summary module it ships along with
-itself are stdlib-only and self-contained, so nothing has to be
-installed on the remote machine beyond ``python3``.
+...``: the script and the two web-app modules it ships along with
+itself (the chat-summary and the task-column code) are stdlib-only and
+self-contained, so nothing has to be installed on the remote machine
+beyond ``python3``.
 
 Usage:
     uv run python -m kiss.scripts.sync_db SOURCE TARGET [OPTIONS]
@@ -127,14 +142,14 @@ from typing import Any, BinaryIO
 TASK_TABLE = "task_history"
 EVENT_TABLE = "events"
 CHAT_TABLE = "chat_summaries"
-# Where each table's column list lives in the manifest.
-MANIFEST_COLUMN_KEYS = {
-    TASK_TABLE: "task_columns",
-    EVENT_TABLE: "event_columns",
+# The web app's own code this script runs on the target: the chat-summary
+# module and the task-column module.  Both are stdlib-only; they are
+# shipped to a remote host with this script (see ``_remote_shell_command``)
+# and read from the checkout here.
+SHIPPED_MODULES = {
+    "chat_summary": os.path.join("agents", "sorcar", "chat_summary.py"),
+    "history_columns": os.path.join("agents", "sorcar", "history_columns.py"),
 }
-# The chat-summary code, stdlib-only, shipped to a remote host with this
-# script (see ``_remote_shell_command``) and read from the checkout here.
-CHAT_SUMMARY_MODULE = os.path.join("agents", "sorcar", "chat_summary.py")
 COPY_BUFFER = 1 << 20
 
 PHASE_MANIFEST = "_manifest"
@@ -308,35 +323,79 @@ def rowid_alias_column(conn: sqlite3.Connection, schema: str, table: str) -> str
     return name if decl_type == "INTEGER" else None
 
 
-def compare_columns(source: list[str], target: list[str], table: str) -> None:
-    """Fail unless a source and a target table have the same columns.
+def add_missing_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Give the target table every column the delta's copy has and it lacks.
 
-    Column order may differ -- every statement names its columns -- but a
-    differing column *set* means the two databases do not share a schema,
-    and syncing them would corrupt row content or loop forever re-copying
-    rows that can never come to match.
+    The two databases need not share a schema: a release adds a column
+    to a history table with ``ALTER TABLE ... ADD COLUMN`` when the
+    daemon first opens a database from before it, and the two machines
+    of a sync are routinely one release apart -- the deploy that syncs
+    them is what upgrades the remote one.  So the target is brought up
+    to the delta's columns here, with the very declaration (type,
+    ``NOT NULL``, default) the source carries, which is what the newer
+    daemon would do when it opens the database; a column the target has
+    and the delta lacks is simply not written, and keeps its declared
+    default for the incoming rows.  Only a column that ``ADD COLUMN``
+    cannot express -- a primary key, or ``NOT NULL`` without a default --
+    is refused, as the daemon could not have added it either.
 
     Args:
-        source: Column names on the source side.
-        target: Column names on the target side.
-        table: Table name, for the error message.
+        conn: Target connection with the delta attached as ``delta``,
+            inside the merge transaction (a dry run rolls the columns
+            back with the rows).
+        table: Table name.
+
+    Returns:
+        The names of the columns added, in the delta's declaration order.
 
     Raises:
-        SyncError: If the two column sets differ.
+        SyncError: If a column the delta has cannot be added to the target.
     """
-    only_source = sorted(set(source) - set(target))
-    only_target = sorted(set(target) - set(source))
-    if not only_source and not only_target:
-        return
-    details = []
-    if only_source:
-        details.append(f"missing from the target: {', '.join(only_source)}")
-    if only_target:
-        details.append(f"missing from the source: {', '.join(only_target)}")
-    raise SyncError(
-        f"the source and target schemas for {table!r} differ ({'; '.join(details)});"
-        " both databases must have the same schema"
-    )
+    present = set(table_columns(conn, "main", table))
+    added: list[str] = []
+    for _cid, name, decl_type, notnull, default, pk in conn.execute(
+        f"PRAGMA delta.table_info({quote_name(table)})"
+    ).fetchall():
+        if name in present:
+            continue
+        if pk:
+            raise SyncError(
+                f"the source's {table!r} table has a primary-key column {name!r}"
+                " the target lacks; both databases must share the table's keys"
+            )
+        if notnull and default is None:
+            raise SyncError(
+                f"the source's {table!r} table has a NOT NULL column {name!r}"
+                " without a default that the target lacks; it cannot be added"
+            )
+        declaration = f"{quote_name(name)} {decl_type}".rstrip()
+        if notnull:
+            declaration += " NOT NULL"
+        if default is not None:
+            declaration += f" DEFAULT {default}"
+        try:
+            conn.execute(f"ALTER TABLE main.{quote_name(table)} ADD COLUMN {declaration}")
+        except sqlite3.OperationalError as exc:
+            raise SyncError(
+                f"cannot add the source's column {name!r} ({declaration.strip()})"
+                f" to the target's {table!r} table: {exc}"
+            ) from exc
+        added.append(name)
+    return added
+
+
+def shared_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """List the columns a merge statement names: those both the delta and the target have.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``.
+        table: Table name.
+
+    Returns:
+        Column names in the target's declaration order.
+    """
+    in_delta = set(table_columns(conn, "delta", table))
+    return [c for c in table_columns(conn, "main", table) if c in in_delta]
 
 
 def require_columns(columns: list[str], needed: tuple[str, ...], where: str) -> None:
@@ -463,12 +522,7 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         }
     finally:
         conn.close()
-    manifest: dict[str, Any] = {
-        MANIFEST_COLUMN_KEYS[TASK_TABLE]: sorted(task_cols),
-        MANIFEST_COLUMN_KEYS[EVENT_TABLE]: sorted(event_cols),
-        "tasks": tasks,
-    }
-    write_json_gz(manifest, out)
+    write_json_gz({"tasks": tasks}, out)
 
 
 def has_table(conn: sqlite3.Connection, schema: str, table: str) -> bool:
@@ -516,11 +570,6 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
             conn.execute("PRAGMA main.synchronous=OFF")
             conn.execute("ATTACH DATABASE ? AS src", (source,))
             _create_delta_tables(conn)
-            for table, key in MANIFEST_COLUMN_KEYS.items():
-                if manifest.get(key) and has_table(conn, "src", table):
-                    compare_columns(
-                        table_columns(conn, "src", table), list(manifest[key]), table
-                    )
             conn.execute("BEGIN")
             _load_target_tasks(conn, manifest.get("tasks") or {})
             _extract_tasks(conn)
@@ -681,7 +730,7 @@ def phase_merge(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> Non
     out.flush()
 
 
-def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, int]:
+def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, Any]:
     """Insert every row of a delta database into the target database.
 
     Args:
@@ -693,21 +742,25 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, i
 
     Returns:
         Counts of the task rows and event rows inserted and of the chat
-        summary rows recomputed.
+        summary rows recomputed, the columns added to each table
+        (``columns_added``, ``{table: [name, ...]}``) and the task
+        columns whose older rows were completed (``columns_completed``).
     """
     conn = open_db(target_path)
     try:
         conn.execute("ATTACH DATABASE ? AS delta", (delta_path,))
         for table in (TASK_TABLE, EVENT_TABLE):
-            compare_columns(
-                table_columns(conn, "delta", table),
-                table_columns(conn, "main", table),
-                table,
-            )
+            table_columns(conn, "delta", table)  # both tables must exist
         conn.execute("BEGIN IMMEDIATE")
         try:
+            columns_added = {
+                table: add_missing_columns(conn, table) for table in (TASK_TABLE, EVENT_TABLE)
+            }
             tasks_inserted = _merge_tasks(conn)
             events_inserted = _merge_events(conn)
+            columns_completed = _complete_tasks(
+                conn, columns_added[TASK_TABLE], tasks_inserted
+            )
             chats_refreshed = _merge_chats(conn)
             conn.execute("COMMIT" if commit else "ROLLBACK")
         except BaseException as exc:
@@ -725,6 +778,8 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, i
         "tasks_inserted": tasks_inserted,
         "events_inserted": events_inserted,
         "chats_refreshed": chats_refreshed,
+        "columns_added": columns_added,
+        "columns_completed": columns_completed,
     }
 
 
@@ -734,6 +789,9 @@ def _merge_tasks(conn: sqlite3.Connection) -> int:
     Task ids are unique and a task row is immutable once created, so an
     id that is already in the target denotes the very same row and the
     incoming copy is simply skipped; the target's rows are never updated.
+    Only the columns the delta carries are written: a column the target
+    gained in a later release than the source runs keeps its declared
+    default for the incoming rows (see :func:`_complete_tasks`).
 
     Args:
         conn: Target connection with the delta attached as ``delta``.
@@ -741,7 +799,7 @@ def _merge_tasks(conn: sqlite3.Connection) -> int:
     Returns:
         The number of task rows inserted.
     """
-    columns = table_columns(conn, "main", TASK_TABLE)
+    columns = shared_columns(conn, TASK_TABLE)
     require_columns(columns, ("id",), f"{TASK_TABLE} in the target database")
     table = quote_name(TASK_TABLE)
     names = ", ".join(quote_name(c) for c in columns)
@@ -770,7 +828,7 @@ def _merge_events(conn: sqlite3.Connection) -> int:
     Returns:
         The number of event rows inserted.
     """
-    columns = table_columns(conn, "main", EVENT_TABLE)
+    columns = shared_columns(conn, EVENT_TABLE)
     require_columns(
         columns, ("task_id", "seq"), f"{EVENT_TABLE} in the target database"
     )
@@ -830,30 +888,71 @@ def _merge_chats(conn: sqlite3.Connection) -> int:
             ' AND ("parent_task_id" IS NULL OR "parent_task_id" = \'\')'
         )
     ]
-    summaries = _chat_summary_module()
-    # A target from before the column existed gets it here, as the
-    # daemon adds it when it opens the database.
-    summaries.add_last_finished_column(conn)
+    # A target from before the columns existed gets them here, as the
+    # daemon adds them when it opens the database.
+    columns = _shipped_module("history_columns")
+    columns.add_missing_columns(conn, CHAT_TABLE, columns.ADDED_SUMMARY_COLUMNS)
+    summaries = _shipped_module("chat_summary")
     for chat_id in chat_ids:
         summaries.upsert_chat_summary(conn, chat_id)
     return len(chat_ids)
 
 
-def _chat_summary_module() -> Any:
-    """Load the chat-summary code as a module.
+def _complete_tasks(
+    conn: sqlite3.Connection, columns_added: list[str], tasks_inserted: int
+) -> list[str]:
+    """Work out the task columns that some rows of the target were written without.
 
-    On a remote host the source arrives with this script, bound to the
-    ``CHAT_SUMMARY_SOURCE`` global by the ssh bootstrap; here it is read
-    from the checkout this script is part of.  Either way the module is
-    built from the text rather than imported, so it needs neither the
-    package on ``sys.path`` nor anything installed.
+    Two kinds of row just landed in the target without a value of their
+    own for a column: every row the target already held, for a column
+    :func:`add_missing_columns` just gave it; and every row the delta
+    brought, for a column the target has and the source's release did
+    not.  Both got the column's declared default, which for a column
+    like ``is_cron`` is a guess the daemon corrects when it adds the
+    column itself -- so the daemon's own backfills
+    (``kiss/agents/sorcar/history_columns.py``) run here for exactly
+    those columns, and the target comes out as if the newer daemon had
+    migrated it and recorded the rows.  Nothing runs when every row
+    carried every column.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``,
+            its task rows already merged.
+        columns_added: Task columns the merge added to the target.
+        tasks_inserted: Task rows the merge inserted.
 
     Returns:
-        The module, with ``upsert_chat_summary``.
+        The names of the columns that were backfilled.
     """
-    source = globals().get("CHAT_SUMMARY_SOURCE") or _read_source(_chat_summary_path())
-    module = types.ModuleType("chat_summary")
-    exec(compile(source, "chat_summary.py", "exec"), module.__dict__)
+    stale = set(columns_added)
+    if tasks_inserted:
+        stale |= set(table_columns(conn, "main", TASK_TABLE)) - set(
+            table_columns(conn, "delta", TASK_TABLE)
+        )
+    if not stale:
+        return []
+    return list(_shipped_module("history_columns").complete_rows(conn, stale))
+
+
+def _shipped_module(name: str) -> Any:
+    """Load one of the web app's modules this script runs (see ``SHIPPED_MODULES``).
+
+    On a remote host the source arrives with this script, bound to the
+    ``SHIPPED_SOURCES`` global by the ssh bootstrap; here it is read from
+    the checkout this script is part of.  Either way the module is built
+    from the text rather than imported, so it needs neither the package
+    on ``sys.path`` nor anything installed.
+
+    Args:
+        name: Key of ``SHIPPED_MODULES``.
+
+    Returns:
+        The module.
+    """
+    shipped: dict[str, bytes] = globals().get("SHIPPED_SOURCES") or {}
+    source = shipped.get(name) or _read_source(_shipped_module_path(name))
+    module = types.ModuleType(name)
+    exec(compile(source, os.path.basename(SHIPPED_MODULES[name]), "exec"), module.__dict__)
     return module
 
 
@@ -993,9 +1092,9 @@ class Runner:
     ) -> str:
         """Build the shell command that runs this script on a remote host.
 
-        The script's own source and the chat-summary module's are shipped
-        inline, base64 encoded, so the remote machine needs nothing but a
-        python interpreter.
+        The script's own source and the modules of ``SHIPPED_MODULES``
+        are shipped inline, base64 encoded, so the remote machine needs
+        nothing but a python interpreter.
 
         Args:
             location: Remote database the phase operates on.
@@ -1006,9 +1105,12 @@ class Runner:
             A single shell command string for ``ssh``.
         """
         script = base64.b64encode(_read_source(_script_path())).decode("ascii")
-        summaries = base64.b64encode(_read_source(_chat_summary_path())).decode("ascii")
+        shipped = ",".join(
+            f"{name!r}:base64.b64decode('{_encoded_source(_shipped_module_path(name))}')"
+            for name in SHIPPED_MODULES
+        )
         bootstrap = (
-            f"import base64;CHAT_SUMMARY_SOURCE=base64.b64decode('{summaries}');"
+            f"import base64;SHIPPED_SOURCES={{{shipped}}};"
             f"exec(base64.b64decode('{script}'))"
         )
         parts = [self.python, "-c", bootstrap, phase, location.path, *args]
@@ -1027,11 +1129,24 @@ def _script_path() -> str:
     return str(path)
 
 
-def _chat_summary_path() -> str:
-    """Return the path of the chat-summary module in the checkout this script is part of."""
+def _shipped_module_path(name: str) -> str:
+    """Return the path of a ``SHIPPED_MODULES`` module in the checkout this script is part of.
+
+    Args:
+        name: Key of ``SHIPPED_MODULES``.
+    """
     return os.path.join(
-        os.path.dirname(os.path.abspath(_script_path())), os.pardir, CHAT_SUMMARY_MODULE
+        os.path.dirname(os.path.abspath(_script_path())), os.pardir, SHIPPED_MODULES[name]
     )
+
+
+def _encoded_source(path: str) -> str:
+    """Read a source file of this checkout as base64 text, for the ssh bootstrap.
+
+    Args:
+        path: The file to read.
+    """
+    return base64.b64encode(_read_source(path)).decode("ascii")
 
 
 def _read_source(path: str) -> bytes:
@@ -1231,6 +1346,19 @@ def format_stats(source: Location, target: Location, stats: dict[str, Any]) -> s
             f" {stats['events_inserted']} event row(s) added,"
             f" {chats} chat summary row(s) refreshed"
         )
+    schema = [
+        f"column(s) {', '.join(names)} {'would be ' if stats['dry_run'] else ''}added to {table}"
+        for table, names in (stats.get("columns_added") or {}).items()
+        if names
+    ]
+    completed = stats.get("columns_completed") or []
+    if completed:
+        schema.append(
+            f"{', '.join(completed)} {'would be ' if stats['dry_run'] else ''}worked out"
+            " for the rows written without"
+        )
+    if schema:
+        applied += "; " + "; ".join(schema)
     return (
         f"{source} -> {target}: {applied}"
         f" [delta {stats['delta_bytes'] / 1024:.1f} KiB,"

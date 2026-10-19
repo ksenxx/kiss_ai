@@ -33,7 +33,6 @@ from kiss.core.kiss_error import (
     KISSError,
 )
 from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
-from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
@@ -366,13 +365,43 @@ def _ledger_totals_and_banked(
         ``(budget, tokens, steps, banked)``.
     """
     view = ledger.view
+    budget, tokens, steps, _delta, banked = _fold_suffix(
+        ledger.records[view.fold_index :], view, session_key
+    )
+    return budget, tokens, steps, banked
+
+
+def _fold_suffix(
+    events: list[_UsageEvent], view: _LedgerView, session_key: str | None
+) -> tuple[float, int, int, dict[str, int], bool]:
+    """Sum *events*, the unfolded suffix after *view*, on top of the view's totals.
+
+    This is THE dedup rule of the ledger, shared by every reader
+    (:func:`_ledger_totals_and_banked`) and by the compactor
+    (:meth:`RelentlessAgent._maybe_compact`): a sourced event counts
+    only when its ``seq`` is above both the source's folded max in
+    ``view.seen`` and the source's max seen earlier in *events*;
+    unsourced events always count.
+
+    Args:
+        events: ``records[view.fold_index:]`` (or a prefix of it).
+        view: The :class:`_LedgerView` whose totals the events extend.
+        session_key: A :func:`_session_key`, or ``None`` to skip the
+            banked check.
+
+    Returns:
+        ``(budget, tokens, steps, delta, banked)``: the extended totals,
+        the per-source max ``seq`` of the events that counted (what a
+        compactor merges into ``view.seen``), and whether *session_key*
+        appears in ``view.seen`` or in *events*.
+    """
     budget = view.budget
     tokens = view.tokens
     steps = view.steps
     seen = view.seen
     banked = session_key is not None and seen.get(session_key) is not None
-    local: dict[str, int] = {}
-    for event in ledger.records[view.fold_index:]:
+    delta: dict[str, int] = {}
+    for event in events:
         source = event.source
         if source is not None:
             if source == session_key:
@@ -380,14 +409,14 @@ def _ledger_totals_and_banked(
             folded = seen.get(source)
             if folded is not None and event.seq <= folded:
                 continue
-            prev = local.get(source)
+            prev = delta.get(source)
             if prev is not None and event.seq <= prev:
                 continue
-            local[source] = event.seq
+            delta[source] = event.seq
         budget += event.budget
         tokens += event.tokens
         steps += event.steps
-    return budget, tokens, steps, banked
+    return budget, tokens, steps, delta, banked
 
 
 def publish_usage_offsets(agent: RelentlessAgent, printer: Any) -> None:
@@ -435,7 +464,8 @@ TASK_PROMPT = """
 #: Sorcar daemon (the base system prompt precedes it); the work dir, PID,
 #: Task Settings and AGENTS.md that follow vary per task.  The Anthropic
 #: adapter caches the prefix as one block (see ``SYSTEM_CACHE_BREAK``).
-IMPORTANT_INSTRUCTIONS = """
+IMPORTANT_INSTRUCTIONS = (
+    """
 # MOST IMPORTANT INSTRUCTIONS
 - **If the task is not complete and you are at risk of running out of context \
 length, you MUST call finish(success=False, is_continue=True, \
@@ -443,9 +473,12 @@ summary_in_html="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets, formatted \
 as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - The summary_in_html argument of finish MUST always be formatted as HTML.
-""" + SYSTEM_CACHE_BREAK + """{work_dir_line}\
+"""
+    + SYSTEM_CACHE_BREAK
+    + """{work_dir_line}\
 - Current process PID: {current_pid} — NEVER kill this process.
 """
+)
 
 #: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  A container run from an
 #: image bind-mounts ``work_dir`` at the same path and starts the
@@ -477,6 +510,7 @@ def resolve_work_dir(work_dir: str | None) -> str:
     default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
     resolved = Path(work_dir or default_work_dir).resolve()
     return str(remap_vanished_worktree(resolved))
+
 
 #: Consecutive continuation sessions that made no progress — no tool
 #: call other than ``finish``, or a summary identical to the previous
@@ -811,9 +845,7 @@ class RelentlessAgent(Base):
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.context_reset_hook: Callable[[], None] | None = None
-        self.llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None
+        self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         # Whether the run has the built-in toolset (``SorcarAgent.run``'s
         # *append_basic_tools*).  A restricted run (False) promises that
@@ -838,9 +870,7 @@ class RelentlessAgent(Base):
 
         self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
         self.max_steps = max_steps if max_steps is not None else 10000
-        self.max_budget = (
-            max_budget if max_budget is not None else DEFAULT_MAX_BUDGET
-        )
+        self.max_budget = max_budget if max_budget is not None else DEFAULT_MAX_BUDGET
         self.model_name = model_name if model_name is not None else DEFAULT_MODEL_NAME
         self.verbose = verbose
         # One atomic ledger swap resets the three counters AND the
@@ -879,7 +909,8 @@ class RelentlessAgent(Base):
 
     @budget_used.setter
     def budget_used(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: float,
+        self,
+        value: float,
     ) -> None:
         # Overrides Base's plain attribute with a property on purpose:
         # the counter is DERIVED from the append-only ledger, so an
@@ -906,7 +937,8 @@ class RelentlessAgent(Base):
 
     @total_tokens_used.setter
     def total_tokens_used(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: int,
+        self,
+        value: int,
     ) -> None:
         # Deliberate property-over-attribute override; see budget_used.
         ledger = self._usage_ledger_object()
@@ -1019,26 +1051,15 @@ class RelentlessAgent(Base):
             view = ledger.view
             records = ledger.records
             n = len(records)
-            budget = view.budget
-            tokens = view.tokens
-            steps = view.steps
-            seen = view.seen
-            delta: dict[str, int] = {}
-            for event in records[view.fold_index:n]:
-                source = event.source
-                if source is not None:
-                    folded = seen.get(source)
-                    if folded is not None and event.seq <= folded:
-                        continue
-                    prev = delta.get(source)
-                    if prev is not None and event.seq <= prev:
-                        continue
-                    delta[source] = event.seq
-                budget += event.budget
-                tokens += event.tokens
-                steps += event.steps
+            budget, tokens, steps, delta, _banked = _fold_suffix(
+                records[view.fold_index : n], view, None
+            )
             ledger.view = _LedgerView(
-                budget, tokens, steps, n, seen.including(delta),
+                budget,
+                tokens,
+                steps,
+                n,
+                view.seen.including(delta),
             )
         finally:
             ledger.compaction_lock.release()
@@ -1175,11 +1196,7 @@ class RelentlessAgent(Base):
         """
         if not budget and not tokens and not steps:
             return
-        ledger = (
-            epoch
-            if isinstance(epoch, _UsageLedger)
-            else self._usage_ledger_object()
-        )
+        ledger = epoch if isinstance(epoch, _UsageLedger) else self._usage_ledger_object()
         self._commit_usage_event(
             ledger,
             _UsageEvent(
@@ -1231,8 +1248,7 @@ class RelentlessAgent(Base):
         ledger = self._usage_ledger_object()
         view = ledger.view
         if view.seen.get(key) is not None or any(
-            event.source == key
-            for event in ledger.records[view.fold_index:]
+            event.source == key for event in ledger.records[view.fold_index :]
         ):
             return
         budget, tokens, steps = _session_usage(agent)
@@ -1267,8 +1283,7 @@ class RelentlessAgent(Base):
         total = self._live_budget_used()
         if total >= self.max_budget:
             raise BudgetExceededError(
-                f"Agent {self.name} budget exceeded "
-                f"(${total:.4f} / ${self.max_budget:.2f})."
+                f"Agent {self.name} budget exceeded (${total:.4f} / ${self.max_budget:.2f})."
             )
 
     def _system_prompt_task_settings(self) -> dict[str, str]:
@@ -1287,9 +1302,7 @@ class RelentlessAgent(Base):
         return {
             "Model name": self.model_name,
             "Max budget (USD)": f"${self.max_budget:.2f}",
-            "Starting time": datetime.now().astimezone().strftime(
-                "%Y-%m-%d %H:%M:%S %Z"
-            ),
+            "Starting time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
             **_host_settings(),
         }
 
@@ -1315,11 +1328,9 @@ class RelentlessAgent(Base):
 
         A copy of :attr:`model_config` with ``work_dir`` defaulted to this
         agent's work directory.  ``work_dir`` is a framework-only config
-        key: CLI-backed run-to-completion models (``cc/*``, ``codex/*``)
-        launch their subprocess with it as the cwd — otherwise the CLI's
-        native tools would act on the daemon's cwd instead of the task's
-        (possibly worktree-redirected) work tree — and API adapters ignore
-        it.  Sorcar's ``set_model`` copies the live model's config on a
+        key: the CLI-backed models (``cc/*``, ``codex/*``) launch their
+        subprocess with it as the cwd, and API adapters ignore it.
+        Sorcar's ``set_model`` copies the live model's config on a
         switch, so the work dir survives mid-run model changes.
 
         Returns:
@@ -1358,8 +1369,7 @@ class RelentlessAgent(Base):
                 session's).
         """
         logger.info(
-            "Executing task: agent=%s model=%s max_steps=%d "
-            "max_budget=$%.2f pid=%d task=%r",
+            "Executing task: agent=%s model=%s max_steps=%d max_budget=$%.2f pid=%d task=%r",
             self.name,
             self.model_name,
             self.max_steps,
@@ -1392,7 +1402,8 @@ class RelentlessAgent(Base):
             # A ``/remember`` replacing the file at this instant must not
             # abort the task either (Windows denies the open mid-rename).
             important_instructions += "\n" + read_text_waiting_for_writer(
-                agents_md, errors="replace",
+                agents_md,
+                errors="replace",
             )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
@@ -1412,8 +1423,7 @@ class RelentlessAgent(Base):
                 return partial
             self._set_printer_offsets()
             logger.info(
-                "Session %d start: agent=%s budget_remaining=$%.4f "
-                "total_tokens=%d total_steps=%d",
+                "Session %d start: agent=%s budget_remaining=$%.4f total_tokens=%d total_steps=%d",
                 session,
                 self.name,
                 remaining_budget,
@@ -1480,12 +1490,9 @@ class RelentlessAgent(Base):
                 self._current_executor = None
                 is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
-                    (
-                        not is_context_overflow
-                        and (exc.__cause__ is not None or not isinstance(exc, KISSError))
-                    )
-                    or executor.step_count <= 1
-                ):
+                    not is_context_overflow
+                    and (exc.__cause__ is not None or not isinstance(exc, KISSError))
+                ) or executor.step_count <= 1:
                     error_result = finish(False, False, f"{type(exc).__name__}: {exc}")
                     if self.printer:
                         self.printer.print(
@@ -1569,7 +1576,8 @@ class RelentlessAgent(Base):
                     "unchanged summary)",
                 )
         self._fail_after_sessions(
-            summaries, f"Task failed after {self.max_sub_sessions} sub-sessions",
+            summaries,
+            f"Task failed after {self.max_sub_sessions} sub-sessions",
         )
 
     def _fail_after_sessions(self, summaries: list[str], banner: str) -> NoReturn:
@@ -1643,7 +1651,11 @@ class RelentlessAgent(Base):
             "summary": _build_exhaustion_summary(
                 summaries,
                 _partial_result_html(
-                    executor, exc, budget_used, self.max_budget, total_steps,
+                    executor,
+                    exc,
+                    budget_used,
+                    self.max_budget,
+                    total_steps,
                 ),
             ),
         }
@@ -1832,13 +1844,23 @@ class RelentlessAgent(Base):
         cost = f"${budget:.4f}"
         broadcast = getattr(printer, "broadcast", None)
         if callable(broadcast):
-            broadcast({
-                "type": "usage_info", "text": text, "total_tokens": tokens,
-                "cost": cost, "cost_usd": budget, "total_steps": steps,
-            })
+            broadcast(
+                {
+                    "type": "usage_info",
+                    "text": text,
+                    "total_tokens": tokens,
+                    "cost": cost,
+                    "cost_usd": budget,
+                    "total_steps": steps,
+                }
+            )
             return
         printer.print(
-            text, type="usage_info", total_tokens=tokens, cost=cost, cost_usd=budget,
+            text,
+            type="usage_info",
+            total_tokens=tokens,
+            cost=cost,
+            cost_usd=budget,
             total_steps=steps,
         )
 
@@ -1879,9 +1901,7 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
         tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
-        llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None,
+        llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
@@ -1936,18 +1956,6 @@ class RelentlessAgent(Base):
         self.tool_call_hook = tool_call_hook
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
-
-        if self.docker_image and model_runs_task_to_completion(self.model_name):
-            # A run-to-completion CLI agent executes its native tools
-            # directly on the host, so the container the caller asked for
-            # would be silently bypassed — refuse rather than break the
-            # isolation contract.
-            raise KISSError(
-                f"Model {self.model_name} is a CLI agent that runs natively on "
-                f"the host and cannot honor docker_image="
-                f"{self.docker_image!r} isolation. Use an API model with "
-                f"docker_image, or drop docker_image for CLI models."
-            )
 
         if self.docker_image:
             from kiss.agents.sorcar.docker_manager import DockerManager

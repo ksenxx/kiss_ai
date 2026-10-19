@@ -1080,9 +1080,14 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
     page = _open_page(browser, remote_url, 1200, height=700, global_sections=True)
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
+        # The subpanels are asked for once the daemon is up (the shim's
+        # `daemonStatus connected`), not by the boot itself.
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
-        assert "getCronJobs" in posted and "getAppsStatus" in posted
-        assert "getSpendReport" in posted and "getMachines" in posted
+        assert "getCronJobs" not in posted and "getAppsStatus" not in posted
+        _deliver(page, {"type": "daemonStatus", "connected": True})
+        posted = page.evaluate("() => window.__posted.map(m => m.type)")
+        assert posted.count("getCronJobs") == 1 and posted.count("getAppsStatus") == 1
+        assert posted.count("getSpendReport") == 1 and posted.count("getMachines") == 1
         _deliver(page, {
             "type": "cronJobs",
             "jobs": [{
@@ -1126,13 +1131,19 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
 
         # The static server never completes the websocket handshake, so
         # the page believes the daemon is down (sends are held back).
-        # Connecting re-requests the five subpanels.
+        # A reconnect after an outage re-requests the five subpanels; a
+        # repeated `connected` with no outage in between (the shim sends
+        # one on `auth_required` and another on `auth_ok`) asks nothing.
         page.evaluate("() => { window.__posted.length = 0; }")
         _deliver(page, {"type": "daemonStatus", "connected": True})
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
-        assert "getCronJobs" in posted and "getAppsStatus" in posted
-        assert "getSpendReport" in posted and "getMachines" in posted
-        assert "getRecommendations" in posted
+        assert "getCronJobs" not in posted and "getAppsStatus" not in posted
+        _deliver(page, {"type": "daemonStatus", "connected": False, "reconnecting": True})
+        _deliver(page, {"type": "daemonStatus", "connected": True})
+        posted = page.evaluate("() => window.__posted.map(m => m.type)")
+        assert posted.count("getCronJobs") == 1 and posted.count("getAppsStatus") == 1
+        assert posted.count("getSpendReport") == 1 and posted.count("getMachines") == 1
+        assert posted.count("getRecommendations") == 1
 
         # Clicking an app that is not connected submits a connect task
         # in a NEW chat, which takes the screen; the idle chat left

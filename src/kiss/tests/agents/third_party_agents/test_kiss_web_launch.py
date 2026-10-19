@@ -37,7 +37,6 @@ agent accounted, and the daemon's registered task state.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import sys
@@ -50,7 +49,6 @@ from typing import Any, cast
 
 import yaml
 
-from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
@@ -60,15 +58,15 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 )
 from kiss.core.models import model_info
 from kiss.server import agent_state
-from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import start_serving
 from kiss.tests.server.parallel_agent_harness import (
     _PROVIDER_KEYS,
     STANDIN_MODEL,
-    IsolatedKissHome,
+    LocalDaemonTestCase,
     _StandInHandler,
     finish_response,
+    override_attribute,
     request_text,
     tool_call_response,
 )
@@ -213,22 +211,17 @@ class LaunchModelServer:
         return self.script.pop(0) if self.script else finish_response(SUMMARY)
 
 
-class _ApiLaunchBase(unittest.TestCase):
+class _ApiLaunchBase(LocalDaemonTestCase):
     """Real daemon over a temp local endpoint; the LLM is the scripted endpoint."""
 
+    home_prefix = "kiss-tp-api-launch-"
+
     def setUp(self) -> None:
-        # Every global mutation registers its restoration with
-        # ``addCleanup`` immediately: cleanups run (in LIFO order) even
-        # when ``setUp`` itself fails partway, unlike ``tearDown``.
-        self.home = IsolatedKissHome(prefix="kiss-tp-api-launch-")
-        self.addCleanup(self.home.cleanup)
-        # Runs before ``home.cleanup``: stops the event writer and
-        # invalidates every thread's cached connection, so the harness
-        # finds no live connection to close raw under another thread.
-        self.addCleanup(_persistence._close_db)
-        self.tmpdir = str(self.home.tmpdir)
-        self.repo = str(self.home.repo)
-        self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
+        # Created before the daemon so it is stopped after the task
+        # threads are joined.
+        self.model_server = LaunchModelServer()
+        self.addCleanup(self.model_server.stop)
+        super().setUp()
         # The daemon imports each channel agent's module as the task's
         # SEA, so credential paths under ``~`` are re-evaluated
         # there: point HOME at the empty tmpdir so every test observes
@@ -236,15 +229,12 @@ class _ApiLaunchBase(unittest.TestCase):
         # developer machine's real credentials.
         self.addCleanup(_restore_env, "HOME", os.environ.get("HOME"))
         os.environ["HOME"] = self.tmpdir
-
-        self.model_server = LaunchModelServer()
-        self.addCleanup(self.model_server.stop)
         # Launches without an explicit model/model_config use the
         # daemon's default model (``last_model``) and the endpoint
         # MY_MODELS.json registers for it: both point at the stand-in.
-        self._saved_my_models = model_info.USER_MY_MODELS_PATH
-        model_info.USER_MY_MODELS_PATH = self.home.kiss_home / "MY_MODELS.json"
-        self.addCleanup(self._restore_my_models)
+        override_attribute(
+            self, model_info, "USER_MY_MODELS_PATH", self.home.kiss_home / "MY_MODELS.json"
+        )
         error = model_info.save_custom_model(
             STANDIN_MODEL,
             endpoint=self.model_server.url,
@@ -258,83 +248,11 @@ class _ApiLaunchBase(unittest.TestCase):
             classify_tasks=False,
             auto_commit_mode=False,
         )
-
-        self.loop = asyncio.new_event_loop()
-        self.loop_thread = threading.Thread(
-            target=self.loop.run_forever,
-            daemon=True,
-        )
-        self.loop_thread.start()
-        self.addCleanup(self._stop_loop)
-        self.server = RemoteAccessServer(
-            local_endpoint_file=self.endpoint_file,
-            work_dir=self.repo,
-        )
-        # Registered before the start is awaited so a start that times
-        # out is still shut down.
-        self.addCleanup(self._shutdown_server)
-        asyncio.run_coroutine_threadsafe(
-            self.server.start_private_async(),
-            self.loop,
-        ).result(timeout=30)
-
-        self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
-        launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file
-        self.addCleanup(self._restore_endpoint_override)
-        # Registered last so they run first: release any held model
-        # call, then join the task workers while the daemon, the model
-        # server and the history DB are all still up.
-        self.addCleanup(self._join_tasks_and_discard)
+        self.start_daemon()
+        override_attribute(self, launcher, "_ENDPOINT_FILE_OVERRIDE", self.endpoint_file)
+        # Registered last so it runs first: release any held model call
+        # before the task workers are joined.
         self.addCleanup(self.model_server.release)
-
-    def _restore_my_models(self) -> None:
-        model_info.USER_MY_MODELS_PATH = self._saved_my_models
-
-    def _restore_endpoint_override(self) -> None:
-        launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
-
-    def _join_tasks_and_discard(self) -> None:
-        # The daemon answers the launcher before its task thread has
-        # finished its bookkeeping (``_record_frequent_task`` and the
-        # event writer still use the test's history.db); join those
-        # threads before the states are dropped and, later, the DB is
-        # closed and the tmpdir removed.
-        for state in agent_state.snapshot():
-            # Read once: the worker clears ``task_thread`` as it ends.
-            task_thread = state.task_thread
-            if task_thread is not None:
-                task_thread.join(timeout=30)
-        for state in agent_state.snapshot():
-            if state.agent is not None and state.agent._wt_pending:
-                try:
-                    state.agent.discard()
-                except Exception:  # pragma: no cover — best-effort cleanup
-                    pass
-        agent_state.agent_states.clear()
-
-    def _shutdown_server(self) -> None:
-        async def _shutdown() -> None:
-            # Closes the listener (and with it every established local
-            # connection) and joins the handlers before the loop stops.
-            await self.server.stop_async()
-            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        try:
-            asyncio.run_coroutine_threadsafe(
-                _shutdown(),
-                self.loop,
-            ).result(timeout=30)
-        except Exception:
-            pass
-
-    def _stop_loop(self) -> None:
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.loop_thread.join(timeout=5)
-        self.loop.close()
 
     def _run_while_held(
         self,
@@ -576,7 +494,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             self.model_server.release()
             thread.join(timeout=30)
         assert not thread.is_alive()
-        self._join_tasks_and_discard()
+        self.join_tasks()
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
             "the workspace env var must be removed once the run has finished"
         )
@@ -638,7 +556,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             if thread_b.ident is not None:
                 thread_b.join(timeout=30)
         assert not thread_b.is_alive()
-        self._join_tasks_and_discard()
+        self.join_tasks()
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
             "the env var must be removed once every launch has finished"
         )
@@ -937,7 +855,7 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
             # temporary persistence/config environment; stop it (listeners,
             # endpoint file, loop thread, private dir) so later tests build
             # their own instead of reusing a daemon wired to a deleted tmpdir.
-            self._join_tasks_and_discard()
+            self.join_tasks()
             launcher._stop_api_server()
         assert launcher._API_SERVER is None
         assert not Path(first_endpoint).exists(), (

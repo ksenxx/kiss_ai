@@ -45,11 +45,7 @@ from urllib.parse import urlparse
 
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.agents.sorcar.useful_tools import (
-    _absolutize,
-    _active_worktree_remap,
-    _stale_worktree_fallback,
-)
+from kiss.agents.sorcar.useful_tools import resolve_tool_path
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive
@@ -694,7 +690,9 @@ class WebUseTool:
             # times out, and is alive.
             try:
                 self._page.wait_for_function(
-                    "() => 1", timeout=_LIVE_PROBE_TIMEOUT_MS, polling=100,
+                    "() => 1",
+                    timeout=_LIVE_PROBE_TIMEOUT_MS,
+                    polling=100,
                 )
             except Exception:  # noqa: BLE001 - closed, exited, or not answering
                 logger.debug("Exception caught", exc_info=True)
@@ -1887,19 +1885,10 @@ class WebUseTool:
         if err is not None:
             return err
         try:
-            path = Path(_absolutize(file_path, self.work_dir)).resolve()
-            remapped = _active_worktree_remap(path, self.work_dir)
-            if remapped is not None:
-                path = remapped
-            else:
-                # Same contract as UsefulTools.Write: a path under a
-                # worktree the framework already merged and removed must
-                # fall back to the parent repo, or mkdir() would
-                # resurrect a zombie worktree whose contents are never
-                # merged and are deleted by the next prune.
-                fallback = _stale_worktree_fallback(path)
-                if fallback is not None:
-                    path = fallback
+            # Same contract as UsefulTools.Write: a path under a worktree
+            # the framework already merged and removed falls back to the
+            # parent repo, or mkdir() would resurrect a zombie worktree.
+            path = resolve_tool_path(file_path, self.work_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"

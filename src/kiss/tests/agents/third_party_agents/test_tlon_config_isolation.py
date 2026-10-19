@@ -30,6 +30,7 @@ import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, _config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, recording_server
 from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
     _CHANNEL_AGENTS,
@@ -46,9 +47,7 @@ class _ShipHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Accept any login POST with 204, like a real ship."""
-        length = int(self.headers.get("Content-Length", 0))
-        if length:
-            self.rfile.read(length)
+        self._read_raw()
         self.send_response(204)
         self.end_headers()
 
@@ -83,7 +82,7 @@ def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None
             _config.save({"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~zod"})
 
             agent = TlonAgent()
-            tools = {t.__name__: t for t in agent._get_tools()}
+            tools = tools_by_name(agent)
             assert json.loads(tools["check_tlon_auth"]())["ok"] is True
 
             _run_check_auth_unauthenticated(_TLON_INFO)
@@ -95,7 +94,7 @@ def test_clear_tlon_auth_resets_backend_and_config() -> None:
         _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
         agent = TlonAgent()
         assert agent._is_authenticated()
-        tools = {t.__name__: t for t in agent._get_tools()}
+        tools = tools_by_name(agent)
         result = tools["clear_tlon_auth"]()
         assert "cleared" in result.lower()
         assert _config.load() is None

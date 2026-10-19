@@ -109,7 +109,6 @@ def _chat(choices: list[dict[str, Any]], usage: dict[str, int] | None = None) ->
 
 _CHAT_CHUNKS = [
     _chat([{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}]),
-    _chat([{"index": 0, "delta": {}, "finish_reason": "stop"}]),
     _chat([], usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}),
 ]
 
@@ -339,7 +338,6 @@ def _tool_call_chunks(usage: dict[str, int]) -> list[bytes]:
     return [
         _chat([{"index": 0, "delta": {"role": "assistant", "tool_calls": [call]},
                 "finish_reason": None}]),
-        _chat([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]),
         _chat([], usage=usage),
     ]
 

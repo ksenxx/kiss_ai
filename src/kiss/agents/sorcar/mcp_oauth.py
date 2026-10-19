@@ -386,7 +386,15 @@ class MCPLoginSession:
         known, so the first tool answer is worded right; ``done`` and
         ``error`` take precedence over it in the answer, so an opener
         that outlives the flow changes nothing.
+
+        A session cancelled while its first request to the server was
+        still in flight (a replacement session took over after the 5 s
+        wait of ``_replace_active``) ends here instead: its redirect
+        listener is already closed, so the page would be a dead sign-in
+        next to the replacement's.  ``_run`` reports the cancel.
         """
+        if self._cancelled:
+            raise RuntimeError("sign-in cancelled")
         self.auth_url = url
         threading.Thread(target=self._open_for_user, args=(url,), daemon=True).start()
 

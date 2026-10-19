@@ -48,11 +48,32 @@ The running window shows that icon too, not the browser's:
   kills a binary whose sealed plist differs.  ``kiss-app`` always
   starts the browser through that copy on macOS and refreshes the
   clone when the browser's version changes.
+
+A click on the icon of the running app (in the Dock, in Finder, in
+Launchpad) must bring its window to the front.  macOS answers such a
+click with a *reopen* event, and Chromium's handler for it focuses the
+browser's windows except *app* windows (the ``--app`` kind: since
+Chromium 92 they are skipped, as the hidden mirrors of its own web-app
+windows live among them), then opens a new, empty browser window when
+it found none.  So on macOS the ``--app`` page is not the webapp but
+the daemon's ``media/appWindow.html`` (:func:`app_window_url`), which
+opens the webapp as a *popup* window of the same bounds and closes
+itself: a popup has the same frame (a title bar, no browser UI), is
+focused by the reopen handler, and is restored from the Dock when
+minimized.  Chromium does not remember the bounds of popups between
+launches, so the webapp's ``appWindow.js`` saves them (``localStorage``
+of the daemon's origin) and ``appWindow.html`` opens the next popup
+with them.  ``--disable-popup-blocking`` lets that page open the popup
+without a click.  A second ``kiss-app`` while the window is open
+(``install.sh`` after an update) brings it to the front the same way
+the icon does (``open -a``, :func:`macos_activate_running`) instead
+of opening another window.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import platform
@@ -145,13 +166,17 @@ def wait_for_loopback_url(url_file: Path, timeout: float) -> str | None:
         time.sleep(0.5)
 
 
+@functools.cache
 def playwright_chromium() -> Path | None:
     """Return the Chromium executable Playwright installed, or None.
 
     Asks Playwright itself (``BrowserType.executable_path``), which
     resolves the browsers directory and revision the installed
     ``playwright`` package expects; nothing is launched.  None when the
-    package or the browser is missing.
+    package or the browser is missing.  Cached: the lookup starts the
+    Playwright node driver and waits for its handshake, and both
+    :func:`find_browser` and :func:`sandboxed` need the answer in one
+    ``kiss-app`` run (conc1018 H1-F2).
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -245,8 +270,30 @@ def sandboxed(browser: Path, system: str = platform.system()) -> bool:
     return bundled is None or browser.resolve() != bundled.resolve()
 
 
+APP_WINDOW_PAGE = "/media/appWindow.html"
+"""The daemon's page that opens the webapp as a popup window (macOS, see the module doc)."""
+
+
+def app_window_url(url: str, brand: dict[str, str] = BRAND) -> str:
+    """Return the URL of the daemon page that opens the webapp at *url* as a popup window.
+
+    The page is :data:`APP_WINDOW_PAGE` on *url*'s origin (the popup
+    must be the same origin to find the bounds the webapp saved for
+    it); its query names the webapp URL to open and the brand's
+    product name as the page's title while it is on screen.
+    """
+    page = urllib.parse.urljoin(url, APP_WINDOW_PAGE)
+    return f"{page}?{urllib.parse.urlencode({'url': url, 'title': brand['product_name']})}"
+
+
 def app_command(
-    browser: Path, url: str, profile_dir: Path, slug: str, *, sandbox: bool = True
+    browser: Path,
+    url: str,
+    profile_dir: Path,
+    slug: str,
+    *,
+    sandbox: bool = True,
+    popups: bool = False,
 ) -> list[str]:
     """Return the command line that opens *url* as a standalone app window.
 
@@ -263,7 +310,10 @@ def app_command(
     keyring (GNOME Keyring / KWallet unlock prompts, the macOS Keychain
     "wants to use Safe Storage" prompt that a bundle with its own
     identity would raise), as Playwright does for its browsers; without
-    *sandbox* the browser runs unsandboxed (:func:`sandboxed`).
+    *sandbox* the browser runs unsandboxed (:func:`sandboxed`); with
+    *popups* pages may open popup windows without a click
+    (``--disable-popup-blocking``), which the macOS *url*, the page of
+    :func:`app_window_url`, needs.
     """
     command = [
         str(browser),
@@ -278,6 +328,8 @@ def app_command(
     ]
     if not sandbox:
         command.append("--no-sandbox")
+    if popups:
+        command.append("--disable-popup-blocking")
     return command
 
 
@@ -624,6 +676,7 @@ def write_macos_launcher(
     exe: Path,
     kiss_home: Path,
     browser: Path | None,
+    in_use: bool | None = None,
 ) -> Path:
     """Write ``<apps_dir>/<Product Name>.app`` and return its path.
 
@@ -647,6 +700,8 @@ def write_macos_launcher(
     the helper executables away from that window).  Without a browser
     bundle (no browser, a bare binary, a clone that failed) the bundle
     is the launcher alone and the Dock shows the browser's icon.
+    *in_use* is whether a window runs from the bundle when the caller
+    already listed the processes (None: find out here).
     """
     bundle = apps_dir / f"{brand['product_name']}.app"
     contents = bundle / "Contents"
@@ -661,7 +716,7 @@ def write_macos_launcher(
     if clone is None:
         # Anything but a current clone is rebuilt from scratch, unless a
         # window still runs from the bundle.
-        if macos_bundle_in_use(bundle):
+        if macos_bundle_in_use(bundle) if in_use is None else in_use:
             print(f"{bundle} is in use; it is rewritten at the next launch.", file=sys.stderr)
             return bundle
         shutil.rmtree(bundle, ignore_errors=True)
@@ -703,6 +758,7 @@ def install_launcher(
     system: str = platform.system(),
     state_dir: Path | None = None,
     browser: Path | None = None,
+    in_use: bool | None = None,
 ) -> Path | None:
     """Register the app with the desktop; return the launcher's path.
 
@@ -713,7 +769,9 @@ def install_launcher(
     ``kiss-app`` command to launch, by default this very script;
     *state_dir* the ``KISS_HOME`` it runs for, by default this one;
     *browser* the engine the launcher is written for (its Wayland app
-    id, its macOS bundle), by default :func:`find_browser`.
+    id, its macOS bundle), by default :func:`find_browser`; *in_use*
+    whether a window runs from the macOS bundle, when known (see
+    :func:`write_macos_launcher`).
     """
     exe = exe or Path(sys.argv[0]).resolve()
     home = home or Path.home()
@@ -729,7 +787,9 @@ def install_launcher(
             subprocess.run([refresh, str(apps_dir)], check=False, capture_output=True)
         return entry
     if system == "Darwin":
-        return write_macos_launcher(home / "Applications", brand, icon, exe, state_dir, browser)
+        return write_macos_launcher(
+            home / "Applications", brand, icon, exe, state_dir, browser, in_use
+        )
     return None
 
 
@@ -746,8 +806,13 @@ def launcher_path(
     if system == "Linux":
         return applications_dir(home) / f"{brand_slug(brand)}.desktop"
     if system == "Darwin":
-        return home / "Applications" / f"{brand['product_name']}.app"
+        return macos_bundle_path(home, brand)
     return None
+
+
+def macos_bundle_path(home: Path | None = None, brand: dict[str, str] = BRAND) -> Path:
+    """Return ``<home>/Applications/<Product Name>.app``, the brand bundle (written or not)."""
+    return (home or Path.home()) / "Applications" / f"{brand['product_name']}.app"
 
 
 def uninstall_launcher(
@@ -794,7 +859,9 @@ def reveal_launcher(
     return path if start_detached(command, subprocess.DEVNULL) else None
 
 
-def macos_launch_browser(browser: Path, home: Path | None = None) -> Path:
+def macos_launch_browser(
+    browser: Path, home: Path | None = None, in_use: bool | None = None
+) -> Path:
     """Return the path to start *browser* by on macOS: the brand bundle's copy of it.
 
     The window then runs under the brand bundle's identity and icon.
@@ -803,19 +870,35 @@ def macos_launch_browser(browser: Path, home: Path | None = None) -> Path:
     be made (a bare binary, an ``~/Applications`` that cannot be
     written, a stale clone a window still runs from) *browser* itself
     is returned: the window still opens, under the browser's icon (or,
-    for a running profile, in the running window).
+    for a running profile, in the running window).  *in_use* is
+    whether a window runs from the bundle when the caller already
+    listed the processes (None: the rewrite finds out).
     """
-    home = home or Path.home()
-    bundle = home / "Applications" / f"{BRAND['product_name']}.app"
+    bundle = macos_bundle_path(home)
     clone = macos_bundle_browser(bundle, browser)
     if clone is None and macos_browser_bundle(browser) is not None:
         try:
-            install_launcher(home=home, system="Darwin", browser=browser)
+            install_launcher(home=home, system="Darwin", browser=browser, in_use=in_use)
         except OSError as exc:
             print(f"Could not write {bundle}: {exc}", file=sys.stderr)
             return browser
         clone = macos_bundle_browser(bundle, browser)
     return clone or browser
+
+
+def macos_activate_running(bundle: Path, in_use: bool | None = None) -> bool:
+    """Bring the window of the app running from *bundle* to the front; whether there was one.
+
+    ``open -a`` on a bundle that is running does what a click on its
+    icon does: Launch Services sends the running app a reopen event,
+    which focuses the window (see the module doc), so nothing else is
+    started.  False when nothing runs from *bundle* (*in_use* when the
+    caller already listed the processes, else
+    :func:`macos_bundle_in_use`) or ``open`` failed.
+    """
+    if not (macos_bundle_in_use(bundle) if in_use is None else in_use):
+        return False
+    return subprocess.run(["open", "-a", str(bundle)], capture_output=True).returncode == 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -892,13 +975,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     sandbox = sandboxed(browser)
-    if platform.system() == "Darwin":
-        browser = macos_launch_browser(browser)
+    macos = platform.system() == "Darwin"
+    # One process listing serves both the bundle rewrite and the
+    # already-open check below.
+    running = macos and macos_bundle_in_use(macos_bundle_path())
+    if macos:
+        browser = macos_launch_browser(browser, in_use=running)
+        url = app_window_url(url)
     command = app_command(
-        browser, url, kiss_home() / PROFILE_DIR_NAME, brand_slug(), sandbox=sandbox
+        browser, url, kiss_home() / PROFILE_DIR_NAME, brand_slug(), sandbox=sandbox, popups=macos
     )
     if args.print_command:
         print(" ".join(command))
+        return 0
+    if running and macos_activate_running(macos_bundle_path(), in_use=True):
+        print(f"{BRAND['product_name']} is already open; its window was brought to the front.")
         return 0
     log = kiss_home() / "kiss-app.log"
     if launch(command, log, foreground=args.foreground):

@@ -272,11 +272,13 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
     names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
     assert cron_agent.seed_default_jobs() == names
     recommend, morning = load_jobs()
-    assert recommend["name"] == "Recommendations: five suggested tasks from the last 24 hours"
+    assert recommend["name"] == (
+        "Recommendations: ten suggested tasks from your recent work and apps"
+    )
     assert recommend["prompt"] == "/recommendations now" and recommend["command"] == ""
     assert recommend["schedule"] == "0 */6 * * *"
     assert recommend["deliver"] == "none" and recommend["enabled"] is True
-    assert recommend["max_budget"] == 1.0 and recommend["timeout"] == 600.0
+    assert recommend["max_budget"] == 2.0 and recommend["timeout"] == 900.0
     assert recommend["in_chat"] is False
     assert morning["prompt"] == "/good_morning now" and morning["schedule"] == "0 8 * * *"
     assert morning["in_chat"] is True and morning["deliver"] == "none"
@@ -307,6 +309,35 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
     assert morning2["prompt"] == "/good_morning now"
     cron_agent._seeded_defaults_path().unlink()
     assert cron_agent.seed_default_jobs() == names and len(load_jobs()) == 2
+    # A default renamed by a later version is the same default: a job
+    # under its former name is kept and nothing is seeded beside it, and
+    # a record naming the former name means it was seeded, so removing
+    # or editing that job never brings the default back.
+    (former,) = cron_agent.FORMER_DEFAULT_NAMES
+    assert cron_agent.FORMER_DEFAULT_NAMES[former] == names[0]
+    for job in load_jobs():
+        cron_job("remove", job_id=job["id"])
+    cron_agent._seeded_defaults_path().unlink()
+    old_name = _create(cron_job(
+        "create", name=former, prompt="/recommendations now", schedule="0 */6 * * *",
+    ))
+    assert cron_agent.seed_default_jobs() == names
+    old_kept, morning3 = load_jobs()
+    assert old_kept["id"] == old_name["id"] and old_kept["max_budget"] == 0.0
+    assert morning3["prompt"] == "/good_morning now"
+    cron_agent._seeded_defaults_path().write_text(json.dumps([former, names[1]]))
+    cron_job("remove", job_id=old_kept["id"])
+    assert cron_agent.seed_default_jobs() == []
+    assert [j["id"] for j in load_jobs()] == [morning3["id"]]
+    # A one-shot with a default's prompt under its own name is not that
+    # default: the recurring job is seeded beside it.
+    cron_agent._seeded_defaults_path().unlink()
+    once = _create(cron_job(
+        "create", name="once", prompt="/recommendations now", schedule="30m",
+    ))
+    assert cron_agent.seed_default_jobs() == names
+    assert sorted(j["name"] for j in load_jobs()) == sorted([*names, "once"])
+    assert next(j for j in load_jobs() if j["name"] == names[0])["id"] != once["id"]
     # A store that exists but cannot be read or parsed is the user's
     # schedules (load_jobs() reads it as empty): it is left as it is.
     cron_agent._seeded_defaults_path().unlink()

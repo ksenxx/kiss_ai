@@ -23,25 +23,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
-
-function openSettings(win) {
-  const gear = win.document.querySelector('#settings-btn');
-  assert.ok(gear, 'the tab bar must render the settings gear');
-  gear.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function closeSettings(win) {
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
+const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
 
 function typeInto(win, id, value) {
   const node = win.document.getElementById(id);

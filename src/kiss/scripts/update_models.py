@@ -158,9 +158,9 @@ def _cap_context_length(ctx: int) -> int:
 def _is_excluded_provider(name: str) -> bool:
     """Return True if ``name`` belongs to a permanently excluded provider.
 
-    Used to drop entries from upstream fetches and to mark any leftover
-    catalog entries as deprecated so they are removed from
-    ``MODEL_INFO.json`` on the next run.
+    One of the two conditions behind :func:`_is_excluded_model`, which
+    drops such entries from upstream fetches and marks any leftover catalog
+    entries as deprecated so they are removed from ``MODEL_INFO.json``.
     """
     return name.startswith(_EXCLUDED_PREFIXES)
 
@@ -279,7 +279,7 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
             completion_per_tok = float(pricing.get("completion") or "0")
             ctx = _cap_context_length(m.get("context_length", 0) or 0)
             name = f"openrouter/{model_id}"
-            if _is_excluded_provider(name):  # pragma: no branch
+            if _is_excluded_model(name):  # pragma: no branch
                 continue
             models[name] = {
                 "context_length": ctx,
@@ -1180,6 +1180,8 @@ def find_deprecated_models(
     """Identify models in current MODEL_INFO that are deprecated upstream.
 
     A model is considered deprecated if:
+    - It's an excluded model (:func:`_is_excluded_model`): an excluded
+      provider or an OpenAI ``-pro`` model such as ``openrouter/openai/o3-pro``.
     - It's a codex/ model whose slug is not in the Codex CLI's official
       models.json (except ``codex/default`` which is always kept).
     - It's a cc/ (Claude Code CLI) model whose ``claude-*`` slug is gone from
@@ -1199,8 +1201,8 @@ def find_deprecated_models(
     deprecated: list[dict] = []
 
     for name in current:  # pragma: no branch
-        if _is_excluded_provider(name):  # pragma: no branch
-            deprecated.append({"name": name, "reason": "excluded provider"})
+        if _is_excluded_model(name):  # pragma: no branch
+            deprecated.append({"name": name, "reason": "excluded model"})
             continue
         if name.endswith(_XHIGH_SUFFIX) or current[name].get("alias_of"):
             continue
@@ -1264,57 +1266,58 @@ def find_deprecated_models(
     return deprecated
 
 
-_GPT_PRO_OR_CODEX_RE = re.compile(r"-(pro|codex)(-|$)")
+_OPENAI_PRO_RE = re.compile(r"^(?:gpt-.*|o\d+(?:\.\d+)?)-pro(?:[-:]|$)")
 
-_OPENAI_RESPONSES_ONLY_RE = re.compile(r"^o\d+(?:\.\d+)?-pro(?:-|$)")
+_GPT_CODEX_RE = re.compile(r"^gpt-.*-codex(?:[-:]|$)")
 
 
-def _is_excluded_openai_responses_only(name: str) -> bool:
-    """Return True for OpenAI reasoning models that only work via ``/v1/responses``.
+def _is_excluded_openai_pro(name: str) -> bool:
+    """Return True for OpenAI ``-pro`` models, which the catalog never lists.
 
-    Models in the ``o1-pro`` / ``o3-pro`` family (e.g. ``o1-pro``,
-    ``o1-pro-2025-03-19``, ``o3-pro``, ``o3-pro-2025-06-10``) are routed
-    exclusively through OpenAI's ``/v1/responses`` endpoint. KISS's
-    ``OpenAICompatibleModel`` invokes ``client.chat.completions.create``
-    (``/v1/chat/completions``), so probing or running these models there
-    returns HTTP 404 — there is no way for the discovery flow to test
-    them, and they would fail at runtime for KISS users anyway. Skipping
-    them upfront avoids a wasted (and billable) probe each ``update_models``
-    run and prevents broken entries from leaking into ``MODEL_INFO.json``.
+    Covers the ``o<n>-pro`` reasoning family (``o1-pro``, ``o3-pro``,
+    ``o3-pro-2025-06-10``) and the GPT ``-pro`` tier (``gpt-5-pro``,
+    ``gpt-5.5-pro-2026-04-23``).  The ``o<n>-pro`` models answer only on
+    ``/v1/responses`` (chat completions returns HTTP 404); the GPT ``-pro``
+    slugs reject ``reasoning_effort``, are billed at premium tiers, and the
+    Codex CLI refuses them for ChatGPT-account users.  Pro models are
+    therefore dropped from every vendor listing, never proposed as new
+    candidates, and flagged deprecated when a stale entry is still in
+    ``MODEL_INFO.json``.
 
-    Matches both bare OpenAI names (``o1-pro``, ``o3-pro``), their dated
-    snapshots (``o1-pro-2025-03-19``), and OpenRouter passthroughs
-    (``openrouter/openai/o1-pro``). The match is scoped to the
-    ``o<digits>-pro`` shape (last ``/``-separated segment) so unrelated
-    names that happen to contain ``o-pro`` aren't caught.
+    The match is scoped to the last ``/``-separated segment, so it applies
+    equally to bare OpenAI names, OpenRouter passthroughs
+    (``openrouter/openai/o3-pro``, including ``:nitro`` / ``:floor`` route
+    modifiers) and Codex CLI keys (``codex/gpt-5-pro``), while unrelated
+    vendor models such as ``openrouter/acme/super-pro`` or ``gemini-2.5-pro``
+    stay eligible.
     """
     base = name.rsplit("/", 1)[-1]
-    return bool(_OPENAI_RESPONSES_ONLY_RE.match(base))
+    return bool(_OPENAI_PRO_RE.match(base))
 
 
-def _is_excluded_gpt_pro_or_codex(name: str) -> bool:
-    """Return True for GPT ``-pro`` / ``-codex`` variants we never auto-add.
+def _is_excluded_gpt_codex(name: str) -> bool:
+    """Return True for GPT ``-codex`` variants we never auto-add.
 
-    GPT ``-pro`` slugs (``gpt-5-pro``, ``gpt-5.5-pro-2026-04-23``, ...) reject
-    the ``reasoning_effort`` parameter, are billed at premium tiers, and the
-    Codex CLI rejects them at runtime for ChatGPT-account users. GPT
-    ``-codex`` slugs (``gpt-5-codex``, ``gpt-5.1-codex-max``, ...) are
+    GPT ``-codex`` slugs (``gpt-5-codex``, ``gpt-5.1-codex-max``, ...) are
     intended to be exercised through the Codex CLI backend rather than
-    direct Chat Completions. In both cases the discovery flow must silently
-    skip those names so they are never appended to ``model_info.py``.
-
-    The match is scoped to the GPT family by checking that the base name
-    (last ``/``-separated segment) starts with ``gpt-``; this keeps unrelated
-    vendor models (e.g. a hypothetical ``acme/super-pro``) eligible for
-    addition. Matches both undated forms (``gpt-5-pro``, ``gpt-5.3-codex``)
-    and dated snapshots (``gpt-5-pro-2025-10-06``), and applies equally to
-    OpenRouter passthroughs (``openrouter/openai/gpt-5-pro``) and Codex CLI
-    keys (``codex/gpt-5.3-codex``).
+    direct Chat Completions, so the discovery flow silently skips them.
+    Matches undated forms (``gpt-5.3-codex``), dated snapshots, OpenRouter
+    passthroughs (``openrouter/openai/gpt-5-codex``) and Codex CLI keys
+    (``codex/gpt-5.3-codex``); the base name must start with ``gpt-``.
     """
     base = name.rsplit("/", 1)[-1]
-    if not base.startswith("gpt-"):
-        return False
-    return bool(_GPT_PRO_OR_CODEX_RE.search(base))
+    return bool(_GPT_CODEX_RE.match(base))
+
+
+def _is_excluded_model(name: str) -> bool:
+    """Return True if ``name`` must never appear in ``MODEL_INFO.json``.
+
+    Union of :func:`_is_excluded_provider` and :func:`_is_excluded_openai_pro`.
+    Applied when vendor listings are fetched, when deprecated entries are
+    collected, and in scrub-only mode, so an excluded model is neither added
+    nor kept.
+    """
+    return _is_excluded_provider(name) or _is_excluded_openai_pro(name)
 
 
 def _strip_date_suffix(name: str) -> str:
@@ -1414,9 +1417,7 @@ def _add_codex_candidates(
         codex_name = f"codex/{slug}"
         if codex_name in current:  # pragma: no branch
             continue
-        if _is_excluded_gpt_pro_or_codex(codex_name):  # pragma: no branch
-            continue
-        if _is_excluded_openai_responses_only(codex_name):  # pragma: no branch
+        if _is_excluded_model(codex_name) or _is_excluded_gpt_codex(codex_name):
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = (
@@ -1585,9 +1586,7 @@ def compute_changes(
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
-            if _is_excluded_gpt_pro_or_codex(name):
-                continue
-            if _is_excluded_openai_responses_only(name):
+            if _is_excluded_model(name) or _is_excluded_gpt_codex(name):
                 continue
             is_preview = "preview" in name.split("/")[-1]
             has_pricing = fetched["input_price_per_1M"] > 0
@@ -1694,9 +1693,7 @@ def compute_changes(
 
     for name in openai:  # pragma: no branch
         if name not in current:  # pragma: no branch
-            if _is_excluded_gpt_pro_or_codex(name):  # pragma: no branch
-                continue
-            if _is_excluded_openai_responses_only(name):  # pragma: no branch
+            if _is_excluded_model(name) or _is_excluded_gpt_codex(name):  # pragma: no branch
                 continue
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
             ctx = (
@@ -2138,6 +2135,8 @@ def apply_updates_to_file(
             ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``,
             ``cache_read_price_per_1M``, ``cache_write_price_per_1M``.
         deprecated: ``[{"name": str, "reason": str}]``; removed by name.
+            An update that targets a deprecated name is skipped so the
+            removal is not undone in the same run.
         current: Snapshot of the pre-update ``MODEL_INFO`` (used to
             preserve unchanged fields when applying updates to models that
             don't yet have a JSON entry).
@@ -2162,6 +2161,8 @@ def apply_updates_to_file(
     applied = 0
     for upd in updates:  # pragma: no branch
         name = upd["name"]
+        if name in deprecated_names:
+            continue
         cur = current.get(name, {})
         entry = data.get(name) or _build_entry(
             ctx=cur.get("context_length", 0),
@@ -2397,22 +2398,23 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
 
 
 def _run_scrub_only(dry_run: bool = False) -> None:
-    """Offline path: drop excluded-provider entries and resync README.
+    """Offline path: drop excluded entries and resync README.
 
     Reads ``MODEL_INFO.json`` directly (rather than going through
     ``get_current_model_info``) so the script can run without importing
-    any provider backends, then writes the trimmed JSON and refreshes the
-    README's catalog totals and per-provider model lists. Used to apply
-    provider-removal fixes (e.g.
-    purging MiniMax) without requiring any vendor API keys.
+    any provider backends, drops every entry :func:`_is_excluded_model`
+    rejects (excluded providers, OpenAI ``-pro`` models), then writes the
+    trimmed JSON and refreshes the README's catalog totals and per-provider
+    model lists. Used to apply catalog-removal fixes (e.g. purging MiniMax
+    or ``o3-pro``) without requiring any vendor API keys.
     """
     print("=" * 60)
     print("Model Info Updater (scrub-only mode)")
     print("=" * 60)
     data = _read_model_info_json(MODEL_INFO_PATH)
     print(f"\n[1/3] Loaded {len(data)} entries from {MODEL_INFO_PATH}")
-    removed = [name for name in list(data) if _is_excluded_provider(name)]
-    print(f"\n[2/3] {len(removed)} excluded-provider entries to remove:")
+    removed = [name for name in list(data) if _is_excluded_model(name)]
+    print(f"\n[2/3] {len(removed)} excluded entries to remove:")
     for name in removed:
         print(f"    {name}")
     if dry_run:
@@ -2513,7 +2515,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Offline mode: skip vendor API fetches, drop catalog entries "
-            "belonging to permanently excluded providers, and resync "
+            "of permanently excluded providers and OpenAI -pro models, and resync "
             "README.md catalog totals and model lists. Requires no API keys."
         ),
     )
@@ -2647,7 +2649,7 @@ def main() -> None:
         print("\n  Re-testing existing models...")
         update_by_name = {upd["name"]: upd for upd in updates}
         for name, cur in current.items():  # pragma: no branch
-            if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of"):
+            if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of") or name in deprecated_names:
                 continue
             caps = test_model_capabilities(
                 name, verbose=args.verbose, decisions=cur.get("dec", False)

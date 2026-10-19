@@ -14,7 +14,7 @@ that process (``model("my-org/my-custom-model")`` then raises
 ``Unknown model name``, or ``calculate_cost`` kills the task's
 accounting).
 
-``src/kiss/server/user_assets.py`` already solved exactly this for
+``kiss.server.tricks.ensure_user_asset_from_default`` already solved exactly this for
 ``MY_INJECTION.md`` by staging the default in
 a sibling temp file and hard-linking it into place; ``_seed_my_models_file``
 was a second, weaker implementation of the same behaviour.

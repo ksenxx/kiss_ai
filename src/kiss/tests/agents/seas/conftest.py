@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.seas.autorouter.autorouter_sea import Tiers
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -28,6 +29,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_commands import SeaRun
+from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve
 
@@ -39,10 +41,38 @@ test commit spawn gpg (and a pinentry that waits for a human), and a
 Git for Windows system ``core.autocrlf`` changes which files git
 reports as modified.
 """
+HERMETIC_GIT_WITH_IDENTITY = {
+    **HERMETIC_GIT,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+"""`HERMETIC_GIT` plus a fixed identity, for commits made by the SEA under test.
+
+The SEA (or a daemon it runs in) spawns ``git commit`` with the process
+environment, not through :func:`git`; on a machine without a global
+``user.name`` (a fresh CI VM) that fails with "Committer identity
+unknown" unless the identity is exported.
+"""
+
+
+def runnable_candidates(tiers: Tiers, tier: str) -> list[str]:
+    """Return the models of *tiers*[*tier*] whose provider credential is configured, in order."""
+    available = set(get_available_models())
+    return [model for model, _ in tiers[tier] if model in available]
+
+
+def gate(report: str, name: str) -> str:
+    """Return the header line of gate *name* in a paper SEA's *report*."""
+    return next(line for line in report.splitlines() if line.startswith(f"{name}: "))
 
 
 def git(
-    repo: Path, *args: str, env: dict[str, str] | None = None, check: bool = True,
+    repo: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    check: bool = True,
     timeout: float = 60,
 ) -> str:
     """Run ``git *args`` in *repo* under :data:`HERMETIC_GIT` and return its stripped stdout.
@@ -55,14 +85,23 @@ def git(
         timeout: Seconds after which the call fails with :exc:`subprocess.TimeoutExpired`.
     """
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=check,
-        timeout=timeout, env={**os.environ, **HERMETIC_GIT, **(env or {})},
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+        env={**os.environ, **HERMETIC_GIT, **(env or {})},
     ).stdout.strip()
 
 
 def run_sea(
-    run: SeaRun, script: list[bytes], work_dir: Path, *,
-    agent: ChatSorcarAgent | None = None, max_steps: int = 8, **overrides: Any,
+    run: SeaRun,
+    script: list[bytes],
+    work_dir: Path,
+    *,
+    agent: ChatSorcarAgent | None = None,
+    max_steps: int = 8,
+    **overrides: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Run *run* (an :func:`evaluate_sea` result) against the scripted local model.
 
@@ -123,9 +162,7 @@ def registered(
         agent_state.unregister(task_id, state)
 
 
-def commit(
-    repo: Path, message: str, files: dict[str, str] | None = None, when: int = 0
-) -> str:
+def commit(repo: Path, message: str, files: dict[str, str] | None = None, when: int = 0) -> str:
     """Write *files* (path -> text) into *repo*, commit everything with *message* and return
     the commit sha; *when* (a unix time) sets the committer date.  An empty commit is allowed."""
     for name, text in (files or {}).items():
@@ -152,7 +189,12 @@ def fake_checkout(root: Path, seas: dict[str, str]) -> Path:
 
 
 def persist_task(
-    prompt: str, events: Sequence[dict[str, Any]] = (), result: str = "", **columns: object,
+    prompt: str,
+    events: Sequence[dict[str, Any]] = (),
+    result: str | None = None,
+    *,
+    success: bool | None = None,
+    **columns: object,
 ) -> str:
     """Persist a finished task row with *events* and *result* and return its id.
 
@@ -160,8 +202,11 @@ def persist_task(
     run of ``model-a`` in ``/work/dir`` that cost $0.5; *columns*
     override or extend those payload fields (``sea=``,
     ``parent_task_id=``, ``startTs=`` ...).  *events* are appended and
-    flushed through the writer thread; *result*, when given, is saved as
-    the task's result text.
+    flushed through the writer thread.  A *result* of ``None`` leaves
+    the row unfinished (no outcome recorded); any other text, the empty
+    string included, is saved as the task's result with the outcome
+    *success*, as the daemon does for a run that finished with nothing
+    to say.
     """
     now_ms = int(time.time() * 1000)
     payload: dict[str, object] = {
@@ -178,8 +223,8 @@ def persist_task(
     for event in events:
         _append_chat_event(event, task_id=task_id)
     _flush_chat_events(task_id)
-    if result:
-        _save_task_result(result, task_id=task_id)
+    if result is not None:
+        _save_task_result(result, task_id=task_id, success=success)
     return task_id
 
 

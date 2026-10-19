@@ -1,10 +1,10 @@
-"""Tests for the DUAL "Sorcar" wake check of ``transcribe_pcm``.
+"""Tests for the DUAL "Abracadabra" wake check of ``transcribe_pcm``.
 
 The wake word is verified twice: locally in the browser (Vosk grammar
 decoding in ``media/voice.js``) and again from the transcript.  The
 browser prepends the wake word's own audio to the captured utterance
 (``wakePrefixed``), so a genuine wake's transcript begins with
-something that sounds like "Sorcar";
+something that sounds like "Abracadabra";
 :func:`kiss.server.speech.split_wake_prefix` confirms and cuts that
 prefix, and an unconfirmed transcript is rejected as a false wake
 (empty ``text``).
@@ -20,13 +20,15 @@ fixed reply, so the tests can steer the transcript exactly:
   the dual check, whatever the STT hallucinated was submitted as the
   user's command);
 - a non-English transcript keeps the single local check, because
-  gpt-audio drops the English wake word while translating;
+  gpt-audio may drop the English wake word while translating;
 - the audio attached to the API request is the WAV of the PCM handed
   in, proving the capture itself is what gets transcribed.
 
 The prefix-gate functions themselves are exercised directly with the
-transcript shapes gpt-audio produces for "Sorcar" (observed: "Sorcar",
-"soccer", "circa", "Sarkar", "sir car", ...).
+transcript shapes gpt-audio produces for "Abracadabra" (measured
+2026-10-17 in three synthesized voices: "Abracadabra," / "Abracadabra."
+/ "Abracadabra" verbatim, in English and in French speech translated to
+English) plus the spellings it could fall back to.
 """
 
 from __future__ import annotations
@@ -56,16 +58,16 @@ class TestLevenshtein(unittest.TestCase):
     """The edit-distance helper of the fuzzy wake-prefix match."""
 
     def test_identical(self) -> None:
-        self.assertEqual(levenshtein("sorcar", "sorcar"), 0)
+        self.assertEqual(levenshtein("abracadabra", "abracadabra"), 0)
 
     def test_empty_vs_word(self) -> None:
         self.assertEqual(levenshtein("", "abc"), 3)
         self.assertEqual(levenshtein("abc", ""), 3)
 
     def test_substitutions_insertions_deletions(self) -> None:
-        self.assertEqual(levenshtein("sorcar", "sarkar"), 2)
-        self.assertEqual(levenshtein("sorcar", "soccer"), 2)
-        self.assertEqual(levenshtein("sorcar", "socar"), 1)
+        self.assertEqual(levenshtein("abracadabra", "abrakadabra"), 1)
+        self.assertEqual(levenshtein("abracadabra", "abracadabr"), 1)
+        self.assertEqual(levenshtein("abracadabra", "abbracadabra"), 1)
         self.assertEqual(levenshtein("kitten", "sitting"), 3)
 
 
@@ -73,29 +75,33 @@ class TestSoundsLikeWakeWord(unittest.TestCase):
     """Transcribed words that must (not) count as the wake word."""
 
     def test_known_transcription_aliases(self) -> None:
-        for word in ["sorcar", "Sorcar", "SORCAR,", "soccer", "circa",
-                     "sarkar", "sorkar", "sorger", "sorcerer"]:
+        for word in ["abracadabra", "Abracadabra", "ABRACADABRA,",
+                     "abrakadabra", "Abrakadabra!"]:
             self.assertTrue(sounds_like_wake_word(word), word)
 
     def test_joined_two_word_aliases(self) -> None:
-        for words in ["sir car", "sore car", "sar car", "so car",
-                      "saw car"]:
+        # Any split whose letters collapse to a listed spelling counts.
+        for words in ["abra cadabra", "Abra kadabra", "abra cadabra,",
+                      "a bracadabra"]:
             self.assertTrue(sounds_like_wake_word(words), words)
 
     def test_fuzzy_near_misses_match(self) -> None:
-        # Plausible one-off STT spellings within edit distance 2.
-        for word in ["sorcarr", "sarcar", "zorcar", "sokar", "sircar"]:
+        # Plausible one-off STT spellings within edit distance 3.
+        for word in ["abracadabr", "bracadabra", "abbracadabra",
+                     "abracadabera", "abracadabras", "abrakadabera"]:
             self.assertTrue(sounds_like_wake_word(word), word)
 
     def test_ordinary_words_do_not_match(self) -> None:
-        for word in ["", "the", "so", "car", "sir", "weather", "please",
-                     "sugar", "solaris", "corsair", "!!!", "42"]:
+        for word in ["", "the", "abra", "cadabra", "algebra", "candelabra",
+                     "abstract", "barbara", "sorcar", "soccer", "please",
+                     "!!!", "42"]:
             self.assertFalse(sounds_like_wake_word(word), word)
 
     def test_ordinary_word_pairs_never_fuzzy_match(self) -> None:
-        # "ourcar" is 2 edits from "sorcar": the fuzzy branch must not
-        # apply to joined pairs, only the measured alias list may.
-        for words in ["our car", "your car", "the car", "so what"]:
+        # The fuzzy branch must not apply to joined pairs, only the
+        # alias list may: "a bracadabr" is two edits from the wake word.
+        for words in ["a bracadabr", "abstract algebra", "sir car",
+                      "our car"]:
             self.assertFalse(sounds_like_wake_word(words), words)
 
 
@@ -104,25 +110,46 @@ class TestSplitWakePrefix(unittest.TestCase):
 
     def test_plain_prefix_is_cut(self) -> None:
         self.assertEqual(
-            split_wake_prefix("Sorcar open the door"),
+            split_wake_prefix("Abracadabra open the door"),
             (True, "open the door"),
         )
 
     def test_punctuated_prefix_is_cut(self) -> None:
+        # The three punctuations measured from gpt-audio.
         self.assertEqual(
-            split_wake_prefix("Sorcar, open the door."),
-            (True, "open the door."),
+            split_wake_prefix("Abracadabra, what is the weather like today?"),
+            (True, "what is the weather like today?"),
+        )
+        self.assertEqual(
+            split_wake_prefix("Abracadabra. Run the tests, please."),
+            (True, "Run the tests, please."),
+        )
+        self.assertEqual(
+            split_wake_prefix("Abracadabra! open the door"),
+            (True, "open the door"),
+        )
+
+    def test_unspaced_dash_does_not_join_the_command_word(self) -> None:
+        # Punctuation separates words: "Abracadabra—run" must not be
+        # matched as one fuzzy token that swallows the verb.
+        self.assertEqual(
+            split_wake_prefix("Abracadabra—run the tests"),
+            (True, "run the tests"),
+        )
+        self.assertEqual(
+            split_wake_prefix("Abracadabra-open the door"),
+            (True, "open the door"),
         )
 
     def test_alias_prefixes_are_cut(self) -> None:
-        for prefix in ["Soccer", "Circa,", "Sarkar", "Sorcerer,"]:
+        for prefix in ["Abrakadabra", "Abrakadabra,", "Abracadabr", "Abracadabera."]:
             confirmed, rest = split_wake_prefix(f"{prefix} run the tests")
             self.assertTrue(confirmed, prefix)
             self.assertEqual(rest, "run the tests", prefix)
 
     def test_two_word_alias_prefix_is_cut(self) -> None:
         self.assertEqual(
-            split_wake_prefix("Sir car, run the tests"),
+            split_wake_prefix("Abra cadabra, run the tests"),
             (True, "run the tests"),
         )
 
@@ -130,77 +157,35 @@ class TestSplitWakePrefix(unittest.TestCase):
         # The pre-wake ring can pick up a breath or the "hey there" of
         # a trailing-alias wake before the wake word itself.
         self.assertEqual(
-            split_wake_prefix("Hey there Sorcar, do it"),
+            split_wake_prefix("Hey there Abracadabra, do it"),
             (True, "do it"),
         )
 
-    def test_single_word_alias_does_not_eat_the_next_word(self) -> None:
-        # Span 1 is tried before span 2: "Sorcar so" must not be
-        # consumed as one fuzzy two-word alias.
+    def test_single_word_match_does_not_eat_the_next_word(self) -> None:
+        # Span 1 is tried before span 2 at every position.
         self.assertEqual(
-            split_wake_prefix("Sorcar so run the tests"),
+            split_wake_prefix("Abracadabra so run the tests"),
             (True, "so run the tests"),
         )
 
     def test_wake_word_only_yields_empty_rest(self) -> None:
-        self.assertEqual(split_wake_prefix("Sorcar."), (True, ""))
+        self.assertEqual(split_wake_prefix("Abracadabra."), (True, ""))
+        self.assertEqual(split_wake_prefix("Abracadabra"), (True, ""))
 
-    def test_clipped_onset_counts_only_as_the_first_word(self) -> None:
-        # Measured live: gpt-audio merged the wake word into the
-        # sentence and transcribed "Sorcar, what is the weather" as
-        # "So, what is the weather".
+    def test_translated_speech_keeps_the_wake_word_in_front(self) -> None:
+        # Measured: French speech after the wake word came back as
+        # "Abracadabra. Hello everyone, how are you?" (language fr).
         self.assertEqual(
-            split_wake_prefix("So, what is the weather like today?"),
-            (True, "what is the weather like today?"),
-        )
-        self.assertEqual(
-            split_wake_prefix("Sir, run the build"),
-            (True, "run the build"),
-        )
-        confirmed, _rest = split_wake_prefix("it is so nice outside")
-        self.assertFalse(confirmed)
-
-    def test_clipped_onset_may_follow_a_leading_hey(self) -> None:
-        # "Hey Sorcar, what is the weather" with the name merged into
-        # the sentence keeps the spoken "Hey" in front of the onset.
-        self.assertEqual(
-            split_wake_prefix("Hey, so what is the weather like today?"),
-            (True, "what is the weather like today?"),
-        )
-        self.assertEqual(
-            split_wake_prefix("hay sir run the build"),
-            (True, "run the build"),
-        )
-        confirmed, _rest = split_wake_prefix("Hey it is so nice outside")
-        self.assertFalse(confirmed)
-        confirmed, _rest = split_wake_prefix("Hey, what is the weather?")
-        self.assertFalse(confirmed)
-
-    def test_hey_sorcar_prefix_is_cut_whole(self) -> None:
-        self.assertEqual(
-            split_wake_prefix("Hey Sorcar, run the tests."),
-            (True, "run the tests."),
-        )
-        self.assertEqual(
-            split_wake_prefix("Hey, soccer. Open the file."),
-            (True, "Open the file."),
-        )
-
-    def test_full_alias_is_preferred_over_a_clipped_onset(self) -> None:
-        # "So car" is the whole wake word; cutting only its "So" would
-        # leak "car" into the command.
-        self.assertEqual(
-            split_wake_prefix("So car run the tests"),
-            (True, "run the tests"),
+            split_wake_prefix("Abracadabra. Hello everyone, how are you?"),
+            (True, "Hello everyone, how are you?"),
         )
 
     def test_content_after_the_cut_is_preserved_verbatim(self) -> None:
         # Exactly ONE wake prefix is cut: a genuine command mentioning
-        # "soccer" right after the wake word keeps its words (the old
-        # loop-stripping behavior lost them).
+        # the word right after the wake word keeps its words.
         self.assertEqual(
-            split_wake_prefix("Sorcar soccer is my favorite sport"),
-            (True, "soccer is my favorite sport"),
+            split_wake_prefix("Abracadabra abracadabra is a magic word"),
+            (True, "abracadabra is a magic word"),
         )
 
     def test_transcript_without_wake_word_is_rejected(self) -> None:
@@ -208,44 +193,51 @@ class TestSplitWakePrefix(unittest.TestCase):
             "open the door",
             "the weather is nice today",
             "please provide the audio",
+            "I bought a candelabra for the abstract algebra lecture",
             "",
         ]:
             confirmed, rest = split_wake_prefix(text)
             self.assertFalse(confirmed, text)
             self.assertEqual(rest, text.strip(), text)
 
+    def test_old_wake_phrases_are_no_longer_accepted(self) -> None:
+        # "Hey Sorcar" and "Abracadabra Sorcar" are history: a bare
+        # name or its sound-alikes must not confirm a wake.
+        for text in [
+            "Sorcar, open the door",
+            "Hey Sorcar, open the door",
+            "soccer run the tests",
+            "Sir car, run the tests",
+            "So, what is the weather like today?",
+        ]:
+            confirmed, _rest = split_wake_prefix(text)
+            self.assertFalse(confirmed, text)
+
     def test_trailing_alias_wake_within_the_window_is_cut(self) -> None:
-        # A trailing-alias wake ("... Sorcar") can carry several ring
-        # words before the wake word; the 8-word window must reach it.
+        # A trailing-alias wake ("... Abracadabra") can carry several
+        # ring words before the wake word; the 8-word window must reach
+        # it.
         self.assertEqual(
             split_wake_prefix(
-                "Could you please help me now Sorcar, open the door"
+                "Could you please help me now Abracadabra, open the door"
             ),
             (True, "open the door"),
         )
 
     def test_wake_word_beyond_the_scan_window_is_rejected(self) -> None:
         confirmed, _rest = split_wake_prefix(
-            "one two three four five six seven eight sorcar said nothing"
+            "one two three four five six seven eight abracadabra said nothing"
         )
         self.assertFalse(confirmed)
 
-    def test_exact_wake_word_outranks_an_earlier_sound_alike(self) -> None:
-        # "Sorry" (a known mishearing alias) and "solar" (a fuzzy
-        # near-miss) come first, but the real wake word follows: the
-        # cut must happen at "Sorcar", not at the weaker match.
+    def test_earlier_sound_alike_words_do_not_shadow_the_wake_word(self) -> None:
+        # Words sharing syllables with the wake word come first, but
+        # none of them is within three edits of it, so the cut happens
+        # at the wake word.
         self.assertEqual(
-            split_wake_prefix("Sorry, I was late Sorcar, open the door"),
+            split_wake_prefix("Barbara, algebra, Abracadabra, open the door"),
             (True, "open the door"),
         )
-        self.assertEqual(
-            split_wake_prefix("The solar panel hums Sorcar, open the door"),
-            (True, "open the door"),
-        )
-
-    def test_everyday_pair_phrases_are_rejected(self) -> None:
-        confirmed, _rest = split_wake_prefix("Our car needs service")
-        self.assertFalse(confirmed)
 
 
 class CannedOpenAiServer:
@@ -370,7 +362,7 @@ class TestDualCheckEndToEnd(unittest.TestCase):
 
     def test_confirmed_wake_prefix_is_cut_from_the_speech(self) -> None:
         result, bodies = self._transcribe(
-            "en\nSorcar, please open the editor.", _tone_pcm(1.0),
+            "en\nAbracadabra, please open the editor.", _tone_pcm(1.0),
         )
         self.assertEqual(result, {"text": "please open the editor.", "language": "en"})
         self.assertEqual(len(bodies), 1)
@@ -389,7 +381,7 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         self.assertEqual(result, {"text": "please open the editor.", "language": "en"})
 
     def test_non_english_speech_keeps_the_single_local_check(self) -> None:
-        # gpt-audio reliably drops the English wake word while it
+        # gpt-audio may drop the English wake word while it
         # TRANSLATES non-English speech, so an unconfirmed transcript
         # with a non-English language tag must still be reported.
         result, _bodies = self._transcribe("fr\nHello everyone.", _tone_pcm(1.0))
@@ -397,12 +389,12 @@ class TestDualCheckEndToEnd(unittest.TestCase):
 
     def test_the_handed_in_audio_is_what_gets_transcribed(self) -> None:
         pcm = _tone_pcm(1.0)
-        _result, bodies = self._transcribe("en\nSorcar, open it.", pcm)
+        _result, bodies = self._transcribe("en\nAbracadabra, open it.", pcm)
         self.assertEqual(_attached_wav_pcm(bodies[0]), pcm)
 
     def test_silent_audio_never_reaches_the_api(self) -> None:
         result, bodies = self._transcribe(
-            "en\nSorcar, open it.", b"\x00\x00" * SAMPLE_RATE,
+            "en\nAbracadabra, open it.", b"\x00\x00" * SAMPLE_RATE,
         )
         self.assertEqual(result, {"text": "", "language": None})
         self.assertEqual(bodies, [])

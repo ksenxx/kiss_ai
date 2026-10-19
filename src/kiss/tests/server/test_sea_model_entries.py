@@ -37,6 +37,8 @@ from typing import Any
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.orautorouter import orautorouter_sea
+from kiss.agents.seas.orbestrouter import orbestrouter_sea
 from kiss.agents.seas.sh import sh_sea
 from kiss.agents.sorcar import local_endpoint, sea_commands
 from kiss.agents.sorcar.cron_agent import load_jobs, save_jobs
@@ -77,12 +79,14 @@ def test_orchestrator_model_is_runnable_whenever_the_picker_offers_autorouter() 
 
 
 def test_bundled_routers_are_the_model_picker_seas() -> None:
-    """Both bundled routers register; no other bundled or third-party SEA does."""
+    """The four bundled routers register; no other bundled or third-party SEA does."""
     sea_commands._reset_for_tests()
     seas = sea_commands.model_seas()
     assert seas == {
         AUTOROUTER: Path(autorouter_sea.__file__).resolve(),
         BESTROUTER: Path(bestrouter_sea.__file__).resolve(),
+        "orautorouter": Path(orautorouter_sea.__file__).resolve(),
+        "orbestrouter": Path(orbestrouter_sea.__file__).resolve(),
     }
     assert sea_commands.model_sea("sh") is None
     assert sea_commands.model_sea("gpt-6-astra") is None
@@ -218,12 +222,12 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         sea_commands.refresh_registry()
 
     def test_picker_lists_the_routers_first_with_a_cost_label(self) -> None:
-        """The entries head the list, in one vendor group, with a label not a price."""
+        """The four entries head the list, in one vendor group, with a label not a price."""
         event = self._models_event()
         assert event["models"], "precondition: at least one runnable model"
         names = [m["name"] for m in event["models"]]
-        assert names[:2] == [AUTOROUTER, BESTROUTER], names[:4]
-        for entry in event["models"][:2]:
+        assert names[:4] == [AUTOROUTER, BESTROUTER, "orautorouter", "orbestrouter"], names[:6]
+        for entry in event["models"][:4]:
             assert entry["vendor"] == "Router"
             assert entry["inp"] == 0 and entry["out"] == 0
             assert isinstance(entry["cost_label"], str) and entry["cost_label"]

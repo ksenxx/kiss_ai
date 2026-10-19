@@ -340,11 +340,6 @@ def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
         stand_in.close()
 
 
-def _launched_prompts(daemon: RecordingDaemon) -> list[str]:
-    """The prompts of the ``run`` commands *daemon* received, in order."""
-    return [str(command["prompt"]) for command in daemon.run_commands]
-
-
 @pytest.fixture()
 def mail_stack(
     tmp_path: Path,
@@ -388,8 +383,8 @@ class TestEmailRedeliveryStops:
         runner = ChannelRunner(backend=backend, channel_name="", agent_name="RR Email Test")
 
         assert runner.run_once() == 1
-        assert len(_launched_prompts(daemon)) == 1
-        assert "please help" in _launched_prompts(daemon)[0]
+        assert len(daemon.launched_prompts) == 1
+        assert "please help" in daemon.launched_prompts[0]
         assert len(smtp.deliveries) == 1
         reply = smtp.deliveries[0].decode("utf-8", errors="replace")
         assert _REPLY_TEXT in reply
@@ -400,7 +395,7 @@ class TestEmailRedeliveryStops:
 
         # Pre-fix, the still-unread mail was handled again every tick.
         assert runner.run_once() == 0
-        assert len(_launched_prompts(daemon)) == 1
+        assert len(daemon.launched_prompts) == 1
         assert len(smtp.deliveries) == 1
 
     def test_new_mail_after_ack_is_still_picked_up(
@@ -416,7 +411,7 @@ class TestEmailRedeliveryStops:
         second = _RAW_MAIL.replace(b"need-help-1", b"need-help-2")
         imap.add_message(second, "<need-help-2@example.com>")
         assert runner.run_once() == 1
-        assert len(_launched_prompts(daemon)) == 2
+        assert len(daemon.launched_prompts) == 2
         assert len(smtp.deliveries) == 2
         assert imap.unseen() == []
 
@@ -493,8 +488,8 @@ class TestRunnerAckDispatch:
                     # run_once() reconnects, joins, polls the queued message,
                     # launches the task and replies on the new connection.
                     assert runner.run_once() == 1
-                assert len(_launched_prompts(daemon)) == 1
-                assert "hi" in _launched_prompts(daemon)[0]
+                assert len(daemon.launched_prompts) == 1
+                assert "hi" in daemon.launched_prompts[0]
                 second, _ = listener.accept()
                 with second:
                     second.settimeout(5.0)

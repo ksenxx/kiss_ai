@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents.webhook.webhook_sea import (
     WebhookChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
 _AUTH_TRIO = {"check_webhook_auth", "authenticate_webhook", "clear_webhook_auth"}
@@ -76,7 +77,7 @@ def _generic_headers(
 def _start_backend(**route_kwargs) -> tuple[WebhookChannelBackend, str]:
     """Authenticate on an ephemeral port, add one route, and start the server."""
     agent = WebhookAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_webhook"](port="0"))
     assert result["ok"]
     backend = agent._backend
@@ -97,7 +98,7 @@ def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
 def test_auth_trio_roundtrip_and_persistence() -> None:
     """authenticate persists 0600 config, check reports it, clear removes it."""
     agent = WebhookAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
 
     unauth = tools["check_webhook_auth"]()
     assert "not configured" in unauth.lower()
@@ -136,7 +137,7 @@ def test_module_add_to_tools_nonempty() -> None:
 def test_route_add_list_remove_persistence() -> None:
     """Routes persist in config and are visible to freshly built agents."""
     agent = WebhookAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert json.loads(tools["authenticate_webhook"](port="0"))["ok"]
     backend = agent._backend
 

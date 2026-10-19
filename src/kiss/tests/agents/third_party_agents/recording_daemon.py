@@ -129,6 +129,11 @@ class RecordingDaemon:
         """The recorded ``run`` commands only (no ``stop`` or other frames)."""
         return [c for c in self.commands if c.get("type") == "run"]
 
+    @property
+    def launched_prompts(self) -> list[str]:
+        """The prompts of the recorded ``run`` commands, in order."""
+        return [str(command["prompt"]) for command in self.run_commands]
+
     def close(self) -> None:
         """Stop serving, close every connection, join the server thread, drop the temp dir.
 

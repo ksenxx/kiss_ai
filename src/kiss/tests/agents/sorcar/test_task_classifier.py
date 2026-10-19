@@ -15,12 +15,6 @@ The classification tests call real LLMs (a cheap model) — no mocks.
 The verdict-cache tests use the real local OpenAI-compatible stand-in
 endpoint from ``parallel_agent_harness`` instead.
 
-Unreachable without test doubles, documented per the testing policy
-rather than mocked: the ``except Exception`` in
-``task_classifier._model_runs_task_to_completion`` — the registry
-lookup it guards (``model_info.model_runs_task_to_completion``) returns
-``False`` for every unknown name and raises for none of the inputs a
-caller can produce.
 The wiring tests drive real ``SorcarAgent`` runs inside an isolated
 KISS_HOME.
 """
@@ -1046,18 +1040,6 @@ def test_base_system_prompt_override_beats_verdict(
 # ---------------------------------------------------------------------------
 # Review-driven fixes: CLI models, pre-seeding, substitution, stale usage
 # ---------------------------------------------------------------------------
-
-
-def test_classify_task_skips_run_to_completion_models(env: IsolatedKissHome) -> None:
-    """cc/* models could execute the embedded task with native tools,
-    so the LLM classifier is skipped for them without any spend (the
-    decisions classifier, pinned off by ``env``, has no such risk and
-    does classify them — see ``test_task_classifier_decisions.py``)."""
-    outcome = classify_task(task=_DEV_TASK, model_name="cc/claude-opus-4-6")
-    assert outcome.classification is None
-    assert outcome.budget_used == 0.0
-    assert outcome.tokens_used == 0
-    assert outcome.steps == 0
 
 
 def test_reset_drops_stale_unfolded_usage(env: IsolatedKissHome) -> None:

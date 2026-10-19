@@ -59,8 +59,7 @@ class _RecordingHandler(RecordingHandler):
     """HTTP handler that records every request and replies with a fixed status."""
 
     def _record_and_reply(self) -> None:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         server = cast(_MatrixServer, self.server)
         server.requests.append(
             {
@@ -73,17 +72,7 @@ class _RecordingHandler(RecordingHandler):
         )
         self._reply(server.reply_status, "{}")
 
-    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Record a PUT request and reply."""
-        self._record_and_reply()
-
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Record a GET request and reply."""
-        self._record_and_reply()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Record a POST request and reply."""
-        self._record_and_reply()
+    do_PUT = do_GET = do_POST = _record_and_reply  # noqa: N815
 
 
 @contextmanager

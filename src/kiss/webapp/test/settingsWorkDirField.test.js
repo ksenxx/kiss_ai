@@ -24,6 +24,7 @@
 'use strict';
 
 const assert = require('assert');
+const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
@@ -78,18 +79,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function openSettings(win) {
-  const gear = win.document.querySelector('#settings-btn');
-  assert.ok(gear, 'the tab bar must render the settings gear');
-  gear.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function closeSettings(win) {
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 // Typing for real: set the value and fire the event the browser fires.
 function typeInto(win, id, value) {
   const node = win.document.getElementById(id);
@@ -131,13 +120,6 @@ function tabBarIds(win) {
 
 function tabEntry(tabId, workDir) {
   return {tabId, chatId: '', title: tabId, workDir};
-}
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
 }
 
 function setWorkDirs(posted) {

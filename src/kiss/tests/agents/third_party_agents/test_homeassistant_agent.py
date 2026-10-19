@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
     _config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -80,8 +81,7 @@ class _HARequestHandler(RecordingHandler):
             self._reply(404, json.dumps({"message": "Not found"}))
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
+        raw = self._read_raw()
         body: dict[str, Any] | None
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -138,7 +138,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_homeassistant_auth explains how to configure when unauthenticated."""
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_homeassistant_auth"]()
     assert "authenticate_homeassistant" in msg
     assert "long-lived" in msg.lower()
@@ -147,7 +147,7 @@ def test_check_auth_unauthenticated_message() -> None:
 def test_authenticate_persists_config_and_exposes_tools() -> None:
     """authenticate_homeassistant persists config (0600) and unlocks backend tools."""
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_homeassistant"]("http://ha.local:8123", _TOKEN))
     assert result["ok"] is True
 
@@ -182,7 +182,7 @@ def test_authenticate_persists_config_and_exposes_tools() -> None:
 def test_authenticate_rejects_empty_values() -> None:
     """authenticate_homeassistant refuses empty base_url or token."""
     agent = HomeAssistantAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cannot be empty" in tools["authenticate_homeassistant"]("", _TOKEN)
     assert "cannot be empty" in tools["authenticate_homeassistant"]("http://x", "  ")
     assert not _config.path.exists()

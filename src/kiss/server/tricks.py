@@ -42,8 +42,8 @@ from pathlib import Path
 from typing import TypedDict
 
 from kiss.core.brand import HOME_DIR
-from kiss.core.utils import atomic_write_text
-from kiss.server.user_assets import ensure_user_asset_from_default
+from kiss.core.config import kiss_home
+from kiss.core.utils import atomic_write_text, seed_file_atomically
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 
@@ -95,6 +95,32 @@ def _parse_trick_sections(text: str) -> list[str]:
         if body:
             tricks.append(body)
     return tricks
+
+
+def ensure_user_asset_from_default(name: str, default_content: str) -> Path | None:
+    """Return ``~/.kiss/<name>``, seeding it with *default_content* if absent.
+
+    The seed is :func:`kiss.core.utils.seed_file_atomically`: atomic and
+    non-clobbering, so a concurrent reader (the autocomplete worker
+    calling :func:`read_tricks` while a command-handler thread seeds
+    ``MY_INJECTION.md``) never observes an empty or partially written
+    file, and an existing file always wins.
+
+    Args:
+        name: Asset file name (``"MY_INJECTION.md"``).
+        default_content: UTF-8 text written on first read only.
+
+    Returns:
+        The path when the file exists or was just created; ``None``
+        when ``~/.kiss/`` is not writable (read-only FS, missing
+        ``HOME``) so callers can skip silently.
+    """
+    user_path = kiss_home() / name
+    try:
+        seed_file_atomically(user_path, default_content)
+    except OSError:
+        return None
+    return user_path
 
 
 def _read_my_injection_tricks() -> list[str]:
@@ -376,8 +402,10 @@ def append_my_injection_trick(text: str) -> str | None:
             return f"That promptlet is already in ~/{HOME_DIR}/MY_INJECTION.md"
         escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)
         separator = "" if existing == "" or existing.endswith("\n") else "\n"
-        with user_path.open("a", encoding="utf-8") as fh:
-            fh.write(separator + "\n## Trick\n\n" + escaped + "\n")
+        # Atomic like the delete and edit rewrites: readers (panel,
+        # completions, bootstrap) take no lock and must never observe
+        # a cut body.
+        atomic_write_text(user_path, existing + separator + "\n## Trick\n\n" + escaped + "\n")
     return None
 
 

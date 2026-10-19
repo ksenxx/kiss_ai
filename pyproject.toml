@@ -295,6 +295,10 @@ module = "docker.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "botocore.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "openai.*"
 ignore_missing_imports = true
 

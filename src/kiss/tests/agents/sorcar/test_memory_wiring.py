@@ -126,7 +126,7 @@ class TestMemoryRootForRun:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         home = self._enable(monkeypatch, tmp_path)
-        root = _memory_root_for_run(True, None, "claude-haiku-4-5")
+        root = _memory_root_for_run(True, None)
         assert root == home / "memories"
 
     def test_config_off_yields_none(
@@ -134,33 +134,26 @@ class TestMemoryRootForRun:
     ) -> None:
         home = _home(monkeypatch, tmp_path)
         _write_config(home, {"use_memory": False})
-        assert _memory_root_for_run(True, None, "claude-haiku-4-5") is None
+        assert _memory_root_for_run(True, None) is None
 
     def test_default_on_yields_memory_root(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         home = _home(monkeypatch, tmp_path)
-        root = _memory_root_for_run(True, None, "claude-haiku-4-5")
+        root = _memory_root_for_run(True, None)
         assert root == home / "memories"
 
     def test_append_basic_tools_false_gates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._enable(monkeypatch, tmp_path)
-        assert _memory_root_for_run(False, None, "claude-haiku-4-5") is None
+        assert _memory_root_for_run(False, None) is None
 
     def test_docker_image_gates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._enable(monkeypatch, tmp_path)
-        assert _memory_root_for_run(True, "python:3.12", "claude-haiku-4-5") is None
-
-    @pytest.mark.parametrize("model", ["cc/claude-fable-5", "codex/gpt-5.3-codex"])
-    def test_run_to_completion_models_gate(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: str
-    ) -> None:
-        self._enable(monkeypatch, tmp_path)
-        assert _memory_root_for_run(True, None, model) is None
+        assert _memory_root_for_run(True, "python:3.12") is None
 
     def test_caller_system_instruction_gates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -169,8 +162,7 @@ class TestMemoryRootForRun:
         (KISSAgent.run only setdefault-s it), so MEMORY_PROTOCOL would never
         reach the model and the tools must not be registered without it."""
         self._enable(monkeypatch, tmp_path)
-        root = _memory_root_for_run(
-            True, None, "claude-haiku-4-5", caller_system_instruction=True
+        root = _memory_root_for_run(True, None, caller_system_instruction=True
         )
         assert root is None
 
@@ -190,8 +182,7 @@ class TestUseMemoryOverride:
     ) -> None:
         home = _home(monkeypatch, tmp_path)
         _write_config(home, {"use_memory": False})
-        root = _memory_root_for_run(
-            True, None, "claude-haiku-4-5", use_memory_override=True
+        root = _memory_root_for_run(True, None, use_memory_override=True
         )
         assert root == home / "memories"
 
@@ -199,8 +190,7 @@ class TestUseMemoryOverride:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _home(monkeypatch, tmp_path)
-        root = _memory_root_for_run(
-            True, None, "claude-haiku-4-5", use_memory_override=False
+        root = _memory_root_for_run(True, None, use_memory_override=False
         )
         assert root is None
 
@@ -209,8 +199,7 @@ class TestUseMemoryOverride:
     ) -> None:
         home = _home(monkeypatch, tmp_path)
         monkeypatch.setenv("KISS_USE_MEMORY", "0")
-        root = _memory_root_for_run(
-            True, None, "claude-haiku-4-5", use_memory_override=True
+        root = _memory_root_for_run(True, None, use_memory_override=True
         )
         assert root == home / "memories"
 
@@ -220,8 +209,7 @@ class TestUseMemoryOverride:
         home = _home(monkeypatch, tmp_path)
         _write_config(home, {"use_memory": False})
         monkeypatch.setenv("KISS_USE_MEMORY", "1")
-        root = _memory_root_for_run(
-            True, None, "claude-haiku-4-5", use_memory_override=False
+        root = _memory_root_for_run(True, None, use_memory_override=False
         )
         assert root is None
 
@@ -231,15 +219,13 @@ class TestUseMemoryOverride:
         home = _home(monkeypatch, tmp_path)
         _write_config(home, {"use_memory": False})
         assert (
-            _memory_root_for_run(
-                True, None, "claude-haiku-4-5", use_memory_override=None
+            _memory_root_for_run(True, None, use_memory_override=None
             )
             is None
         )
         _write_config(home, {"use_memory": True})
         assert (
-            _memory_root_for_run(
-                True, None, "claude-haiku-4-5", use_memory_override=None
+            _memory_root_for_run(True, None, use_memory_override=None
             )
             == home / "memories"
         )
@@ -248,26 +234,19 @@ class TestUseMemoryOverride:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """An explicit True stays gated: stripped basic tools, Docker,
-        run-to-completion CLI models, and a caller system_instruction
-        all keep the run memory-free."""
+        and a caller system_instruction all keep the run memory-free."""
         _home(monkeypatch, tmp_path)
         gated = [
-            _memory_root_for_run(
-                False, None, "claude-haiku-4-5", use_memory_override=True
+            _memory_root_for_run(False, None, use_memory_override=True
+            ),
+            _memory_root_for_run(True, "python:3.12", use_memory_override=True,
             ),
             _memory_root_for_run(
-                True, "python:3.12", "claude-haiku-4-5",
-                use_memory_override=True,
-            ),
-            _memory_root_for_run(
-                True, None, "cc/claude-fable-5", use_memory_override=True
-            ),
-            _memory_root_for_run(
-                True, None, "claude-haiku-4-5",
+                True, None,
                 caller_system_instruction=True, use_memory_override=True,
             ),
         ]
-        assert gated == [None, None, None, None]
+        assert gated == [None, None, None]
 
 
 def _git_repo(path: Path) -> None:

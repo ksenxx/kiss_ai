@@ -29,7 +29,9 @@
 #   [3/5] Byte-compile the library with the venv's own interpreter and
 #         delete the compiled sources (see COMPILE_KEEP_SOURCE below).
 #   [4/5] Install the ``sorcar`` CLI, Playwright's Chromium and cloudflared.
-#   [5/5] Refresh ~/.kiss/MODEL_INFO.json, run the post-install hooks and
+#   [5/5] Refresh ~/.kiss/MODEL_INFO.json, run the post-install hooks
+#         (each brand hook's git checkout is first reset to its upstream,
+#         so the branding steps run the brand's latest code) and
 #         set the remote-access password; repeat steps 1-5 into every
 #         other brand home on the machine (a ``~/.<brand>`` with
 #         post-install hooks, or the home the existing service runs
@@ -949,6 +951,96 @@ other_brand_homes() {
     done
 }
 
+hook_checkout_dir() {
+    # Print the git checkout a post-install hook runs its brand from, or
+    # nothing.  A brand's installer writes its hook as a one-line
+    # ``exec <script> <args>`` stub (s10s: ``exec /path/s10s/scripts/
+    # install.sh --from-kiss-install``); the checkout is the work tree
+    # that script sits in.  A hook that execs nothing, or a script
+    # outside any git work tree (a copied file), gives nothing.  The
+    # script word is split off with the shell's own rules (a brand
+    # installer writes it with ``printf %q``, so a path with a space is
+    # backslash-escaped or quoted): the hook is executed in full a
+    # moment later, so evaluating its command line here adds nothing.
+    local hook="$1" line script dir
+    line="$(grep -m 1 '^exec[[:space:]]' "$hook" 2>/dev/null || true)"
+    [ -n "$line" ] || return 0
+    script="$(set -f; eval "set -- ${line#exec}" 2>/dev/null && printf '%s' "$1")"
+    case "$script" in
+        /*) ;;
+        *) return 0 ;;
+    esac
+    dir="$(dirname "$script")"
+    [ -d "$dir" ] || return 0
+    git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+update_brand_checkout() {
+    # Bring the git checkout a post-install hook runs from up to date
+    # before the hook runs, so every install carries the brand's latest
+    # code.  The upstream is fetched and the checkout rebased onto it,
+    # local edits stashed around the rebase (git's autostash), so the
+    # brand's unpushed commits and work in progress ride along on top
+    # of the latest code.  When that rebase cannot complete (a conflict),
+    # the checkout is forced to the upstream anyway: the local commits
+    # are kept on a ``brand-update-backup-<time>`` branch and the edits
+    # in a stash entry, both named in the warning, and the work tree is
+    # reset hard to the upstream.  A checkout with no upstream, or one
+    # that cannot be fetched (offline, no remote), is left as it is with
+    # a warning; the hook then runs the code already there.
+    #
+    # Replaying the local commits needs a committer identity, which an
+    # end user's machine often lacks (no user.name/user.email, an empty
+    # passwd name): git would then refuse the rebase and the commits
+    # would land on the backup branch for no reason.  Such a machine
+    # gets a placeholder identity for the rebase command alone; the
+    # authorship of the commits is untouched.
+    local hook="$1" dir upstream before after backup ident=""
+    dir="$(hook_checkout_dir "$hook")"
+    [ -n "$dir" ] || return 0
+    upstream="$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    if [ -z "$upstream" ]; then
+        warn "brand checkout $dir tracks no upstream branch; running its current code"
+        return 0
+    fi
+    echo "   Updating brand checkout $dir from $upstream..."
+    if ! git -C "$dir" fetch --force --prune "${upstream%%/*}" < /dev/null; then
+        warn "could not fetch $upstream for brand checkout $dir; running its current code"
+        return 0
+    fi
+    before="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || true)"
+    git -C "$dir" var GIT_COMMITTER_IDENT > /dev/null 2>&1 \
+        || ident="-c user.name=kiss-install -c user.email=kiss-install@localhost"
+    # shellcheck disable=SC2086  # $ident holds separate -c options
+    if ! git -C "$dir" $ident rebase --quiet --autostash '@{u}' < /dev/null; then
+        git -C "$dir" rebase --abort < /dev/null 2>/dev/null || true
+        backup="brand-update-backup-$(date +%Y%m%d-%H%M%S)"
+        git -C "$dir" branch -f "$backup" HEAD < /dev/null
+        if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+            git -C "$dir" stash push --quiet --include-untracked \
+                -m "install.sh: local edits before the forced update to $upstream" < /dev/null
+        fi
+        if ! git -C "$dir" reset --hard '@{u}' < /dev/null; then
+            warn "could not reset brand checkout $dir to $upstream; running its current code"
+            return 0
+        fi
+        warn "brand checkout $dir did not rebase onto $upstream cleanly; forced to $upstream, the local commits are on branch $backup and the local edits, if any, in the latest stash entry"
+    elif [ -n "$(git -C "$dir" diff --name-only --diff-filter=U 2>/dev/null)" ]; then
+        # The commits rebased, but re-applying the autostashed edits
+        # conflicted: git still exits 0, leaves conflict markers in the
+        # work tree and keeps the edits as a regular stash entry.  The
+        # hook must not run a file with markers in it.
+        git -C "$dir" reset --hard --quiet HEAD < /dev/null
+        warn "brand checkout $dir rebased onto $upstream but its local edits did not re-apply cleanly; they are kept in the latest stash entry"
+    fi
+    after="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || true)"
+    if [ "$before" = "$after" ]; then
+        echo "   Brand checkout $dir is up to date ($after)."
+    else
+        echo "   Brand checkout $dir updated $before -> $after."
+    fi
+}
+
 previous_kiss_web_homes() {
     # State directories of the daemon the existing service runs: the
     # KISS_HOME its unit/plist sets, and its runtime's own default home.
@@ -1519,10 +1611,11 @@ COMPILE_KEEP_SOURCE=(
     # Read as text by the webapp's version check (web_server._parse_version_py)
     # and by hatchling for the project version.
     "src/kiss/core/_version.py"
-    # kiss.scripts.sync_db ships its own source (``__file__``) and this
-    # module's to the remote machine it synchronizes the database with.
+    # kiss.scripts.sync_db ships its own source (``__file__``) and these
+    # two modules' to the remote machine it synchronizes the database with.
     "src/kiss/scripts/sync_db.py"
     "src/kiss/agents/sorcar/chat_summary.py"
+    "src/kiss/agents/sorcar/history_columns.py"
 )
 
 keep_source() {
@@ -1785,9 +1878,13 @@ fi
     # layer that patches the installed files (a white-label brand) is
     # applied before the daemon serves them.  Hooks run in name order
     # with KISS_HOME and KISS_APP_DIR set and no stdin; a failing hook is
-    # reported and the install still completes.
+    # reported and the install still completes.  A hook that runs a
+    # brand's installer out of a git checkout gets that checkout pulled
+    # to its upstream first (update_brand_checkout), so the brand steps
+    # it performs are the brand's latest.
     for hook in "$KISS_HOME_DIR"/post-install.d/*; do
         [ -f "$hook" ] && [ -x "$hook" ] || continue
+        update_brand_checkout "$hook"
         echo "   Running post-install hook $hook..."
         hook_rc=0
         KISS_HOME="$KISS_HOME_DIR" KISS_APP_DIR="$APP_DIR" "$hook" < /dev/null || hook_rc=$?
