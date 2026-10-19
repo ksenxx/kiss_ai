@@ -11,8 +11,17 @@ place, with the ``git_sync`` tool (:func:`kiss.agents.seas.sync.git_sync.sync`)
 doing the fetch, merge and push in one deterministic call and the shell
 and file tools only for resolving a merge that stops on conflicts.  It
 replaces the "pull origin/main, merge, push" prompts that used to be
-typed by hand.  The methods follow the SEA contract in
-:mod:`kiss.agents.seas.base.base_sea`.
+typed by hand.
+
+When machines are registered (``/machine add``), the same ``/sync``
+then runs on each of them, one after the other, as a sub-task
+(``run_agent(agent="sync", machine=<name>)``) on the checkout at the
+same path there, and finally syncs this checkout once more so it gets
+what the machines pushed.  The sub-task's message ends in
+:data:`THIS_MACHINE_ONLY`, which keeps it from fanning out again to
+the machines registered there; ``/sync this machine only`` is the
+user's way of asking for the local sync alone.  The methods follow the
+SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -22,9 +31,15 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.sync.git_sync import GitSyncError, sync
+from kiss.agents.sorcar.machines import load_machines
 
 DEFAULT_REF = "origin/main"
 """The remote branch ``/sync`` merges when the message names none."""
+
+THIS_MACHINE_ONLY = "this machine only"
+"""A message containing these words syncs this checkout alone, whatever machines
+are registered: the sub-task sent to a machine ends in them, so it never fans out
+to the machines registered there."""
 
 ADD_TO_PROMPT = (
     "Sync the work dir checkout: fetch the remote branch named above "
@@ -33,12 +48,19 @@ ADD_TO_PROMPT = (
 """Appended to every task: a bare ``/sync`` runs on this text alone, and a caller that
 prefixes its own text (the cron preamble) keeps it."""
 
-MAX_BUDGET_USD = 2.0
-"""Spending cap of one sync run; a conflict-free sync is two tool calls."""
+MACHINES_PROMPT = "Then sync the registered machines, one at a time, in this order: "
+"""Followed by the registered machine names, appended to a task that does not contain
+:data:`THIS_MACHINE_ONLY` when at least one machine is registered."""
 
-SYSTEM_PROMPT = """\
+MAX_BUDGET_USD = 2.0
+"""Spending cap per checkout (a conflict-free sync is two tool calls): a run's cap is
+this times the number of registered machines plus one, and each machine's sub-task is
+sent exactly this much, whatever that machine has registered."""
+
+SYSTEM_PROMPT = f"""\
 You are the git sync agent. You update the checkout in the work dir from a remote
-branch and push the result. Nothing else.
+branch and push the result, here and on the registered machines the message lists.
+Nothing else.
 
 1. Call `git_sync` once with `repo` = the work dir named below and `ref` = the
    `<remote>/<branch>` the message names (default `origin/main`). It fetches, merges,
@@ -51,8 +73,18 @@ branch and push the result. Nothing else.
    `git checkout --`, `git restore`, `git stash` or `git push --force`.
 3. If the report says anything else failed (not a checkout, detached HEAD, a refused
    push), stop and report it. Do not work around it.
-4. Call `finish` with a short HTML summary: branch, what was merged (fast-forward,
-   merge commit or nothing), what was pushed, and any warning.
+4. If the message lists registered machines, sync each of them in the order given,
+   one at a time: call `run_agent(agent="sync", task="<ref> {THIS_MACHINE_ONLY}",
+   machine="<name>", max_budget="{MAX_BUDGET_USD:g}", options='{{"work_dir": "<the work
+   dir named below>"}}')` and wait for its result before the next machine (never
+   `run_parallel`, never `wait="false"`). The checkout is at the same path on every
+   machine; the budget is one checkout's share, whatever the machine has registered. A machine
+   that cannot be reached or whose sync fails is reported, not retried; go on to the
+   next one. When the last machine is done, call `git_sync` once more here so this
+   checkout gets what the machines pushed.
+5. Call `finish` with a short HTML summary: branch, what was merged (fast-forward,
+   merge commit or nothing), what was pushed, any warning, and one line per machine
+   saying what its sync did or why it failed.
 """
 """The whole base system prompt of the sync agent (replaces ``SYSTEM.md``)."""
 
@@ -74,6 +106,16 @@ def git_sync(repo: str, ref: str = DEFAULT_REF) -> str:
         return str(exc)
 
 
+def machine_names(task: str) -> list[str]:
+    """Return the registered machines *task* fans out to, in registration order.
+
+    Empty when none is registered or *task* contains :data:`THIS_MACHINE_ONLY`.
+    """
+    if THIS_MACHINE_ONLY in task:
+        return []
+    return [machine.name for machine in load_machines()]
+
+
 class SyncSea(WorkerSea):
     """The ``/sync`` SEA."""
 
@@ -81,28 +123,39 @@ class SyncSea(WorkerSea):
         """Return the one-sentence help text shown by ``/sync help``."""
         return (
             "Fetches origin/main, merges it into the current branch of the tab's working "
-            "directory and pushes, resolving merge conflicts when they stop the merge; use "
-            "`/sync` in the chat (`/sync <remote>/<branch>` to merge another remote branch) "
-            'or run_agent(agent="sync", task="origin/main").'
+            "directory and pushes, resolving merge conflicts when they stop the merge, then "
+            "does the same on every registered machine (`/machine list`), one at a time, on "
+            "the checkout at the same path there, and syncs here once more; use `/sync` in "
+            "the chat (`/sync <remote>/<branch>` to merge another remote branch, `/sync this "
+            'machine only` to skip the machines) or run_agent(agent="sync", task="origin/main").'
         )
 
     def prompt(self, task: str) -> str:
-        """Return the message followed by :data:`ADD_TO_PROMPT` (alone for a bare ``/sync``)."""
-        return f"{task.strip()}\n\n{ADD_TO_PROMPT}".strip()
+        """Return the message, :data:`ADD_TO_PROMPT` and the machines to sync next.
+
+        A bare ``/sync`` runs on :data:`ADD_TO_PROMPT` alone; the machine
+        list (:func:`machine_names`) follows when there is one.
+        """
+        names = machine_names(task)
+        machines = f"\n\n{MACHINES_PROMPT}{', '.join(names)}." if names else ""
+        return f"{task.strip()}\n\n{ADD_TO_PROMPT}{machines}".strip()
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
         return SYSTEM_PROMPT
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """A worker with the shell and file tools on the checkout, capped at :data:`MAX_BUDGET_USD`.
+        """A worker with the shell, file and sub-agent tools, :data:`MAX_BUDGET_USD` per checkout.
 
         ``tool_profile`` is ``locked``: the agent needs Bash to commit a
-        resolved merge and the file tools to resolve it, and nothing else.
+        resolved merge, the file tools to resolve it, ``run_agent`` to
+        sync the registered machines, and nothing else.  The budget
+        covers this checkout and one per registered machine (a machine's
+        sub-task spend counts in this run's).
         """
         return settings | {
-            "tool_profile": "shell+edit",
-            "max_budget": MAX_BUDGET_USD,
+            "tool_profile": "shell+edit+agents",
+            "max_budget": MAX_BUDGET_USD * (1 + len(load_machines())),
             "locked": ["tool_profile"],
         }
 

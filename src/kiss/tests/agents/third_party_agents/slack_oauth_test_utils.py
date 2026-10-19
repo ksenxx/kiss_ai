@@ -104,7 +104,7 @@ class _Handler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve the token endpoint and the Web API."""
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        body = self._read_raw().decode()
         auth = self.headers.get("Authorization", "")
         self.server.requests.append((self.path, auth))
         if self.path == "/api/oauth.v2.access":
@@ -113,12 +113,7 @@ class _Handler(RecordingHandler):
             data = {"ok": True, "user_id": "U1", "user": "alice", "team": "KISS", "url": ""}
         else:
             data = {"ok": False, "error": "invalid_auth"}
-        payload = json.dumps(data).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._json(200, data, "application/json; charset=utf-8")
 
 
 class SlackApiServer(ThreadedHTTPServer):

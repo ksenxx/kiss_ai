@@ -27,6 +27,7 @@ from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
     reason="claude CLI not installed",
 )
 @pytest.mark.live_cli
+@pytest.mark.usefixtures("claude_live_billing")
 class TestCCOpusLiveThinking:
     """Live test against the real claude CLI to verify thinking block behaviour."""
 

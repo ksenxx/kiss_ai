@@ -17,7 +17,8 @@
 # 3. Check if origin is ahead of kiss_ai repo, whose main must consist of one
 #    "Release X.Y.Z" commit per release and nothing else (no development
 #    commits); a main of any other shape is replaced
-# 4. If ahead, bump version in _version.py, README.md, SYSTEM.md
+# 4. If ahead, bump version in _version.py and README.md (SYSTEM.md renders
+#    its "Version:" from _version.py through the {{VERSION}} placeholder)
 # 5. Commit changes with "Version bumped"
 # 6. Push to origin
 # 7. Push one "Release X.Y.Z" commit holding origin's tree minus the paths
@@ -46,7 +47,6 @@ PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 # The version literal is single-sourced in src/kiss/core/_version.py.
 VERSION_FILE="src/kiss/core/_version.py"
 README_FILE="README.md"
-SYSTEM_FILE="src/kiss/SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 # JSON list of literal file/folder paths (repo-relative, no globs) that MUST
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
@@ -148,48 +148,6 @@ update_readme_version() {
         print_warn "Version badge not found in $README_FILE - skipping"
     else
         print_info "README already at version $version"
-    fi
-}
-
-update_system_md_version() {
-    local version="$1"
-    if [[ ! -f "$SYSTEM_FILE" ]]; then
-        print_warn "SYSTEM file not found: $SYSTEM_FILE - skipping"
-        return
-    fi
-    local old_version updated=false found=false
-
-    # Replace "Version: X.Y.Z" (in the <identity> block: "... · Version: X.Y.Z").
-    # Use a portable POSIX BRE so this works on macOS BSD grep and Linux GNU grep alike.
-    old_version=$(grep 'Version: ' "$SYSTEM_FILE" | sed -n 's/.*Version: \([0-9][0-9.]*\).*/\1/p' | head -1)
-    if [[ -n "$old_version" ]]; then
-        found=true
-        if [[ "$old_version" != "$version" ]]; then
-            sed -i.bak "s/Version: ${old_version}/Version: ${version}/g" "$SYSTEM_FILE"
-            rm -f "${SYSTEM_FILE}.bak"
-            print_info "Updated 'Version:' from $old_version to $version in $SYSTEM_FILE"
-            updated=true
-        fi
-    fi
-
-    # Replace "Your version is X.Y.Z" (legacy phrasing, kept for safety).
-    old_version=$(grep 'Your version is ' "$SYSTEM_FILE" | sed -n 's/.*Your version is \([0-9][0-9.]*\).*/\1/p' | head -1)
-    if [[ -n "$old_version" ]]; then
-        found=true
-        if [[ "$old_version" != "$version" ]]; then
-            sed -i.bak "s/Your version is ${old_version}/Your version is ${version}/g" "$SYSTEM_FILE"
-            rm -f "${SYSTEM_FILE}.bak"
-            print_info "Updated 'Your version is' from $old_version to $version in $SYSTEM_FILE"
-            updated=true
-        fi
-    fi
-
-    if [[ "$updated" == false ]]; then
-        if [[ "$found" == false ]]; then
-            print_warn "Version not found in $SYSTEM_FILE - skipping"
-        else
-            print_info "SYSTEM.md already at version $version"
-        fi
     fi
 }
 
@@ -989,7 +947,6 @@ main() {
     print_step "Bumping version..."
     update_version_file "$VERSION"
     update_readme_version "$VERSION"
-    update_system_md_version "$VERSION"
 
     # Step 5: Commit the version bump
     print_step "Committing version bump..."

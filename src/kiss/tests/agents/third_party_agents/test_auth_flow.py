@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+
 _AUTH_AGENTS: list[dict[str, Any]] = [
     {
         "module": "kiss.agents.third_party_agents.slack.slack_sea",
@@ -187,11 +189,6 @@ def _get_agent(info: dict[str, Any]) -> Any:
     return agent
 
 
-def _get_tools(agent: Any) -> dict[str, Any]:
-    """Return auth tools as a name→callable dict."""
-    return {t.__name__: t for t in agent._get_auth_tools()}
-
-
 _CREDENTIAL_AGENTS = [a for a in _AUTH_AGENTS if a["required_params"]]
 
 
@@ -201,7 +198,7 @@ def test_authenticate_rejects_blank_required_params(info: dict[str, Any], blank:
     """authenticate_*() returns an error for every empty or whitespace-only required param."""
     if info.get("macos_only") and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
-    auth_fn = _get_tools(_get_agent(info))[info["auth"]]
+    auth_fn = auth_tools(_get_agent(info))[info["auth"]]
     sig = inspect.signature(auth_fn)
 
     for blank_param in info["required_params"]:
@@ -226,7 +223,7 @@ def test_authenticate_rejects_blank_required_params(info: dict[str, Any], blank:
 def test_auth_function_has_expected_params(info: dict[str, Any]) -> None:
     """authenticate_*() signature includes all expected required params."""
     agent = _get_agent(info)
-    tools = _get_tools(agent)
+    tools = auth_tools(agent)
     auth_fn = tools[info["auth"]]
     sig = inspect.signature(auth_fn)
 
@@ -250,7 +247,7 @@ class TestPlatformSpecificAuth:
                 "class": "IMessageAgent",
             }
         )
-        tools = _get_tools(agent)
+        tools = auth_tools(agent)
         result = tools["check_imessage_auth"]()
         data = json.loads(result)
         assert data.get("ok") is False
@@ -266,7 +263,7 @@ class TestPlatformSpecificAuth:
                 "class": "IMessageAgent",
             }
         )
-        tools = _get_tools(agent)
+        tools = auth_tools(agent)
         result = tools["authenticate_imessage"]()
         data = json.loads(result)
         assert data.get("ok") is False
@@ -281,7 +278,7 @@ class TestPlatformSpecificAuth:
                 "class": "BlueBubblesAgent",
             }
         )
-        tools = _get_tools(agent)
+        tools = auth_tools(agent)
         result = tools["authenticate_bluebubbles"](
             server_url="http://localhost:1234", password="test"
         )

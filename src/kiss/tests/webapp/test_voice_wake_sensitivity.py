@@ -38,7 +38,7 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
 
         self.tmpdir = Path(tempfile.mkdtemp())
         self.wav = _say_wav(
-            self.tmpdir, "hey", "hey there [[slnc 300]] Hey Sorcar [[slnc 1500]]"
+            self.tmpdir, "hey", "hey there [[slnc 300]] Abracadabra [[slnc 1500]]"
         )
         self.port = find_free_port()
 

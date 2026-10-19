@@ -37,6 +37,7 @@ from kiss.agents.third_party_agents.github.github_sea import (
     GitHubChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -332,7 +333,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_github_auth points at the device-flow sign-in when unauthenticated."""
     agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_github_auth"]()
     assert "authenticate_github()" in msg
     assert "https://github.com/login/device" in msg
@@ -345,7 +346,7 @@ def test_authenticate_without_client_id_explains_setup(
     """With no embedded or overriding client ID, sign-in reports the setup error."""
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "")
     agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_github"]())
     assert result["ok"] is False
     assert result["error"] == missing_client_id_error("github", "GitHub")

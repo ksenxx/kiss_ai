@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -22,18 +23,33 @@ import pytest
 import requests
 
 import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_agent_mod
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     NtfyAgent,
     NtfyChannelBackend,
     _config,
 )
 from kiss.core.config import kiss_home
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 
-class _NtfyEmulator:
-    """Local HTTP server emulating the ntfy publish/poll API.
+class _NtfyServer(RecordingServer):
+    """State of the ntfy emulator: stored messages per topic and the auth headers seen."""
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.messages: dict[str, list[dict[str, Any]]] = {}
+        self.auth_headers: list[str] = []
+        self._next_time = 0
+        self._lock = threading.Lock()
+
+
+class _NtfyHandler(RecordingHandler):
+    """Emulates the ntfy publish/poll API.
 
     POST ``/{topic}`` stores the body as a message (403 for the topic
     ``forbidden``); GET ``/{topic}/json`` returns an ``open`` event
@@ -41,80 +57,67 @@ class _NtfyEmulator:
     Records every Authorization header it sees.
     """
 
-    def __init__(self) -> None:
-        self.messages: dict[str, list[dict[str, Any]]] = {}
-        self.auth_headers: list[str] = []
-        self._next_time = 0
-        self._lock = threading.Lock()
-        emulator = self
+    server: _NtfyServer  # type: ignore[assignment]
 
-        class Handler(RecordingHandler):
-            def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-                topic = self.path.strip("/")
-                emulator.auth_headers.append(self.headers.get("Authorization", ""))
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length).decode("utf-8")
-                if topic == "forbidden":
-                    self.send_response(403)
-                    self.end_headers()
-                    return
-                tags = [t for t in self.headers.get("X-Tags", "").split(",") if t]
-                with emulator._lock:
-                    emulator._next_time += 1
-                    msg = {
-                        "id": f"id{emulator._next_time}",
-                        "time": emulator._next_time,
-                        "event": "message",
-                        "topic": topic,
-                        "message": body,
-                        "title": self.headers.get("X-Title", ""),
-                        "tags": tags,
-                    }
-                    emulator.messages.setdefault(topic, []).append(msg)
-                self._json(200, msg)
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        """Store the posted message under its topic."""
+        emulator = self.server
+        topic = self.path.strip("/")
+        emulator.auth_headers.append(self.headers.get("Authorization", ""))
+        body = self._read_raw().decode("utf-8")
+        if topic == "forbidden":
+            self.send_response(403)
+            self.end_headers()
+            return
+        tags = [t for t in self.headers.get("X-Tags", "").split(",") if t]
+        with emulator._lock:
+            emulator._next_time += 1
+            msg = {
+                "id": f"id{emulator._next_time}",
+                "time": emulator._next_time,
+                "event": "message",
+                "topic": topic,
+                "message": body,
+                "title": self.headers.get("X-Title", ""),
+                "tags": tags,
+            }
+            emulator.messages.setdefault(topic, []).append(msg)
+        self._json(200, msg)
 
-            def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-                emulator.auth_headers.append(self.headers.get("Authorization", ""))
-                parsed = urlparse(self.path)
-                topic = parsed.path.strip("/").removesuffix("/json")
-                if topic == "forbidden":
-                    self.send_response(403)
-                    self.end_headers()
-                    return
-                since = parse_qs(parsed.query).get("since", ["all"])[0]
-                with emulator._lock:
-                    stored = list(emulator.messages.get(topic, []))
-                if since != "all":
-                    stored = [m for m in stored if m["time"] > int(since)]
-                lines = [json.dumps({"id": "open1", "time": 0, "event": "open", "topic": topic})]
-                lines.extend(json.dumps(m) for m in stored)
-                self._reply(200, "\n".join(lines) + "\n", "application/x-ndjson")
-
-        self.server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        self._thread = start_serving(self.server)
-
-    def stop(self) -> None:
-        """Shut down the emulator server."""
-        stop_http_server(self.server, self._thread)
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        """Stream the topic's messages newer than ``since`` as JSON lines."""
+        emulator = self.server
+        emulator.auth_headers.append(self.headers.get("Authorization", ""))
+        parsed = urlparse(self.path)
+        topic = parsed.path.strip("/").removesuffix("/json")
+        if topic == "forbidden":
+            self.send_response(403)
+            self.end_headers()
+            return
+        since = parse_qs(parsed.query).get("since", ["all"])[0]
+        with emulator._lock:
+            stored = list(emulator.messages.get(topic, []))
+        if since != "all":
+            stored = [m for m in stored if m["time"] > int(since)]
+        lines = [json.dumps({"id": "open1", "time": 0, "event": "open", "topic": topic})]
+        lines.extend(json.dumps(m) for m in stored)
+        self._reply(200, "\n".join(lines) + "\n", "application/x-ndjson")
 
 
 @pytest.fixture()
-def emulator() -> Any:
-    """Start a local ntfy emulator on a free port and stop it after the test."""
-    server = _NtfyEmulator()
-    yield server
-    server.stop()
+def emulator() -> Iterator[_NtfyServer]:
+    """Run a local ntfy emulator on a free port for the duration of a test."""
+    yield from serve_recording(_NtfyHandler, _NtfyServer)
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def _authenticated_agent(emulator: _NtfyEmulator, topic: str = "alerts", token: str = "") -> Any:
+def _authenticated_agent(emulator: _NtfyServer, topic: str = "alerts", token: str = "") -> Any:
     """Return an NtfyAgent authenticated against the emulator."""
     agent = NtfyAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    result = json.loads(tools["authenticate_ntfy"](topic, server=emulator.url, token=token))
+    tools = tools_by_name(agent)
+    result = json.loads(tools["authenticate_ntfy"](topic, server=emulator.base_url, token=token))
     assert result["ok"] is True
     return agent
 
@@ -129,7 +132,7 @@ def test_unauthenticated_agent_exposes_only_auth_trio() -> None:
     assert "Not configured" in agent._get_auth_tools()[0]()
 
 
-def test_authenticate_persists_config_and_clear_removes_it(emulator: _NtfyEmulator) -> None:
+def test_authenticate_persists_config_and_clear_removes_it(emulator: _NtfyServer) -> None:
     """authenticate_ntfy persists 0600 config under KISS_HOME; clear removes it."""
     agent = _authenticated_agent(emulator, token="tok123")
     path = _config.path
@@ -139,7 +142,7 @@ def test_authenticate_persists_config_and_clear_removes_it(emulator: _NtfyEmulat
         assert path.stat().st_mode & 0o777 == 0o600
     saved = json.loads(path.read_text())
     assert saved["topic"] == "alerts"
-    assert saved["server"] == emulator.url
+    assert saved["server"] == emulator.base_url
     assert saved["token"] == "tok123"
     assert saved["echo_tag"] == "kiss-sorcar"
 
@@ -149,7 +152,7 @@ def test_authenticate_persists_config_and_clear_removes_it(emulator: _NtfyEmulat
     tool_names = {t.__name__ for t in agent._get_tools()}
     assert {"publish_notification", "poll_topic"} <= tool_names
 
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cleared" in tools["clear_ntfy_auth"]()
     assert not path.exists()
     assert agent._is_authenticated() is False
@@ -158,12 +161,12 @@ def test_authenticate_persists_config_and_clear_removes_it(emulator: _NtfyEmulat
 def test_authenticate_rejects_empty_topic() -> None:
     """authenticate_ntfy refuses an empty topic and persists nothing."""
     agent = NtfyAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "empty" in tools["authenticate_ntfy"]("   ")
     assert not _config.path.exists()
 
 
-def test_publish_then_poll_end_to_end(emulator: _NtfyEmulator) -> None:
+def test_publish_then_poll_end_to_end(emulator: _NtfyServer) -> None:
     """publish_notification stores a message the backend polls back normalized."""
     agent = _authenticated_agent(emulator)
     result = json.loads(agent._backend.publish_notification("hello world", title="Build"))
@@ -186,7 +189,7 @@ def test_publish_then_poll_end_to_end(emulator: _NtfyEmulator) -> None:
     assert [m["text"] for m in listed["messages"]] == ["Build\n\nhello world"]
 
 
-def test_incremental_poll_with_since_cursor(emulator: _NtfyEmulator) -> None:
+def test_incremental_poll_with_since_cursor(emulator: _NtfyServer) -> None:
     """Polling with the returned newest cursor yields only newer messages."""
     agent = _authenticated_agent(emulator)
     agent._backend.send_message("", "first")
@@ -198,11 +201,11 @@ def test_incremental_poll_with_since_cursor(emulator: _NtfyEmulator) -> None:
     assert agent._backend.poll_messages("", newer) == ([], newer)
 
 
-def test_echo_tagged_messages_are_from_bot(emulator: _NtfyEmulator) -> None:
+def test_echo_tagged_messages_are_from_bot(emulator: _NtfyServer) -> None:
     """Messages published by the agent carry the echo tag; foreign ones do not."""
     agent = _authenticated_agent(emulator)
     agent._backend.send_message("", "bot says hi")
-    requests.post(f"{emulator.url}/alerts", data=b"human says hi", timeout=10)
+    requests.post(f"{emulator.base_url}/alerts", data=b"human says hi", timeout=10)
 
     messages, _ = agent._backend.poll_messages("", "")
     by_text = {m["text"]: m for m in messages}
@@ -210,7 +213,7 @@ def test_echo_tagged_messages_are_from_bot(emulator: _NtfyEmulator) -> None:
     assert agent._backend.is_from_bot(by_text["human says hi"]) is False
 
 
-def test_token_sent_as_bearer_authorization(emulator: _NtfyEmulator) -> None:
+def test_token_sent_as_bearer_authorization(emulator: _NtfyServer) -> None:
     """The configured token is sent as an Authorization header on publish and poll."""
     agent = _authenticated_agent(emulator, token="secret-token")
     agent._backend.publish_notification("with auth")
@@ -218,7 +221,7 @@ def test_token_sent_as_bearer_authorization(emulator: _NtfyEmulator) -> None:
     assert emulator.auth_headers.count("Bearer secret-token") >= 2
 
 
-def test_publish_to_forbidden_topic_reports_error(emulator: _NtfyEmulator) -> None:
+def test_publish_to_forbidden_topic_reports_error(emulator: _NtfyServer) -> None:
     """A non-2xx publish surfaces as ok:false from the tool and raises from send."""
     agent = _authenticated_agent(emulator, topic="forbidden")
     result = json.loads(agent._backend.publish_notification("nope"))
@@ -228,7 +231,7 @@ def test_publish_to_forbidden_topic_reports_error(emulator: _NtfyEmulator) -> No
         agent._backend.send_message("", "nope")
 
 
-def test_connect_uses_persisted_config(emulator: _NtfyEmulator) -> None:
+def test_connect_uses_persisted_config(emulator: _NtfyServer) -> None:
     """A fresh backend connects from the persisted config; without it, fails."""
     _authenticated_agent(emulator, topic="ops")
     backend = NtfyChannelBackend()
@@ -240,16 +243,16 @@ def test_connect_uses_persisted_config(emulator: _NtfyEmulator) -> None:
     assert "No ntfy config" in fresh.connection_info
 
 
-def test_poll_uses_channel_id_when_unconfigured(emulator: _NtfyEmulator) -> None:
+def test_poll_uses_channel_id_when_unconfigured(emulator: _NtfyServer) -> None:
     """An unconfigured backend polls the topic given as channel_id."""
-    requests.post(f"{emulator.url}/adhoc", data=b"direct", timeout=10)
+    requests.post(f"{emulator.base_url}/adhoc", data=b"direct", timeout=10)
     backend = NtfyChannelBackend()
-    backend._server = emulator.url
+    backend._server = emulator.base_url
     messages, _ = backend.poll_messages("adhoc", "")
     assert [m["text"] for m in messages] == ["direct"]
 
 
-def test_poll_network_error_returns_empty(emulator: _NtfyEmulator, refusing_port: int) -> None:
+def test_poll_network_error_returns_empty(emulator: _NtfyServer, refusing_port: int) -> None:
     """Poll failures are swallowed by poll_messages but reported by poll_topic."""
     agent = _authenticated_agent(emulator)
     # A port that is bound but never accepts: unlike stopping the emulator
@@ -262,7 +265,7 @@ def test_poll_network_error_returns_empty(emulator: _NtfyEmulator, refusing_port
     assert result["error"]
 
 
-def test_poll_topic_reports_http_error(emulator: _NtfyEmulator) -> None:
+def test_poll_topic_reports_http_error(emulator: _NtfyServer) -> None:
     """poll_topic returns ok:false on a non-2xx poll and ok:true on success."""
     agent = _authenticated_agent(emulator, topic="forbidden")
     result = json.loads(agent._backend.poll_topic())
@@ -270,22 +273,22 @@ def test_poll_topic_reports_http_error(emulator: _NtfyEmulator) -> None:
     assert "403" in result["error"]
 
     ok_agent = _authenticated_agent(emulator, topic="alerts")
-    requests.post(f"{emulator.url}/alerts", data=b"hello", timeout=10)
+    requests.post(f"{emulator.base_url}/alerts", data=b"hello", timeout=10)
     result = json.loads(ok_agent._backend.poll_topic())
     assert result["ok"] is True
     assert [m["text"] for m in result["messages"]] == ["hello"]
 
 
-def test_comma_echo_tag_round_trip_is_from_bot(emulator: _NtfyEmulator) -> None:
+def test_comma_echo_tag_round_trip_is_from_bot(emulator: _NtfyServer) -> None:
     """A comma-separated echo_tag still filters the agent's own messages."""
     agent = NtfyAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(
-        tools["authenticate_ntfy"]("alerts", server=emulator.url, echo_tag="kiss, sorcar-bot")
+        tools["authenticate_ntfy"]("alerts", server=emulator.base_url, echo_tag="kiss, sorcar-bot")
     )
     assert result["ok"] is True
     agent._backend.send_message("", "multi-tag bot message")
-    requests.post(f"{emulator.url}/alerts", data=b"human message", timeout=10)
+    requests.post(f"{emulator.base_url}/alerts", data=b"human message", timeout=10)
 
     messages, _ = agent._backend.poll_messages("", "")
     by_text = {m["text"]: m for m in messages}
@@ -295,18 +298,21 @@ def test_comma_echo_tag_round_trip_is_from_bot(emulator: _NtfyEmulator) -> None:
 
     # Even a message carrying only one echo sub-tag is treated as from the bot.
     requests.post(
-        f"{emulator.url}/alerts", data=b"partial", headers={"X-Tags": "sorcar-bot"}, timeout=10
+        f"{emulator.base_url}/alerts", data=b"partial", headers={"X-Tags": "sorcar-bot"}, timeout=10
     )
     messages, _ = agent._backend.poll_messages("", "")
     partial = next(m for m in messages if m["text"] == "partial")
     assert agent._backend.is_from_bot(partial) is True
 
 
-def test_title_prepended_to_poll_text(emulator: _NtfyEmulator) -> None:
+def test_title_prepended_to_poll_text(emulator: _NtfyServer) -> None:
     """A published title is prepended to the normalized message text."""
     agent = _authenticated_agent(emulator)
     requests.post(
-        f"{emulator.url}/alerts", data=b"disk almost full", headers={"X-Title": "Alert"}, timeout=10
+        f"{emulator.base_url}/alerts",
+        data=b"disk almost full",
+        headers={"X-Title": "Alert"},
+        timeout=10,
     )
     messages, _ = agent._backend.poll_messages("", "")
     assert messages[0]["text"] == "Alert\n\ndisk almost full"
@@ -319,9 +325,9 @@ def test_make_backend_exits_when_unconfigured() -> None:
         ntfy_agent_mod._make_backend()
 
 
-def test_make_backend_loads_config(emulator: _NtfyEmulator) -> None:
+def test_make_backend_loads_config(emulator: _NtfyServer) -> None:
     """_make_backend returns a backend loaded from the persisted config."""
     _authenticated_agent(emulator, topic="ops")
     backend = ntfy_agent_mod._make_backend()
     assert backend._topic == "ops"
-    assert backend._server == emulator.url
+    assert backend._server == emulator.base_url

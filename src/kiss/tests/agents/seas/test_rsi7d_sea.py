@@ -44,6 +44,7 @@ from kiss.tests.agents.seas.conftest import (
     registered,
     run_sea,
 )
+from kiss.tests.agents.seas.sea_contract import system_message
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.server.conftest import init_repo
@@ -981,8 +982,8 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     # ``decide`` is not asserted: the Jev tool follows the "Use Jev"
     # setting and the OpenRouter key, not the SEA's tool list.
     assert {"Bash", "run_agent", "finish"} <= names
-    system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-    assert str(system["content"]).startswith(sea.Rsi7dSea().system_prompt(""))
+    system = system_message(agentic[0])
+    assert system.startswith(sea.Rsi7dSea().system_prompt(""))
     listing, refused, patched = _tool_results(agentic)
     scoped = json.loads(listing)
     assert scoped["scope"] == {"seas_dir": "", "names": ["demo", "fdemo"]}

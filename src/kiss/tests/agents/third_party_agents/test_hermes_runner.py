@@ -202,11 +202,6 @@ def _point_launcher_at(monkeypatch: pytest.MonkeyPatch, endpoint_file: Path) -> 
     monkeypatch.setattr(_kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", str(endpoint_file))
 
 
-def _launched_prompts(daemon: RecordingDaemon) -> list[str]:
-    """Prompts of the ``run`` commands *daemon* received, in order."""
-    return [str(command["prompt"]) for command in daemon.run_commands]
-
-
 def _make_runner(
     backend: Any,
     state_path: Path | None,
@@ -304,9 +299,7 @@ class TestChannelState:
         state["failures"] = 7
         save_channel_state(path, state)
         assert load_channel_state(path)["failures"] == 7
-        leftovers = [
-            p for p in tmp_path.iterdir() if p.is_file() and p.name.endswith(".tmp")
-        ]
+        leftovers = [p for p in tmp_path.iterdir() if p.is_file() and p.name.endswith(".tmp")]
         assert leftovers == []
 
 
@@ -393,9 +386,7 @@ class TestCircuitBreaker:
 class TestDeliveryLedger:
     """At-least-once reply delivery through the persistent ledger."""
 
-    def test_ledger_recorded_before_send_and_removed_on_success(
-        self, tmp_path: Path
-    ) -> None:
+    def test_ledger_recorded_before_send_and_removed_on_success(self, tmp_path: Path) -> None:
         """The reply is in the on-disk ledger at send time, gone after."""
         state_path = tmp_path / "channel_state_default_gen.json"
         backend = LedgerCheckingBackend(state_path)
@@ -439,9 +430,7 @@ class TestDeliveryLedger:
         """A redelivery that fails again keeps the entry for later."""
         state_path = tmp_path / "channel_state_default_gen.json"
         state = default_channel_state()
-        state["ledger"] = [
-            {"channel_id": "C1", "thread_ts": "3.0", "text": "hi", "created": 1.0}
-        ]
+        state["ledger"] = [{"channel_id": "C1", "thread_ts": "3.0", "text": "hi", "created": 1.0}]
         save_channel_state(state_path, state)
         backend = RecordingBackend(send_fail_times=2)
         runner = _make_runner(backend, state_path)
@@ -459,9 +448,7 @@ class TestDeliveryLedger:
 class TestDmPairing:
     """DM pairing codes, no-spam behaviour, and the approval flow."""
 
-    def _pairing_runner(
-        self, backend: RecordingBackend, state_path: Path
-    ) -> ChannelRunner:
+    def _pairing_runner(self, backend: RecordingBackend, state_path: Path) -> ChannelRunner:
         return _make_runner(
             backend,
             state_path,
@@ -530,9 +517,7 @@ class TestDmPairing:
         state_path = tmp_path / "channel_state_default_gen.json"
         msg = {"user": "bob", "text": "hi", "ts": "10.0"}
         backend = RecordingBackend(messages=[msg])
-        runner = _make_runner(
-            backend, state_path, dm_pairing=True, cli_name="kiss-faketest"
-        )
+        runner = _make_runner(backend, state_path, dm_pairing=True, cli_name="kiss-faketest")
         assert runner.run_once() == 0
         assert len(backend.sent) == 1
         assert "not authorized" in backend.sent[0][1]
@@ -540,9 +525,7 @@ class TestDmPairing:
 
     def test_pairing_reply_names_cli(self, tmp_path: Path) -> None:
         """The pairing reply names the channel CLI command."""
-        runner = _make_runner(
-            RecordingBackend(), tmp_path / "s.json", cli_name="kiss-x"
-        )
+        runner = _make_runner(RecordingBackend(), tmp_path / "s.json", cli_name="kiss-x")
         assert "kiss-x --approve c0dec0de" in runner._pairing_reply_text("c0dec0de")
 
     def test_pairing_reply_is_complete_shell_command(self, tmp_path: Path) -> None:
@@ -597,45 +580,31 @@ class TestPairingAdminCli:
         finally:
             sys.argv = original
 
-    def test_approve_moves_user_to_approved(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_approve_moves_user_to_approved(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--approve CODE approves the matching pending user."""
-        state_path = self._seed_state(
-            "pair-approve", {"bob": {"code": "abcd1234", "ts": 1.0}}
-        )
-        self._run_main(
-            ["kiss-telegram", "--channel", "pair-approve", "--approve", "abcd1234"]
-        )
+        state_path = self._seed_state("pair-approve", {"bob": {"code": "abcd1234", "ts": 1.0}})
+        self._run_main(["kiss-telegram", "--channel", "pair-approve", "--approve", "abcd1234"])
         assert "Approved user: bob" in capsys.readouterr().out
         state = load_channel_state(state_path)
         assert state["approved_users"] == ["bob"]
         assert state["pending_pairing"] == {}
 
-    def test_approve_unknown_code_exits_nonzero(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_approve_unknown_code_exits_nonzero(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--approve with an unknown code prints an error and exits 1."""
         self._seed_state("pair-unknown", {"bob": {"code": "abcd1234", "ts": 1.0}})
         with pytest.raises(SystemExit) as exc_info:
-            self._run_main(
-                ["kiss-telegram", "--channel", "pair-unknown", "--approve", "ffff0000"]
-            )
+            self._run_main(["kiss-telegram", "--channel", "pair-unknown", "--approve", "ffff0000"])
         assert exc_info.value.code == 1
         assert "no pending pairing request" in capsys.readouterr().out
 
-    def test_approve_requires_channel(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_approve_requires_channel(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--approve without --channel exits nonzero with an error."""
         with pytest.raises(SystemExit) as exc_info:
             self._run_main(["kiss-telegram", "--approve", "abcd1234"])
         assert exc_info.value.code == 1
         assert "require --channel" in capsys.readouterr().out
 
-    def test_approve_is_serialized_with_tick_lock(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_approve_is_serialized_with_tick_lock(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--approve blocks while a tick holds the channel state lock.
 
         The admin thread must not complete its read-modify-write while
@@ -643,9 +612,7 @@ class TestPairingAdminCli:
         save could overwrite the approval); once the lock is released
         the approval proceeds and is persisted.
         """
-        state_path = self._seed_state(
-            "pair-lockrace", {"bob": {"code": "abcd1234", "ts": 1.0}}
-        )
+        state_path = self._seed_state("pair-lockrace", {"bob": {"code": "abcd1234", "ts": 1.0}})
         admin = threading.Thread(
             target=_handle_pairing_admin,
             args=(TelegramAgent, "Telegram", "default", "pair-lockrace", "abcd1234", False),
@@ -670,9 +637,7 @@ class TestPairingAdminCli:
         assert final["failures"] == 1
         assert "Approved user: bob" in capsys.readouterr().out
 
-    def test_list_pending_prints_pairs(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_list_pending_prints_pairs(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--list-pending prints user_id:code pairs and exits cleanly."""
         self._seed_state(
             "pair-list",
@@ -709,18 +674,14 @@ class TestModelOverrides:
     def test_explicit_cli_values_win(self) -> None:
         """User-passed -m / -b values are never overridden."""
         cfg = {"channel_model_name": "override-model", "channel_max_budget": "2.5"}
-        model, budget = resolve_channel_overrides(
-            cfg, "user-model", 9.0, "default-model", 5.0
-        )
+        model, budget = resolve_channel_overrides(cfg, "user-model", 9.0, "default-model", 5.0)
         assert model == "user-model"
         assert budget == 9.0
 
     def test_explicit_values_equal_to_defaults_win(self) -> None:
         """Explicitly passing the default value blocks config overrides."""
         cfg = {"channel_model_name": "override-model", "channel_max_budget": "2.5"}
-        model, budget = resolve_channel_overrides(
-            cfg, "default-model", 5.0, "default-model", 5.0
-        )
+        model, budget = resolve_channel_overrides(cfg, "default-model", 5.0, "default-model", 5.0)
         assert model == "default-model"
         assert budget == 5.0
 
@@ -837,9 +798,7 @@ class TestThreadContinuations:
         selected = runner._select_thread_followups(replies, "100.0", "101.0")
         assert [m["text"] for m in selected] == ["follow-up A", "follow-up B"]
 
-    def test_followup_during_task_selected_despite_bot_answer(
-        self, tmp_path: Path
-    ) -> None:
+    def test_followup_during_task_selected_despite_bot_answer(self, tmp_path: Path) -> None:
         """A follow-up that arrived mid-task is selected after the bot posts.
 
         Deduplication is only on last_reply_ts: follow-up B (ts 102)
@@ -972,9 +931,7 @@ class TestThreadContinuations:
         save_channel_state(state_path, state)
         backend = ThreadBackend(
             thread_replies={
-                thread_ts: [
-                    {"user": "", "bot": True, "text": "answer", "ts": f"{now - 50:.4f}"}
-                ]
+                thread_ts: [{"user": "", "bot": True, "text": "answer", "ts": f"{now - 50:.4f}"}]
             }
         )
         runner = _make_runner(backend, state_path)
@@ -1119,9 +1076,7 @@ class TestContinuationFailureCursor:
         self._seed_state(state_path, "100.0", "101.0")
         backend = ThreadBackend(
             cursor="99",
-            thread_replies={
-                "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
-            },
+            thread_replies={"100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]},
         )
         _point_launcher_at(monkeypatch, tmp_path / "no-daemon.json")
         runner = _make_runner(backend, state_path)
@@ -1145,9 +1100,7 @@ class TestContinuationFailureCursor:
         self._seed_state(state_path, "100.0", "101.0")
         failing = ThreadBackend(
             cursor="99",
-            thread_replies={
-                "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
-            },
+            thread_replies={"100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]},
         )
         _point_launcher_at(monkeypatch, tmp_path / "no-daemon.json")
         assert _make_runner(failing, state_path).run_once() == 0
@@ -1169,7 +1122,7 @@ class TestContinuationFailureCursor:
         )
         runner = _make_runner(retry_backend, state_path)
         assert runner.run_once() == 1
-        assert any("follow up" in p for p in _launched_prompts(launch_daemon)), (
+        assert any("follow up" in p for p in launch_daemon.launched_prompts), (
             "the bot error reply must not suppress the retried follow-up"
         )
         state = load_channel_state(state_path)
@@ -1184,9 +1137,7 @@ class TestContinuationFailureCursor:
         self._seed_state(state_path, "100.0", "101.0")
         backend = ThreadBackend(
             cursor="99",
-            thread_replies={
-                "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
-            },
+            thread_replies={"100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]},
         )
         runner = _make_runner(backend, state_path)
         assert runner.run_once() == 1
@@ -1199,9 +1150,7 @@ class TestContinuationFailureCursor:
         assert state["threads"]["100.0"]["chat_id"] == "chat-cont"
         assert any(_CONTINUATION_TEXT in text for _, text, _ in backend.sent)
 
-    def test_thread_poll_failure_keeps_cursor_without_breaker(
-        self, tmp_path: Path
-    ) -> None:
+    def test_thread_poll_failure_keeps_cursor_without_breaker(self, tmp_path: Path) -> None:
         """A thread-poll failure keeps the cursor and skips the breaker."""
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")

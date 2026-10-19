@@ -78,7 +78,7 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
+    loopback_policy,
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -106,8 +106,7 @@ class _ApiHandler(RecordingHandler):
     server: Any
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self.server.requests.append(
             {
                 "method": self.command,
@@ -118,12 +117,8 @@ class _ApiHandler(RecordingHandler):
         )
         auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
         if self.path == "/api/oauth.v2.access":
-            payload = json.dumps(self.server.oauth.answer(body.decode())).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            answer = self.server.oauth.answer(body.decode())
+            self._json(200, answer, "application/json; charset=utf-8")
             return
         if self.path == "/upload/file" and self.server.upload_redirect_to:
             self.send_response(307)
@@ -157,23 +152,9 @@ class _ApiHandler(RecordingHandler):
                 }
             ).encode()
             content_type = "application/json; charset=utf-8"
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._reply(200, payload, content_type)
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a GET request."""
-        self._serve()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a POST request."""
-        self._serve()
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a DELETE request."""
-        self._serve()
+    do_GET = do_POST = do_DELETE = _serve  # noqa: N815
 
 
 class _ApiServer(RecordingServer):
@@ -197,24 +178,10 @@ def api_server() -> Any:
     yield from serve_recording(_ApiHandler, _ApiServer)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon.
-
-    Slack and Brave get a loopback ``extra_hosts`` policy entry (their
-    real hosts are fixed); Firecrawl deliberately gets none, so its
-    tests prove the enrollment-time ``hosts`` extension works.
-    """
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "slack": {"extra_hosts": ["127.0.0.1"]},
-            "brave_search": {"extra_hosts": ["127.0.0.1"]},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# Slack and Brave get a loopback ``extra_hosts`` policy entry (their
+# real hosts are fixed); Firecrawl deliberately gets none, so its
+# tests prove the enrollment-time ``hosts`` extension works.
+MUSE_POLICY = loopback_policy("slack", "brave_search")
 
 
 @pytest.fixture()
@@ -227,7 +194,7 @@ def slack_sign_in(
     """
     from kiss.agents.third_party_agents._device_auth import ConsentSession
 
-    monkeypatch.setenv("KISS_SLACK_BASE_URL", f"http://127.0.0.1:{api_server.server_address[1]}")
+    monkeypatch.setenv("KISS_SLACK_BASE_URL", api_server.base_url)
     monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
     yield api_server
     ConsentSession.cancel_active("slack")
@@ -243,7 +210,7 @@ def _slack_backend(api_server: _ApiServer) -> SlackChannelBackend:
         A connected backend holding only a surrogate-token client.
     """
     backend = SlackChannelBackend()
-    backend._api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
+    backend._api_base_url = f"{api_server.base_url}/api/"
     assert backend.connect()
     return backend
 
@@ -425,7 +392,7 @@ def test_slack_rotating_token_file_migrates_to_refreshing_vault_entry(
 
 def test_firecrawl_selfhosted_enrollment_hosts(muse_env: Path, api_server: _ApiServer) -> None:
     """A self-hosted base_url host is enrolled with the credential."""
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     firecrawl_config.save({"api_key": _REAL_FIRECRAWL_KEY, "base_url": base_url})
     backend = FirecrawlChannelBackend()
     assert backend.connect()
@@ -471,7 +438,7 @@ def test_firecrawl_rotation_and_clear_via_tools(muse_env: Path, api_server: _Api
     """authenticate_firecrawl re-enrolls; clear_firecrawl_auth wipes the vault."""
     from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     agent = FirecrawlAgent()
     tools = auth_tools(agent)
     assert "Not configured" in tools["check_firecrawl_auth"]()
@@ -497,7 +464,7 @@ def test_brave_header_kind_credential_swap(muse_env: Path, api_server: _ApiServe
     """The Brave surrogate bearer becomes a real X-Subscription-Token."""
     brave_config.save({"api_key": _REAL_BRAVE_KEY})
     backend = BraveSearchChannelBackend()
-    backend._base_url = f"http://127.0.0.1:{api_server.server_address[1]}/res/v1"
+    backend._base_url = f"{api_server.base_url}/res/v1"
     assert backend.connect()
     assert backend._api_key.startswith("muse-sgt.brave_search.")
     assert vault_has_credentials("brave_search")
@@ -531,7 +498,7 @@ def test_brave_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServ
 
     agent = BraveSearchAgent()
     tools = auth_tools(agent)
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}/res/v1"
+    base_url = f"{api_server.base_url}/res/v1"
 
     assert json.loads(tools["authenticate_brave_search"]("brave-first"))["ok"] is True
     agent._backend._base_url = base_url
@@ -802,7 +769,7 @@ def test_slack_unreachable_api_stores_nothing(
 
 def test_firecrawl_base_url_survives_key_removal(muse_env: Path, api_server: _ApiServer) -> None:
     """Removing api_key after migration keeps the self-hosted base_url."""
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}/proxy/firecrawl"
+    base_url = f"{api_server.base_url}/proxy/firecrawl"
     firecrawl_config.save({"api_key": _REAL_FIRECRAWL_KEY, "base_url": base_url})
     backend = FirecrawlChannelBackend()
     assert backend.connect()
@@ -945,7 +912,7 @@ def test_legacy_mode_untouched(
     from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent, _make_backend
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
+    api_base_url = f"{api_server.base_url}/api/"
     empty = SlackChannelBackend()
     assert not empty.connect()
     assert "No Slack credential" in empty._connection_info
@@ -964,7 +931,7 @@ def test_legacy_mode_untouched(
 
     brave_config.save({"api_key": _REAL_BRAVE_KEY})
     brave = BraveSearchChannelBackend()
-    brave._base_url = f"http://127.0.0.1:{api_server.server_address[1]}/res/v1"
+    brave._base_url = f"{api_server.base_url}/res/v1"
     assert brave.connect()
     assert brave._api_key == _REAL_BRAVE_KEY
     assert json.loads(brave.brave_web_search("q"))["ok"] is True

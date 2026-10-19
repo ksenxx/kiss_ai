@@ -239,7 +239,6 @@ class TestPreResultContentFallback:
         function_calls, content, m = _run_with_events(events)
 
         assert content == ""
-        assert m._pre_result_content == ""
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
         assert "tool_calls" in m._last_thinking_content

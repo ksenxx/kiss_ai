@@ -125,7 +125,7 @@ def default_browser_executable() -> str | None:
     """
     env_browser = os.environ.get("BROWSER", "").strip()
     if env_browser:
-        words = shlex.split(env_browser, posix=not sys.platform.startswith("win"))
+        words = _split_words(env_browser, posix=not sys.platform.startswith("win"))
         if words:
             return _which(words[0])
     if sys.platform == "darwin":
@@ -169,6 +169,16 @@ def resolve_browser() -> ResolvedBrowser:
         name = family_name(installed) or Path(installed).name
         return ResolvedBrowser(name, installed, False, note)
     return ResolvedBrowser("Chromium (bundled)", None, False, note)
+
+
+def _split_words(command_line: str, *, posix: bool = True) -> list[str]:
+    """Split a command line into words; ``[]`` when it is malformed (e.g. an
+    unbalanced quote), so a bad ``$BROWSER`` or ``Exec=`` line counts as
+    "no browser from this source" instead of raising."""
+    try:
+        return shlex.split(command_line, posix=posix)
+    except ValueError:
+        return []
 
 
 def _which(command: str) -> str | None:
@@ -223,9 +233,8 @@ def _desktop_exec(desktop_file: Path) -> str | None:
         return None
     for line in lines:
         if line.startswith("Exec="):
-            words = shlex.split(line[len("Exec=") :])
             # Skip wrappers such as "env FOO=bar chromium %U".
-            for word in words:
+            for word in _split_words(line[len("Exec=") :]):
                 if word == "env" or "=" in word or word.startswith("%"):
                     continue
                 return _which(word)
@@ -272,7 +281,7 @@ def _windows_default_executable() -> str | None:
             command = winreg.QueryValueEx(key, "")[0]
     except OSError:
         return None
-    words = shlex.split(str(command), posix=False)
+    words = _split_words(str(command), posix=False)
     return _which(words[0].strip('"')) if words else None
 
 

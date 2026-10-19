@@ -35,7 +35,6 @@ from typing import Any
 import pytest
 
 import kiss.agents.third_party_agents.overleaf.overleaf_sea as overleaf_mod
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._overleaf_realtime import flatten_tree
 from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     OverleafAgent,
@@ -45,7 +44,11 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _normalize_cookie,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serving,
+)
 
 _COOKIE = "s%3Aabc123.sig"
 _GIT_TOKEN = "olp_gittoken"
@@ -225,10 +228,9 @@ def _ws_recv(rfile: BufferedIOBase) -> tuple[int, bytes]:
     return first & 0x0F, bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
 
 
-class _OverleafServer(ThreadedHTTPServer):
+class _OverleafServer(RecordingServer):
     """The emulator's server, carrying the recorded traffic and behaviour switches."""
 
-    requests: list[dict[str, Any]]
     uploads: list[dict[str, Any]]
     ws_received: list[str]
     csrf: str
@@ -249,22 +251,6 @@ class _OverleafHandler(RecordingHandler):
 
     server: Any
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Handle GET."""
-        self._handle("GET")
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Handle POST."""
-        self._handle("POST")
-
-    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Handle PUT."""
-        self._handle("PUT")
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Handle DELETE."""
-        self._handle("DELETE")
-
     def _send(
         self, status: int, body: bytes = b"", ctype: str = "application/json", location: str = ""
     ) -> None:
@@ -276,12 +262,12 @@ class _OverleafHandler(RecordingHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _handle(self, method: str) -> None:
+    def _handle(self) -> None:
         srv = self.server
+        method = self.command
         path, _, raw_query = self.path.partition("?")
         query = dict(part.split("=", 1) for part in raw_query.split("&") if "=" in part)
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         srv.requests.append(
             {
                 "method": method,
@@ -420,12 +406,13 @@ class _OverleafHandler(RecordingHandler):
             return self._send(404, b"Not found", "text/plain")
         return self._send(200, target.read_bytes(), "application/octet-stream")
 
+    do_GET = do_POST = do_PUT = do_DELETE = _handle  # noqa: N815
+
 
 @pytest.fixture()
 def overleaf_server():
     """Start the emulated Overleaf server; yield (base_url, server)."""
     server = _OverleafServer(("127.0.0.1", 0), _OverleafHandler)
-    server.requests = []
     server.uploads = []
     server.ws_received = []
     server.csrf = "tok-1"
@@ -440,7 +427,7 @@ def overleaf_server():
     server.tree = copy.deepcopy(_ROOT_FOLDER)
     server.contents = {"d-main": b"\\documentclass{article}"}
     with serving(server):
-        yield f"http://127.0.0.1:{server.server_address[1]}", server
+        yield server.base_url, server
 
 
 @pytest.fixture()

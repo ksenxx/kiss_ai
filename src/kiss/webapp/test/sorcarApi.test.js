@@ -42,11 +42,11 @@ test('catalog contains the core task-lifecycle commands', () => {
 test('catalog omits the commands only other clients send', () => {
   // ``run`` is the Python API's (daemon_client.py), ``getTabsState``
   // a daemon link's on reconnect (commands.py _cmd_get_tabs_state),
-  // ``getModels``/``getSeaCommands`` the daemon's own ``ready``
-  // fan-out: no page message carries them.  ``auth`` is the WebSocket
-  // handshake transport.js sends raw before the api exists, and
-  // ``generateCommitMessage`` was the VS Code SCM input's command.
-  ['run', 'getTabsState', 'getModels', 'getSeaCommands', 'activeTasksQuery',
+  // ``getModels`` the daemon's own ``ready`` fan-out: no page message
+  // carries them.  ``auth`` is the WebSocket handshake transport.js
+  // sends raw before the api exists, and ``generateCommitMessage``
+  // was the VS Code SCM input's command.
+  ['run', 'getTabsState', 'getModels', 'activeTasksQuery',
    'auth', 'generateCommitMessage',
   ].forEach(name => assert.ok(!SORCAR_API_COMMANDS.includes(name), name));
 });

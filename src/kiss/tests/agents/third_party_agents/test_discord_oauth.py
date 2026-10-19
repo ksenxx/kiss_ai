@@ -48,6 +48,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
+    tools_by_name,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
 from kiss.tests.conftest import IS_WINDOWS
@@ -63,7 +64,7 @@ class _DiscordHandler(RecordingHandler):
     server: _DiscordServer  # type: ignore[assignment]
 
     def _read(self) -> bytes:
-        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        return self._read_raw()
 
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         auth = self.headers.get("Authorization", "")
@@ -508,7 +509,7 @@ def test_muse_sign_in_uses_vault(
         assert migrated._backend._muse and vault_has_credentials("discord")
         assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
         # Cached tools keep working on retries with the one surrogate.
-        list_guilds = {t.__name__: t for t in migrated._get_tools()}["list_guilds"]
+        list_guilds = tools_by_name(migrated)["list_guilds"]
         surrogate = migrated._backend._token
         for _ in range(2):
             assert json.loads(list_guilds())["ok"] is True

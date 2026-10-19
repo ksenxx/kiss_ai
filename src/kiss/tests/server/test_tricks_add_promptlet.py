@@ -274,17 +274,18 @@ class TestAddTrickCommand(_TricksHome):
         self.assertNotIn("connId", err)
         self.assertEqual(err["text"], "Promptlet must not be empty")
 
-    @posix_only("directory and file permission bits")
+    @posix_only("directory permission bits")
     @unittest.skipIf(is_root(), "root ignores file permissions")
     def test_os_error_on_write_answers_error_not_crash(self) -> None:
-        # The seeded file exists but is read-only: the seeding step
-        # succeeds (it only checks existence), the append raises.
+        # The seeded file exists but its directory is not writable: the
+        # seeding step succeeds (it only checks existence), the atomic
+        # rewrite cannot stage its temp file and raises.
         self.user_file.write_text(tricks.DEFAULT_MY_INJECTION, encoding="utf-8")
-        self.user_file.chmod(stat.S_IRUSR)
+        self.kiss_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
         try:
             self.server._cmd_add_trick({"text": "Blocked.", "connId": "c2"})
         finally:
-            self.user_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            self.kiss_dir.chmod(stat.S_IRWXU)
         err = self.server.last("error")
         assert err is not None
         self.assertEqual(err["connId"], "c2")

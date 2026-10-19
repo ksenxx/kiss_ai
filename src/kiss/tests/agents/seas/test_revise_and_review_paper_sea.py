@@ -33,7 +33,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -403,7 +403,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             "finish",
         } <= names
         assert "go_to_url" not in names, names
-        system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
+        system = system_message(request)
         assert not system.startswith(sea.SYSTEM_PROMPT)
         assert "# Revise-and-review loop coordinator" in system
         assert sea.REVIEW_PAPER_SEA in system

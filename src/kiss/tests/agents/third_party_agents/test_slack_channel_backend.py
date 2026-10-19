@@ -14,9 +14,7 @@ raises ``SlackApiError`` deterministically without network access.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
@@ -25,6 +23,7 @@ from slack_sdk.errors import SlackApiError
 
 from kiss.agents.third_party_agents.slack.slack_sea import SlackChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
     RecordingServer,
     recording_server,
     serve_recording,
@@ -38,17 +37,10 @@ def invalid_auth_server() -> Iterator[RecordingServer]:
     yield from serve_recording(InvalidAuthHandler)
 
 
-def _send_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
+def _send_json(handler: RecordingHandler, payload: dict[str, Any]) -> None:
     """Consume the request body and answer *payload* as JSON."""
-    length = int(handler.headers.get("Content-Length") or 0)
-    if length:
-        handler.rfile.read(length)
-    data = json.dumps(payload).encode()
-    handler.send_response(200)
-    handler.send_header("Content-Type", "application/json")
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
+    handler._read_raw()
+    handler._json(200, payload)
 
 
 class TestSlackChannelBackendMethods:

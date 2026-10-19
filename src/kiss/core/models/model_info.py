@@ -167,44 +167,48 @@ def _select_catalog_path(
         return user_path
     return package_path
 
-MY_MODELS_DEFAULT_CONTENT = json.dumps(
-    {
-        "_documentation": [
-            "MY_MODELS.json — your personal model registry.",
-            "",
-            "Entries here OVERRIDE matching keys in the bundled MODEL_INFO.json,",
-            "and entries whose key does not appear in the bundled file are ADDED.",
-            "Any top-level key starting with '_' is treated as a comment and is",
-            "skipped by the loader (use it for documentation or to keep an",
-            "example entry inert).",
-            "",
-            "Per-model schema:",
-            "  context_length         (int)   max input+output tokens",
-            "  input_price_per_1M     (float) USD per 1M input tokens",
-            "  output_price_per_1M    (float) USD per 1M output tokens",
-            "  fc       (bool, default true)  function-calling supported",
-            "  emb      (bool, default false) embedding model",
-            "  gen      (bool, default true)  text generation supported",
-            "  dec      (bool, default false) OpenRouter decisions model answering",
-            "      noul/choice/score questions via /api/alpha/decisions",
-            "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
-            "  use_responses_api (bool, optional) route via the OpenAI v2",
-            "      Responses API (/v1/responses) instead of Chat Completions",
-            "",
-            "To activate the example below, remove the leading '_example/'",
-            "from its key and adjust the values.",
-        ],
-        "_example/my-org/my-custom-model": {
-            "context_length": 128000,
-            "input_price_per_1M": 0.0,
-            "output_price_per_1M": 0.0,
-            "fc": True,
-            "emb": False,
-            "gen": True,
+
+MY_MODELS_DEFAULT_CONTENT = (
+    json.dumps(
+        {
+            "_documentation": [
+                "MY_MODELS.json — your personal model registry.",
+                "",
+                "Entries here OVERRIDE matching keys in the bundled MODEL_INFO.json,",
+                "and entries whose key does not appear in the bundled file are ADDED.",
+                "Any top-level key starting with '_' is treated as a comment and is",
+                "skipped by the loader (use it for documentation or to keep an",
+                "example entry inert).",
+                "",
+                "Per-model schema:",
+                "  context_length         (int)   max input+output tokens",
+                "  input_price_per_1M     (float) USD per 1M input tokens",
+                "  output_price_per_1M    (float) USD per 1M output tokens",
+                "  fc       (bool, default true)  function-calling supported",
+                "  emb      (bool, default false) embedding model",
+                "  gen      (bool, default true)  text generation supported",
+                "  dec      (bool, default false) OpenRouter decisions model answering",
+                "      noul/choice/score questions via /api/alpha/decisions",
+                "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
+                "  use_responses_api (bool, optional) route via the OpenAI v2",
+                "      Responses API (/v1/responses) instead of Chat Completions",
+                "",
+                "To activate the example below, remove the leading '_example/'",
+                "from its key and adjust the values.",
+            ],
+            "_example/my-org/my-custom-model": {
+                "context_length": 128000,
+                "input_price_per_1M": 0.0,
+                "output_price_per_1M": 0.0,
+                "fc": True,
+                "emb": False,
+                "gen": True,
+            },
         },
-    },
-    indent=2,
-) + "\n"
+        indent=2,
+    )
+    + "\n"
+)
 
 
 def _seed_my_models_file() -> None:
@@ -282,6 +286,7 @@ def _my_models_flock() -> Iterator[None]:
     with exclusive_file_lock(path.with_name("." + path.name + ".kiss.lock")):
         yield
 
+
 _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
     "context_length": 128000,
     "input_price_per_1M": 0.0,
@@ -290,8 +295,8 @@ _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
 """Loader-required keys seeded into a settings-panel-created entry.
 
 :func:`_build_model_info_entry` raises ``KeyError`` on an entry missing
-any of these, which would poison the whole catalog load, so every entry
-the settings panel creates carries them.
+any of these and :func:`_load_catalog_file` then skips the entry, so
+every entry the settings panel creates carries them.
 """
 
 
@@ -337,12 +342,14 @@ def list_custom_models() -> list[dict[str, str]]:
     """
     rows: list[dict[str, str]] = []
     for name, entry in sorted(_read_my_models().items()):
-        rows.append({
-            "name": name,
-            "endpoint": _entry_str(entry, "endpoint"),
-            "api_key": _entry_str(entry, "api_key"),
-            "headers": _entry_str(entry, "headers"),
-        })
+        rows.append(
+            {
+                "name": name,
+                "endpoint": _entry_str(entry, "endpoint"),
+                "api_key": _entry_str(entry, "api_key"),
+                "headers": _entry_str(entry, "headers"),
+            }
+        )
     return rows
 
 
@@ -447,10 +454,7 @@ def save_custom_model(
         if original_name != name and name in raw:
             if original_name:
                 return f"A custom model named '{name}' already exists"
-            return (
-                f"A custom model named '{name}' already exists; "
-                "use its Edit button to change it"
-            )
+            return f"A custom model named '{name}' already exists; use its Edit button to change it"
         entry: dict[str, Any] | None = None
         if original_name:
             moved = raw.pop(original_name)
@@ -640,9 +644,7 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
             if not isinstance(decoded, dict):
                 # `dict(None)` / `dict(42)` raise TypeError, which would
                 # escape this handler and reach the importer unclassified.
-                raise ValueError(
-                    f"expected a JSON object, got {type(decoded).__name__}"
-                )
+                raise ValueError(f"expected a JSON object, got {type(decoded).__name__}")
             return decoded
         except (OSError, ValueError) as e:
             logger.debug("Exception caught", exc_info=True)
@@ -668,9 +670,7 @@ _ALIAS_MIRRORED_FIELDS = (
 )
 
 
-def _sync_alias_transport_flags(
-    raw: dict[str, Any], user_keys: set[str]
-) -> None:
+def _sync_alias_transport_flags(raw: dict[str, Any], user_keys: set[str]) -> None:
     """Mirror a user-overridden base's transport flag and prices onto its aliases.
 
     Generated ``-{level}`` thinking aliases ship with a copy of their
@@ -731,8 +731,7 @@ def _load_model_info() -> dict[str, ModelInfo]:
         if catalog_path == PACKAGE_MODEL_INFO_PATH:
             raise
         logger.warning(
-            "Model catalog %s is unreadable or invalid; falling back to "
-            "the bundled %s",
+            "Model catalog %s is unreadable or invalid; falling back to the bundled %s",
             catalog_path,
             PACKAGE_MODEL_INFO_PATH,
             exc_info=True,
@@ -749,16 +748,30 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
     Returns:
         The complete name → :class:`ModelInfo` mapping.
 
+    A ``MY_MODELS.json`` entry that does not conform to the schema is
+    skipped with a warning *before* the merge, so it neither replaces
+    the bundled entry of the same name nor (through
+    :func:`_sync_alias_transport_flags`) strips the prices of that
+    entry's thinking aliases.  Only a hand-edited or foreign-written
+    registry can hold such an entry (the settings panel seeds
+    :data:`_CUSTOM_MODEL_DEFAULTS`), and the hot-add path
+    :func:`_lookup_model_info` already treats it as "unknown model".
+
     Raises:
         KISSError: When the catalog is unreadable or not a JSON object.
-        KeyError, TypeError, ValueError, AttributeError: When an entry
-            does not conform to the catalog schema (e.g. a required
+        KeyError, TypeError, ValueError, AttributeError: When a *catalog*
+            entry does not conform to the catalog schema (e.g. a required
             field is missing or has the wrong type).
     """
     raw = _read_model_info_json(catalog_path)
     user_entries = _read_my_models()
-    for name, entry in user_entries.items():
-        raw[name] = entry
+    for name in list(user_entries):
+        try:
+            _build_model_info_entry(user_entries[name])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            logger.warning("Ignoring malformed MY_MODELS.json entry %r", name, exc_info=True)
+            del user_entries[name]
+    raw.update(user_entries)
     _sync_alias_transport_flags(raw, set(user_entries))
     return {name: _build_model_info_entry(entry) for name, entry in raw.items()}
 
@@ -937,20 +950,148 @@ the only place either is consulted.
 
 
 def bedrock_credentials_configured() -> bool:
-    """Whether Amazon Bedrock credentials are set in the config.
+    """Whether Amazon Bedrock credentials are available.
 
     Either a bearer token (``AWS_BEARER_TOKEN_BEDROCK``) or an access key
     pair (``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY``) configures
-    Bedrock.  Ambient AWS credentials (``~/.aws``, an instance role) also
-    work at request time but are not detected here.
+    Bedrock directly.  Otherwise the ``AnthropicBedrock`` client signs
+    with boto3's default credential chain at request time, so a chain
+    source found by :func:`_ambient_aws_credentials_configured` (a
+    web-identity token as on EKS/IRSA, ECS container credentials, a
+    profile in the shared ``~/.aws`` files, ...) counts too.  Only the
+    EC2 instance-metadata source goes undetected: its probe is a network
+    round-trip per call.
 
     Returns:
-        True when one of the two credential forms is configured.
+        True when one of the credential forms is available.
     """
     keys = config_module.DEFAULT_CONFIG
-    return bool(keys.AWS_BEARER_TOKEN_BEDROCK) or bool(
-        keys.AWS_ACCESS_KEY_ID and keys.AWS_SECRET_ACCESS_KEY
+    return (
+        bool(keys.AWS_BEARER_TOKEN_BEDROCK)
+        or bool(keys.AWS_ACCESS_KEY_ID and keys.AWS_SECRET_ACCESS_KEY)
+        or _ambient_aws_credentials_configured()
     )
+
+
+_AWS_LOCAL_CREDENTIAL_METHODS = frozenset(
+    {"env", "shared-credentials-file", "config-file", "ec2-credentials-file", "boto-config"}
+)
+"""botocore credential providers (by ``METHOD``) whose ``load()`` only reads
+the environment and local files: no process is spawned and no network
+request is made, so the model picker may call them on every render."""
+
+_AWS_PROFILE_PROVIDER_KEYS: dict[str, tuple[str, ...]] = {
+    "assume-role": ("role_arn",),
+    "sso": ("sso_account_id", "sso_role_name"),
+    "custom-process": ("credential_process",),
+    "login": ("login_session",),
+}
+"""Profile keys that switch on botocore's profile-based network/process
+providers (by ``METHOD``): the keys each provider's ``load()`` tests
+before it runs a process or calls STS/SSO.  Only that gate is checked
+here; a profile the gate admits but that is otherwise incomplete fails
+at request time with botocore's own error instead of hiding the models."""
+
+
+def _aws_web_identity_setting(profile: dict[str, Any], key: str, env_var: str) -> str | None:
+    """Return a web-identity setting the way botocore resolves it.
+
+    The environment wins when the variable is set at all (an exported
+    empty value counts as set), then the selected profile.
+
+    Args:
+        profile: The selected profile's configuration.
+        key: The profile key (``web_identity_token_file``, ``role_arn``).
+        env_var: The environment variable that overrides it.
+
+    Returns:
+        The setting's value, or None when neither source has it.
+    """
+    if env_var in os.environ:
+        return os.environ[env_var]
+    value = profile.get(key)
+    return None if value is None else str(value)
+
+
+def _aws_provider_outcome(provider: Any, profile: dict[str, Any]) -> bool | None:
+    """What boto3's credential chain does when it reaches *provider*.
+
+    Args:
+        provider: One of the resolver's providers, in chain order.
+        profile: The selected profile's configuration.
+
+    Returns:
+        True when the provider yields credentials, False when the chain
+        aborts there (botocore raises for a malformed source, or for a
+        web-identity token without a role ARN), None when the chain moves
+        on to the next provider.
+    """
+    method = provider.METHOD
+    if method in _AWS_LOCAL_CREDENTIAL_METHODS:
+        try:
+            return True if provider.load() else None
+        except Exception:
+            # botocore raises PartialCredentialsError, ConfigParseError,
+            # KeyError (a half-written legacy file) or a date ParserError
+            # (AWS_CREDENTIAL_EXPIRATION) here; the client hits the same.
+            return False
+    if method == "container-role":
+        # The endpoint itself is not validated (botocore only allows a
+        # few hosts): a bad value fails at request time with its error.
+        return (
+            True
+            if os.environ.get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+            or os.environ.get("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+            else None
+        )
+    if method == "assume-role-with-web-identity":
+        token_file = _aws_web_identity_setting(
+            profile, "web_identity_token_file", "AWS_WEB_IDENTITY_TOKEN_FILE"
+        )
+        if not token_file:
+            return None
+        role_arn = _aws_web_identity_setting(profile, "role_arn", "AWS_ROLE_ARN")
+        return bool(role_arn) and Path(token_file).is_file()
+    if method == "assume-role" and "web_identity_token_file" in profile:
+        return None  # botocore leaves that profile to the web-identity provider
+    keys = _AWS_PROFILE_PROVIDER_KEYS.get(method, ())
+    # ``iam-role`` (EC2 instance metadata) has no keys: never probed.
+    return True if any(key in profile for key in keys) else None
+
+
+def _ambient_aws_credentials_configured() -> bool:
+    """Whether boto3's default credential chain has a usable source.
+
+    botocore builds the chain exactly as the ``AnthropicBedrock`` client
+    will see it (profile selection through ``AWS_PROFILE``, the
+    ``AWS_SHARED_CREDENTIALS_FILE``/``AWS_CONFIG_FILE`` overrides, its
+    own INI parsing) and the providers are walked in that order, stopping
+    where the chain would: the ones that only read files or the
+    environment are asked to load; the network ones are judged by their
+    configuration alone (see :func:`_aws_provider_outcome`).  The EC2
+    instance-metadata provider is skipped: it costs a network round-trip
+    per picker render.
+
+    Returns:
+        True when a non-network credential source is present; False when
+        none is, or when the configuration is unusable (a missing
+        ``AWS_PROFILE`` profile, a half-set key pair, an unparsable file).
+    """
+    import botocore.credentials
+    import botocore.exceptions
+    import botocore.session
+
+    session = botocore.session.Session()
+    try:
+        profile = session.get_scoped_config()
+        providers = botocore.credentials.create_credential_resolver(session).providers
+    except botocore.exceptions.BotoCoreError:  # ProfileNotFound, ConfigParseError
+        return False
+    for provider in providers:
+        outcome = _aws_provider_outcome(provider, profile)
+        if outcome is not None:
+            return outcome
+    return False
 
 
 def _match_openai_compatible_provider(
@@ -1202,10 +1343,7 @@ def _openai_charges_cache_writes(bare: str) -> bool:
     Returns:
         True when cache-write tokens are billed at 1.25x the input price.
     """
-    return (
-        bare.startswith(("gpt-5.6", "gpt-6") + _OPENAI_ROLLING_LATEST)
-        and "-pro" not in bare
-    )
+    return bare.startswith(("gpt-5.6", "gpt-6") + _OPENAI_ROLLING_LATEST) and "-pro" not in bare
 
 
 def _openai_cache_read_multiplier(bare: str) -> float:
@@ -1279,9 +1417,7 @@ def _openai_bare_name(name: str) -> str | None:
         if bare.startswith("gpt-oss"):
             return None
         return bare
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
-        ("text-embedding", "codex/")
-    ):
+    if name.startswith(_OPENAI_PREFIXES) and not name.startswith(("text-embedding", "codex/")):
         return name
     return None
 
@@ -1311,7 +1447,7 @@ def _split_bedrock_name(model_name: str) -> tuple[str, str, str] | None:
     """
     if not model_name.startswith(BEDROCK_PREFIX):
         return None
-    bedrock_id = model_name[len(BEDROCK_PREFIX):]
+    bedrock_id = model_name[len(BEDROCK_PREFIX) :]
     level = ""
     for suffix in (_XHIGH_SUFFIX, *_LEVEL_ALIAS_SUFFIXES):
         if bedrock_id.endswith(suffix):
@@ -1320,7 +1456,7 @@ def _split_bedrock_name(model_name: str) -> tuple[str, str, str] | None:
     claude = bedrock_id
     for prefix in _BEDROCK_ID_PREFIXES:
         if claude.startswith(prefix):
-            claude = claude[len(prefix):]
+            claude = claude[len(prefix) :]
     claude = _BEDROCK_VERSION_SUFFIX_RE.sub("", claude)
     if not claude.startswith("claude-"):
         return None
@@ -1412,7 +1548,7 @@ def bedrock_model_id(model_name: str) -> str:
     split = _split_bedrock_name(model_name)
     if split is not None:
         return split[0]
-    return model_name[len(BEDROCK_PREFIX):]
+    return model_name[len(BEDROCK_PREFIX) :]
 
 
 # Bedrock bills Claude 4.5 and later 10% above the ``global.`` profile
@@ -1568,9 +1704,7 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     published = info.cache_read_price_per_1M is not None
     if not published:
         info.cache_read_price_per_1M = read
-    if info.cache_write_price_per_1M is None and not (
-        published and name.startswith("openrouter/")
-    ):
+    if info.cache_write_price_per_1M is None and not (published and name.startswith("openrouter/")):
         info.cache_write_price_per_1M = write
     if info.cache_write_1h_price_per_1M is None:
         info.cache_write_1h_price_per_1M = write_1h
@@ -1625,6 +1759,7 @@ def _normalize_entry(name: str, info: ModelInfo) -> None:
 for _name, _info in MODEL_INFO.items():
     _normalize_entry(_name, _info)
 
+
 def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
 
@@ -1647,7 +1782,7 @@ def _strip_provider_prefix(model_name: str) -> str:
     strip_prefixes = ("openai/", "anthropic/", "google/")
     for prefix in strip_prefixes:
         if model_name.startswith(prefix):
-            bare = model_name[len(prefix):]
+            bare = model_name[len(prefix) :]
             if bare.startswith(("claude-", "gemini-")) or (
                 bare.startswith(_OPENAI_PREFIXES) and not bare.startswith("gpt-oss")
             ):
@@ -1718,27 +1853,7 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     return _scaled_prices(info, bedrock_price_factor(model_name))
 
 
-def model_runs_task_to_completion(model_name: str) -> bool:
-    """Whether *model_name* names a CLI agent that runs a whole task itself.
-
-    ``cc/*`` (Claude Code) and ``codex/*`` (Codex) models are full coding
-    agents: an agentic :class:`~kiss.core.kiss_agent.KISSAgent` hands them
-    the entire task in one invocation instead of driving a turn-by-turn
-    KISS tool loop, and their native tools run directly on the host (so
-    they cannot honor ``docker_image`` isolation).
-
-    Args:
-        model_name: Full model name including any provider prefix.
-
-    Returns:
-        True for ``cc/*`` and ``codex/*`` model names.
-    """
-    return model_name.startswith(("cc/", "codex/"))
-
-
-def _wants_responses_api(
-    model_name: str, model_config: dict[str, Any] | None
-) -> bool:
+def _wants_responses_api(model_name: str, model_config: dict[str, Any] | None) -> bool:
     """Decide whether the factory should build the v2 (Responses API) adapter.
 
     The caller's ``model_config["use_responses_api"]`` wins in either
@@ -1889,8 +2004,7 @@ def model(
             endpoint_provider = _registered_provider_for_exact_base_url(base_url)
             use_v2 = (
                 endpoint_provider is not None
-                and endpoint_provider
-                is _match_openai_compatible_provider(model_name)
+                and endpoint_provider is _match_openai_compatible_provider(model_name)
                 and _wants_responses_api(model_name, None)
             )
         return _openai_compatible(
@@ -1944,7 +2058,9 @@ def model(
             thinking_callback=thinking_callback,
             bedrock=bedrock,
         )
-    if model_runs_task_to_completion(model_name):
+    if model_name.startswith(("cc/", "codex/")):
+        # The CLI-backed models: KISS drives both as plain models with
+        # their native tools switched off (see their modules).
         class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
         cls = _load_model_class(class_name, f"{class_name} could not be loaded.")
         return cls(  # type: ignore[no-any-return]
@@ -2207,9 +2323,7 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare:
         return 272_000, 2.0, 1.5
-    if bare.startswith(
-        ("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro", "gemini-pro-latest")
-    ):
+    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro", "gemini-pro-latest")):
         return 200_000, 2.0, 1.5
     return None
 
@@ -2300,10 +2414,7 @@ def calculate_cost(
     output_price = info.output_price_per_1M
     uplift = _long_context_uplift(model_name)
     prompt_tokens = (
-        total_tokens
-        - num_output_tokens
-        - num_audio_output_tokens
-        - num_image_output_tokens
+        total_tokens - num_output_tokens - num_audio_output_tokens - num_image_output_tokens
     )
     if uplift is not None and prompt_tokens > uplift[0]:
         _, input_mult, output_mult = uplift
@@ -2313,9 +2424,7 @@ def calculate_cost(
         cw_price *= input_mult
         cw1h_price *= input_mult
     audio_in_price = (
-        info.audio_input_price_per_1M
-        if info.audio_input_price_per_1M is not None
-        else input_price
+        info.audio_input_price_per_1M if info.audio_input_price_per_1M is not None else input_price
     )
     audio_out_price = (
         info.audio_output_price_per_1M
@@ -2327,9 +2436,7 @@ def calculate_cost(
         if info.image_output_price_per_1M is not None
         else output_price
     )
-    audio_cr_price = (
-        audio_in_price * cr_price / input_price if input_price > 0 else cr_price
-    )
+    audio_cr_price = audio_in_price * cr_price / input_price if input_price > 0 else cr_price
     input_cost = num_input_tokens * input_price
     output_cost = num_output_tokens * output_price
     cache_read_cost = num_cache_read_tokens * cr_price

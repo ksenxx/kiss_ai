@@ -79,8 +79,7 @@ class _DiscordHandler(RecordingHandler):
             self._json(404, {"message": "404: Not Found", "code": 0})
 
     def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b""
+        raw = self._read_raw()
         body = json.loads(raw) if raw else None
         self._record(body)
         path = urlsplit(self.path).path

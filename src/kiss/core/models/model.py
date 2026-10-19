@@ -15,6 +15,7 @@ transports — the subprocess supervision those two share:
 import base64
 import contextlib
 import dataclasses
+import importlib
 import inspect
 import json
 import logging
@@ -37,6 +38,7 @@ from typing import Any, Union, get_args, get_origin
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import locked_call
 from kiss.core.models.heif import (
     HEIF_MIME_TYPES,
     HEIF_SUFFIXES,
@@ -305,9 +307,7 @@ class Attachment:
                 ".mov": "video/quicktime",
             }
             mime_type = mime_map.get(suffix, "")
-        heif = (
-            mime_type in HEIF_MIME_TYPES or file_path.suffix.lower() in HEIF_SUFFIXES
-        )
+        heif = mime_type in HEIF_MIME_TYPES or file_path.suffix.lower() in HEIF_SUFFIXES
         if not heif and mime_type not in SUPPORTED_MIME_TYPES:
             raise ValueError(
                 f"Unsupported MIME type '{mime_type}' for file '{path}'. "
@@ -324,9 +324,7 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-BINARY_ATTACHMENT_OPEN_RE = re.compile(
-    r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>"
-)
+BINARY_ATTACHMENT_OPEN_RE = re.compile(r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>")
 BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
 
 # The Read tool may also embed a HEIF photo: parse_binary_attachments() runs
@@ -347,10 +345,7 @@ def encode_binary_attachment(mime_type: str, data: bytes) -> str:
         :class:`Attachment`.
     """
     payload = base64.b64encode(data).decode("ascii")
-    return (
-        f"<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>"
-        f"{payload}{BINARY_ATTACHMENT_CLOSE}"
-    )
+    return f"<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>{payload}{BINARY_ATTACHMENT_CLOSE}"
 
 
 def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
@@ -386,16 +381,18 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
             break
         mime_type = match.group(1)
         b64_payload = text[open_end:close_idx]
+        out_parts.append(text[cursor:open_start])
+        cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
         try:
             data = base64.b64decode(b64_payload, validate=False)
-        except Exception:  # pragma: no cover – validate=False is permissive
+        except Exception:
+            # validate=False still rejects a payload of the wrong length
+            # (incorrect padding); keep the surrounding text, drop the block.
             logger.debug("Failed to decode binary attachment", exc_info=True)
-            cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
+            out_parts.append(f"[undecodable {mime_type} attachment dropped]")
             continue
-        out_parts.append(text[cursor:open_start])
         out_parts.append(f"[attached {mime_type}, {len(data)} bytes]")
         attachments.append(Attachment.from_bytes(data, mime_type))
-        cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
     out_parts.append(text[cursor:])
     return "".join(out_parts), attachments
 
@@ -433,6 +430,7 @@ _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
     "audio/mp4": "mp4",
 }
 
+
 # format -> MIME, keeping the FIRST (canonical) MIME for formats that have
 # aliases: mp3 -> audio/mpeg (not audio/mp3), wav -> audio/wav.
 def _invert_audio_table(mime_to_format: dict[str, str]) -> dict[str, str]:
@@ -447,8 +445,7 @@ _AUDIO_FORMAT_TO_MIME: dict[str, str] = _invert_audio_table(_AUDIO_MIME_TO_FORMA
 
 # MIME -> filename extension; audio/mp4 bytes conventionally use ``.m4a``.
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
-    mime: (".m4a" if fmt == "mp4" else f".{fmt}")
-    for mime, fmt in _AUDIO_MIME_TO_FORMAT.items()
+    mime: (".m4a" if fmt == "mp4" else f".{fmt}") for mime, fmt in _AUDIO_MIME_TO_FORMAT.items()
 }
 
 
@@ -464,6 +461,38 @@ def _audio_mime_to_format(mime_type: str) -> str:
     """
     fallback = mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
     return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
+
+
+#: Serializes the lazy imports of the provider modules and SDKs.  The
+#: ``openai`` package's import graph is cyclic (``openai.resources.chat``,
+#: ``openai.resources.responses`` and ``openai.resources.audio`` reach
+#: each other through ``openai.types``), which Python's per-module import
+#: locks resolve only when ONE thread walks the cycle: two threads
+#: entering it from different modules (a task thread building its model
+#: while the daemon's prewarm thread imports the other adapter, or a
+#: transcription importing the audio resource) trip the import system's
+#: deadlock detector and the import fails with ``_DeadlockError``.
+#: Re-entrant so an import done under the lock may import another one.
+_IMPORT_LOCK = threading.RLock()
+
+
+def import_provider_module(name: str) -> types_module.ModuleType:
+    """Import module *name* under the process-wide provider import lock.
+
+    Every lazy import of a ``kiss.core.models`` provider module or of a
+    provider SDK submodule (the package's lazy class attributes, the
+    daemon's prewarm, the Responses-API delegate, the audio resource of
+    :func:`transcribe_audio`) goes through here so that no two threads
+    walk the SDK's import graph at the same time.  Interrupt-safe on a
+    task thread (see :func:`kiss.core.locked.locked_call`).
+
+    Args:
+        name: Dotted module name, e.g. ``"kiss.core.models.gemini_model"``.
+
+    Returns:
+        The imported module.
+    """
+    return locked_call(_IMPORT_LOCK, importlib.import_module, name)
 
 
 def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
@@ -490,14 +519,17 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
         RuntimeError: If the transcription API call fails.
     """
     import httpx
-    from openai import OpenAI
+
+    openai = import_provider_module("openai")
+    # ``client.audio`` imports this lazily; done here, under the lock.
+    import_provider_module("openai.resources.audio")
 
     key = api_key or os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise ValueError("OpenAI API key is required for audio transcription")
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
-    client = OpenAI(
+    client = openai.OpenAI(
         api_key=key, timeout=httpx.Timeout(120.0, connect=10.0), max_retries=2
     )
     try:
@@ -603,9 +635,7 @@ def flatten_content_to_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def merge_system_texts(
-    configured: str | None, messages: list[dict[str, Any]]
-) -> str | None:
+def merge_system_texts(configured: str | None, messages: list[dict[str, Any]]) -> str | None:
     """Merge a configured system instruction with conversation system messages.
 
     Providers whose request carries the system prompt out-of-band (the
@@ -734,13 +764,57 @@ def accepted_request_params(method: Any) -> frozenset[str]:
     return frozenset(inspect.signature(method).parameters) - {"self"}
 
 
+def environ_without(names: Collection[str]) -> dict[str, str]:
+    """Return a copy of ``os.environ`` without the variables in *names*.
+
+    Copied key by key with ``get``: a settings save on another thread
+    may delete a variable between the key listing and its lookup, which
+    would make ``dict(os.environ)`` raise.
+
+    Args:
+        names: The variable names to leave out.
+
+    Returns:
+        The environment copy, for a CLI child.
+    """
+    env: dict[str, str] = {}
+    for name in list(os.environ):
+        value = os.environ.get(name)
+        if value is not None and name not in names:
+            env[name] = value
+    return env
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
-    # When True, the model is itself a full agent (e.g. a CLI coding agent):
-    # KISSAgent hands it the whole task in ONE generate() call and returns
-    # its final output, instead of driving a turn-by-turn tool loop.
-    runs_task_to_completion = False
+    #: Whether :meth:`native_tools_exposed` serves the tools to the model
+    #: (Codex, over MCP).  The agent builds the native tool set and its
+    #: executor only for a model that does.
+    serves_tools_natively = False
+
+    @contextlib.contextmanager
+    def native_tools_exposed(
+        self,
+        tools_schema: list[dict[str, Any]],
+        execute: Callable[[dict[str, Any]], tuple[str, str]],
+    ) -> Iterator[None]:
+        """Make the KISS tools natively callable by the model within the block.
+
+        The default does nothing: most models receive the tools in the
+        request itself.  A model whose backend is an agent that accepts
+        external tool servers (Codex, via MCP) overrides this to serve
+        *tools_schema* through *execute* for the duration of the block;
+        :class:`~kiss.core.kiss_agent.KISSAgent` wraps every
+        ``generate_and_process_with_tools`` step in it.
+
+        Args:
+            tools_schema: The tools in OpenAI function-calling layout
+                (``_build_openai_tools_schema``).
+            execute: Called with ``{"name": ..., "arguments": {...}}``
+                for each tool call; returns ``(name, result_text)``.
+        """
+        yield
 
     def __init__(
         self,
@@ -774,9 +848,7 @@ class Model(ABC):
         # once for every streaming transport (the key is in
         # FRAMEWORK_ONLY_CONFIG_KEYS, so no adapter forwards it).
         self._stream_stall_timeout = float(
-            self.model_config.get(
-                "stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT
-            )
+            self.model_config.get("stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT)
         )
         # Whether a thinking block is currently open, so an aborted
         # stream can close it (see _close_thinking_if_open).
@@ -1102,9 +1174,7 @@ class Model(ABC):
                 break
             if msg.get("role") == "assistant":
                 if msg.get("tool_calls"):
-                    return [
-                        (tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]
-                    ]
+                    return [(tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]]
                 content = msg.get("content")
                 if isinstance(content, list):
                     ids = [
@@ -1135,9 +1205,7 @@ class Model(ABC):
             The text to put in the tool message, and the attachments the
             tool produced (empty when it produced none).
         """
-        text, attachments = parse_binary_attachments(
-            _tool_result_to_string(result_dict)
-        )
+        text, attachments = parse_binary_attachments(_tool_result_to_string(result_dict))
         if self.usage_info_for_messages:
             text = f"{text}\n\n{self.usage_info_for_messages}"
         return text, attachments
@@ -1176,9 +1244,7 @@ class Model(ABC):
             return tool_calls[index][1]
         return f"{prefix}_{func_name}_{index}"
 
-    def _deliver_tool_result_attachments(
-        self, attachments: list[Attachment]
-    ) -> None:
+    def _deliver_tool_result_attachments(self, attachments: list[Attachment]) -> None:
         """Make bytes a tool returned visible to the model.
 
         A tool result is a string, so an image or audio clip a tool produced
@@ -1219,15 +1285,11 @@ class Model(ABC):
         pending: list[Attachment] = []
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content, attachments = self.tool_result_text_and_attachments(
-                result_dict
-            )
+            result_content, attachments = self.tool_result_text_and_attachments(result_dict)
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": self.tool_result_call_id(
-                        result_dict, i, tool_calls, func_name
-                    ),
+                    "tool_call_id": self.tool_result_call_id(result_dict, i, tool_calls, func_name),
                     "content": result_content,
                 }
             )
@@ -1388,8 +1450,10 @@ class Model(ABC):
         Returns:
             list[dict[str, Any]]: The resolved OpenAI-format tool schema list.
         """
-        return tools_schema if tools_schema is not None else self._build_openai_tools_schema(
-            function_map
+        return (
+            tools_schema
+            if tools_schema is not None
+            else self._build_openai_tools_schema(function_map)
         )
 
     def _build_openai_tools_schema(
@@ -1550,21 +1614,16 @@ class Model(ABC):
         return {"type": "string"}
 
 
-# Separates the task from the appended system prompt in the single prompt
-# sent to a CLI-backed agent (see CLITextModel._build_prompt).
-CLI_SYSTEM_PROMPT_HEADER = "\n\n# Your new system prompt follows:\n"
-
-
 class CLITextModel(Model):
     """Base class for the stateless CLI-backed models (Claude Code, Codex).
 
-    Both transports are full coding agents in their own right, so
-    ``runs_task_to_completion`` is True: :class:`~kiss.core.kiss_agent.KISSAgent`
-    hands them the whole task in one ``generate()`` call and returns their
-    final output, instead of driving a turn-by-turn KISS tool loop.  The
-    system prompt reaches Claude Code as ``--append-system-prompt``;
-    Codex's CLI has no such flag, so it gets the prompt appended to the
-    task after :data:`CLI_SYSTEM_PROMPT_HEADER`.
+    Both CLIs are coding agents in their own right, but KISS drives them
+    as plain language models: every turn runs the CLI with its native
+    tools, MCP servers, hooks and project instructions switched off and
+    KISS's own system prompt installed in place of the CLI's (``claude
+    --tools "" --system-prompt`` and ``codex exec`` with its tool
+    features disabled and ``model_instructions_file``), so the KISS tool
+    loop — and only it — acts on the user's behalf.
 
     Both transports flatten the conversation into a single text prompt,
     support tool calling only via the text-based ``tool_calls`` JSON
@@ -1576,45 +1635,26 @@ class CLITextModel(Model):
     _cli_model_name = "CLITextModel"
     _cli_logger = logger
 
-    runs_task_to_completion = True
-
     # Set for the duration of a tool-bearing turn by
     # :class:`_ToolCallFilteredStream`; adapters that can end such a turn
     # early at the first complete ``tool_calls`` block consult it.
     _tool_bearing_turn = False
 
-    def _task_text(self) -> str:
-        """Return the conversation as the task text sent to the CLI.
+    def _build_prompt(self) -> str:
+        """Return the conversation as the prompt sent to the CLI.
 
-        A one-message conversation (the normal run-to-completion case) is
-        the task text itself; a multi-turn conversation is flattened into
-        a ``[User]/[Assistant]/[Tool Result]`` transcript.
+        A one-message conversation is the task text itself; a multi-turn
+        conversation is flattened into a ``[User]/[Assistant]/[Tool
+        Result]`` transcript.  The system instruction never rides in the
+        prompt: each adapter hands it to its CLI as the real system
+        prompt (see :meth:`_build_cli_args` of the subclasses).
 
         Returns:
-            The task text, without any system instruction.
+            The prompt text, without any system instruction.
         """
         if len(self.conversation) == 1:
             return flatten_content_to_text(self.conversation[0]["content"])
         return self._conversation_as_dialogue()
-
-    def _build_prompt(self) -> str:
-        """Build the single prompt string sent to the CLI.
-
-        When ``system_instruction`` is set in ``model_config`` it is
-        appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the
-        CLIs are agents with their own system prompts, so KISS's system
-        prompt rides inside the task instead of replacing theirs.  A CLI
-        with a real channel for an appended system prompt overrides this
-        (see :class:`~kiss.core.models.claude_code_model.ClaudeCodeModel`).
-
-        Returns:
-            The assembled prompt string.
-        """
-        task = self._task_text()
-        system_instruction = self.system_instruction_text()
-        if system_instruction:
-            return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"
-        return task
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -1625,14 +1665,11 @@ class CLITextModel(Model):
         """
         if attachments:  # pragma: no cover – attachments not used in practice
             self._cli_logger.warning(
-                f"{self._cli_model_name} does not support attachments; "
-                "they will be ignored."
+                f"{self._cli_model_name} does not support attachments; they will be ignored."
             )
         self.conversation = [{"role": "user", "content": prompt}]
 
-    def _deliver_tool_result_attachments(
-        self, attachments: list[Attachment]
-    ) -> None:
+    def _deliver_tool_result_attachments(self, attachments: list[Attachment]) -> None:
         """State that this transport cannot show the bytes a tool returned.
 
         The CLI is driven by a single text prompt and has no content-part
@@ -1644,12 +1681,9 @@ class CLITextModel(Model):
         Args:
             attachments: The attachments lifted out of the tool results.
         """
-        described = ", ".join(
-            f"{att.mime_type} ({len(att.data)} bytes)" for att in attachments
-        )
+        described = ", ".join(f"{att.mime_type} ({len(att.data)} bytes)" for att in attachments)
         self._cli_logger.warning(
-            "%s cannot show attachments to the model; %s from the tool "
-            "result were not sent.",
+            "%s cannot show attachments to the model; %s from the tool result were not sent.",
             self._cli_model_name,
             described,
         )
@@ -1687,13 +1721,13 @@ class CLITextModel(Model):
 
     @contextlib.contextmanager
     def _tools_prompt_installed(
-        self, function_map: dict[str, Callable[..., Any]], extra_note: str = ""
+        self, function_map: dict[str, Callable[..., Any]]
     ) -> Iterator[None]:
         """Run one text-based tool turn with the tools prompt installed.
 
         The skeleton both CLI adapters' ``generate_and_process_with_tools``
         share: a *copy* of ``model_config`` whose ``system_instruction``
-        carries the tools prompt (plus *extra_note*) is installed, the
+        carries the tools prompt is installed, the
         stream callbacks are wrapped by :class:`_ToolCallFilteredStream`
         (which holds the assistant text back until the turn ends so the
         raw ``tool_calls`` block is never rendered), and on every exit the
@@ -1701,15 +1735,12 @@ class CLITextModel(Model):
 
         Args:
             function_map: Dictionary mapping function names to callables.
-            extra_note: Text appended after the tools prompt.
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
         original_config = self.model_config
         config = dict(original_config)
         original_system = config.get("system_instruction", "")
-        config["system_instruction"] = (
-            original_system + "\n\n" + tools_prompt
-        ).strip() + extra_note
+        config["system_instruction"] = (original_system + "\n\n" + tools_prompt).strip()
         self.model_config = config
         try:
             with _ToolCallFilteredStream(self):
@@ -1737,8 +1768,7 @@ class CLITextModel(Model):
         (:class:`_CLIProcess`) and the two ways a turn is cut short:
 
         * output silence longer than ``model_config["timeout"]`` (300 s by
-          default; KISSAgent raises it to 3600 s for run-to-completion
-          tasks) becomes the retryable :func:`_cli_stall_error`, never a
+          default) becomes the retryable :func:`_cli_stall_error`, never a
           ``KISSError`` that would abort the whole task;
         * a user Stop propagates as ``KeyboardInterrupt``.
 
@@ -1756,13 +1786,49 @@ class CLITextModel(Model):
         """
         timeout = self.model_config.get("timeout", 300)
         work_dir = self.model_config.get("work_dir") or None
-        with _CLIProcess(args, label, timeout, cwd=work_dir) as proc:
+        with _CLIProcess(
+            args,
+            label,
+            timeout,
+            cwd=work_dir,
+            env=self._cli_env(),
+            waiting_on_caller=self._tool_call_in_flight,
+            caller_error=self._tool_call_error,
+        ) as proc:
             try:
                 yield proc
             except _StreamReadTimeoutError:
                 raise _cli_stall_error(label, timeout) from None
             finally:
                 self._close_thinking_if_open()
+
+    def _tool_call_in_flight(self) -> bool:
+        """Return whether the CLI is silent because it waits on a KISS tool.
+
+        A CLI that calls KISS tools natively (Codex over the MCP bridge)
+        produces no output while a tool runs, so its silence must not
+        count as a stall.  The default — a CLI with no native tool
+        channel — is never waiting on the caller.
+        """
+        return False
+
+    def _tool_call_error(self) -> Exception | None:
+        """Return the fatal error a KISS tool the CLI called natively raised, if any.
+
+        The turn is ended and the error raised as soon as the wait loop
+        sees it: the CLI itself would talk past the tool's error reply
+        for the rest of its turn.  The default never errs.
+        """
+        return None
+
+    def _cli_env(self) -> dict[str, str] | None:
+        """Return the environment for the CLI child, or ``None`` to inherit.
+
+        Adapters whose CLI reads credentials from the environment
+        override this (Claude Code drops the API key so a turn bills the
+        user's subscription instead).
+        """
+        return None
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Not supported — the CLI transports do not provide embeddings.
@@ -1813,9 +1879,7 @@ class _StreamReadTimeoutError(Exception):
 # ``bin`` entry on Windows (the cmd-shim package): the target relative to
 # the shim's directory, run directly or through ``node`` (``%_prog%``,
 # followed by the flags of a ``#!/usr/bin/env -S node <flags>`` shebang).
-_NPM_CMD_SHIM_TARGET = re.compile(
-    r'(?:"%_prog%"((?:\s+-[^\s"]+)*)\s+)?"%dp0%\\([^"]+)"\s+%\*'
-)
+_NPM_CMD_SHIM_TARGET = re.compile(r'(?:"%_prog%"((?:\s+-[^\s"]+)*)\s+)?"%dp0%\\([^"]+)"\s+%\*')
 
 
 def _unwrap_npm_cmd_shim(args: list[str]) -> list[str]:
@@ -1899,7 +1963,14 @@ class _CLIProcess:
     """
 
     def __init__(
-        self, args: list[str], label: str, timeout: float, cwd: str | None = None
+        self,
+        args: list[str],
+        label: str,
+        timeout: float,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        waiting_on_caller: Callable[[], bool] | None = None,
+        caller_error: Callable[[], Exception | None] | None = None,
     ) -> None:
         """Start *args* and begin draining both of its output pipes.
 
@@ -1913,6 +1984,16 @@ class _CLIProcess:
                 is detected within *timeout* seconds.
             cwd: Working directory for the child, or ``None`` to inherit
                 the caller's.
+            env: Environment for the child, or ``None`` to inherit the
+                caller's.
+            waiting_on_caller: Returns ``True`` while the child is silent
+                because it waits on the caller (a tool call it made to the
+                caller is still running); an expired deadline is then
+                re-armed instead of ending the run.  ``None`` never waits.
+            caller_error: Returns the error that ends the run (a tool
+                call the child made to the caller hit a fatal limit), or
+                ``None``; polled with the stop signal by :meth:`lines`.
+                ``None`` never errs.
 
         Raises:
             KISSError: If the executable could not be started.
@@ -1920,6 +2001,8 @@ class _CLIProcess:
         self._label = label
         self._timeout = timeout
         self._deadline = time.monotonic() + timeout
+        self._waiting_on_caller = waiting_on_caller
+        self._caller_error = caller_error
         try:
             # errors="replace": a hook, plugin or shell command the CLI
             # runs can print bytes in any encoding.  With the strict
@@ -1940,6 +2023,7 @@ class _CLIProcess:
                 encoding="utf-8",
                 errors="replace",
                 cwd=cwd,
+                env=env,
             )
         except OSError as e:
             raise KISSError(f"Failed to start {label}: {e}") from e
@@ -1953,11 +2037,17 @@ class _CLIProcess:
             self._abort_start(readers)
             raise
         self._readers = (readers[0], readers[1])
-        # The stdin writer, once send_prompt() has started it, and the
+        # The stdin writer, once send_prompt() has created it, and the
         # flag that tells it to give up: close() (and a Stop or deadline
         # in send_prompt) set the flag, join the thread, then close stdin.
+        # The lock is held by the writer for the whole write and by
+        # close() while it closes stdin, so the descriptor can never be
+        # closed (and its number reused) under an os.write: a Stop
+        # delivered inside Thread.start() leaves a writer that is not yet
+        # alive, so nothing to join, but it still runs.
         self._writer: threading.Thread | None = None
         self._writer_cancel = threading.Event()
+        self._stdin_lock = threading.Lock()
 
     def __enter__(self) -> "_CLIProcess":
         """Return the running process supervisor."""
@@ -1994,9 +2084,7 @@ class _CLIProcess:
 
     def _start_reader(self, target: Callable[[], None], suffix: str) -> threading.Thread:
         """Start a daemon thread draining one of the child's pipes."""
-        thread = threading.Thread(
-            target=target, daemon=True, name=f"cli-{suffix}-drain"
-        )
+        thread = threading.Thread(target=target, daemon=True, name=f"cli-{suffix}-drain")
         thread.start()
         return thread
 
@@ -2046,6 +2134,7 @@ class _CLIProcess:
             KeyboardInterrupt: The user pressed Stop.
             _StreamReadTimeoutError: The turn outlived its deadline
                 before the child accepted the whole prompt.
+            Exception: What ``caller_error()`` returned.
         """
         writer = threading.Thread(
             target=self._write_prompt,
@@ -2053,19 +2142,54 @@ class _CLIProcess:
             daemon=True,
             name="cli-stdin-write",
         )
+        # Owned before start(): a Stop raised right after start() returns
+        # must find the running thread in self._writer so close() joins
+        # it before closing stdin.  close() skips the join when start()
+        # raised (the thread is not alive), so this cannot abort cleanup.
         self._writer = writer
         writer.start()
         while True:
-            remaining = self._deadline - time.monotonic()
-            if remaining <= 0:
+            try:
+                remaining = self._remaining()
+            except BaseException:
                 self._writer_cancel.set()
-                raise _StreamReadTimeoutError()
-            if stop_signal.stop_requested():
-                self._writer_cancel.set()
-                raise stop_error()
+                raise
             writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
             if not writer.is_alive() or self._proc.poll() is not None:
                 return
+
+    def _raise_for_caller(self) -> None:
+        """Raise when the caller's side ends the run: a Stop, or the error it reports.
+
+        The one check of every wait loop of this class (:meth:`send_prompt`,
+        :meth:`lines`, :meth:`wait_for_exit`): a tool call the child made
+        to the caller can hit a fatal limit while the caller is blocked
+        writing the prompt or waiting for the child to wind down, not
+        only while it is reading output.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop.
+            Exception: What ``caller_error()`` returned.
+        """
+        if stop_signal.stop_requested():
+            raise stop_error()
+        error = self._caller_error() if self._caller_error is not None else None
+        if error is not None:
+            raise error
+
+    def _remaining(self) -> float:
+        """Return the seconds left before the inactivity deadline, after :meth:`_raise_for_caller`.
+
+        Raises:
+            _StreamReadTimeoutError: The deadline has passed.
+            KeyboardInterrupt: The user pressed Stop.
+            Exception: What ``caller_error()`` returned.
+        """
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise _StreamReadTimeoutError()
+        self._raise_for_caller()
+        return remaining
 
     def _write_prompt(self, data: bytes) -> None:
         """Push *data* into the child's stdin, then close it.
@@ -2092,39 +2216,45 @@ class _CLIProcess:
         ``BlockingIOError`` (or, on Windows pipes, a zero-byte write),
         and the writer waits up to :data:`_STOP_POLL_SECONDS` on the
         cancel event — waking early on cancellation — before retrying.
+
+        ``_stdin_lock`` is held from before the descriptor is read until
+        the pipe is closed, so :meth:`close` cannot close it between the
+        cancel check and the ``os.write``; a writer that only gets the
+        lock after :meth:`close` finds the file closed and exits.
         """
         stdin = self._proc.stdin
         assert stdin is not None
         view = memoryview(data)
-        try:
-            fd = stdin.fileno()
-            os.set_blocking(fd, False)
-            while view:
-                if (
-                    self._writer_cancel.is_set()
-                    or self._proc.poll() is not None
-                    or time.monotonic() >= self._deadline
-                ):
-                    break
-                try:
-                    written = os.write(fd, view)
-                except BlockingIOError:
-                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
-                    continue
-                if written == 0:  # pragma: no cover
-                    # Not reachable on POSIX: a non-blocking pipe write
-                    # either transfers at least one byte or raises
-                    # BlockingIOError.  Windows pipes can report a full
-                    # buffer as a zero-byte write instead; treat it the
-                    # same so the loop never spins hot or stalls.
-                    self._writer_cancel.wait(_STOP_POLL_SECONDS)
-                    continue
-                view = view[written:]
-        except (OSError, ValueError):
-            logger.debug("%s exited before reading its prompt", self._label)
-        finally:
-            with contextlib.suppress(OSError):
-                stdin.close()
+        with self._stdin_lock:
+            try:
+                fd = stdin.fileno()
+                os.set_blocking(fd, False)
+                while view:
+                    if (
+                        self._writer_cancel.is_set()
+                        or self._proc.poll() is not None
+                        or time.monotonic() >= self._deadline
+                    ):
+                        break
+                    try:
+                        written = os.write(fd, view)
+                    except BlockingIOError:
+                        self._writer_cancel.wait(_STOP_POLL_SECONDS)
+                        continue
+                    if written == 0:  # pragma: no cover
+                        # Not reachable on POSIX: a non-blocking pipe write
+                        # either transfers at least one byte or raises
+                        # BlockingIOError.  Windows pipes can report a full
+                        # buffer as a zero-byte write instead; treat it the
+                        # same so the loop never spins hot or stalls.
+                        self._writer_cancel.wait(_STOP_POLL_SECONDS)
+                        continue
+                    view = view[written:]
+            except (OSError, ValueError):
+                logger.debug("%s exited before reading its prompt", self._label)
+            finally:
+                with contextlib.suppress(OSError):
+                    stdin.close()
 
     def lines(self) -> Iterator[str]:
         """Yield the child's stdout lines until EOF.
@@ -2133,7 +2263,10 @@ class _CLIProcess:
         configured timeout: the timeout bounds *silence*, not total run
         time, so a CLI agent productively streaming events for hours is
         never cut off mid-work while one that stops producing output is
-        detected within ``timeout`` seconds.
+        detected within ``timeout`` seconds.  Silence while the child
+        waits on the caller (``waiting_on_caller()`` is true) re-arms the
+        deadline instead of ending the run; an error the caller reports
+        (``caller_error()``) ends the run at once.
 
         Yields:
             One line of stdout at a time.
@@ -2142,17 +2275,18 @@ class _CLIProcess:
             KeyboardInterrupt: The user pressed Stop.
             _StreamReadTimeoutError: The child produced no output for
                 ``timeout`` seconds.
+            Exception: What ``caller_error()`` returned.
         """
         while True:
-            remaining = self._deadline - time.monotonic()
-            if remaining <= 0:
-                raise _StreamReadTimeoutError()
-            if stop_signal.stop_requested():
-                raise stop_error()
+            if self._waiting_on_caller is not None and self._waiting_on_caller():
+                # Re-armed on every poll, not only once expired: the
+                # child must get the full timeout of silence AFTER the
+                # tool returned, not whatever was left of a deadline
+                # re-armed while the tool ran.
+                self._deadline = time.monotonic() + self._timeout
+            remaining = self._remaining()
             try:
-                line = self._stdout_lines.get(
-                    timeout=min(remaining, _STOP_POLL_SECONDS)
-                )
+                line = self._stdout_lines.get(timeout=min(remaining, _STOP_POLL_SECONDS))
             except queue.Empty:
                 continue
             if line is None:
@@ -2204,22 +2338,23 @@ class _CLIProcess:
         waiting on its own children) must not turn a complete turn into
         an unclassified ``subprocess.TimeoutExpired``.  The wait is
         bounded by whatever is left of the run's deadline, so a short
-        configured timeout stays short, and it polls the stop signal in
-        :data:`_STOP_POLL_SECONDS` slices like :meth:`lines` does: a Stop
-        pressed while the child winds down must not be answered with a
-        successful turn.
+        configured timeout stays short, and it polls the stop signal and
+        the caller's error in :data:`_STOP_POLL_SECONDS` slices like
+        :meth:`lines` does: neither a Stop pressed while the child winds
+        down nor a tool call of the child that hit a fatal limit
+        meanwhile must be answered with a successful turn.
 
         Returns:
             The exit status, or ``None`` when the child outlived the wait.
 
         Raises:
             KeyboardInterrupt: The user pressed Stop during the wait.
+            Exception: What ``caller_error()`` returned.
         """
         remaining = max(self._deadline - time.monotonic(), 0.0)
         wait_until = time.monotonic() + min(remaining, _EXIT_GRACE_SECONDS)
         while True:
-            if stop_signal.stop_requested():
-                raise stop_error()
+            self._raise_for_caller()
             slice_ = min(wait_until - time.monotonic(), _STOP_POLL_SECONDS)
             status = self._reap(max(slice_, 0.0))
             if status is not None or slice_ <= 0:
@@ -2249,19 +2384,22 @@ class _CLIProcess:
             KISSError: With the exit status and the child's stderr.
             KeyboardInterrupt: The user pressed Stop while the child was
                 winding down (see :meth:`wait_for_exit`).
+            Exception: What ``caller_error()`` returned meanwhile.
         """
         status = self.wait_for_exit()
         if status not in (0, None):
-            raise KISSError(
-                f"{self._label} failed (exit {status}): {self.stderr_text().strip()}"
-            )
+            raise KISSError(f"{self._label} failed (exit {status}): {self.stderr_text().strip()}")
 
     def close(self) -> None:
         """Terminate the child, reap it, and release its pipes.
 
         The prompt pipe is always released: its writer is told to stop,
-        joined (it re-checks the flag every :data:`_STOP_POLL_SECONDS`),
-        and stdin is closed.  An output pipe is closed only once the
+        joined if it is alive (it re-checks the flag every
+        :data:`_STOP_POLL_SECONDS`; a writer whose ``start()`` raised is
+        not alive and has nothing to join), and stdin is closed under
+        ``_stdin_lock`` so a writer still inside ``Thread.start()`` when
+        the Stop landed cannot write through the closed descriptor
+        afterwards.  An output pipe is closed only once the
         thread moving bytes through it has finished.  A grandchild that
         inherited stdout or stderr keeps it open after the child is
         gone, leaving that reader parked inside ``read(2)`` holding the
@@ -2284,10 +2422,10 @@ class _CLIProcess:
         if proc.poll() is None:
             self._reap(_REAP_GRACE_SECONDS)
         self._writer_cancel.set()
-        if self._writer is not None:
+        if self._writer is not None and self._writer.is_alive():
             self._writer.join()
         assert proc.stdin is not None  # every pipe is subprocess.PIPE
-        with contextlib.suppress(OSError):
+        with self._stdin_lock, contextlib.suppress(OSError):
             proc.stdin.close()
         attached = (
             (proc.stdout, self._readers[0]),
@@ -2310,14 +2448,10 @@ class _CLIProcess:
 # is the shape a model uses to wrap its tool-call JSON in a code block,
 # and it matches the whitespace tolerance of the batch stripper this
 # streaming filter replaced.
-_FENCE_OPENER_RE = re.compile(
-    r"`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*\Z"
-)
+_FENCE_OPENER_RE = re.compile(r"`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*\Z")
 # A trailing run that could still grow into a fence opener followed by a
 # brace once the next streaming chunk arrives.
-_FENCE_PREFIX_RE = re.compile(
-    r"(?:`{1,2}|`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*)\Z"
-)
+_FENCE_PREFIX_RE = re.compile(r"(?:`{1,2}|`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*)\Z")
 
 
 class _ToolCallFilteredStream:

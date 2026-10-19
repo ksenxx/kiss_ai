@@ -2,17 +2,12 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Live integration tests: cc/* models run the claude CLI agentically.
+"""Live integration test: cc/* models drive KISS tools through the claude CLI.
 
-Mirrors how codex/* models run ``codex exec`` in agentic mode.  Verifies
-against the real ``claude`` CLI that:
-
-1. The CLI's native tools (Bash, ...) execute for the model — the run
-   spans several assistant messages and the tool activity streams as
-   thinking blocks.
-2. KISS-level text-based tool calling still works: the model prints the
-   ``tool_calls`` JSON as plain text instead of attempting (and failing)
-   a native invocation of the framework tool.
+``ClaudeCodeModel`` runs the CLI with ``--tools ""``: it is a plain model, so
+KISS-level text-based tool calling must work, i.e. the model prints the
+``tool_calls`` JSON as plain text instead of attempting (and failing) a
+native invocation of the framework tool.
 
 Requires the ``claude`` CLI to be installed and authenticated.
 """
@@ -31,47 +26,9 @@ requires_claude = pytest.mark.skipif(
 
 @requires_claude
 @pytest.mark.live_cli
+@pytest.mark.usefixtures("claude_live_billing")
 class TestCCAgenticLive:
-    """Live agentic runs against the real claude CLI."""
-
-    @pytest.mark.slow
-    def test_native_tool_execution_streams_as_thinking(
-        self, tmp_path: "pytest.TempPathFactory"
-    ) -> None:
-        """The CLI executes its own Bash tool; activity streams as thinking."""
-        import os
-
-        thinking: list[str] = []
-        in_thinking = [False]
-
-        def token_cb(text: str) -> None:
-            if in_thinking[0]:
-                thinking.append(text)
-
-        def thinking_cb(is_start: bool) -> None:
-            in_thinking[0] = is_start
-
-        note = tmp_path / "note.txt"  # type: ignore[operator]
-        note.write_text("kiss-agentic-probe\n")
-        cwd = os.getcwd()
-        os.chdir(tmp_path)  # type: ignore[arg-type]
-        try:
-            m = ClaudeCodeModel(
-                "cc/haiku", token_callback=token_cb, thinking_callback=thinking_cb
-            )
-            m.initialize(
-                "Use your Bash tool to run 'cat note.txt' and report the "
-                "exact contents."
-            )
-            content, response = m.generate()
-        finally:
-            os.chdir(cwd)
-
-        assert "kiss-agentic-probe" in content
-        joined = "".join(thinking)
-        assert "cat note.txt" in joined, f"tool use not in thinking: {joined!r}"
-        counts = m.extract_input_output_token_counts_from_response(response)
-        assert counts[1] > 0, f"no output tokens reported: {counts}"
+    """Live runs against the real claude CLI."""
 
     @pytest.mark.slow
     def test_kiss_tool_calls_emitted_as_text_not_native(self) -> None:

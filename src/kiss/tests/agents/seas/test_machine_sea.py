@@ -26,7 +26,7 @@ from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
@@ -158,8 +158,8 @@ def test_agent_lists_the_machines_and_finishes_with_the_text(
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"finish", "machine_add", "machine_remove", "machine_list"}, names
-        system = next(m for m in request["messages"] if m["role"] == "system")
-        assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
+        system = system_message(request)
+        assert system.startswith(sea.SYSTEM_PROMPT)
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
     assert len(tool_results) == 1
     # The tool result is followed by the step/usage footer the agent appends.

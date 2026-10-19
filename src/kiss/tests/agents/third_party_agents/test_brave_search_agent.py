@@ -39,6 +39,7 @@ from kiss.agents.third_party_agents.brave.brave_sea import (
     _clamp,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -205,7 +206,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_brave_search_auth explains how to configure when unauthenticated."""
     agent = BraveSearchAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_brave_search_auth"]()
     assert "authenticate_brave_search" in msg
     assert "https://api-dashboard.search.brave.com/" in msg
@@ -214,7 +215,7 @@ def test_check_auth_unauthenticated_message() -> None:
 def test_authenticate_persists_config_and_exposes_tools() -> None:
     """authenticate_brave_search persists config (0600) and unlocks backend tools."""
     agent = BraveSearchAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_brave_search"](f"  {_API_KEY}  "))
     assert result["ok"] is True
 
@@ -253,7 +254,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
     tools still locked.
     """
     agent = BraveSearchAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     config_dir = _config.path.parent
     if config_dir.is_dir():
         shutil.rmtree(config_dir)
@@ -273,7 +274,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
 def test_authenticate_rejects_empty_api_key() -> None:
     """authenticate_brave_search refuses an empty or blank api_key."""
     agent = BraveSearchAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cannot be empty" in tools["authenticate_brave_search"]("")
     assert "cannot be empty" in tools["authenticate_brave_search"]("   ")
     assert not _config.path.exists()

@@ -29,6 +29,7 @@ from kiss.agents.third_party_agents.simplex.simplex_sea import (
     SimpleXChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 
 _NEW_CHAT_ITEMS_EVENT: dict[str, Any] = {
     "resp": {
@@ -143,10 +144,10 @@ def simplex_server() -> Iterator[str]:
 
 def _authenticate(agent: SimpleXAgent, ws_url: str) -> dict[str, Callable[..., str]]:
     """Run the authenticate_simplex tool and return the tool map."""
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_simplex"](ws_url=ws_url))
     assert result["ok"] is True
-    return {t.__name__: t for t in agent._get_tools()}
+    return tools_by_name(agent)
 
 
 def test_agent_unauthenticated_state() -> None:
@@ -160,7 +161,7 @@ def test_agent_unauthenticated_state() -> None:
         "check_simplex_auth",
         "clear_simplex_auth",
     ]
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_simplex_auth"]()
     assert "Not configured" in msg
     assert "authenticate_simplex" in msg
@@ -202,7 +203,7 @@ def test_auth_persistence_and_clear(isolated_kiss_home: Path) -> None:
 def test_authenticate_rejects_empty_url() -> None:
     """authenticate_simplex('') returns an error and stores nothing."""
     agent = SimpleXAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert tools["authenticate_simplex"](ws_url="  ") == "ws_url cannot be empty."
     assert agent._is_authenticated() is False
     assert not _config.path.exists()
@@ -278,6 +279,8 @@ def test_poll_filters_by_channel(simplex_server: str) -> None:
         deadline = time.time() + 10.0
         while time.time() < deadline and not messages:
             messages, _ = backend.poll_messages("team", "0", limit=10)
+            if not messages:
+                time.sleep(0.05)
         assert [m["text"] for m in messages] == ["hi from group"]
         # The non-matching direct message was discarded; the queue is empty now.
         again, _ = backend.poll_messages("", "0", limit=10)

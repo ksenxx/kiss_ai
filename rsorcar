@@ -108,8 +108,11 @@
 #      rows into the receiving database in place via
 #      src/kiss/scripts/sync_db.py — no row is ever deleted, both web apps keep
 #      running, and a task that ran on only one of the two machines ends up on
-#      both.  Only a remote without a usable database (first deploy) — or a
-#      merge the schemas refuse — falls back to a full copy, which stops the
+#      both.  The two machines may be on different releases: a column one
+#      database has and the other lacks is added to the receiving database
+#      the way the web app adds it when it opens an older database.  Only a
+#      remote without a usable database (first deploy) — or a merge that
+#      fails for another reason — falls back to a full copy, which stops the
 #      remote web app for the swap, keeps the database it replaces as
 #      history.db.replaced (with the usage counters of that database carried
 #      into the new one), and starts the web app again before returning.
@@ -260,6 +263,7 @@ for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh 
               src/kiss/scripts/sync_kiss_notes.py \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/agents/sorcar/chat_summary.py \
+              src/kiss/agents/sorcar/history_columns.py \
               src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
               src/kiss/scripts/db_fingerprint.py \

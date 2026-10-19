@@ -708,6 +708,23 @@ body.content-tab-open #chat-header { display: none; }
 
 .config-subpanel-body[hidden] { display: none !important; }
 
+/* The Claude Code subpanel's login line (claudeCodeStatus reply). */
+.claude-code-status { line-height: 1.4; }
+.claude-code-status-ok { color: var(--green); }
+.claude-code-status-warn { color: var(--warning); }
+
+/* The Codex subpanel's login line (codexStatus reply) and the
+   device-code sign-in row (codexLogin reply). */
+.codex-status { line-height: 1.4; }
+.codex-status-ok { color: var(--green); }
+.codex-status-warn { color: var(--warning); }
+
+.codex-login-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+}
+
+.codex-login-row code { user-select: all; }
+
 /* The Custom Models subpanel's Add / Save / Cancel row and the list of
    models stored in ~/.kiss/MY_MODELS.json. */
 .custom-model-actions {
@@ -2267,7 +2284,9 @@ body.meta-section-resizing {
   color: var(--fg);
 }
 
-.sched-row {
+.sched-row,
+.machine-row,
+.recommendation-row {
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -2296,15 +2315,6 @@ body.meta-section-resizing {
 
 .sched-row .sidebar-item-edit:disabled,
 .machine-row .sidebar-item-delete:disabled { opacity: 0.2; cursor: default; }
-
-.machine-row,
-.recommendation-row {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: var(--space-1) var(--space-0-5);
-  border-radius: var(--radius-sm);
-}
 
 .machine-row:hover,
 .machine-row:focus-visible,
@@ -2449,6 +2459,16 @@ button.app-row-main:hover,
 button.app-row-main:focus-visible {
   background: color-mix(in srgb, var(--fg) 10%, transparent);
   outline: none;
+}
+
+/* A Connect row whose task is under way ("Connecting…"). */
+button.app-row-main:disabled {
+  cursor: default;
+  background: none;
+}
+
+button.app-row-main:disabled .app-state {
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
 }
 
 .app-dot {
@@ -2870,15 +2890,6 @@ button.app-row-main .app-state { color: var(--accent); }
   display: flex;
   gap: var(--space-1-5);
   margin-left: auto;
-}
-
-.sidebar-tab-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 0;
-  margin-top: var(--space-0-5);
 }
 
 .sidebar-section {
@@ -3752,13 +3763,14 @@ button.app-row-main .app-state { color: var(--accent); }
 #tricks-search:focus,
 #tricks-add-input:focus { border-color: var(--accent); }
 
-/* The Inject promptlet panel's "new promptlet" box with its Add button. */
-#tricks-add-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
+/* The Inject promptlet panel's "new promptlet" box with its Add button,
+   and the History search box with the flat-list / chat-panels switch on
+   its right. */
+#tricks-add-row,
+.history-search-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
 
 #tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: var(--space-2-5); }
 
-/* The search box with the flat-list / chat-panels switch on its right. */
-.history-search-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
 .history-search-row .search-wrap { flex: 1; min-width: 0; margin-bottom: 0; }
 
 #history-view-toggle {
@@ -3851,6 +3863,10 @@ button.app-row-main .app-state { color: var(--accent); }
 
 .hf-chip-favorite:has(> input:checked) .hf-chip-icon {
   color: var(--favorite); opacity: 1;
+}
+
+.hf-chip-cron:has(> input:checked) .hf-chip-icon {
+  color: var(--accent); opacity: 1;
 }
 
 .history-filter-date-lbl {
@@ -4430,23 +4446,10 @@ body.remote-chat .running-item.history-active-task:hover {
 .running-item.collapsed > .running-item-info { display: none; }
 
 /* "3 hours ago" — the task's age, right after the show-details chevron
-   of a history task panel. Muted and small so it reads as metadata; it
-   may shrink (with an ellipsis) but never wraps. */
-.sidebar-item-launched {
-  flex-shrink: 1;
-  min-width: 0;
-  margin-left: var(--space-0-5);
-  font-size: var(--fs-sm);
-  color: var(--fg);
-  opacity: 0.55;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The task's tags ("work · coding") and SEA, right after its
-   "3 hours ago" label and in the same muted style, so they read as one
-   line of metadata. */
+   of a history task panel — followed by its tags ("work · coding"), SEA
+   and machine in the same muted, small style, so they read as one line
+   of metadata; each may shrink (with an ellipsis) but never wraps. */
+.sidebar-item-launched,
 .sidebar-item-tags,
 .sidebar-item-sea,
 .sidebar-item-machine {

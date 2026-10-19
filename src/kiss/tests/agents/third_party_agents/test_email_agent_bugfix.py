@@ -29,7 +29,7 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _store_result,
     _truncate_text,
 )
-from kiss.tests.agents.third_party_agents.test_email_agent import _raw_plain
+from kiss.tests.agents.third_party_agents.email_test_utils import raw_plain
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -59,7 +59,7 @@ class TestReplyToPreference:
     def test_normalize_mail_parses_reply_to(self) -> None:
         """_normalize_mail exposes the Reply-To address."""
         msg = email.message_from_bytes(
-            _raw_plain(**{"Reply-To": "Alice Work <alice.work@corp.example>"})
+            raw_plain(**{"Reply-To": "Alice Work <alice.work@corp.example>"})
         )
         normalized = _normalize_mail(msg, "INBOX")
         assert normalized["reply_to"] == "alice.work@corp.example"
@@ -67,13 +67,13 @@ class TestReplyToPreference:
 
     def test_normalize_mail_without_reply_to(self) -> None:
         """Mail without Reply-To yields an empty reply_to field."""
-        normalized = _normalize_mail(email.message_from_bytes(_raw_plain()), "INBOX")
+        normalized = _normalize_mail(email.message_from_bytes(raw_plain()), "INBOX")
         assert normalized["reply_to"] == ""
 
     def test_cached_thread_prefers_reply_to(self) -> None:
         """The thread cache routes replies to Reply-To, not From."""
         backend = EmailChannelBackend()
-        msg = email.message_from_bytes(_raw_plain(**{"Reply-To": "alice.work@corp.example"}))
+        msg = email.message_from_bytes(raw_plain(**{"Reply-To": "alice.work@corp.example"}))
         backend._cache_thread(_normalize_mail(msg, "INBOX"))
         to, subject = backend._resolve_outbound("INBOX", "<abc123@example.com>")
         assert (to, subject) == ("alice.work@corp.example", "Hello there")
@@ -81,7 +81,7 @@ class TestReplyToPreference:
     def test_cached_thread_falls_back_to_from(self) -> None:
         """Without Reply-To, the From address is cached as the recipient."""
         backend = EmailChannelBackend()
-        backend._cache_thread(_normalize_mail(email.message_from_bytes(_raw_plain()), "INBOX"))
+        backend._cache_thread(_normalize_mail(email.message_from_bytes(raw_plain()), "INBOX"))
         to, _ = backend._resolve_outbound("INBOX", "<abc123@example.com>")
         assert to == "alice@example.com"
 
@@ -90,7 +90,7 @@ class TestReplyToPreference:
         backend = EmailChannelBackend()
         backend._cfg = {"email_address": "bot@example.com"}
         msg = email.message_from_bytes(
-            _raw_plain(From="bot@example.com", **{"Reply-To": "human@example.com"})
+            raw_plain(From="bot@example.com", **{"Reply-To": "human@example.com"})
         )
         assert backend.is_from_bot(_normalize_mail(msg, "INBOX")) is True
 
@@ -102,7 +102,7 @@ class TestMissingMessageId:
         """Without a Message-ID the thread is cached by ts and thread_ts=ts."""
         backend = EmailChannelBackend()
         normalized = _normalize_mail(
-            email.message_from_bytes(_raw_plain(**{"Message-ID": ""})), "INBOX"
+            email.message_from_bytes(raw_plain(**{"Message-ID": ""})), "INBOX"
         )
         assert normalized["thread_ts"] == ""
         backend._cache_thread(normalized)
@@ -167,7 +167,7 @@ class TestHtmlOnlyBody:
 
     def test_html_only_single_part_body(self) -> None:
         """A non-multipart text/html mail is also stripped."""
-        raw = _raw_plain(**{"Content-Type": 'text/html; charset="utf-8"'})
+        raw = raw_plain(**{"Content-Type": 'text/html; charset="utf-8"'})
         raw = raw.replace(b"Hi bot, please help.", b"<p>Hi <b>bot</b>, please help.</p>")
         body = _message_body_text(email.message_from_bytes(raw))
         assert body == "Hi bot, please help."
@@ -191,7 +191,7 @@ class TestJsonTruncation:
 
     def test_truncated_large_body_stays_valid_json(self) -> None:
         """A >8000-char body, truncated then dumped, survives json.loads."""
-        raw = _raw_plain().replace(b"Hi bot, please help.", b"x" * 20000 + b'"quote')
+        raw = raw_plain().replace(b"Hi bot, please help.", b"x" * 20000 + b'"quote')
         normalized = _normalize_mail(email.message_from_bytes(raw), "INBOX")
         normalized["text"] = _truncate_text(normalized["text"], 8000)
         payload = json.dumps({"ok": True, "email": normalized}, indent=2)

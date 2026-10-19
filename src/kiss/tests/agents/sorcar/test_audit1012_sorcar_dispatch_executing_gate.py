@@ -7,14 +7,15 @@
 The daemon stops a task by injecting ``KeyboardInterrupt`` into the
 task thread at an arbitrary bytecode boundary
 (``PyThreadState_SetAsyncExc``, see ``task_runner._stop_task``).  In
-``sea_settings._executing`` the call of ``_EXECUTING.__exit__`` is such
-a boundary, and it lies AFTER the thread recorded itself as the file's
-executor and released the lock but BEFORE the ``try: yield`` whose
-``finally`` removes the record.  A stop landing there leaves the record
-behind; nothing of the stopped thread runs again to remove it.
+``sea_settings._executing`` the return of ``locked_call(_EXECUTING,
+_claim, ...)`` is such a boundary, and it lies AFTER the thread recorded
+itself as the file's executor and released the lock but BEFORE the
+``try: yield`` whose ``finally`` removes the record.  A stop landing
+there leaves the record behind; nothing of the stopped thread runs
+again to remove it.
 
 The test delivers the interrupt at exactly that boundary through an
-opcode trace in the loading thread (the instruction after ``__exit__``
+opcode trace in the loading thread (the instruction after the claim
 returned, before the ``try`` is entered, which is where the injected
 exception would be raised), then asserts
 that a later execution of the same file — on another thread — does not
@@ -45,18 +46,22 @@ _GATE_CODE = sea_settings._executing.__wrapped__.__code__  # type: ignore[attr-d
 
 
 def _after_lock_release_offset() -> int:
-    """Return the offset of the instruction right after ``_EXECUTING.__exit__`` returns.
+    """Return the offset of the instruction right after the claim's ``locked_call`` returns.
 
-    The ``POP_TOP`` that drops ``__exit__``'s result, just before the
-    first ``yield``: the owner record is written and the lock released,
-    the ``try`` is not entered.  ``PyThreadState_SetAsyncExc`` delivers
-    an injected stop at the eval-breaker check that follows the
-    ``__exit__`` call, which is this very boundary.
+    The ``STORE_FAST`` of ``depth``, just before the first ``yield``:
+    the owner record is written and the lock released, the ``try`` is
+    not entered.  ``PyThreadState_SetAsyncExc`` delivers an injected
+    stop at the eval-breaker check that follows the ``locked_call``
+    call, which is this very boundary.
     """
     instructions = list(dis.get_instructions(_GATE_CODE))
     first_yield = next(i for i, ins in enumerate(instructions) if ins.opname == "YIELD_VALUE")
-    pop_top = next(ins for ins in reversed(instructions[:first_yield]) if ins.opname == "POP_TOP")
-    return pop_top.offset
+    store = next(
+        ins
+        for ins in reversed(instructions[:first_yield])
+        if ins.opname == "STORE_FAST" and ins.argval == "depth"
+    )
+    return store.offset
 
 
 def _interrupt_after_lock_release(frame: FrameType, event: str, arg: Any) -> Any:

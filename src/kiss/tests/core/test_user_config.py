@@ -1018,6 +1018,8 @@ class TestApiKeyEnvVarsConstant:
             "AWS_SECRET_ACCESS_KEY",
             "AWS_SESSION_TOKEN",
             "AWS_REGION",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CODEX_ACCESS_TOKEN",
         }
         assert API_KEY_ENV_VARS == expected
 

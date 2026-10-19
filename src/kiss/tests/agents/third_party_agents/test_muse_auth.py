@@ -68,7 +68,7 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     vault_has_credentials,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
-    setup_muse_env,
+    loopback_policy,
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -108,8 +108,7 @@ class _ApiHandler(RecordingHandler):
     server: Any
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self.server.requests.append(
             {
                 "method": self.command,
@@ -120,25 +119,7 @@ class _ApiHandler(RecordingHandler):
         )
         self._json(200, {"ok": True, "path": self.path})
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a GET request."""
-        self._serve()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a POST request."""
-        self._serve()
-
-    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a PUT request."""
-        self._serve()
-
-    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a PATCH request."""
-        self._serve()
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a DELETE request."""
-        self._serve()
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _serve  # noqa: N815
 
 
 @pytest.fixture()
@@ -147,20 +128,7 @@ def api_server() -> Iterator[RecordingServer]:
     yield from serve_recording(_ApiHandler)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon."""
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "google_drive": {"extra_hosts": ["127.0.0.1"]},
-            "gmail": {"extra_hosts": ["127.0.0.1"]},
-            "github": {"extra_hosts": ["127.0.0.1"]},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+MUSE_POLICY = loopback_policy("google_drive", "gmail", "github")
 
 
 class _DriveClient:
@@ -206,7 +174,7 @@ class _DriveClient:
 def test_surrogate_swap_read_allowed(muse_env: Path, api_server: RecordingServer) -> None:
     """Reads run without approval and the API sees only the real token."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     backend = _DriveClient(base_url)
     assert backend.token.startswith("muse-sgt.google_drive.")
     assert _REAL_DRIVE_TOKEN not in backend.token
@@ -226,7 +194,7 @@ def test_surrogate_swap_read_allowed(muse_env: Path, api_server: RecordingServer
 def test_write_needs_grant_once_consumed(muse_env: Path, api_server: RecordingServer) -> None:
     """Writes ask for approval; a once grant allows exactly one write."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     backend = _DriveClient(base_url)
 
     denied = backend.create_folder("blocked")
@@ -253,7 +221,7 @@ def test_write_needs_grant_once_consumed(muse_env: Path, api_server: RecordingSe
 def test_ttl_and_session_grants(muse_env: Path, api_server: RecordingServer) -> None:
     """TTL grants expire; session grants die with the daemon."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     backend = _DriveClient(base_url)
 
     # Allow side: a generous TTL that cannot expire between grant and use
@@ -324,7 +292,7 @@ def test_github_bearer_service(muse_env: Path, api_server: RecordingServer) -> N
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps({"token": _REAL_GITHUB_TOKEN}))
     backend = GitHubChannelBackend()
-    backend._base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    backend._base_url = api_server.base_url
     assert backend.connect()
     assert backend._token.startswith("muse-sgt.github.")
     assert vault_has_credentials("github")
@@ -351,7 +319,7 @@ def test_github_bearer_service(muse_env: Path, api_server: RecordingServer) -> N
 def test_audit_log_and_no_secrets(muse_env: Path, api_server: RecordingServer) -> None:
     """Every decision is audited and the audit never leaks tokens."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-    backend = _DriveClient(f"http://127.0.0.1:{api_server.server_address[1]}")
+    backend = _DriveClient(api_server.base_url)
     backend.search()
     backend.create_folder("denied")
     audit = (muse_auth_dir() / "audit.jsonl").read_text()
@@ -368,7 +336,7 @@ def test_unrefreshable_vault_credential_errors(muse_env: Path, api_server: Recor
     store_credentials(
         "google_drive", {"refresh_token": "", "client_id": "c", "client_secret": "s"}, []
     )
-    backend = _DriveClient(f"http://127.0.0.1:{api_server.server_address[1]}")
+    backend = _DriveClient(api_server.base_url)
     result = backend.search()
     assert result["ok"] is False
     assert "credential resolution failed" in result["error"]
@@ -703,7 +671,7 @@ def test_reachable_edge_paths(muse_env: Path, api_server: RecordingServer) -> No
 def test_policy_deny_and_malformed_policy(muse_env: Path, api_server: RecordingServer) -> None:
     """An explicit deny rule blocks reads; a malformed policy falls back safely."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     backend = _DriveClient(base_url)
 
     # Deny reads for google_drive (policy is re-read on every decision).

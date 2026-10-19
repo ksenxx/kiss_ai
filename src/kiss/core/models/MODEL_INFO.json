@@ -6060,16 +6060,6 @@
     "use_responses_api": true,
     "cache_read_price_per_1M": 7.5
   },
-  "openrouter/openai/o1-pro": {
-    "context_length": 200000,
-    "input_price_per_1M": 150.0,
-    "output_price_per_1M": 600.0,
-    "fc": false,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW",
-    "use_responses_api": true
-  },
   "openrouter/openai/o3": {
     "context_length": 200000,
     "input_price_per_1M": 2.0,
@@ -6099,16 +6089,6 @@
     "gen": true,
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.55
-  },
-  "openrouter/openai/o3-pro": {
-    "context_length": 200000,
-    "input_price_per_1M": 20.0,
-    "output_price_per_1M": 80.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW",
-    "use_responses_api": true
   },
   "openrouter/openai/o4-mini": {
     "context_length": 200000,

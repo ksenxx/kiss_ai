@@ -17,7 +17,6 @@ code.hljs { padding: 3px 5px; }
 .hljs-doctag,
 .hljs-keyword,
 .hljs-meta .hljs-keyword,
-.hljs-template-tag,
 .hljs-variable.language_,
 .hljs-literal,
 .hljs-meta { color: #569cd6; }
@@ -63,7 +62,6 @@ code.hljs { padding: 3px 5px; }
 /* comment */
 .hljs-comment,
 .hljs-code,
-.hljs-formula,
 .hljs-quote { color: #6a9955; }
 
 /* entity.name.tag */

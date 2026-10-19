@@ -17,6 +17,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
 
 // The full first-party inventory the daemon's key store supports (see
 // chat.html's cfg-key-* inputs).
@@ -34,26 +35,9 @@ const KEYS = [
   'AWS_SECRET_ACCESS_KEY',
   'AWS_SESSION_TOKEN',
   'AWS_REGION',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CODEX_ACCESS_TOKEN',
 ];
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
-
-function openSettings(win) {
-  const gear = win.document.querySelector('#settings-btn');
-  assert.ok(gear, 'the tab bar must render the settings gear');
-  gear.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function closeSettings(win) {
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
 
 function typeInto(win, id, value) {
   const node = win.document.getElementById(id);

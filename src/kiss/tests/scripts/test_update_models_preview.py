@@ -262,11 +262,11 @@ def test_find_deprecated_codex_entries_without_slugs():
     """When codex_slugs is None (fetch failed), no codex models are deprecated."""
     current = {
         "codex/default": {"source": "codex"},
-        "codex/gpt-5.5-pro": {"source": "codex"},
+        "codex/gpt-5.5": {"source": "codex"},
     }
     deprecated = find_deprecated_models(
         current, {}, {}, {}, {}, codex_slugs=None
     )
     names = {d["name"] for d in deprecated}
     assert "codex/default" not in names
-    assert "codex/gpt-5.5-pro" not in names
+    assert "codex/gpt-5.5" not in names

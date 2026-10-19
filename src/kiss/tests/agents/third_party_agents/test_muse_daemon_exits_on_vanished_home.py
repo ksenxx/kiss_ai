@@ -38,7 +38,8 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
 
 
 def test_daemon_exits_when_its_home_is_deleted(
-    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch,
+    isolated_kiss_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
     try:
@@ -56,15 +57,14 @@ def test_daemon_exits_when_its_home_is_deleted(
         # Long enough for a periodic sweep in the (now gone) loop to have
         # run had the daemon survived the accept timeout.
         time.sleep(0.6)
-        assert not isolated_kiss_home.exists(), (
-            "something re-created the deleted KISS_HOME"
-        )
+        assert not isolated_kiss_home.exists(), "something re-created the deleted KISS_HOME"
     finally:
         teardown_muse_env()
 
 
 def test_client_recovers_right_after_home_is_recreated(
-    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch,
+    isolated_kiss_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Delete ``KISS_HOME``, recreate it, and use the client at once.
 

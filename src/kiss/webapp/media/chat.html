@@ -116,7 +116,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
-                <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the words 'Hey Sorcar'" aria-label="Voice trigger: listen for the words 'Hey Sorcar'">
+                <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the word 'Abracadabra'" aria-label="Voice trigger: listen for the word 'Abracadabra'">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
                 </button>
@@ -201,7 +201,7 @@
            task-info panel (#meta-explorer / #meta-scm below). -->
       <div id="sidebar-body">
         <div id="sidebar-views">
-      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel sidebar-view">
+      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-view">
         <div class="sidebar-hdr">Chats</div>
         <div class="history-search-row">
           <div class="search-wrap">
@@ -229,6 +229,11 @@
             </label>
             <label class="hf-chip hf-chip-favorite" title="Show only tasks marked as favourite">
               <input type="checkbox" id="hf-favorite"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 1.6l1.9 3.9 4.3.62-3.1 3.03.73 4.28L8 11.4l-3.83 2.03.73-4.28-3.1-3.03 4.3-.62z"/></svg><span class="hf-chip-label">Favorites</span>
+            </label>
+            <!-- Off by default: the tasks the cron scheduler launched
+                 (history rows with is_cron) stay hidden until it is on. -->
+            <label class="hf-chip hf-chip-cron" title="Show the tasks run by scheduled automations (cron jobs)">
+              <input type="checkbox" id="hf-cron"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.4V8l2.4 1.6"/></svg><span class="hf-chip-label">Cron</span>
             </label>
           </div>
           <div class="history-filter-daterange" role="group" aria-label="Filter tasks by date range">
@@ -405,13 +410,13 @@
           <button type="button" id="scm-refresh" class="meta-section-refresh" title="Refresh source control" aria-label="Refresh source control"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button>
         </div>
         <div id="scm-body" class="scm-body meta-section-body">
-          <div id="scm-changes-section" class="scm-section">
-            <button type="button" id="scm-changes-toggle" class="scm-section-hdr" aria-expanded="true" aria-controls="scm-changes"><svg class="scm-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Changes</span><span id="scm-changes-count" class="scm-count"></span></button>
+          <div class="scm-section">
+            <button type="button" class="scm-section-hdr" aria-expanded="true" aria-controls="scm-changes"><svg class="scm-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Changes</span><span id="scm-changes-count" class="scm-count"></span></button>
             <div id="scm-changes" class="scm-list" role="tree" aria-label="Changes">
               <div class="sidebar-empty">No changes</div>
             </div>
           </div>
-          <div id="scm-graph-section" class="scm-section">
+          <div class="scm-section">
             <button type="button" id="scm-graph-toggle" class="scm-section-hdr" aria-expanded="true" aria-controls="scm-graph"><svg class="scm-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Graph</span><span id="scm-graph-count" class="scm-count"></span></button>
             <div id="scm-graph" class="scm-list" role="tree" aria-label="Commit graph">
               <div class="sidebar-empty">No commits</div>
@@ -504,7 +509,7 @@
 
     <div id="tricks-panel">
       <button id="tricks-panel-close" aria-label="Close promptlets">&times;</button>
-      <div class="sidebar-section sidebar-tab-panel">
+      <div class="sidebar-section">
         <div class="sidebar-hdr">Inject</div>
         <div class="search-wrap">
           <input type="text" id="tricks-search" placeholder="Search promptlets..." aria-label="Search promptlets">
@@ -566,7 +571,7 @@
               <option value="off">No &mdash; insert it at the cursor</option>
             </select>
           </label>
-          <label class="config-label">Wake word ("Hey Sorcar") sensitivity
+          <label class="config-label">Wake word ("Abracadabra") sensitivity
             <div class="config-sensitivity-row">
               <input type="range" id="cfg-voice-sensitivity" min="0" max="100" step="5" value="80">
               <span id="cfg-voice-sensitivity-value" class="config-sensitivity-value">80</span>
@@ -592,7 +597,7 @@
           </div>
 
           <div class="config-divider"></div>
-          <!-- Collapsible subpanels (API Keys, Custom Models, Bedrock):
+          <!-- Collapsible subpanels (API Keys, Custom Models, Bedrock, Claude Code):
                same toggle pattern as the history panel's Filters drawer;
                main.js re-collapses all of them every time the settings
                panel opens, so they always START collapsed. -->
@@ -670,6 +675,42 @@
           </label>
             </div>
           </div>
+          <div class="config-subpanel" id="claude-code-subpanel">
+            <button type="button" id="claude-code-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="claude-code-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Claude Code</span></button>
+            <div id="claude-code-body" class="config-subpanel-body" hidden>
+          <!-- Claude Code (cc/ models): the `claude` CLI bills the Claude
+               plan it is logged in to unless an API key is in its
+               environment; the switch keeps the key out. -->
+          <div class="config-label claude-code-status" id="cfg-claude-code-status" aria-live="polite">Checking the claude CLI&hellip;</div>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-claude-code-use-subscription" checked>
+            Bill my Claude subscription for cc/ models (hide ANTHROPIC_API_KEY from the claude CLI)
+          </label>
+          <label class="config-label">Claude subscription token (optional, from <code>claude setup-token</code>; for a machine without <code>claude login</code>)
+            <input type="password" autocomplete="off" id="cfg-key-CLAUDE_CODE_OAUTH_TOKEN" placeholder="sk-ant-oat01-...">
+          </label>
+            </div>
+          </div>
+          <div class="config-subpanel" id="codex-subpanel">
+            <button type="button" id="codex-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="codex-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Codex</span></button>
+            <div id="codex-body" class="config-subpanel-body" hidden>
+          <!-- Codex (codex/ models): the `codex` CLI bills the ChatGPT
+               plan it is logged in to unless an API key is in its
+               environment; the switch keeps the key out. -->
+          <div class="config-label codex-status" id="cfg-codex-status" aria-live="polite">Checking the codex CLI&hellip;</div>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-codex-use-subscription" checked>
+            Bill my ChatGPT subscription for codex/ models (hide OPENAI_API_KEY and CODEX_API_KEY from the codex CLI)
+          </label>
+          <div class="config-label codex-login-row">
+            <button type="button" id="cfg-codex-login-btn" class="config-update-btn">Sign in with ChatGPT</button>
+            <span id="cfg-codex-login-note" aria-live="polite">Opens a device-code login: a link and a one-time code to enter in any browser.</span>
+          </div>
+          <label class="config-label">Codex access token (optional, ChatGPT Business/Enterprise; for a machine without <code>codex login</code>)
+            <input type="password" autocomplete="off" id="cfg-key-CODEX_ACCESS_TOKEN" placeholder="Codex access token">
+          </label>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -721,6 +762,9 @@
   <!-- Phone layout of the remote page: a horizontal swipe steps
        between the chats, chat, file and task-info screens. -->
   <script src="{{MOBILE_SWIPE_SRC}}"></script>
+  <!-- The macOS standalone window (kiss-app, a popup opened by
+       appWindow.html): keeps its bounds for the next launch. -->
+  <script src="{{APP_WINDOW_SRC}}"></script>
   <script src="{{MAIN_SRC}}"></script>
   <script>window.__VOICE__ = {{VOICE_CONFIG}};</script>
   <script src="{{VOICE_SRC}}"></script>

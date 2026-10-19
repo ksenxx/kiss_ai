@@ -21,7 +21,7 @@ the per-task ones:
 * **Spend** draws a daily cost heatmap and cost-by-model bars from the
   task history, answered by :func:`spend_report` for the
   ``getSpendReport`` command;
-* **Recommendations** lists the five next tasks the last
+* **Recommendations** lists the ten next tasks the last
   ``/recommendations`` run suggested (a 6-hourly default cron job,
   :data:`kiss.agents.sorcar.cron_agent.DEFAULT_JOBS`), answered by
   :func:`recommendations_report` for the ``getRecommendations`` command.
@@ -40,11 +40,8 @@ result is cached for :data:`MACHINES_STATUS_TTL_SECONDS`.
 
 from __future__ import annotations
 
-import json
 import logging
 import socket
-import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -55,14 +52,19 @@ from urllib.parse import urlsplit
 from kiss.agents.seas.recommendations.recommendations_sea import load_recommendations
 from kiss.agents.sorcar import cron_agent, machines
 from kiss.agents.sorcar.persistence import _spend_by_day_and_model
+from kiss.agents.third_party_agents.auth_status import (
+    PROBE_PROCESS_TIMEOUT_SECONDS,
+    probe_statuses,
+)
 
 logger = logging.getLogger(__name__)
 
 APPS_STATUS_TTL_SECONDS = 30.0
 MACHINES_STATUS_TTL_SECONDS = 60.0
-# Upper bound for the probe subprocess (the probe gives up on slow
-# channels after 20 s by itself).
-_PROBE_PROCESS_TIMEOUT_SECONDS = 45.0
+# Seconds ``codex login --device-auth`` may take to print its code
+# (:func:`kiss.core.models.codex_model.codex_device_login`'s default
+# *timeout*): a forwarded ``startCodexLogin`` is waited for that long.
+_CODEX_LOGIN_TIMEOUT_SECONDS = 60.0
 
 _apps_lock = threading.Lock()
 _apps_cache: list[dict[str, Any]] = []
@@ -169,27 +171,6 @@ def spend_report() -> dict[str, Any]:
     }
 
 
-def _probe_apps() -> list[dict[str, Any]]:
-    """Run the auth-status probe subprocess and parse its JSON answer.
-
-    Returns:
-        The probe's status list; empty when the probe failed.
-    """
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "kiss.agents.third_party_agents.auth_status"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_PROBE_PROCESS_TIMEOUT_SECONDS,
-            check=False,
-        )
-        data = json.loads(proc.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
-    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
-        logger.warning("apps auth-status probe failed", exc_info=True)
-        return []
-    return data if isinstance(data, list) else []
-
-
 def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
     """Return every channel agent's authentication status.
 
@@ -215,7 +196,7 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
         # A probe that finished while this caller waited for the lock
         # already answers a refresh request.
         if age >= APPS_STATUS_TTL_SECONDS or (refresh and _apps_attempted_at < requested_at):
-            apps = _probe_apps()
+            apps = probe_statuses()
             _apps_attempted_at = time.time()
             if apps:
                 _apps_cache = apps
@@ -445,6 +426,9 @@ MACHINE_SETTINGS_REPLIES: dict[str, str] = {
     "getConfig": "configData",
     "saveConfig": "configData",
     "getMyModels": "myModelsData",
+    "getClaudeCodeStatus": "claudeCodeStatus",
+    "getCodexStatus": "codexStatus",
+    "startCodexLogin": "codexLogin",
     "saveMyModel": "myModelsData",
     "deleteMyModel": "myModelsData",
 }
@@ -474,7 +458,75 @@ def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         frame instead, which the link does not wait for).
     """
     reply_type = MACHINE_SETTINGS_REPLIES[str(cmd["type"])]
-    reply = _machine_reply(name, cmd, reply_type, {}, errors=True)
+    # The machine's device login answers once its CLI printed the code,
+    # up to _CODEX_LOGIN_TIMEOUT_SECONDS later: its reply is waited for
+    # that long, on a link lane of its own so the sheet's other requests
+    # (and a submit to the machine) do not queue behind it.
+    timeout, lane = machines.REQUEST_TIMEOUT, ""
+    if reply_type == "codexLogin":
+        timeout, lane = timeout + _CODEX_LOGIN_TIMEOUT_SECONDS, "login"
+    reply = _machine_reply(name, cmd, reply_type, {}, errors=True, timeout=timeout, lane=lane)
+    reply["forwarded"] = True
+    return reply
+
+
+MACHINE_PANEL_REPLIES: dict[str, str] = {
+    "getCronJobs": "cronJobs",
+    "cronAction": "cronJobs",
+    "getAppsStatus": "appsStatus",
+    "getSpendReport": "spendReport",
+    "getRecommendations": "recommendations",
+}
+"""The sidebar subpanel commands a registered machine answers, by reply type.
+
+The remote webapp's Schedule, Apps, Spend and Recommendations
+subpanels show the machine the chat header's drop-down has picked:
+each of these commands, when it carries ``machine``, is forwarded to
+that machine's daemon (:func:`machine_panel_reply`), so the subpanels
+list (and the Schedule one edits) that machine's cron jobs, app
+sign-ins, spend and recommendations instead of this daemon's.  The
+Machines subpanel is this daemon's registry and is never forwarded.
+"""
+
+_PANEL_EMPTY_FIELDS: dict[str, dict[str, Any]] = {
+    "cronJobs": {"jobs": []},
+    "appsStatus": {"apps": [], "checkedAt": 0},
+    "spendReport": {},
+    "recommendations": {"generatedAt": 0, "tasks": []},
+}
+
+
+def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the subpanel command *cmd* to registered machine *name* and return its reply.
+
+    *cmd* is one of :data:`MACHINE_PANEL_REPLIES`; it is sent to the
+    machine's daemon minus ``machine`` and this daemon's ``connId``.
+    The reply comes back stamped ``machine`` and ``forwarded`` so the
+    client can tell it from this daemon's own, and drop one for a
+    machine it no longer shows.
+
+    Returns:
+        The machine's reply, or an empty one of the expected type
+        (no jobs, apps or tasks; a ``cronAction``'s ``action`` kept)
+        carrying the ``error`` when the machine is not registered,
+        unreachable, or refused the command with an ``error`` frame.
+    """
+    reply_type = MACHINE_PANEL_REPLIES[str(cmd["type"])]
+    refused = dict(_PANEL_EMPTY_FIELDS[reply_type])
+    if cmd["type"] == "cronAction":
+        refused["action"] = str(cmd.get("action") or "")
+    # The machine's app probe is a subprocess of up to
+    # PROBE_PROCESS_TIMEOUT_SECONDS: its reply is waited for that long,
+    # not the link's usual few seconds (a timed-out reply would be lost,
+    # and the panel shown "did not answer" for a probe that succeeded).
+    # The subpanels' polls travel on a link lane of their own, so that
+    # wait holds up no submit, settings or Explorer request.
+    timeout = machines.REQUEST_TIMEOUT
+    if reply_type == "appsStatus":
+        timeout += PROBE_PROCESS_TIMEOUT_SECONDS
+    reply = _machine_reply(
+        name, cmd, reply_type, refused, errors=True, timeout=timeout, lane="panels",
+    )
     reply["forwarded"] = True
     return reply
 
@@ -482,18 +534,51 @@ def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
 MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
     **dict.fromkeys(MACHINE_WORKSPACE_REPLIES, machine_workspace_reply),
     **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
+    **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
 }
 """Every command a registered machine answers when it carries ``machine``, by its forwarder."""
+
+MACHINE_COMMIT_TIMEOUT = 900.0
+"""Seconds a machine gets to stage, write a commit message with an LLM and commit.
+
+Beyond what one ``git`` call may take there (300 s), the LLM call and
+a wait for the repository's lock: a timeout reports a failure here
+while the machine may still commit, so it must not come first.
+"""
+
+
+def machine_autocommit(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Run the Git Commit button's ``autocommitAction`` *cmd* on registered machine *name*.
+
+    The machine's daemon commits the folder *cmd* names (its own
+    configured folder when ``workDir`` is empty) and answers the link
+    with the tab's ``autocommit_done`` (a link peer gets its own copy
+    of the event its browsers get by broadcast; see
+    ``ServerApi.autocommit_action``).  The exchange has its own
+    ``commit`` lane so the minutes an LLM commit message may take do
+    not hold up the machine's file browsing.
+
+    Returns:
+        The machine's ``autocommit_done``, or one with ``success``
+        false and the ``error`` when the machine is not registered,
+        unreachable or silent; either stamped ``machine``.
+    """
+    refused = {"tabId": cmd.get("tabId"), "success": False, "committed": False}
+    return _machine_reply(
+        name, cmd, "autocommit_done", refused, timeout=MACHINE_COMMIT_TIMEOUT, lane="commit",
+    )
 
 
 def _machine_reply(
     name: str, cmd: dict[str, Any], reply_type: str, refused: dict[str, Any],
-    *, errors: bool = False,
+    *, errors: bool = False, timeout: float = machines.REQUEST_TIMEOUT, lane: str = "",
 ) -> dict[str, Any]:
     """Forward *cmd* to registered machine *name* and return its *reply_type* reply.
 
     The command goes to the machine's daemon minus ``machine`` and this
-    daemon's ``connId``; *errors* is passed to
+    daemon's ``connId`` over the machine's *lane* link
+    (:func:`~kiss.agents.sorcar.machines.link_for`); *errors* and
+    *timeout* are passed to
     :meth:`~kiss.agents.sorcar.machines.MachineLink.request`.  A
     ``saveConfig`` reply re-registers the machine with the remote
     password it reports (:func:`_adopt_machine_password`).
@@ -508,7 +593,9 @@ def _machine_reply(
     try:
         if machine is None:
             raise machines.MachineError(f"no machine named {name!r}")
-        reply = machines.link_for(machine).request(forwarded, reply_type, errors=errors)
+        reply = machines.link_for(machine, lane).request(
+            forwarded, reply_type, timeout, errors=errors,
+        )
         if cmd["type"] == "saveConfig":
             _adopt_machine_password(machine, reply)
     except machines.MachineError as exc:
@@ -544,7 +631,7 @@ def _adopt_machine_password(machine: machines.Machine, reply: dict[str, Any]) ->
 def recommendations_report() -> dict[str, Any]:
     """Return the RECOMMENDATIONS subpanel's content.
 
-    The five suggested tasks the last ``/recommendations`` run stored
+    The ten suggested tasks the last ``/recommendations`` run stored
     (:func:`kiss.agents.seas.recommendations.recommendations_sea.load_recommendations`).
 
     Returns:

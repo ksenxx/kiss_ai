@@ -36,7 +36,6 @@ from kiss.core.tool_interrupt import (
     begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
-    running_tool_name,
     unregister_tool_call,
 )
 
@@ -44,6 +43,12 @@ _MODEL = "gpt-4o-mini"
 _SLOW_SECONDS = 30.0
 
 tools = UsefulTools()
+
+
+def running_tool_name(thread_ident: int) -> str | None:
+    """Name of the tool thread *thread_ident* is inside, or ``None``."""
+    token = tool_interrupt._RUNNING.get(thread_ident)
+    return token.name if token is not None else None
 
 
 def slow_wait(seconds: float) -> str:

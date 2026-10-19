@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.brand import HOME_DIR
-from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
+from kiss.core.config import DEFAULT_MAX_BUDGET, _env_flag, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
@@ -112,6 +112,19 @@ DEFAULTS: dict[str, Any] = {
     # hashed embedder (kiss.core.memoryfield.index.default_embedder).
     "use_memory": True,
     "memory_dir": "",
+    # Claude Code (``cc/`` models) bills the Claude subscription the
+    # ``claude`` CLI is logged in to (or CLAUDE_CODE_OAUTH_TOKEN) rather
+    # than an API key: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are kept
+    # out of the CLI's environment.  Mirrored into
+    # ``DEFAULT_CONFIG.claude_code_use_subscription`` by
+    # :func:`apply_config_to_env`.  The same KISS_CLAUDE_CODE_USE_SUBSCRIPTION
+    # flag as ``Config`` seeds the default, so an environment opt-out holds
+    # until the panel's switch is saved.
+    "claude_code_use_subscription": _env_flag("KISS_CLAUDE_CODE_USE_SUBSCRIPTION", True),
+    # Codex (``codex/`` models) likewise bills the ChatGPT subscription
+    # the ``codex`` CLI is logged in to (or CODEX_ACCESS_TOKEN):
+    # OPENAI_API_KEY / CODEX_API_KEY are kept out of the CLI's environment.
+    "codex_use_subscription": _env_flag("KISS_CODEX_USE_SUBSCRIPTION", True),
     "work_dir": "",
     "last_model": "",
 }
@@ -154,6 +167,12 @@ API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
+    # Claude subscription token from ``claude setup-token`` (``cc/``
+    # models on a machine without a ``claude login``).
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    # Codex access token (``codex/`` models on a machine without a
+    # ``codex login``; ChatGPT Business/Enterprise workspaces).
+    "CODEX_ACCESS_TOKEN",
 })
 
 
@@ -896,7 +915,8 @@ def _refresh_config() -> None:
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Apply loaded config values to the running process.
 
-    Sets ``max_budget`` on the default config.
+    Sets ``max_budget``, ``claude_code_use_subscription`` and
+    ``codex_use_subscription`` on the default config.
 
     A junk value (boolean, non-numeric, or non-finite) falls back to
     ``DEFAULTS['max_budget']``: the value can come from the
@@ -914,6 +934,14 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
     sanitized = sanitize_config({"max_budget": budget})
     config_module.DEFAULT_CONFIG.max_budget = float(sanitized["max_budget"])
+    # The subscription switches are read by every ``cc/`` / ``codex/``
+    # turn from ``DEFAULT_CONFIG`` (the model layer never opens config.json).
+    for switch in ("claude_code_use_subscription", "codex_use_subscription"):
+        setattr(
+            config_module.DEFAULT_CONFIG,
+            switch,
+            bool(cfg.get(switch, DEFAULTS[switch])),
+        )
 
 
 def _parse_custom_headers(raw_headers: str) -> dict[str, str]:
@@ -1171,7 +1199,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
                 # communicate() would block on them without a timeout.
                 try:
                     kill_process_group(proc.pid, SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
+                except OSError:
                     proc.kill()
                 logger.warning(
                     "Shell RC took longer than %.0fs to source; "
