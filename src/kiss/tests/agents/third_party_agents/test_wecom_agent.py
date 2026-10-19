@@ -22,6 +22,7 @@ from kiss.agents.third_party_agents.wecom.wecom_sea import (
     WeComAgent,
     WeComChannelBackend,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
     serve_json_webhook,
@@ -57,7 +58,7 @@ def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
 def test_authenticate_persists_and_clear_removes() -> None:
     """authenticate_wecom persists 0600 config; clear removes it."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools["authenticate_wecom"]("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k")
     assert json.loads(result)["ok"] is True
 
@@ -82,7 +83,7 @@ def test_authenticate_persists_and_clear_removes() -> None:
 def test_authenticate_rejects_empty_url() -> None:
     """An empty webhook URL is rejected without persisting config."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "empty" in tools["authenticate_wecom"]("   ")
     assert not wecom_mod._config.path.exists()
 
@@ -90,7 +91,7 @@ def test_authenticate_rejects_empty_url() -> None:
 def test_fresh_agent_loads_persisted_config() -> None:
     """A new agent instance picks up the persisted config."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"]("https://x?key=1")
     fresh = WeComAgent()
     assert fresh._is_authenticated() is True
@@ -100,7 +101,7 @@ def test_fresh_agent_loads_persisted_config() -> None:
 def test_post_message_shape(receiver: JsonWebhookServer) -> None:
     """post_message sends the WeCom text payload with mentions."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"](_webhook_url(receiver))
 
     result = json.loads(agent._backend.post_message("hello 团队", mentioned_list="alice, @all"))
@@ -114,7 +115,7 @@ def test_post_message_shape(receiver: JsonWebhookServer) -> None:
 def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
     """post_markdown sends the WeCom markdown payload."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"](_webhook_url(receiver))
 
     assert json.loads(agent._backend.post_markdown("# heading\n> quote"))["ok"] is True
@@ -127,7 +128,7 @@ def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
 def test_send_message_posts_text(receiver: JsonWebhookServer) -> None:
     """send_message posts a plain text payload, ignoring channel/thread."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"](_webhook_url(receiver))
 
     agent._backend.send_message("ignored-channel", "plain text", thread_ts="ignored")
@@ -137,7 +138,7 @@ def test_send_message_posts_text(receiver: JsonWebhookServer) -> None:
 def test_errcode_nonzero_raises_and_tools_report(receiver: JsonWebhookServer) -> None:
     """A non-zero errcode raises from send_message and yields ok:false tools."""
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"](_webhook_url(receiver))
     receiver.response_body = {"errcode": 93000, "errmsg": "invalid webhook url"}
 
@@ -160,7 +161,7 @@ def test_connect_reflects_config_state() -> None:
     assert "No WeCom config" in backend.connection_info
 
     agent = WeComAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_wecom"]("https://x?key=1")
     assert backend.connect() is True
     assert backend.connection_info == "WeCom configured"

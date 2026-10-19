@@ -976,7 +976,15 @@
         // stored copy is dropped so the reconnect's probe is the
         // uncounted empty one, not a second wrong guess.  Any other
         // pre-auth error (e.g. remote access disabled) replaces the
-        // overlay spinner text so the user is told why.
+        // overlay spinner text so the user is told why.  The server
+        // answered, so any outage is over: stop the overlay escalation
+        // / lockout countdown, else the next tick overwrites the
+        // explanation with "Still trying to reach ..." and a stale
+        // "Retry now" button.
+        _outageSince = 0;
+        _lockedUntil = 0;
+        _stopOverlayTick();
+        _setOverlayAction(null, null);
         const text = (msg.text && String(msg.text)) || 'Something went wrong.';
         if (msg.code === 'auth_failed') {
           try {

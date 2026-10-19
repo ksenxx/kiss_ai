@@ -25,10 +25,17 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     "Using SO_REUSEADDR and SO_EXCLUSIVEADDRUSE"), so "bind failed" is
     never reported and two backends silently share one port.  The option
     is therefore left off on Windows.
+
+    ``socketserver`` listens with a backlog of 5.  When the accept loop
+    is starved (a busy daemon holding the GIL) a burst of more than five
+    pending connections overflows that queue and the kernel answers the
+    excess with a reset, which the sender sees as ``ConnectionResetError``
+    before any handler ran.  128 pending connections are queued instead.
     """
 
     daemon_threads = True
     allow_reuse_address = sys.platform != "win32"
+    request_queue_size = 128
 
 
 MAX_DRAIN_BYTES = 8 * 1024 * 1024

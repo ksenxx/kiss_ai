@@ -170,3 +170,25 @@ class Printer(ABC):
     @abstractmethod
     def reset(self) -> None:
         """Reset the printer's internal streaming state between messages."""
+
+    def thread_binding(self) -> Any:
+        """Return the calling thread's task binding for :meth:`adopt_thread_binding`.
+
+        A printer that keeps per-task state in thread-local storage
+        (``JsonPrinter`` routes every event by the thread's ``task_id``)
+        returns whatever a helper thread must adopt to print on the
+        task's behalf.  The default has nothing to carry and returns
+        ``None``.
+
+        Returns:
+            An opaque binding, or ``None``.
+        """
+        return None
+
+    def adopt_thread_binding(self, binding: Any) -> None:
+        """Bind the calling thread to the task of *binding*.
+
+        Args:
+            binding: A value returned by :meth:`thread_binding` on the
+                task's own thread.  The default ignores it.
+        """

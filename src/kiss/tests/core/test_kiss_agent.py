@@ -23,6 +23,7 @@ from openai import AuthenticationError as OpenAIAuthError
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Model
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.tests.conftest import requires_gemini_api_key, simple_calculator
 
@@ -57,9 +58,8 @@ def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
 
 
 class _RetryableErrorModel:
-    # Mirrors Model.runs_task_to_completion: the agentic loop consults it
-    # every iteration to route CLI-agent models to the one-shot path.
-    runs_task_to_completion = False
+    serves_tools_natively = False  # no native tool set is built for it
+    native_tools_exposed = Model.native_tools_exposed  # the base no-op
 
     def __init__(self, failures: int) -> None:
         self.failures = failures

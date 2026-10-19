@@ -943,13 +943,6 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     transition: opacity var(--dur-slow) var(--ease);
   }
 
-  body.remote-chat.remote-desktop #meta-drawer:hover,
-  body.remote-chat.remote-desktop #meta-drawer:focus-visible {
-    color: var(--fg);
-    background: var(--hover);
-    outline: none;
-  }
-
   /* The pane folded away by its hide button (body.content-pane-folded,
      main.js): the chat alone fills #app with the task-info panel docked
      beside it (the rules above, no body.content-pane-open), and this
@@ -978,6 +971,10 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     z-index: var(--z-docked);
   }
 
+  /* Both handles light up alike; this rule sits after the folded
+     handle's base rule (same specificity) so it wins on hover. */
+  body.remote-chat.remote-desktop #meta-drawer:hover,
+  body.remote-chat.remote-desktop #meta-drawer:focus-visible,
   body.remote-chat.remote-desktop #content-pane-show:hover,
   body.remote-chat.remote-desktop #content-pane-show:focus-visible {
     color: var(--fg);

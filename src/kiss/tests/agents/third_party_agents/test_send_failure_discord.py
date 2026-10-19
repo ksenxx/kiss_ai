@@ -41,8 +41,7 @@ class _SendHandler(RecordingHandler):
     """Records requests; 200 for channel OK, 500 for channel ERR."""
 
     def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b""
+        raw = self._read_raw()
         path = urlsplit(self.path).path
         cast(RecordingServer, self.server).requests.append(
             {

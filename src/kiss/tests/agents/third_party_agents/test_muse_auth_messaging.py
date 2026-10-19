@@ -88,8 +88,7 @@ from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import _config as zalo_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
-    teardown_muse_env,
+    loopback_policy,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -112,8 +111,7 @@ class _MessagingApiHandler(RecordingHandler):
     server: Any
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self.server.requests.append(
             {
                 "method": self.command,
@@ -287,27 +285,9 @@ class _MessagingApiHandler(RecordingHandler):
                 payload = json.dumps({"success": False, "error": {"code": 404}}).encode()
         else:
             payload = json.dumps({"ok": True}).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._reply(status, payload, "application/json; charset=utf-8")
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a GET request."""
-        self._serve()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a POST request."""
-        self._serve()
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a DELETE request."""
-        self._serve()
-
-    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a PUT request."""
-        self._serve()
+    do_GET = do_POST = do_DELETE = do_PUT = _serve  # noqa: N815
 
 
 class _MessagingApiServer(RecordingServer):
@@ -317,15 +297,6 @@ class _MessagingApiServer(RecordingServer):
         super().__init__(address, handler)
         # Redirect target served by /redirect-offsite.
         self.offsite_location: str = ""
-
-    @property
-    def port(self) -> int:
-        """Return the bound TCP port."""
-        return int(self.server_address[1])
-
-    def base(self, suffix: str = "") -> str:
-        """Return the server's loopback base URL plus *suffix*."""
-        return f"http://127.0.0.1:{self.port}{suffix}"
 
     def query(self, index: int = -1) -> dict[str, list[str]]:
         """Return a recorded request's parsed query parameters.
@@ -351,26 +322,11 @@ def rogue_server() -> Any:
     yield from serve_recording(_MessagingApiHandler, _MessagingApiServer)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon.
-
-    Twitch, Zalo, and LINE get a loopback ``extra_hosts`` policy entry
-    (their real hosts are fixed cloud endpoints); Mattermost, Nextcloud,
-    BlueBubbles, and Synology deliberately get none, so their tests
-    prove the enrollment-time origin binding.
-    """
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "twitch": {"extra_hosts": ["127.0.0.1"]},
-            "zalo": {"extra_hosts": ["127.0.0.1"]},
-            "line": {"extra_hosts": ["127.0.0.1"]},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# Twitch, Zalo, and LINE get a loopback ``extra_hosts`` policy entry
+# (their real hosts are fixed cloud endpoints); Mattermost, Nextcloud,
+# BlueBubbles, and Synology deliberately get none, so their tests
+# prove the enrollment-time origin binding.
+MUSE_POLICY = loopback_policy("twitch", "zalo", "line")
 
 
 # ---------------------------------------------------------------- Mattermost
@@ -379,7 +335,12 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 def _mm_config(api_server: _MessagingApiServer, token: str = _REAL_MM_TOKEN) -> None:
     """Save a legacy Mattermost config pointing at the emulator."""
     mm_config.save(
-        {"url": "127.0.0.1", "token": token, "port": str(api_server.port), "scheme": "http"}
+        {
+            "url": "127.0.0.1",
+            "token": token,
+            "port": str(api_server.server_address[1]),
+            "scheme": "http",
+        }
     )
 
 
@@ -448,7 +409,7 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_mattermost"](
-            "127.0.0.1", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
+            "127.0.0.1", _REAL_MM_TOKEN, port=api_server.server_address[1], scheme="http"
         )
     )
     assert result["ok"] is True
@@ -461,7 +422,7 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     # A bad rotation rolls the vault back to empty.
     result = json.loads(
         tools["authenticate_mattermost"](
-            "127.0.0.1", "mm-rotated-invalid", port=api_server.port, scheme="http"
+            "127.0.0.1", "mm-rotated-invalid", port=api_server.server_address[1], scheme="http"
         )
     )
     assert result["ok"] is False
@@ -469,7 +430,7 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     # A malformed server URL is rejected before any state change.
     result = json.loads(
         tools["authenticate_mattermost"](
-            "bad..host", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
+            "bad..host", _REAL_MM_TOKEN, port=api_server.server_address[1], scheme="http"
         )
     )
     assert result["ok"] is False
@@ -478,7 +439,7 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     assert (
         json.loads(
             tools["authenticate_mattermost"](
-                "127.0.0.1", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
+                "127.0.0.1", _REAL_MM_TOKEN, port=api_server.server_address[1], scheme="http"
             )
         )["ok"]
         is True
@@ -519,7 +480,7 @@ def test_twitch_bearer_swap_and_secret_scrub(
             "channel_name": "kisscaster",
         }
     )
-    backend = TwitchChannelBackend(helix_base=api_server.base("/helix"))
+    backend = TwitchChannelBackend(helix_base=api_server.base_url + "/helix")
     assert backend.connect() is True
     assert backend._muse is True
     assert api_server.header("Authorization") == f"Bearer {_REAL_TWITCH_TOKEN}"
@@ -544,7 +505,7 @@ def test_twitch_muse_authenticate_rollback_and_clear(
     from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
 
     agent = TwitchAgent()
-    agent._backend._helix_base = api_server.base("/helix")
+    agent._backend._helix_base = api_server.base_url + "/helix"
     tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_twitch"]("cid1", "cs-secret", _REAL_TWITCH_TOKEN, "kisscaster")
@@ -572,13 +533,15 @@ def test_twitch_wire_failure_and_off_allowlist(
     muse_env: Path, api_server: _MessagingApiServer, rogue_server: Any
 ) -> None:
     """An empty vault fails closed; an off-allowlist origin is denied."""
-    backend = TwitchChannelBackend(helix_base=api_server.base("/helix"))
+    backend = TwitchChannelBackend(helix_base=api_server.base_url + "/helix")
     assert backend.connect() is False
     assert "No Twitch credential" in backend._connection_info
     # Enroll, then aim the backend at a host missing from the twitch
     # allowlist (the policy allows 127.0.0.1; use localhost instead).
     twitch_config.save({"client_id": "cid1", "access_token": _REAL_TWITCH_TOKEN})
-    backend = TwitchChannelBackend(helix_base=f"http://localhost:{rogue_server.port}/helix")
+    backend = TwitchChannelBackend(
+        helix_base=f"http://localhost:{rogue_server.server_address[1]}/helix"
+    )
     assert backend.connect() is False
     assert "not in the 'twitch' connector's allowlist" in backend._connection_info
     assert not rogue_server.requests
@@ -590,7 +553,7 @@ def test_twitch_wire_failure_and_off_allowlist(
 def test_zalo_header_kind_swap_and_scrub(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """The surrogate bearer becomes Zalo's real ``access_token`` header."""
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN, "oa_id": "OA1"})
-    backend = ZaloChannelBackend(api_base=api_server.base("/v2.0/oa"))
+    backend = ZaloChannelBackend(api_base=api_server.base_url + "/v2.0/oa")
     assert backend._wire_muse() is True
     assert backend._access_token.startswith("muse-sgt.zalo.")
     result = json.loads(backend.get_oa_info())
@@ -609,7 +572,7 @@ def test_zalo_write_grant_and_multipart_upload(
 ) -> None:
     """Sends/uploads are writes; multipart bodies survive the boundary."""
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN})
-    backend = ZaloChannelBackend(api_base=api_server.base("/v2.0/oa"))
+    backend = ZaloChannelBackend(api_base=api_server.base_url + "/v2.0/oa")
     assert backend._wire_muse() is True
     denied = json.loads(backend.send_text_message("U9", "hello"))
     assert denied["ok"] is False
@@ -632,7 +595,7 @@ def test_zalo_muse_authenticate_rollback_and_clear(
     """authenticate_zalo enrolls into the vault and rolls back bad tokens."""
     from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloAgent
 
-    monkeypatch.setenv("ZALO_API_BASE", api_server.base("/v2.0/oa"))
+    monkeypatch.setenv("ZALO_API_BASE", api_server.base_url + "/v2.0/oa")
     agent = ZaloAgent()
     tools = auth_tools(agent)
     result = json.loads(tools["authenticate_zalo"](_REAL_ZALO_TOKEN, oa_id="OA1"))
@@ -656,7 +619,7 @@ def test_line_muse_adapter_reads_and_writes(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The LINE Muse adapter spends the real bearer only at the boundary."""
-    monkeypatch.setenv("LINE_API_BASE", api_server.base(""))
+    monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     line_config.save({"channel_access_token": _REAL_LINE_TOKEN, "channel_secret": "cs1"})
     backend = LineChannelBackend()
     assert backend._wire_muse() is True
@@ -692,7 +655,7 @@ def test_line_muse_authenticate_rollback_and_clear(
     """authenticate_line enrolls into the vault and rolls back bad tokens."""
     from kiss.agents.third_party_agents.line.line_sea import LineAgent
 
-    monkeypatch.setenv("LINE_API_BASE", api_server.base(""))
+    monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     agent = LineAgent()
     tools = auth_tools(agent)
     result = json.loads(tools["authenticate_line"](_REAL_LINE_TOKEN, "cs1"))
@@ -727,7 +690,7 @@ def _nc_expected_basic() -> str:
 
 def test_nextcloud_basic_swap_and_scrub(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """The surrogate bearer becomes the real ``Authorization: Basic``."""
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": _REAL_NC_PASSWORD})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is True
     assert backend._muse is True
@@ -748,7 +711,7 @@ def test_nextcloud_join_is_read_and_writes_need_grants(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """participants/active is a state-changing join: a write, like posting."""
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": _REAL_NC_PASSWORD})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is True
     api_server.requests.clear()
@@ -783,7 +746,7 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
     result = json.loads(
-        tools["authenticate_nextcloud"](api_server.base(), "bot", _REAL_NC_PASSWORD)
+        tools["authenticate_nextcloud"](api_server.base_url, "bot", _REAL_NC_PASSWORD)
     )
     assert result["ok"] is True
     assert vault_has_credentials("nextcloud")
@@ -791,7 +754,7 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     assert "password" not in stored
     assert json.loads(tools["check_nextcloud_auth"]())["ok"] is True
     result = json.loads(
-        tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-rotated-invalid")
+        tools["authenticate_nextcloud"](api_server.base_url, "bot", "nc-rotated-invalid")
     )
     assert result["ok"] is False
     # A rejected rotation leaves the working credential in place.
@@ -803,7 +766,7 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     assert result["ok"] is False
     assert "not a valid" in result["error"]
     assert (
-        json.loads(tools["authenticate_nextcloud"](api_server.base(), "bot", _REAL_NC_PASSWORD))[
+        json.loads(tools["authenticate_nextcloud"](api_server.base_url, "bot", _REAL_NC_PASSWORD))[
             "ok"
         ]
         is True
@@ -833,7 +796,7 @@ def test_nextcloud_wire_failure_paths(muse_env: Path) -> None:
 
 def _bb_backend(api_server: _MessagingApiServer) -> BlueBubblesChannelBackend:
     """Enroll and wire a BlueBubbles backend against the emulator."""
-    bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
+    bb_config.save({"server_url": api_server.base_url, "password": _REAL_BB_PASSWORD})
     backend = BlueBubblesChannelBackend()
     assert backend._wire_muse() is True
     return backend
@@ -847,7 +810,7 @@ def test_bluebubbles_query_kind_password_injection(
     assert backend._muse is True
     assert backend._surrogate.startswith("muse-sgt.bluebubbles.")
     # The password is scrubbed from the config; server_url survives.
-    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base()}
+    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base_url}
     assert vault_has_credentials("bluebubbles")
     # message/query is a POST that only retrieves data: a read.
     messages, cursor = backend.poll_messages("chat1", "")
@@ -873,7 +836,7 @@ def test_bluebubbles_caller_password_param_is_stripped(
     backend = _bb_backend(api_server)
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
-        api_server.base("/api/v1/server/info"),
+        api_server.base_url + "/api/v1/server/info",
         params={"password": "attacker-chosen", "limit": "5"},
         headers={"Authorization": f"Bearer {backend._surrogate}"},
     )
@@ -888,10 +851,10 @@ def test_bluebubbles_cross_origin_redirect_drops_password(
 ) -> None:
     """A redirect off the enrolled origin is followed without the credential."""
     backend = _bb_backend(api_server)
-    api_server.offsite_location = rogue_server.base("/api/v1/server/info")
+    api_server.offsite_location = rogue_server.base_url + "/api/v1/server/info"
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
-        api_server.base("/redirect-offsite"),
+        api_server.base_url + "/redirect-offsite",
         headers={"Authorization": f"Bearer {backend._surrogate}"},
     )
     assert resp.status_code == 200
@@ -912,12 +875,12 @@ def test_bluebubbles_rotation_invalidates_surrogates(
         "bluebubbles",
         {"kind": "query", "param": "password", "token": "bb-rotated"},
         [],
-        hosts=(f"127.0.0.1:{api_server.port}",),
+        hosts=(f"127.0.0.1:{api_server.server_address[1]}",),
     )
     session = MuseBoundarySession("bluebubbles")
     with pytest.raises(MuseAuthError, match="stale surrogate"):
         session.get(
-            api_server.base("/api/v1/server/info"),
+            api_server.base_url + "/api/v1/server/info",
             headers={"Authorization": f"Bearer {old_surrogate}"},
         )
     # A fresh wire uses the rotated credential.
@@ -948,9 +911,9 @@ def test_synology_webhook_token_extraction_and_send(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """The URL-embedded token moves to the vault; sends re-inject it."""
-    webhook = api_server.base(
-        f"/webapi/entry.cgi?api=SYNO.Chat.External&method=incoming&version=2"
-        f"&token={_REAL_SYNO_TOKEN}"
+    webhook = (
+        f"{api_server.base_url}/webapi/entry.cgi?api=SYNO.Chat.External&method=incoming"
+        f"&version=2&token={_REAL_SYNO_TOKEN}"
     )
     syno_config.save({"webhook_url": webhook, "token": "outgoing-verify"})
     backend = SynologyChatChannelBackend()
@@ -996,7 +959,7 @@ def test_synology_muse_authenticate_and_clear(
 
     agent = SynologyChatAgent()
     tools = auth_tools(agent)
-    webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
+    webhook = api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
     result = json.loads(tools["authenticate_synology"](webhook, token="verify1"))
     assert result["ok"] is True
     assert vault_has_credentials("synology")
@@ -1073,7 +1036,7 @@ def test_cli_import_messaging_services(muse_env: Path, api_server: _MessagingApi
         {
             "url": "127.0.0.1",
             "token": _REAL_MM_TOKEN,
-            "port": str(api_server.port),
+            "port": str(api_server.server_address[1]),
             "scheme": "http",
         }
     )
@@ -1098,17 +1061,17 @@ def test_cli_import_messaging_services(muse_env: Path, api_server: _MessagingApi
     assert muse_cli.main(["import", "line"]) == 0
     assert json.loads(line_config.path.read_text()) == {"channel_secret": "cs1"}
 
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": _REAL_NC_PASSWORD})
     assert muse_cli.main(["import", "nextcloud"]) == 0
     stored = json.loads(nc_config.path.read_text())
     assert "password" not in stored
     assert stored["username"] == "bot"
 
-    bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
+    bb_config.save({"server_url": api_server.base_url, "password": _REAL_BB_PASSWORD})
     assert muse_cli.main(["import", "bluebubbles"]) == 0
-    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base()}
+    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base_url}
 
-    webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
+    webhook = api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
     syno_config.save({"webhook_url": webhook})
     assert muse_cli.main(["import", "synology"]) == 0
     stored = json.loads(syno_config.path.read_text())
@@ -1160,40 +1123,42 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     """With Muse off, every connector still sends its credential directly."""
     assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     # Mattermost: the typing indicator posts the real bearer directly.
-    backend_mm = MattermostChannelBackend(base_url=api_server.base(), token=_REAL_MM_TOKEN)
+    backend_mm = MattermostChannelBackend(base_url=api_server.base_url, token=_REAL_MM_TOKEN)
     backend_mm.send_typing("C1")
     assert api_server.header("Authorization") == f"Bearer {_REAL_MM_TOKEN}"
     assert backend_mm._http is requests
     # Twitch: direct connect with the stored token.
     twitch_config.save({"client_id": "cid1", "access_token": _REAL_TWITCH_TOKEN})
-    backend_tw = TwitchChannelBackend(helix_base=api_server.base("/helix"))
+    backend_tw = TwitchChannelBackend(helix_base=api_server.base_url + "/helix")
     assert backend_tw.connect() is True
     assert backend_tw._muse is False
     assert backend_tw._access_token == _REAL_TWITCH_TOKEN
     assert api_server.header("Authorization") == f"Bearer {_REAL_TWITCH_TOKEN}"
     # Zalo: the real token rides the custom header directly.
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN})
-    backend_z = ZaloChannelBackend(api_base=api_server.base("/v2.0/oa"))
+    backend_z = ZaloChannelBackend(api_base=api_server.base_url + "/v2.0/oa")
     backend_z._access_token = _REAL_ZALO_TOKEN
     assert json.loads(backend_z.get_oa_info())["ok"] is True
     assert api_server.header("access_token") == _REAL_ZALO_TOKEN
     assert backend_z._headers() == {"access_token": _REAL_ZALO_TOKEN}
     # Nextcloud: requests derives the Basic header from the auth tuple.
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": _REAL_NC_PASSWORD})
     backend_nc = NextcloudTalkChannelBackend()
     assert backend_nc.connect() is True
     assert backend_nc._muse is False
     assert api_server.header("Authorization") == _nc_expected_basic()
     # BlueBubbles: the password rides the query string directly.
     backend_bb = BlueBubblesChannelBackend()
-    backend_bb._server_url = api_server.base()
+    backend_bb._server_url = api_server.base_url
     backend_bb._password = _REAL_BB_PASSWORD
     backend_bb.poll_messages("chat1", "")
     assert api_server.query().get("password") == [_REAL_BB_PASSWORD]
     assert backend_bb._headers() == {}
     # Synology: the token-bearing webhook URL is posted directly.
     backend_sy = SynologyChatChannelBackend()
-    backend_sy._webhook_url = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
+    backend_sy._webhook_url = (
+        api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
+    )
     backend_sy.send_message("", "legacy hello")
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
     # LINE: the SDK is not installed here, so the legacy constructor
@@ -1290,7 +1255,7 @@ def test_embedded_token_helper(muse_env: Path) -> None:
 def test_connect_failure_paths_under_muse(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """connect() fails closed without credentials or with a bad token."""
     assert MattermostChannelBackend().connect() is False
-    assert ZaloChannelBackend(api_base=api_server.base("/v2.0/oa")).connect() is False
+    assert ZaloChannelBackend(api_base=api_server.base_url + "/v2.0/oa").connect() is False
     assert SynologyChatChannelBackend().connect() is False
     backend_line = LineChannelBackend()
     assert backend_line.connect() is False
@@ -1323,14 +1288,14 @@ def test_make_backends_muse_mode(
     ):
         with pytest.raises(SystemExit):
             module._make_backend()
-    monkeypatch.setenv("LINE_API_BASE", api_server.base(""))
+    monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     _mm_config(api_server)
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN})
     line_config.save({"channel_access_token": _REAL_LINE_TOKEN})
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
-    bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": _REAL_NC_PASSWORD})
+    bb_config.save({"server_url": api_server.base_url, "password": _REAL_BB_PASSWORD})
     syno_config.save(
-        {"webhook_url": api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")}
+        {"webhook_url": api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"}
     )
     assert mattermost_sea._make_backend()._muse is True
     assert zalo_sea._make_backend()._muse is True
@@ -1358,7 +1323,7 @@ def test_zalo_remaining_reads_and_image_send(
 ) -> None:
     """Every remaining Zalo tool method flows through the boundary."""
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN})
-    backend = ZaloChannelBackend(api_base=api_server.base("/v2.0/oa"))
+    backend = ZaloChannelBackend(api_base=api_server.base_url + "/v2.0/oa")
     assert backend._wire_muse() is True
     assert json.loads(backend.get_follower_profile("U1"))["ok"] is True
     assert json.loads(backend.get_followers())["ok"] is True
@@ -1374,7 +1339,7 @@ def test_line_send_message_and_legacy_paths(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """send_message uses the adapter; legacy paths surface the missing SDK."""
-    monkeypatch.setenv("LINE_API_BASE", api_server.base(""))
+    monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     line_config.save({"channel_access_token": _REAL_LINE_TOKEN})
     backend = LineChannelBackend()
     assert backend._wire_muse() is True
@@ -1415,7 +1380,7 @@ def test_bluebubbles_muse_authenticate_rollbacks(
     result = json.loads(_muse_authenticate(backend, "http://bad..host", "pw"))
     assert result["ok"] is False
     assert "not a valid" in result["error"]
-    result = json.loads(_muse_authenticate(backend, api_server.base(), _REAL_BB_PASSWORD))
+    result = json.loads(_muse_authenticate(backend, api_server.base_url, _REAL_BB_PASSWORD))
     assert result["ok"] is False
     assert not vault_has_credentials("bluebubbles")
     assert backend._muse is False
@@ -1428,7 +1393,7 @@ def test_bluebubbles_agent_init_and_clear_tool(
     """The agent wires Muse on its first request; the clear tool empties the vault."""
     from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesAgent
 
-    bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
+    bb_config.save({"server_url": api_server.base_url, "password": _REAL_BB_PASSWORD})
     agent = BlueBubblesAgent()
     assert agent._is_authenticated() and agent._backend._muse is False
     before = len(api_server.requests)
@@ -1456,7 +1421,7 @@ def test_query_kind_same_origin_redirect_reinjects(
     backend = _bb_backend(api_server)
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
-        api_server.base("/redirect-onsite"),
+        api_server.base_url + "/redirect-onsite",
         headers={"Authorization": f"Bearer {backend._surrogate}"},
     )
     assert resp.status_code == 200
@@ -1518,13 +1483,15 @@ def test_query_kind_allowlisted_cross_origin_redirect_drops_credential(
     backend = _bb_backend(api_server)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
-        "services": {"bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}},
+        "services": {
+            "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.server_address[1]}"]}
+        },
     }
     (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
-    api_server.offsite_location = rogue_server.base("/api/v1/server/info")
+    api_server.offsite_location = rogue_server.base_url + "/api/v1/server/info"
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
-        api_server.base("/redirect-offsite"),
+        api_server.base_url + "/redirect-offsite",
         headers={"Authorization": f"Bearer {backend._surrogate}"},
     )
     assert resp.status_code == 200
@@ -1575,10 +1542,10 @@ def test_synology_tokenless_rotation_never_revives_vault_token(
 
     agent = SynologyChatAgent()
     tools = auth_tools(agent)
-    webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
+    webhook = api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
     assert json.loads(tools["authenticate_synology"](webhook))["ok"] is True
     assert vault_has_credentials("synology")
-    tokenless = api_server.base("/webapi/entry.cgi?api=X")
+    tokenless = api_server.base_url + "/webapi/entry.cgi?api=X"
     result = json.loads(tools["authenticate_synology"](tokenless))
     assert result["ok"] is True
     assert not vault_has_credentials("synology")
@@ -1606,9 +1573,9 @@ def test_synology_wire_tokenless_config_ignores_stale_vault(
         "synology",
         {"kind": "query", "param": "token", "token": "stale-synology-token"},
         [],
-        hosts=(f"127.0.0.1:{api_server.port}",),
+        hosts=(f"127.0.0.1:{api_server.server_address[1]}",),
     )
-    syno_config.save({"webhook_url": api_server.base("/webapi/entry.cgi?api=X")})
+    syno_config.save({"webhook_url": api_server.base_url + "/webapi/entry.cgi?api=X"})
     backend = SynologyChatChannelBackend()
     assert backend._wire_muse() is True
     assert backend._muse is False
@@ -1625,7 +1592,7 @@ def test_synology_scrubbed_config_marker_rewires(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A Muse-scrubbed config carries the marker and keeps re-wiring."""
-    webhook = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
+    webhook = api_server.base_url + f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
     syno_config.save({"webhook_url": webhook})
     first = SynologyChatChannelBackend()
     assert first._wire_muse() is True
@@ -1648,10 +1615,10 @@ def test_synology_authenticate_invalid_embedded_token_keeps_config(
         _muse_authenticate as syno_auth,
     )
 
-    prev = {"webhook_url": api_server.base("/webapi/entry.cgi?api=Y")}
+    prev = {"webhook_url": api_server.base_url + "/webapi/entry.cgi?api=Y"}
     syno_config.save(prev)
     backend = SynologyChatChannelBackend()
-    bad = api_server.base("/webapi/entry.cgi?api=X&token=line%0Abreak")
+    bad = api_server.base_url + "/webapi/entry.cgi?api=X&token=line%0Abreak"
     result = json.loads(syno_auth(backend, bad, ""))
     assert result["ok"] is False
     assert "control characters" in result["error"]
@@ -1665,7 +1632,7 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     """An HTTP 401 with an OCS failure envelope is a failure, not a success."""
     from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkAgent
 
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": "nc-bad-invalid"})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": "nc-bad-invalid"})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is False
     assert "HTTP 401" in backend._connection_info
@@ -1673,7 +1640,9 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     nc_config.clear()
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
-    result = json.loads(tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-bad-invalid"))
+    result = json.loads(
+        tools["authenticate_nextcloud"](api_server.base_url, "bot", "nc-bad-invalid")
+    )
     assert result["ok"] is False
     assert "401" in result["error"]
     assert not vault_has_credentials("nextcloud")
@@ -1700,7 +1669,7 @@ def test_nextcloud_non_json_failure_is_rejected(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A 5xx with a non-JSON body fails validation instead of crashing."""
-    nc_config.save({"url": api_server.base(), "username": "bot", "password": "nc-bad-nonjson"})
+    nc_config.save({"url": api_server.base_url, "username": "bot", "password": "nc-bad-nonjson"})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is False
     assert "HTTP 500" in backend._connection_info
@@ -1727,7 +1696,7 @@ def test_synology_marker_with_empty_vault_falls_back_direct(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A scrubbed config whose vault entry is gone degrades to direct mode."""
-    syno_config.save({"webhook_url": api_server.base("/webapi/entry.cgi?api=X"), "muse": "1"})
+    syno_config.save({"webhook_url": api_server.base_url + "/webapi/entry.cgi?api=X", "muse": "1"})
     backend = SynologyChatChannelBackend()
     assert backend._wire_muse() is True
     assert backend._muse is False
@@ -1749,13 +1718,15 @@ def test_query_kind_two_hop_allowlisted_chain_never_regains_credential(
     backend = _bb_backend(api_server)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
-        "services": {"bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}},
+        "services": {
+            "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.server_address[1]}"]}
+        },
     }
     (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
-    api_server.offsite_location = rogue_server.base("/chain-middle")
+    api_server.offsite_location = rogue_server.base_url + "/chain-middle"
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
-        api_server.base("/redirect-offsite"),
+        api_server.base_url + "/redirect-offsite",
         headers={"Authorization": f"Bearer {backend._surrogate}"},
     )
     assert resp.status_code == 200
@@ -1781,16 +1752,16 @@ def test_header_kind_allowlisted_cross_origin_redirect_keeps_header(
             "zalo": {
                 "extra_hosts": [
                     "127.0.0.1",
-                    f"127.0.0.1:{rogue_server.port}",
+                    f"127.0.0.1:{rogue_server.server_address[1]}",
                 ]
             }
         },
     }
     (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
-    api_server.offsite_location = rogue_server.base("/v2.0/oa/getoa")
+    api_server.offsite_location = rogue_server.base_url + "/v2.0/oa/getoa"
     session = MuseBoundarySession("zalo")
     resp = session.get(
-        api_server.base("/redirect-offsite"),
+        api_server.base_url + "/redirect-offsite",
         headers={"Authorization": f"Bearer {backend._access_token}"},
     )
     assert resp.status_code == 200

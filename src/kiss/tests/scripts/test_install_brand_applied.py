@@ -152,6 +152,9 @@ class BrandAppliedTest(unittest.TestCase):
             self.port = probe.getsockname()[1]
         # No DISPLAY and no systemctl: a remote Linux box whose daemon is
         # a detached process; the stub daemon listens on a free port.
+        # The start budget is generous: on a loaded machine the stub (a
+        # bash wrapper exec'ing python) has taken over 15 s to bind, and
+        # the installer's resulting warning lands in ``.install-problems``.
         self.env = {
             "PATH": f"{self.stubs}:{tools}",
             "HOME": str(self.home),
@@ -160,7 +163,7 @@ class BrandAppliedTest(unittest.TestCase):
             "KISS_TEST_RELEASE2": str(self.tmp / "release2"),
             "KISS_TEST_PYTHON": python,
             "KISS_WEB_PORT": str(self.port),
-            "KISS_WEB_START_TIMEOUT": "15",
+            "KISS_WEB_START_TIMEOUT": "60",
             "KISS_WEBAPP_WAIT_SECS": "10",
             "LANG": "C",
         }

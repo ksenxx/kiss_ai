@@ -8,8 +8,8 @@
 
   // The daemon commands the chat page sends.  Commands the daemon
   // accepts from other clients only (the Python ``run`` API,
-  // ``getTabsState``, the ``ready`` fan-out's ``getModels``/
-  // ``getSeaCommands``) are not here.
+  // ``getTabsState``, the ``ready`` fan-out's ``getModels``) are not
+  // here.
   const SORCAR_API_COMMANDS = [
     'submit',
     'appendUserMessage',
@@ -26,11 +26,15 @@
     'setFavorite',
     'setChatSummary',
     'getInputHistory',
+    'getSeaCommands',
     'getWelcomeInfo',
     'selectModel',
     'getConfig',
     'saveConfig',
     'getMyModels',
+    'getClaudeCodeStatus',
+    'getCodexStatus',
+    'startCodexLogin',
     'saveMyModel',
     'deleteMyModel',
     'addTrick',
@@ -105,7 +109,6 @@
     return api;
   }
 
-  global.SORCAR_API_COMMANDS = SORCAR_API_COMMANDS;
   global.createSorcarApi = createSorcarApi;
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {

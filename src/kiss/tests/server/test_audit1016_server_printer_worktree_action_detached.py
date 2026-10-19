@@ -281,8 +281,11 @@ class TestWorktreeActionDetached(IsolatedAsyncioTestCase):
             await asyncio.wait_for(stopping, timeout=20)
             elapsed = time.monotonic() - started
 
+        # Half the 30 s grace: the regression runs the grace out, while
+        # the merge's remaining git commands (commit, merge, worktree
+        # removal) have taken 5.3 s on a loaded Windows box.
         self.assertLess(
-            elapsed, 5.0,
+            elapsed, 15.0,
             f"stop_async took {elapsed:.1f}s: it waited for the pooled executor "
             "worker instead of the merge operation",
         )

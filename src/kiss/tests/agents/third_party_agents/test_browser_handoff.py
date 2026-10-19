@@ -63,8 +63,8 @@ from kiss.core.browser_handoff import (
     portal_handoff,
     set_browser_tab_opener,
 )
+from kiss.tests.agents.third_party_agents.conftest import FAKE_SIGNAL_LINK_CLI
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
-from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 _FAKE_BROWSER = """#!/usr/bin/env python3
@@ -536,7 +536,7 @@ def test_signal_link_opens_black_on_white_qr_page(
 ) -> None:
     """Signal opens its QR page (a file:// URL it wrote) in the Browser tab, else the browser."""
     cli = tmp_path / "signal-cli"
-    install_cli_script(cli, _FAKE_SIGNAL_CLI)
+    install_cli_script(cli, FAKE_SIGNAL_LINK_CLI)
     tools = auth_tools(SignalAgent())
     try:
         started = json.loads(tools["authenticate_signal"](signal_cli_path=str(cli)))

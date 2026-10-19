@@ -14,14 +14,10 @@ a mock.
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
 from kiss.agents.third_party_agents.signal.signal_sea import SignalChannelBackend
-from kiss.tests.conftest import install_cli_script
+from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 
 # A Python program (not a shell script) so the same stand-in runs on
 # Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
@@ -44,18 +40,8 @@ class TestSendSignalMessage(unittest.TestCase):
     """send_signal_message delegates to send_message and reports JSON."""
 
     def setUp(self) -> None:
-        """Install a real executable signal-cli stub on PATH.
-
-        Each mutation registers its undo at once, so a failure later in
-        ``setUp`` (where ``tearDown`` does not run) still restores PATH
-        and removes the stub directory.
-        """
-        tmpdir = tempfile.mkdtemp(prefix="rr-area-g-signal-")
-        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        install_cli_script(Path(tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
-        old_path = os.environ["PATH"]
-        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
-        os.environ["PATH"] = tmpdir + os.pathsep + old_path
+        """Install a real executable signal-cli stub on PATH."""
+        install_cli_on_path(self, "signal-cli", _FAKE_SIGNAL_CLI)
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
 

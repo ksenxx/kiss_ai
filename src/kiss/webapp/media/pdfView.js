@@ -35,7 +35,7 @@
 // mountPdfViewer(holder, bytes, opts) is the only entry point; it returns
 // {dispose} so the caller can stop pending renders and free the document.
 
-/* global Worker, Element */
+/* global Worker, Element, AbortController */
 
 (function () {
   'use strict';
@@ -48,6 +48,10 @@
   // Canvas backing stores above this many pixels are refused or blank on
   // iOS, so the device-pixel oversampling shrinks for huge pages.
   const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
+  // A CDN connection that stalls without dropping would otherwise keep
+  // the tab on "Loading…" until the browser's own network timeout,
+  // minutes later (terminalTab.js gives xterm.js the same 15 s).
+  const LOAD_TIMEOUT_MS = 15000;
 
   let pdfjsPromise = null;
   let pdfjsAttempts = 0;
@@ -62,8 +66,10 @@
    * blip would otherwise leave the tab saying "Cannot display" until
    * the user reopens it; an HTTP error for the worker is final.  (A
    * failed import() is a TypeError whatever the cause, so a module
-   * download the server refused gets the one retry too.)  A failed
-   * load is forgotten so the next viewer retries.
+   * download the server refused gets the one retry too.)  A download
+   * that has not finished after LOAD_TIMEOUT_MS fails (no retry: the
+   * connection did not drop, it is slow).  A failed load is forgotten
+   * so the next viewer retries.
    */
   function loadPdfJs() {
     if (pdfjsPromise) return pdfjsPromise;
@@ -88,18 +94,40 @@
     // ignores the query).
     pdfjsAttempts++;
     const retry = pdfjsAttempts > 1 ? '?retry=' + pdfjsAttempts : '';
-    return Promise.all([
+    // The timer aborts the worker fetch; the import() cannot be
+    // aborted, so the timer's rejection wins the race against it.  The
+    // worker's blob: URL is made only once the race is won: an import
+    // that completes after the timeout must not allocate a URL nobody
+    // will use or revoke.
+    const ctl = new AbortController();
+    let timer = 0;
+    const timeout = new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        ctl.abort();
+        reject(
+          new Error(
+            'pdf.js did not load within ' + LOAD_TIMEOUT_MS / 1000 + ' s',
+          ),
+        );
+      }, LOAD_TIMEOUT_MS);
+    });
+    const load = Promise.all([
       import(PDFJS_BUILD + 'pdf.min.mjs' + retry),
-      fetch(PDFJS_BUILD + 'pdf.worker.min.mjs').then(res => {
-        if (!res.ok) throw new Error('pdf.js worker HTTP ' + res.status);
-        return res.blob();
-      }),
-    ]).then(([lib, workerBlob]) => ({
-      lib,
-      workerUrl: URL.createObjectURL(
-        new Blob([workerBlob], {type: 'text/javascript'}),
+      fetch(PDFJS_BUILD + 'pdf.worker.min.mjs', {signal: ctl.signal}).then(
+        res => {
+          if (!res.ok) throw new Error('pdf.js worker HTTP ' + res.status);
+          return res.blob();
+        },
       ),
-    }));
+    ]);
+    return Promise.race([load, timeout])
+      .finally(() => clearTimeout(timer))
+      .then(([lib, workerBlob]) => ({
+        lib,
+        workerUrl: URL.createObjectURL(
+          new Blob([workerBlob], {type: 'text/javascript'}),
+        ),
+      }));
   }
 
   function el(tag, className, text) {

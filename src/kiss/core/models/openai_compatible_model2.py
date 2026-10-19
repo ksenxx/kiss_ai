@@ -41,6 +41,7 @@ from kiss.core.models.model import (
     _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
+    strip_system_cache_break,
 )
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleBase,
@@ -55,9 +56,7 @@ logger = logging.getLogger(__name__)
 # signature (keyword-only, no **kwargs), and the sub-keys its
 # ``stream_options`` declares (the Chat Completions shape differs).
 _RESPONSES_REQUEST_PARAMS = accepted_request_params(Responses.create)
-_RESPONSES_STREAM_OPTION_KEYS = frozenset(
-    response_create_params.StreamOptions.__annotations__
-)
+_RESPONSES_STREAM_OPTION_KEYS = frozenset(response_create_params.StreamOptions.__annotations__)
 
 
 class OpenAICompatibleModel2(OpenAICompatibleBase):
@@ -106,9 +105,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._last_stream_item_indexes: dict[str, int] = {}
         self._last_stream_message_output_index: int | None = None
 
-    def initialize(
-        self, prompt: str, attachments: list[Attachment] | None = None
-    ) -> None:
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with ``prompt`` and any ``attachments``.
 
         The ``system_instruction`` (if any) is captured separately and
@@ -158,9 +155,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         super().reset_conversation()
         self._reset_turn_state()
 
-    def _request_response(
-        self, kwargs: dict[str, Any]
-    ) -> tuple[str, list[dict[str, str]], Any]:
+    def _request_response(self, kwargs: dict[str, Any]) -> tuple[str, list[dict[str, str]], Any]:
         """Issue one Responses request, streaming iff a token callback is set.
 
         The single place the transport talks to ``responses.create``, so
@@ -182,9 +177,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             # inside ``_consume_stream`` cannot see (see
             # ``stream_abort.CONNECT_TIMEOUT``); both clocks raise the same
             # retryable stall error.
-            kwargs["timeout"] = httpx.Timeout(
-                self._stream_stall_timeout, connect=CONNECT_TIMEOUT
-            )
+            kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
             try:
                 return self._consume_stream(self.client.responses.create(**kwargs))
             except (httpx.TimeoutException, APITimeoutError) as err:
@@ -251,25 +244,19 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     call_id = self._pending_function_calls.pop(j)["call_id"]
                     if not call_id:
                         raise KISSError(
-                            f"Pending function_call for {func_name!r} has "
-                            "empty call_id"
+                            f"Pending function_call for {func_name!r} has empty call_id"
                         )
                     return call_id
-            pending_names = [
-                p.get("name", "") for p in self._pending_function_calls
-            ]
+            pending_names = [p.get("name", "") for p in self._pending_function_calls]
             raise KISSError(
-                f"No pending function_call named {func_name!r}; "
-                f"pending calls are {pending_names!r}"
+                f"No pending function_call named {func_name!r}; pending calls are {pending_names!r}"
             )
         if fallback_unanswered is not None:
             for j, pending in enumerate(fallback_unanswered):
                 if pending.get("name") == func_name:
                     return fallback_unanswered.pop(j)["call_id"]
             if fallback_unanswered:
-                fallback_names = [
-                    p.get("name", "") for p in fallback_unanswered
-                ]
+                fallback_names = [p.get("name", "") for p in fallback_unanswered]
                 raise KISSError(
                     f"No unanswered function_call named {func_name!r}; "
                     f"unanswered calls are {fallback_names!r}"
@@ -453,15 +440,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         content = item.get("content")
         if isinstance(content, list):
             return all(
-                not isinstance(part, dict)
-                or part.get("type") in cls._NATIVE_INPUT_PART_TYPES
+                not isinstance(part, dict) or part.get("type") in cls._NATIVE_INPUT_PART_TYPES
                 for part in content
             )
         return True
 
-    def _foreign_items_to_native_input(
-        self, conversation: list[Any]
-    ) -> list[Any]:
+    def _foreign_items_to_native_input(self, conversation: list[Any]) -> list[Any]:
         """Convert handed-off foreign conversation items to Responses items.
 
         When a live conversation is handed off from another provider's
@@ -491,9 +475,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 out.append(item)
                 continue
             for chat_msg in OpenAICompatibleModel._normalize_message_for_api(item):
-                out.extend(
-                    OpenAICompatibleModel._chat_message_to_responses_items(chat_msg)
-                )
+                out.extend(OpenAICompatibleModel._chat_message_to_responses_items(chat_msg))
         return out
 
     @staticmethod
@@ -573,9 +555,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             occupant_iid = str(occupant.get("item_id", "") or "")
             if occupant_iid and occupant_iid != item_id:
                 relocated_idx = (
-                    old_idx
-                    if old_idx not in tool_calls
-                    else (max(tool_calls, default=-1) + 1)
+                    old_idx if old_idx not in tool_calls else (max(tool_calls, default=-1) + 1)
                 )
                 tool_calls[relocated_idx] = tool_calls.pop(new_idx)
                 item_to_idx[occupant_iid] = relocated_idx
@@ -650,60 +630,75 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if key not in text_delta_seen and final_text:
             text_delta_seen.add(key)
             return final_text
-        if (
-            allow_suffix
-            and key in text_delta_seen
-            and final_text.startswith(old_text)
-        ):
-            return final_text[len(old_text):]
+        if allow_suffix and key in text_delta_seen and final_text.startswith(old_text):
+            return final_text[len(old_text) :]
         return ""
 
-    def _slot_for_argument_event(
+    def _tool_slot_index(
         self,
         event: Any,
+        item_id: str,
         tool_calls: dict[int, dict[str, str]],
         item_to_idx: dict[str, int],
         args_from_delta: set[int],
         args_from_added: set[int],
-    ) -> tuple[dict[str, str], int]:
-        """Locate (or create) the tool-call slot for an arguments event.
+        make_room: bool,
+    ) -> int:
+        """Return the ``tool_calls`` index a streamed function-call event lands in.
 
-        Resolves the ``(slot, idx)`` for a ``function_call_arguments.delta``
-        / ``.done`` event: prefers the slot already mapped to the event's
-        ``item_id``, re-keying it via :meth:`_move_tool_slot` when the event
-        carries a real ``output_index`` that differs from the provisional
-        one (the model's real output ordering must win — otherwise parallel
-        tool calls return in the wrong order).  Unknown ``item_id`` values
-        allocate a fresh slot at the event's ``output_index`` (or at the
-        next free position).
+        Shared by the ``output_item.added`` / ``output_item.done`` branches
+        and the ``function_call_arguments.delta`` / ``.done`` events.  A
+        known ``item_id`` keeps its slot, re-keyed via :meth:`_move_tool_slot`
+        when the event carries a real ``output_index`` that differs from the
+        provisional one (the model's real output ordering must win, or
+        parallel tool calls return in the wrong order).  An unknown item
+        lands at the event's ``output_index`` (or the next position).
+
+        Args:
+            event: The stream event (``output_index`` is read from it).
+            item_id: The function-call item id the event belongs to; empty
+                when the event carries none.
+            tool_calls: Accumulated slots keyed by output index.
+            item_to_idx: Map from item id to its slot index.
+            args_from_delta: Indices whose arguments came from deltas.
+            args_from_added: Indices whose arguments came from ``added``.
+            make_room: For item events: when the target index holds a
+                different known item, move that occupant out of the way
+                (``_relocate_slot``) when the event has a real
+                ``output_index``, else take the index after the last slot.
+                Argument events pass ``False`` and join whatever is there.
+
+        Returns:
+            The index to use; the caller creates the slot with
+            ``setdefault`` and fills it by its own rules.
         """
-        item_id = str(getattr(event, "item_id", "") or "")
-        idx_opt = item_to_idx.get(item_id)
-        if idx_opt is None:
-            idx = self._stream_output_index(event, len(tool_calls))
-        elif getattr(event, "output_index", None) is not None:
-            real_idx = self._stream_output_index(event, len(tool_calls))
-            if real_idx != idx_opt:
-                idx = self._move_tool_slot(
+        has_real_index = getattr(event, "output_index", None) is not None
+        event_idx = self._stream_output_index(event, len(tool_calls))
+        old_idx = item_to_idx.get(item_id) if item_id else None
+        if old_idx is not None:
+            if has_real_index and event_idx != old_idx:
+                return self._move_tool_slot(
                     tool_calls,
                     item_to_idx,
                     args_from_delta,
                     args_from_added,
                     item_id,
-                    idx_opt,
-                    real_idx,
+                    old_idx,
+                    event_idx,
                 )
-            else:
-                idx = idx_opt
-        else:
-            idx = idx_opt
-        slot = tool_calls.setdefault(
-            idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-        )
-        if item_id and not slot.get("item_id"):
-            slot["item_id"] = item_id
-            item_to_idx[item_id] = idx
-        return slot, idx
+            return old_idx
+        if not make_room or not item_id:
+            return event_idx
+        occupant = tool_calls.get(event_idx)
+        occupant_iid = str(occupant.get("item_id", "") or "") if occupant else ""
+        if not occupant_iid or occupant_iid == item_id:
+            return event_idx
+        if has_real_index:
+            self._relocate_slot(
+                tool_calls, item_to_idx, args_from_delta, args_from_added, event_idx
+            )
+            return event_idx
+        return max(tool_calls) + 1
 
     @staticmethod
     def _relocate_slot(
@@ -733,6 +728,31 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if from_idx in args_from_added:
             args_from_added.discard(from_idx)
             args_from_added.add(free_idx)
+
+    @staticmethod
+    def _input_carries_system_text(items: list[Any], text: str) -> bool:
+        """Return whether a ``role="system"`` input item already carries *text*.
+
+        Args:
+            items: The normalized ``input`` array about to be sent.
+            text: The configured system instruction (cache marker stripped).
+
+        Returns:
+            ``True`` when one of the system items has exactly that text,
+            comparing string content or the joined ``text`` of part lists
+            with any cache-break marker removed.
+        """
+        for item in items:
+            if not isinstance(item, dict) or item.get("role") != "system":
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                content = "".join(
+                    str(part.get("text", "")) for part in content if isinstance(part, dict)
+                )
+            if isinstance(content, str) and strip_system_cache_break(content) == text:
+                return True
+        return False
 
     def _shape_responses_kwargs(
         self,
@@ -797,12 +817,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         response_format = kwargs.pop("response_format", None)
         if response_format is not None:
             existing_text = kwargs.get("text")
-            text_cfg = (
-                dict(existing_text) if isinstance(existing_text, dict) else {}
-            )
-            text_cfg["format"] = self._translate_response_format_for_responses(
-                response_format
-            )
+            text_cfg = dict(existing_text) if isinstance(existing_text, dict) else {}
+            text_cfg["format"] = self._translate_response_format_for_responses(response_format)
             kwargs["text"] = text_cfg
 
         kwargs["model"] = self._api_model_name
@@ -815,7 +831,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             )
         kwargs["input"] = normalized
 
-        if system_instruction:
+        # A conversation handed over from a Chat Completions model
+        # (``set_model``, the fallback switch) already carries the configured
+        # prompt as its ``role="system"`` message, which travels through
+        # ``input`` verbatim; adding ``instructions`` too would send it twice.
+        if system_instruction and not self._input_carries_system_text(
+            normalized, system_instruction
+        ):
             kwargs["instructions"] = system_instruction
         if reasoning_effort is not None:
             existing = kwargs.get("reasoning")
@@ -930,48 +952,30 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     raise KISSError("function_call item missing call_id")
                 name = str(item.get("name", "") or "")
                 if not name:
-                    raise KISSError(
-                        "function_call item missing name for call_id "
-                        f"{call_id!r}"
-                    )
+                    raise KISSError(f"function_call item missing name for call_id {call_id!r}")
                 arguments = item.get("arguments", "")
                 if not isinstance(arguments, str):
                     raise KISSError(
-                        "function_call.arguments must be a string for "
-                        f"call_id {call_id!r}"
+                        f"function_call.arguments must be a string for call_id {call_id!r}"
                     )
                 if call_id in seen_calls:
-                    raise KISSError(
-                        f"Duplicate function_call call_id: {call_id!r}"
-                    )
+                    raise KISSError(f"Duplicate function_call call_id: {call_id!r}")
                 seen_calls.add(call_id)
                 outstanding.append(call_id)
             elif itype == "function_call_output":
                 call_id = str(item.get("call_id", "") or "")
                 if not call_id:
-                    raise KISSError(
-                        "function_call_output item missing call_id"
-                    )
+                    raise KISSError("function_call_output item missing call_id")
                 if "output" not in item:
-                    raise KISSError(
-                        "function_call_output missing output for call_id "
-                        f"{call_id!r}"
-                    )
+                    raise KISSError(f"function_call_output missing output for call_id {call_id!r}")
                 if not isinstance(item.get("output"), str):
                     raise KISSError(
-                        "function_call_output.output must be a string for "
-                        f"call_id {call_id!r}"
+                        f"function_call_output.output must be a string for call_id {call_id!r}"
                     )
                 if call_id not in seen_calls:
-                    raise KISSError(
-                        "function_call_output has no prior function_call: "
-                        f"{call_id!r}"
-                    )
+                    raise KISSError(f"function_call_output has no prior function_call: {call_id!r}")
                 if call_id in answered_calls:
-                    raise KISSError(
-                        "Duplicate function_call_output for call_id: "
-                        f"{call_id!r}"
-                    )
+                    raise KISSError(f"Duplicate function_call_output for call_id: {call_id!r}")
                 answered_calls.add(call_id)
                 if call_id in outstanding:
                     outstanding.remove(call_id)
@@ -1015,8 +1019,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 ``function_call_output``.
         """
         pending = [
-            p.get("call_id") or p.get("name") or "<unknown>"
-            for p in self._pending_function_calls
+            p.get("call_id") or p.get("name") or "<unknown>" for p in self._pending_function_calls
         ]
         outstanding = self._validate_function_call_conversation()
         if pending or outstanding:
@@ -1051,9 +1054,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         else:
             kwargs.pop("stream_options")
 
-    def _build_request_kwargs(
-        self, *, tools: list[dict[str, Any]] | None
-    ) -> dict[str, Any]:
+    def _build_request_kwargs(self, *, tools: list[dict[str, Any]] | None) -> dict[str, Any]:
         """Assemble the kwargs dict for ``client.responses.create(...)``.
 
         Thin wrapper around :meth:`_shape_responses_kwargs` that uses the
@@ -1067,9 +1068,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             The kwargs dict.
         """
         self._ensure_no_pending_function_calls()
-        return self._shape_responses_kwargs(
-            input_items=self.conversation, tools=tools
-        )
+        return self._shape_responses_kwargs(input_items=self.conversation, tools=tools)
 
     @staticmethod
     def _reasoning_inner_index(event: Any) -> int:
@@ -1117,10 +1116,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            if (
-                item.get("type") != "message"
-                and item.get("role") != "assistant"
-            ):
+            if item.get("type") != "message" and item.get("role") != "assistant":
                 continue
             content = item.get("content")
             if isinstance(content, str) and content.strip():
@@ -1131,9 +1127,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         continue
                     if part.get("type") not in ("output_text", "refusal"):
                         continue
-                    text = str(
-                        part.get("text") or part.get("refusal") or ""
-                    )
+                    text = str(part.get("text") or part.get("refusal") or "")
                     if text.strip():
                         return True
         return False
@@ -1214,9 +1208,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ``(content, tool_calls, response)`` — see
             :meth:`_consume_stream_events`.
         """
-        with self._watched_events(
-            stream, "openai-responses-stream-abort-watchdog"
-        ) as events:
+        with self._watched_events(stream, "openai-responses-stream-abort-watchdog") as events:
             return self._consume_stream_events(events)
 
     def _consume_stream_events(
@@ -1304,9 +1296,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 key = (output_index, inner_index)
                 reasoning_delta_seen.add(key)
                 delta = getattr(event, "delta", "") or ""
-                reasoning_part_buffers[key] = (
-                    reasoning_part_buffers.get(key, "") + delta
-                )
+                reasoning_part_buffers[key] = reasoning_part_buffers.get(key, "") + delta
                 self._invoke_token_callback(delta)
             elif etype in (
                 "response.reasoning_text.done",
@@ -1320,11 +1310,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if key not in reasoning_delta_seen and final_reasoning:
                     self._open_thinking_if_closed()
                     self._invoke_token_callback(final_reasoning)
-                elif (
-                    key in reasoning_delta_seen
-                    and final_reasoning.startswith(old_reasoning)
-                ):
-                    suffix = final_reasoning[len(old_reasoning):]
+                elif key in reasoning_delta_seen and final_reasoning.startswith(old_reasoning):
+                    suffix = final_reasoning[len(old_reasoning) :]
                     if suffix:
                         self._open_thinking_if_closed()
                         self._invoke_token_callback(suffix)
@@ -1382,53 +1369,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     call_id = str(getattr(item, "call_id", "") or "")
                     name = str(getattr(item, "name", "") or "")
                     args = str(getattr(item, "arguments", "") or "")
-                    event_idx = self._stream_output_index(event, len(tool_calls))
-                    has_real_index = (
-                        getattr(event, "output_index", None) is not None
+                    idx = self._tool_slot_index(
+                        event,
+                        item_id,
+                        tool_calls,
+                        item_to_idx,
+                        args_from_delta,
+                        args_from_added,
+                        make_room=True,
                     )
-                    if item_id and item_id in item_to_idx:
-                        old_idx = item_to_idx[item_id]
-                        if has_real_index and event_idx != old_idx:
-                            idx = self._move_tool_slot(
-                                tool_calls,
-                                item_to_idx,
-                                args_from_delta,
-                                args_from_added,
-                                item_id,
-                                old_idx,
-                                event_idx,
-                            )
-                        else:
-                            idx = old_idx
-                    else:
-                        idx = event_idx
-                        occupant = tool_calls.get(event_idx)
-                        if occupant is not None:
-                            occupant_iid = str(
-                                occupant.get("item_id", "") or ""
-                            )
-                            if (
-                                occupant_iid
-                                and item_id
-                                and occupant_iid != item_id
-                            ):
-                                if not has_real_index:
-                                    idx = max(tool_calls) + 1
-                                    event_idx = idx
-                        if has_real_index:
-                            occupant = tool_calls.get(event_idx)
-                            if occupant is not None:
-                                occupant_iid = str(
-                                    occupant.get("item_id", "") or ""
-                                )
-                                if occupant_iid and occupant_iid != item_id:
-                                    self._relocate_slot(
-                                        tool_calls,
-                                        item_to_idx,
-                                        args_from_delta,
-                                        args_from_added,
-                                        event_idx,
-                                    )
                     slot = tool_calls.setdefault(
                         idx,
                         {"id": "", "name": "", "arguments": "", "item_id": ""},
@@ -1447,30 +1396,40 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     if item_id:
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
-            elif etype == "response.function_call_arguments.delta":
+            elif etype in (
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+            ):
                 self._close_thinking_if_open()
-                slot, idx = self._slot_for_argument_event(
-                    event, tool_calls, item_to_idx, args_from_delta, args_from_added
+                item_id = str(getattr(event, "item_id", "") or "")
+                idx = self._tool_slot_index(
+                    event,
+                    item_id,
+                    tool_calls,
+                    item_to_idx,
+                    args_from_delta,
+                    args_from_added,
+                    make_room=False,
                 )
-                arg_delta: str = str(getattr(event, "delta", "") or "")
-                if idx in args_from_added and arg_delta:
-                    existing_arg_str: str = str(slot.get("arguments", "") or "")
-                    if (
-                        existing_arg_str == arg_delta
-                        or self._is_valid_json(existing_arg_str)
-                    ):
-                        arg_delta = ""
-                slot["arguments"] += arg_delta
-                if arg_delta:
-                    args_from_delta.add(idx)
-            elif etype == "response.function_call_arguments.done":
-                self._close_thinking_if_open()
-                slot, _idx = self._slot_for_argument_event(
-                    event, tool_calls, item_to_idx, args_from_delta, args_from_added
+                slot = tool_calls.setdefault(
+                    idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
                 )
-                final_args = getattr(event, "arguments", None)
-                if final_args is not None:
-                    slot["arguments"] = str(final_args)
+                if item_id and not slot.get("item_id"):
+                    slot["item_id"] = item_id
+                    item_to_idx[item_id] = idx
+                if etype == "response.function_call_arguments.done":
+                    final_args = getattr(event, "arguments", None)
+                    if final_args is not None:
+                        slot["arguments"] = str(final_args)
+                else:
+                    arg_delta: str = str(getattr(event, "delta", "") or "")
+                    if idx in args_from_added and arg_delta:
+                        existing_arg_str: str = str(slot.get("arguments", "") or "")
+                        if existing_arg_str == arg_delta or self._is_valid_json(existing_arg_str):
+                            arg_delta = ""
+                    slot["arguments"] += arg_delta
+                    if arg_delta:
+                        args_from_delta.add(idx)
             elif etype in (
                 "response.output_item.done",
                 "response.output_item.completed",
@@ -1479,44 +1438,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if item is not None and getattr(item, "type", "") == "function_call":
                     self._close_thinking_if_open()
                     item_id = str(getattr(item, "id", "") or "")
-                    has_real_index = (
-                        getattr(event, "output_index", None) is not None
+                    idx = self._tool_slot_index(
+                        event,
+                        item_id,
+                        tool_calls,
+                        item_to_idx,
+                        args_from_delta,
+                        args_from_added,
+                        make_room=True,
                     )
-                    real_idx = self._stream_output_index(event, len(tool_calls))
-                    if item_id and item_id in item_to_idx:
-                        old_idx = item_to_idx[item_id]
-                        if has_real_index and real_idx != old_idx:
-                            idx = self._move_tool_slot(
-                                tool_calls,
-                                item_to_idx,
-                                args_from_delta,
-                                args_from_added,
-                                item_id,
-                                old_idx,
-                                real_idx,
-                            )
-                        else:
-                            idx = old_idx
-                    else:
-                        idx = real_idx
-                        if has_real_index:
-                            occupant = tool_calls.get(real_idx)
-                            if occupant is not None:
-                                occupant_iid = str(
-                                    occupant.get("item_id", "") or ""
-                                )
-                                if (
-                                    occupant_iid
-                                    and item_id
-                                    and occupant_iid != item_id
-                                ):
-                                    self._relocate_slot(
-                                        tool_calls,
-                                        item_to_idx,
-                                        args_from_delta,
-                                        args_from_added,
-                                        real_idx,
-                                    )
                     slot = tool_calls.setdefault(
                         idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
                     )
@@ -1567,8 +1497,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     if not message and isinstance(err, dict):
                         message = str(err.get("message", "") or "")
                 raise KISSError(
-                    f"Responses API stream ended with {etype}"
-                    + (f": {message}" if message else "")
+                    f"Responses API stream ended with {etype}" + (f": {message}" if message else "")
                 )
             elif etype == "response.incomplete":
                 resp = getattr(event, "response", None)
@@ -1576,19 +1505,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 # the thinking callback runs (a Stop can interrupt it).
                 self._rejected_response = resp
                 self._close_thinking_if_open()
-                details = (
-                    getattr(resp, "incomplete_details", None)
-                    if resp is not None
-                    else None
-                )
+                details = getattr(resp, "incomplete_details", None) if resp is not None else None
                 reason = ""
                 if details is not None:
                     reason = str(getattr(details, "reason", "") or "")
                     if not reason and isinstance(details, dict):
                         reason = str(details.get("reason", "") or "")
                 raise KISSError(
-                    "Responses API stream ended incomplete"
-                    + (f": {reason}" if reason else "")
+                    "Responses API stream ended incomplete" + (f": {reason}" if reason else "")
                 )
             elif etype == "response.completed":
                 saw_completed = True
@@ -1613,28 +1537,21 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._close_thinking_if_open()
         if not saw_completed:
             raise KISSError(
-                "Responses API stream ended without a terminal "
-                "response.completed event."
+                "Responses API stream ended without a terminal response.completed event."
             )
         if response is None:
-            raise KISSError(
-                "Responses API stream completed without a response payload."
-            )
+            raise KISSError("Responses API stream completed without a response payload.")
 
-        all_text_keys = (
-            set(text_part_buffers.keys()) | set(added_message_buffers.keys())
-        )
+        all_text_keys = set(text_part_buffers.keys()) | set(added_message_buffers.keys())
         if all_text_keys:
-            self._last_stream_message_output_index = min(
-                key[0] for key in all_text_keys
-            )
+            self._last_stream_message_output_index = min(key[0] for key in all_text_keys)
 
         self._raise_for_failed_response(response)
 
         final_content, final_tool_calls = self._parse_non_streaming(response)
         if self._response_has_message_text(response):
             if final_content.startswith(content):
-                suffix = final_content[len(content):]
+                suffix = final_content[len(content) :]
                 if suffix:
                     self._invoke_token_callback(suffix)
             content = final_content
@@ -1650,9 +1567,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     self._invoke_token_callback(added_text)
                     text_delta_seen.add(key)
             if text_part_buffers:
-                content = "".join(
-                    text_part_buffers[k] for k in sorted(text_part_buffers)
-                )
+                content = "".join(text_part_buffers[k] for k in sorted(text_part_buffers))
         call_id_to_idx: dict[str, int] = {
             str(slot.get("id", "")): idx
             for idx, slot in tool_calls.items()
@@ -1668,17 +1583,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 idx = call_id_to_idx[fcid]
             else:
                 try:
-                    candidate_idx = int(
-                        final_tc.get("output_index", "") or len(tool_calls)
-                    )
+                    candidate_idx = int(final_tc.get("output_index", "") or len(tool_calls))
                 except (ValueError, TypeError):
                     candidate_idx = len(tool_calls)
                 if not iid and not fcid and not fname:
                     if tool_calls:
                         continue
                     raise KISSError(
-                        "Responses API returned identityless function_call "
-                        "without id/call_id/name"
+                        "Responses API returned identityless function_call without id/call_id/name"
                     )
                 idx = candidate_idx
             slot = tool_calls.setdefault(
@@ -1742,8 +1654,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if err is not None:
                 message = str(_get_attr_or_key(err, "message", "") or "")
             raise KISSError(
-                "Responses API returned failed response"
-                + (f": {message}" if message else "")
+                "Responses API returned failed response" + (f": {message}" if message else "")
             )
         if status == "incomplete":
             details = _get_attr_or_key(response, "incomplete_details")
@@ -1751,8 +1662,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if details is not None:
                 reason = str(_get_attr_or_key(details, "reason", "") or "")
             raise KISSError(
-                "Responses API returned incomplete response"
-                + (f": {reason}" if reason else "")
+                "Responses API returned incomplete response" + (f": {reason}" if reason else "")
             )
 
     @classmethod
@@ -1809,28 +1719,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 for part in _get_attr_or_key(item, "content", []) or []:
                     ptype = _get_attr_or_key(part, "type", "")
                     if ptype == "output_text":
-                        text_chunks.append(
-                            _get_attr_or_key(part, "text", "") or ""
-                        )
+                        text_chunks.append(_get_attr_or_key(part, "text", "") or "")
                     elif ptype == "refusal":
-                        text_chunks.append(
-                            _get_attr_or_key(part, "refusal", "") or ""
-                        )
+                        text_chunks.append(_get_attr_or_key(part, "refusal", "") or "")
             elif itype == "function_call":
                 tool_calls.append(
                     {
-                        "id": str(
-                            _get_attr_or_key(item, "call_id", "") or ""
-                        ),
-                        "name": str(
-                            _get_attr_or_key(item, "name", "") or ""
-                        ),
-                        "arguments": str(
-                            _get_attr_or_key(item, "arguments", "") or ""
-                        ),
-                        "item_id": str(
-                            _get_attr_or_key(item, "id", "") or ""
-                        ),
+                        "id": str(_get_attr_or_key(item, "call_id", "") or ""),
+                        "name": str(_get_attr_or_key(item, "name", "") or ""),
+                        "arguments": str(_get_attr_or_key(item, "arguments", "") or ""),
+                        "item_id": str(_get_attr_or_key(item, "id", "") or ""),
                         "output_index": str(output_index),
                     }
                 )
@@ -1865,9 +1763,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     d = item.model_dump(exclude_none=True)
                 except Exception:  # noqa: BLE001 - SDK can raise on partials
                     d = None
-                    logger.debug(
-                        "Failed to model_dump response.output item", exc_info=True
-                    )
+                    logger.debug("Failed to model_dump response.output item", exc_info=True)
             elif isinstance(item, dict):
                 d = dict(item)
             else:
@@ -1898,9 +1794,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             except json.JSONDecodeError:
                 logger.debug("Failed to decode tool-call args", exc_info=True)
                 args = {}
-            out.append(
-                {"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args}
-            )
+            out.append({"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args})
         return out
 
     def generate(self) -> tuple[str, Any]:
@@ -1919,21 +1813,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
             if content.strip():
-                self.conversation.append(
-                    {"role": "assistant", "content": content}
-                )
+                self.conversation.append({"role": "assistant", "content": content})
             self._rejected_response = None
             return content, response
 
         raw_items = self._response_output_items_to_input_items(response)
         if raw_items:
             self.conversation.extend(raw_items)
-            if content.strip() and not self._raw_items_have_message_text(
-                raw_items
-            ):
-                self.conversation.append(
-                    {"role": "assistant", "content": content}
-                )
+            if content.strip() and not self._raw_items_have_message_text(raw_items):
+                self.conversation.append({"role": "assistant", "content": content})
         else:
             self.conversation.append({"role": "assistant", "content": content})
         self._rejected_response = None
@@ -1971,33 +1859,20 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         for tc in raw_tool_calls:
             if not tc.get("id"):
-                raise KISSError(
-                    f"Responses API returned function_call without call_id: {tc!r}"
-                )
+                raise KISSError(f"Responses API returned function_call without call_id: {tc!r}")
             if not tc.get("name"):
-                raise KISSError(
-                    f"Responses API returned function_call without name: {tc!r}"
-                )
+                raise KISSError(f"Responses API returned function_call without name: {tc!r}")
 
         function_calls = self._build_function_calls(raw_tool_calls)
 
         raw_items = self._response_output_items_to_input_items(response)
         if raw_items:
-            tool_by_item_id = {
-                tc.get("item_id"): tc
-                for tc in raw_tool_calls
-                if tc.get("item_id")
-            }
-            tool_by_call_id = {
-                tc.get("id"): tc for tc in raw_tool_calls if tc.get("id")
-            }
+            tool_by_item_id = {tc.get("item_id"): tc for tc in raw_tool_calls if tc.get("item_id")}
+            tool_by_call_id = {tc.get("id"): tc for tc in raw_tool_calls if tc.get("id")}
             used_patches: set[int] = set()
             stale_indexes: list[int] = []
             for raw_i, item in enumerate(raw_items):
-                if (
-                    not isinstance(item, dict)
-                    or item.get("type") != "function_call"
-                ):
+                if not isinstance(item, dict) or item.get("type") != "function_call":
                     continue
                 patch: dict[str, str] | None = tool_by_item_id.get(
                     item.get("id")
@@ -2055,10 +1930,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     combined.append((known_order, fallback_i, item))
             stream_only_orders_list: list[tuple[int, int, dict[str, Any]]] = []
             for tc_i, tc in enumerate(raw_tool_calls):
-                if (
-                    tc.get("id") in existing_call_ids
-                    or tc.get("item_id") in existing_item_ids
-                ):
+                if tc.get("id") in existing_call_ids or tc.get("item_id") in existing_item_ids:
                     continue
                 fc_item = self._function_call_item(tc)
                 item_id = tc.get("item_id", "")
@@ -2068,9 +1940,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         resolved_order = int(tc.get("output_index", "") or "")
                     except (ValueError, TypeError):
                         resolved_order = len(raw_items)
-                stream_only_orders_list.append(
-                    (resolved_order, len(raw_items) + tc_i, fc_item)
-                )
+                stream_only_orders_list.append((resolved_order, len(raw_items) + tc_i, fc_item))
                 used_orders.add(resolved_order)
             next_order = 0
             for fallback_i, item in unknown_raw:
@@ -2081,14 +1951,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 next_order += 1
             combined.extend(stream_only_orders_list)
             if content.strip() and not any(
-                self._raw_items_have_message_text([entry[2]])
-                for entry in combined
+                self._raw_items_have_message_text([entry[2]]) for entry in combined
             ):
                 msg_order = self._last_stream_message_output_index
                 if msg_order is None:
-                    msg_order = (
-                        max(used_orders) + 1 if used_orders else len(raw_items)
-                    )
+                    msg_order = max(used_orders) + 1 if used_orders else len(raw_items)
                 used_orders.add(msg_order)
                 combined.append(
                     (
@@ -2098,9 +1965,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     )
                 )
             combined.sort(key=lambda entry: (entry[0], entry[1]))
-            merged_items: list[dict[str, Any]] = [
-                item for _order, _tie, item in combined
-            ]
+            merged_items: list[dict[str, Any]] = [item for _order, _tie, item in combined]
             self.conversation.extend(merged_items)
         else:
             if content:
@@ -2108,8 +1973,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             for tc in raw_tool_calls:
                 self.conversation.append(self._function_call_item(tc))
         self._pending_function_calls = [
-            {"name": tc.get("name", ""), "call_id": tc.get("id", "")}
-            for tc in raw_tool_calls
+            {"name": tc.get("name", ""), "call_id": tc.get("id", "")} for tc in raw_tool_calls
         ]
         self._rejected_response = None
         return function_calls, content, response
@@ -2135,9 +1999,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if isinstance(first, dict) and first.get("role") == "user":
                 parts = first.get("content")
                 if isinstance(parts, list):
-                    new_parts = [
-                        dict(p) if isinstance(p, dict) else p for p in parts
-                    ]
+                    new_parts = [dict(p) if isinstance(p, dict) else p for p in parts]
                     found = False
                     for p in new_parts:
                         if isinstance(p, dict) and p.get("type") == "input_text":
@@ -2145,9 +2007,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             found = True
                             break
                     if not found:
-                        new_parts.append(
-                            {"type": "input_text", "text": tools_prompt}
-                        )
+                        new_parts.append({"type": "input_text", "text": tools_prompt})
                     modified[0] = {"role": "user", "content": new_parts}
                 elif isinstance(parts, str):
                     modified[0] = {
@@ -2159,9 +2019,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     0,
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": tools_prompt}
-                        ],
+                        "content": [{"type": "input_text", "text": tools_prompt}],
                     },
                 )
 
@@ -2174,9 +2032,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         function_calls = _parse_text_based_tool_calls(content_clean)
 
         if content_clean.strip():
-            self.conversation.append(
-                {"role": "assistant", "content": content_clean}
-            )
+            self.conversation.append({"role": "assistant", "content": content_clean})
         for fc in function_calls:
             self.conversation.append(
                 {
@@ -2228,15 +2084,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             else None
         )
         for func_name, result_dict in function_results:
-            result_content, attachments = self.tool_result_text_and_attachments(
-                result_dict
-            )
+            result_content, attachments = self.tool_result_text_and_attachments(result_dict)
             # The pending call is consumed either way, so the bookkeeping
             # that guards the next turn stays correct even when the caller
             # names the id itself.
-            matched_call_id = self._consume_pending_call_id(
-                func_name, fallback_unanswered
-            )
+            matched_call_id = self._consume_pending_call_id(func_name, fallback_unanswered)
             explicit_call_id = result_dict.get("tool_use_id")
             call_id = str(explicit_call_id) if explicit_call_id else matched_call_id
             self.conversation.append(
@@ -2258,8 +2110,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         sentinel_indexes = [
             i
             for i, item in enumerate(self.conversation)
-            if isinstance(item, dict)
-            and item.get("type") == "_kiss_pending_tool_result_attachment"
+            if isinstance(item, dict) and item.get("type") == "_kiss_pending_tool_result_attachment"
         ]
 
         if (
@@ -2269,12 +2120,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         ):
             sentinel_attachments = [
                 Attachment(
-                    data=base64.b64decode(
-                        str(self.conversation[i].get("data", "") or "")
-                    ),
-                    mime_type=str(
-                        self.conversation[i].get("mime_type", "") or ""
-                    ),
+                    data=base64.b64decode(str(self.conversation[i].get("data", "") or "")),
+                    mime_type=str(self.conversation[i].get("mime_type", "") or ""),
                 )
                 for i in sentinel_indexes
             ]
@@ -2282,9 +2129,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 del self.conversation[i]
             parts = self._attachments_to_content_parts(sentinel_attachments)
             if parts:
-                parts.append(
-                    {"type": "input_text", "text": TOOL_RESULT_ATTACHMENT_NOTE}
-                )
+                parts.append({"type": "input_text", "text": TOOL_RESULT_ATTACHMENT_NOTE})
                 self.conversation.append({"role": "user", "content": parts})
 
     def extract_input_output_token_counts_from_response(
@@ -2316,19 +2161,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if usage is None:
             return 0, 0, 0, 0
         input_tokens = int(_get_attr_or_key(usage, "input_tokens", 0) or 0)
-        output_tokens = int(
-            _get_attr_or_key(usage, "output_tokens", 0) or 0
-        )
+        output_tokens = int(_get_attr_or_key(usage, "output_tokens", 0) or 0)
         cached_tokens = 0
         cache_write_tokens = 0
         details = _get_attr_or_key(usage, "input_tokens_details")
         if details is not None:
-            cached_tokens = int(
-                _get_attr_or_key(details, "cached_tokens", 0) or 0
-            )
-            cache_write_tokens = int(
-                _get_attr_or_key(details, "cache_write_tokens", 0) or 0
-            )
+            cached_tokens = int(_get_attr_or_key(details, "cached_tokens", 0) or 0)
+            cache_write_tokens = int(_get_attr_or_key(details, "cache_write_tokens", 0) or 0)
         return (
             max(0, input_tokens - cached_tokens - cache_write_tokens),
             output_tokens,

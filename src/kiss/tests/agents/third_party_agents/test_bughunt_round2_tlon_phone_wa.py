@@ -48,8 +48,7 @@ class _RecordingHandler(RecordingHandler):
         )
 
     def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length", 0))
-        return self.rfile.read(length) if length else b""
+        return self._read_raw()
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve the phone REST GET endpoints."""

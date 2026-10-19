@@ -35,6 +35,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     fake_composio,
     reset_state,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -153,12 +154,8 @@ class _GmailHandler(RecordingHandler):
         if self.path.split("?", 1)[0].endswith("/users/me/profile") and (
             self.headers.get("Authorization") == f"Bearer {TOKEN}"
         ):
-            profile = json.dumps({"emailAddress": "me@example.com", "messagesTotal": 3})
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=UTF-8")
-            self.send_header("Content-Length", str(len(profile)))
-            self.end_headers()
-            self.wfile.write(profile.encode())
+            profile = {"emailAddress": "me@example.com", "messagesTotal": 3}
+            self._json(200, profile, "application/json; charset=UTF-8")
             return
         body = json.dumps(
             {
@@ -176,31 +173,9 @@ class _GmailHandler(RecordingHandler):
                 }
             }
         ).encode("utf-8")
-        self.send_response(401)
-        self.send_header("Content-Type", "application/json; charset=UTF-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._reply(401, body, "application/json; charset=UTF-8")
 
-    def do_GET(self) -> None:  # noqa: N802
-        """Reply 401 to GET requests."""
-        self._handle()
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Reply 401 to POST requests."""
-        self._handle()
-
-    def do_PUT(self) -> None:  # noqa: N802
-        """Reply 401 to PUT requests."""
-        self._handle()
-
-    def do_PATCH(self) -> None:  # noqa: N802
-        """Reply 401 to PATCH requests."""
-        self._handle()
-
-    def do_DELETE(self) -> None:  # noqa: N802
-        """Reply 401 to DELETE requests."""
-        self._handle()
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle  # noqa: N815
 
 
 @pytest.fixture()
@@ -284,7 +259,7 @@ class TestGmailAgent:
         composio, _ = gmail_server
         reset_state(_SERVICE)
         agent = GmailAgent()
-        tools = {t.__name__: t for t in agent._get_tools()}
+        tools = tools_by_name(agent)
         started = json.loads(tools["authenticate_gmail"]())
         composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
         assert json.loads(tools["finish_gmail_auth"]())["ok"] is True

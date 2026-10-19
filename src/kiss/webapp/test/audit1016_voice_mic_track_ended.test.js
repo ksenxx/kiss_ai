@@ -210,7 +210,7 @@ async function main() {
   // pipeline, as they do when the user turns the mic off.
   const wrap = win.document.getElementById('input-text-wrap');
   recognizers[recognizers.length - 1]._handlers.result({
-    result: {text: 'hey sorcar'},
+    result: {text: 'abracadabra'},
   });
   assert.ok(wrap.classList.contains('listening'), 'overlay on after wake');
   assert.ok(btn.classList.contains('voice-triggered'), 'flash on after wake');

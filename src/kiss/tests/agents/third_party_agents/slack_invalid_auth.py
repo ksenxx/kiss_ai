@@ -13,7 +13,6 @@ token, so ``SlackChannelBackend.connect()`` follows its real
 
 from __future__ import annotations
 
-import json
 from typing import cast
 
 from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, RecordingServer
@@ -26,15 +25,8 @@ class InvalidAuthHandler(RecordingHandler):
         cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path.split("?", 1)[0]}
         )
-        length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
-        data = json.dumps({"ok": False, "error": "invalid_auth"}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._read_raw()
+        self._json(200, {"ok": False, "error": "invalid_auth"})
 
     def do_GET(self) -> None:  # noqa: N802
         """Handle GET requests (e.g. conversations.list)."""

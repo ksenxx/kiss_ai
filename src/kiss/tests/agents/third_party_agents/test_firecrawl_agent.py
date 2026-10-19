@@ -33,6 +33,7 @@ from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
     FirecrawlChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -123,8 +124,7 @@ class _FirecrawlRequestHandler(RecordingHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
+        raw = self._read_raw()
         try:
             body: dict[str, Any] | None = json.loads(raw.decode("utf-8")) if raw else {}
         except ValueError:
@@ -222,7 +222,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_firecrawl_auth explains how to configure when unauthenticated."""
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_firecrawl_auth"]()
     assert "authenticate_firecrawl" in msg
     assert "https://www.firecrawl.dev" in msg
@@ -231,7 +231,7 @@ def test_check_auth_unauthenticated_message() -> None:
 def test_authenticate_persists_config_and_exposes_tools() -> None:
     """authenticate_firecrawl persists config (0600) and unlocks backend tools."""
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_firecrawl"](_API_KEY))
     assert result["ok"] is True
 
@@ -268,7 +268,7 @@ def test_authenticate_persists_config_and_exposes_tools() -> None:
 def test_authenticate_stores_optional_base_url() -> None:
     """A self-hosted base_url is persisted and applied to the backend."""
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_firecrawl"](_API_KEY, "http://firecrawl.internal:3002"))
     assert result["ok"] is True
     saved = json.loads(_config.path.read_text(encoding="utf-8"))
@@ -285,7 +285,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
     untouched) with the backend tools still locked.
     """
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     config_dir = _config.path.parent
     if config_dir.is_dir():
         shutil.rmtree(config_dir)
@@ -308,7 +308,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
 def test_authenticate_rejects_empty_api_key() -> None:
     """authenticate_firecrawl refuses an empty or whitespace api_key."""
     agent = FirecrawlAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cannot be empty" in tools["authenticate_firecrawl"]("")
     assert "cannot be empty" in tools["authenticate_firecrawl"]("   ")
     assert not _config.path.exists()

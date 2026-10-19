@@ -192,9 +192,14 @@ _SLACK_TOOL_ERROR_CASES = [
     ("add_reaction", {"channel": "C01234567", "timestamp": "1234.5678", "name": "thumbsup"}),
     ("search_messages", {"query": "test"}),
     ("set_channel_topic", {"channel": "C01234567", "topic": "new topic"}),
-    ("upload_file", {
-        "third_party_agents": "C01234567", "content": "hello", "filename": "test.txt",
-    }),
+    (
+        "upload_file",
+        {
+            "third_party_agents": "C01234567",
+            "content": "hello",
+            "filename": "test.txt",
+        },
+    ),
     ("get_channel_info", {"channel": "C01234567"}),
 ]
 

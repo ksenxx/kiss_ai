@@ -135,11 +135,7 @@ class _PhoneApiHandler(RecordingHandler):
         else:
             body = json.dumps({})
         data = body.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._reply(200, data)
 
 
 class TestPhoneControlPollCursor(unittest.TestCase):

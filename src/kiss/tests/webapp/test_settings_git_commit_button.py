@@ -67,7 +67,10 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         self.assertIn("autocommitTargetTabId()", helper.group(1))
         self.assertIn("setAutocommitInFlight(true)", helper.group(1))
         self.assertIn("closeSettingsPanel()", helper.group(1))
-        self.assertIn("workDirForTab(commitTabId)", helper.group(1))
+        # The commit goes to the machine and folder the chat header's
+        # drop-down shows for the tab.
+        self.assertIn("tabBrowseWorkDir(commitTabId)", helper.group(1))
+        self.assertIn("tabMachine(commitTabId)", helper.group(1))
 
     def test_gitcommit_css_present(self) -> None:
         main_css = (_MEDIA_DIR / "main.css").read_text(encoding="utf-8")

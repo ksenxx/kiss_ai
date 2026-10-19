@@ -140,7 +140,10 @@ the job's own work directory.
 TIER_NAMES = ("small", "medium", "frontier")
 """The routing tiers, cheapest first."""
 
-TIERS: dict[str, tuple[tuple[str, str], ...]] = {
+Tiers = dict[str, tuple[tuple[str, str], ...]]
+"""A tier table: tier name -> ordered ``(model, note)`` candidates, preferred first."""
+
+TIERS: Tiers = {
     "small": (
         ("zai-org/GLM-5.3-Flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
         ("openrouter/z-ai/glm-5.3-flash", "same model via OpenRouter"),
@@ -258,6 +261,16 @@ def observed_evidence() -> str:
     return text or NO_EVIDENCE
 
 
+INTRO = "## Model routing protocol (autorouter)\n\nYou are the autorouter."
+"""How :data:`SYSTEM_PROMPT` opens; :func:`routing_prompt` swaps it for a derived router's."""
+
+EVIDENCE = observed_evidence()
+"""The observed evidence spliced into :data:`SYSTEM_PROMPT` when this file loads."""
+
+AFTER_EVIDENCE = "\n\n## Hard rules"
+"""What follows :data:`EVIDENCE` in :data:`SYSTEM_PROMPT`; :func:`routing_prompt` finds the
+evidence block by it."""
+
 SYSTEM_PROMPT = f"""\
 ## Model routing protocol (autorouter)
 
@@ -321,7 +334,7 @@ time; escalate only on a verified failure. Take models, prices and availability 
 `~/{HOME_DIR}/AUTOROUTER.md`: put a model with a high observed failure share for its role
 in `exclude` even when `pick_model` ranks it first.
 
-{observed_evidence()}
+{EVIDENCE}
 
 ## Hard rules
 
@@ -345,7 +358,41 @@ in `exclude` even when `pick_model` ranks it first.
 Task result, then a routing summary: per unit tier, model, estimated and actual cost,
 outcome, escalations, ledger path.
 """
-"""The routing protocol; the operating manual for the orchestrating model."""
+"""The routing protocol; the operating manual for the orchestrating model.
+
+A module-level f-string so ``/rsi7d`` can tune it (``patch_sea_prompt``
+edits only such constants); routers derived from this one
+(``orautorouter``) take it through :func:`routing_prompt`.
+"""
+
+
+def routing_prompt(router: str, intro: str) -> str:
+    """Return :data:`SYSTEM_PROMPT` re-headed for a router derived from this one.
+
+    :data:`INTRO` (the heading and the opening sentence) becomes
+    ``## Model routing protocol (<router>)`` followed by *intro*; the rest of
+    the protocol is shared word for word.  The observed evidence is read again,
+    so a derived SEA file that the loader re-executes shows the current
+    ``AUTOROUTER.md`` even though this imported module keeps its load-time copy.
+
+    Args:
+        router: The SEA's command name, shown in the heading.
+        intro: The opening sentence(s): which router the model is and what
+            restricts its candidates.
+
+    Raises:
+        ValueError: When :data:`SYSTEM_PROMPT` no longer opens with :data:`INTRO`
+            or its evidence block no longer ends right before :data:`AFTER_EVIDENCE`.
+    """
+    if not SYSTEM_PROMPT.startswith(INTRO):
+        raise ValueError(f"autorouter SYSTEM_PROMPT no longer opens with {INTRO!r}")
+    # Only the evidence block is swapped, located by the heading that follows it, so an
+    # evidence text that also occurs elsewhere in the protocol never rewrites a rule.
+    before, after_evidence, rest = SYSTEM_PROMPT.removeprefix(INTRO).partition(AFTER_EVIDENCE)
+    if not after_evidence or not before.endswith(EVIDENCE):
+        raise ValueError(f"autorouter SYSTEM_PROMPT evidence no longer ends at {AFTER_EVIDENCE!r}")
+    body = before.removesuffix(EVIDENCE) + observed_evidence() + after_evidence + rest
+    return f"## Model routing protocol ({router})\n\n{intro}{body}"
 
 
 class AutorouterSea(BaseSea):
@@ -426,15 +473,61 @@ def _priced(
     }
 
 
-def _candidates(tier: str, tokens_in: int, tokens_out: int, exclude: str) -> list[dict[str, Any]]:
-    """Return the priced candidates of *tier* in preference order, minus *exclude*."""
+def _candidates(
+    tiers: Tiers, tier: str, tokens_in: int, tokens_out: int, exclude: str
+) -> list[dict[str, Any]]:
+    """Return the priced candidates of *tier* of *tiers* in preference order, minus *exclude*."""
     excluded = {name.strip() for name in exclude.replace(",", " ").split()}
     runnable = set(get_available_models())
     return [
         _priced(model, note, runnable, tokens_in, tokens_out)
-        for model, note in TIERS[tier]
+        for model, note in tiers[tier]
         if model not in excluded
     ]
+
+
+def tier_menu(tiers: Tiers, tokens_in: int, tokens_out: int) -> str:
+    """Return the JSON menu of every tier of *tiers* (the body of a ``model_menu`` tool).
+
+    Args:
+        tiers: The router's tier table.
+        tokens_in: Prompt tokens the unit is expected to consume.
+        tokens_out: Completion tokens the unit is expected to produce.
+
+    Returns:
+        JSON: tier name -> ordered list of ``{model, input_per_1M, output_per_1M,
+        estimated_usd, runnable, note}`` records.
+    """
+    menu = {tier: _candidates(tiers, tier, tokens_in, tokens_out, "") for tier in TIER_NAMES}
+    return json.dumps(menu, indent=2)
+
+
+def tier_pick(tiers: Tiers, tier: str, tokens_in: int, tokens_out: int, exclude: str) -> str:
+    """Return the cheapest runnable candidate of *tier* (the body of a ``pick_model`` tool).
+
+    Args:
+        tiers: The router's tier table.
+        tier: ``small``, ``medium`` or ``frontier``.
+        tokens_in: Prompt tokens the unit is expected to consume.
+        tokens_out: Completion tokens the unit is expected to produce.
+        exclude: Models that already failed this unit, separated by commas or spaces.
+
+    Returns:
+        JSON ``{model, tier, input_per_1M, output_per_1M, estimated_usd, note}`` of
+        the first candidate whose provider credential is configured, or an
+        ``Error:`` line when the tier is unknown or has no runnable candidate.
+    """
+    if tier not in TIER_NAMES:
+        return f"Error: unknown tier {tier!r}; use one of {', '.join(TIER_NAMES)}."
+    usable = [c for c in _candidates(tiers, tier, tokens_in, tokens_out, exclude) if c["runnable"]]
+    if not usable:
+        return (
+            f"Error: no runnable model in tier {tier!r} (excluded: {exclude or 'none'}); "
+            "configure an API key for one of its candidates or route one tier up."
+        )
+    chosen = dict(usable[0], tier=tier)
+    del chosen["runnable"]
+    return json.dumps(chosen, indent=2)
 
 
 def model_menu(tokens_in: int = DEFAULT_TOKENS_IN, tokens_out: int = DEFAULT_TOKENS_OUT) -> str:
@@ -449,8 +542,7 @@ def model_menu(tokens_in: int = DEFAULT_TOKENS_IN, tokens_out: int = DEFAULT_TOK
         estimated_usd, runnable, note}`` records; ``runnable`` is true when the
         model's provider credential is configured on this installation.
     """
-    menu = {tier: _candidates(tier, tokens_in, tokens_out, "") for tier in TIER_NAMES}
-    return json.dumps(menu, indent=2)
+    return tier_menu(TIERS, tokens_in, tokens_out)
 
 
 def pick_model(
@@ -472,17 +564,7 @@ def pick_model(
         the first candidate of the tier whose provider credential is configured, or
         an ``Error:`` line when the tier is unknown or has no runnable candidate.
     """
-    if tier not in TIER_NAMES:
-        return f"Error: unknown tier {tier!r}; use one of {', '.join(TIER_NAMES)}."
-    usable = [c for c in _candidates(tier, tokens_in, tokens_out, exclude) if c["runnable"]]
-    if not usable:
-        return (
-            f"Error: no runnable model in tier {tier!r} (excluded: {exclude or 'none'}); "
-            "configure an API key for one of its candidates or route one tier up."
-        )
-    chosen = dict(usable[0], tier=tier)
-    del chosen["runnable"]
-    return json.dumps(chosen, indent=2)
+    return tier_pick(TIERS, tier, tokens_in, tokens_out, exclude)
 
 
 def estimate_cost(

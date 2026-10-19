@@ -99,12 +99,7 @@ class _GmailHandler(RecordingHandler):
     """Local Gmail endpoint: profile, messages.list/get, threads.get, drafts.create."""
 
     def _send(self, status: int, payload: Any) -> None:
-        data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=UTF-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._json(status, payload, "application/json; charset=UTF-8")
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve profile, message list/get and thread get."""
@@ -148,8 +143,7 @@ class _GmailHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Record ``drafts.create`` / ``messages.send`` and answer in the requested thread."""
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length)) if length else {}
+        body = self._read_body()
         parts = urlsplit(self.path)
         cast(RecordingServer, self.server).requests.append(
             {"method": "POST", "path": parts.path, "body": body}

@@ -12,7 +12,6 @@ supported ``KISS_SLACK_BASE_URL`` setting.
 
 from __future__ import annotations
 
-import json
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -51,19 +50,12 @@ class _SlackThreadApiHandler(InvalidAuthHandler):
         cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path.split("?", 1)[0]}
         )
-        length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        self._read_raw()
         if method == "auth.test":
             body: dict[str, Any] = {"ok": True, "user_id": BOT_USER_ID, "user": "bot", "team": "T1"}
         else:
             body = type(self).replies
-        data = json.dumps(body).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._json(200, body)
 
 
 @contextmanager

@@ -8,13 +8,16 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import inspect
 import json
 import logging
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from kiss.core import stop_signal
 from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
@@ -65,16 +68,17 @@ _NON_RETRYABLE_PHRASES = (
 )
 MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
+# Sent after a turn in which the model called natively served tools
+# (``Model.native_tools_exposed``) but ended with text alone.
+NATIVE_TOOLS_CONTINUE_MSG = (
+    "**Your tool calls were executed. If the task is complete, call the "
+    "`finish` tool now (a `tool_calls` JSON block) with your final result "
+    "instead of describing it in text; otherwise continue working.**"
+)
 # ``model_config`` keys that name the caller's endpoint and its credentials;
 # they belong to the provider that just failed and do not travel to the
 # implicit OpenRouter-twin fallback.
 _ENDPOINT_CONFIG_KEYS = frozenset({"base_url", "api_key", "extra_headers"})
-# Default stall timeout (seconds of output silence) for a run-to-completion
-# model executing a whole task in one CLI invocation.  The per-turn default
-# (300 s, see CLITextModel._cli_turn) is too short for a full agentic run,
-# where a single long native command (a build, a test suite) can be silent
-# for many minutes.  model_config["timeout"] still overrides it.
-CLI_TASK_TIMEOUT_SECONDS = 3600
 CONTEXT_LIMIT_FRACTION = (
     DEFAULT_CONFIG.context_limit_fraction
     if 0.0 < DEFAULT_CONFIG.context_limit_fraction <= 1.0
@@ -131,6 +135,12 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     """Return the arguments dict of a function call, or {} if absent/malformed."""
     raw_args = function_call.get("arguments")
     return raw_args if isinstance(raw_args, dict) else {}
+
+
+def _call_repr(function_call: dict[str, Any]) -> str:
+    """Render a tool call as the Python-style invocation the trajectory records."""
+    args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(function_call).items())
+    return f"```python\n{function_call['name']}({args_str})\n```"
 
 
 def unknown_argument_hint(
@@ -370,6 +380,11 @@ class KISSAgent(Base):
         """
         self._consecutive_no_tool_calls = 0
         self._last_response_text = ""
+        # Tool calls the model made natively (over the MCP bridge) during
+        # the current step, counted on the bridge thread, and the fatal
+        # error one of them raised there, if any.
+        self._native_tool_calls = 0
+        self._native_tool_error: Exception | None = None
 
     def _set_prompt(
         self,
@@ -417,16 +432,6 @@ class KISSAgent(Base):
         """
         Runs the agent's main ReAct loop to solve the task.
 
-        Run-to-completion models (``cc/*``, ``codex/*`` — see
-        ``Model.runs_task_to_completion``) skip the ReAct loop entirely:
-        the whole task, with *system_prompt* as the model's
-        ``system_instruction`` (``--append-system-prompt`` for ``cc/*``,
-        appended after ``CLI_SYSTEM_PROMPT_HEADER`` for ``codex/*``), is
-        handed to the CLI agent in one
-        ``generate()`` call and its final output is returned (wrapped in
-        the registered ``finish`` contract).  *tools* are registered but
-        never exposed to such a model; it uses its own native tools.
-
         Args:
             model_name (str): The name of the model to use for the agent.
             prompt_template (str): The prompt template for the agent.
@@ -460,7 +465,10 @@ class KISSAgent(Base):
                 previous LLM call) about to be sent to the LLM. Its return
                 value — a possibly modified list of messages — replaces those
                 new messages in the conversation before the call is made.
-                Default is None (no hook).
+                After a turn in which the model called tools natively
+                (Codex over MCP) the new messages include those calls and
+                their results, and the turn's answer. Default is None (no
+                hook).
             tool_call_hook (Callable | None): Optional hook called before every
                 tool call with the tool's name and its arguments dict; it
                 returns a :class:`~kiss.core.tool_verdict.Verdict`:
@@ -537,9 +545,7 @@ class KISSAgent(Base):
     def _generate_once(self) -> str:
         """Run one model generation with token/budget accounting and transcript.
 
-        Shared by :meth:`_run_non_agentic` and
-        :meth:`_run_task_to_completion`, which differ only in how the
-        generated text becomes the run's result.
+        Used by :meth:`_run_non_agentic`.
 
         Returns:
             str: The generated response text from the model.
@@ -592,90 +598,6 @@ class KISSAgent(Base):
         response_text = self._generate_once()
         self._print_result(response_text)
         return response_text
-
-    def _run_task_to_completion(self) -> str:
-        """Hand the whole task to a run-to-completion model in one shot.
-
-        CLI-backed models (``cc/*``, ``codex/*``) are full coding agents
-        with their own native tools, so instead of the turn-by-turn KISS
-        tool loop the task is sent in a single ``generate()`` call — the
-        system prompt goes to ``claude`` as ``--append-system-prompt`` and
-        to ``codex`` inside the prompt, appended to the task after
-        ``CLI_SYSTEM_PROMPT_HEADER`` (see ``CLITextModel._build_prompt``).
-        KISS tools are not exposed to the CLI; its final message becomes
-        the run's result, wrapped in the registered ``finish`` tool's
-        output contract when that tool follows the structured
-        ``summary_in_html`` signature (callers like RelentlessAgent and
-        ChatSorcarAgent parse the result as YAML).
-
-        Also reached when a tool (Sorcar's ``set_model``) swaps the live
-        model to a CLI agent mid-run: the conversation so far is then
-        flattened into the prompt as a ``[User]/[Assistant]/[Tool Result]``
-        transcript (see ``CLITextModel._build_prompt``), so the CLI
-        continues from the accumulated context.
-
-        Returns:
-            str: The task result in the registered finish contract.
-        """
-        if "timeout" not in self.model.model_config:
-            # A copy, not setdefault: the model may hold the caller's own
-            # config dict by reference, and callers rely on their configs
-            # never being mutated.
-            self.model.model_config = {
-                **self.model.model_config,
-                "timeout": CLI_TASK_TIMEOUT_SECONDS,
-            }
-        response_text = self._generate_once()
-        result = self._wrap_in_finish_contract(response_text)
-        self._print_result(result)
-        return result
-
-    def _wrap_in_finish_contract(self, text: str) -> str:
-        """Return *text* in the registered ``finish`` tool's output contract.
-
-        When the registered ``finish`` follows the structured
-        :func:`kiss.core.utils.finish` signature (has a ``summary_in_html``
-        parameter), *text* is wrapped as a successful, non-continuing
-        result so YAML-parsing callers keep working.  A ``finish(result)``
-        contract gets *text* as its ``result`` (the built-in returns it
-        unchanged; a wrapper like ``SummarizerFinish.finish`` applies its
-        own structure).  With no inspectable ``finish``, *text* is
-        returned unchanged.
-
-        Args:
-            text: The model's final output for the task.
-
-        Returns:
-            str: *text* in the registered finish contract.
-        """
-        finish_fn, params = self._registered_finish_and_params()
-        if "summary_in_html" in params:
-            assert finish_fn is not None
-            return str(finish_fn(success=True, is_continue=False, summary_in_html=text))
-        if "result" in params:
-            assert finish_fn is not None
-            return str(finish_fn(result=text))
-        return text
-
-    def _registered_finish_and_params(
-        self,
-    ) -> tuple[Callable[..., Any] | None, set[str]]:
-        """Return the registered ``finish`` tool and its parameter names.
-
-        Returns:
-            tuple: ``(finish_fn, params)`` where *finish_fn* is the
-            registered ``finish`` callable (or ``None``) and *params* is
-            the set of its parameter names (empty when absent or when the
-            signature cannot be inspected).
-        """
-        finish_fn = self.function_map.get("finish")
-        params: set[str] = set()
-        if finish_fn is not None:
-            try:
-                params = set(inspect.signature(finish_fn).parameters)
-            except (TypeError, ValueError):  # pragma: no cover — exotic callable
-                params = set()
-        return finish_fn, params
 
     def _try_switch_to_fallback(
         self, reason: str = "a non-retryable error"
@@ -757,12 +679,6 @@ class KISSAgent(Base):
         # correct even if steps are ever counted from outside the loop,
         # and leaves exactly one message for "out of steps".
         while self.step_count < self.max_steps:
-            # Checked every iteration, not just before the loop: a tool
-            # (Sorcar's set_model) can swap the live model mid-run, and a
-            # switch INTO a CLI agent must hand it the remaining task in
-            # one shot rather than resume turn-by-turn tool prompting.
-            if self.model.runs_task_to_completion:
-                return self._run_task_to_completion()
             self.step_count += 1  # pyright: ignore[reportIncompatibleVariableOverride]
             self._check_limits()
             try:
@@ -845,24 +761,32 @@ class KISSAgent(Base):
         self._prompt_cache_touched_at = time.time()
         call_started = time.time()
         self.last_call_usage = None
+        self._native_tool_calls = 0
+        self._native_tool_error = None
         try:
-            function_calls, response_text, response = (
-                self.model.generate_and_process_with_tools(
-                    self.function_map, tools_schema=self._cached_tools_schema
+            with self._native_tools_exposed():
+                function_calls, response_text, response = (
+                    self.model.generate_and_process_with_tools(
+                        self.function_map, tools_schema=self._cached_tools_schema
+                    )
                 )
-            )
         except Exception:
             # A truncated, incomplete or refused response raises but was
             # still billed; the retry/fallback loop must not drop it.
             self._bill_partial_usage()
             self._print_llm_call(call_started)
+            if self._native_tool_error is not None:
+                raise self._native_tool_error
             raise
         except BaseException:
             self._bill_stopped_call(call_started)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
-        # appended is not treated as a "new" message on the next call.
-        self._llm_hook_conversation_index = len(self.model.conversation)
+        # appended is not treated as a "new" message on the next call —
+        # unless tools ran natively during it: their calls and results
+        # were appended by the model and are new to the hook.
+        if not self._native_tool_calls:
+            self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
         self._update_tokens_and_budget_from_response(response)
@@ -881,14 +805,28 @@ class KISSAgent(Base):
                 model=self.model.model_name,
             )
 
-        if function_calls and any(fc["name"] != "finish" for fc in function_calls):
+        # A fatal error a natively run tool raised (budget exhausted, a
+        # limit hit) ends the step now that the turn is billed and in the
+        # trajectory; the ordinary tool loop below does the same.
+        if self._native_tool_error is not None:
+            raise self._native_tool_error
+        if self._native_tool_calls or any(fc["name"] != "finish" for fc in function_calls):
             self._check_limits()
 
         if not function_calls:
-            self._consecutive_no_tool_calls += 1
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
+            if self._native_tool_calls:
+                # The model worked through natively served tools and ended
+                # the turn with text: not a text-only turn, so no implicit
+                # finish — it is told to go on, or to finish through the
+                # text protocol.
+                self._consecutive_no_tool_calls = 0
+                self._add_message("user", NATIVE_TOOLS_CONTINUE_MSG)
+                self.model.add_message_to_conversation("user", NATIVE_TOOLS_CONTINUE_MSG)
+                return None
+            self._consecutive_no_tool_calls += 1
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
                 if not response_text or not response_text.strip():
                     raise _EmptyModelResponseError(
@@ -937,26 +875,8 @@ class KISSAgent(Base):
         limit_error: KISSError | None = None
 
         for fc in function_calls:
-            if fc["name"] != "finish":
-                self.tool_calls_made += 1
-            args = _call_args(fc)
-            blocked: str | None = None
-            # The hook is called before EVERY tool call (its contract), so it
-            # runs first; a refusal is the result the model sees.  Allowing
-            # means "no objection", not "must execute": the framework's
-            # tool_call_guard may still block the call.
-            hook = self.tool_call_hook
-            if hook is not None:
-                verdict = hook(fc["name"], args)
-                blocked = None if verdict.allowed else verdict.text
-            if blocked is None and self.tool_call_guard is not None:
-                blocked = self.tool_call_guard(fc["name"], args)
-            if blocked is None and is_long_running_call(fc["name"], args):
-                name, response_str = self._execute_tool_keeping_cache_warm(fc)
-            else:
-                name, response_str = self._execute_tool(fc, blocked=blocked)
-            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            call_reprs.append(f"```python\n{name}({args_str})\n```")
+            name, response_str, blocked = self._guarded_execute_tool(fc)
+            call_reprs.append(_call_repr(fc))
             function_results.append((name, {"result": response_str}))
             if name == "finish" and blocked is None:
                 finish_result = response_str
@@ -994,6 +914,127 @@ class KISSAgent(Base):
 
         self.model.add_function_results_to_conversation_and_return(function_results)
         return None
+
+    @contextlib.contextmanager
+    def _native_tools_exposed(self) -> Iterator[None]:
+        """Serve the tools natively to the model within the block, ``finish`` excluded.
+
+        See :meth:`Model.native_tools_exposed`: a no-op for every model
+        but Codex, which takes them as an MCP server and calls them on
+        the bridge's threads through
+        :meth:`_execute_tool_on_helper_thread`.  ``finish`` stays on the
+        model's ordinary tool protocol so that a turn ends when the task
+        does and nothing runs after it; so does any tool marked
+        ``runs_between_turns = True`` (Sorcar's ``set_model``, which
+        replaces this agent's model and must not do so under a running
+        turn).  The tool set and its executor are built only for a
+        model that serves tools natively (:attr:`Model.serves_tools_natively`).
+        """
+        if not self.model.serves_tools_natively:
+            yield
+            return
+        schema = [
+            tool
+            for tool in self._cached_tools_schema or []
+            if tool["function"]["name"] != "finish"
+            and not getattr(
+                self.function_map.get(tool["function"]["name"]), "runs_between_turns", False
+            )
+        ]
+        execute = functools.partial(
+            self._execute_tool_on_helper_thread,
+            stop_event=stop_signal.get_thread_stop_event(),
+            printer_binding=self.printer.thread_binding() if self.printer else None,
+        )
+        with self.model.native_tools_exposed(schema, execute):
+            yield
+
+    def _guarded_execute_tool(
+        self, function_call: dict[str, Any]
+    ) -> tuple[str, str, str | None]:
+        """Execute one tool call the way the agent loop does: hook, guard, then tool.
+
+        The :attr:`tool_call_hook` is called before EVERY tool call (its
+        contract), so it runs first; a refusal is the result the model
+        sees.  Allowing means "no objection", not "must execute": the
+        framework's :attr:`tool_call_guard` may still block the call.  A
+        long-running call keeps the prompt cache warm meanwhile.
+
+        Args:
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+
+        Returns:
+            tuple[str, str, str | None]: (function_name, function_response_string,
+            blocked) where *blocked* is the refusal text when the call was
+            not executed, else ``None``.
+        """
+        name = function_call["name"]
+        args = _call_args(function_call)
+        if name != "finish":
+            self.tool_calls_made += 1
+        blocked: str | None = None
+        hook = self.tool_call_hook
+        if hook is not None:
+            verdict = hook(name, args)
+            blocked = None if verdict.allowed else verdict.text
+        if blocked is None and self.tool_call_guard is not None:
+            blocked = self.tool_call_guard(name, args)
+        if blocked is None and is_long_running_call(name, args):
+            return (*self._execute_tool_keeping_cache_warm(function_call), None)
+        return (*self._execute_tool(function_call, blocked=blocked), blocked)
+
+    def _execute_tool_on_helper_thread(
+        self,
+        function_call: dict[str, Any],
+        stop_event: threading.Event | None,
+        printer_binding: Any,
+    ) -> tuple[str, str]:
+        """Execute a tool call that arrived on a thread other than the agent's.
+
+        Codex calls KISS tools over MCP, and each call reaches the
+        bridge of :meth:`_native_tools_exposed` on a fresh server thread
+        while the agent's thread waits for the turn to end.  Both the
+        stop event (``kiss.core.stop_signal``) and the printer's task
+        routing are thread-local, so they are re-bound here before the
+        call takes the normal :meth:`_guarded_execute_tool` path —
+        otherwise the tool's events would reach no tab and the task's
+        Stop would not reach the tool.  The call is recorded in the
+        trajectory as it happens, since the step's own record comes
+        later; the model's conversation is the model's to keep.  The
+        limits are checked after every call, as in the ordinary tool
+        loop; a fatal error (a limit hit, a sub-agent's budget exceeded)
+        is kept for :meth:`_execute_step` to raise once the turn ends,
+        and every further call of that turn is refused.
+
+        Args:
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            stop_event: The agent thread's stop event.
+            printer_binding: The agent thread's ``Printer.thread_binding()``.
+
+        Returns:
+            tuple[str, str]: (function_name, function_response_string).
+
+        Raises:
+            Exception: What the tool or the limit check raised, or a
+                ``KISSError`` naming the earlier fatal error.
+        """
+        stop_signal.set_thread_stop_event(stop_event)
+        if self.printer is not None:
+            self.printer.adopt_thread_binding(printer_binding)
+        if self._native_tool_error is not None:
+            raise KISSError(f"The run is ending: {self._native_tool_error}")
+        try:
+            name, response, _blocked = self._guarded_execute_tool(function_call)
+            self._native_tool_calls += 1
+            self._add_message("model", _call_repr(function_call))
+            self._add_message("user", f"[{name}]: {response}")
+            self._check_limits()
+        except Exception as e:
+            self._native_tool_error = e
+            raise
+        return name, response
 
     def _execute_tool_keeping_cache_warm(
         self, function_call: dict[str, Any]
@@ -1131,14 +1172,23 @@ class KISSAgent(Base):
             str: The implicit result in the registered finish contract.
         """
         text = self._last_response_text.strip()
-        finish_fn, params = self._registered_finish_and_params()
+        finish_fn = self.function_map.get("finish")
+        params: set[str] = set()
+        if finish_fn is not None:
+            try:
+                params = set(inspect.signature(finish_fn).parameters)
+            except (TypeError, ValueError):  # pragma: no cover — exotic callable
+                params = set()
         if "summary_in_html" in params:
             summary = explanation + (f" Last status from the model: {text}" if text else "")
             assert finish_fn is not None
             return str(
                 finish_fn(success=success, is_continue=is_continue, summary_in_html=summary)
             )
-        return self._wrap_in_finish_contract(text or explanation)
+        if "result" in params:
+            assert finish_fn is not None
+            return str(finish_fn(result=text or explanation))
+        return text or explanation
 
     def _execute_tool(
         self,

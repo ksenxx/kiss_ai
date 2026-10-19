@@ -24,6 +24,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {byId, click} = require('./settings_helpers');
 
 const MACHINES = [
   {name: 'laptop', status: 'reachable', local: true},
@@ -49,16 +50,6 @@ const GPU_CONFIG = {
   config: {remote_password: 'gpu-pw', max_budget: 42},
   apiKeys: {OPENAI_API_KEY: 'sk-gpu'},
 };
-
-function byId(win, id) {
-  const el = win.document.getElementById(id);
-  assert.ok(el, `#${id} must exist`);
-  return el;
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
 
 function typeInto(win, id, value) {
   const node = byId(win, id);

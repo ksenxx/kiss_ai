@@ -14,20 +14,25 @@ mocking library, patch, fake or test double is used.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import sys
 import tempfile
 import threading
-from collections.abc import Callable
+import unittest
+from collections.abc import Callable, Coroutine
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as persistence
 from kiss.core import user_config
+from kiss.core.utils import rmtree_force
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import init_repo
 
 # The stand-in server speaks the OpenAI chat-completions wire format,
@@ -327,8 +332,6 @@ class IsolatedKissHome:
 
     def cleanup(self) -> None:
         """Restore global state and delete the temp directory."""
-        from kiss.server import agent_state
-
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
         if persistence._db_conn is not None:
@@ -353,7 +356,13 @@ class IsolatedKissHome:
                     delattr(user_config, name)
             else:
                 setattr(user_config, name, value)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # The scratch repo's ``.git/objects`` are read-only, which plain
+        # ``rmtree`` cannot delete on Windows; a file still open elsewhere
+        # (a straggling process) keeps the cleanup best-effort as before.
+        try:
+            rmtree_force(self.tmpdir)
+        except OSError:
+            pass
 
 
 _PROVIDER_KEYS = (
@@ -477,3 +486,150 @@ def wait_for(predicate: Callable[[], bool], timeout: float = 30.0) -> bool:
         deadline.wait(step)
         waited += step
     return predicate()
+
+
+def override_attribute(test: unittest.TestCase, owner: Any, name: str, value: Any) -> None:
+    """Set ``owner.name`` to *value* for the rest of *test*; the cleanup restores it."""
+    test.addCleanup(setattr, owner, name, getattr(owner, name))
+    setattr(owner, name, value)
+
+
+class LocalDaemonTestCase(unittest.TestCase):
+    """A real :class:`RemoteAccessServer` on its own loop thread, under an isolated home.
+
+    ``setUp`` builds an :class:`IsolatedKissHome`; :meth:`start_daemon`
+    then starts an asyncio loop on a daemon thread and serves the daemon
+    over a temporary local endpoint file (``self.endpoint_file``) with
+    ``self.repo`` as its work dir.  A subclass's ``setUp`` calls
+    ``super().setUp()``, writes whatever config the daemon must read at
+    construction (``self.home.write_config``), then calls
+    ``self.start_daemon()``.
+
+    Cleanups run in LIFO order and every step is strict: the task threads
+    are joined (:meth:`join_tasks`) before the daemon stops, a shutdown
+    that overruns or raises is reported, and the loop is only closed once
+    its thread has ended.  A task thread still alive after the bounded
+    join fails the test and keeps the home: its history.db is not closed,
+    the persistence/``KISS_HOME`` globals are not restored and the temp
+    directory is not removed, so the straggler cannot write into the next
+    test's.  A fixture a running task may still be using while its thread
+    is joined (a stand-in model server) must be created *before*
+    ``super().setUp()`` so its cleanup runs after the join.
+    """
+
+    home_prefix = "kiss-local-daemon-"
+    # Seconds a task thread may take to end once the test is over.
+    task_join_timeout = 30.0
+
+    # Task threads an earlier case of this process left alive: the
+    # persistence path is process-wide, so a later case must not start
+    # (and redirect it) while one of them may still write.
+    _leftover_threads: list[threading.Thread] = []
+
+    def setUp(self) -> None:
+        leftovers = [t for t in LocalDaemonTestCase._leftover_threads if t.is_alive()]
+        for thread in leftovers:
+            thread.join(timeout=self.task_join_timeout)
+        LocalDaemonTestCase._leftover_threads = [t for t in leftovers if t.is_alive()]
+        if LocalDaemonTestCase._leftover_threads:
+            self.fail(
+                f"{len(LocalDaemonTestCase._leftover_threads)} task thread(s) of an "
+                "earlier test are still alive; this process's history.db cannot be isolated"
+            )
+        self.home = IsolatedKissHome(prefix=self.home_prefix)
+        # Task threads :meth:`join_tasks` found alive, as (tab_id, thread).
+        self.stragglers: list[tuple[str, threading.Thread]] = []
+        self.addCleanup(self._cleanup_home)
+        self.tmpdir = str(self.home.tmpdir)
+        self.repo = str(self.home.repo)
+        self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
+
+    def start_daemon(self) -> None:
+        """Start the loop thread and serve the daemon over ``self.endpoint_file``."""
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.loop_thread.start()
+        self.addCleanup(self._stop_loop)
+        self.server = RemoteAccessServer(
+            local_endpoint_file=self.endpoint_file,
+            work_dir=self.repo,
+        )
+        # Registered before the start is awaited so a start that times
+        # out is still shut down (stop_async on an unstarted server is a no-op).
+        self.addCleanup(self._shutdown_server)
+        self.run_on_loop(self.server.start_private_async(), timeout=30)
+        self.addCleanup(self.join_tasks)
+
+    def run_on_loop(self, coro: Coroutine[Any, Any, Any], timeout: float) -> Any:
+        """Run *coro* on the daemon's loop and return its result within *timeout* seconds."""
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=timeout)
+
+    def join_tasks(self) -> None:
+        """Join every registered task thread, then drop the registry.
+
+        The daemon answers a client before its task thread has finished
+        its bookkeeping (``_record_frequent_task`` and the event writer
+        still use the test's history.db), so the threads are joined before
+        the states are dropped and, later, the DB is closed and the tmpdir
+        removed.  A thread still alive after :attr:`task_join_timeout` is
+        an error: it is recorded in :attr:`stragglers` so
+        :meth:`_cleanup_home` leaves its DB, globals and home alone.
+        """
+        self.stragglers = []
+        for state in agent_state.snapshot():
+            # Read once: the worker clears ``task_thread`` as it ends.
+            thread = state.task_thread
+            if thread is None:
+                continue
+            thread.join(timeout=self.task_join_timeout)
+            if thread.is_alive():
+                self.stragglers.append((state.tab_id, thread))
+        if self.stragglers:
+            tabs = ", ".join(repr(tab_id) for tab_id, _ in self.stragglers)
+            raise AssertionError(
+                f"task thread of tab {tabs} still alive after {self.task_join_timeout}s; "
+                f"its history.db is not closed and its home {self.tmpdir} is left in place"
+            )
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
+                state.agent.discard()
+        agent_state.agent_states.clear()
+
+    def _cleanup_home(self) -> None:
+        # With a straggler, closing the DB would make the thread reopen
+        # it at the restored (or the next test's) path and removing the
+        # home would pull its files from under it; only the registry is
+        # emptied so the next test starts clean.
+        if self.stragglers:
+            LocalDaemonTestCase._leftover_threads.extend(t for _, t in self.stragglers)
+            with agent_state.STATE_LOCK:
+                agent_state.agent_states.clear()
+            return
+        # Stops the event writer and invalidates every thread's cached
+        # connection first, so ``home.cleanup`` finds no live connection
+        # to close raw under another thread.
+        persistence._close_db()
+        self.home.cleanup()
+
+    def _shutdown_server(self) -> None:
+        async def _shutdown() -> None:
+            # Closes the listener (and with it every established local
+            # connection), removes the endpoint file and joins the
+            # handlers before the loop stops.
+            await self.server.stop_async()
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        # A shutdown that overruns or fails surfaces here: ``_stop_loop``
+        # must not close a loop that is still running.
+        self.run_on_loop(_shutdown(), timeout=30)
+
+    def _stop_loop(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop_thread.join(timeout=5)
+        if self.loop_thread.is_alive():
+            raise AssertionError("the daemon's loop thread is still running; not closing its loop")
+        self.loop.close()

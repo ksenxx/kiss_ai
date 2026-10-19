@@ -50,9 +50,7 @@ def _blocked_port() -> tuple[socket.socket, int]:
 class TestStartHttpServerHelper:
     """Direct tests of the shared helper."""
 
-    def test_success_serves_requests_and_logs(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_success_serves_requests_and_logs(self, caplog: pytest.LogCaptureFixture) -> None:
         """The started server answers a real HTTP request; port is logged."""
         with caplog.at_level(logging.INFO, logger=__name__):
             server, thread, error = start_http_server(
@@ -74,9 +72,7 @@ class TestStartHttpServerHelper:
         finally:
             stop_http_server(server, thread)
 
-    def test_started_log_none_logs_nothing(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_started_log_none_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         """``started_log=None`` leaves success logging to the caller."""
         with caplog.at_level(logging.INFO, logger=__name__):
             server, thread, error = start_http_server(
@@ -93,9 +89,7 @@ class TestStartHttpServerHelper:
         finally:
             stop_http_server(server, thread)
 
-    def test_bind_conflict_returns_error(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_bind_conflict_returns_error(self, caplog: pytest.LogCaptureFixture) -> None:
         """An occupied port yields (None, None, error) and a warning log."""
         blocker, port = _blocked_port()
         try:
@@ -251,9 +245,7 @@ class TestAttributePortBackends:
             backend._bind_host = ""
             assert backend._start_server() is False
             assert backend._server is None
-            assert backend.connection_info.startswith(
-                "OpenAI-compatible API bind failed: "
-            )
+            assert backend.connection_info.startswith("OpenAI-compatible API bind failed: ")
         finally:
             blocker.close()
 

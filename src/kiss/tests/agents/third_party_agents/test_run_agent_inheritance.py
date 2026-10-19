@@ -128,8 +128,16 @@ def _dispatch(
 ) -> daemon_client.TaskResult:
     """Run ``dispatch_result`` for ``sorcar_sea.py`` on *parent*'s repo."""
     result = dispatch_result(
-        "sorcar_sea", "say hi", DUMMY_SEA, parent.work_dir, model_name, budget, 30.0,
-        parent_agent=parent, inherit=inherit, options=options,
+        "sorcar_sea",
+        "say hi",
+        DUMMY_SEA,
+        parent.work_dir,
+        model_name,
+        budget,
+        30.0,
+        parent_agent=parent,
+        inherit=inherit,
+        options=options,
     )
     assert isinstance(result, daemon_client.TaskResult), result
     return result
@@ -139,7 +147,9 @@ class TestDispatchResultInheritance:
     """``dispatch_result(inherit=True)`` fills the empty arguments from the caller."""
 
     def test_empty_arguments_come_from_the_parent(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """Model, same-model config, budget share, chat, web, memory."""
         parent = _parent_after_a_run(env.repo)
@@ -161,7 +171,9 @@ class TestDispatchResultInheritance:
         assert call["inheritTools"] is True
 
     def test_script_prompt_getters_win_over_the_inherited_prompts(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """The daemon applies the SEA's methods over the wire fields the parent filled.
 
@@ -186,8 +198,15 @@ class Sea(BaseSea):
         )
         parent = _parent_after_a_run(env.repo)
         result = dispatch_result(
-            "prompts", "say hi", str(script), str(env.repo), "", None, 30.0,
-            parent_agent=parent, inherit=True,
+            "prompts",
+            "say hi",
+            str(script),
+            str(env.repo),
+            "",
+            None,
+            30.0,
+            parent_agent=parent,
+            inherit=True,
         )
         assert isinstance(result, daemon_client.TaskResult), result
         (call,) = daemon.run_commands
@@ -212,15 +231,20 @@ class Sea(BaseSea):
         assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
     def test_explicit_arguments_win(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """Every explicitly passed value is kept, nothing is overwritten."""
         parent = _parent_after_a_run(env.repo)
         options = RunOptions(
-            chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
-            system_prompt="explicit base", add_to_system_prompt="explicit suffix",
+            chat_id="chat-explicit",
+            model_config={"base_url": "http://x/v1"},
+            system_prompt="explicit base",
+            add_to_system_prompt="explicit suffix",
             add_to_prompt="explicit prompt suffix",
-            use_web_tools=True, use_memory=False,
+            use_web_tools=True,
+            use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
         (call,) = daemon.run_commands
@@ -235,7 +259,9 @@ class Sea(BaseSea):
         assert call["useMemory"] is False
 
     def test_a_different_model_drops_the_parent_model_config(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """The parent's endpoint and key belong to its model only."""
         parent = _parent_after_a_run(env.repo)
@@ -244,7 +270,9 @@ class Sea(BaseSea):
         assert _sent(daemon)["modelConfig"] is None
 
     def test_a_script_that_picks_its_model_gets_no_parent_model_config(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """The daemon applies the script's ``model`` setting without touching ``modelConfig``.
 
@@ -337,7 +365,9 @@ class Sea(BaseSea):
         # An explicit model wins over the script's; when it is the
         # parent's launch model the parent's endpoint still applies.
         text = run_agent(
-            task="say hi", agent=str(scripts / "settings_sea.py"), model=PARENT_MODEL,
+            task="say hi",
+            agent=str(scripts / "settings_sea.py"),
+            model=PARENT_MODEL,
             timeout="30",
         )
         assert yaml.safe_load(text)["success"] is True, text
@@ -408,14 +438,10 @@ class Sea(BaseSea):
                 )
             elif label == "async":
                 expected = (
-                    f"Error: settings() of SEA {canonical!r} must return a dict, "
-                    "got coroutine"
+                    f"Error: settings() of SEA {canonical!r} must return a dict, got coroutine"
                 )
             elif label == "raising":
-                expected = (
-                    f"Error: settings() of SEA {canonical!r} raised: "
-                    "RuntimeError: boom"
-                )
+                expected = f"Error: settings() of SEA {canonical!r} raised: RuntimeError: boom"
             else:
                 expected = f"Error: SEA {canonical!r}: settings()"
             assert text.startswith(expected), (label, text)
@@ -424,15 +450,25 @@ class Sea(BaseSea):
         _dispatch(parent)
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
         result = dispatch_result(
-            "sorcar_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
-            parent_agent=parent, inherit=True, settings={"model": "x"},
+            "sorcar_sea",
+            "say hi",
+            DUMMY_SEA,
+            str(env.repo),
+            "",
+            None,
+            30.0,
+            parent_agent=parent,
+            inherit=True,
+            settings={"model": "x"},
         )
         assert isinstance(result, daemon_client.TaskResult), result
         assert _sent(daemon)["modelConfig"] is None
         assert _sent(daemon)["model"] == PARENT_MODEL
 
     def test_an_empty_parent_model_config_is_not_forwarded(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """``{}`` means "no configuration": the daemon default applies."""
         parent = _parent_after_a_run(env.repo)
@@ -441,7 +477,9 @@ class Sea(BaseSea):
         assert _sent(daemon)["modelConfig"] is None
 
     def test_model_config_follows_the_launch_model_after_set_model(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """The run's config belongs to the launch model, not to a model switched to later.
 
@@ -460,7 +498,9 @@ class Sea(BaseSea):
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
 
     def test_a_parent_without_a_run_inherits_only_its_defaults(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """A never-run ``ChatSorcarAgent`` has no budget or chat yet."""
         parent = ChatSorcarAgent("fresh-parent")
@@ -477,7 +517,9 @@ class Sea(BaseSea):
         assert call["useMemory"] is None
 
     def test_inherit_false_keeps_the_old_defaults(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """Programmatic callers that pass values explicitly are unaffected."""
         parent = _parent_after_a_run(env.repo)
@@ -495,7 +537,9 @@ class Sea(BaseSea):
         assert call["inheritTools"] is False
 
     def test_unattended_preamble_follows_the_inherited_prompt_suffix(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """A cron sub-task's no-questions rule is added after the inherited suffix.
 
@@ -514,7 +558,9 @@ class Sea(BaseSea):
         assert _sent(daemon)["appendToPrompt"] == unattended_child_suffix("")
 
     def test_exhausted_parent_budget_raises_like_run_parallel(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """Nothing left to split: the fan-out signal propagates, no dispatch happens."""
         parent = _parent_after_a_run(env.repo)
@@ -524,7 +570,9 @@ class Sea(BaseSea):
         assert daemon.run_commands == []
 
     def test_channel_mode_inherits_nothing(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """A channel sub-task acts on an external service: no chat, model, or budget.
 
@@ -568,7 +616,9 @@ class Sea(BaseSea):
 
 
 def _run_parent(
-    env: IsolatedKissHome, server: StandInModelServer, **kwargs: Any,
+    env: IsolatedKissHome,
+    server: StandInModelServer,
+    **kwargs: Any,
 ) -> ChatSorcarAgent:
     """Run a ``ChatSorcarAgent`` whose scripted model calls ``run_agent`` once."""
     parent = ChatSorcarAgent("inherit-e2e-parent")
@@ -610,7 +660,8 @@ class _DelegatingModel:
         if self.script[self.turns - 1] == "create_worktree":
             return tool_call_response("create_worktree", {})
         return tool_call_response(
-            "run_agent", {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
+            "run_agent",
+            {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
         )
 
 
@@ -618,7 +669,9 @@ class TestFullRunInheritance:
     """A real ``ChatSorcarAgent.run`` → ``run_agent`` → recorded ``run`` command."""
 
     def test_direct_run_passes_its_live_state_to_the_sub_task(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """Model, config, budget share, chat, web/memory, the run's work dir."""
         env.write_config(classify_tasks=False)
@@ -648,7 +701,9 @@ class TestFullRunInheritance:
         assert parent.budget_used >= 0.25
 
     def test_run_system_prompts_reach_the_sub_task(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """A run's ``base_system_prompt`` and ``system_prompt`` suffix go to the sub-task.
 
@@ -661,8 +716,10 @@ class TestFullRunInheritance:
         server = StandInModelServer(model)
         try:
             parent = _run_parent(
-                env, server,
-                base_system_prompt=PARENT_BASE_PROMPT, system_prompt=PARENT_SUFFIX,
+                env,
+                server,
+                base_system_prompt=PARENT_BASE_PROMPT,
+                system_prompt=PARENT_SUFFIX,
             )
         finally:
             server.stop()
@@ -675,7 +732,9 @@ class TestFullRunInheritance:
         assert call["appendToSystemPrompt"] == PARENT_SUFFIX
 
     def test_run_prompt_suffix_reaches_the_sub_task(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """The ``appendToPrompt`` text a run was given becomes the sub-task's.
 
@@ -693,7 +752,9 @@ class TestFullRunInheritance:
         assert _sent(daemon)["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
     def test_worktree_run_passes_its_worktree_and_its_directory(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
     ) -> None:
         """A parent that created a worktree hands the sub-task that worktree's directory."""
         env.write_config(classify_tasks=False)
@@ -724,7 +785,8 @@ def _docker_available() -> bool:
 @pytest.mark.slow
 @pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running")
 def test_parent_container_is_attached_by_the_sub_task(
-    env: IsolatedKissHome, daemon: RecordingDaemon,
+    env: IsolatedKissHome,
+    daemon: RecordingDaemon,
 ) -> None:
     """A parent inside a Docker container sends the sub-task into the same container.
 
@@ -738,7 +800,9 @@ def test_parent_container_is_attached_by_the_sub_task(
 
     client = docker.from_env()
     container = client.containers.run(
-        "python:3.11-slim", command="sleep infinity", detach=True,
+        "python:3.11-slim",
+        command="sleep infinity",
+        detach=True,
         name=f"kiss-inherit-{uuid.uuid4().hex[:8]}",
     )
     container_id = str(container.id)

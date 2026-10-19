@@ -20,17 +20,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from kiss.agents.seas.write import write_sea
 from kiss.agents.seas.write.write_sea import WriteSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import resolve_timeout
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.tool_verdict import ALLOW
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
-from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
+from kiss.tests.agents.seas.conftest import run_sea
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.sorcar.local_model_server import finish_body
 
 _SEA_PATH = Path(write_sea.__file__).resolve()
 
@@ -124,31 +122,20 @@ def test_agent_run_sends_the_default_prompt_with_the_protocol_added(tmp_path: Pa
     (``<identity>``) comes first, the writing protocol follows, and the
     prose reaches the summary untouched.
     """
-    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH)}
-    apply_sea(cmd)
+    run = sea_commands.evaluate_sea([WriteSea()], "Explain in one paragraph why the test failed.")
     prose = "<p>The port was in use, so the test failed. Free it and rerun.</p>"
-    with serve([finish_body(prose, prompt_tokens=500)]) as (url, requests):
-        agent = ChatSorcarAgent("write-sea-test")
-        result = agent.run(
-            prompt_template="Explain in one paragraph why the test failed.",
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=3,
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            system_prompt_hook=cmd["systemPromptHook"],
-            web_tools=False,
-            use_memory=False,
-            is_parallel=False,
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
+    parsed, agentic = run_sea(
+        run,
+        [finish_body(prose, prompt_tokens=500)],
+        tmp_path,
+        max_steps=3,
+        is_parallel=False,
+    )
     assert parsed["success"] is True
     assert parsed["summary"] == prose
 
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 1, [list(r) for r in requests]
-    system = str(next(m for m in agentic[0]["messages"] if m["role"] == "system")["content"])
+    assert len(agentic) == 1, agentic
+    system = system_message(agentic[0])
     assert system.lstrip().startswith("<identity>"), system[:200]
     assert write_sea.SYSTEM_PROMPT in system
     assert system.index("<identity>") < system.index("## Writing protocol (write)")

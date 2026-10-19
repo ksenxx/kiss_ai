@@ -42,8 +42,8 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
-    teardown_muse_env,
+    loopback_policy,
+    tools_by_name,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -93,8 +93,7 @@ class _Handler(RecordingHandler):
     server: Any
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         split = urlsplit(self.path)
         self.server.requests.append(
             {
@@ -113,12 +112,7 @@ class _Handler(RecordingHandler):
             payload = {"ok": True, "result": []}
         else:
             payload = _BODY
-        data = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._json(200, payload)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _serve  # noqa: N815
 
@@ -129,16 +123,8 @@ def server() -> Any:
     yield from serve_recording(_Handler)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth with a live daemon; every service may reach loopback."""
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {service: {"extra_hosts": ["127.0.0.1"]} for service in _SERVICES},
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# Every service may reach loopback.
+MUSE_POLICY = loopback_policy(*_SERVICES)
 
 
 def _audit(service: str, verdict: str) -> list[dict[str, Any]]:
@@ -573,7 +559,7 @@ def test_ntfy_failed_wiring_fails_closed_on_every_retry(
 
     _config.save({"topic": "t1", "server": server.base_url, "token": "bad\ntoken"})
     agent = NtfyAgent()
-    tools = {tool.__name__: tool for tool in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "publish_notification" in tools
 
     first = json.loads(tools["publish_notification"]("x"))
@@ -606,7 +592,7 @@ def test_discord_failed_wiring_fails_closed_on_every_retry(
     _config.save({"bot_token": "bad\ntoken"})
     agent = DiscordAgent()
     agent._backend._api_base = server.base_url
-    tools = {tool.__name__: tool for tool in agent._get_tools()}
+    tools = tools_by_name(agent)
 
     for _ in range(2):
         failed = json.loads(tools["list_guilds"]())

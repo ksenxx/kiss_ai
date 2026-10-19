@@ -73,6 +73,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, channel_work_dir
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.core.stop_signal import stop_requested
 from kiss.core.tool_interrupt import ToolCallInterrupted
 
@@ -457,32 +458,57 @@ def _executing(module_name: str, raw_path: str) -> Iterator[None]:
     A record left behind by a stopped thread (see
     :func:`_executing_owner`) is dropped by the next thread that waits
     for the file, which re-checks every
-    :data:`_EXECUTING_RECHECK_SECONDS`.
+    :data:`_EXECUTING_RECHECK_SECONDS`.  :data:`_EXECUTING` itself is
+    taken through :func:`locked_call`: this runs on task threads, where
+    a Stop injected right after a plain ``with _EXECUTING:`` acquired
+    it would skip the release and wedge every later SEA load in the
+    daemon (gh-74174).
     """
     me = threading.current_thread()
-    with _EXECUTING:
-        while (owner := _executing_owner(module_name)) is not None and owner[0] is not me:
-            if _waits_on_thread(module_name, me):
-                raise SeaError(
-                    f"SEA {raw_path!r} is being imported by another thread that is "
-                    "waiting for a SEA this thread is importing (circular SEA imports)"
-                )
-            _EXECUTING_WAIT[me] = module_name
-            try:
-                _EXECUTING.wait(_EXECUTING_RECHECK_SECONDS)
-            finally:
-                del _EXECUTING_WAIT[me]
-        depth = owner[1] if owner is not None else 0
-        _EXECUTING_OWNER[module_name] = (me, depth + 1)
+    depth = locked_call(_EXECUTING, _claim, module_name, raw_path, me)
     try:
         yield
     finally:
-        with _EXECUTING:
-            if depth:
-                _EXECUTING_OWNER[module_name] = (me, depth)
-            else:
-                del _EXECUTING_OWNER[module_name]
-                _EXECUTING.notify_all()
+        locked_call(_EXECUTING, _release, module_name, me, depth)
+
+
+def _claim(module_name: str, raw_path: str, me: threading.Thread) -> int:
+    """Record *me* as the thread executing *module_name*; the caller holds :data:`_EXECUTING`.
+
+    Waits while another live thread executes the file.
+
+    Returns:
+        The re-entry depth before this claim (0 for an outermost one).
+
+    Raises:
+        SeaError: When the thread executing the file is waiting on *me*.
+    """
+    while (owner := _executing_owner(module_name)) is not None and owner[0] is not me:
+        if _waits_on_thread(module_name, me):
+            raise SeaError(
+                f"SEA {raw_path!r} is being imported by another thread that is "
+                "waiting for a SEA this thread is importing (circular SEA imports)"
+            )
+        _EXECUTING_WAIT[me] = module_name
+        try:
+            _EXECUTING.wait(_EXECUTING_RECHECK_SECONDS)
+        finally:
+            del _EXECUTING_WAIT[me]
+    depth = owner[1] if owner is not None else 0
+    _EXECUTING_OWNER[module_name] = (me, depth + 1)
+    return depth
+
+
+def _release(module_name: str, me: threading.Thread, depth: int) -> None:
+    """Undo one :func:`_claim` of *module_name* by *me*; the caller holds :data:`_EXECUTING`.
+
+    The outermost release drops the record and wakes the waiters.
+    """
+    if depth:
+        _EXECUTING_OWNER[module_name] = (me, depth)
+    else:
+        del _EXECUTING_OWNER[module_name]
+        _EXECUTING.notify_all()
 
 
 def execute_python_file(raw_path: Any) -> dict[str, Any]:

@@ -41,86 +41,52 @@ from typing import Any
 import yaml
 
 from kiss.agents.sorcar import channel_workspace
-from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
 from kiss.server import agent_state
-from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import LocalWriter, open_local_connection
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
-    IsolatedKissHome,
+    LocalDaemonTestCase,
     StandInModelServer,
     finish_response,
+    override_attribute,
 )
 
 STUB_SUMMARY = "<p>remote client run done</p>"
 FOLLOW_UP = "follow-up from the client"
 
 
-class TestRemoteClientInteraction(unittest.TestCase):
+class TestRemoteClientInteraction(LocalDaemonTestCase):
     """Third-party agent tasks are open/interactable via a remote client.
 
     The daemon under test is reached over its local WSS channel (the
     launcher's private endpoint file).
     """
 
+    home_prefix = "kiss-tp-client-"
+
     def setUp(self) -> None:
-        # Every global mutation registers its restoration with
-        # ``addCleanup`` immediately: cleanups run (in LIFO order) even
-        # when ``setUp`` itself fails partway, unlike ``tearDown``.
-        self.home = IsolatedKissHome(prefix="kiss-tp-client-")
-        self.addCleanup(self.home.cleanup)
-        # Runs before ``home.cleanup``: stops the event writer and
-        # invalidates every thread's cached connection, so the harness
-        # finds no live connection to close raw under another thread.
-        self.addCleanup(_persistence._close_db)
-        self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
-        self.repo = str(self.home.repo)
-
-        self.loop = asyncio.new_event_loop()
-        self.loop_thread = threading.Thread(
-            target=self.loop.run_forever,
-            daemon=True,
-        )
-        self.loop_thread.start()
-        self.addCleanup(self._stop_loop)
-
-        self.server = RemoteAccessServer(
-            local_endpoint_file=self.endpoint_file,
-            work_dir=self.repo,
-        )
-
-        self._viewer_writer: LocalWriter | None = None
-        self._reader_task: concurrent.futures.Future[None] | None = None
-        self._received_cv = threading.Condition()
-        # Registered before the start is awaited so a start that times out
-        # is still shut down (stop_async on an unstarted server is a no-op).
-        self.addCleanup(self._shutdown_server)
-        asyncio.run_coroutine_threadsafe(
-            self.server.start_private_async(),
-            self.loop,
-        ).result(timeout=30)
-        # Launches go to this test's daemon, not the process-global one.
-        self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
-        launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file
-        self.addCleanup(self._restore_endpoint_override)
-
         self.model_requests: list[dict[str, Any]] = []
         self.model_seen = threading.Event()
         self.model_gate = threading.Event()
+        # Created before the daemon so it is stopped after the task
+        # threads are joined.
         self.model_server = StandInModelServer(self._answer_model_request)
         self.addCleanup(self.model_server.stop)
-        # Registered last so they run first: release any in-flight model
-        # call, then join the task workers while the daemon, the model
-        # server and the history DB are all still up.
-        self.addCleanup(self._join_tasks)
+        super().setUp()
+        self.start_daemon()
+        self._viewer_writer: LocalWriter | None = None
+        self._reader_task: concurrent.futures.Future[None] | None = None
+        self._received_cv = threading.Condition()
+        self.addCleanup(self._close_viewer)
+        # Launches go to this test's daemon, not the process-global one.
+        override_attribute(self, launcher, "_ENDPOINT_FILE_OVERRIDE", self.endpoint_file)
+        # Registered last so it runs first: release any in-flight model
+        # call before the task workers are joined.
         self.addCleanup(self.model_gate.set)
-
-    def _restore_endpoint_override(self) -> None:
-        launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
 
     def _answer_model_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """Record *request*, hold it until the test opens ``model_gate``, then ``finish``.
@@ -132,46 +98,14 @@ class TestRemoteClientInteraction(unittest.TestCase):
         self.model_gate.wait(timeout=60)
         return finish_response(STUB_SUMMARY)
 
-    def _shutdown_server(self) -> None:
-        async def _shutdown() -> None:
+    def _close_viewer(self) -> None:
+        async def _close() -> None:
             if self._viewer_writer is not None:
                 self._viewer_writer.close()
                 with suppress(OSError):  # the viewer may already be gone
                     await self._viewer_writer.wait_closed()
-            # Closes the listener (and with it every established local
-            # connection), removes the endpoint file and joins the
-            # handlers before the loop stops.
-            await self.server.stop_async()
-            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
 
-        # A shutdown that overruns or fails surfaces here: ``_stop_loop``
-        # must not close a loop that is still running.
-        asyncio.run_coroutine_threadsafe(_shutdown(), self.loop).result(timeout=30)
-
-    def _stop_loop(self) -> None:
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.loop_thread.join(timeout=5)
-        self.loop.close()
-
-    def _join_tasks(self) -> None:
-        # The daemon answers the launcher before its task thread has
-        # finished its bookkeeping on the test's history.db; join those
-        # threads before the DB is closed and the tmpdir removed.  The
-        # worker clears ``state.task_thread`` itself as it finishes, so
-        # read the attribute once and keep the reference.
-        for state in agent_state.snapshot():
-            thread = state.task_thread
-            if thread is None:
-                continue
-            thread.join(timeout=30)
-            if thread.is_alive():
-                raise AssertionError(
-                    f"task thread of tab {state.tab_id} still alive; not closing its DB"
-                )
+        self.run_on_loop(_close(), timeout=30)
 
     def _open_viewer(self) -> list[dict[str, Any]]:
         """Open a remote client's local connection and drain its inbox.
@@ -180,13 +114,7 @@ class TestRemoteClientInteraction(unittest.TestCase):
         condition is notified, so waiters block on it instead of polling.
         """
 
-        async def _open() -> tuple[LocalReader, LocalWriter]:
-            return await open_local_connection(self.server)
-
-        reader, writer = asyncio.run_coroutine_threadsafe(
-            _open(),
-            self.loop,
-        ).result(timeout=5)
+        reader, writer = self.run_on_loop(open_local_connection(self.server), timeout=5)
         self._viewer_writer = writer
 
         received: list[dict[str, Any]] = []
@@ -247,9 +175,7 @@ class TestRemoteClientInteraction(unittest.TestCase):
             writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
             await writer.drain()
 
-        asyncio.run_coroutine_threadsafe(_send(), self.loop).result(
-            timeout=5,
-        )
+        self.run_on_loop(_send(), timeout=5)
 
     @staticmethod
     def _events_for_tab(

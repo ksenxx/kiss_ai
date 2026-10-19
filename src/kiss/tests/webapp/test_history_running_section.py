@@ -163,9 +163,16 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 _seed(harness, "older completed", "older-chat", yesterday - 60)
                 # This is the production refresh signal for changed persisted history.
                 harness.server._printer.broadcast({"type": "tasks_updated"})
-                expect(page.locator("#history-list .sidebar-item")).to_have_count(50)
+                # 56 rows: the live task plus the 55 seeded above.  The
+                # first page holds 50, but folded chat groups leave the
+                # list unfilled, so the panel pages the rest in at once
+                # (applyHistoryFilterVisibility -> loadMoreHistory).
+                expect(page.locator("#history-list .sidebar-item")).to_have_count(56)
                 if flat:
                     page.click("#history-view-toggle")
+                # A task that died at start (its model import, say) is
+                # dated history, not "Running": name the real cause.
+                assert not task.done(), f"the live task ended early: {task.result().text}"
                 expect(page.locator("#history-list > .history-day-sep").first).to_have_text(
                     "Running"
                 )

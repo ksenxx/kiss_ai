@@ -40,22 +40,37 @@ class TestTranscriptHelpers(unittest.TestCase):
     """Transcript cleanup and WAV framing used by ``transcribe_pcm``."""
 
     def test_strip_leading_wake_word_aliases(self) -> None:
-        self.assertEqual(strip_leading_wake_word("Sorcar, fix it"), "fix it")
+        self.assertEqual(strip_leading_wake_word("Abracadabra, fix it"), "fix it")
         self.assertEqual(
-            strip_leading_wake_word("sir car please fix it"),
+            strip_leading_wake_word("abracadabra please fix it"),
             "please fix it",
         )
-        self.assertEqual(strip_leading_wake_word("fix Sorcar bug"), "fix Sorcar bug")
         self.assertEqual(
-            strip_leading_wake_word("Sorger, fix the failing test"),
+            strip_leading_wake_word("Abrakadabra! fix the failing test"),
             "fix the failing test",
         )
-        self.assertEqual(strip_leading_wake_word("Hey Sorcar, fix it"), "fix it")
         self.assertEqual(
-            strip_leading_wake_word("hey, sir car - fix it"), "fix it"
+            strip_leading_wake_word("Abra cadabra - fix it"), "fix it"
+        )
+        self.assertEqual(
+            strip_leading_wake_word("Abracadabra. Abracadabra, fix it"), "fix it"
+        )
+        # Only a LEADING wake word is cut; the word elsewhere is content.
+        self.assertEqual(
+            strip_leading_wake_word("fix the Abracadabra bug"),
+            "fix the Abracadabra bug",
+        )
+        # "Sorcar" is no longer part of the wake phrase, so it is plain
+        # text, as are the "Hey" and the name aliases of earlier phrases.
+        self.assertEqual(
+            strip_leading_wake_word("Sorcar, fix it"), "Sorcar, fix it"
         )
         self.assertEqual(
             strip_leading_wake_word("Hey there, fix it"), "Hey there, fix it"
+        )
+        self.assertEqual(
+            strip_leading_wake_word("sir car please fix it"),
+            "sir car please fix it",
         )
 
     def test_clean_transcript_strips_preamble_and_quotes(self) -> None:

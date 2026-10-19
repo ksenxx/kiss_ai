@@ -1061,7 +1061,7 @@ function lastRecognizer(page) {
 function wake(page) {
   page.clock.now += 3000; // clear the 2 s wake cooldown
   const rec = lastRecognizer(page);
-  rec.handlers.result({result: {text: 'hey sorcar'}});
+  rec.handlers.result({result: {text: 'abracadabra'}});
   rec.handlers.result({result: {text: ''}});
   assert.ok(
     micBtn(page.win).classList.contains('voice-triggered'),

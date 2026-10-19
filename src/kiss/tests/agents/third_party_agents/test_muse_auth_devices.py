@@ -90,9 +90,10 @@ from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyChannelBackend
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import _config as ntfy_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
+    loopback_policy,
     requires_muse_daemon,
-    setup_muse_env,
     teardown_muse_env,
+    tools_by_name,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -113,8 +114,7 @@ class _DeviceApiHandler(RecordingHandler):
     server: Any
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self.server.requests.append(
             {
                 "method": self.command,
@@ -200,31 +200,9 @@ class _DeviceApiHandler(RecordingHandler):
             payload = json.dumps({"code": 200, "data": {}}).encode()
         else:
             payload = json.dumps({"id": "m1", "ok": True}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._reply(200, payload, content_type)
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a GET request."""
-        self._serve()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a POST request."""
-        self._serve()
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a DELETE request."""
-        self._serve()
-
-    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a PATCH request."""
-        self._serve()
-
-    def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a PUT request."""
-        self._serve()
+    do_GET = do_POST = do_DELETE = do_PATCH = do_PUT = _serve  # noqa: N815
 
 
 class _DeviceApiServer(RecordingServer):
@@ -276,24 +254,10 @@ def lan_api_server() -> Any:
         yield server
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon.
-
-    Discord and Govee get a loopback ``extra_hosts`` policy entry
-    (their real hosts are fixed); Home Assistant and ntfy deliberately
-    get none, so their tests prove the enrollment-time host extension.
-    """
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "discord": {"extra_hosts": ["127.0.0.1"]},
-            "govee": {"extra_hosts": ["127.0.0.1"]},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# Discord and Govee get a loopback ``extra_hosts`` policy entry
+# (their real hosts are fixed); Home Assistant and ntfy deliberately
+# get none, so their tests prove the enrollment-time host extension.
+MUSE_POLICY = loopback_policy("discord", "govee")
 
 
 def _discord_backend(api_server: _DeviceApiServer) -> DiscordChannelBackend:
@@ -305,9 +269,7 @@ def _discord_backend(api_server: _DeviceApiServer) -> DiscordChannelBackend:
     Returns:
         An unconnected backend with the emulator as its API base.
     """
-    return DiscordChannelBackend(
-        api_base=f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
-    )
+    return DiscordChannelBackend(api_base=f"{api_server.base_url}/api/v10")
 
 
 def test_discord_bot_scheme_boundary_swap(muse_env: Path, api_server: _DeviceApiServer) -> None:
@@ -376,9 +338,7 @@ def test_discord_vault_first_and_make_backend(
     """Vault-first connects survive config removal; poll mode is vault-aware."""
     from kiss.agents.third_party_agents.discord.discord_sea import _make_backend
 
-    monkeypatch.setenv(
-        "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
-    )
+    monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     # Token-only config: the scrub deletes the whole file.
     discord_config.save({"bot_token": _REAL_DISCORD_TOKEN})
     backend = _discord_backend(api_server)
@@ -409,9 +369,7 @@ def test_discord_authenticate_rotation_rollback_clear(
     """authenticate_discord enrolls, validates, rolls back, and rotates."""
     from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
 
-    monkeypatch.setenv(
-        "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
-    )
+    monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     agent = DiscordAgent()
     assert agent._backend._token == ""
     tools = auth_tools(agent)
@@ -514,7 +472,7 @@ def test_homeassistant_authenticate_and_clear_tools(
     """authenticate_homeassistant re-enrolls rotated tokens; clear wipes."""
     from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     agent = HomeAssistantAgent()
     tools = auth_tools(agent)
     assert "Not configured" in tools["check_homeassistant_auth"]()
@@ -541,7 +499,7 @@ def test_homeassistant_authenticate_and_clear_tools(
     assert status == {"ok": True, "base_url": base_url}
     assert len(api_server.requests) == requests_before
     # First use through a cached tool wires; the retry reuses the wiring.
-    get_states = {t.__name__: t for t in agent2._get_tools()}["ha_get_states"]
+    get_states = tools_by_name(agent2)["ha_get_states"]
     for _ in range(2):
         assert json.loads(get_states())["ok"] is True
         assert api_server.header("Authorization") == "Bearer ha-second"
@@ -557,7 +515,7 @@ def test_homeassistant_authenticate_and_clear_tools(
 
 def test_ntfy_token_enrollment_and_scrub(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A configured ntfy token is enrolled with the self-hosted server host."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
     assert backend.connect()
@@ -601,7 +559,7 @@ def test_ntfy_tokenless_stays_legacy_and_rotation(
     """Tokenless ntfy has no credential to protect and skips the boundary."""
     from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     agent = NtfyAgent()
     tools = auth_tools(agent)
     assert "Not configured" in tools["check_ntfy_auth"]()
@@ -642,9 +600,7 @@ def test_govee_header_kind_credential_and_action_classes(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The Govee surrogate bearer becomes a real ``Govee-API-Key`` header."""
-    monkeypatch.setattr(
-        govee, "API", f"http://127.0.0.1:{api_server.server_address[1]}/router/api/v1"
-    )
+    monkeypatch.setattr(govee, "API", f"{api_server.base_url}/router/api/v1")
     monkeypatch.setattr(govee, "_MUSE_SESSION", None)
     monkeypatch.setenv("GOVEE_API_KEY", _REAL_GOVEE_KEY)
 
@@ -728,7 +684,7 @@ def test_cli_import_devices(
     assert lan_api_server.header("Authorization") == f"Bearer {_REAL_HA_TOKEN}"
 
     # ntfy: the self-hosted server host is enrolled with the token.
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     assert muse_cli.main(["import", "ntfy"]) == 0
     assert json.loads(ntfy_config.path.read_text()) == {"topic": "t1", "server": server_url}
@@ -864,9 +820,7 @@ def test_discord_legacy_mode_unchanged(
     from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent, _make_backend
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    monkeypatch.setenv(
-        "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
-    )
+    monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     backend = _discord_backend(api_server)
     assert not backend.connect()
     assert backend._connection_info == "No Discord token found."
@@ -908,7 +862,7 @@ def test_homeassistant_no_credential_and_bad_host(
     """Vault-less connects fail cleanly; malformed hosts fail enrollment."""
     from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     # A base_url without any token (config or vault) cannot connect.
     ha_config.path.parent.mkdir(parents=True, exist_ok=True)
     ha_config.path.write_text(json.dumps({"base_url": base_url}))
@@ -996,7 +950,7 @@ def test_failed_enrollment_is_transactional(muse_env: Path, api_server: _DeviceA
     from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
     from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     ha_agent = HomeAssistantAgent()
     ha_tools = auth_tools(ha_agent)
     assert json.loads(ha_tools["authenticate_homeassistant"](base_url, "ha-good"))["ok"] is True
@@ -1043,7 +997,7 @@ def test_boundary_ignores_ambient_proxy_env(
         monkeypatch.delenv(var, raising=False)
     for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
         monkeypatch.setenv(var, f"http://127.0.0.1:{refusing_port}")
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
     try:
@@ -1063,9 +1017,7 @@ def test_rotation_invalidates_old_surrogates(
     """Replacing a credential kills surrogates minted for the old one."""
     from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
 
-    monkeypatch.setenv(
-        "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
-    )
+    monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     discord_config.save({"bot_token": "tok-old"})
     old_backend = _discord_backend(api_server)
     assert old_backend.connect()
@@ -1113,7 +1065,7 @@ def test_ntfy_private_token_never_reaches_public_server(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A self-hosted enrollment is origin-bound: ntfy.sh is not allowed."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
     assert backend.connect() and backend._muse
@@ -1161,7 +1113,7 @@ def test_redirect_hops_reauthorized_per_generation(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """Redirect hops re-run Sentinel and re-resolve the credential."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     store_credentials(
         "ntfy", {"kind": "bearer", "token": _REAL_NTFY_TOKEN}, [], hosts=("127.0.0.1",)
     )
@@ -1191,7 +1143,7 @@ def test_redirect_hops_reauthorized_per_generation(
 
 def test_ntfy_credential_is_port_origin_bound(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A token enrolled for one port is refused on another port of the host."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
     assert backend.connect() and backend._muse
@@ -1220,7 +1172,7 @@ def test_rotation_mid_request_aborts_redirect_hop(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A credential replaced between hops aborts the in-flight request."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     store_credentials(
         "ntfy", {"kind": "bearer", "token": _REAL_NTFY_TOKEN}, [], hosts=("127.0.0.1",)
     )
@@ -1253,7 +1205,7 @@ def test_rotation_mid_request_aborts_header_kind_hop(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A header-kind credential replaced between hops also aborts."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     store_credentials(
         "discord",
         {"kind": "header", "header": "Authorization", "token": "Bot tok-old"},
@@ -1325,9 +1277,7 @@ def test_govee_legacy_mode_unchanged(
 ) -> None:
     """With Muse-auth off, Govee sends the real key directly via urllib."""
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    monkeypatch.setattr(
-        govee, "API", f"http://127.0.0.1:{api_server.server_address[1]}/router/api/v1"
-    )
+    monkeypatch.setattr(govee, "API", f"{api_server.base_url}/router/api/v1")
     monkeypatch.setenv("GOVEE_API_KEY", _REAL_GOVEE_KEY)
     devices = govee.list_devices()
     assert [d["deviceName"] for d in devices] == ["Desk lamp"]
@@ -1369,9 +1319,7 @@ def test_govee_daemon_reply_loss_not_replayed(
     """A lost daemon reply after egress is surfaced, not replayed as a write."""
     from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
-    monkeypatch.setattr(
-        govee, "API", f"http://127.0.0.1:{api_server.server_address[1]}/router/api/v1"
-    )
+    monkeypatch.setattr(govee, "API", f"{api_server.base_url}/router/api/v1")
     monkeypatch.setattr(govee, "_MUSE_SESSION", None)
     monkeypatch.setenv("GOVEE_API_KEY", _REAL_GOVEE_KEY)
     assert govee.list_devices()
@@ -1395,7 +1343,7 @@ def test_ntfy_wiring_failure_hides_backend_tools(
     """A failed Muse wiring hides the backend tools (no tokenless egress)."""
     from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": base_url, "token": "bad\ntoken"})
     agent = NtfyAgent()
     # Wiring is deferred to the first request, which fails closed
@@ -1492,7 +1440,7 @@ def test_ntfy_explicit_tokenless_overrides_stale_vault(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A deliberate tokenless rotation is not revived from the vault."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     # Enroll a token, then simulate a legacy-mode tokenless rotation:
     # config.json carries an explicit empty token while the vault still
     # holds the old one.
@@ -1601,7 +1549,7 @@ def test_wiring_failure_leaves_agents_constructible(
     from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
     from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
-    base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    base_url = api_server.base_url
     monkeypatch.setenv("DISCORD_API_BASE", f"{base_url}/api/v10")
     # A token the daemon rejects at enrollment (embedded newline).
     discord_config.save({"bot_token": "bad\ntoken"})
@@ -1612,7 +1560,7 @@ def test_wiring_failure_leaves_agents_constructible(
     # The cached tool fails closed on the first use and on every retry:
     # nothing ever reaches the server on the direct transport.
     before = len(api_server.requests)
-    list_guilds = {t.__name__: t for t in agent._get_tools()}["list_guilds"]
+    list_guilds = tools_by_name(agent)["list_guilds"]
     for _ in range(2):
         failed = json.loads(list_guilds())
         assert failed["ok"] is False and "invalid credential token" in failed["error"]
@@ -1631,7 +1579,7 @@ def test_wiring_failure_leaves_agents_constructible(
     ntfy_agent_obj = NtfyAgent()
     # The first request runs the deferred wiring, which fails closed;
     # a retry must not slip out tokenless on the direct transport.
-    publish = {t.__name__: t for t in ntfy_agent_obj._get_tools()}["publish_notification"]
+    publish = tools_by_name(ntfy_agent_obj)["publish_notification"]
     for _ in range(2):
         assert "wiring failed" in json.loads(publish("x"))["error"]
     assert len(api_server.requests) == before
@@ -1698,7 +1646,7 @@ def test_network_failure_error_is_redacted(muse_env: Path, refusing_port: int) -
 
 def test_corrupted_vault_entry_fails_closed(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A corrupted vault file yields no enrolled hosts: requests are denied."""
-    server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
+    server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
     assert backend.connect() and backend._muse

@@ -29,27 +29,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage, send} = require('./simplify2_harness');
+const {lastMsg, click, openSettings, closeSettings} = require('./settings_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function openSettings(win) {
-  click(win, win.document.getElementById('settings-btn'));
-}
-
-function closeSettings(win) {
-  click(win, win.document.getElementById('settings-panel-close'));
-}
 
 function typeInto(win, id, value) {
   const node = win.document.getElementById(id);

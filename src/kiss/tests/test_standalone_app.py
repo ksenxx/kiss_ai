@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,25 @@ pytestmark = posix_only("runs the kiss-app console script and stub browsers unde
 _SRC = Path(__file__).resolve().parents[2]
 _KISS_APP = Path(sys.executable).parent / "kiss-app"
 _LOOPBACK = "http://127.0.0.1:8787"
+_MACOS = platform.system() == "Darwin"
+
+
+def _app_flag(url: str, product_name: str = BRAND["product_name"]) -> str:
+    """The ``--app=`` argument kiss-app passes for *url* on this platform.
+
+    macOS: the daemon's ``media/appWindow.html`` page, which opens *url*
+    as a popup window (the Dock-click fix, see the module); elsewhere
+    *url* itself.
+    """
+    if not _MACOS:
+        return f"--app={url}"
+    query = urllib.parse.urlencode({"url": url, "title": product_name})
+    return f"--app={urllib.parse.urljoin(url, '/media/appWindow.html')}?{query}"
+
+
+# The flags that follow the common ones on this platform: macOS lets the
+# appWindow.html page open its popup without a click.
+_PLATFORM_FLAGS = ["--disable-popup-blocking"] if _MACOS else []
 
 
 def _write_stub_browser(
@@ -149,7 +169,7 @@ def test_browser_override_wins_and_must_exist(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.split() == [
         str(stub),
-        f"--app={_LOOPBACK}",
+        _app_flag(_LOOPBACK),
         f"--user-data-dir={tmp_path / 'kiss-home' / 'webapp-profile'}",
         f"--profile-directory={standalone_app.brand_slug()}",
         f"--class={standalone_app.brand_slug()}",
@@ -157,6 +177,7 @@ def test_browser_override_wins_and_must_exist(tmp_path: Path) -> None:
         "--no-default-browser-check",
         "--password-store=basic",
         "--use-mock-keychain",
+        *_PLATFORM_FLAGS,
     ]
     proc = _run(
         ["--print-command", "--url", _LOOPBACK],
@@ -245,7 +266,7 @@ def test_opens_the_daemon_url_detached(tmp_path: Path) -> None:
     # period, while the (8 s) browser was still running: detached.
     assert standalone_app.STARTUP_GRACE_SECS < elapsed < 6, elapsed
     assert _stub_calls(log) == [
-        f"--app={_LOOPBACK}",
+        _app_flag(_LOOPBACK),
         f"--user-data-dir={env['KISS_HOME']}/webapp-profile",
         f"--profile-directory={standalone_app.brand_slug()}",
         f"--class={standalone_app.brand_slug()}",
@@ -253,6 +274,7 @@ def test_opens_the_daemon_url_detached(tmp_path: Path) -> None:
         "--no-default-browser-check",
         "--password-store=basic",
         "--use-mock-keychain",
+        *_PLATFORM_FLAGS,
     ]
 
 
@@ -274,7 +296,7 @@ def test_foreground_runs_the_browser_in_place(tmp_path: Path) -> None:
     stub = _write_stub_browser(tmp_path / "bin" / "chrome", log, exit_code=7)
     proc = _run(["--foreground", "--url", _LOOPBACK], _env(tmp_path, KISS_APP_BROWSER=str(stub)))
     assert proc.returncode == 7
-    assert _stub_calls(log)[0] == f"--app={_LOOPBACK}"
+    assert _stub_calls(log)[0] == _app_flag(_LOOPBACK)
 
 
 def test_browser_dying_at_once_is_a_failure_with_its_stderr(tmp_path: Path) -> None:
@@ -305,16 +327,42 @@ def test_browser_handing_off_to_a_running_instance_is_a_success(tmp_path: Path) 
 # --- a real browser window --------------------------------------------------
 
 
+_MOVED_BOUNDS = (123, 77, 640, 480)
+"""Where ``_Hits``'s page moves the macOS popup window to: left, top, width, height."""
+
+
 class _Hits(http.server.BaseHTTPRequestHandler):
-    """A one-page site that records every request path."""
+    """A one-page site that records every request path.
+
+    Like the daemon it serves the packaged ``media/appWindow.html`` and
+    ``media/appWindow.js`` (the macOS popup window and its bounds
+    keeper), and its page loads that script, so the window kiss-app
+    opens on macOS is the real popup.  The page also moves and
+    resizes a popup once to ``_MOVED_BOUNDS`` (a popup may move itself;
+    an app window may not), so a relaunch shows whether the bounds
+    were kept.
+    """
 
     paths: list[str] = []
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         self.paths.append(self.path)
-        body = b"<title>Standalone window test</title><h1>standalone ok</h1>"
+        media = Path(self.path.split("?")[0]).name
+        if self.path.startswith("/media/") and media in ("appWindow.html", "appWindow.js"):
+            body = (standalone_app.MEDIA_DIR / media).read_bytes()
+        else:
+            body = (
+                b"<title>Standalone window test</title><h1>standalone ok</h1>"
+                b'<script src="/media/appWindow.js"></script><script>'
+                b"if (window.name === 'kiss-app-window' && !localStorage.getItem('moved')) {"
+                b"  localStorage.setItem('moved', '1');"
+                + f"  window.moveTo({_MOVED_BOUNDS[0]}, {_MOVED_BOUNDS[1]});"
+                f"  window.resizeTo({_MOVED_BOUNDS[2]}, {_MOVED_BOUNDS[3]});".encode()
+                + b"}</script>"
+            )
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        ctype = "text/javascript" if media.endswith(".js") else "text/html"
+        self.send_header("Content-Type", ctype)
         self.end_headers()
         self.wfile.write(body)
 
@@ -425,9 +473,97 @@ def test_macos_real_browser_runs_from_the_brand_bundle(tmp_path: Path) -> None:
         assert "/" in _Hits.paths, (_Hits.paths, log.read_text())
         # The window and its helpers run from the clone, not the browser's own bundle.
         assert standalone_app.macos_bundle_in_use(bundle)
+        # The --app page was the popup opener, which closed itself: one
+        # window, the popup, showing the page.
+        assert _Hits.paths[0].startswith("/media/appWindow.html?url="), _Hits.paths
+        pid = _macos_engine_pid(exe_copy, profile)
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+        # A click on the running app's icon (what `open -a` sends: a
+        # reopen event) brings that window to the front and opens no
+        # other, which it would for an app window (Chromium opens a new
+        # browser window when it finds no window of its own to focus).
+        subprocess.run(["open", "-a", str(bundle)], check=True)
+        time.sleep(3)
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        # A second kiss-app while the window is open does the same.
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        assert "already open" in proc.stdout
+        time.sleep(3)
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _Hits.paths.count("/") == 1, _Hits.paths
+        # The popup's bounds (moved once by the page) survive a relaunch:
+        # the browser forgets a popup's bounds, appWindow.js keeps them.
+        os.kill(pid, 15)
+        for _ in range(100):
+            if not standalone_app.macos_bundle_in_use(bundle):
+                break
+            time.sleep(0.1)
+        assert not standalone_app.macos_bundle_in_use(bundle)
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        for _ in range(300):
+            if _Hits.paths.count("/") == 2:
+                break
+            time.sleep(0.1)
+        pid = _macos_engine_pid(exe_copy, profile)
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
     finally:
         subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False)
         httpd.shutdown()
+
+
+def _macos_engine_pid(exe: Path, profile: Path) -> int:
+    """The pid of the browser process *exe* running with *profile* as its user data dir."""
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    for line in listing.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if command.startswith(f"{exe} ") and f"--user-data-dir={profile} " in command:
+            return int(pid)
+    raise AssertionError(f"no {exe} with --user-data-dir={profile} in\n{listing.stdout}")
+
+
+_WINDOWS_JXA = """
+ObjC.import('CoreGraphics');
+function run(argv) {
+  var ref = $.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+    $.kCGNullWindowID);
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject(ref));
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    if (w.kCGWindowOwnerPID === parseInt(argv[0], 10) && w.kCGWindowLayer === 0) {
+      var b = w.kCGWindowBounds;
+      out.push([b.X, b.Y, b.Width, b.Height]);
+    }
+  }
+  return JSON.stringify(out);
+}
+"""
+
+
+def _macos_windows(pid: int, expected: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
+    """The on-screen windows of process *pid* as (left, top, width, height), front to back.
+
+    Waits up to 30 s for them to be *expected*, then returns whatever is
+    there.  The list comes from the window server (JXA over
+    CoreGraphics), which needs no accessibility permission; a minimized
+    window is off screen and not listed.
+    """
+    windows: list[tuple[int, ...]] = []
+    for _ in range(300):
+        out = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", _WINDOWS_JXA, str(pid)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        windows = [tuple(int(v) for v in w) for w in json.loads(out)]
+        if windows == expected:
+            break
+        time.sleep(0.1)
+    return windows
 
 
 # --- desktop launchers ------------------------------------------------------
@@ -767,7 +903,7 @@ def test_branded_app_uses_the_brand_home_and_window_class(
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.split() == [
         str(stub),
-        f"--app={_LOOPBACK}",
+        _app_flag(_LOOPBACK, "Seamless Loop"),
         f"--user-data-dir={tmp_path / 'home' / '.s10s' / 'webapp-profile'}",
         "--profile-directory=seamless-loop",
         "--class=seamless-loop",
@@ -775,6 +911,7 @@ def test_branded_app_uses_the_brand_home_and_window_class(
         "--no-default-browser-check",
         "--password-store=basic",
         "--use-mock-keychain",
+        *_PLATFORM_FLAGS,
     ]
     proc = _run_branded(branded_src, ["--wait", "0"], env)
     assert proc.returncode == 1
@@ -1121,6 +1258,49 @@ def test_macos_stale_clone_in_use_is_left_alone(tmp_path: Path) -> None:
     assert not standalone_app.macos_bundle_in_use(bundle)
     assert standalone_app.macos_launch_browser(newer, home=tmp_path) == exe_copy
     assert _bundle_plist(bundle)["CFBundleShortVersionString"] == "141.0.7400.1"
+
+
+def test_macos_app_page_opens_the_webapp_as_a_popup_of_its_origin() -> None:
+    """The macOS ``--app`` page is ``media/appWindow.html`` on the webapp's origin.
+
+    Its query names the webapp URL and the brand (the page's title);
+    the command line lets that page open its popup without a click.
+    """
+    title = urllib.parse.quote_plus(BRAND["product_name"])
+    assert standalone_app.app_window_url(_LOOPBACK) == (
+        f"{_LOOPBACK}/media/appWindow.html?url=http%3A%2F%2F127.0.0.1%3A8787&title={title}"
+    )
+    assert standalone_app.app_window_url("https://t.trycloudflare.com/", SEAMLESS_LOOP) == (
+        "https://t.trycloudflare.com/media/appWindow.html"
+        "?url=https%3A%2F%2Ft.trycloudflare.com%2F&title=Seamless+Loop"
+    )
+    command = standalone_app.app_command(Path("chrome"), _LOOPBACK, Path("p"), "s", popups=True)
+    assert command[-1] == "--disable-popup-blocking"
+    assert "--disable-popup-blocking" not in standalone_app.app_command(
+        Path("chrome"), _LOOPBACK, Path("p"), "s"
+    )
+
+
+@pytest.mark.skipif(not _MACOS, reason="`open -a` is macOS' Launch Services")
+def test_macos_activate_running_needs_a_window_open_can_reach(tmp_path: Path) -> None:
+    """Nothing running from the bundle, or a bundle ``open`` cannot launch: False.
+
+    (The real-browser test above covers the window being brought to
+    the front.)
+    """
+    bundle = tmp_path / "Applications" / f"{BRAND['product_name']}.app"
+    assert not standalone_app.macos_activate_running(bundle)
+    # A "window" running from what is not an application bundle (no
+    # Info.plist, no launcher): ``open -a`` refuses it.
+    exe = bundle / "Contents" / "MacOS" / "Chromium"
+    _write_stub_browser(exe, tmp_path / "log", sleep=30)
+    window = subprocess.Popen([str(exe), "--app=http://127.0.0.1:1/"])
+    try:
+        assert standalone_app.macos_bundle_in_use(bundle)
+        assert not standalone_app.macos_activate_running(bundle)
+    finally:
+        window.kill()
+        window.wait()
 
 
 def test_macos_clone_failure_leaves_the_launcher_alone(

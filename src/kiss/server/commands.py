@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import logging
 import queue
+import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
+    _load_slash_command_usage,
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
@@ -112,6 +114,56 @@ def _task_accepts_input(state: AgentState | None) -> bool:
         still alive.
     """
     return state is not None and state.running()
+
+
+# How many of the most recently run commands the ``/`` popup lists
+# first, and the run count from which a command counts as frequent.
+_RECENT_COMMANDS = 3
+_FREQUENT_COMMAND_MIN_RUNS = 2
+
+
+def sea_commands_event(commands: list[str]) -> dict[str, Any]:
+    """Build the ``seaCommands`` event the composer's ``/`` popup renders.
+
+    The popup lists the commands the user ran most recently first,
+    then the ones run often, then the rest; both ranked lists come
+    from the task history (see
+    :func:`kiss.agents.sorcar.persistence._load_slash_command_usage`)
+    so every surface shows the same order.
+
+    Args:
+        commands: The registered command names (``list_commands()``).
+
+    Returns:
+        ``{"type": "seaCommands", "commands": [...], "recent": [...],
+        "frequent": [...]}`` -- ``recent`` is the :data:`_RECENT_COMMANDS`
+        most recently run registered commands, newest first;
+        ``frequent`` the other registered commands run at least
+        :data:`_FREQUENT_COMMAND_MIN_RUNS` times, most-run first (ties
+        newest first).  Both are empty when the history cannot be read.
+    """
+    try:
+        usage = _load_slash_command_usage()
+    except sqlite3.Error:
+        logger.warning("slash command usage unavailable", exc_info=True)
+        usage = {}
+    used = sorted(
+        (name for name in commands if name in usage),
+        key=lambda name: usage[name][1],
+        reverse=True,
+    )
+    recent = used[:_RECENT_COMMANDS]
+    frequent = sorted(
+        (name for name in used[_RECENT_COMMANDS:] if usage[name][0] >= _FREQUENT_COMMAND_MIN_RUNS),
+        key=lambda name: usage[name][0],
+        reverse=True,
+    )
+    return {
+        "type": "seaCommands",
+        "commands": commands,
+        "recent": recent,
+        "frequent": frequent,
+    }
 
 
 # Prefix that flags an ``appendUserMessage`` as a live-side-channel
@@ -253,6 +305,7 @@ class _CommandsMixin:
         browser_tabs: BrowserTabService
 
         def _broadcast_tabs_state(self) -> None: ...
+        def _publish_tabs_state(self) -> None: ...
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(
@@ -316,7 +369,14 @@ class _CommandsMixin:
             self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "",
         ) -> None: ...
-        def _commit_main_tree(self, tab_id: str, work_dir: str = "") -> None: ...
+        def _commit_main_tree(
+            self, tab_id: str, work_dir: str = "", reply_to: str = "",
+        ) -> None: ...
+        def _commit_on_machine(self, tab_id: str, machine: str, work_dir: str) -> None: ...
+        def _broadcast_autocommit_done(
+            self, tab_id: str, *, success: bool, committed: bool, message: str,
+            commit_message: str | None = None, work_dir: str = "", reply_to: str = "",
+        ) -> dict[str, Any]: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "",
         ) -> dict[str, Any]: ...
@@ -1623,7 +1683,7 @@ class _CommandsMixin:
         list, so answering all clients is as cheap as answering one.
         """
         del cmd
-        self._broadcast_tabs_state()
+        self._publish_tabs_state()
 
     def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
         """Register a client-opened tab in the shared tab registry.
@@ -1655,7 +1715,7 @@ class _CommandsMixin:
             work_dir = ""
         outcome = self.tab_registry.open_tab(tab_id, title, work_dir)
         if outcome is OpenTabOutcome.OPENED:
-            self._broadcast_tabs_state()
+            self._publish_tabs_state()
         elif outcome is OpenTabOutcome.FULL:
             self._broadcast_to_conn(
                 {
@@ -1799,16 +1859,13 @@ class _CommandsMixin:
         """Send the slash-command list built from every SEA folder.
 
         Sent as a ``seaCommands`` event scoped to the requesting
-        connection: ``{type: "seaCommands", commands: [...]}``.  The
-        chat page uses the list to render the autocomplete popup
-        when the user types ``/`` at the start of the composer.
+        connection (see :func:`sea_commands_event` for its shape).
+        The chat page uses it to render the autocomplete popup when
+        the user types ``/`` in the composer, and asks again each
+        time that popup opens so the recent / frequent ranking is
+        current.
         """
-        commands = list_commands()
-        event: dict[str, Any] = {
-            "type": "seaCommands",
-            "commands": commands,
-        }
-        self._broadcast_to_conn(event, cmd.get("connId", ""))
+        self._broadcast_to_conn(sea_commands_event(list_commands()), cmd.get("connId", ""))
 
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
         """Send events for the adjacent task in the same chat session.
@@ -1905,29 +1962,47 @@ class _CommandsMixin:
         The command's ``workDir`` (the tab's own folder) is forwarded so
         the commit lands in the tab's repository rather than the
         daemon-wide ``self.work_dir``, which may point at a different —
-        possibly non-git — folder.
+        possibly non-git — folder.  A command stamped ``machine`` (the
+        tab's drop-down names a registered machine) commits that
+        machine's folder instead, through :meth:`_commit_on_machine`.
 
         At most one commit runs per tab: the commit-message generation
         is a billed LLM call and ``git add -A``/``git commit`` mutate
         the repository, so an impatient double click must not race two
-        commits.  Extra clicks are dropped while the tab's commit is in
-        flight.
+        commits.  While the tab's commit is in flight an extra click is
+        answered, on its own connection alone, with a failed
+        ``autocommit_done`` saying so: a link waiting for its answer
+        would otherwise wait out the whole request timeout, and a
+        browser of this daemon whose click lost to a forwarded commit
+        (whose outcome goes to its link alone) would never hear back.
         """
         tab_id = cmd.get("tabId", "")
-        work_dir = cmd.get("workDir", "") or self.work_dir
+        machine = str(cmd.get("machine") or "")
+        work_dir = str(cmd.get("workDir") or "")
+        # ``replyTo``: the command came over a daemon link (see
+        # ``ServerApi.autocommit_action``); the outcome goes to that
+        # connection as the reply to its request.
+        reply_to = str(cmd.get("replyTo") or "")
+        if machine:
+            job = functools.partial(self._commit_on_machine, tab_id, machine, work_dir)
+        else:
+            job = functools.partial(
+                self._commit_main_tree, tab_id, work_dir or self.work_dir, reply_to,
+            )
         with self._state_lock:
-            if tab_id in self._autocommit_tabs:
-                logger.debug(
-                    "Commit already in flight for tab %r; ignoring duplicate request",
-                    tab_id,
+            in_flight = tab_id in self._autocommit_tabs
+            if not in_flight:
+                self._autocommit_tabs.add(tab_id)
+        if in_flight:
+            logger.debug("Commit already in flight for tab %r; refusing the duplicate", tab_id)
+            requester = reply_to or str(cmd.get("connId") or "")
+            if requester:
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="A Git Commit of this tab is already running.", reply_to=requester,
                 )
-                return
-            self._autocommit_tabs.add(tab_id)
-        self._start_tab_job(
-            self._autocommit_tabs,
-            tab_id,
-            functools.partial(self._commit_main_tree, tab_id, work_dir),
-        )
+            return
+        self._start_tab_job(self._autocommit_tabs, tab_id, job)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -1952,6 +2027,16 @@ class _CommandsMixin:
         value once anything has been adopted, and the daemon's startup
         fallback (``--workdir``, ``$KISS_WORKDIR``, cwd) before that.
         """
+        self._broadcast_to_conn(self._config_data_event(), cmd.get("connId", ""))
+
+    def _config_data_event(self) -> dict[str, Any]:
+        """Build the ``configData`` reply both ``getConfig`` and ``saveConfig`` send.
+
+        One shape for both: the settings sheet repaints from either
+        reply (``populateConfigForm`` writes every API-key field from
+        ``apiKeys``, and the status bar takes ``machine``), so a save
+        echo without them blanked the key fields (conc1018 H2-F3).
+        """
         from kiss.core.user_config import (
             get_current_api_keys,
             load_config,
@@ -1961,14 +2046,17 @@ class _CommandsMixin:
         cfg = load_config()
         # ``remote_password`` travels along: the Settings panel edits it
         # (``saveConfig`` stores a new one, in force at once; see
-        # ``_cmd_save_config``).
+        # ``_cmd_save_config``).  The reported ``work_dir`` is the
+        # daemon's live global directory, not the stored one: a save
+        # that carries no ``work_dir`` must not report the startup
+        # fallback as "".
         cfg["work_dir"] = self.work_dir
         # Only directories that still exist, most recently opened first
-        # (the raw stored list may hold deleted or malformed entries).
+        # (the raw stored list may hold deleted or malformed entries,
+        # and the chat header's drop-down shows whatever this carries).
         cfg["recent_work_dirs"] = recent_work_dirs()
-        api_keys = get_current_api_keys()
-        event: dict[str, Any] = {
-            "type": "configData", "config": cfg, "apiKeys": api_keys,
+        return {
+            "type": "configData", "config": cfg, "apiKeys": get_current_api_keys(),
             # The server machine's short host name, shown centered in the
             # page's status bar so the user always sees which machine the
             # agent runs on.  The same name labels the local row of the
@@ -1976,7 +2064,6 @@ class _CommandsMixin:
             # `platform.node()` would add the domain on cloud hosts.
             "machine": local_machine_name(),
         }
-        self._broadcast_to_conn(event, cmd.get("connId", ""))
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
@@ -2001,7 +2088,6 @@ class _CommandsMixin:
         from kiss.core.user_config import (
             apply_config_to_env,
             load_config,
-            recent_work_dirs,
             sanitize_config,
             save_api_key,
             save_config,
@@ -2047,23 +2133,14 @@ class _CommandsMixin:
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)
 
-        new_cfg = load_config()
-        # Same effective directory as ``getConfig``: a save that carries
-        # no ``work_dir`` must not report the startup fallback as "".
-        new_cfg["work_dir"] = self.work_dir
-        # Same recent directories as ``getConfig`` too: the stored list
-        # may still name directories that were deleted since, and the
-        # chat header's drop-down shows whatever this reply carries.
-        new_cfg["recent_work_dirs"] = recent_work_dirs()
-        new_password = new_cfg.get("remote_password", "")
+        event = self._config_data_event()
+        new_password = event["config"].get("remote_password", "")
         if new_password != prev_password:
             self._broadcast_to_conn(
                 {"type": "remotePasswordChanged", "password": new_password},
                 conn_id,
             )
-        self._broadcast_to_conn(
-            {"type": "configData", "config": new_cfg}, conn_id,
-        )
+        self._broadcast_to_conn(event, conn_id)
 
     def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
         """Send the custom models from ``~/.kiss/MY_MODELS.json``.
@@ -2079,6 +2156,96 @@ class _CommandsMixin:
             {"type": "myModelsData", "models": list_custom_models()},
             cmd.get("connId", ""),
         )
+
+    def _cmd_get_claude_code_status(self, cmd: dict[str, Any]) -> None:
+        """Answer the settings panel's Claude Code subpanel.
+
+        Replies with a ``claudeCodeStatus`` event (the dict of
+        :func:`~kiss.core.models.claude_code_model.claude_auth_status`),
+        stamped with the sender's ``connId``.
+        """
+        from kiss.core.models.claude_code_model import claude_auth_status
+
+        self._reply_from_thread(
+            "claudeCodeStatus", claude_auth_status, [cmd.get("connId", "")], "claude-code-status",
+        )
+
+    def _cmd_get_codex_status(self, cmd: dict[str, Any]) -> None:
+        """Answer the settings panel's Codex subpanel.
+
+        Replies with a ``codexStatus`` event (the dict of
+        :func:`~kiss.core.models.codex_model.codex_auth_status`), stamped
+        with the sender's ``connId``.
+        """
+        from kiss.core.models.codex_model import codex_auth_status
+
+        self._reply_from_thread(
+            "codexStatus", codex_auth_status, [cmd.get("connId", "")], "codex-status",
+        )
+
+    def _cmd_start_codex_login(self, cmd: dict[str, Any]) -> None:
+        """Start a ChatGPT device-code login for the Codex subpanel.
+
+        Runs :func:`~kiss.core.models.codex_model.codex_device_login` on
+        a daemon thread and replies with a ``codexLogin`` event carrying
+        the verification ``url`` and one-time ``code`` the user must
+        enter in a browser (or ``error``).  The panel then polls
+        ``getCodexStatus`` until the login shows up (a push would not
+        survive the machine link, which answers one reply per request).
+
+        One login at a time (:func:`codex_device_login`): while the CLI
+        of an earlier request is still alive, waiting for its code to
+        be entered, a request (another surface's click, a retry) is
+        answered with that same code and starts no second CLI; a
+        request carrying ``fresh: true`` ends that CLI and starts a
+        new one.
+        """
+        from kiss.core.models.codex_model import codex_device_login
+
+        self._reply_from_thread(
+            "codexLogin", functools.partial(codex_device_login, fresh=bool(cmd.get("fresh"))),
+            [cmd.get("connId", "")], "codex-login",
+        )
+
+    def _reply_from_thread(
+        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_ids: list[str],
+        name: str,
+    ) -> None:
+        """Answer the connections *conn_ids* with a *reply_type* event built by *report*.
+
+        For the settings sheet's CLI probes (``claude auth status``,
+        ``codex login status``, ``codex login --device-auth``): each a
+        bounded process start-up of seconds, run on a daemon thread
+        *name* rather than in the command loop.  When the thread cannot
+        start (``RuntimeError`` under thread pressure) the event carries
+        the reason as ``error`` instead, so the sheet is never left
+        waiting for an answer that is not coming.
+
+        Args:
+            reply_type: The event type of the reply.
+            report: Builds the reply's fields (never raises).
+            conn_ids: The ``connId`` of every sender to answer.
+            name: The thread's name.
+        """
+        try:
+            threading.Thread(
+                target=self._report_from_thread, args=(reply_type, report, conn_ids),
+                name=name, daemon=True,
+            ).start()
+        except RuntimeError as exc:
+            logger.exception("%s thread could not start", name)
+            self._send_report(reply_type, {"error": f"{name} could not start: {exc}"}, conn_ids)
+
+    def _report_from_thread(
+        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_ids: list[str],
+    ) -> None:
+        """Thread body of :meth:`_reply_from_thread`."""
+        self._send_report(reply_type, report(), conn_ids)
+
+    def _send_report(self, reply_type: str, fields: dict[str, Any], conn_ids: list[str]) -> None:
+        """Send the *reply_type* event with *fields* to each connection of *conn_ids*."""
+        for conn_id in conn_ids:
+            self._broadcast_to_conn({"type": reply_type, **fields}, conn_id)
 
     def _broadcast_my_models(self) -> None:
         """Broadcast the current custom-model list to every client.
@@ -2314,6 +2481,9 @@ class _CommandsMixin:
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
         "getMyModels": _cmd_get_my_models,
+        "getClaudeCodeStatus": _cmd_get_claude_code_status,
+        "getCodexStatus": _cmd_get_codex_status,
+        "startCodexLogin": _cmd_start_codex_login,
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,
         "addTrick": _cmd_add_trick,

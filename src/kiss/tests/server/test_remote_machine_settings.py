@@ -60,8 +60,8 @@ def _save_models_as_another_client(url: str, names: list[str]) -> None:
     )
 
 
-class TestRemoteMachineSettings(IsolatedAsyncioTestCase):
-    """One local daemon, one remote daemon registered as ``box``."""
+class RemoteMachineCase(IsolatedAsyncioTestCase):
+    """One local daemon, one remote daemon registered as ``box``, a client on the local socket."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -124,6 +124,10 @@ class TestRemoteMachineSettings(IsolatedAsyncioTestCase):
         """Send *cmd* for ``box`` and return its forwarded *reply_type* reply."""
         await self._send({"machine": "box", **cmd})
         return await self._next(reply_type, forwarded=True)
+
+
+class TestRemoteMachineSettings(RemoteMachineCase):
+    """The settings sheet's commands stamped ``machine`` are the machine's."""
 
     async def test_get_and_save_config_are_the_machines(self) -> None:
         reply = await self._ask_box({"type": "getConfig"}, "configData")

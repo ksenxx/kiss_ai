@@ -4,16 +4,16 @@
 # add your name here
 """Audit 2026-09-03 (core-base): one implementation for the terminal result print.
 
-``KISSAgent`` gained ``_print_result`` (shared by ``_run_non_agentic`` and
-``_run_task_to_completion``), but ``_run_agentic_loop`` kept its own inline
+``KISSAgent`` gained ``_print_result`` (used by ``_run_non_agentic``), but
+``_run_agentic_loop`` kept its own inline
 copy of the same printer call — duplicated logic that had already drifted:
 the helper skips an **empty** result (nothing to show), while the loop's
 copy printed one, so a model that calls the built-in ``finish`` tool with
 an empty ``result`` produced a green "Result" panel containing the
 "(no result)" placeholder on the agentic path but no panel at all on the
-non-agentic and run-to-completion paths.
+non-agentic path.
 
-The fix routes the agentic loop through ``_print_result``, so all three
+The fix routes the agentic loop through ``_print_result``, so both
 run modes share exactly one implementation of "emit the terminal result
 event".
 

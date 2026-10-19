@@ -85,10 +85,6 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
 
     def test_three_clicks_on_same_history_row_create_three_tabs(self) -> None:
         create_new_tab_src = _extract_fn_body(self.js, "function createNewTab(")
-        assert "function createNewTab()" in create_new_tab_src, (
-            "createNewTab must take no parameters; the multi-client "
-            "dedupe path was removed."
-        )
         assert "switchToTab(" not in create_new_tab_src, (
             "createNewTab must not focus an existing tab; the dedupe "
             "branch was removed."

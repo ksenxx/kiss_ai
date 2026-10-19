@@ -315,7 +315,7 @@ function lastProcessor(page) {
 /** Fire the wake word through the pipeline's own result handler. */
 function fireWake(page) {
   page.clock.now += 3000; // clear the 2 s wake cooldown
-  lastRecognizer(page).handlers.result({result: {text: 'hey sorcar'}});
+  lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
 }
 
 /**

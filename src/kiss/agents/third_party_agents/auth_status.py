@@ -18,6 +18,9 @@ which prints one JSON array on stdout, one object per channel::
 
     {"name": "slack", "label": "Slack", "authenticated": true, "error": ""}
 
+:func:`probe_statuses` runs that subprocess and parses its answer; it
+serves the sidebar's Apps panel and the ``/recommendations`` agent.
+
 Channels are probed concurrently, each with a deadline: a channel whose
 constructor hangs (a network call, a stuck bridge) is reported with
 ``authenticated: null`` instead of delaying every other row.
@@ -37,8 +40,10 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import logging
 import os
 import re
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
@@ -47,9 +52,37 @@ from kiss.agents.sorcar.agent_dispatch import available_channels
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 from kiss.agents.third_party_agents._composio_google import TOOLKITS
 
+logger = logging.getLogger(__name__)
+
 # Per-run deadline for the whole probe; channels still running when it
 # expires are reported as unknown.
 PROBE_TIMEOUT_SECONDS = 20.0
+
+# Upper bound for the probe subprocess (the probe gives up on slow
+# channels after PROBE_TIMEOUT_SECONDS by itself).
+PROBE_PROCESS_TIMEOUT_SECONDS = 45.0
+
+
+def probe_statuses() -> list[dict[str, Any]]:
+    """Run the auth-status probe subprocess and parse its JSON answer.
+
+    Returns:
+        The probe's status list (see :func:`channel_status`); empty when
+        the probe failed.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "kiss.agents.third_party_agents.auth_status"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=PROBE_PROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+        data = json.loads(proc.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        logger.warning("apps auth-status probe failed", exc_info=True)
+        return []
+    return data if isinstance(data, list) else []
 
 
 def _agent_class(module: Any) -> type[BaseChannelAgent] | None:

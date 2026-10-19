@@ -48,6 +48,8 @@ import logging
 import threading
 import time
 
+from kiss.core.locked import locked
+
 logger = logging.getLogger(__name__)
 
 USER_INTERRUPTED_MESSAGE = "User interrupted the tool call."
@@ -157,8 +159,9 @@ class ToolCallToken:
 
 
 # Serializes the interrupting side only; the tool's own thread never
-# acquires it (see the module docstring).
-_INJECT_LOCK = threading.Lock()
+# acquires it (see the module docstring).  An RLock, as every lock a
+# task thread can take under an injected Stop (``locked_call``).
+_INJECT_LOCK = threading.RLock()
 # thread ident -> the tool call that thread is running right now.  Only
 # the owning thread writes its own key.
 _RUNNING: dict[int, ToolCallToken] = {}
@@ -327,20 +330,6 @@ def raise_if_interrupted() -> None:
     raise ToolCallInterrupted(USER_INTERRUPTED_MESSAGE)
 
 
-def running_tool_name(thread_ident: int) -> str | None:
-    """Return the name of the tool thread *thread_ident* is running.
-
-    Args:
-        thread_ident: A thread's ``ident``.
-
-    Returns:
-        The tool name, or ``None`` when that thread is not inside a
-        tool call.
-    """
-    token = _RUNNING.get(thread_ident)
-    return token.name if token is not None else None
-
-
 def _inject_unless_closing(token: ToolCallToken) -> bool:
     """Inject :class:`ToolCallInterrupted` into *token*'s thread if it still runs the call.
 
@@ -404,6 +393,24 @@ def _inject_after_grace(token: ToolCallToken) -> None:
     _inject_unless_closing(token)
 
 
+def _running_call(thread_ident: int, call_id: int | None) -> ToolCallToken | None:
+    """Return the call thread *thread_ident* runs, or the one *call_id* names.
+
+    The thread is tried first; when *call_id* is given and that thread
+    runs some other call (or none), the id is searched for: a tool
+    Codex calls over the MCP bridge runs on a bridge thread the caller
+    does not know, while the id, process-unique, still names exactly
+    that call.
+    """
+    token = _RUNNING.get(thread_ident)
+    if call_id is not None and (token is None or token.call_id != call_id):
+        # ``list()`` snapshots the dict atomically; a tool thread may be
+        # storing its own key meanwhile.
+        token = next((t for t in list(_RUNNING.values()) if t.call_id == call_id), None)
+    return token
+
+
+@locked(_INJECT_LOCK)
 def interrupt_tool_call(
     thread_ident: int,
     tool_name: str = "",
@@ -414,7 +421,12 @@ def interrupt_tool_call(
     Marks the call interrupted and sets its event at once (the
     cooperative signal), then arms a watchdog thread that injects
     :class:`ToolCallInterrupted` if the tool is still running after
-    :data:`_INJECT_AFTER_SECONDS`.
+    :data:`_INJECT_AFTER_SECONDS`.  Runs under :data:`_INJECT_LOCK`
+    through :func:`~kiss.core.locked.locked`, because a task thread
+    leaving the Codex tool bridge calls this during its own Stop, when
+    a ``KeyboardInterrupt`` can land on it at any check point; the
+    watchdog takes the lock only after its grace period, so arming it
+    under the lock cannot deadlock.
 
     Args:
         thread_ident: The ``ident`` of the task thread.
@@ -423,27 +435,26 @@ def interrupt_tool_call(
         call_id: When given, the interrupt only applies to the call with
             that id (the one the clicked panel shows): a click that
             arrives after that call returned must not hit the next
-            call, even one of the same name.
+            call, even one of the same name.  The id also finds a call
+            running on another thread than *thread_ident* (a tool
+            served to Codex over the MCP bridge).
 
     Returns:
         ``True`` when a matching tool call was (or already is)
         interrupted; ``False`` when the thread is not inside a tool
         call, runs a different tool, or has already begun returning.
     """
-    with _INJECT_LOCK:
-        token = _RUNNING.get(thread_ident)
-        if token is None or token.closing:
-            return False
-        if tool_name and token.name != tool_name:
-            return False
-        if call_id is not None and token.call_id != call_id:
-            return False
-        if token.interrupted:
-            # Already signalled; a second click must not arm a second
-            # watchdog.
-            return True
-        token.interrupted = True
-        token.event.set()
+    token = _running_call(thread_ident, call_id)
+    if token is None or token.closing:
+        return False
+    if tool_name and token.name != tool_name:
+        return False
+    if token.interrupted:
+        # Already signalled; a second click must not arm a second
+        # watchdog.
+        return True
+    token.interrupted = True
+    token.event.set()
     logger.info(
         "Interrupting tool call %s (#%d) on thread %s",
         token.name,

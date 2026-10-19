@@ -207,21 +207,9 @@ _repo_locks_guard = threading.RLock()
 # every same-process :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`,
 # whose owner-pid protection deliberately exempts this process — treats
 # the branch as preserved until the marker really is on disk.
+# Every access is one built-in set operation (atomic under the GIL),
+# so no lock guards it.
 _volatile_preserve_claims: set[tuple[str, str]] = set()
-_volatile_preserve_guard = threading.RLock()
-
-
-def _record_volatile_claim(key: tuple[str, str], saved: bool) -> None:
-    """Drop *key* from the volatile claims after a saved marker, add it after a failed one."""
-    if saved:
-        _volatile_preserve_claims.discard(key)
-    else:
-        _volatile_preserve_claims.add(key)
-
-
-def _has_volatile_claim(key: tuple[str, str]) -> bool:
-    """Return whether this process holds a volatile preserve claim for *key*."""
-    return key in _volatile_preserve_claims
 
 _REPO_SCOPED_GIT_ENV = (
     "GIT_DIR",
@@ -435,6 +423,7 @@ def _git(
     *args: str,
     cwd: str | Path,
     env: dict[str, str] | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the CompletedProcess result.
 
@@ -451,12 +440,19 @@ def _git(
     agent thread forever — the one hardened runner every server-side
     git call goes through.  On expiry a synthesized
     non-zero ``CompletedProcess`` (returncode 124, the timeout
-    convention) is returned so callers keep working.
+    convention) is returned so callers keep working.  A command that
+    cannot start at all (``OSError``, e.g. an argument over the
+    kernel's single-argument limit; ``ValueError`` for a NUL byte in
+    an argument) is likewise returned as a failed ``CompletedProcess``
+    (returncode 1) instead of raising.
 
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
         cwd: Working directory for the git command (required).
         env: Extra environment variables for this call only.
+        input: Text fed to git's stdin (e.g. a commit message for
+            ``commit -F -``, which has no argument-size limit); ``None``
+            leaves stdin inherited.
 
     Returns:
         The completed process with stdout/stderr captured as text.
@@ -464,17 +460,22 @@ def _git(
     cmd, full_env = _git_command(args, cwd)
     if env:
         full_env.update(env)
-    proc = popen_process_group(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="surrogateescape",
-        env=full_env,
-    )
     try:
-        stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
+        proc = popen_process_group(
+            cmd,
+            stdin=None if input is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            env=full_env,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning("git %s could not start: %s", args[:1], exc)
+        return subprocess.CompletedProcess(cmd, 1, "", f"git could not start: {exc}")
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=_GIT_TIMEOUT_SECONDS)
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
@@ -1179,10 +1180,12 @@ class GitWorktreeOps:
         """
         if not GitWorktreeOps.has_staged_changes(wt_dir):
             return False
-        cmd = ["commit", "-m", message]
+        # The message goes on stdin: an argv string is capped at the
+        # kernel's single-argument limit (128 KiB on Linux).
+        cmd = ["commit", "-F", "-"]
         if no_verify:
             cmd.append("--no-verify")
-        result = _git(*cmd, cwd=wt_dir)
+        result = _git(*cmd, cwd=wt_dir, input=message)
         if result.returncode != 0:
             logger.warning(
                 "git commit failed: %s",
@@ -1478,7 +1481,7 @@ class GitWorktreeOps:
             msg = GitWorktreeOps._merge_commit_message(
                 repo, branch, user_prompt=user_prompt, task_result=task_result,
             )
-            commit_result = _git("commit", "-m", msg, cwd=repo)
+            commit_result = _git("commit", "-F", "-", cwd=repo, input=msg)
             if commit_result.returncode != 0:
                 logger.warning(
                     "squash merge commit failed: %s",
@@ -1995,7 +1998,10 @@ class GitWorktreeOps:
                     "Failed to write the preserve-for-review marker of branch '%s'",
                     branch, exc_info=True,
                 )
-        locked_call(_volatile_preserve_guard, _record_volatile_claim, key, saved)
+        if saved:
+            _volatile_preserve_claims.discard(key)
+        else:
+            _volatile_preserve_claims.add(key)
         return saved
 
     @staticmethod
@@ -2008,8 +2014,7 @@ class GitWorktreeOps:
         """
         if GitWorktreeOps._preserve_marker_on_disk(repo, branch):
             return True
-        key = (str(repo.resolve()), branch)
-        return locked_call(_volatile_preserve_guard, _has_volatile_claim, key)
+        return (str(repo.resolve()), branch) in _volatile_preserve_claims
 
     @staticmethod
     def _preserve_marker_on_disk(repo: Path, branch: str) -> bool:

@@ -569,22 +569,210 @@ def test_events_of_a_task_without_a_task_row_do_not_travel(tmp_path: Path) -> No
     assert event_keys(target) == [("a", 1)]
 
 
-def test_schema_mismatch_is_refused(tmp_path: Path) -> None:
-    """Databases whose columns differ are not synced at all."""
+CRON_MARKER = "You are running as an unattended scheduled automation (cron job)."
+"""First sentence of the cron preamble (``history_columns.CRON_TASK_MARKER``)."""
+
+
+def column_info(path: Path, table: str) -> dict[str, tuple[str, int, str | None]]:
+    """Map each column of a table to its ``(type, notnull, default)`` declaration."""
+    return {
+        row[1]: (row[2], row[3], row[4])
+        for row in rows(path, f"PRAGMA table_info({table})")
+    }
+
+
+def upgrade(conn: sqlite3.Connection) -> None:
+    """Give a task table the columns a later release added (as the daemon does)."""
+    conn.execute("ALTER TABLE task_history ADD COLUMN success INTEGER")
+    conn.execute("ALTER TABLE task_history ADD COLUMN is_cron INTEGER DEFAULT 0")
+
+
+def test_a_target_from_an_older_release_gains_the_source_columns(tmp_path: Path) -> None:
+    """The deploy syncs before it upgrades the remote, so the target's table
+    is one release behind the source's: it gets the source's columns, with
+    the source's declarations, and the incoming rows keep their values."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
+    upgrade(src)
     add_task(src, "a", events=1)
+    src.execute("UPDATE task_history SET success = 1, is_cron = 1 WHERE id = 'a'")
+    add_task(src, "b", task="plain new task")
+    src.execute("UPDATE task_history SET success = 0 WHERE id = 'b'")
     src.close()
     dst = make_db(target)
-    dst.execute("ALTER TABLE task_history ADD COLUMN extra TEXT DEFAULT 'x'")
+    # Rows the target wrote before the column existed: a cron run and a
+    # sub-task of it, recognisable only by their traces.
+    add_task(dst, "old-cron", task=CRON_MARKER + " Check the mail.")
+    add_task(dst, "old-child", task="look at the inbox", parent_task_id="old-cron")
+    add_task(dst, "old-plain", task="an ordinary old task")
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "column(s) success, is_cron added to task_history" in done.stdout
+    assert "is_cron worked out for the rows written without" in done.stdout
+    info = column_info(target, "task_history")
+    assert info["success"] == ("INTEGER", 0, None)
+    assert info["is_cron"] == ("INTEGER", 0, "0")
+    assert column_info(target, "task_history") == column_info(source, "task_history")
+    assert rows(
+        target, "SELECT id, success, is_cron FROM task_history ORDER BY id"
+    ) == [
+        ("a", 1, 1),
+        ("b", 0, 0),
+        ("old-child", None, 1),
+        ("old-cron", None, 1),
+        ("old-plain", None, 0),
+    ]
+    assert event_keys(target) == [("a", 1)]
+    # The databases now share a schema: the next sync has nothing to do.
+    again = sync(str(source), str(target))
+    assert again.returncode == 0, again.stderr
+    assert "0 task row(s) added" in again.stdout and "column(s)" not in again.stdout
+
+
+def test_rows_from_an_older_release_get_the_columns_worked_out(tmp_path: Path) -> None:
+    """Pulling from a remote still on the older release: its rows lack the
+    target's newer columns, which take their defaults -- except that the
+    daemon's backfill decides ``is_cron`` for them, as it would have when
+    adding the column, so a cron run from the remote is not filed as a
+    plain task for good (task rows are never updated once present)."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "remote-cron", task=CRON_MARKER + " Check the mail.", events=2)
+    add_task(src, "remote-child", task="a sub-task", parent_task_id="remote-cron")
+    add_task(src, "remote-rundir", task="/good_morning")
+    src.execute(
+        "UPDATE task_history SET work_dir = '/home/u/.kiss/cron/runs/good-abc'"
+        " WHERE id = 'remote-rundir'"
+    )
+    add_task(src, "remote-plain", task="an ordinary task")
+    src.close()
+    dst = make_db(target)
+    upgrade(dst)
+    add_task(dst, "local", task=CRON_MARKER + " Already stamped?")
+    dst.execute("UPDATE task_history SET success = 1 WHERE id = 'local'")
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "4 task row(s) added" in done.stdout
+    assert "column(s)" not in done.stdout
+    assert "is_cron worked out for the rows written without" in done.stdout
+    assert rows(
+        target, "SELECT id, success, is_cron FROM task_history ORDER BY id"
+    ) == [
+        ("local", 1, 1),
+        ("remote-child", None, 1),
+        ("remote-cron", None, 1),
+        ("remote-plain", None, 0),
+        ("remote-rundir", None, 1),
+    ]
+    assert event_keys(target) == [("remote-cron", 1), ("remote-cron", 2)]
+    assert column_info(target, "task_history") != column_info(source, "task_history")
+
+
+def test_each_side_may_have_a_column_the_other_lacks(tmp_path: Path) -> None:
+    """Two machines on two different newer releases: the target gains the
+    source's column, the source's rows take the default of the target's."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    src.execute("ALTER TABLE task_history ADD COLUMN only_source TEXT DEFAULT 's'")
+    add_task(src, "a")
+    src.close()
+    dst = make_db(target)
+    dst.execute("ALTER TABLE task_history ADD COLUMN only_target TEXT DEFAULT 't'")
+    add_task(dst, "b")
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert rows(
+        target, "SELECT id, only_source, only_target FROM task_history ORDER BY id"
+    ) == [("a", "s", "t"), ("b", "s", "t")]
+
+
+def test_the_event_table_gains_the_source_columns_too(tmp_path: Path) -> None:
+    """A column added to ``events`` travels the same way, rowid alias aside."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    src.execute("ALTER TABLE events ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'")
+    add_task(src, "a", events=2)
+    src.execute("UPDATE events SET origin = 'replayed' WHERE seq = 2")
+    src.close()
+    make_db(target).close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "column(s) origin added to events" in done.stdout
+    assert column_info(target, "events")["origin"] == ("TEXT", 1, "'local'")
+    assert rows(target, "SELECT seq, origin FROM events ORDER BY seq") == [
+        (1, "local"),
+        (2, "replayed"),
+    ]
+
+
+def test_a_dry_run_rolls_the_added_columns_back(tmp_path: Path) -> None:
+    """A dry run reports the columns it would add and leaves the schema alone."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    upgrade(src)
+    add_task(src, "a")
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "old-cron", task=CRON_MARKER + " Check the mail.")
+    dst.close()
+    before = column_info(target, "task_history")
+
+    done = sync(str(source), str(target), "--dry-run")
+
+    assert done.returncode == 0, done.stderr
+    assert "column(s) success, is_cron would be added to task_history" in done.stdout
+    assert "is_cron would be worked out" in done.stdout
+    assert column_info(target, "task_history") == before
+    assert task_ids(target) == ["old-cron"]
+
+
+def test_a_column_add_column_cannot_express_is_refused(tmp_path: Path) -> None:
+    """A ``NOT NULL`` column without a default cannot be added to a table
+    that has rows -- the daemon could not have added it either -- so the
+    sync stops before touching anything rather than guess a value."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    src.execute(
+        "CREATE TABLE task_history_new AS SELECT *, 'x' AS strict FROM task_history"
+    )
+    src.executescript(
+        """
+        DROP TABLE task_history;
+        CREATE TABLE task_history (
+            id TEXT PRIMARY KEY,
+            timestamp REAL NOT NULL,
+            task TEXT NOT NULL,
+            strict TEXT NOT NULL,
+            parent_task_id TEXT DEFAULT ''
+        );
+        DROP TABLE task_history_new;
+        """
+    )
+    src.execute(
+        "INSERT INTO task_history (id, timestamp, task, strict) VALUES ('a', 1, 't', 'x')"
+    )
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "b")
     dst.close()
 
     done = sync(str(source), str(target))
 
     assert done.returncode == 1
-    assert "schemas for 'task_history' differ" in done.stderr
-    assert "extra" in done.stderr
-    assert task_ids(target) == []
+    assert "NOT NULL column 'strict' without a default" in done.stderr
+    assert task_ids(target) == ["b"]
+    assert "strict" not in column_info(target, "task_history")
 
 
 def test_dry_run_reports_what_a_real_run_would_do(tmp_path: Path) -> None:
@@ -1037,7 +1225,11 @@ def test_chat_summaries_without_the_expected_columns_are_refused(tmp_path: Path)
 
 
 def test_chat_summaries_need_the_summary_code_next_to_the_script(tmp_path: Path) -> None:
-    """A copy of the script without the checkout's chat-summary module stops rather than guesses."""
+    """A copy of the script without the checkout's shipped modules stops rather than guesses.
+
+    The chat-summary phase reads the column module first (the target's
+    ``chat_summaries`` columns), then the summary module.
+    """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
     add_task(src, "a", chat_id="c1")
@@ -1055,7 +1247,7 @@ def test_chat_summaries_need_the_summary_code_next_to_the_script(tmp_path: Path)
         check=False,
     )
     assert done.returncode == 1
-    assert "cannot read" in done.stderr and "chat_summary.py" in done.stderr
+    assert "cannot read" in done.stderr and "history_columns.py" in done.stderr
     assert task_ids(target) == []
 
 

@@ -35,8 +35,7 @@ class _RecordingHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Record the POST request and respond with the configured status."""
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode() if length else ""
+        body = self._read_raw().decode()
         server = cast(_MattermostServer, self.server)
         server.requests.append(
             {"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)}

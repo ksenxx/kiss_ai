@@ -5,7 +5,7 @@
 """macOS text-to-speech helpers shared by the real-voice tests.
 
 The browser wake-word tests under ``kiss.tests.webapp`` feed a spoken
-"Hey Sorcar" into Chromium's fake microphone; the WAV comes from the
+"Abracadabra" into Chromium's fake microphone; the WAV comes from the
 macOS ``say`` + ``afconvert`` pair, so those tests skip unless
 :data:`HAVE_MAC_TTS`.
 """
@@ -35,7 +35,7 @@ def _say_wav(
     return wav
 
 
-def _make_sorcar_wav(directory: Path, phrase: str = "Hey Sorcar") -> Path:
+def _make_sorcar_wav(directory: Path, phrase: str = "Abracadabra") -> Path:
     """Synthesize a 16kHz mono 16-bit WAV that says *phrase* three times."""
     return _say_wav(
         directory, "sorcar", " [[slnc 1200]] ".join([phrase] * 3) + " [[slnc 1200]]",

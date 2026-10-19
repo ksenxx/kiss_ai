@@ -93,7 +93,6 @@ from kiss.core.models.model_info import (
     _match_openai_compatible_provider,
     _strip_provider_prefix,
     get_default_model,
-    model_runs_task_to_completion,
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
@@ -298,13 +297,12 @@ def summary(description: str) -> str:
 def _memory_root_for_run(
     append_basic_tools: bool,
     docker_image: str | None,
-    model_name: str,
     caller_system_instruction: bool = False,
     use_memory_override: bool | None = None,
 ) -> Path | None:
     """The memory directory this run should use, or None for no memory.
 
-    Memory rides with the built-in toolset, so four gates precede the
+    Memory rides with the built-in toolset, so three gates precede the
     user's ``use_memory`` setting (see :func:`_memory_settings`):
 
     * ``append_basic_tools=False`` strips the run down to ``finish`` plus
@@ -314,9 +312,6 @@ def _memory_root_for_run(
       tools; the memory tools execute in the host process on host paths,
       so registering them would hand a containerized task read/write
       access to host memory outside the ``docker_image`` boundary.
-    * Run-to-completion CLI models (``cc/*``, ``codex/*``) never see
-      KISS-registered tools, so they get neither the tools nor a protocol
-      demanding them.
     * A caller-supplied ``model_config["system_instruction"]`` replaces
       the whole composed prompt (``KISSAgent.run`` only ``setdefault``-s
       it), so ``MEMORY_PROTOCOL`` would never reach the model; the tools
@@ -331,7 +326,6 @@ def _memory_root_for_run(
     Args:
         append_basic_tools: Whether the run builds the built-in toolset.
         docker_image: The run's Docker image, if any.
-        model_name: The resolved model name the run will use.
         caller_system_instruction: Whether the caller's ``model_config``
             carries its own ``system_instruction``.
         use_memory_override: Per-run memory toggle — ``True`` enables
@@ -343,8 +337,6 @@ def _memory_root_for_run(
         it, else None.
     """
     if not append_basic_tools or docker_image or caller_system_instruction:
-        return None
-    if model_runs_task_to_completion(model_name):
         return None
     enabled, root = _memory_settings()
     if use_memory_override is not None:
@@ -383,6 +375,22 @@ def _memory_settings() -> tuple[bool, Path]:
     return enabled, root
 
 
+def _existing_ancestor(path: Path) -> Path:
+    """Return *path* or its nearest ancestor that is an existing directory.
+
+    A path that does not exist yet (a run's work directory the run
+    creates, a file the task is about to write) is placed by the
+    closest directory that does.  Stops at the filesystem root, which
+    the caller must check with ``is_dir()`` when *path* was relative.
+
+    Args:
+        path: Any path, existing or not.
+    """
+    while not path.is_dir() and path.parent != path:
+        path = path.parent
+    return path
+
+
 def _repo_memory_domains(work_dir: str) -> dict[str, str]:
     """The domain memories a run in *work_dir* attaches: the memory of its repository.
 
@@ -409,11 +417,9 @@ def _repo_memory_domains(work_dir: str) -> dict[str, str]:
     from kiss.core.memoryfield.pages import slugify
     from kiss.core.memoryfield.tools import GENERAL
 
-    cwd = Path(work_dir)
-    while not cwd.is_dir():
-        if cwd.parent == cwd:
-            return {}
-        cwd = cwd.parent
+    cwd = _existing_ancestor(Path(work_dir))
+    if not cwd.is_dir():
+        return {}
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir", "--show-toplevel"],
@@ -865,7 +871,9 @@ def _attribute_sub_usage(
             # decrease.
             locked_call(_OFFSET_PUBLISH_LOCK, publish_usage_offsets, agent, printer)
         except Exception:
-            pass
+            # The ledger append above already banked the spend; only the
+            # status line's offsets are stale until the next publish.
+            logger.debug("usage offset publish failed", exc_info=True)
 
 
 def _first_cleanup_error(
@@ -1523,16 +1531,6 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
-            from kiss.core.models.model_info import (
-                model_runs_task_to_completion,
-            )
-
-            if self.docker_image and model_runs_task_to_completion(model_name):
-                return (
-                    f"Cannot switch to {model_name}: it is a CLI agent "
-                    "that runs natively on the host, which would bypass "
-                    "this task's docker_image isolation. Pick an API model."
-                )
             target = self._current_executor or self
             old_model = getattr(target, "model", None)
             if old_model is None:
@@ -1678,6 +1676,9 @@ class SorcarAgent(RelentlessAgent):
             tools.append(make_agent_job_tool(self))
         tools.append(ask_user_question)
         tools.append(talk)
+        # Replaces the agent's model, so it must run between turns, never
+        # natively inside one (``KISSAgent._native_tools_exposed``).
+        set_model.runs_between_turns = True  # type: ignore[attr-defined]
         tools.append(set_model)
         # Typed classification / routing / scoring through OpenRouter's
         # decisions endpoint (Jev).  Offered only when the
@@ -2178,7 +2179,7 @@ class SorcarAgent(RelentlessAgent):
                 setting (see :func:`_memory_settings`).  A boolean
                 never bypasses the hard gates of
                 :func:`_memory_root_for_run` (stripped basic tools,
-                Docker runs, run-to-completion CLI models, a caller
+                Docker runs, a caller
                 ``model_config["system_instruction"]``).  Forwarded to
                 every ``run_parallel`` sub-agent, so one override
                 governs the whole task tree.
@@ -2281,7 +2282,6 @@ class SorcarAgent(RelentlessAgent):
                 memory_root = _memory_root_for_run(
                     self._append_basic_tools,
                     docker_image,
-                    model_name,
                     caller_system_instruction=bool(
                         (model_config or {}).get("system_instruction")
                     ),
@@ -2642,9 +2642,7 @@ class SorcarAgent(RelentlessAgent):
                 f"the files in {work_dir} directly."
             )
         target = Path(_absolutize(path, work_dir)).resolve() if path else Path(work_dir).resolve()
-        anchor = target
-        while not anchor.is_dir():
-            anchor = anchor.parent
+        anchor = _existing_ancestor(target)
         repo = GitWorktreeOps.discover_repo(anchor) if work_dir or path else None
         existing = next(
             (wt for wt in self.worktrees if _path_inside(target, wt.wt_dir) is not None),
@@ -2860,10 +2858,7 @@ class SorcarAgent(RelentlessAgent):
         path = Path(_absolutize(args["file_path"], self.work_dir)).resolve()
         if inside_kiss_worktree(path):
             return None
-        anchor = path
-        while not anchor.is_dir():
-            anchor = anchor.parent
-        repo = GitWorktreeOps.discover_repo(anchor)
+        repo = GitWorktreeOps.discover_repo(_existing_ancestor(path))
         if (
             repo is None
             or repo.resolve() in self._unisolated_repos
@@ -2936,10 +2931,17 @@ class SorcarAgent(RelentlessAgent):
         Its own worktrees and the ones it inherited from calling tasks,
         so a sub-agent of a sub-agent still sees the top task's
         worktrees.
+
+        Runs on a sub-task's thread (``task_runner`` reads the parent's
+        map at the child's run start) while this agent's own thread
+        keeps storing into and popping from ``_wts``: ``list(...)`` is
+        one C-level copy under the GIL, so the Python-level loop never
+        sees the dict change size.  ``_inherited_worktrees`` is only
+        ever replaced wholesale, never mutated.
         """
         return {
             **self._inherited_worktrees,
-            **{repo: wt.wt_dir for repo, wt in self._wts.items()},
+            **{repo: wt.wt_dir for repo, wt in list(self._wts.items())},
         }
 
     # ------------------------------------------------------------------
@@ -2985,7 +2987,28 @@ class SorcarAgent(RelentlessAgent):
         # merge/reclaim/discard stashes, checks out and resets that same
         # tree under the cross-process flock, so the capture takes the
         # flock too (repo_lock -> flock order, like every other taker).
-        return locked_call(repo_lock(repo), self._setup_worktree_locked, repo, work_dir_str)
+        #
+        # Another tab's merge may hold ``repo_lock`` for minutes while
+        # its conflict resolver runs.  The daemon's Stop injects
+        # ``KeyboardInterrupt``, which CPython delivers only at a
+        # bytecode check point, and a thread parked in the untimed
+        # C-level ``acquire`` reaches none until the holder releases:
+        # acquire in short slices so the Stop lands within one.  The
+        # acquire stays inside the ``try`` (CPython gh-74174, see
+        # ``locked_call``): an interrupt landing right after a
+        # successful slice still reaches the ``finally``, and one
+        # landing after a failed slice makes ``release`` raise
+        # ``RuntimeError``, which is swallowed.
+        lock = repo_lock(repo)
+        try:
+            while not lock.acquire(timeout=0.5):
+                pass
+            return self._setup_worktree_locked(repo, work_dir_str)
+        finally:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass  # the interrupt landed before the acquisition took effect
 
     def _setup_worktree_locked(self, repo: Path, work_dir_str: str) -> Path | None:
         """Body of :meth:`_try_setup_worktree`; the caller holds ``repo_lock(repo)``."""
@@ -3182,9 +3205,7 @@ class SorcarAgent(RelentlessAgent):
         """
         transient = getattr(printer, "broadcast_transient", None)
         if callable(transient):
-            # ``last_task_id``: the ``task_history`` row of a ChatSorcarAgent.
-            task_id = str(getattr(self, "last_task_id", "") or "")
-            transient(event, task_id=task_id or None, tab_id=self._tab_id)
+            transient(event, task_id=_persisted_task_id(self) or None, tab_id=self._tab_id)
             return
         printer.broadcast({**event, "tabId": self._tab_id})
 

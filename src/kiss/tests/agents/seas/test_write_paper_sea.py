@@ -30,8 +30,8 @@ from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.seas.write_paper.write_paper_sea import WritePaperSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.conftest import gate, run_sea
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -125,11 +125,6 @@ def _write(tmp_path: Path, tex: str, bib: str | None) -> Path:
     return path
 
 
-def _gate(report: str, name: str) -> str:
-    """Return the header line of gate *name* in *report*."""
-    return next(line for line in report.splitlines() if line.startswith(f"{name}: "))
-
-
 def _line(tex: str, needle: str) -> int:
     """Return the 1-based line number of the first line of *tex* containing *needle*."""
     return next(i for i, line in enumerate(tex.splitlines(), 1) if needle in line)
@@ -179,37 +174,37 @@ def test_check_paper_flags_the_sloppy_prose_and_skips_non_prose(tmp_path: Path) 
     report = write_paper_sea.check_paper(str(_write(tmp_path, _SLOPPY_TEX, _SLOPPY_BIB)))
     # The em dash in the prose counts; the ones in the comment, the listing and
     # the table do not.
-    assert _gate(report, "em dashes") == (
+    assert gate(report, "em dashes") == (
         "em dashes: 1 (limit 0) FAIL; use commas, parentheses, a colon or a new sentence"
     )
     assert f"    L{_line(_SLOPPY_TEX, '--- it')}: ...It is a log, not a table --- it" in report
-    assert _gate(report, "antithesis").startswith("antithesis: 6 (limit 5) FAIL")
-    assert _gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
+    assert gate(report, "antithesis").startswith("antithesis: 6 (limit 5) FAIL")
+    assert gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
     assert f"L{_line(_SLOPPY_TEX, 'We delve into the design')}: ..." in report
     assert "keys. We delve into the design rather than the history...." in report
-    assert _gate(report, "draft and review talk").startswith(
+    assert gate(report, "draft and review talk").startswith(
         "draft and review talk: 0 (list only) PASS"
     )
-    assert _gate(report, "markdown artifacts") == "markdown artifacts: 0 (limit 0) PASS"
-    assert _gate(report, "abstract words") == "abstract words: 170 (150 to 250) PASS"
+    assert gate(report, "markdown artifacts") == "markdown artifacts: 0 (limit 0) PASS"
+    assert gate(report, "abstract words") == "abstract words: 170 (150 to 250) PASS"
     # \Speedup and 3.7 never recur in the body; \Runs does.  Digits inside
     # words (``word10``) are not numbers.
-    orphans = _gate(report, "abstract numbers or macros unused elsewhere in the body")
+    orphans = gate(report, "abstract numbers or macros unused elsewhere in the body")
     assert orphans.endswith(": 2 (limit 0) FAIL")
     assert "    3.7\n" in report and "    \\Speedup\n" in report
     assert "    \\Runs\n" not in report and "    10\n" not in report
-    assert _gate(report, "duplicated sentences") == "duplicated sentences: 1 (limit 0) FAIL"
+    assert gate(report, "duplicated sentences") == "duplicated sentences: 1 (limit 0) FAIL"
     first, second = _line(_SLOPPY_TEX, "We delve into the design"), _line(_SLOPPY_TEX, "--- it")
     assert f"    L{first}, L{second}: the store serves reads from an index of keys." in report
-    assert _gate(report, "single-word \\emph").startswith("single-word \\emph: 1 (list only) CHECK")
-    assert _gate(report, "non-ASCII lines") == (
+    assert gate(report, "single-word \\emph").startswith("single-word \\emph: 1 (list only) CHECK")
+    assert gate(report, "non-ASCII lines") == (
         "non-ASCII lines: 0 (list only) PASS; none unless intended"
     )
-    assert _gate(report, "\\ref without \\label") == "\\ref without \\label: 1 (limit 0) FAIL"
+    assert gate(report, "\\ref without \\label") == "\\ref without \\label: 1 (limit 0) FAIL"
     assert "    fig:missing\n" in report
     assert f"bib files: {tmp_path / 'refs.bib'}" in report
-    assert _gate(report, "\\cite without bib entry") == "\\cite without bib entry: 0 (limit 0) PASS"
-    assert _gate(report, "bib entries never cited") == "bib entries never cited: 1 (limit 0) FAIL"
+    assert gate(report, "\\cite without bib entry") == "\\cite without bib entry: 0 (limit 0) PASS"
+    assert gate(report, "bib entries never cited") == "bib entries never cited: 1 (limit 0) FAIL"
     assert "    unused\n" in report
     assert report.endswith("summary: 7 gate(s) failed")
 
@@ -219,7 +214,7 @@ def test_check_paper_passes_clean_prose_and_reports_missing_inputs(tmp_path: Pat
     path = _write(tmp_path, _CLEAN_TEX, _CLEAN_BIB)
     report = write_paper_sea.check_paper(str(path))
     assert report.endswith("summary: 0 gate(s) failed"), report
-    assert _gate(report, "antithesis") == "antithesis: 0 (limit 5) PASS; only technical contrasts"
+    assert gate(report, "antithesis") == "antithesis: 0 (limit 5) PASS; only technical contrasts"
 
     # The abstract's non-ASCII character is listed (CHECK), and the bib is found
     # through the explicit ``bib_path`` when the .tex does not name one.
@@ -228,11 +223,11 @@ def test_check_paper_passes_clean_prose_and_reports_missing_inputs(tmp_path: Pat
     path.write_text(tex, encoding="utf-8")
     report = write_paper_sea.check_paper(str(path))
     assert "bib files: none found (pass bib_path to check the citations) CHECK" in report
-    assert _gate(report, "markdown artifacts") == "markdown artifacts: 2 (limit 0) FAIL"
-    assert _gate(report, "non-ASCII lines").startswith("non-ASCII lines: 1 (list only) CHECK")
+    assert gate(report, "markdown artifacts") == "markdown artifacts: 2 (limit 0) FAIL"
+    assert gate(report, "non-ASCII lines").startswith("non-ASCII lines: 1 (list only) CHECK")
     report = write_paper_sea.check_paper(str(path), bib_path="other.bib")
     assert f"bib files: {tmp_path / 'other.bib'}" in report
-    assert _gate(report, "\\cite without bib entry") == "\\cite without bib entry: 0 (limit 0) PASS"
+    assert gate(report, "\\cite without bib entry") == "\\cite without bib entry: 0 (limit 0) PASS"
     # An absolute bib path works too; a bib path that does not exist is not "found".
     report = write_paper_sea.check_paper(str(path), bib_path=str(tmp_path / "other.bib"))
     assert f"bib files: {tmp_path / 'other.bib'}" in report
@@ -243,7 +238,7 @@ def test_check_paper_passes_clean_prose_and_reports_missing_inputs(tmp_path: Pat
     path.write_text("Hi. We delve.", encoding="utf-8")
     report = write_paper_sea.check_paper(str(path))
     assert "abstract: not found FAIL" in report
-    assert _gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
+    assert gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
     missing = tmp_path / "nope.tex"
     assert write_paper_sea.check_paper(str(missing)) == f"no such file: {missing}"
 
@@ -266,25 +261,25 @@ def test_check_paper_catches_the_forms_the_rules_name(tmp_path: Path) -> None:
     )
     path = _write(tmp_path, tex, "@misc{real, title={Real}}\n@misc{ghost, title={Ghost}}\n")
     report = write_paper_sea.check_paper(str(path))
-    assert _gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
+    assert gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
     assert "...We optimize not speed but latency." in report
-    assert _gate(report, "performative honesty").startswith("performative honesty: 3 (limit 3)")
-    assert _gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
+    assert gate(report, "performative honesty").startswith("performative honesty: 3 (limit 3)")
+    assert gate(report, "slop vocabulary") == "slop vocabulary: 1 (limit 0) FAIL"
     assert "We harness compiler feedback" in report
     # \emph{ten} counts as a word; a macro's expansion is not counted (148 + ten,
     # words, 10, GB).
-    assert _gate(report, "abstract words") == "abstract words: 152 (150 to 250) PASS"
+    assert gate(report, "abstract words") == "abstract words: 152 (150 to 250) PASS"
     # ``10`` is not reused by ``100``; ``\Ten`` is not reused by ``\Tenfold``.
-    orphans = _gate(report, "abstract numbers or macros unused elsewhere in the body")
+    orphans = gate(report, "abstract numbers or macros unused elsewhere in the body")
     assert orphans.endswith(": 2 (limit 0) FAIL")
     assert "    10\n" in report and "    \\Ten\n" in report
     # ``et al.`` does not end a sentence; the four-word sentence is a duplicate.
-    duplicates = _gate(report, "duplicated sentences")
+    duplicates = gate(report, "duplicated sentences")
     assert duplicates == "duplicated sentences: 1 (limit 0) FAIL"
     assert "    L4, L5: we report the final result." in report
     # The commented \cite and \label do not count; the listings label does.
-    assert _gate(report, "\\ref without \\label") == "\\ref without \\label: 0 (limit 0) PASS"
-    assert _gate(report, "bib entries never cited") == "bib entries never cited: 1 (limit 0) FAIL"
+    assert gate(report, "\\ref without \\label") == "\\ref without \\label: 0 (limit 0) PASS"
+    assert gate(report, "bib entries never cited") == "bib entries never cited: 1 (limit 0) FAIL"
     assert "    ghost\n" in report
 
 
@@ -316,31 +311,29 @@ def test_check_paper_flags_the_researched_slop_tells(tmp_path: Path) -> None:
     """Each gate added from the 2024-2026 AI-writing studies fires on its own examples."""
     path = _write(tmp_path, _TELLS_TEX, _TELLS_BIB)
     report = write_paper_sea.check_paper(str(path))
-    assert _gate(report, "scope-inflation openers") == (
+    assert gate(report, "scope-inflation openers") == (
         "scope-inflation openers: 4 (limit 0) FAIL; open on the problem and a number"
     )
     assert "In today's rapidly evolving world" in report
-    assert _gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
+    assert gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
     # Three comma-led participle clauses (", and contributing" is not one) and
     # "marks a pivotal shift": four, over the limit of 3.
-    puffery = _gate(report, "significance puffery")
+    puffery = gate(report, "significance puffery")
     assert puffery.startswith("significance puffery: 4 (limit 3) FAIL")
-    assert _gate(report, "slop vocabulary") == "slop vocabulary: 2 (limit 0) FAIL"
-    assert _gate(report, "signposting and throat-clearing").startswith(
+    assert gate(report, "slop vocabulary") == "slop vocabulary: 2 (limit 0) FAIL"
+    assert gate(report, "signposting and throat-clearing").startswith(
         "signposting and throat-clearing: 3 (limit 0) FAIL"
     )
-    assert _gate(report, "vague attribution").startswith("vague attribution: 2 (list only) CHECK")
-    assert _gate(report, "motivational closers").startswith(
-        "motivational closers: 3 (limit 0) FAIL"
-    )
-    assert _gate(report, "intensifiers and marketing").startswith(
+    assert gate(report, "vague attribution").startswith("vague attribution: 2 (list only) CHECK")
+    assert gate(report, "motivational closers").startswith("motivational closers: 3 (limit 0) FAIL")
+    assert gate(report, "intensifiers and marketing").startswith(
         "intensifiers and marketing: 2 (list only) CHECK"
     )
-    assert _gate(report, "leaked LLM output").startswith("leaked LLM output: 3 (limit 0) FAIL")
-    assert _gate(report, "markdown artifacts") == "markdown artifacts: 1 (limit 0) FAIL"
+    assert gate(report, "leaked LLM output").startswith("leaked LLM output: 3 (limit 0) FAIL")
+    assert gate(report, "markdown artifacts") == "markdown artifacts: 1 (limit 0) FAIL"
     # Placeholder authors, an XXXX arXiv id, "et al." in an author field, pages
     # 1234, "to be updated"; the real entry is not flagged.
-    assert _gate(report, "fabricated-reference signatures").startswith(
+    assert gate(report, "fabricated-reference signatures").startswith(
         "fabricated-reference signatures: 6 (limit 0) FAIL"
     )
     assert "    refs.bib L2: ...@article{fake1, author={John Doe and Jane Smith}" in report
@@ -375,7 +368,7 @@ def test_check_paper_flags_the_researched_slop_tells(tmp_path: Path) -> None:
         "leaked LLM output",
         "fabricated-reference signatures",
     ):
-        assert _gate(report, name).startswith(f"{name}: 0 "), _gate(report, name)
+        assert gate(report, name).startswith(f"{name}: 0 "), gate(report, name)
 
 
 def test_section_truncates_long_hit_lists() -> None:
@@ -439,9 +432,9 @@ def test_build_paper_builds_a_clean_paper_with_bibtex(
     assert lines[0] == "pdflatex 1: exit 0"
     assert lines[1] == "bibtex: exit 0"
     assert "pdflatex 3: exit 0" in lines
-    assert _gate(report, "errors") == "errors: 0 (limit 0) PASS"
-    assert _gate(report, "undefined references or citations").endswith(": 0 (limit 0) PASS")
-    assert _gate(report, "overfull boxes over 10pt") == "overfull boxes over 10pt: 0 (limit 0) PASS"
+    assert gate(report, "errors") == "errors: 0 (limit 0) PASS"
+    assert gate(report, "undefined references or citations").endswith(": 0 (limit 0) PASS")
+    assert gate(report, "overfull boxes over 10pt") == "overfull boxes over 10pt: 0 (limit 0) PASS"
     assert "pages: 1" in lines
     assert f"pdf: {tmp_path / 'paper.pdf'}" in lines
     assert (tmp_path / "paper.pdf").is_file()
@@ -451,7 +444,7 @@ def test_build_paper_builds_a_clean_paper_with_bibtex(
     path.write_text(_CLEAN_TEX.replace(r"\bibliography{refs}", "").replace(r"~\cite{bitcask}", ""))
     report = write_paper_sea.build_paper(str(path))
     assert "no bibliography requested; bibtex skipped" in report
-    assert _gate(report, "errors") == "errors: 0 (limit 0) PASS"
+    assert gate(report, "errors") == "errors: 0 (limit 0) PASS"
     # A stale biblatex control file alone does not select biber ...
     (tmp_path / "paper.bcf").write_text("", encoding="utf-8")
     report = write_paper_sea.build_paper(str(path))
@@ -468,13 +461,13 @@ def test_build_paper_summarizes_errors_undefined_refs_and_overfull_boxes(tmp_pat
     tex_bin = _tex_bin()
     path = _write(tmp_path, _BROKEN_BUILD_TEX, None)
     report = write_paper_sea.build_paper(str(path), tex_bin=tex_bin)
-    assert _gate(report, "errors").endswith(" FAIL")
+    assert gate(report, "errors").endswith(" FAIL")
     assert "Undefined control sequence" in report
-    assert _gate(report, "undefined references or citations") == (
+    assert gate(report, "undefined references or citations") == (
         "undefined references or citations: 1 (limit 0) FAIL"
     )
     assert "    sec:missing" in report
-    assert _gate(report, "overfull boxes over 10pt").startswith(
+    assert gate(report, "overfull boxes over 10pt").startswith(
         "overfull boxes over 10pt: 1 (limit 0) FAIL"
     )
     assert "pt at lines 5--7" in report, report
@@ -504,7 +497,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
         names = {t["function"]["name"] for t in request["tools"]}
         expected = {"check_paper", "build_paper", "Bash", "run_parallel", "go_to_url", "finish"}
         assert expected <= names, names
-        system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
+        system = system_message(request)
         assert not system.startswith(write_paper_sea.SYSTEM_PROMPT)
         assert "# Paper-writing agent" in system
         assert "Em dashes: zero in prose" in system

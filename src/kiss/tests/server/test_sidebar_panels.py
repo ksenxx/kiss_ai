@@ -18,8 +18,9 @@
   ``getRecommendations`` are answered over the local connection of a
   real :class:`RemoteAccessServer`.
 
-Not covered in-process: the probe-failure branch of ``_probe_apps``
-(the subprocess crashing, timing out or printing no JSON) cannot be
+Not covered in-process: the probe-failure branch of
+``auth_status.probe_statuses`` (the subprocess crashing, timing out or
+printing no JSON) cannot be
 forced without replacing the interpreter or the probe module;
 ``auth_status.main`` only runs as the probe subprocess (it ends in
 ``os._exit``) and is exercised through ``apps_status``; and the
@@ -471,8 +472,8 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         try:
             path.unlink(missing_ok=True)
             (empty,) = self._ask({"type": "getRecommendations"})
-            five = [f"Task {i}" for i in range(5)]
-            assert recommendations_sea.save_recommendations(five) == "Saved 5 recommendations."
+            ten = [f"Task {i}" for i in range(10)]
+            assert recommendations_sea.save_recommendations(ten) == "Saved 10 recommendations."
             generated = json.loads(path.read_text())["generatedAt"]
             (event,) = self._ask({"type": "getRecommendations"})
         finally:
@@ -484,7 +485,7 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         self.assertEqual(event, {
             "type": "recommendations",
             "generatedAt": int(generated * 1000),
-            "tasks": five,
+            "tasks": ten,
         })
 
     def test_an_apps_probe_does_not_hold_up_later_commands(self) -> None:

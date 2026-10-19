@@ -31,8 +31,8 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
-from kiss.tests.agents.seas.conftest import git, registered, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.conftest import git, registered, run_sea, runnable_candidates
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -43,12 +43,6 @@ _SEA_PATH = Path(autorouter_sea.__file__).resolve()
 _TOOL_NAMES = {
     "model_menu", "pick_model", "estimate_cost", "observed_call_costs", "log_decision",
 }
-
-
-def _runnable_candidates(tier: str) -> list[str]:
-    """Return the tier's candidates whose provider credential is configured, in order."""
-    available = set(get_available_models())
-    return [model for model, _ in autorouter_sea.TIERS[tier] if model in available]
 
 
 def test_sea_methods_follow_the_contract() -> None:
@@ -196,7 +190,7 @@ def test_model_menu_prices_every_candidate_from_the_catalog() -> None:
 def test_pick_model_returns_the_first_runnable_candidate_and_honours_exclude() -> None:
     """The pick is the first configured candidate; excluded models are skipped in order."""
     for tier in autorouter_sea.TIER_NAMES:
-        runnable = _runnable_candidates(tier)
+        runnable = runnable_candidates(autorouter_sea.TIERS, tier)
         if not runnable:
             pytest.skip(f"no provider credential configured for any {tier} candidate")
         pick = json.loads(autorouter_sea.pick_model(tier, 1_000_000, 100_000))
@@ -337,7 +331,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     """
     home = tmp_path / "home"
     monkeypatch.setenv("KISS_HOME", str(home))
-    runnable = _runnable_candidates("medium")
+    runnable = runnable_candidates(autorouter_sea.TIERS, "medium")
     model = runnable[0] if runnable else autorouter_sea.TIERS["medium"][0][0]
     run = sea_commands.evaluate_sea(
         [AutorouterSea()], "add a --json flag to the export command"
@@ -370,7 +364,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
             "run_agent", "run_parallel", "set_model", "Bash", "run_commands_parallel", "finish",
         } <= names, names
         assert {"go_to_url", "click", "screenshot", "memory_search"} <= names, names
-        system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
+        system = system_message(request)
         assert autorouter_sea.SYSTEM_PROMPT in system, system[:200]
         assert system.startswith("<identity>"), system[:200]
     # Step 2 carries the real pick; step 3 carries the ledger path.

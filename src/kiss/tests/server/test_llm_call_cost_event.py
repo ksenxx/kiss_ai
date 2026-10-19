@@ -22,6 +22,7 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.seas.autorouter.autorouter_sea import observed_call_costs
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.models.model import Model
 from kiss.core.models.model_info import calculate_cost
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -29,6 +30,9 @@ from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 class _ScriptedModel:
     """Returns one finish call with a fixed token usage, or raises."""
+
+    serves_tools_natively = False  # no native tool set is built for it
+    native_tools_exposed = Model.native_tools_exposed  # the base no-op
 
     def __init__(
         self, usage: tuple[int, ...], raise_partial: bool = False, raise_unbilled: bool = False

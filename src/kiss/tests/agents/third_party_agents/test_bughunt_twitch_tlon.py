@@ -28,6 +28,7 @@ from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -59,8 +60,7 @@ class _RecordingHandler(RecordingHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         """Serve Eyre channel PUT (poke) endpoints."""
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self._record(body)
         if self.path.startswith("/~/channel"):
             self.send_response(204)
@@ -70,8 +70,7 @@ class _RecordingHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve Helix POST and Eyre login/poke endpoints."""
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self._record(body)
         if self.path == "/~/login" or self.path.startswith("/~/channel"):
             self.send_response(204)
@@ -204,7 +203,7 @@ class TestTlonBackendBugs:
         from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent
 
         agent = TlonAgent()
-        tools = {t.__name__: t for t in agent._get_auth_tools()}
+        tools = auth_tools(agent)
         result = json.loads(tools["authenticate_tlon"](ship_url=self.base + "/", code="code123"))
         assert result["ok"] is True
         cfg = _tlon_config.load()

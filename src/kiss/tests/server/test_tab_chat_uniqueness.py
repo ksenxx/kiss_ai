@@ -31,6 +31,7 @@ path that binds a chat to a tab:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import unittest
@@ -200,11 +201,21 @@ class TestOneTabPerChat(TabMirroringBase):
         )
         assert self.server is not None
         vs = self.server._agent_server
+        # The daemon publishes the reopened tab (the snapshot above) FIRST and
+        # commits the backend binding afterwards, outside any single lock
+        # (``_commit_replay_publication``): wait for that commit instead of
+        # reading the mapping the instant the snapshot arrives.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while vs._tab_chat_views.get("tab-s2") != chat_id:
+            self.assertLess(
+                asyncio.get_running_loop().time(), deadline,
+                "tab-s2 never got its chat-view binding committed",
+            )
+            await asyncio.sleep(0.02)
         self.assertNotIn(
             "tab-s1", vs._tab_chat_views,
             "the displaced tab's chat-view mapping leaked",
         )
-        self.assertEqual(vs._tab_chat_views.get("tab-s2"), chat_id)
 
     async def test_legacy_restored_tabs_with_duplicate_chat(self) -> None:
         """Two legacy tabs for one chat must be adopted as ONE tab."""

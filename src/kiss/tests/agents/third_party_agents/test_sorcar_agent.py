@@ -46,12 +46,18 @@ class TestDefaultTaskNoCredentials:
 class TestBuildArgParser:
     def test_custom_args(self) -> None:
         parser = _build_arg_parser()
-        args = parser.parse_args([
-            "--model_name", "gpt-4",
-            "--max_budget", "1.5",
-            "--work_dir", "/tmp/test",
-            "--task", "hello world",
-        ])
+        args = parser.parse_args(
+            [
+                "--model_name",
+                "gpt-4",
+                "--max_budget",
+                "1.5",
+                "--work_dir",
+                "/tmp/test",
+                "--task",
+                "hello world",
+            ]
+        )
         assert args.model_name == "gpt-4"
         assert args.max_budget == 1.5
         assert args.work_dir == "/tmp/test"

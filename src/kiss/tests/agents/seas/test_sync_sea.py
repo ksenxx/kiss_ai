@@ -26,33 +26,23 @@ from kiss.agents.seas.sync import git_sync, sync_sea
 from kiss.agents.seas.sync.git_sync import GitSyncError, sync
 from kiss.agents.seas.sync.sync_sea import SyncSea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.machines import Machine, save_machines
 from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
-from kiss.tests.agents.seas.conftest import HERMETIC_GIT, commit, git, run_sea
+from kiss.tests.agents.seas.conftest import HERMETIC_GIT_WITH_IDENTITY, commit, git, run_sea
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _SEA_PATH = Path(sync_sea.__file__).resolve()
 
-# A fixed identity and no user or system git config: the same settings
-# for the test's own git calls (:func:`git` reads the environment on
-# every call) and for the ones :func:`sync` spawns.  Otherwise a machine
-# without a global ``user.name`` (a fresh CI VM) fails the merge commit
-# with "Committer identity unknown", and Git for Windows' system
-# ``core.autocrlf=true`` against the user's ``false`` makes the two
-# sides disagree on which files are modified.
-_HERMETIC_GIT = {
-    **HERMETIC_GIT,
-    "GIT_AUTHOR_NAME": "t",
-    "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "t",
-    "GIT_COMMITTER_EMAIL": "t@t",
-}
-
 
 @pytest.fixture(autouse=True)
 def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the git commands :func:`sync` spawns with :data:`_HERMETIC_GIT` too."""
-    for key, value in _HERMETIC_GIT.items():
+    """Run the git commands :func:`sync` spawns under :data:`HERMETIC_GIT_WITH_IDENTITY` too.
+
+    The test's own :func:`git` calls read the environment on every call,
+    so both sides commit as ``t <t@t>`` with no user or system config.
+    """
+    for key, value in HERMETIC_GIT_WITH_IDENTITY.items():
         monkeypatch.setenv(key, value)
 
 
@@ -126,23 +116,24 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "ASSEMBLED" not in prompt
     assert "`git_sync`" in prompt
     assert "git merge --abort" in prompt
+    assert f'task="<ref> {sync_sea.THIS_MACHINE_ONLY}"' in prompt
     assert sea.settings({"model": "m"}) == {
         "model": "m",
-        "tool_profile": "shell+edit",
+        "tool_profile": "shell+edit+agents",
         "max_budget": sync_sea.MAX_BUDGET_USD,
         "locked": ["tool_profile"],
     }
     assert sea_commands.base_settings([sea]) == {
-        "tool_profile": "shell+edit",
+        "tool_profile": "shell+edit+agents",
         "max_budget": sync_sea.MAX_BUDGET_USD,
         "locked": ["tool_profile"],
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
     }
-    profile = resolve_tool_profile("shell+edit")
+    profile = resolve_tool_profile("shell+edit+agents")
     assert profile is not None
-    assert {"Bash", "Read", "Edit", "Write"} <= profile
+    assert {"Bash", "Read", "Edit", "Write", "run_agent"} <= profile
     # The chained ``tools``: the worker drops the worktree tools, the
     # subclass adds ``git_sync``.
     def create_worktree() -> None: ...
@@ -160,6 +151,34 @@ def test_slash_sync_resolves_bare_and_with_a_ref() -> None:
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
     assert run.prompt == sync_sea.ADD_TO_PROMPT
     assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([SyncSea()])
+
+
+def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> None:
+    """With machines registered the task names them in order, unless it says
+    "this machine only" (what the sub-task sent to a machine says); the budget
+    is one share per checkout."""
+    sea = SyncSea()
+    save_machines([Machine("box", url="https://box:8787"), Machine("lab", ssh="u@lab")])
+    try:
+        listed = f"\n\n{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box, lab."
+        assert sea.prompt("") == listed.strip()
+        assert sea.prompt("upstream/dev") == "upstream/dev" + listed
+        assert sea.prompt("preamble\n/sync upstream/dev") == "preamble\n/sync upstream/dev" + listed
+        local = f"origin/main {sync_sea.THIS_MACHINE_ONLY}"
+        assert sea.prompt(local) == f"{local}\n\n{sync_sea.ADD_TO_PROMPT}"
+        assert sea.prompt(f"/sync {sync_sea.THIS_MACHINE_ONLY}") == (
+            f"/sync {sync_sea.THIS_MACHINE_ONLY}\n\n{sync_sea.ADD_TO_PROMPT}"
+        )
+        assert sync_sea.machine_names("") == ["box", "lab"]
+        assert sync_sea.machine_names(local) == []
+        assert sea.settings({})["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+        run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
+        assert run.prompt == listed.strip()
+        assert run.settings["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+    finally:
+        save_machines([])
+    assert sea.prompt("") == sync_sea.ADD_TO_PROMPT
+    assert sea.settings({})["max_budget"] == sync_sea.MAX_BUDGET_USD
 
 
 def test_sync_fast_forwards_when_the_branch_has_no_own_commits(tmp_path: Path) -> None:
@@ -341,7 +360,7 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
-        assert {"git_sync", "Bash", "Read", "Edit", "Write", "finish"} <= names, names
+        assert {"git_sync", "Bash", "Read", "Edit", "Write", "run_agent", "finish"} <= names, names
         assert not {"create_worktree", "commit_and_merge", "go_to_url", "memory_search"} & names
         system = system_message(request)
         assert system.startswith(sync_sea.SYSTEM_PROMPT), system[:200]

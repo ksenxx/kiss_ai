@@ -18,7 +18,11 @@ payloads, then assert on the resulting ``new_models`` list — the same list
 that ``apply_updates_to_file`` would otherwise write into ``model_info.py``.
 """
 
-from kiss.scripts.update_models import _add_codex_candidates, compute_changes
+from kiss.scripts.update_models import (
+    _add_codex_candidates,
+    compute_changes,
+    find_deprecated_models,
+)
 
 
 def _empty_current() -> dict[str, dict]:
@@ -174,10 +178,9 @@ def test_add_codex_candidates_keeps_normal_gpt_slug() -> None:
     assert names == {"codex/gpt-5.5", "codex/gpt-5.4-mini"}
 
 
-def test_existing_gpt_pro_entry_still_receives_price_updates() -> None:
-    """If a GPT pro entry already lives in ``MODEL_INFO``, the script must still
-    propagate vendor pricing updates to it — the exclusion only blocks *new*
-    additions, not edits to existing entries the maintainer chose to keep.
+def test_existing_gpt_pro_entry_is_flagged_deprecated() -> None:
+    """A GPT pro entry already in ``MODEL_INFO`` is removed on the next run,
+    even while OpenRouter still lists it: pro models are never kept.
     """
     current = {
         "openrouter/openai/gpt-5-pro": {
@@ -198,8 +201,5 @@ def test_existing_gpt_pro_entry_still_receives_price_updates() -> None:
             "source": "openrouter",
         },
     }
-    updates, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
-    new_names = {m["name"] for m in new_models}
-    assert "openrouter/openai/gpt-5-pro" not in new_names
-    update_names = {u["name"] for u in updates}
-    assert "openrouter/openai/gpt-5-pro" in update_names
+    deprecated = find_deprecated_models(current, openrouter, {}, {}, {})
+    assert deprecated == [{"name": "openrouter/openai/gpt-5-pro", "reason": "excluded model"}]

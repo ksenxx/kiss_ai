@@ -29,7 +29,7 @@ from typing import Any
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
-from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER, Attachment
+from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
@@ -71,6 +71,8 @@ def make_cli(cls: type, model_config: dict[str, Any] | None = None) -> Any:
 def test_is_openrouter_anthropic_parity() -> None:
     for cls in MODEL_CLASSES:
         assert make(cls, "openrouter/anthropic/claude-opus-4.7")._is_openrouter_anthropic()
+        # OpenRouter alias form (``~anthropic``) must be cached too, like pricing treats it.
+        assert make(cls, "openrouter/~anthropic/claude-fable-latest")._is_openrouter_anthropic()
         assert not make(cls, "openrouter/deepseek/deepseek-r1")._is_openrouter_anthropic()
         assert not make(cls, "gpt-4o")._is_openrouter_anthropic()
 
@@ -84,10 +86,14 @@ def test_is_deepseek_reasoning_model_parity() -> None:
 
 def test_cache_control_applied_for_openrouter_anthropic_parity() -> None:
     for cls in MODEL_CLASSES:
-        m = make(cls, "openrouter/anthropic/claude-opus-4.7")
-        kwargs: dict[str, Any] = {}
-        m._apply_cache_control_for_openrouter_anthropic(kwargs)
-        assert kwargs["extra_body"]["cache_control"] == {"type": "ephemeral"}
+        for name in (
+            "openrouter/anthropic/claude-opus-4.7",
+            "openrouter/~anthropic/claude-fable-latest",
+        ):
+            m = make(cls, name)
+            kwargs: dict[str, Any] = {}
+            m._apply_cache_control_for_openrouter_anthropic(kwargs)
+            assert kwargs["extra_body"]["cache_control"] == {"type": "ephemeral"}, name
 
 
 def test_cache_control_noop_when_disabled_or_other_vendor_parity() -> None:
@@ -164,11 +170,12 @@ def test_cli_models_multi_turn_prompt_renders_dialogue() -> None:
         assert "[Tool Result]: tool output" in prompt
 
 
-def test_codex_prompt_appends_system_instruction_after_header() -> None:
+def test_codex_prompt_never_carries_the_system_instruction() -> None:
+    """The system instruction reaches Codex through its instructions file
+    (``-c model_instructions_file=...``), not inside the prompt."""
     m = make_cli(CodexModel, model_config={"system_instruction": "be terse"})
     m.initialize("do it")
-    prompt = m._build_prompt()
-    assert prompt == "do it" + CLI_SYSTEM_PROMPT_HEADER + "be terse"
+    assert m._build_prompt() == "do it"
 
 
 def test_cli_attachment_warning_preserves_logger_and_record(caplog: Any) -> None:

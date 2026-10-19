@@ -375,34 +375,29 @@ class TestRaceSetupRespectsRepoLock:
     """
 
     def test_setup_holds_repo_lock_across_dirty_state_copy(
-        self,
+        self, tmp_path: Path,
     ) -> None:
-        """Structural confirmation: ``_try_setup_worktree`` runs its
-        whole body (``_setup_worktree_locked``, which contains the
-        ``copy_dirty_state`` and ``save_baseline_commit`` calls) under
-        ``repo_lock(repo)`` via ``locked_call``.
+        """``_try_setup_worktree`` cannot start while another thread holds
+        ``repo_lock``; once the lock is released the setup completes and
+        registers the worktree.
         """
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "agents" / "sorcar" / "sorcar_agent.py"
-        ).read_text(encoding="utf-8")
+        repo = _make_repo(tmp_path / "repo")
+        agent = ChatSorcarAgent("Sorcar")
+        agent.work_dir = str(repo)
+        lock = repo_lock(repo)
+        lock.acquire()
+        done = threading.Event()
+        result: list[Path | None] = []
 
-        start = src.index("def _try_setup_worktree")
-        end = src.index("\n    def ", start + 1)
-        assert "locked_call(repo_lock(repo), self._setup_worktree_locked" in src[start:end], (
-            "RACE-2 regression: ``_try_setup_worktree`` must hold "
-            "``repo_lock(repo)`` across the setup body."
-        )
+        def setup() -> None:
+            result.append(agent._try_setup_worktree(repo, str(repo)))
+            done.set()
 
-        start = src.index("def _setup_worktree_locked")
-        end = src.index("\n    def ", start + 1)
-        body = src[start:end]
-        copy_idx = body.find("GitWorktreeOps.copy_dirty_state")
-        baseline_idx = body.find("GitWorktreeOps.save_baseline_commit")
-        assert copy_idx != -1 and baseline_idx != -1, (
-            "RACE-2 regression: ``repo_lock`` must enclose both "
-            "``copy_dirty_state`` and ``save_baseline_commit``."
-        )
+        threading.Thread(target=setup, daemon=True).start()
+        assert not done.wait(1.5), "setup ran while another thread held repo_lock"
+        lock.release()
+        assert done.wait(30)
+        assert result and result[0] is not None and agent._wts
 
     def test_repo_lock_is_reentrant(self) -> None:
         """``repo_lock`` returns an RLock so a nested ``_do_merge``

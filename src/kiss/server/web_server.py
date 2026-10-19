@@ -125,7 +125,7 @@ from kiss.core.utils import (
 )
 from kiss.server import agent_state
 from kiss.server import sorcar as sorcar_api
-from kiss.server.commands import broadcast_to_conn
+from kiss.server.commands import broadcast_to_conn, sea_commands_event
 from kiss.server.install_problems import NOTICE_ID as INSTALL_PROBLEMS_NOTICE_ID
 from kiss.server.install_problems import install_problems_notice
 from kiss.server.json_printer import (
@@ -1401,7 +1401,7 @@ def _looks_like_cloudflared(pid: int) -> bool:
     return Path(comm).name.lower() in ("cloudflared", "cloudflared.exe")
 
 
-def _terminate_declined_cloudflared(pid: int) -> None:
+def _terminate_declined_cloudflared(pid: int, grace_s: float = 2.0) -> None:
     """Terminate a pidfile-recorded cloudflared we declined to adopt.
 
     A declined-but-alive cloudflared would otherwise be orphaned
@@ -1412,23 +1412,26 @@ def _terminate_declined_cloudflared(pid: int) -> None:
     recycled the recorded PID for an unrelated process, so the
     process identity is verified (:func:`_looks_like_cloudflared`)
     before every signal; a mismatch only unlinks the stale pidfile.
-    Sends SIGTERM, waits up to ~2s, re-verifies identity (the PID can
-    be recycled inside the wait window too), escalates to SIGKILL if
-    still alive, then unlinks the pidfile.
+    Sends SIGTERM, waits up to *grace_s*, re-verifies identity (the
+    PID can be recycled inside the wait window too), escalates to
+    SIGKILL if still alive, then unlinks the pidfile.  Also how the
+    unhealthy-tunnel watchdog retires an adopted tunnel
+    (:meth:`RemoteAccessServer._terminate_tunnel_proc`).
     """
-    _terminate_cloudflared_pid(pid)
+    _terminate_cloudflared_pid(pid, grace_s)
     _unlink_cloudflared_pidfile()
 
 
-def _terminate_cloudflared_pid(pid: int) -> None:
+def _terminate_cloudflared_pid(pid: int, grace_s: float = 2.0) -> None:
     """Terminate the cloudflared process *pid* without touching the pidfile.
 
     Verifies the process identity (:func:`_looks_like_cloudflared`)
     before EVERY signal because *pid* may come from a stale pidfile or
     a process listing and could have been recycled for an unrelated
-    process.  Sends SIGTERM, waits up to ~2s, re-verifies, escalates to
-    SIGKILL if still alive.  Used both for pidfile-recorded processes
-    (via :func:`_terminate_declined_cloudflared`) and for stray tunnels
+    process.  Sends SIGTERM, waits up to *grace_s* (polling every
+    0.1 s), re-verifies, escalates to SIGKILL if still alive.  Used
+    both for pidfile-recorded processes (via
+    :func:`_terminate_declined_cloudflared`) and for stray tunnels
     found by :func:`_find_cloudflared_forwarding_to`, where unlinking
     the pidfile would wrongly discard the daemon's OWN tunnel record.
     """
@@ -1443,7 +1446,7 @@ def _terminate_cloudflared_pid(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         return
-    for _ in range(20):
+    for _ in range(int(grace_s / 0.1)):
         if not _is_pid_alive(pid):
             break
         time.sleep(0.1)
@@ -3179,7 +3182,10 @@ class WebPrinter(JsonPrinter):
         if kept is not None:
             self._keep_tab_stamped_task_event(*kept)
         if data:
-            self._send_to_ws_clients(data)
+            # The stamp narrows local delivery to the peers that can
+            # show the tab, as for fan-out copies; an empty stamp is
+            # a global event that reaches every peer (conc1018 I1-F1).
+            self._send_to_ws_clients(data, event["tabId"])
             # An explicit empty stamp is a global event sent
             # verbatim (``tabs_state``, ``tasks_updated``), so
             # daemon-link peers get it; a tab's event is a
@@ -4332,6 +4338,7 @@ def _build_html() -> str:
         "TERMINAL_TAB_SRC": _media_url("terminalTab.js"),
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MOBILE_SWIPE_SRC": _media_url("mobileSwipe.js"),
+        "APP_WINDOW_SRC": _media_url("appWindow.js"),
         "MAIN_SRC": _media_url("main.js"),
         "HLJS_THEME_CSS": json.dumps({
             "dark": _media_url("highlight-dark.css"),
@@ -5359,7 +5366,9 @@ class RemoteAccessServer:
         is_local = auth.kind == "local" and not auth.link
 
         self._printer.add_client(websocket, local=is_local, link=auth.link)
-        conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex}
+        # ``link``: a daemon-link peer, told only global events and the
+        # replies to its own requests (see ``WebPrinter.add_client``).
+        conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
         self._printer.bind_conn(conn_state["conn_id"], websocket)
         try:
             async for message in websocket:
@@ -5382,10 +5391,14 @@ class RemoteAccessServer:
                         "Frame %r from %s carries a wrong password; closing",
                         cmd.get("type", ""), websocket.remote_address,
                     )
-                    await websocket.send(json.dumps({
-                        "type": "error", "code": "auth_failed",
-                        "text": "Wrong password.",
-                    }))
+                    # Through the printer's per-endpoint send lock and
+                    # bounded send like every other frame, so a peer
+                    # that stopped reading cannot hold this handler.
+                    await self._reply_direct(
+                        websocket,
+                        {"type": "error", "code": "auth_failed", "text": "Wrong password."},
+                        "wrong-password close",
+                    )
                     await websocket.close()
                     break
                 try:
@@ -5823,7 +5836,14 @@ class RemoteAccessServer:
         — so a Cancel that lands while this thread waits for the lock
         is seen here and nothing is armed for an update nobody will
         run (the cancelled poller has already lowered the barrier and
-        no exit watcher would ever lower it again).
+        no exit watcher would ever lower it again).  The flag is also
+        CONSUMED in this section: from here on the launch belongs to
+        the poller, and a Cancel that gets the lock after it finds the
+        flag down and stands down.  Clearing the flag later, on the
+        poller's next loop step, let such a Cancel cancel a poller
+        already inside :meth:`_handle_run_update`; landing at the spawn
+        ``await`` that left a started installer with the barrier
+        lowered and no exit watcher (conc1018 I2-F1).
         Blocks on the lock: call it off the event loop.
 
         Returns:
@@ -5834,6 +5854,7 @@ class RemoteAccessServer:
         with agent_state.STATE_LOCK:
             if not self._update_when_idle_armed or _snapshot_active_tabs():
                 return False
+            self._update_when_idle_armed = False
             self._agent_server._update_installing = True
             return True
 
@@ -6025,8 +6046,7 @@ class RemoteAccessServer:
                 A second of slack covers file systems with whole-second
                 mtimes.
         """
-        while proc.poll() is None:
-            await asyncio.sleep(0.2)
+        await _wait_exit(proc)
         if not self._update_in_progress():
             self._set_update_barrier(False)
         notice = await asyncio.to_thread(install_problems_notice, since=started - 1.0)
@@ -6078,10 +6098,7 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        if self._update_models_starting or (
-            self._update_models_proc is not None
-            and self._update_models_proc.poll() is None
-        ):
+        if _proc_live(self._update_models_starting, self._update_models_proc):
             self._broadcast_to_conn({
                 "type": "notice",
                 "text": (
@@ -6153,8 +6170,7 @@ class RemoteAccessServer:
             proc: The updater started by :meth:`_spawn_update_models`.
             conn_id: Requesting connection id (``""`` to broadcast).
         """
-        while proc.poll() is None:
-            await asyncio.sleep(0.2)
+        await _wait_exit(proc)
         if proc.returncode == 0:
             self._broadcast_to_conn({
                 "type": "notice",
@@ -6211,7 +6227,7 @@ class RemoteAccessServer:
 
         voice.js cannot call gpt-audio itself (the API key lives on
         this machine), so after the in-page wake-word detector hears
-        "Hey Sorcar" it captures the utterance that follows and ships
+        "Abracadabra" it captures the utterance that follows and ships
         it here as ``{type: 'voiceTranscribe', audio: <base64 16kHz
         mono s16le PCM>}``.  The audio is translated into English by
         the KISS transcription agent (:func:`transcribe_pcm`) — which
@@ -6895,9 +6911,10 @@ class RemoteAccessServer:
     ) -> None:
         """Send *reply* to *endpoint* only, logging (not raising) failures.
 
-        Shared tail of the Explorer / Source Control handlers below:
-        their replies go to the requesting connection alone, and a
-        client that vanished mid-request must not surface an error.
+        Shared tail of the Explorer / Source Control handlers below
+        and of the ``ready`` nudges: those replies go to the requesting
+        connection alone, and a client that vanished mid-request must
+        not surface an error.
         """
         try:
             await self._endpoint_send(endpoint, json.dumps(reply))
@@ -7600,24 +7617,28 @@ class RemoteAccessServer:
         self._url_publish_gen += 1
         return self._deliver_remote_url(url, self._url_publish_gen)
 
-    async def _deliver_remote_url(self, url: str, gen: int) -> None:
-        """Build the ``remote_url`` message off-thread and broadcast it.
+    async def _deliver_remote_url(self, url: str, gen: int, conn_id: str = "") -> None:
+        """Build the ``remote_url`` message off-thread and send it.
 
-        Dropped when a newer publication (a higher
-        :attr:`_url_publish_gen`) was stamped while the message was
-        being built, so clients never see a superseded URL land after
-        its replacement.
+        To every client, or (*conn_id* non-empty) to that connection
+        alone: a client's own ``ready``/``getWelcomeInfo`` asks for the
+        URL it missed, not for a repaint of every other tab.  Dropped
+        when a newer publication (a higher :attr:`_url_publish_gen`)
+        was stamped while the message was being built, so clients never
+        see a superseded URL land after its replacement (the
+        requesting client got the newer one with everybody else).
         """
         msg = await asyncio.to_thread(self._remote_url_message, url)
         if gen == self._url_publish_gen:
-            self._printer.broadcast(msg)
+            self._broadcast_to_conn(msg, conn_id)
 
-    async def _broadcast_update_available(self) -> None:
-        """Broadcast the cached PyPI ``update_available`` state.
+    async def _broadcast_update_available(self, conn_id: str = "") -> None:
+        """Send the cached PyPI ``update_available`` state.
 
-        No-op until :meth:`_check_for_update` has cached a latest
-        version on :attr:`_latest_version`.  ``_read_version`` scans a
-        directory on disk, so it runs off-thread (M10).
+        To every client, or (*conn_id* non-empty) to that connection
+        alone.  No-op until :meth:`_check_for_update` has cached a
+        latest version on :attr:`_latest_version`.  ``_read_version``
+        scans a directory on disk, so it runs off-thread (M10).
         """
         latest = self._latest_version
         if not latest:
@@ -7627,20 +7648,18 @@ class RemoteAccessServer:
         snoozed = available and await asyncio.to_thread(
             _is_update_snoozed, latest,
         )
-        self._printer.broadcast({
+        self._broadcast_to_conn({
             "type": "update_available",
             "available": available,
             "latest": latest,
             "current": current,
             "snoozed": snoozed,
             "pendingIdle": self._update_when_idle_armed,
-        })
+        }, conn_id)
 
     def _update_in_progress(self) -> bool:
         """Return whether an installer is being spawned or still running."""
-        return self._update_starting or (
-            self._update_proc is not None and self._update_proc.poll() is None
-        )
+        return _proc_live(self._update_starting, self._update_proc)
 
     async def _cancel_update_when_idle(self) -> bool:
         """Disarm an "Update when idle" still waiting for idle.
@@ -7717,8 +7736,9 @@ class RemoteAccessServer:
         The idle verdict and the run-admission barrier are one atomic
         step, so no ``run`` can start between "no active tasks" and the
         installer spawn (the barrier makes ``_cmd_run`` refuse it).
-        Once armed it disarms itself and, without yielding to the loop
-        in between, runs :meth:`_handle_run_update` for every window
+        That step also disarms the poller, so a Cancel arriving later
+        finds nothing to cancel; it then runs
+        :meth:`_handle_run_update` for every window
         (``conn_id=""``): the click that armed it may be long gone by
         the time the update starts, so its notices must not be confined
         to one connection.  The task stays tracked on
@@ -7728,7 +7748,6 @@ class RemoteAccessServer:
         try:
             while not await asyncio.to_thread(self._arm_update_barrier_if_idle):
                 await asyncio.sleep(_IDLE_UPDATE_POLL_S)
-            self._update_when_idle_armed = False
             await self._handle_run_update("")
             await self._broadcast_update_available()
         except asyncio.CancelledError:
@@ -7777,12 +7796,16 @@ class RemoteAccessServer:
             )
             self._last_posted_url = url
 
-    async def _send_welcome_info(self) -> None:
-        """Broadcast the active remote URL to all connected clients.
+    async def _send_welcome_info(self, conn_id: str = "") -> None:
+        """Send the active remote URL (and the update state) to a client.
 
-        Broadcasts the ``remote_url`` event using the in-memory URL,
-        the URL file, or — for tunnel-enabled servers only — the
-        ``cloudflared`` metrics API as successive fallbacks.
+        Sends the ``remote_url`` event using the in-memory URL, the
+        URL file, or — for tunnel-enabled servers only — the
+        ``cloudflared`` metrics API as successive fallbacks.  A
+        ``ready`` or ``getWelcomeInfo`` passes its *conn_id* so only
+        the asking connection is answered: N tabs reconnecting after a
+        daemon restart used to cost N broadcasts of each event to all
+        N clients.  ``""`` broadcasts to every client.
 
         M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
         call (which spawns ``pgrep`` and does HTTP requests) are
@@ -7832,8 +7855,14 @@ class RemoteAccessServer:
         # published the current URL, which must not be followed by the
         # obsolete one the file or the scan returned.
         url = self._active_url or url
-        await self._broadcast_remote_url(url or "")
-        await self._broadcast_update_available()
+        if conn_id:
+            # Not a new publication (no generation bump: the URL did
+            # not change), so a publication in flight for everybody is
+            # not superseded by this one client's catch-up.
+            await self._deliver_remote_url(url or "", self._url_publish_gen, conn_id)
+        else:
+            await self._broadcast_remote_url(url or "")
+        await self._broadcast_update_available(conn_id)
 
     async def _endpoint_send(
         self, endpoint: ServerConnection, data: str,
@@ -7960,30 +7989,21 @@ class RemoteAccessServer:
             "getSeaCommands",
         ):
             await self._run_cmd({"type": init_cmd, "connId": conn_id})
-        try:
-            await self._endpoint_send(
-                websocket, json.dumps({"type": "tasks_updated"}),
-            )
-        except Exception:
-            logger.debug("ready tasks_updated nudge failed", exc_info=True)
+        await self._reply_direct(websocket, {"type": "tasks_updated"}, "ready tasks_updated nudge")
         # A browser tab is open on every surface while its page lives
         # and on none once it closes: the snapshot lets this
         # (re)connecting client add the live ones and drop any it kept
         # from before a disconnect or a daemon restart.
         self._broadcast_to_conn(self._agent_server.browser_tabs.snapshot_event(), conn_id)
-        await self._send_welcome_info()
+        await self._send_welcome_info(conn_id)
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
         # these events (the page also embeds them at load).
         for bootstrap in await asyncio.to_thread(self._bootstrap_events):
             self._broadcast_to_conn(bootstrap, conn_id)
-        try:
-            await self._endpoint_send(
-                websocket,
-                json.dumps({"type": "focusInput", "tabId": tab_id}),
-            )
-        except Exception:
-            pass
+        await self._reply_direct(
+            websocket, {"type": "focusInput", "tabId": tab_id}, "ready focusInput",
+        )
         try:
             bound, adopted = await asyncio.to_thread(
                 self._agent_server.ready_tab_sync, cmd["restoredTabs"],
@@ -8157,7 +8177,7 @@ class RemoteAccessServer:
             "type": "run",
             "prompt": prompt,
             "model": cmd.get("model", ""),
-            "workDir": cmd.get("workDir") or self._agent_server.work_dir,
+            "workDir": self._cmd_work_dir(cmd),
             "tabId": tab_id,
             # The file tab the user viewed last (the page's Monaco
             # editor), named in the run's system prompt.
@@ -8736,38 +8756,10 @@ class RemoteAccessServer:
             # An adopted pid came from the pidfile of a PREVIOUS
             # process, so unlike the self-spawned ``proc`` above it
             # may have been recycled for an unrelated process since
-            # adoption.  Verify the identity before every signal
-            # (same rule as _terminate_declined_cloudflared).
-            adopted_pid = self._tunnel_adopted_pid
-            if _looks_like_cloudflared(adopted_pid):
-                try:
-                    os.kill(adopted_pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-                else:
-                    for _ in range(50):
-                        if not _is_pid_alive(adopted_pid):
-                            break
-                        time.sleep(0.1)
-                    else:
-                        if _looks_like_cloudflared(adopted_pid):
-                            try:
-                                os.kill(
-                                    adopted_pid,
-                                    getattr(signal, "SIGKILL", signal.SIGTERM),
-                                )
-                            except (
-                                ProcessLookupError,
-                                PermissionError,
-                                OSError,
-                            ):
-                                pass
-            else:
-                logger.info(
-                    "Adopted pid %d is no longer a cloudflared process "
-                    "(pid recycled); not signalling it", adopted_pid,
-                )
-            _unlink_cloudflared_pidfile()
+            # adoption: the helper verifies the identity before every
+            # signal.  Off the loop (the watchdog's to_thread), so the
+            # longer grace costs nothing.
+            _terminate_declined_cloudflared(self._tunnel_adopted_pid, grace_s=5.0)
         self._reset_tunnel_proc_state()
 
     async def _ping_one_ws(self, ws: Any) -> None:
@@ -9734,7 +9726,7 @@ class RemoteAccessServer:
         Args:
             commands: The sorted command names after a registry change.
         """
-        self._printer.broadcast({"type": "seaCommands", "commands": commands})
+        self._printer.broadcast(sea_commands_event(commands))
 
     def _stop_sea_command_watcher(self) -> None:
         """Unsubscribe from the SEA registry and stop its poller.
@@ -10006,12 +9998,13 @@ class RemoteAccessServer:
         ``disconnect_all`` is idempotent, so the repeated calls a
         single shutdown makes are harmless no-ops, and it leaves the
         manager usable for an embedder that starts another server in
-        the same process.
+        the same process.  A process that never used an MCP server has
+        no manager and gets none built here (``disconnect_existing``).
         """
         try:
             from kiss.agents.sorcar.mcp_servers import MCPManager
 
-            MCPManager.instance().disconnect_all()
+            MCPManager.disconnect_existing()
         except Exception:  # noqa: BLE001 — shutdown must proceed regardless
             logger.debug("MCP server disconnect failed", exc_info=True)
 
@@ -10396,6 +10389,7 @@ class RemoteAccessServer:
             self._update_models_watch_task = None
             await _cancel_task(self._republish_task)
             self._republish_task = None
+            await self._server_api.cancel_background_replies()
             ws_servers = [
                 s for s in (self._ws_server, self._ws_loopback_server)
                 if s is not None
@@ -10420,7 +10414,24 @@ class RemoteAccessServer:
             # ``_stop_tunnel`` blocks in ``Popen.wait(timeout=5)`` while
             # cloudflared shuts down; off the loop for the same reason.
             await asyncio.to_thread(self._stop_tunnel)
-            _remove_url_file(self._url_file)
+            # Only a URL file this server wrote: a private (loopback-
+            # only) daemon shares the home with the canonical kiss-web
+            # daemon and never writes the file, so removing it here
+            # unlinked the live daemon's URL until its watchdog rewrote
+            # it (conc1018 I2-F2).
+            if not self._local_only:
+                _remove_url_file(self._url_file)
+
+
+def _proc_live(starting: bool, proc: subprocess.Popen[bytes] | None) -> bool:
+    """Whether a child is being spawned (*starting*) or *proc* is still running."""
+    return starting or (proc is not None and proc.poll() is None)
+
+
+async def _wait_exit(proc: subprocess.Popen[bytes]) -> None:
+    """Poll until *proc* exits without blocking the event loop."""
+    while proc.poll() is None:
+        await asyncio.sleep(0.2)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

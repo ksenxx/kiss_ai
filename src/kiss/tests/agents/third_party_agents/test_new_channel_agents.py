@@ -16,6 +16,8 @@ import sys
 
 import pytest
 
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
+
 _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
     {
         "module": "kiss.agents.third_party_agents.telegram.telegram_sea",
@@ -392,15 +394,15 @@ def test_check_auth_unauthenticated(info: dict) -> None:
     mod, agent_cls, _ = _load(info)
     _reset_config(mod)
     agent = agent_cls()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools[info["auth_check"]]()
     lower = result.lower()
-    assert ("not authenticated" in lower
-            or "not configured" in lower
-            or "no " in lower
-            or "authenticate" in lower), (
-        f"Expected unauthenticated message, got: {result[:200]}"
-    )
+    assert (
+        "not authenticated" in lower
+        or "not configured" in lower
+        or "no " in lower
+        or "authenticate" in lower
+    ), f"Expected unauthenticated message, got: {result[:200]}"
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
@@ -409,7 +411,7 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
     mod, agent_cls, _ = _load(info)
     _reset_config(mod)
     agent = agent_cls()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools[info["auth_clear"]]()
     assert "cleared" in result.lower() or "removed" in result.lower(), (
         f"Expected cleared message, got: {result[:200]}"

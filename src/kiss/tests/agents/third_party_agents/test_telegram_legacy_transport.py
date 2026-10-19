@@ -53,8 +53,7 @@ class _BotApiHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Answer ``/bot<token>/<method>`` like api.telegram.org would."""
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length)
+        body = self._read_raw()
         _, _, rest = self.path.partition("/bot")
         token, _, method = rest.partition("/")
         self.server.requests.append(

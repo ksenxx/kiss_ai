@@ -365,9 +365,7 @@ class GeminiModel(Model):
         """
         return responses_items_to_chat_messages(self.conversation)
 
-    def _tool_call_id_to_name_map(
-        self, chat_messages: list[dict[str, Any]] | None = None
-    ) -> dict[str, str]:
+    def _tool_call_id_to_name_map(self, chat_messages: list[dict[str, Any]]) -> dict[str, str]:
         """Map tool-call ids to function names across the whole conversation.
 
         Scans assistant messages for both OpenAI-style ``tool_calls``
@@ -376,16 +374,14 @@ class GeminiModel(Model):
         model, e.g. via the Sorcar ``set_model`` tool).
 
         Args:
-            chat_messages: The pre-converted conversation, or ``None`` to
-                convert ``self.conversation`` here.
+            chat_messages: The conversation, pre-converted by
+                :meth:`_chat_messages`.
 
         Returns:
             dict[str, str]: Mapping of tool-call id to function name.
         """
         mapping: dict[str, str] = {}
-        for msg in (
-            chat_messages if chat_messages is not None else self._chat_messages()
-        ):
+        for msg in chat_messages:
             if msg.get("role") != "assistant":
                 continue
             for tc in msg.get("tool_calls") or []:

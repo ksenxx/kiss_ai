@@ -37,6 +37,7 @@ from kiss.agents.sorcar.channel_workspace import (
     held_workspace,
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.cron_agent import is_unattended_text
 from kiss.agents.sorcar.fanout_guard import is_review_task as _is_review_task
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
@@ -989,6 +990,14 @@ class _TaskRunnerMixin:
             # below, so the raise is deferred until after the start status.
             sea_error: SeaError | None = None
             overridden_fields: set[str] = set()
+            # Decided on the task text as SUBMITTED: a cron prompt job
+            # carries its unattended preamble there, and the SEA a
+            # ``/xxx`` prompt turns into may replace the text (the
+            # scheduled ``/recommendations now`` does).  An in-chat
+            # cron job and a cron run's sub-tasks say so on the wire.
+            cmd["cronJob"] = bool(cmd.get("cronJob")) or is_unattended_text(
+                str(cmd.get("prompt", "")) + str(cmd.get("appendToPrompt") or "")
+            )
             try:
                 overridden_fields = self._apply_sea(cmd)
             except SeaError as exc:
@@ -1160,8 +1169,9 @@ class _TaskRunnerMixin:
             # The channel workspace ``_apply_sea`` entered on this
             # thread is released on every exit path — a script that
             # broke after the hold and a stop during setup included.
-            if held_workspace():
-                exit_workspace(held_workspace())
+            workspace = held_workspace()
+            if workspace:
+                exit_workspace(workspace)
             if state is None:
                 # The interrupt (or an override crash) landed before
                 # the state was resolved above.  ``_cmd_run`` already
@@ -1705,6 +1715,11 @@ class _TaskRunnerMixin:
         agent.sea_name = (
             Path(str(_raw_sea_path).strip()).stem if _sea_run else ""
         )
+        # Recorded in the row's ``is_cron`` column (the CHATS list's Cron
+        # chip); ``cronJob`` was settled from the submitted command in
+        # ``_run_task``.  Set unconditionally: a reused agent must not
+        # keep a previous run's marking.
+        agent.is_cron_job = bool(cmd.get("cronJob"))
         _open_bare_path = not _sea_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = (

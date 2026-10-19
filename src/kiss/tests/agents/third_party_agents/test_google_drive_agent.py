@@ -19,7 +19,6 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -33,7 +32,11 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     connect,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serve_recording,
+)
 
 _TOKEN = TOKEN
 
@@ -80,18 +83,8 @@ _FILES: dict[str, dict[str, Any]] = {
 _BIN_CONTENT = b"hello plain content"
 
 
-class _DriveRequestHandler(BaseHTTPRequestHandler):
+class _DriveRequestHandler(RecordingHandler):
     """Emulates the Google Drive v3 REST API and records requests."""
-
-    def _reply(self, status: int, body: bytes, content_type: str = "application/json") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _reply_json(self, status: int, obj: Any) -> None:
-        self._reply(status, json.dumps(obj).encode("utf-8"))
 
     def _record(self, raw: bytes) -> None:
         body: Any = None
@@ -111,24 +104,24 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _handle(self) -> None:
-        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        raw = self._read_raw()
         self._record(raw)
         if self.headers.get("Authorization") != f"Bearer {_TOKEN}":
-            self._reply_json(401, {"error": {"code": 401, "message": "Unauthorized"}})
+            self._json(401, {"error": {"code": 401, "message": "Unauthorized"}})
             return
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
         if path == "/files/boom" or path.startswith("/files/boom/"):
-            self._reply_json(500, {"error": {"code": 500, "message": "boom"}})
+            self._json(500, {"error": {"code": 500, "message": "boom"}})
         elif self.command == "PATCH" and path == "/files/pboom":
-            self._reply_json(500, {"error": {"code": 500, "message": "patch boom"}})
+            self._json(500, {"error": {"code": 500, "message": "patch boom"}})
         elif self.command == "GET" and path == "/plaintext":
             self._reply(200, b"pong", content_type="text/plain")
         elif self.command == "GET" and path == "/files":
             if query.get("q") == ["name = 'none'"]:
-                self._reply_json(200, {"files": []})
+                self._json(200, {"files": []})
             else:
-                self._reply_json(200, {"files": list(_FILES.values()), "nextPageToken": "tok-next"})
+                self._json(200, {"files": list(_FILES.values()), "nextPageToken": "tok-next"})
         elif self.command == "GET" and path.endswith("/export"):
             file_id = path.split("/")[-2]
             mime = query.get("mimeType", [""])[0]
@@ -136,41 +129,31 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
         elif self.command == "GET" and path.startswith("/files/"):
             file_id = path.split("/")[2]
             if file_id not in _FILES:
-                self._reply_json(404, {"error": {"code": 404, "message": "Not found"}})
+                self._json(404, {"error": {"code": 404, "message": "Not found"}})
             elif query.get("alt") == ["media"]:
                 if file_id == "cfail":
-                    self._reply_json(500, {"error": {"code": 500, "message": "content boom"}})
+                    self._json(500, {"error": {"code": 500, "message": "content boom"}})
                 else:
                     self._reply(200, _BIN_CONTENT, content_type="application/octet-stream")
             else:
-                self._reply_json(200, _FILES[file_id])
+                self._json(200, _FILES[file_id])
         elif self.command == "POST" and path.endswith("/permissions"):
-            self._reply_json(200, {"id": "perm1"} | json.loads(raw.decode("utf-8")))
+            self._json(200, {"id": "perm1"} | json.loads(raw.decode("utf-8")))
         elif self.command == "POST" and path == "/upload/files":
             if b"multipart/related" not in self.headers.get("Content-Type", "").encode():
-                self._reply_json(400, {"error": {"code": 400, "message": "not multipart"}})
+                self._json(400, {"error": {"code": 400, "message": "not multipart"}})
             else:
-                self._reply_json(200, {"id": "up1", "name": "uploaded"})
+                self._json(200, {"id": "up1", "name": "uploaded"})
         elif self.command == "POST" and path == "/files":
-            self._reply_json(200, {"id": "folder-new"} | json.loads(raw.decode("utf-8")))
+            self._json(200, {"id": "folder-new"} | json.loads(raw.decode("utf-8")))
         elif self.command == "PATCH" and path.startswith("/files/"):
             file_id = path.split("/")[2]
             body = json.loads(raw.decode("utf-8")) if raw else {}
-            self._reply_json(200, _FILES.get(file_id, {"id": file_id}) | body)
+            self._json(200, _FILES.get(file_id, {"id": file_id}) | body)
         else:
-            self._reply_json(404, {"error": {"code": 404, "message": "Not found"}})
+            self._json(404, {"error": {"code": 404, "message": "Not found"}})
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
+    do_GET = do_POST = do_PATCH = _handle  # noqa: N815
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")

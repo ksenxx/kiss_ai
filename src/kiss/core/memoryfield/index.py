@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.core.locked import locked_call
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, split_frontmatter
-from kiss.core.utils import read_bytes_waiting_for_writer
+from kiss.core.utils import read_bytes_waiting_for_writer, unlink_waiting_for_holders
 
 if TYPE_CHECKING:
     import numpy as np
@@ -910,6 +910,11 @@ class VectorIndex:
             return int(conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0])
 
     def clear(self) -> None:
-        """Delete the index file; the next :meth:`sync` rebuilds it from the pages."""
-        if self.path.exists():
-            self.path.unlink()
+        """Delete the index file; the next :meth:`sync` rebuilds it from the pages.
+
+        A concurrent clear of the same file (another thread, or a parallel
+        ``evaluate.py`` run) is tolerated: POSIX reports it as a missing
+        file, Windows as ``PermissionError`` while the file is pending
+        deletion, which :func:`unlink_waiting_for_holders` waits out.
+        """
+        unlink_waiting_for_holders(self.path)

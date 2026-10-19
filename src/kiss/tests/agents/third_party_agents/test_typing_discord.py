@@ -20,7 +20,6 @@ the tests verify the actual HTTP traffic the typing indicator produces:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from typing import cast
 from urllib.parse import urlsplit
@@ -48,12 +47,7 @@ class _TypingHandler(RecordingHandler):
             }
         )
         if path == "/channels/ERR/typing":
-            body = json.dumps({"message": "Internal Server Error", "code": 0}).encode()
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._json(500, {"message": "Internal Server Error", "code": 0})
         else:
             self.send_response(204)
             self.send_header("Content-Length", "0")
@@ -70,7 +64,7 @@ def server() -> Iterator[RecordingServer]:
 def backend(server: RecordingServer) -> DiscordChannelBackend:
     """A backend pointed at *server*; the request log starts empty."""
     server.requests.clear()
-    backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{server.server_address[1]}")
+    backend = DiscordChannelBackend(api_base=server.base_url)
     backend._token = "test-token"
     return backend
 

@@ -45,8 +45,7 @@ class _GraphHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a recorded POST with a Graph create payload."""
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode() if length else ""
+        body = self._read_raw().decode()
         cast(RecordingServer, self.server).requests.append(
             {"method": "POST", "path": self.path, "body": body}
         )

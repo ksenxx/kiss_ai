@@ -180,6 +180,11 @@ class ChatSorcarAgent(SorcarAgent):
         # ``cron_agent``; set by the task runner and persisted in the
         # ``task_history.sea`` column.  Empty for a plain run.
         self.sea_name: str = ""
+        # True when the cron scheduler launched this run, or a cron run
+        # dispatched it as a sub-task (see cron_agent.is_cron_run); set
+        # by the task runner and persisted in the ``task_history.is_cron``
+        # column, which the CHATS list's Cron chip filters on.
+        self.is_cron_job: bool = False
         # The run's effective configuration beyond model / work dir /
         # budget (see kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS):
         # set per run by the task runner or the fan-out engine and
@@ -365,6 +370,8 @@ class ChatSorcarAgent(SorcarAgent):
             payload["subagent"] = self._subagent_info
         if self.sea_name:
             payload["sea"] = self.sea_name
+        if self.is_cron_job:
+            payload["is_cron"] = True
         return payload
 
     def _system_prompt_task_settings(self) -> dict[str, str]:
@@ -445,6 +452,8 @@ class ChatSorcarAgent(SorcarAgent):
             payload["parent_task_id"] = parent_id
         if self.sea_name:
             payload["sea"] = self.sea_name
+        if self.is_cron_job:
+            payload["is_cron"] = True
         payload.update(self.run_config)
         if tool_profile != "" or "tool_profile" in payload:
             payload["tool_profile"] = tool_profile
