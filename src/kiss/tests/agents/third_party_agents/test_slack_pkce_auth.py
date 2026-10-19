@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
-from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -32,6 +31,7 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     _load_config,
     _make_backend,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     CLIENT_ID,
     SlackApiServer,
@@ -62,17 +62,13 @@ def slack(
         server.stop()
 
 
-def _tools(agent: SlackAgent) -> dict[str, Any]:
-    return {fn.__name__: fn for fn in agent._get_auth_tools()}
-
-
 def test_missing_client_id_is_reported(
     slack: tuple[SlackOAuthState, SlackApiServer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without an embedded or overridden client ID nothing starts."""
     monkeypatch.delenv("KISS_SLACK_CLIENT_ID")
     monkeypatch.setitem(_oauth_apps.KISS_OAUTH_CLIENT_IDS, "slack", "")
-    result = json.loads(_tools(SlackAgent())["authenticate_slack"]())
+    result = json.loads(auth_tools(SlackAgent())["authenticate_slack"]())
     assert result["ok"] is False
     assert "KISS_SLACK_CLIENT_ID" in result["error"]
 
@@ -82,7 +78,7 @@ def test_authorize_url_requests_user_scopes_with_pkce(
 ) -> None:
     """The sign-in URL targets Slack's authorize page with PKCE and user scopes."""
     oauth, server = slack
-    tools = _tools(SlackAgent())
+    tools = auth_tools(SlackAgent())
     started = start_sign_in(tools, oauth)
     assert started["status"] == "consent_required"
     assert "finish_slack_auth()" in started["instructions"]
@@ -108,7 +104,7 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     """The user token is validated, saved with its refresh token, and rotated."""
     oauth, server = slack
     agent = SlackAgent()
-    tools = _tools(agent)
+    tools = auth_tools(agent)
     assert "Not authenticated" in tools["check_slack_auth"]()
 
     done = sign_in(tools, oauth)
@@ -166,7 +162,7 @@ def test_rejected_or_failed_sign_in_keeps_the_stored_token(
     """Failed sign-ins never replace the working credential."""
     oauth, server = slack
     agent = SlackAgent()
-    tools = _tools(agent)
+    tools = auth_tools(agent)
     assert "Slack sign-in failed" in json.loads(tools["finish_slack_auth"]())["error"]
     assert sign_in(tools, oauth)["ok"] is True
 
@@ -199,7 +195,7 @@ def test_answer_without_user_token_is_refused(
     """An exchange answer lacking ``authed_user.access_token`` stores nothing."""
     oauth, _server = slack
     oauth.omit_user_token = True
-    tools = _tools(SlackAgent())
+    tools = auth_tools(SlackAgent())
     failed = sign_in(tools, oauth)
     assert failed["ok"] is False and "no user token" in failed["error"]
     assert _load_config("default") is None
@@ -215,7 +211,7 @@ def test_second_client_reuses_token_rotated_by_the_first(
     refresh token it was constructed with.
     """
     oauth, server = slack
-    tools = _tools(SlackAgent())
+    tools = auth_tools(SlackAgent())
     oauth.expires_in = 30  # the stored token is inside the refresh margin
     assert sign_in(tools, oauth)["ok"] is True  # xoxp-access-1 / refresh-1
     oauth.expires_in = 43200
@@ -245,6 +241,6 @@ def test_busy_redirect_port_is_reported(
 ) -> None:
     """Another program holding the redirect port makes the start fail cleanly."""
     with occupy_loopback_port(_oauth_apps.LOOPBACK_PORT):
-        result = json.loads(_tools(SlackAgent())["authenticate_slack"]())
+        result = json.loads(auth_tools(SlackAgent())["authenticate_slack"]())
     assert result["ok"] is False
     assert "Could not start the Slack sign-in" in result["error"]

@@ -38,8 +38,7 @@ class _BridgeHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         server = cast(BridgeServer, self.server)
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        body = json.loads(self._read_raw() or b"{}")
         server.requests.append({"path": self.path, "json": body})
         self._json(200, server.response_body)
 

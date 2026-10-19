@@ -27,7 +27,7 @@ from kiss.agents.seas.recommendations import recommendations_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -125,7 +125,7 @@ def test_agent_greets_with_the_stored_suggestions(tmp_path: Path) -> None:
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"finish", "stored_recommendations"}, names
-        system = next(m for m in request["messages"] if m["role"] == "system")
-        assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
+        system = system_message(request)
+        assert system.startswith(sea.SYSTEM_PROMPT)
     (tool_result,) = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
     assert str(tool_result["content"]).startswith("Suggested 1 hour ago:\n1. " + FIVE[0])

@@ -980,8 +980,18 @@
   let _replaying = false;
   let acIdx = -1;
   // Slash-command list (SEA agents), pushed by the daemon on connect
-  // and on any registry rescan.  Empty until the daemon replies.
+  // and on any registry rescan, and fetched again each time a ``/``
+  // popup opens.  Empty until the daemon replies.  ``recent`` and
+  // ``frequent`` are the daemon's ranking (newest first / most-run
+  // first) drawn from the task history, so every surface shows the
+  // same order.
   let seaCommands = [];
+  let seaRecentCommands = [];
+  let seaFrequentCommands = [];
+  // True from the keystroke that puts the cursor in a ``/name`` word
+  // until the popup is dismissed (hideAC); its rising edge is when the
+  // ranking is refreshed.
+  let inSlashCommand = false;
 
   let histCache = [];
   let histIdx = -1;
@@ -2666,6 +2676,27 @@
     if (tab) setMetaPanelHidden(true);
   }
 
+  /**
+   * Paint the tab row after a content tab was opened without focus.
+   *
+   * In the split layout the pane opens for its first content tab
+   * whether or not the open had focus (renderContentTabBar), so an
+   * empty pane takes the tab as its shown one: otherwise its row would
+   * list the file over "No open files." with nothing selected.  Unlike
+   * showInContentPane this neither unfolds the pane nor slides the
+   * task-info panel away, and the chat on screen is kept: the open was
+   * a background one.  A pane already showing a tab only gains a row.
+   *
+   * @param {object} tab The content tab that was opened or re-opened.
+   */
+  function renderBackgroundContentTab(tab) {
+    if (splitLayout() && activeContentTabId === null) {
+      activeContentTabId = tab.id;
+      showContentTab(tab);
+    }
+    renderTabBar();
+  }
+
   // The chat pane's share of the split (percent of the chat + content
   // area): --chat-pane-w on #app, remembered in localStorage.
   const PANE_PCT_KEY = 'kiss-chat-pane-pct';
@@ -2930,8 +2961,10 @@
     const shown = getTab(shownContentTabId());
     if (ev.focus && (!ev.popup || (shown && shown.isBrowserTab))) {
       switchToTab(tab.id);
+      renderTabBar();
+    } else {
+      renderBackgroundContentTab(tab);
     }
-    renderTabBar();
   }
 
   // The daemon's snapshot of live browser pages, sent on every `ready`:
@@ -4940,7 +4973,7 @@
     tabs.push(tab);
     renderContentView(tab, ev);
     if (mayFocus) switchToTab(tab.id);
-    else renderTabBar();
+    else renderBackgroundContentTab(tab);
   }
 
   function reportPathInfo(p) {
@@ -5439,7 +5472,14 @@
     setOwnTaskPanel(O, t);
   }
 
-  function createNewTab() {
+  /**
+   * Open a new chat tab, carrying the composer's draft over.
+   *
+   * @param {string=} machine The registered machine the chat's tasks
+   *     run on (its header drop-down shows it picked); '' or omitted
+   *     for this machine.
+   */
+  function createNewTab(machine) {
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
     closeLaunchSwitch();
@@ -5447,6 +5487,12 @@
     saveCurrentTab();
     const tab = makeTab('new chat');
     tab.inputValue = pendingText;
+    // Bound before the tab shows, so its first header repaint and
+    // the side panels' sync (restoreTab) already see the machine.
+    if (machine) {
+      tabMachines.set(tab.id, machine);
+      tabMachinePicked.add(tab.id);
+    }
     tabs.push(tab);
     restoreTab(tab);
     renderTabBar();
@@ -6832,28 +6878,151 @@
     'meta-recommendations-refresh',
   );
   const SIDEBAR_PANELS_POLL_MS = 30000;
-  // Apps with a connect task launched from this page (name -> launch
-  // time): while any is waiting, the poll re-probes (refresh) so the
-  // new state shows without waiting for the daemon's cache to expire.
-  // An app leaves the set once connected, or after APP_AUTH_WAIT_MS.
+  // Apps with a connect task launched from this page, on the machine
+  // whose Apps subpanel launched it (appAuthKey -> launch time): while
+  // any of the shown machine's is waiting, the poll re-probes
+  // (refresh) so the new state shows without waiting for that daemon's
+  // cache to expire.  An app leaves the set once its machine reports
+  // it connected, or after APP_AUTH_WAIT_MS.
   const appsAwaitingAuth = new Map();
   const APP_AUTH_WAIT_MS = 30 * 60000;
   let sidebarPanelsTimer = 0;
+  // The registered machine the Schedule, Apps, Spend and
+  // Recommendations subpanels show ('' for this daemon): the one the
+  // chat header's drop-down has picked for the active chat (a content
+  // tab keeps its owner chat's, like the Explorer: sidebarMachine).
+  // Set by each request, compared by syncSidebarPanelsMachine at every
+  // point the pick can change; a reply for another machine (a poll
+  // answered after the pick moved, this daemon's own cronJobs push
+  // while a machine is shown) is dropped (panelReplyShown).  The
+  // Machines subpanel is this daemon's registry and never follows.
+  let panelsMachine = '';
+
+  /**
+   * The appsAwaitingAuth key of *app* on the machine the subpanels show.
+   *
+   * @param {string} app The app's name.
+   * @returns {string} The key.
+   */
+  function appAuthKey(app) {
+    return panelsMachine + '/' + app;
+  }
+
+  /** Whether an app connect launched for the machine the subpanels show is still waiting. */
+  function appsAwaitingAuthShown() {
+    const prefix = appAuthKey('');
+    for (const key of appsAwaitingAuth.keys()) {
+      if (key.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * *fields* stamped with the machine the subpanels show, so the
+   * daemon forwards the command there (sidebar_panels.MACHINE_PANEL_REPLIES).
+   *
+   * @param {Object=} fields The command's fields.
+   * @returns {Object} The fields to send.
+   */
+  function panelCommand(fields) {
+    const cmd = Object.assign({}, fields || {});
+    if (panelsMachine) cmd.machine = panelsMachine;
+    return cmd;
+  }
+
+  /**
+   * Whether a subpanel reply is for the machine the subpanels show: a
+   * forwarded one for that machine, or this daemon's own while this
+   * daemon is shown.
+   *
+   * @param {{forwarded?: boolean, machine?: string}} ev The reply.
+   * @returns {boolean} Whether to render it.
+   */
+  function panelReplyShown(ev) {
+    const from = ev.forwarded ? String(ev.machine || '') : '';
+    return from === panelsMachine;
+  }
 
   /**
    * Ask the daemon for the Schedule, Machines, Apps, Spend and
-   * Recommendations data.
+   * Recommendations data, the first four for the machine the chat
+   * header shows.  When that is not the machine the subpanels show
+   * (however the change came: a pick, a tab switch, the daemon's
+   * binding, the owner chat of a content tab closed elsewhere), they
+   * are emptied first, so the previous machine's jobs, apps, spend
+   * and tips are never taken (or acted on) for the new one's.
    *
    * @param {boolean} refreshApps Re-probe the apps' authentication
    *     state instead of accepting the daemon's cached answer.
    */
   function requestSidebarPanels(refreshApps) {
-    api.getCronJobs();
+    retargetSidebarPanels();
+    api.getCronJobs(panelCommand());
     api.getMachines();
-    api.getAppsStatus(refreshApps ? {refresh: true} : undefined);
-    api.getSpendReport();
-    api.getRecommendations();
+    api.getAppsStatus(panelCommand(refreshApps ? {refresh: true} : undefined));
+    api.getSpendReport(panelCommand());
+    api.getRecommendations(panelCommand());
     if (refreshApps) setRefreshSpin(appsRefreshBtn, true);
+  }
+
+  /**
+   * The chat header's machine may have changed (a pick, a tab switch,
+   * the daemon's binding): when the subpanels show another machine,
+   * ask for the new one's data (requestSidebarPanels empties them).
+   * While the daemon is away they are only emptied: the reconnect
+   * asks for every subpanel itself, and a request made now would be
+   * queued and sent on top of it.
+   */
+  function syncSidebarPanelsMachine() {
+    if (sidebarMachine() === panelsMachine) return;
+    if (daemonConnected) requestSidebarPanels(false);
+    else retargetSidebarPanels();
+  }
+
+  /** Point the subpanels at the chat header's machine, emptied if it changed. */
+  function retargetSidebarPanels() {
+    if (sidebarMachine() === panelsMachine) return;
+    panelsMachine = sidebarMachine();
+    clearSidebarPanels();
+  }
+
+  /**
+   * Empty the four subpanels while the machine they now show answers.
+   * A job being added keeps its typed values: the add form reopens
+   * with them when the new machine's jobs arrive (a create in flight
+   * went to the machine left behind, whose reply is dropped, so Save
+   * works again).  A row's editor is closed: it edits a job of the
+   * machine left behind.
+   */
+  function clearSidebarPanels() {
+    const draft =
+      scheduleAdd && (openFormValues(scheduleList) || scheduleAdd.values);
+    closeScheduleForms();
+    if (draft) scheduleAdd = {values: draft, saving: false};
+    scheduleList.textContent = '';
+    scheduleStatus.textContent = 'Loading\u2026';
+    scheduleStatus.classList.remove('is-error');
+    appsList.textContent = '';
+    appsStatusLine.textContent = 'Checking\u2026';
+    appsStatusLine.classList.remove('is-error');
+    spendReport = null;
+    spendByDate = new Map();
+    spendGraph.textContent = '';
+    spendStatus.textContent = 'Loading\u2026';
+    spendStatus.classList.remove('is-error');
+    recommendationsList.textContent = '';
+    recommendationsStatusLine.textContent = 'Loading\u2026';
+    recommendationsStatusLine.classList.remove('is-error');
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * Send a Schedule subpanel action for the machine the subpanels show.
+   *
+   * @param {Object} fields The cronAction fields (`action`, `jobId`, ...).
+   */
+  function cronAction(fields) {
+    api.cronAction(panelCommand(fields));
   }
 
   // The spinning refresh buttons (Machines, Apps, Recommendations) send
@@ -6865,7 +7034,7 @@
   /** Ask the daemon for the recommendations again (the Recommendations refresh button). */
   function requestRecommendationsRefresh() {
     if (!daemonConnected) return;
-    api.getRecommendations();
+    api.getRecommendations(panelCommand());
     setRefreshSpin(recommendationsRefreshBtn, true);
   }
 
@@ -6883,7 +7052,9 @@
 
   /** Boot the subpanels: refresh buttons, hover and resize handlers, the first request. */
   function startSidebarPanels() {
-    scheduleRefreshBtn.addEventListener('click', () => api.getCronJobs());
+    scheduleRefreshBtn.addEventListener('click', () =>
+      api.getCronJobs(panelCommand()),
+    );
     scheduleAddBtn.addEventListener('click', () =>
       openScheduleAddForm({
         values: {name: '', schedule: '', kind: 'prompt', what: ''},
@@ -6898,7 +7069,9 @@
       }),
     );
     appsRefreshBtn.addEventListener('click', requestAppsRefresh);
-    spendRefreshBtn.addEventListener('click', () => api.getSpendReport());
+    spendRefreshBtn.addEventListener('click', () =>
+      api.getSpendReport(panelCommand()),
+    );
     recommendationsRefreshBtn.addEventListener(
       'click',
       requestRecommendationsRefresh,
@@ -6913,7 +7086,10 @@
     spendGraph.addEventListener('click', onSpendGraphClick);
     if (typeof ResizeObserver === 'function')
       new ResizeObserver(onSpendGraphResize).observe(spendGraph);
-    requestSidebarPanels(false);
+    // The first request is the `daemonStatus connected` handler's
+    // (media/transport.js announces it once the socket is
+    // authenticated): one made here would only be queued and sent
+    // again by that handler.
   }
 
   /**
@@ -6925,10 +7101,15 @@
     sidebarPanelsTimer = setInterval(() => {
       if (document.hidden || !daemonConnected) return;
       const now = Date.now();
-      for (const [name, at] of appsAwaitingAuth) {
-        if (now - at > APP_AUTH_WAIT_MS) appsAwaitingAuth.delete(name);
+      for (const [key, at] of appsAwaitingAuth) {
+        if (now - at > APP_AUTH_WAIT_MS) appsAwaitingAuth.delete(key);
       }
-      requestSidebarPanels(appsAwaitingAuth.size > 0);
+      // A re-probe is for the machine the subpanels show; when the
+      // chat header moved to another, the request re-targets them
+      // and that machine's cached answer will do.
+      requestSidebarPanels(
+        sidebarMachine() === panelsMachine && appsAwaitingAuthShown(),
+      );
     }, SIDEBAR_PANELS_POLL_MS);
   }
 
@@ -7232,7 +7413,7 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleEdit = {id: job.id, values: saved, saving: true};
-        api.cronAction({
+        cronAction({
           action: 'update',
           jobId: job.id,
           name: saved.name,
@@ -7294,7 +7475,7 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleAdd = {values: saved, saving: true};
-        api.cronAction({
+        cronAction({
           action: 'create',
           name: saved.name,
           schedule: saved.schedule,
@@ -7397,7 +7578,7 @@
         'sidebar-item-edit sched-play',
         SIDEBAR_PLAY_SVG,
         'Run the job now',
-        () => api.cronAction({action: 'run_now', jobId: job.id}),
+        () => cronAction({action: 'run_now', jobId: job.id}),
       );
       play.disabled = Boolean(job.running);
       top.appendChild(play);
@@ -7407,7 +7588,7 @@
           job.enabled ? SIDEBAR_PAUSE_SVG : SIDEBAR_PLAY_SVG,
           job.enabled ? 'Disable the job' : 'Enable the job',
           () =>
-            api.cronAction({
+            cronAction({
               action: job.enabled ? 'pause' : 'resume',
               jobId: job.id,
             }),
@@ -7421,7 +7602,7 @@
       top.appendChild(copyBtn);
       const del = makeSidebarDeleteConfirm({
         ariaLabel: 'Delete the job',
-        onConfirm: () => api.cronAction({action: 'remove', jobId: job.id}),
+        onConfirm: () => cronAction({action: 'remove', jobId: job.id}),
       });
       top.appendChild(del.delBtn);
       top.appendChild(del.confirmWrap);
@@ -7799,7 +7980,8 @@
     setRefreshSpin(appsRefreshBtn, false);
     const apps = (Array.isArray(ev.apps) ? ev.apps : []).slice();
     for (const app of apps) {
-      if (app.authenticated === true) appsAwaitingAuth.delete(app.name);
+      if (app.authenticated === true)
+        appsAwaitingAuth.delete(appAuthKey(app.name));
     }
     apps.sort(
       (a, b) =>
@@ -7807,9 +7989,13 @@
         String(a.label).localeCompare(String(b.label)),
     );
     const connected = apps.filter(app => app.authenticated === true).length;
-    appsStatusLine.textContent = apps.length
-      ? connected + ' of ' + apps.length + ' connected'
-      : 'Could not check the apps. Press refresh to try again.';
+    const error = String(ev.error || '');
+    appsStatusLine.textContent =
+      error ||
+      (apps.length
+        ? connected + ' of ' + apps.length + ' connected'
+        : 'Could not check the apps. Press refresh to try again.');
+    appsStatusLine.classList.toggle('is-error', Boolean(error));
     appsList.textContent = '';
     for (const app of apps) {
       const li = document.createElement('li');
@@ -7838,7 +8024,11 @@
           'Click to connect ' +
           app.label +
           ' in a new task';
-        row.addEventListener('click', () => launchAppAuthTask(app));
+        row.addEventListener('click', () => {
+          if (launchAppAuthTask(app)) markAppConnecting(row, app);
+        });
+        if (appsAwaitingAuth.has(appAuthKey(app.name)))
+          markAppConnecting(row, app);
       }
       li.appendChild(row);
       appsList.appendChild(li);
@@ -7884,7 +8074,10 @@
   /**
    * Put *prompt* in a new chat's composer, submitted at once when
    * *submit*: open a new tab, closing the mobile drawer so the new
-   * chat is on screen.
+   * chat is on screen.  The new chat runs on the machine the subpanels
+   * show: an app connected from the Apps subpanel of a machine must
+   * sign in THERE, and a recommendation drawn from a machine's history
+   * is for that machine.
    *
    * @param {string} prompt The task text.
    * @param {boolean} submit Whether to send it right away.
@@ -7893,7 +8086,7 @@
     // The prompt replaces whatever "+" carried over, so the draft
     // stays with the chat left behind (which it then keeps open).
     const left = getTab(activeTabId);
-    createNewTab();
+    createNewTab(panelsMachine);
     inp.value = prompt;
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     setMetaDrawerOpen(false);
@@ -7903,13 +8096,35 @@
   }
 
   /**
-   * Launch the task that connects *app* in a new chat.
+   * Show an app's Connect row as waiting for the task connecting it:
+   * disabled, until a probe finds the app connected or the wait lapses.
+   *
+   * @param {HTMLButtonElement} row The app's `.app-row-main` button.
+   * @param {{label: string}} app The app.
+   */
+  function markAppConnecting(row, app) {
+    row.disabled = true;
+    row.querySelector('.app-state').textContent = 'Connecting\u2026';
+    row.title = 'A task is connecting ' + app.label;
+  }
+
+  /**
+   * Launch the task that connects *app* in a new chat, unless one is
+   * already being awaited on the machine the subpanels show.  While
+   * the daemon is away nothing is launched (sendMessage holds prompts
+   * back then), like the refresh buttons: marking the app as
+   * connecting without a task would leave Connect dead until the wait
+   * lapsed.
    *
    * @param {{name: string, label: string}} app The app to connect.
+   * @returns {boolean} Whether a task was launched.
    */
   function launchAppAuthTask(app) {
-    appsAwaitingAuth.set(app.name, Date.now());
+    const key = appAuthKey(app.name);
+    if (!daemonConnected || appsAwaitingAuth.has(key)) return false;
+    appsAwaitingAuth.set(key, Date.now());
     openNewChatWithPrompt(appAuthPrompt(app), true);
+    return true;
   }
 
   // ---- Recommendations subpanel ----
@@ -7932,9 +8147,12 @@
       .map(task => String(task || '').trim())
       .filter(Boolean);
     const generatedAt = Number(ev.generatedAt) || 0;
+    const error = String(ev.error || '');
     recommendationsList.textContent = '';
-    if (!tasks.length) {
+    recommendationsStatusLine.classList.toggle('is-error', Boolean(error));
+    if (error || !tasks.length) {
       recommendationsStatusLine.textContent =
+        error ||
         'No recommendations yet: /recommendations now suggests five tasks from your last 24 hours.';
       return;
     }
@@ -8107,9 +8325,10 @@
       daysByModel: ev.daysByModel || {},
     };
     spendByDate = new Map(spendReport.days.map(day => [day.date, day]));
-    spendStatus.textContent = spendReport.total.tasks
-      ? ''
-      : 'No spend recorded yet.';
+    const error = String(ev.error || '');
+    spendStatus.textContent =
+      error || (spendReport.total.tasks ? '' : 'No spend recorded yet.');
+    spendStatus.classList.toggle('is-error', Boolean(error));
     drawSpendGraph();
     applyMetaSectionLayout();
   }
@@ -8582,11 +8801,14 @@
    * Only a view on screen reloads right away.  Task news marks BOTH
    * views dirty first, so a view out of sight (its section collapsed,
    * the panel hidden) reloads the moment it shows instead of staying
-   * stale.
+   * stale.  The Schedule, Apps, Spend and Recommendations subpanels
+   * follow the same machine as the views, from here too
+   * (syncSidebarPanelsMachine).
    *
    * @param {boolean} force Reload even if the workspace is unchanged.
    */
   function refreshSidebarDataViews(force) {
+    syncSidebarPanelsMachine();
     if (force) {
       explorerDirty = true;
       scmDirty = true;
@@ -9338,7 +9560,7 @@
     // top; a Rename... box lives in the entry's own row, which is
     // re-used by path below like any other row.  A row that moves in
     // the DOM loses focus, so it is given back at the end.
-    const editing =
+    let editing =
       explorerInputRow && explorerInputRow.parentNode === kids
         ? explorerInputRow
         : null;
@@ -9353,6 +9575,15 @@
     const focused = document.activeElement;
     const focusedInKids = focused && kids.contains(focused) ? focused : null;
     if (ev.error) {
+      // The removed folder rows take their registered sub-trees with
+      // them, as below: a node left behind would be re-listed by every
+      // later refresh though it is no longer in the tree.
+      kids
+        .querySelectorAll(':scope > .explorer-row.is-dir[data-explorer-path]')
+        .forEach(r => {
+          if (r !== editing)
+            dropExplorerSubtree(node.root, r.dataset.explorerPath);
+        });
       Array.from(kids.childNodes).forEach(n => {
         if (n !== editing && n !== editingKids) kids.removeChild(n);
       });
@@ -9411,8 +9642,14 @@
       );
     });
     // Rows for entries that disappeared take their sub-trees with them.
+    // A Rename... box lives in the entry's own row: the entry gone, the
+    // edit is cancelled with it (nothing is left to commit on).
     keep.forEach((r, p) => {
       dropExplorerSubtree(node.root, p);
+      if (r === editing) {
+        cancelExplorerInput();
+        editing = null;
+      }
       r.remove();
     });
     Array.from(kids.childNodes).forEach(n => {
@@ -13335,27 +13572,18 @@
    */
   function replayDetachedTranscript(events, ownerTabId, onFollowupClick) {
     const container = mkEl('div', 'adjacent-task');
-    const savedTokens = statusTokens ? statusTokens.textContent : '';
-    const savedBudget = statusBudget ? statusBudget.textContent : '';
-    const savedSteps = statusSteps ? statusSteps.textContent : '';
     // visibletask-coverage:start
     // The replay below renders another task's transcript through the
-    // very renderers the live stream uses, so it walks the live task's
-    // step counter and metrics along with it. They are put back
-    // afterwards — and so is the tab's failure flag, which a replayed
-    // task's OWN failed result would otherwise pin onto the tab.
-    const savedMetrics = currentTaskMetrics;
-    const savedStepCount = stepCount;
-    const savedVisibleTab = activeTabId;
+    // very renderers the live stream uses, so it borrows the status
+    // row, the step counter and the metrics of the live task. Its
+    // tab's failure flag, which a replayed task's OWN failed result
+    // would otherwise pin onto the tab, is put back along with them.
+    // The row starts empty: a neighbour whose transcript carries no
+    // usage event must not inherit the live task's numbers below.
     const savedTab = getTab(activeTabId);
     const savedTaskFailed = savedTab ? savedTab.lastTaskFailed : false;
-    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    const lent = borrowStatusRow('', '', '');
     // visibletask-coverage:end
-    // Start the row empty: a neighbour whose transcript carries no usage
-    // event must not inherit the live task's numbers below.
-    if (statusTokens) statusTokens.textContent = '';
-    if (statusBudget) statusBudget.textContent = '';
-    if (statusSteps) statusSteps.textContent = '';
     if (events && events.length > 0) {
       // tableak-coverage:start
       replayEventsInto(container, events, {
@@ -13371,19 +13599,11 @@
       ? statusBudget.textContent
       : '';
     container.dataset.metricSteps = statusSteps ? statusSteps.textContent : '';
-    // Same rule as everywhere else: if the replay swapped the tab on
-    // screen, its numbers (status row included — restoreTab repainted
-    // it from the swapped-in tab) are already up and must be left alone.
-    if (activeTabId === savedVisibleTab) {
-      if (statusTokens) statusTokens.textContent = savedTokens;
-      if (statusBudget) statusBudget.textContent = savedBudget;
-      if (statusSteps) statusSteps.textContent = savedSteps;
-      // visibletask-coverage:start
-      currentTaskMetrics = savedMetrics;
-      stepCount = savedStepCount;
-      if (savedTab) savedTab.lastTaskFailed = savedTaskFailed;
-      // visibletask-coverage:end
+    // visibletask-coverage:start
+    if (returnStatusRow(lent) && savedTab) {
+      savedTab.lastTaskFailed = savedTaskFailed;
     }
+    // visibletask-coverage:end
     return container;
   }
 
@@ -13934,18 +14154,21 @@
   }
 
   function handlePathsExist(ev) {
-    const results = ev.results;
-    if (!results || typeof results !== 'object') return;
     const workDir = typeof ev.workDir === 'string' ? ev.workDir : '';
     // A reply from a registered machine is stamped `machine`; it
     // resolves only the spans checked there, and this daemon's reply
     // only the spans of this machine.
     const machine = typeof ev.machine === 'string' ? ev.machine : '';
-    // tableak-coverage:start
     // The reply resolves only the spans of the tab that asked. Sweeping
     // every span in the document would promote or grey out another
     // conversation's file links whenever both tabs share a workspace.
     const owner = ev.tabId === undefined ? activeTabId : ev.tabId;
+    const results = ev.results;
+    if (!results || typeof results !== 'object') {
+      releaseRefusedPathChecks(owner, machine);
+      return;
+    }
+    // tableak-coverage:start
     for (const p of Object.keys(results)) {
       _pendingPathChecks.delete(_fileLinkCacheKey(owner, workDir, p, machine));
     }
@@ -13969,6 +14192,43 @@
       if (Object.prototype.hasOwnProperty.call(results, p)) {
         if (results[p]) promoteFileLink(span);
         else demoteFileLink(span);
+      }
+    }
+  }
+
+  /**
+   * Release the checks a machine could not answer.
+   *
+   * A `checkPaths` forwarded to a registered machine that is
+   * unregistered, unreachable or timed out comes back as a `pathsExist`
+   * stamped with the tab and the machine but carrying `error` instead
+   * of `results` (sidebar_panels.py `_machine_reply`), so no path of it
+   * can be resolved. Its dedup keys would otherwise outlive the
+   * outage: every later panel of the tab that mentions the same path
+   * would be skipped as "already in flight" and its links stay inert
+   * for the rest of the session. The reply does not say which paths it
+   * was for, so every key of the tab+machine goes; a check of the same
+   * machine still in flight is answered or refused on its own, and a
+   * duplicate check meanwhile is harmless.
+   *
+   * The candidate spans stay registered: the file's existence is
+   * unknown, not false, and a hidden tab's transcript is a detached
+   * fragment that only the registry can reach, so dropping them would
+   * strand the spans of the tab's OTHER outstanding checks (a later
+   * reply sweeps the registry plus the document's candidates). A
+   * later check of the same path from a new panel, or a reconnect's
+   * reissueFileLinkChecks(), resolves them; forgetPendingFileLinks()
+   * drops them with the transcript.
+   *
+   * @param {string} owner The tab whose check was refused.
+   * @param {string} machine The machine that refused it ('' = this daemon).
+   */
+  function releaseRefusedPathChecks(owner, machine) {
+    const tab = String(owner);
+    for (const key of Array.from(_pendingPathChecks)) {
+      const parts = key.split('\u0000');
+      if (parts[0] === tab && parts[2] === machine) {
+        _pendingPathChecks.delete(key);
       }
     }
   }
@@ -16776,6 +17036,78 @@
     return true;
   }
 
+  // visibletask-coverage:start
+  /**
+   * Lend the window's one status row to a hidden tab's rendering.
+   *
+   * A hidden tab's live events and replays go through the very
+   * renderers the visible tab's do, so they paint the status row
+   * (tokens, budget, steps) and move the step counter and the
+   * remembered metrics along with it.  This saves all of those,
+   * together with which tab is on screen, empties the remembered
+   * metrics and paints the row with the hidden tab's own numbers (or
+   * '' for a replay that must start from nothing); returnStatusRow
+   * puts everything back.
+   *
+   * @param {string|undefined} tokensText Row text to start from.
+   * @param {string|undefined} budgetText Row text to start from.
+   * @param {string|undefined} stepsText Row text to start from.
+   * @returns {object} The snapshot returnStatusRow takes.
+   */
+  function borrowStatusRow(tokensText, budgetText, stepsText) {
+    const lent = {
+      metrics: currentTaskMetrics,
+      stepCount: stepCount,
+      tokens: statusTokens ? statusTokens.textContent : '',
+      budget: statusBudget ? statusBudget.textContent : '',
+      steps: statusSteps ? statusSteps.textContent : '',
+      visibleTab: activeTabId,
+    };
+    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    paintStatusRow(tokensText, budgetText, stepsText);
+    return lent;
+  }
+
+  /**
+   * Give the status row back after borrowStatusRow.
+   *
+   * Only to the tab it was borrowed from: the rendering in between can
+   * swap the tab on screen (collapsing a finished run_parallel panel
+   * closes its sub-agent tabs), and restoreTab then repainted the row,
+   * the step counter and the remembered metrics from the swapped-in
+   * tab, all fresher than the borrowed numbers.  When *tab* is given it
+   * first keeps the row's numbers as its own, under the same rule: after
+   * a swap the row holds the swapped-in tab's values, not this tab's.
+   *
+   * @param {object} lent The snapshot borrowStatusRow returned.
+   * @param {object} [tab] The hidden tab whose rendering painted the row.
+   * @returns {boolean} Whether the tab on screen is unchanged (the row,
+   *     counter and metrics were put back).
+   */
+  function returnStatusRow(lent, tab) {
+    if (activeTabId !== lent.visibleTab) return false;
+    if (tab) saveStatusRowTo(tab);
+    currentTaskMetrics = lent.metrics;
+    stepCount = lent.stepCount;
+    paintStatusRow(lent.tokens, lent.budget, lent.steps);
+    return true;
+  }
+
+  /** Keep the status row's current numbers on *tab* for its next switch-in. */
+  function saveStatusRowTo(tab) {
+    if (statusTokens) tab.statusTokensText = statusTokens.textContent;
+    if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
+    if (statusSteps) tab.statusStepsText = statusSteps.textContent;
+  }
+
+  /** Paint the status row's three numbers ('' or undefined clears one). */
+  function paintStatusRow(tokensText, budgetText, stepsText) {
+    if (statusTokens) statusTokens.textContent = tokensText || '';
+    if (statusBudget) statusBudget.textContent = budgetText || '';
+    if (statusSteps) statusSteps.textContent = stepsText || '';
+  }
+  // visibletask-coverage:end
+
   function processOutputEventForBgTab(ev, tab) {
     if (isUsageOfAnotherTask(ev, tab)) return;
     normalizeEventTs(ev);
@@ -16801,21 +17133,13 @@
     // is what lets a background tab go through exactly the same
     // renderers as a visible one — usage_info in both its numeric and
     // its text form included.
-    const prevStepCount = stepCount;
-    const prevTokensText = statusTokens ? statusTokens.textContent : '';
-    const prevBudgetText = statusBudget ? statusBudget.textContent : '';
-    const prevStepsText = statusSteps ? statusSteps.textContent : '';
     // visibletask-coverage:start
-    // A hidden tab's event runs through the same renderers, so it also
-    // moves the visible tab's remembered numbers unless they are put
-    // back with the status row below.
-    const prevMetrics = currentTaskMetrics;
-    const prevVisibleTab = activeTabId;
-    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    const lent = borrowStatusRow(
+      tab.statusTokensText,
+      tab.statusBudgetText,
+      tab.statusStepsText,
+    );
     // visibletask-coverage:end
-    if (statusTokens) statusTokens.textContent = tab.statusTokensText || '';
-    if (statusBudget) statusBudget.textContent = tab.statusBudgetText || '';
-    if (statusSteps) statusSteps.textContent = tab.statusStepsText || '';
 
     handleOutputEvent(
       ev,
@@ -16825,26 +17149,9 @@
       tab.id,
     );
 
-    // Collapsing a finished run_parallel panel closes its sub-agent
-    // tabs, so this event may have swapped the tab on screen; restoreTab
-    // then repainted the status row, the step counter and the remembered
-    // metrics from the newly visible tab, all fresher than the borrowed
-    // numbers. The borrowed numbers only go back to the tab they came
-    // from, and the background tab only saves back a row it still owns —
-    // after a swap the row holds the swapped-in tab's values, not this
-    // tab's.
-    if (activeTabId === prevVisibleTab) {
-      if (statusTokens) tab.statusTokensText = statusTokens.textContent;
-      if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
-      if (statusSteps) tab.statusStepsText = statusSteps.textContent;
-      stepCount = prevStepCount;
-      if (statusTokens) statusTokens.textContent = prevTokensText;
-      if (statusBudget) statusBudget.textContent = prevBudgetText;
-      if (statusSteps) statusSteps.textContent = prevStepsText;
-      // visibletask-coverage:start
-      currentTaskMetrics = prevMetrics;
-      // visibletask-coverage:end
-    }
+    // visibletask-coverage:start
+    returnStatusRow(lent, tab);
+    // visibletask-coverage:end
 
     streamEnd(ctx, ev, target);
     if (ev.type === 'result' && ev.step_count) {
@@ -17176,8 +17483,24 @@
     const h = Math.floor(total / 3600);
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
-    const pad = n => (n < 10 ? '0' + n : String(n));
-    return pad(h) + ':' + pad(m) + ':' + pad(s);
+    return pad2(h) + ':' + pad2(m) + ':' + pad2(s);
+  }
+  /** Two-digit, zero-padded *n* (0 <= n < 100). */
+  function pad2(n) {
+    return n < 10 ? '0' + n : '' + n;
+  }
+  /**
+   * The `YYYY-MM-DD` of civil date *year* / *month* (0-based) / *day*,
+   * as an `<input type="date">` wants it.  Takes the components, not a
+   * Date: a local `new Date(y, m, d)` normalizes a day the zone skipped
+   * (Samoa had no 2011-12-30), which a calendar label must not do.
+   */
+  function isoDate(year, month, day) {
+    return year + '-' + pad2(month + 1) + '-' + pad2(day);
+  }
+  /** The local `YYYY-MM-DD` of the instant *date*. */
+  function isoDateOf(date) {
+    return isoDate(date.getFullYear(), date.getMonth(), date.getDate());
   }
   function _renderTimerTick() {
     if (endTs > 0 && t0 && Date.now() >= endTs) {
@@ -17355,9 +17678,14 @@
     historyGeneration++;
   }
 
-  /** The tag chosen in the history panel's tag dropdown ('' = all). */
-  function historyTagFilter() {
-    const sel = document.getElementById('hf-tag');
+  /**
+   * The value chosen in one of the history panel's filter dropdowns
+   * ('' = all).
+   * @param {string} id `hf-tag`, `hf-machine` or `hf-workdir`.
+   * @returns {string}
+   */
+  function historyFilter(id) {
+    const sel = document.getElementById(id);
     return sel && sel.value ? sel.value : '';
   }
 
@@ -17370,9 +17698,9 @@
   function requestHistory(offset = 0) {
     api.getHistory({
       query: historySearch ? historySearch.value : '',
-      tag: historyTagFilter(),
-      machine: historyMachineFilter(),
-      workDir: historyWorkDirFilter(),
+      tag: historyFilter('hf-tag'),
+      machine: historyFilter('hf-machine'),
+      workDir: historyFilter('hf-workdir'),
       offset,
       generation: historyGeneration,
     });
@@ -17382,6 +17710,25 @@
   function requestHistoryFromStart() {
     resetHistoryPagination();
     requestHistory();
+  }
+
+  /**
+   * Fetch the next history page, with a "Loading..." row at the end of
+   * the list, unless one is in flight or the last page was short.
+   * Taken by the list's scroll handler near its bottom, and by
+   * applyHistoryFilterVisibility when the rows the filters leave do
+   * not fill the list (a first page of nothing but cron rows): no
+   * scroll event would ever ask for the page then.
+   */
+  function loadMoreHistory() {
+    if (historyLoading || !historyHasMore) return;
+    historyLoading = true;
+    const loader = document.createElement('div');
+    loader.className = 'sidebar-loading';
+    loader.id = 'history-loader';
+    loader.textContent = 'Loading...';
+    historyList.appendChild(loader);
+    requestHistory(historyOffset);
   }
 
   // A burst of task news (the daemon replays one `status` per tab after
@@ -17905,6 +18252,11 @@
           // would show under the Add box as its rejection.  The typed
           // text stays in the box for the user to resend.
           pendingTrickAdd = '';
+          // A "Sign in with ChatGPT" awaiting its device code never
+          // gets it: the button works again, and the status poll a
+          // code had started ends with the daemon's `codex login`.
+          renderCodexLogin(null);
+          stopCodexLoginPoll();
           if (pendingSidebarRequests.size > 0) {
             // The user asked for something and would otherwise wait
             // forever for a reply that is never coming.
@@ -17922,6 +18274,13 @@
           chatStayedOnScreen = ev.reconnecting === true;
         }
         if (ev.connected) {
+          // A password-protected transport announces `connected` twice
+          // per connection: on `auth_required` (to reveal the page) and
+          // again on `auth_ok`.  The subpanels are asked once per
+          // connection: on the first announcement and after an outage
+          // (the request made before the password is typed waits in
+          // the transport's queue and goes out on `auth_ok`).
+          const cameUp = !daemonConnected || !daemonEverConnected;
           daemonConnected = true;
           daemonEverConnected = true;
           ensureScmBadgePoll();
@@ -17963,7 +18322,7 @@
           reissueFileLinkChecks();
           relistFolderPicker();
           refreshHistory();
-          requestSidebarPanels(false);
+          if (cameUp) requestSidebarPanels(false);
         }
         return;
       case 'notification':
@@ -18337,6 +18696,27 @@
         }
         renderCustomModels();
         break;
+      case 'claudeCodeStatus':
+        // The claude login of the machine the settings sheet is for.  A
+        // real status always carries `useSubscription`; a forwarded
+        // reply without it is the link's own error (machine unreachable).
+        if (loginReplyShown(ev, typeof ev.useSubscription !== 'boolean'))
+          renderClaudeCodeStatus(ev);
+        break;
+      case 'codexStatus':
+        // The codex login of the machine the settings sheet is for; the
+        // same forwarded-error rule as claudeCodeStatus.
+        if (loginReplyShown(ev, typeof ev.useSubscription !== 'boolean'))
+          renderCodexStatus(ev);
+        break;
+      case 'codexLogin':
+        // The device-code prompt of a "Sign in with ChatGPT" click (or
+        // why the codex CLI could not start one).  The sheet's own
+        // machine not answering ends its sign-in: the button works
+        // again; another machine's link error leaves this sheet alone.
+        if (loginReplyShown(ev, !ev.url)) renderCodexLogin(ev);
+        else if (replyIsForSettings(ev)) renderCodexLogin(null);
+        break;
       case 'tipsData':
         // The daemon's tips bootstrap, sent on every `ready`: tips.js
         // stores it and auto-opens the window when due (centered over
@@ -18371,8 +18751,13 @@
       case 'taskUpdate':
         renderTaskUpdateEvent(ev);
         break;
+      // The Schedule, Apps, Spend and Recommendations replies: only
+      // the one for the machine the subpanels show is painted
+      // (panelReplyShown); a poll's answer for the machine shown
+      // before, or this daemon's own push while a machine is shown,
+      // is dropped.
       case 'cronJobs':
-        renderCronJobs(ev);
+        if (panelReplyShown(ev)) renderCronJobs(ev);
         break;
       case 'machines':
         noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
@@ -18407,13 +18792,13 @@
         }
         break;
       case 'appsStatus':
-        renderAppsStatus(ev);
+        if (panelReplyShown(ev)) renderAppsStatus(ev);
         break;
       case 'spendReport':
-        renderSpendReport(ev);
+        if (panelReplyShown(ev)) renderSpendReport(ev);
         break;
       case 'recommendations':
-        renderRecommendations(ev);
+        if (panelReplyShown(ev)) renderRecommendations(ev);
         break;
       case 'history':
         // The labels first: the rows' machine chips are built with
@@ -18452,13 +18837,25 @@
         renderAutocomplete(ev.files || []);
         break;
       }
-      case 'seaCommands':
-        seaCommands = Array.isArray(ev.commands) ? ev.commands.slice() : [];
+      case 'seaCommands': {
+        const names = list => (Array.isArray(list) ? list.slice() : []);
+        const changed =
+          JSON.stringify([ev.commands, ev.recent, ev.frequent]) !==
+          JSON.stringify([seaCommands, seaRecentCommands, seaFrequentCommands]);
+        seaCommands = names(ev.commands);
+        seaRecentCommands = names(ev.recent);
+        seaFrequentCommands = names(ev.frequent);
         // Refresh a slash-command popup currently on screen so a
-        // registry rescan (SEAS.md edit, new SEA file) reflows the
-        // list without needing another keystroke.
-        if (getSlashCtx()) checkAutocomplete();
+        // registry rescan (SEAS.md edit, new SEA file) or a fresh
+        // ranking reflows the list without needing another keystroke.
+        // An identical reply (the usual answer to the popup's own
+        // refresh) is left alone so it cannot reset the arrow-key
+        // selection, and a popup the user dismissed (Escape, a click
+        // elsewhere: inSlashCommand is down) stays dismissed until
+        // the next keystroke.
+        if (changed && inSlashCommand && getSlashCtx()) checkAutocomplete();
         break;
+      }
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
@@ -18835,24 +19232,15 @@
           // This transcript belongs to a hidden tab, but it renders
           // through the same renderers as the live stream: the visible
           // tab's status row, step counter and remembered numbers are
-          // put back exactly as they were found.
-          const teMetrics = currentTaskMetrics;
-          const teStepCount = stepCount;
-          const teTokens = statusTokens ? statusTokens.textContent : '';
-          const teBudget = statusBudget ? statusBudget.textContent : '';
-          const teSteps = statusSteps ? statusSteps.textContent : '';
-          const teVisibleTab = activeTabId;
-          currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+          // put back exactly as they were found.  The borrowed row
+          // starts empty, exactly like the active tab's
+          // replayTaskEvents() starts with clearUsageMetrics(): this
+          // replay REPLACES the tab's transcript, so a transcript that
+          // carries no usage event must leave the tab with no numbers
+          // — not with the visible tab's (or the hidden tab's own
+          // stale) ones.
+          const lent = borrowStatusRow('', '', '');
           // visibletask-coverage:end
-          // The borrowed row starts empty, exactly like the active
-          // tab's replayTaskEvents() starts with clearUsageMetrics():
-          // this replay REPLACES the tab's transcript, so a transcript
-          // that carries no usage event must leave the tab with no
-          // numbers — not with the visible tab's (or the hidden tab's
-          // own stale) ones.
-          if (statusTokens) statusTokens.textContent = '';
-          if (statusBudget) statusBudget.textContent = '';
-          if (statusSteps) statusSteps.textContent = '';
           let bgCtx = null;
           try {
             bgCtx = replayEventsInto(frag, ev.events || [], {
@@ -18870,12 +19258,7 @@
               // screen, and the tab-switch that follows repaints the
               // row before the replay returns.
               onEventsRendered: function () {
-                if (statusTokens)
-                  teTab.statusTokensText = statusTokens.textContent;
-                if (statusBudget)
-                  teTab.statusBudgetText = statusBudget.textContent;
-                if (statusSteps)
-                  teTab.statusStepsText = statusSteps.textContent;
+                saveStatusRowTo(teTab);
               },
               onFollowupClick: copyFollowupToInput,
             });
@@ -18884,18 +19267,7 @@
             throw e;
           } finally {
             // visibletask-coverage:start
-            // The replay can close the tab that was on screen — a
-            // finished run_parallel panel takes its sub-agent tabs with
-            // it — and the tab that takes its place has already put its
-            // own numbers up. Only give the borrowed ones back to the tab
-            // they were borrowed from.
-            if (activeTabId === teVisibleTab) {
-              currentTaskMetrics = teMetrics;
-              stepCount = teStepCount;
-              if (statusTokens) statusTokens.textContent = teTokens;
-              if (statusBudget) statusBudget.textContent = teBudget;
-              if (statusSteps) statusSteps.textContent = teSteps;
-            }
+            returnStatusRow(lent);
             // visibletask-coverage:end
           }
           teTab.welcomeVisible = false;
@@ -19159,15 +19531,7 @@
             ? doneLabelFor(ev.startTs, ev.endTs)
             : doneLabelFor(doneT0 || doneNow, doneNow);
         // donelabel-coverage:end
-        markTabDone(ev.tabId, ev.success === false);
-        sealTabPanelTimes(ev.tabId, ev.endTs);
-        // trajectory-coverage:start
-        foldTabTrajectory(ev.tabId);
-        // trajectory-coverage:end
-        clearActionProgressForTab(ev.tabId);
-        setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
-        focusFinishedTab(ev.tabId);
-        openReadyReportTabs(ev.tabId);
+        finishTabTask(ev, doneLabel, ev.success === false);
         // The task may have registered a machine (`/machine add`):
         // the daemon's report is cached unless the registry changed,
         // and a new machine brings the Machines subpanel on screen
@@ -19178,8 +19542,9 @@
       case 'task_error':
       case 'task_interrupted':
       case 'task_stopped': {
-        markTabDone(ev.tabId, true);
-        clearActionProgressForTab(ev.tabId);
+        // The streaming LLM panel closes against the local clock first:
+        // sealTabPanelTimes below would otherwise stamp it with the
+        // event's endTs.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           if (llmPanel && llmPanel._provisional)
             discardProvisionalPanel(llmPanel);
@@ -19196,21 +19561,13 @@
             endTab.streamPendingPanel = true;
           }
         }
-        sealTabPanelTimes(ev.tabId, ev.endTs);
-        // trajectory-coverage:start
-        foldTabTrajectory(ev.tabId);
-        // trajectory-coverage:end
         const label =
           t === 'task_error'
             ? 'Error'
             : t === 'task_interrupted'
               ? 'Interrupted'
               : 'Stopped';
-        setReady(label, ev.tabId, ev.startTs, ev.endTs);
-        focusFinishedTab(ev.tabId);
-        // The task finished (with an error / stop): a successfully
-        // written report is still a real artifact — open it.
-        openReadyReportTabs(ev.tabId);
+        finishTabTask(ev, label, true);
         break;
       }
       case 'new_tab': {
@@ -19615,6 +19972,37 @@
    *     undefined means the visible tab.
    * @param {boolean} failed True when the terminal event is a failure.
    */
+  /**
+   * End a task in its tab, whichever way it ended.
+   *
+   * The common tail of task_done, task_error, task_interrupted and
+   * task_stopped: the tab is marked done (or failed), its open panel
+   * times are sealed with the event's endTs, its action-progress row
+   * goes, its event panels fold into one Trajectory panel, the status
+   * row shows *label*, the finished tab is focused when the user asked
+   * for that, and a report the task wrote opens: a successfully written
+   * report is a real artifact even after an error or a stop.
+   *
+   * The progress row goes before the fold: folded first it would be
+   * counted into the Trajectory preview and then removed from under
+   * it, and a lone one would leave an empty Trajectory panel behind.
+   *
+   * @param {object} ev The terminal event (tabId, startTs, endTs).
+   * @param {string} label The status row's text ('Done (3s)', 'Error', ...).
+   * @param {boolean} failed Whether the tab shows the failure dot.
+   */
+  function finishTabTask(ev, label, failed) {
+    markTabDone(ev.tabId, failed);
+    sealTabPanelTimes(ev.tabId, ev.endTs);
+    clearActionProgressForTab(ev.tabId);
+    // trajectory-coverage:start
+    foldTabTrajectory(ev.tabId);
+    // trajectory-coverage:end
+    setReady(label, ev.tabId, ev.startTs, ev.endTs);
+    focusFinishedTab(ev.tabId);
+    openReadyReportTabs(ev.tabId);
+  }
+
   function markTabDone(tabId, failed) {
     const tid = tabId !== undefined ? tabId : activeTabId;
     const tab = getTab(tid);
@@ -20973,10 +21361,16 @@
     if (settingsPanel && settingsPanel.classList.contains('open')) {
       closeSettingsPanel();
     }
-    api.autocommitAction({
-      tabId: commitTabId,
-      workDir: workDirForTab(commitTabId),
-    });
+    // The machine and folder the chat header's drop-down shows for the
+    // tab: a tab picked onto a registered machine commits that
+    // machine's folder (the daemon forwards the command there), any
+    // other this daemon's.
+    api.autocommitAction(
+      onMachine(
+        {tabId: commitTabId, workDir: tabBrowseWorkDir(commitTabId)},
+        tabMachine(commitTabId),
+      ),
+    );
   }
 
   function setAutocommitInFlight(pending) {
@@ -21096,6 +21490,9 @@
       }
     });
     inp.addEventListener('keydown', e => {
+      // Enter/Escape confirming an IME composition belong to the IME
+      // (keyCode 229 on engines that report the real key).
+      if (e.isComposing || e.keyCode === 229) return;
       if (autocomplete.style.display === 'block') {
         const items = autocomplete.querySelectorAll('.ac-item');
         if (e.key === 'ArrowDown') {
@@ -21327,6 +21724,15 @@
       });
     }
 
+    const codexLoginBtn = document.getElementById('cfg-codex-login-btn');
+    if (codexLoginBtn) {
+      codexLoginBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        startCodexLogin();
+      });
+    }
+
     if (serverResetConfirmOkBtn) {
       serverResetConfirmOkBtn.addEventListener('click', e => {
         e.preventDefault();
@@ -21384,15 +21790,7 @@
       if (modelSearchClear)
         modelSearchClear.style.display = this.value ? '' : 'none';
     });
-    if (modelSearchClear) {
-      modelSearchClear.addEventListener('click', e => {
-        e.stopPropagation();
-        modelSearch.value = '';
-        renderModelList('');
-        modelSearchClear.style.display = 'none';
-        modelSearch.focus();
-      });
-    }
+    wireSearchClear(modelSearch, modelSearchClear);
     modelSearch.addEventListener('keydown', e => {
       const items = modelList.querySelectorAll('.model-item');
       if (e.key === 'ArrowDown') {
@@ -21991,14 +22389,7 @@
         renderTricks(window.__TRICKS__ || []);
       });
     }
-    if (tricksSearchClear) {
-      tricksSearchClear.addEventListener('click', () => {
-        tricksSearch.value = '';
-        tricksSearchClear.style.display = 'none';
-        renderTricks(window.__TRICKS__ || []);
-        tricksSearch.focus();
-      });
-    }
+    wireSearchClear(tricksSearch, tricksSearchClear);
     if (tricksAddInput) {
       syncTricksAddBtn();
       tricksAddInput.addEventListener('input', () => {
@@ -22063,16 +22454,7 @@
       if (historySearchClear)
         historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
-    if (historySearchClear) {
-      historySearchClear.addEventListener('click', () => {
-        historySearch.value = '';
-        if (historySearchClear) historySearchClear.style.display = 'none';
-        resetHistoryPagination();
-        reapplyAllHistoryGroupCollapse(true);
-        requestHistory();
-        historySearch.focus();
-      });
-    }
+    wireSearchClear(historySearch, historySearchClear);
     const historyViewToggle = document.getElementById('history-view-toggle');
     if (historyViewToggle) {
       applyHistoryViewToggle(historyViewToggle);
@@ -22098,6 +22480,7 @@
       hfErrors,
       hfCompleted,
       hfFavorite,
+      hfCron,
       hfFrom,
       hfTo,
       hfSea,
@@ -22110,6 +22493,7 @@
       hfErrors,
       hfCompleted,
       hfFavorite,
+      hfCron,
       hfFrom,
       hfTo,
       hfSea,
@@ -22197,18 +22581,11 @@
       });
     }
     historyList.addEventListener('scroll', () => {
-      if (historyLoading || !historyHasMore) return;
       if (
         historyList.scrollTop + historyList.clientHeight >=
         historyList.scrollHeight - 50
       ) {
-        historyLoading = true;
-        const loader = document.createElement('div');
-        loader.className = 'sidebar-loading';
-        loader.id = 'history-loader';
-        loader.textContent = 'Loading...';
-        historyList.appendChild(loader);
-        requestHistory(historyOffset);
+        loadMoreHistory();
       }
     });
     // A click on a file link of a transcript (a span promoteFileLink
@@ -23162,6 +23539,25 @@
     api.selectModel({model: name, tabId: activeTabId});
   }
 
+  /**
+   * Make the × button of a search box clear it.
+   *
+   * The click empties *search*, fires its `input` event (whose handler
+   * repaints the filtered view and hides the button, exactly as typing
+   * the last character away would) and puts the caret back in the box.
+   *
+   * @param {HTMLInputElement|null} search The search box.
+   * @param {HTMLElement|null} clearBtn Its clear button (optional markup).
+   */
+  function wireSearchClear(search, clearBtn) {
+    if (!search || !clearBtn) return;
+    clearBtn.addEventListener('click', () => {
+      search.value = '';
+      search.dispatchEvent(new Event('input', {bubbles: true}));
+      search.focus();
+    });
+  }
+
   function closeModelDD() {
     modelDropdown.classList.remove('open');
     modelDropdown.style.right = '';
@@ -23488,12 +23884,6 @@
     return chip;
   }
 
-  /** The machine chosen in the history panel's machine dropdown ('' = all). */
-  function historyMachineFilter() {
-    const sel = document.getElementById('hf-machine');
-    return sel && sel.value ? sel.value : '';
-  }
-
   /**
    * Rebuild the WORKDIR filter: All, then the chat header's working
    * directories in order (the current one, then the ones adopted
@@ -23519,12 +23909,6 @@
     if (selected !== hfWorkDir.value) {
       hfWorkDir.dispatchEvent(new Event('change', {bubbles: true}));
     }
-  }
-
-  /** The directory chosen in the history panel's WORKDIR dropdown ('' = all). */
-  function historyWorkDirFilter() {
-    const sel = document.getElementById('hf-workdir');
-    return sel && sel.value ? sel.value : '';
   }
 
   // Keep every on-screen "... ago" launch-age label current: history
@@ -23804,7 +24188,7 @@
   function historySearchActive() {
     return !!(
       (historySearch && historySearch.value.trim()) ||
-      historyTagFilter()
+      historyFilter('hf-tag')
     );
   }
 
@@ -24913,6 +25297,9 @@
       div.dataset.timestamp = String(historyTimestamp(s) || 0);
       div.dataset.ts = String(historyTimestamp(s));
       div.dataset.favorite = s.is_favorite ? '1' : '0';
+      // '1' for a task the cron scheduler launched (hidden unless the
+      // Cron chip is on).
+      div.dataset.cron = s.is_cron ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
       div.dataset.tags = typeof s.tags === 'string' ? s.tags : '';
@@ -25176,9 +25563,7 @@
       const n = Number(sec);
       if (!isFinite(n)) return '';
       const d = new Date(n * 1000);
-      if (isNaN(d.getTime())) return '';
-      const p = x => (x < 10 ? '0' + x : '' + x);
-      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      return isNaN(d.getTime()) ? '' : isoDateOf(d);
     };
     const fromIso = isoOfSec(range.min);
     const toIso = isoOfSec(range.max);
@@ -25228,13 +25613,6 @@
     let viewYear = cursor.getFullYear();
     let viewMonth = cursor.getMonth();
 
-    function pad2(n) {
-      return n < 10 ? '0' + n : '' + n;
-    }
-    function isoOf(y, m, d) {
-      return y + '-' + pad2(m + 1) + '-' + pad2(d);
-    }
-
     function render() {
       const today = new Date();
       const selVal = input.value;
@@ -25259,7 +25637,7 @@
       for (let i = 0; i < firstDow; i++)
         html += '<div class="dp-day dp-empty"></div>';
       for (let d = 1; d <= daysInMonth; d++) {
-        const iso = isoOf(viewYear, viewMonth, d);
+        const iso = isoDate(viewYear, viewMonth, d);
         const isToday =
           d === today.getDate() &&
           viewMonth === today.getMonth() &&
@@ -25357,7 +25735,7 @@
       }
       if (e.target.closest('.dp-today-btn')) {
         const t = new Date();
-        commit(isoOf(t.getFullYear(), t.getMonth(), t.getDate()));
+        commit(isoDateOf(t));
         return;
       }
     });
@@ -25379,6 +25757,7 @@
       hfErrors: document.getElementById('hf-errors'),
       hfCompleted: document.getElementById('hf-completed'),
       hfFavorite: document.getElementById('hf-favorite'),
+      hfCron: document.getElementById('hf-cron'),
       hfFrom: document.getElementById('hf-from'),
       hfTo: document.getElementById('hf-to'),
       hfSea: document.getElementById('hf-sea'),
@@ -25394,6 +25773,7 @@
       hfErrors,
       hfCompleted,
       hfFavorite,
+      hfCron,
       hfFrom,
       hfTo,
       hfSea,
@@ -25406,6 +25786,10 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
+    // The Cron chip is off by default: the tasks the scheduler launched
+    // (data-cron="1") are hidden until it is on; the other rows never
+    // depend on it.
+    const showCron = !!(hfCron && hfCron.checked);
     // '' = every SEA, HF_SEA_NONE = plain runs only, otherwise
     // the exact SEA name.
     const seaFilter = hfSea ? hfSea.value : '';
@@ -25454,6 +25838,7 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      const cronOk = showCron || row.dataset.cron !== '1';
       const tagOk =
         !onlyTag || (row.dataset.tags || '').split(',').includes(onlyTag);
       const rowSea = row.dataset.sea || '';
@@ -25472,6 +25857,7 @@
         catOk &&
         dateOk &&
         favOk &&
+        cronOk &&
         tagOk &&
         seaOk &&
         machineOk &&
@@ -25507,8 +25893,21 @@
       }
     });
     if (daySep) daySep.style.display = dayShown ? '' : 'none';
+    // Hidden rows take no room: when what is left does not fill the
+    // list, the next page is asked for now (see loadMoreHistory).  A
+    // list that is not laid out (the panel closed) has no height and
+    // must not page the whole database in.
+    if (
+      historyList.clientHeight > 0 &&
+      historyList.scrollHeight <= historyList.clientHeight
+    ) {
+      loadMoreHistory();
+    }
     let placeholder = historyList.querySelector('.sidebar-empty-filter');
-    if (rows.length > 0 && visible === 0) {
+    // Not under a "Loading..." row: the page it announces may well
+    // hold matching tasks.
+    const loading = !!historyList.querySelector('#history-loader');
+    if (rows.length > 0 && visible === 0 && !loading) {
       if (!placeholder) {
         placeholder = document.createElement('div');
         placeholder.className = 'sidebar-empty sidebar-empty-filter';
@@ -25585,6 +25984,24 @@
       message: machineLabel(ev.machine) + ': ' + ev.error,
       severity: 'error',
     });
+  }
+
+  /**
+   * Whether a login reply (claudeCodeStatus, codexStatus, codexLogin)
+   * is the settings sheet's machine's to paint.  A forwarded reply
+   * carrying only the machine link's error (*linkError*: the machine
+   * was unreachable or refused, no status or prompt came back) is a
+   * notification instead, never painted as a status.
+   * @param {object} ev The reply event.
+   * @param {boolean} linkError Whether `ev` lacks the reply's own fields.
+   * @returns {boolean}
+   */
+  function loginReplyShown(ev, linkError) {
+    if (ev.forwarded && ev.error && linkError) {
+      notifySettingsMachineError(ev);
+      return false;
+    }
+    return replyIsForSettings(ev);
   }
 
   /**
@@ -25691,7 +26108,10 @@
    * an open inline Delete / Cancel confirm inside `panel`.
    */
   function sheetHasInnerPopup(panel) {
-    if (editingTrickIndex >= 0) return true;
+    // The promptlet editor counts only while on screen: a search query
+    // that filters its row out leaves the draft latched (editingTrickIndex
+    // stays set) with nothing for Escape to close before the sheet.
+    if (editingTrickRow && editingTrickRow.isConnected) return true;
     if (openInlineConfirm(panel)) return true;
     if (document.getElementById('kiss-datepicker-pop')) return true;
     if (modelDropdown && modelDropdown.classList.contains('open')) return true;
@@ -25799,6 +26219,214 @@
     }
     api.getConfig(settingsCommand({}));
     api.getMyModels(settingsCommand({}));
+    renderClaudeCodeStatus(null);
+    api.getClaudeCodeStatus(settingsCommand({}));
+    renderCodexStatus(null);
+    renderCodexLogin(null);
+    stopCodexLoginPoll();
+    api.getCodexStatus(settingsCommand({}));
+  }
+
+  /**
+   * Paint the Claude Code subpanel's status line.
+   *
+   * @param {object|null} status A `claudeCodeStatus` reply (the dict of
+   *   claude_auth_status: installed / loggedIn / authMethod /
+   *   subscriptionType / email / useSubscription / hasToken / error), or
+   *   null while the daemon is being asked.
+   */
+  function renderClaudeCodeStatus(status) {
+    const node = document.getElementById('cfg-claude-code-status');
+    if (!node) return;
+    node.classList.remove('claude-code-status-ok', 'claude-code-status-warn');
+    if (!status) {
+      node.textContent = 'Checking the claude CLI\u2026';
+      return;
+    }
+    let text;
+    let ok = false;
+    if (!status.installed) {
+      text =
+        'The claude CLI is not installed on this machine: cc/ models need it.';
+    } else if (status.error) {
+      text = 'Could not read the claude login: ' + status.error;
+    } else if (!status.loggedIn) {
+      text = status.useSubscription
+        ? 'Not logged in: run `claude login` on this machine, or paste a ' +
+          '`claude setup-token` token below.'
+        : 'Not logged in; cc/ models will use ANTHROPIC_API_KEY (billed per token).';
+    } else {
+      const method = status.authMethod || '';
+      const plan = status.subscriptionType
+        ? ' (' + status.subscriptionType + ')'
+        : '';
+      const who = status.email ? ' as ' + status.email : '';
+      if (method === 'claude.ai' || method === 'oauth_token') {
+        ok = true;
+        text =
+          'Logged in' +
+          who +
+          plan +
+          ': cc/ models bill your Claude subscription.';
+      } else {
+        text =
+          'The claude CLI authenticates with ' +
+          (method || 'an unknown method') +
+          ': cc/ models are billed per token, not to a subscription.';
+      }
+    }
+    node.textContent = text;
+    node.classList.add(
+      ok ? 'claude-code-status-ok' : 'claude-code-status-warn',
+    );
+  }
+
+  /**
+   * Paint the Codex subpanel's status line.
+   *
+   * @param {object|null} status A `codexStatus` reply (the dict of
+   *   codex_auth_status: installed / loggedIn / authMethod /
+   *   useSubscription / hasToken / detail / error), or null while the
+   *   daemon is being asked.
+   */
+  function renderCodexStatus(status) {
+    const node = document.getElementById('cfg-codex-status');
+    if (!node) return;
+    node.classList.remove('codex-status-ok', 'codex-status-warn');
+    if (!status) {
+      node.textContent = 'Checking the codex CLI\u2026';
+      return;
+    }
+    // Only the ChatGPT sign-in the device code leads to ends the poll: a
+    // saved API-key login is "logged in" too, and stays until it completes.
+    if (status.authMethod === 'chatgpt') stopCodexLoginPoll();
+    let text;
+    let ok = false;
+    if (!status.installed) {
+      text =
+        'The codex CLI is not installed on this machine: codex/ models need it.';
+    } else if (status.error) {
+      text = 'Could not read the codex login: ' + status.error;
+    } else if (!status.loggedIn) {
+      text = status.useSubscription
+        ? 'Not logged in: click "Sign in with ChatGPT" (or run `codex login` ' +
+          'on this machine), or paste a Codex access token below.'
+        : 'Not logged in; codex/ models will use OPENAI_API_KEY (billed per token).';
+    } else {
+      const method = status.authMethod || '';
+      if (method === 'chatgpt') {
+        ok = true;
+        text =
+          'Logged in with ChatGPT: codex/ models bill your ChatGPT subscription.';
+      } else if (method === 'access_token') {
+        ok = true;
+        text =
+          'Logged in with a Codex access token: codex/ models bill your ' +
+          'ChatGPT workspace.';
+      } else if (method === 'api_key') {
+        text =
+          'The codex CLI is logged in with an API key (`codex login ' +
+          '--with-api-key`): codex/ models are billed per token, not to a ' +
+          'subscription. Run `codex logout`, then sign in with ChatGPT.';
+      } else {
+        text =
+          'The codex CLI authenticates with ' +
+          (method || 'an unknown method') +
+          ': codex/ models are billed per token, not to a subscription.';
+      }
+    }
+    node.textContent = text;
+    node.classList.add(ok ? 'codex-status-ok' : 'codex-status-warn');
+  }
+
+  /**
+   * Paint the Codex subpanel's sign-in row.
+   *
+   * @param {object|null} login A `codexLogin` reply ({url, code} once
+   *   `codex login --device-auth` printed them, or {error}), or null to
+   *   show the idle hint and re-enable the button.
+   */
+  function renderCodexLogin(login) {
+    const btn = document.getElementById('cfg-codex-login-btn');
+    const note = document.getElementById('cfg-codex-login-note');
+    if (!btn || !note) return;
+    btn.disabled = false;
+    note.textContent = '';
+    if (!login) {
+      note.textContent =
+        'Opens a device-code login: a link and a one-time code to enter in any browser.';
+      return;
+    }
+    if (login.error || !login.url || !login.code) {
+      note.textContent =
+        'Sign-in failed: ' + (login.error || 'no login code was printed.');
+      return;
+    }
+    note.append('Open ');
+    const link = document.createElement('a');
+    link.href = login.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = login.url;
+    note.append(link, ' and enter the code ');
+    const code = document.createElement('code');
+    code.textContent = login.code;
+    note.append(
+      code,
+      ' (valid 15 minutes). The status line above updates when the login completes.',
+    );
+    startCodexLoginPoll();
+  }
+
+  // After a device-code sign-in the daemon's `codex login` keeps polling
+  // OpenAI for up to 15 minutes; the sheet asks for the login status
+  // every CODEX_LOGIN_POLL_MS until it shows up (a daemon push would be
+  // dropped by the machine link, which forwards one reply per request).
+  const CODEX_LOGIN_POLL_MS = 5000;
+  const CODEX_LOGIN_POLL_LIMIT_MS = 15 * 60 * 1000;
+  let codexLoginPoll = null;
+
+  /**
+   * Start (or restart) polling the sheet's machine for the codex login.
+   * The sheet closing or reopening, and the daemon going down, stop
+   * the poll; a tick while the page is hidden or the daemon is down
+   * posts nothing, like the other pollers.  A device code answered
+   * after the sheet closed (a late local reply: a remote one is
+   * dropped as another machine's once settingsMachine is reset)
+   * starts no poll: there is no sheet to update.
+   */
+  function startCodexLoginPoll() {
+    stopCodexLoginPoll();
+    if (!settingsPanel || !settingsPanel.classList.contains('open')) return;
+    const deadline = Date.now() + CODEX_LOGIN_POLL_LIMIT_MS;
+    codexLoginPoll = setInterval(() => {
+      if (Date.now() > deadline) {
+        stopCodexLoginPoll();
+        return;
+      }
+      if (document.hidden || !daemonConnected) return;
+      api.getCodexStatus(settingsCommand({}));
+    }, CODEX_LOGIN_POLL_MS);
+  }
+
+  /** Stop the login poll started by startCodexLoginPoll, if any. */
+  function stopCodexLoginPoll() {
+    if (codexLoginPoll !== null) {
+      clearInterval(codexLoginPoll);
+      codexLoginPoll = null;
+    }
+  }
+
+  /**
+   * Ask the settings sheet's machine to start a ChatGPT device-code
+   * login for the codex CLI (the "Sign in with ChatGPT" button).
+   */
+  function startCodexLogin() {
+    const btn = document.getElementById('cfg-codex-login-btn');
+    const note = document.getElementById('cfg-codex-login-note');
+    if (btn) btn.disabled = true;
+    if (note) note.textContent = 'Starting `codex login --device-auth`\u2026';
+    api.startCodexLogin(settingsCommand({}));
   }
 
   /**
@@ -25853,6 +26481,7 @@
     saveSettingsIfPopulated();
     settingsEditedFields.clear();
     setSettingsUpdateStatus('', false);
+    stopCodexLoginPoll();
     setPanelOpen(settingsPanel, settingsOverlay, false);
     if (settingsMachine) {
       // The form and the custom-model list showed another machine's
@@ -26276,6 +26905,8 @@
     ['api-keys-toggle', 'api-keys-body'],
     ['custom-models-toggle', 'custom-models-body'],
     ['bedrock-toggle', 'bedrock-body'],
+    ['claude-code-toggle', 'claude-code-body'],
+    ['codex-toggle', 'codex-body'],
   ];
 
   /**
@@ -26633,6 +27264,12 @@
     'AWS_SECRET_ACCESS_KEY',
     'AWS_SESSION_TOKEN',
     'AWS_REGION',
+    // Claude Code (cc/ models): the `claude setup-token` subscription
+    // token, for a machine without a `claude login`.
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    // Codex (codex/ models): a ChatGPT Business/Enterprise access
+    // token, for a machine without a `codex login`.
+    'CODEX_ACCESS_TOKEN',
   ];
   // Inventory entries that are plain text, not secrets: they get no
   // password masking or reveal toggle (setupSecretInput).
@@ -26706,6 +27343,16 @@
     // ``useWebTools`` override.
     webToolsStateKnown = true;
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
+    // Claude Code bills the subscription unless the user turned it off
+    // (user_config.DEFAULTS.claude_code_use_subscription is true).
+    setChecked(
+      document.getElementById('cfg-claude-code-use-subscription'),
+      cfg.claude_code_use_subscription !== false,
+    );
+    setChecked(
+      document.getElementById('cfg-codex-use-subscription'),
+      cfg.codex_use_subscription !== false,
+    );
     setValue('cfg-remote-password', cfg.remote_password || '');
     // Recorded even while an edit is active (the boxes themselves are
     // skipped below), so cancelling the edit restores the latest
@@ -26793,6 +27440,14 @@
     if (want('cfg-use-memory')) {
       cfg.use_memory = !!(memoryToggleBtn && memoryToggleBtn.checked);
     }
+    if (want('cfg-claude-code-use-subscription')) {
+      cfg.claude_code_use_subscription = el(
+        'cfg-claude-code-use-subscription',
+      ).checked;
+    }
+    if (want('cfg-codex-use-subscription')) {
+      cfg.codex_use_subscription = el('cfg-codex-use-subscription').checked;
+    }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();
     }
@@ -26834,51 +27489,70 @@
   }
 
   function getSlashCtx() {
-    // Only match a leading slash on the very first line (a stray "/"
-    // typed inside multi-line text is not a command). The cursor must
-    // be inside the command word — once whitespace follows, the user
-    // is typing the sub-task text and the popup should hide.
+    // A slash anywhere in the text opens the command popup, as long
+    // as it starts a word (the start of the text, or after whitespace
+    // or a line break): the slashes inside a path such as
+    // ``src/kiss`` or ``@docs/a.md`` never do.  The cursor must be
+    // inside the command word — once whitespace follows, the user is
+    // typing the sub-task text and the popup should hide.
     const val = inp.value;
     const pos = inp.selectionStart || 0;
     const before = val.substring(0, pos);
-    const m = before.match(/^\/([A-Za-z0-9_-]*)$/);
-    return m ? {start: 0, query: m[1]} : null;
+    const m = before.match(/(^|\s)\/([A-Za-z0-9_-]*)$/);
+    if (!m) return null;
+    return {start: before.length - m[0].length + m[1].length, query: m[2]};
   }
 
   function acceptSlashCommand(name) {
     const slashCtx = getSlashCtx();
     if (!slashCtx) return;
     const cursor = inp.selectionStart || inp.value.length;
+    const before = inp.value.substring(0, slashCtx.start);
     const after = inp.value.substring(cursor);
     const sep = /^\s/.test(after) ? '' : ' ';
     const inserted = '/' + name + sep;
-    inp.value = inserted + after;
+    inp.value = before + inserted + after;
     syncClearBtn();
-    const np = inserted.length;
+    const np = before.length + inserted.length;
     inp.setSelectionRange(np, np);
     autosizeComposer();
     hideAC();
     inp.focus();
   }
 
+  /**
+   * Render the ``/`` command popup for *query*: the commands run most
+   * recently (the daemon's ``recent``, newest first), then the ones
+   * run often (``frequent``, most-run first), then every other
+   * registered command in name order.  A command appears once, in the
+   * first group that holds it.
+   */
   function renderSlashCommands(query) {
     if (!seaCommands || !seaCommands.length) {
       hideAC();
       return;
     }
     const q = (query || '').toLowerCase();
-    const matches = q
-      ? seaCommands.filter(n => n.toLowerCase().indexOf(q) >= 0)
-      : seaCommands.slice();
-    if (!matches.length) {
+    const matches = name => !q || name.toLowerCase().indexOf(q) >= 0;
+    const known = name => seaCommands.indexOf(name) >= 0;
+    const recent = seaRecentCommands.filter(n => known(n) && matches(n));
+    const frequent = seaFrequentCommands.filter(
+      n => known(n) && matches(n) && recent.indexOf(n) < 0,
+    );
+    const ranked = recent.concat(frequent);
+    const rest = seaCommands.filter(n => matches(n) && ranked.indexOf(n) < 0);
+    const data = recent
+      .map(name => ({type: 'recent', text: name}))
+      .concat(frequent.map(name => ({type: 'frequent', text: name})))
+      .concat(rest.map(name => ({type: 'command', text: name})));
+    if (!data.length) {
       hideAC();
       return;
     }
-    const data = matches.map(name => ({type: 'command', text: name}));
     renderAcDropdown(
       data,
-      ['command'],
-      {command: 'Commands'},
+      ['recent', 'frequent', 'command'],
+      {recent: 'Recent', frequent: 'Frequent', command: 'Commands'},
       item => (q ? '/' + hlMatch(item.text, q) : '/' + esc(item.text)),
       acceptSlashCommand,
     );
@@ -26887,7 +27561,17 @@
   function checkAutocomplete() {
     const slashCtx = getSlashCtx();
     if (slashCtx) {
+      // Entering a ``/name`` word asks the daemon for the list again:
+      // the recent / frequent ranking moves with every command run,
+      // on this surface or any other.  The popup paints at once from
+      // the last reply; a different ranking reflows it when it
+      // arrives.  The flag is raised AFTER the paint (which may hide
+      // the popup, and so clear it, when nothing matches) so a word
+      // with no matches does not ask again on every keystroke.
+      const opening = !inSlashCommand;
       renderSlashCommands(slashCtx.query);
+      inSlashCommand = true;
+      if (opening) api.getSeaCommands();
       return;
     }
     const atCtx = getAtCtx();
@@ -26911,8 +27595,11 @@
     spark:
       '<svg viewBox="0 0 24 24"><path d="M12 2l1.5 5L19 8.5 13.5 10 12 15 10.5 10 5 8.5 10.5 7 12 2z"/></svg>',
     code: '<svg viewBox="0 0 24 24"><path d="M8 4H6a2 2 0 00-2 2v4a2 2 0 01-2 2 2 2 0 012 2v4a2 2 0 002 2h2M16 4h2a2 2 0 012 2v4a2 2 0 002 2 2 2 0 00-2 2v4a2 2 0 01-2 2h-2"/></svg>',
+    clock:
+      '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>',
   };
   function _acIcon(type) {
+    if (type === 'recent') return _acSvg.clock;
     if (type === 'frequent') return _acSvg.star;
     if (type === 'task') return _acSvg.bolt;
     if (type === 'trick') return _acSvg.spark;
@@ -26948,6 +27635,7 @@
   }
   function hideAC() {
     autocomplete.style.display = 'none';
+    inSlashCommand = false;
     acIdx = -1;
   }
 

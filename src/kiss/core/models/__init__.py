@@ -5,9 +5,7 @@
 
 """Model implementations for different LLM providers."""
 
-import importlib
-
-from kiss.core.models.model import Attachment, Model
+from kiss.core.models.model import Attachment, Model, import_provider_module
 
 __all__ = [
     "Attachment",
@@ -57,7 +55,7 @@ def __getattr__(name: str) -> type:
         ImportError: When the class or its SDK could not be imported.
     """
     if name in _LAZY_IMPORTS:
-        module = importlib.import_module(_LAZY_IMPORTS[name])
+        module = import_provider_module(_LAZY_IMPORTS[name])
         cls: type = getattr(module, name)
         globals()[name] = cls
         return cls

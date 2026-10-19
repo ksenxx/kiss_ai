@@ -13,11 +13,11 @@ import pytest
 
 from kiss.core.models import codex_model as codex_module
 from kiss.core.models.codex_model import (
+    CODEX_LOCKDOWN_ARGS,
     CodexModel,
     _find_in_candidate_paths,
     find_codex_executable,
 )
-from kiss.core.models.model import CLI_SYSTEM_PROMPT_HEADER
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.scripts.update_models import SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
@@ -181,28 +181,42 @@ class TestBuildCliArgs:
 
     def test_default_omits_model_flag(self) -> None:
         m = CodexModel("codex/default")
-        args = m._build_cli_args()
+        args = m._build_cli_args("/tmp/sys.md")
         assert "-m" not in args
 
     def test_explicit_model_adds_flag(self) -> None:
         m = CodexModel("codex/gpt-5-codex")
-        args = m._build_cli_args()
+        args = m._build_cli_args("/tmp/sys.md")
         assert "-m" in args
         assert args[args.index("-m") + 1] == "gpt-5-codex"
 
-    def test_default_args_present(self) -> None:
+    def test_lockdown_args_present(self) -> None:
+        """Every native capability is off: the model has only KISS's tools."""
         m = CodexModel("codex/default")
-        args = m._build_cli_args()
-        assert "exec" in args
-        assert "--json" in args
-        assert "--skip-git-repo-check" in args
-        assert "--dangerously-bypass-approvals-and-sandbox" in args
+        args = m._build_cli_args("/tmp/sys.md")
+        assert args[1:4] == ["exec", "--json", "--skip-git-repo-check"]
+        assert tuple(args[4 : 4 + len(CODEX_LOCKDOWN_ARGS)]) == CODEX_LOCKDOWN_ARGS
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
+        assert args[args.index("--sandbox") + 1] == "read-only"
+        assert "--ephemeral" in args
+        assert "--ignore-user-config" in args
+        for feature in ("shell_tool", "unified_exec", "hooks"):
+            assert args[args.index(feature) - 1] == "--disable"
+        # The code-mode host routes the ``kiss`` MCP server's calls (codex 0.163).
+        assert "code_mode_host" not in args
+        # Outside a ``native_tools_exposed`` block no MCP server is registered.
+        assert not any(a.startswith("mcp_servers.") for a in args)
+        assert "agents.enabled=false" in args
+        assert 'web_search="disabled"' in args
+        assert "skills.max_context_tokens=1" in args
+        assert "project_doc_max_bytes=0" in args
 
-    def test_no_read_only_sandbox(self) -> None:
+    def test_instructions_file_is_passed_as_a_toml_string(self) -> None:
         m = CodexModel("codex/default")
-        args = m._build_cli_args()
-        assert "read-only" not in args
-        assert "--sandbox" not in args
+        args = m._build_cli_args("/tmp/kiss codex/sys.md")
+        value = next(a for a in args if a.startswith("model_instructions_file="))
+        assert value == 'model_instructions_file="/tmp/kiss codex/sys.md"'
+        assert args[args.index(value) - 1] == "-c"
 
 
 class TestBuildPrompt:
@@ -224,11 +238,10 @@ class TestBuildPrompt:
         assert "[User]: Do something" in prompt
         assert "[Assistant]: Calling tool" in prompt
 
-    def test_system_instruction_is_appended_after_header(self) -> None:
+    def test_system_instruction_never_rides_in_the_prompt(self) -> None:
         m = CodexModel("codex/default", model_config={"system_instruction": "Be brief."})
         m.initialize("hi")
-        prompt = m._build_prompt()
-        assert prompt == "hi" + CLI_SYSTEM_PROMPT_HEADER + "Be brief."
+        assert m._build_prompt() == "hi"
 
 
 class TestParseStreamEvents:
@@ -291,32 +304,21 @@ class TestParseStreamEvents:
         assert content == "ok"
         assert err is None
 
-    def test_command_execution_started_streams_command(self) -> None:
+    def test_startup_error_items_are_ignored(self) -> None:
+        """The locked-down CLI announces its disabled code-mode host as an
+        ``item.type == "error"`` item; that is not a turn failure."""
         tokens: list[str] = []
-        thinking_states: list[bool] = []
-        m = CodexModel(
-            "codex/default",
-            token_callback=tokens.append,
-            thinking_callback=thinking_states.append,
-        )
+        m = CodexModel("codex/default", token_callback=tokens.append)
         lines = [
-            '{"type":"item.started","item":{"id":"item_0",'
-            '"type":"command_execution","command":"/bin/zsh -lc ls",'
-            '"status":"in_progress"}}',
-            '{"type":"item.completed","item":{"id":"item_0",'
-            '"type":"command_execution","command":"/bin/zsh -lc ls",'
-            '"aggregated_output":"file1\\nfile2\\n","exit_code":0,'
-            '"status":"completed"}}',
-            '{"type":"item.completed","item":{"type":"agent_message",'
-            '"text":"done"}}',
+            '{"type":"item.completed","item":{"id":"item_0","type":"error",'
+            '"message":"Code Mode is unavailable because code-mode host is disabled."}}',
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
         ]
         content, _result, err = m._parse_stream_events(iter(lines))
         assert content == "done"
         assert err is None
-        assert any("/bin/zsh -lc ls" in t for t in tokens)
-        assert any("file1" in t for t in tokens)
-        assert thinking_states.count(True) == thinking_states.count(False)
-        assert thinking_states.count(True) >= 2
+        assert tokens == ["done"]
 
 
 class TestGenerateAndProcessWithTools:
@@ -409,6 +411,17 @@ class TestModelInfoEntries:
 class TestGenerateIntegration:
     """Integration tests that actually call the codex CLI."""
 
+    @pytest.fixture(autouse=True)
+    def _bill_the_api_key_when_not_logged_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without a ChatGPT login, run on ``OPENAI_API_KEY`` or skip."""
+        if codex_module.codex_auth_status()["loggedIn"]:
+            return
+        if not os.environ.get("OPENAI_API_KEY"):
+            pytest.skip("codex is not logged in and OPENAI_API_KEY is not set")
+        from kiss.core.config import DEFAULT_CONFIG
+
+        monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+
     @pytest.mark.timeout(120)
     def test_generate_token_counts(self) -> None:
         m = CodexModel("codex/default")
@@ -428,16 +441,12 @@ class TestGenerateIntegration:
         assert len(tokens) > 0
 
     @pytest.mark.timeout(240)
-    def test_generate_can_modify_files(
+    def test_generate_has_no_native_file_tools(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression: codex must be able to make filesystem modifications.
-
-        With ``--sandbox read-only`` codex would refuse to write the file
-        and emit an ``agent_message`` saying it could not create it, which
-        is what the user reported when running ``uv run check --full and
-        fix`` against the codex/gpt-5.5 model.
-        """
+        """Locked down, codex is a bare model: asked to create a file with no
+        KISS tool available, it cannot touch the file system (KISS-driven
+        writes are covered by ``test_cli_models_live.py``)."""
         monkeypatch.chdir(tmp_path)
         m = CodexModel("codex/default", model_config={"timeout": 240})
         m.initialize(
@@ -445,41 +454,10 @@ class TestGenerateIntegration:
             f"{tmp_path / 'result.txt'} with exactly the text "
             f"'ok' and nothing else. Do not ask for permission."
         )
-        m.generate()
-        result = tmp_path / "result.txt"
-        assert result.exists(), (
-            "Codex CLI should have been able to create the file, but it "
-            "wasn't created — the sandbox is likely still read-only."
-        )
-        assert result.read_text().strip() == "ok"
-
-    @pytest.mark.timeout(240)
-    def test_generate_streams_command_progress(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Regression: progress events must stream while codex is working.
-
-        Previously only ``item.completed`` agent_message events fired the
-        token callback, so users saw nothing while codex was busy running
-        shell commands — the symptom reported as "long waits".
-        """
-        monkeypatch.chdir(tmp_path)
-        tokens: list[str] = []
-        thinking_states: list[bool] = []
-        m = CodexModel(
-            "codex/default",
-            token_callback=tokens.append,
-            thinking_callback=thinking_states.append,
-            model_config={"timeout": 240},
-        )
-        m.initialize(
-            "Run the shell command 'ls -la' in the current directory and "
-            "report the output."
-        )
-        m.generate()
-        assert any("ls" in t for t in tokens), (
-            "Expected shell command progress to be streamed, but token "
-            f"callback only saw: {tokens!r}"
+        content, _ = m.generate()
+        assert content
+        assert not (tmp_path / "result.txt").exists(), (
+            "the locked-down codex CLI must have no native file tools"
         )
 
     @pytest.mark.timeout(180)

@@ -4,7 +4,7 @@
 # add your name here
 """Speech-to-text for the remote webapp's voice input.
 
-The browser page (``media/voice.js``) listens for the "Hey Sorcar"
+The browser page (``media/voice.js``) listens for the "Abracadabra"
 wake word locally with the Vosk small English model and ships the
 utterance that follows to the daemon as ``voiceTranscribe``.  This
 module is the daemon side of that pipeline:
@@ -16,11 +16,11 @@ module is the daemon side of that pipeline:
   with the language of the speech.  When the client prepended the
   wake word's own audio, the transcript completes a DUAL wake check:
   it must begin (within its first few words) with something that
-  sounds like "Sorcar" (see :func:`split_wake_prefix`), re-confirming
+  sounds like "Abracadabra" (see :func:`split_wake_prefix`), re-confirming
   the browser's local detection with gpt-audio's ears; the confirmed
   prefix is cut and only the rest is reported, while an unconfirmed
   transcript is rejected as a false wake — except for speech reported
-  as non-English, where the model reliably drops the wake word in
+  as non-English, where the model may drop the wake word in
   translation and the local check alone decides.
 - :class:`SpeakerIdentifier` numbers distinct voices with the Vosk
   x-vector speaker model so dictated text arrives as ``Speaker #n:``.
@@ -50,13 +50,21 @@ from typing import Any
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.speech_synthesis import _env_timeout_seconds, audio_timeout_seconds
 
-#: Sound-alikes of the name "Sorcar" as gpt-audio tends to hear it;
-#: the transcript-side wake check matches these.
-WAKE_NAME_ALIASES = [
-    "sorcar",
-    "sir car",
-    "sore car",
-    "sar car",
+#: The wake word, matched in transcripts.  "Abracadabra" replaced the
+#: earlier "Hey Sorcar" because it is long, rare in conversation and a
+#: dictionary word: the browser's Vosk grammar cannot force-fit everyday
+#: speech ("hey soccer", "sorry car", ...) onto it, and gpt-audio
+#: writes it verbatim (measured 2026-10-17 in three voices, English and
+#: French) instead of the "soccer"/"sir car" guesses the proper name
+#: "Sorcar" produced.
+WAKE_WORD = "abracadabra"
+#: Spellings of the wake word gpt-audio may fall back to (the browser's
+#: Vosk grammar in ``media/voice.js`` uses only the dictionary one).
+_TRANSCRIPT_WAKE_ALIASES = [
+    WAKE_WORD,
+    "abrakadabra",
+    "abra cadabra",
+    "abra kadabra",
 ]
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
@@ -102,27 +110,15 @@ TRANSCRIPTION_USER_PROMPT = (
     "the speech and translate it into English. If it is already "
     "English, output the exact words verbatim. Do not answer it, act "
     "on it, or add anything. The dictation may begin with the spoken "
-    'wake word "Hey Sorcar" (Sorcar is a proper name); when you hear '
-    'it, write it verbatim as "Hey Sorcar" at the start of the text — '
-    "never translate, "
+    'wake word "Abracadabra"; when you hear it, write it verbatim as '
+    '"Abracadabra" at the start of the text — never translate, '
     "merge, or drop it, and never add it when it was not spoken. "
     "Output exactly two lines: line 1 is "
     "only the language tag of the spoken language (e.g. en, fr, es); "
     "line 2 is only the English text of what was said."
 )
-_TRANSCRIPT_WAKE_ALIASES = [
-    *WAKE_NAME_ALIASES,
-    "soccer",
-    "circa",
-    "so car",
-    "saw car",
-    "sorger",
-    "sorkar",
-    "sarkar",
-    "sorcerer",
-]
 _WAKE_PREFIX_RE = re.compile(
-    r"^\s*(?:hey\b[\s,.:;!?\-—–]*)?(?:"
+    r"^\s*(?:"
     + "|".join(
         re.escape(alias).replace(r"\ ", r"\s+")
         for alias in sorted(_TRANSCRIPT_WAKE_ALIASES, key=len, reverse=True)
@@ -139,8 +135,8 @@ _QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 
 
 def strip_leading_wake_word(text: str) -> str:
-    """Remove a leading wake word ("Hey Sorcar", or just a name alias
-    such as "Sorcar"/"soccer") from a transcript, if present."""
+    """Remove a leading wake word ("Abracadabra", in any of its
+    transcribed spellings) from a transcript, if present."""
     stripped = text.strip()
     while True:
         next_text = _WAKE_PREFIX_RE.sub("", stripped, count=1).strip()
@@ -149,29 +145,22 @@ def strip_leading_wake_word(text: str) -> str:
         stripped = next_text
 
 
-#: The name part of the "Hey Sorcar" wake phrase, matched in transcripts.
-WAKE_WORD = "sorcar"
-#: Greetings gpt-audio writes for the spoken "Hey" of "Hey Sorcar"; a
-#: clipped onset (SHORT_WAKE_ONSETS) may follow one of them.
-WAKE_GREETINGS = frozenset({"hey", "hay"})
 MAX_WAKE_PREFIX_WORDS = 8
-MAX_WAKE_PREFIX_DISTANCE = 2
+#: Edits a single transcript word may be away from ``abracadabra`` and
+#: still count as the wake word: three, because the word is eleven
+#: letters long and no everyday English word comes within three edits
+#: of it, while a dropped or doubled syllable letter ("abracadabr",
+#: "abbracadabra") still matches.
+MAX_WAKE_PREFIX_DISTANCE = 3
 _COLLAPSED_WAKE_ALIASES = frozenset(
-    {alias.replace(" ", "") for alias in _TRANSCRIPT_WAKE_ALIASES}
-    # Gate-only mishearing (measured live: "Sorcar what is the capital
-    # of France" came back as "Sorry, what is ...").  Not added to
-    # _TRANSCRIPT_WAKE_ALIASES: plain dictation legitimately starts
-    # with "Sorry," and must not lose it in the lenient path.
-    | {"sorry"}
+    alias.replace(" ", "") for alias in _TRANSCRIPT_WAKE_ALIASES
 )
-# Clipped onsets gpt-audio produces when it merges the wake word into
-# the sentence (measured live: "Sorcar, what is the weather" came back
-# as "So, what is the weather").  Too short for the fuzzy gate, so they
-# are accepted only as the transcript's VERY FIRST word, or right after
-# a leading "Hey" (WAKE_GREETINGS) — the positions the prepended
-# wake-word audio guarantees.
-SHORT_WAKE_ONSETS = frozenset({"so", "sor", "sir", "saw", "sar", "zor"})
-_TOKEN_RE = re.compile(r"\S+")
+#: Characters that separate transcript words: whitespace and the
+#: punctuation gpt-audio puts after the wake word, including an
+#: unspaced dash ("Abracadabra—run the tests"), so the wake word is
+#: never joined to the command's first word.
+_WORD_SEPARATORS = " \t\n\r,.:;!?-—–"
+_TOKEN_RE = re.compile(f"[^{re.escape(_WORD_SEPARATORS)}]+")
 _NON_LETTER_RE = re.compile(r"[^a-z]")
 
 
@@ -193,35 +182,28 @@ def levenshtein(a: str, b: str) -> int:
 
 
 def sounds_like_wake_word(candidate: str) -> bool:
-    """Return True when *candidate* sounds like the wake word "Sorcar".
+    """Return True when *candidate* sounds like the wake word "Abracadabra".
 
     The candidate (one transcript word, or two adjacent words joined)
     is lowercased and reduced to letters, then accepted when it is a
     known transcription alias (:data:`_TRANSCRIPT_WAKE_ALIASES` with
-    spaces collapsed: "soccer", "circa", "sarkar", ...) or — for a
-    single word only — within :data:`MAX_WAKE_PREFIX_DISTANCE` edits
-    of ``sorcar``.  The fuzzy branch is length-bounded (4..8 letters)
-    so short words ("so", "car") and long words can never
-    edit-distance their way in, and it never applies to joined word
-    pairs: everyday pairs such as "our car" are two edits from
-    ``sorcar``, so pair matching is reserved for the measured aliases.
+    spaces collapsed: "abrakadabra", "abracadabra" split in two, ...)
+    or — for a single word only — within
+    :data:`MAX_WAKE_PREFIX_DISTANCE` edits of ``abracadabra``.  The
+    fuzzy branch never applies to joined word pairs, so two everyday
+    words can never edit-distance their way in together.
     """
     letters = _NON_LETTER_RE.sub("", candidate.lower())
-    if not letters:
-        return False
     if letters in _COLLAPSED_WAKE_ALIASES:
         return True
     if " " in candidate.strip():
         return False
-    return (
-        4 <= len(letters) <= len(WAKE_WORD) + MAX_WAKE_PREFIX_DISTANCE
-        and levenshtein(letters, WAKE_WORD) <= MAX_WAKE_PREFIX_DISTANCE
-    )
+    return levenshtein(letters, WAKE_WORD) <= MAX_WAKE_PREFIX_DISTANCE
 
 
 def _text_after_token(text: str, token: re.Match[str]) -> str:
     """Return *text* after *token*, less leading separator punctuation."""
-    return text[token.end():].lstrip(" \t\n\r,.:;!?-—–").strip()
+    return text[token.end():].lstrip(_WORD_SEPARATORS).strip()
 
 
 def split_wake_prefix(text: str) -> tuple[bool, str]:
@@ -229,23 +211,14 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
 
     The browser prepends the wake-word audio to every post-wake
     capture (``wakePrefixed``), so a genuine wake's transcript carries
-    "Hey Sorcar" — the name as heard by gpt-audio: "Sorcar", "soccer",
-    "sir car", "Sarkar", ... — at or near the beginning (near, not
-    necessarily first: the "Hey" itself, a breath, a stray word, or
-    the "okay" of a trailing-alias wake precede the name).  The
-    first :data:`MAX_WAKE_PREFIX_WORDS` words are therefore scanned
-    for a word (or two adjacent words, e.g. "sir car") that
+    "Abracadabra" — as gpt-audio writes it: "Abracadabra",
+    "Abrakadabra", "Abra cadabra", ... — at or near the beginning
+    (near, not necessarily first: a breath, a stray word, or the
+    "okay" of a trailing-alias wake precede it).  The first
+    :data:`MAX_WAKE_PREFIX_WORDS` words are therefore scanned for a
+    word (or two adjacent words, e.g. "abra cadabra") that
     :func:`sounds_like_wake_word`; everything up to and including the
-    match — pre-wake noise plus the wake word itself — is cut.
-
-    Matches are RANKED so a weaker sound-alike earlier in the
-    transcript can never shadow the wake word itself ("Sorry, I was
-    late. Sorcar, open the door" must cut at "Sorcar", not at
-    "Sorry"): an exact ``sorcar`` beats a known alias, which beats a
-    single-word fuzzy match, and a clipped onset
-    (:data:`SHORT_WAKE_ONSETS`, e.g. the measured "So," for a merged
-    "Sorcar,") counts last and only as the very first word or right
-    after a leading "Hey" (:data:`WAKE_GREETINGS`).
+    first match — pre-wake noise plus the wake word itself — is cut.
 
     Args:
         text: The cleaned transcript of a wake-prefixed utterance.
@@ -256,7 +229,6 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
         ``(False, text.strip())``.
     """
     tokens = list(_TOKEN_RE.finditer(text))
-    spans: list[tuple[str, re.Match[str]]] = []
     for index in range(min(len(tokens), MAX_WAKE_PREFIX_WORDS)):
         for span in (1, 2):
             if index + span > len(tokens):
@@ -264,22 +236,8 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
             candidate = " ".join(
                 token.group() for token in tokens[index:index + span]
             )
-            spans.append((candidate, tokens[index + span - 1]))
-    for candidate, last in spans:
-        if _NON_LETTER_RE.sub("", candidate.lower()) == WAKE_WORD:
-            return True, _text_after_token(text, last)
-    for candidate, last in spans:
-        if sounds_like_wake_word(candidate):
-            return True, _text_after_token(text, last)
-    # No full wake word anywhere near the start: fall back to a clipped
-    # onset, checked LAST so it can never shadow a real alias ("So car"
-    # must be cut whole, not just its "So").
-    for token in tokens[:2]:
-        word = _NON_LETTER_RE.sub("", token.group().lower())
-        if word in SHORT_WAKE_ONSETS:
-            return True, _text_after_token(text, token)
-        if word not in WAKE_GREETINGS:
-            break
+            if sounds_like_wake_word(candidate):
+                return True, _text_after_token(text, tokens[index + span - 1])
     return False, text.strip()
 
 
@@ -556,13 +514,14 @@ def transcribe_pcm(
     With *expect_wake_prefix* the caller prepended the wake-word audio
     itself to *pcm*, so the transcript is
     the second half of the dual wake check: it must START with
-    something that sounds like "(Hey) Sorcar" (:func:`split_wake_prefix`).
+    something that sounds like "Abracadabra"
+    (:func:`split_wake_prefix`).
     When it does, the confirmed prefix is cut and the rest is
     returned; when it does not, the local wake detection was a false
     positive and the whole utterance is rejected (empty ``text``,
     details on stderr) instead of being submitted as a command.  The
     one exception is speech the agent reports as non-English: the
-    model reliably drops the English wake word while translating, so
+    model may drop the English wake word while translating, so
     such utterances keep the single local check instead.
 
     Args:
@@ -639,14 +598,15 @@ def transcribe_pcm(
             if confirmed:
                 return {"text": rest, "language": language}
             if language is not None and language.split("-")[0] != "en":
-                # gpt-audio reliably DROPS the English wake word when
-                # it translates non-English speech (measured:
-                # "Sorcar" + French "Bonjour tout le monde" came back
-                # as just "Hello everyone."), so the transcript cannot
-                # re-confirm the wake.  Fall back to the single local
-                # check for foreign speech — the pre-dual-check
-                # behavior — instead of swallowing every non-English
-                # command.
+                # gpt-audio may DROP the English wake word when it
+                # translates non-English speech (measured with the
+                # earlier "Sorcar": + French "Bonjour tout le monde"
+                # came back as just "Hello everyone."; "Abracadabra"
+                # survived the same test, but the model's wording
+                # is not guaranteed), so the transcript cannot be
+                # relied on to re-confirm the wake.  Fall back to the
+                # single local check for foreign speech instead of
+                # swallowing every non-English command.
                 return {"text": text, "language": language}
             print(
                 "wake word not confirmed by the transcript; "

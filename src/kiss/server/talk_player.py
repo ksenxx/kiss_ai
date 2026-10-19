@@ -40,6 +40,7 @@ grandchild holding the audio device and overlapping the next clip.
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import math
 import os
@@ -53,6 +54,7 @@ import tempfile
 import threading
 from typing import Any
 
+from kiss.core.locked import locked_call
 from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
@@ -193,8 +195,8 @@ def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
         pass
     except OSError:
         # The group could not be signalled (or is already gone): kill
-        # the child alone, or the caller's unbounded ``proc.wait()``
-        # would hang the sole talk worker.
+        # the child alone so the caller's final wait normally ends
+        # at once instead of running out its timeout.
         proc.kill()
         return
     try:
@@ -224,7 +226,13 @@ def _run_playback(argv: list[str]) -> bool:
         return proc.wait(timeout=_playback_timeout()) == 0
     except subprocess.TimeoutExpired:
         _kill_playback(proc)
-        proc.wait()
+        # Bounded: a SIGKILLed player stuck in the kernel (an audio
+        # device or network file system that does not return) would
+        # otherwise wedge the sole talk worker for good.  A child that
+        # outlives the wait stays ours; ``subprocess`` reaps it later
+        # from its unreaped-children list once it finally dies.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
         return False
 
 
@@ -239,9 +247,17 @@ class TalkPlayer:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Taken on the task thread of the ``talk`` tool (``WebPrinter.
+        # broadcast`` -> ``_fanout_talk`` -> ``play``), where the
+        # runner's Stop injects ``KeyboardInterrupt``: a reentrant lock
+        # through ``locked_call``, never a plain ``with``.
+        self._lock = threading.RLock()
         self._spoken_ids: dict[str, None] = {}
-        self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        # A SimpleQueue, whose put/get are C calls: a queue.Queue's
+        # put is a Python ``with self.not_full:``, which the same
+        # injection leaks, wedging the worker's get and every later
+        # play.
+        self._queue: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self._worker: threading.Thread | None = None
 
     def play(self, event: dict[str, Any]) -> None:
@@ -256,21 +272,24 @@ class TalkPlayer:
         text = str(event.get("text") or "").strip()
         if not text and not event.get("audioB64"):
             return
-        talk_id = event.get("talkId")
-        with self._lock:
-            if talk_id:
-                if talk_id in self._spoken_ids:
-                    return
-                self._spoken_ids[talk_id] = None
-                if len(self._spoken_ids) > _MAX_TALK_IDS:
-                    for stale in list(self._spoken_ids)[: _MAX_TALK_IDS // 2]:
-                        del self._spoken_ids[stale]
-            if self._worker is None or not self._worker.is_alive():
-                self._worker = threading.Thread(
-                    target=self._drain, name="sorcar-talk-player", daemon=True
-                )
-                self._worker.start()
-        self._queue.put(dict(event))
+        if locked_call(self._lock, self._admit_locked, event.get("talkId")):
+            self._queue.put(dict(event))
+
+    def _admit_locked(self, talk_id: Any) -> bool:
+        """Record *talk_id* and make sure the worker runs; ``False`` when already spoken."""
+        if talk_id:
+            if talk_id in self._spoken_ids:
+                return False
+            self._spoken_ids[talk_id] = None
+            if len(self._spoken_ids) > _MAX_TALK_IDS:
+                for stale in list(self._spoken_ids)[: _MAX_TALK_IDS // 2]:
+                    del self._spoken_ids[stale]
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(
+                target=self._drain, name="sorcar-talk-player", daemon=True
+            )
+            self._worker.start()
+        return True
 
     def _drain(self) -> None:
         """Worker loop: play queued events one at a time, forever."""
@@ -320,7 +339,7 @@ class TalkPlayer:
                 pass
 
 
-_shared_lock = threading.Lock()
+_shared_lock = threading.RLock()
 _shared_player: TalkPlayer | None = None
 
 
@@ -330,16 +349,21 @@ def shared_player() -> TalkPlayer:
     One player per process mirrors the browser client's one-queue-per-device
     semantics: talks from every printer/agent in this process are
     deduped and serialised together, so parallel sub-agents can never
-    speak over each other on the same speakers.
+    speak over each other on the same speakers.  Called on the task
+    thread of the ``talk`` tool, so the lock goes through
+    :func:`~kiss.core.locked.locked_call`.
 
     Returns:
         The shared :class:`TalkPlayer`.
     """
+    return locked_call(_shared_lock, _shared_player_locked)
+
+
+def _shared_player_locked() -> TalkPlayer:
     global _shared_player
-    with _shared_lock:
-        if _shared_player is None:
-            _shared_player = TalkPlayer()
-        return _shared_player
+    if _shared_player is None:
+        _shared_player = TalkPlayer()
+    return _shared_player
 
 
 def reset_shared_player_for_tests() -> None:

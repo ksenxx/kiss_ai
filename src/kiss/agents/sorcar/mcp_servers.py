@@ -835,6 +835,24 @@ class MCPManager:
             cls._instance = MCPManager()
         return cls._instance
 
+    @classmethod
+    def disconnect_existing(cls) -> None:
+        """Disconnect the singleton's servers when one exists; never create one.
+
+        The daemon's shutdown paths call this: a process that never
+        used an MCP server has no manager, and building one (a loop
+        thread plus an ``atexit`` hook) just to disconnect an empty
+        pool left a live loop thread behind in every embedder or test
+        process that stopped a server (conc1018 D1-F2).  The instance
+        is read under the lock and disconnected outside it, so a
+        manager busy closing its children does not stall
+        :meth:`instance` callers.
+        """
+        with cls._instance_lock:
+            manager = cls._instance
+        if manager is not None:
+            manager.disconnect_all()
+
     def connect(
         self, config: MCPServerConfig, auth: Any = None,
     ) -> _Connection:

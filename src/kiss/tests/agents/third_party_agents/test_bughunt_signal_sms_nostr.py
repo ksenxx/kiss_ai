@@ -27,22 +27,18 @@ Covers:
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import tempfile
 import unittest
 from importlib.util import find_spec
-from pathlib import Path
 
 from kiss.agents.third_party_agents.signal.signal_sea import _config as _signal_config
 from kiss.agents.third_party_agents.sms.sms_sea import _config as _sms_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
     recording_server,
 )
-from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
 # Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
@@ -74,18 +70,8 @@ class TestSignalBackend(unittest.TestCase):
     """End-to-end tests driving SignalChannelBackend through a real fake signal-cli."""
 
     def setUp(self) -> None:
-        """Install a real executable signal-cli script on PATH and a test config.
-
-        Each global mutation registers its restoration with ``addCleanup``
-        immediately, so state is restored even when ``setUp`` itself fails
-        part-way (unittest skips ``tearDown`` in that case, but cleanups run).
-        """
-        self._tmpdir = tempfile.mkdtemp(prefix="bughunt-signal-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        install_cli_script(Path(self._tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
-        self._old_path = os.environ["PATH"]
-        os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
-        self.addCleanup(os.environ.__setitem__, "PATH", self._old_path)
+        """Install a real executable signal-cli script on PATH and a test config."""
+        install_cli_on_path(self, "signal-cli", _FAKE_SIGNAL_CLI)
         self.enterContext(config_backup(_signal_config.path))
         from kiss.agents.third_party_agents.signal.signal_sea import (
             SignalChannelBackend,
@@ -231,11 +217,7 @@ class TestSMSBackend(unittest.TestCase):
                         "status": 401,
                     }
                 ).encode("utf-8")
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._reply(401, body)
 
         class LocalTwilioHttpClient(twilio_http.TwilioHttpClient):  # type: ignore[misc, name-defined]
             """Real Twilio transport re-hosted onto the local emulator."""

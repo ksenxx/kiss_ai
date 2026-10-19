@@ -23,14 +23,9 @@ from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands, task_digest
-from kiss.agents.sorcar.persistence import (
-    _add_task,
-    _append_chat_event,
-    _flush_chat_events,
-)
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.conftest import persist_task, run_sea
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -44,18 +39,15 @@ def _persist_task(
     events: list[dict[str, Any]],
     extra: dict[str, Any] | None = None,
 ) -> str:
-    """Persist a task row with *events* and return its id."""
-    payload: dict[str, object] = {
+    """Persist a still-running task row (started 90 s ago, no spend recorded yet) with
+    *events* and return its id; *extra* overrides the row's columns."""
+    columns: dict[str, Any] = {
         "model": "test-model",
-        "work_dir": "/work/dir",
         "startTs": int(time.time() * 1000) - 90_000,
+        "endTs": 0, "cost": 0, "steps": 0, "tokens": 0,
+        **(extra or {}),
     }
-    payload.update(extra or {})
-    task_id, _chat = _add_task(prompt, extra=payload)
-    for ev in events:
-        _append_chat_event(ev, task_id=task_id)
-    _flush_chat_events(task_id)
-    return task_id
+    return persist_task(prompt, events, **columns)
 
 
 def _entries(digest: str) -> list[str]:
@@ -277,8 +269,8 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish", "task_transcript"}, names
-        system = next(m for m in request["messages"] if m["role"] == "system")
-        assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
+        system = system_message(request)
+        assert system.startswith(sea.SYSTEM_PROMPT)
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert sea.build_prompt(task_id) in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]

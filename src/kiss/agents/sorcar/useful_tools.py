@@ -92,9 +92,7 @@ def _worktree_index(parts: tuple[str, ...]) -> int | None:
         when *parts* does not run through a worktree.
     """
     for i in range(len(parts) - 2, -1, -1):
-        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(
-            _WORKTREE_SLUG_PREFIX
-        ):
+        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX):
             return i
     return None
 
@@ -216,7 +214,7 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
         or res_parts[: len(main_repo_parts)] != main_repo_parts
     ):
         return None
-    tail = res_parts[len(main_repo_parts):]
+    tail = res_parts[len(main_repo_parts) :]
     if (tail and tail[0] == _WORKTREE_SUBDIR) or _worktree_index(tail) is not None:
         # Already inside a worktree: this one, or the worktree of a
         # repository nested under the parent repo (isolated on its own
@@ -280,6 +278,47 @@ def _absolutize(file_path: str, work_dir: str | None) -> str:
     return str(Path(work_dir) / p)
 
 
+def resolve_tool_path(
+    file_path: str,
+    work_dir: str | None,
+    exists: Callable[[Path], bool] | None = None,
+) -> Path:
+    """Resolve the path a file tool is about to operate on.
+
+    Anchors *file_path* under *work_dir* (:func:`_absolutize`),
+    resolves it, then applies the two worktree corrections in order:
+    a path in the parent repo while *work_dir* is inside a live
+    worktree is remapped into that worktree
+    (:func:`_active_worktree_remap`); otherwise a path under a
+    worktree that has since been torn down falls back to the parent
+    repo (:func:`_stale_worktree_fallback`).
+
+    Args:
+        file_path: The path as given to the tool (relative, ``~`` or
+            absolute).
+        work_dir: The agent's working directory, or ``None``.
+        exists: For tools that need the target to already exist
+            (``Read``, ``Edit``): the fallback is taken only when
+            *exists* fails for the resolved path and holds for the
+            fallback.  ``None`` (``Write``, ``screenshot``) takes the
+            fallback unconditionally so a vanished worktree is never
+            resurrected by a ``mkdir``.
+
+    Returns:
+        The fully resolved path to operate on.
+    """
+    resolved = Path(_absolutize(file_path, work_dir)).resolve()
+    remapped = _active_worktree_remap(resolved, work_dir)
+    if remapped is not None:
+        return remapped
+    if exists is not None and exists(resolved):
+        return resolved
+    fallback = _stale_worktree_fallback(resolved)
+    if fallback is None or (exists is not None and not exists(fallback)):
+        return resolved
+    return fallback.resolve()
+
+
 def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     """Refuse a Bash command that targets the parent repo's working tree.
 
@@ -317,10 +356,10 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
             end = m.end()
             while end < len(command) and not re.match(_PATH_END, command[end]):
                 end += 1
-            hit = command[m.start():end]
+            hit = command[m.start() : end]
             if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
                 continue
-            if _worktree_index(Path(hit).parts[len(Path(main_repo).parts):]) is not None:
+            if _worktree_index(Path(hit).parts[len(Path(main_repo).parts) :]) is not None:
                 # The worktree of a repository nested under the parent
                 # repo, isolated on its own: not the user's checkout.
                 continue
@@ -411,7 +450,7 @@ def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
 
 def _swap_root(match: re.Match[str], wt_root: str) -> str:
     """Replace one matched repo root unless it already names a worktree."""
-    rest = match.string[match.end():]
+    rest = match.string[match.end() :]
     if rest[:1] in ("/", "\\") and re.match(
         re.escape(_WORKTREE_SUBDIR), rest[1:], flags=_PATH_RE_FLAGS
     ):
@@ -439,9 +478,7 @@ def _suggest_close_path(resolved: Path) -> str:
     matches = difflib.get_close_matches(resolved.name, names, n=1, cutoff=0.6)
     if not matches:
         lowered = {n.lower(): n for n in names}
-        ci = difflib.get_close_matches(
-            resolved.name.lower(), list(lowered), n=1, cutoff=0.6
-        )
+        ci = difflib.get_close_matches(resolved.name.lower(), list(lowered), n=1, cutoff=0.6)
         if ci:
             matches = [lowered[ci[0]]]
     if matches:
@@ -469,9 +506,7 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
         else _OUTLINE_SYMBOL_RE
     )
     entries = [
-        f"{number}: {line.strip()}"
-        for number, line in enumerate(lines, 1)
-        if pattern.match(line)
+        f"{number}: {line.strip()}" for number, line in enumerate(lines, 1) if pattern.match(line)
     ]
     if len(entries) < _OUTLINE_MIN_ENTRIES:
         return None
@@ -483,7 +518,7 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
         + "\n".join(shown)
         + (f"\n... {more} more entries" if more else "")
         + "\n\nRead a range with Read(file_path, start_line=N, max_lines=M), or "
-        "locate text with Bash(\"grep -n PATTERN FILE\")."
+        'locate text with Bash("grep -n PATTERN FILE").'
     )
 
 
@@ -580,7 +615,9 @@ def _format_bash_timeout(output: str, timeout_seconds: float, max_output_chars: 
 
 
 def _refuse_or_lift(
-    command: str, work_dir: str | None, timeout_seconds: float,
+    command: str,
+    work_dir: str | None,
+    timeout_seconds: float,
 ) -> tuple[str | None, float]:
     """Apply the shell guards to *command* and lift its timeout for installs.
 
@@ -597,12 +634,16 @@ def _refuse_or_lift(
         when the command may run) and the possibly lifted deadline.
     """
     guard = _bash_parent_repo_guard(command, work_dir) or destructive_command_guard(
-        command, work_dir)
+        command, work_dir
+    )
     return guard, lift_install_timeout(command, timeout_seconds)
 
 
 def _run_one_command(
-    command: str, cancel: threading.Event, work_dir: str | None, timeout_seconds: float,
+    command: str,
+    cancel: threading.Event,
+    work_dir: str | None,
+    timeout_seconds: float,
 ) -> tuple[int | None, str, float]:
     """Run one host ``run_commands_parallel`` command on a worker thread.
 
@@ -706,8 +747,7 @@ def _format_parallel_report(
     timed_out = sum(1 for code in codes if code is None)
     failed = len(codes) - succeeded - timed_out
     lines = [
-        f"{len(commands)} commands: {succeeded} succeeded, {failed} failed, "
-        f"{timed_out} timed out."
+        f"{len(commands)} commands: {succeeded} succeeded, {failed} failed, {timed_out} timed out."
     ]
     for index, (command, (code, output, seconds)) in enumerate(
         zip(commands, results, strict=True), start=1
@@ -1008,15 +1048,13 @@ class UsefulTools:
         fallback = _stale_worktree_fallback(Path(cwd))
         if fallback is not None and fallback.is_dir():
             logger.warning(
-                "Bash work_dir %r vanished mid-task; "
-                "falling back to parent repo root %r",
+                "Bash work_dir %r vanished mid-task; falling back to parent repo root %r",
                 cwd,
                 str(fallback),
             )
             return str(fallback)
         logger.warning(
-            "Bash work_dir %r vanished mid-task and no "
-            "fallback parent exists; running without cwd",
+            "Bash work_dir %r vanished mid-task and no fallback parent exists; running without cwd",
             cwd,
         )
         return None
@@ -1058,7 +1096,9 @@ class UsefulTools:
             return f"Error: could not start background job: {e}"
         try:
             threading.Thread(
-                target=_watch_job, args=(self.stop_event, process), daemon=True,
+                target=_watch_job,
+                args=(self.stop_event, process),
+                daemon=True,
             ).start()
         except BaseException:
             # Thread exhaustion or a stop injected inside ``Thread.start``:
@@ -1067,14 +1107,18 @@ class UsefulTools:
             _kill_job_group(process)
             raise
         self._jobs[job_id] = BackgroundJob(
-            job_id, command, log_path, process, time.monotonic(),
+            job_id,
+            command,
+            log_path,
+            process,
+            time.monotonic(),
         )
         return (
             f"Started background job {job_id} (pid {process.pid}).\n"
             f"Log: {log_path}\n"
-            f"Follow it with bash_job({job_id!r}, action=\"tail\") or block on it with "
-            f"bash_job({job_id!r}, action=\"wait\", timeout_seconds=...); "
-            f"bash_job({job_id!r}, action=\"kill\") stops it."
+            f'Follow it with bash_job({job_id!r}, action="tail") or block on it with '
+            f'bash_job({job_id!r}, action="wait", timeout_seconds=...); '
+            f'bash_job({job_id!r}, action="kill") stops it.'
         )
 
     def _wait_for_job(self, job: BackgroundJob, timeout_seconds: float) -> None:
@@ -1099,7 +1143,9 @@ class UsefulTools:
         tool_interrupt.raise_if_interrupted()
 
     def _start_stop_monitor(
-        self, process: subprocess.Popen, done: threading.Event,
+        self,
+        process: subprocess.Popen,
+        done: threading.Event,
     ) -> None:
         """Start a daemon thread that kills *process* on a stop or interrupt.
 
@@ -1149,23 +1195,11 @@ class UsefulTools:
                 one-line "unchanged" note instead of the content).
         """
         if start_line < 1:
-            return (
-                f"Error: start_line must be >= 1 (got {start_line}); the "
-                f"parameter is 1-indexed."
-            )
+            return f"Error: start_line must be >= 1 (got {start_line}); the parameter is 1-indexed."
         if max_lines < 1:
             return f"Error: max_lines must be >= 1 (got {max_lines})."
         try:
-            expanded = _absolutize(file_path, self.work_dir)
-            resolved = Path(expanded).resolve()
-
-            remapped = _active_worktree_remap(resolved, self.work_dir)
-            if remapped is not None:
-                resolved = remapped
-            elif not resolved.exists():
-                fallback = _stale_worktree_fallback(resolved)
-                if fallback is not None and fallback.exists():
-                    resolved = fallback.resolve()
+            resolved = resolve_tool_path(file_path, self.work_dir, Path.exists)
 
             if resolved.is_dir():
                 return self._read_directory_listing(file_path, resolved)
@@ -1205,7 +1239,8 @@ class UsefulTools:
             whole_file_requested = start_line == 1 and max_lines >= 2000
             outline = (
                 _outline(file_path, lines, len(text))
-                if whole_file_requested and 0 < outline_limit < total else None
+                if whole_file_requested and 0 < outline_limit < total
+                else None
             )
             window = lines[start_line - 1 : start_line - 1 + max_lines]
             last = start_line - 1 + len(window)
@@ -1241,9 +1276,7 @@ class UsefulTools:
         listing so the model can self-correct on the next turn.
         """
         try:
-            entries = sorted(
-                p.name + ("/" if p.is_dir() else "") for p in resolved.iterdir()
-            )
+            entries = sorted(p.name + ("/" if p.is_dir() else "") for p in resolved.iterdir())
         except OSError as e:  # pragma: no cover — permission edge case
             return f"Error: Cannot list directory {file_path}: {e}"
         listing = "\n".join(entries) if entries else "(empty directory)"
@@ -1293,15 +1326,7 @@ class UsefulTools:
             content: The full content to write to the file.
         """
         try:
-            expanded = _absolutize(file_path, self.work_dir)
-            resolved = Path(expanded).resolve()
-            remapped = _active_worktree_remap(resolved, self.work_dir)
-            if remapped is not None:
-                resolved = remapped
-            else:
-                fallback = _stale_worktree_fallback(resolved)
-                if fallback is not None:
-                    resolved = fallback
+            resolved = resolve_tool_path(file_path, self.work_dir)
             if resolved.exists() and not resolved.is_file():
                 return (
                     f"Error: {file_path} exists and is not a regular file "
@@ -1340,15 +1365,7 @@ class UsefulTools:
             The output of the edit operation.
         """
         try:
-            expanded = _absolutize(file_path, self.work_dir)
-            resolved = Path(expanded).resolve()
-            remapped = _active_worktree_remap(resolved, self.work_dir)
-            if remapped is not None:
-                resolved = remapped
-            elif not resolved.is_file():
-                fallback = _stale_worktree_fallback(resolved)
-                if fallback is not None and fallback.is_file():
-                    resolved = fallback.resolve()
+            resolved = resolve_tool_path(file_path, self.work_dir, Path.is_file)
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
             if resolved not in self.read_files:
@@ -1528,10 +1545,16 @@ class UsefulTools:
         if max_workers < 0:
             return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
         run_one = functools.partial(
-            _run_one_command, work_dir=self.work_dir, timeout_seconds=timeout_seconds,
+            _run_one_command,
+            work_dir=self.work_dir,
+            timeout_seconds=timeout_seconds,
         )
         return run_commands_pool(
-            command_list, run_one, max_workers, self.stop_event, max_output_chars,
+            command_list,
+            run_one,
+            max_workers,
+            self.stop_event,
+            max_output_chars,
         )
 
     def _consume_stream(
@@ -1595,7 +1618,9 @@ class UsefulTools:
                 self.stream_callback(line)
 
     def _bash_streaming(
-        self, command: str, timeout_seconds: float,
+        self,
+        command: str,
+        timeout_seconds: float,
     ) -> tuple[int | None, str]:
         """Run *command* through a reader thread, bounded by *timeout_seconds*.
 
@@ -1634,13 +1659,13 @@ class UsefulTools:
                     if not abandoned.is_set():
                         out_queue.put(line)
             finally:
-                if abandoned.is_set():
-                    # The main thread returned long ago and never closes
-                    # the pipe in this mode; release the fd here.
-                    try:
-                        process.stdout.close()  # type: ignore[union-attr]
-                    except Exception:
-                        logger.debug("stdout close failed", exc_info=True)
+                # The reader is the pipe's only user, so it owns the close:
+                # EOF here means every writer let go, whether the main
+                # thread is still waiting or returned (abandoned) long ago.
+                try:
+                    process.stdout.close()  # type: ignore[union-attr]
+                except Exception:
+                    logger.debug("stdout close failed", exc_info=True)
                 out_queue.put(None)
 
         timed_out = False
@@ -1658,7 +1683,11 @@ class UsefulTools:
             interrupt = tool_interrupt.current_tool_interrupt_event()
             deadline = time.monotonic() + timeout_seconds
             eof = self._consume_stream(
-                out_queue, chunks, deadline, stop=self.stop_event, interrupt=interrupt,
+                out_queue,
+                chunks,
+                deadline,
+                stop=self.stop_event,
+                interrupt=interrupt,
             )
             if not eof:
                 # A stop is not a timeout: the shell is killed (the
@@ -1676,7 +1705,9 @@ class UsefulTools:
                 # would let the forced injection land in this loop
                 # instead of at the raise below.
                 eof = self._consume_stream(
-                    out_queue, chunks, time.monotonic() + (0.5 if interrupted else 5),
+                    out_queue,
+                    chunks,
+                    time.monotonic() + (0.5 if interrupted else 5),
                 )
                 if not eof:
                     abandoned.set()
@@ -1704,8 +1735,6 @@ class UsefulTools:
             raise
         finally:
             done.set()
-            if eof:
-                process.stdout.close()  # type: ignore[union-attr]
 
         # The tool panel's own Stop: whether the monitor killed the shell
         # (EOF) or the loop above noticed the event first, the shell is

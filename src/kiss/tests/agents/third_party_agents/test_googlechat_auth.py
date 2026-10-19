@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -31,6 +31,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     fake_composio,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -95,18 +96,14 @@ def _write_service_account_key(path: Path) -> None:
     )
 
 
-def _tools(agent: GoogleChatAgent) -> dict[str, Any]:
-    return {t.__name__: t for t in agent._get_auth_tools()}
-
-
 def test_unauthenticated_without_key_or_connection() -> None:
     """With neither a key nor a connection, the agent offers the auth tools."""
     agent = GoogleChatAgent()
     assert agent._is_authenticated() is False
     assert agent._backend._service is None
     assert _load_service() is None
-    assert "Not authenticated with Google Chat" in _tools(agent)["check_googlechat_auth"]()
-    assert list(_tools(agent)) == [
+    assert "Not authenticated with Google Chat" in auth_tools(agent)["check_googlechat_auth"]()
+    assert list(auth_tools(agent)) == [
         "check_googlechat_auth",
         "authenticate_googlechat",
         "clear_googlechat_auth",
@@ -119,7 +116,7 @@ def test_connect_link_flow_builds_composio_service(chat) -> None:
     """authenticate -> approve -> finish gives a Chat service behind Composio."""
     composio, server = chat
     agent = GoogleChatAgent()
-    tools = _tools(agent)
+    tools = auth_tools(agent)
     started = json.loads(tools["authenticate_googlechat"]())
     assert started["status"] == "consent_required"
     composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
@@ -137,7 +134,7 @@ def test_service_account_tool_copies_key_and_authenticates(tmp_path: Path) -> No
     key_file = tmp_path / "bot.json"
     _write_service_account_key(key_file)
     agent = GoogleChatAgent()
-    result = json.loads(_tools(agent)["authenticate_googlechat_service_account"](str(key_file)))
+    result = json.loads(auth_tools(agent)["authenticate_googlechat_service_account"](str(key_file)))
     assert result == {"ok": True, "message": "Google Chat service account loaded."}
     assert agent._backend._service is not None
     assert agent._is_authenticated() is True
@@ -145,7 +142,7 @@ def test_service_account_tool_copies_key_and_authenticates(tmp_path: Path) -> No
     assert json.loads(saved.read_text()) == json.loads(key_file.read_text())
     assert IS_WINDOWS or stat.S_IMODE(saved.stat().st_mode) == 0o600
     # The saved default key now loads without a path.
-    again = json.loads(_tools(GoogleChatAgent())["authenticate_googlechat_service_account"]())
+    again = json.loads(auth_tools(GoogleChatAgent())["authenticate_googlechat_service_account"]())
     assert again["ok"] is True
     assert _load_service() is not None
 
@@ -156,7 +153,7 @@ def test_clear_forgets_the_service_account_key(chat, tmp_path: Path) -> None:
     key_file = tmp_path / "bot.json"
     _write_service_account_key(key_file)
     agent = GoogleChatAgent()
-    tools = _tools(agent)
+    tools = auth_tools(agent)
     assert json.loads(tools["authenticate_googlechat_service_account"](str(key_file)))["ok"]
     assert _service_account_path().exists() and agent._backend._service is not None
     assert json.loads(tools["check_googlechat_auth"]())["ok"] is True
@@ -181,7 +178,7 @@ def test_malformed_stored_key_is_not_authenticated() -> None:
     assert agent._backend._service is None
     assert agent._is_authenticated() is False
     assert _load_service() is None
-    assert "Not authenticated with Google Chat" in _tools(agent)["check_googlechat_auth"]()
+    assert "Not authenticated with Google Chat" in auth_tools(agent)["check_googlechat_auth"]()
 
     # Valid JSON that is not a service-account key fails the same way.
     path.write_text(json.dumps({"type": "service_account", "client_email": "x"}))
@@ -198,7 +195,7 @@ def test_malformed_stored_key_is_not_authenticated() -> None:
 
 def test_service_account_tool_rejects_missing_or_bad_keys(tmp_path: Path) -> None:
     """Missing or malformed keys fail clearly and are not copied."""
-    tools = _tools(GoogleChatAgent())
+    tools = auth_tools(GoogleChatAgent())
     missing = json.loads(tools["authenticate_googlechat_service_account"]())
     assert missing["ok"] is False and "service_account.json" in missing["error"]
     bad = tmp_path / "bad.json"

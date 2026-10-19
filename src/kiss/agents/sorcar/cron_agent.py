@@ -26,7 +26,8 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   (so the same occurrence never double-fires), and launches each one
   CONCURRENTLY in its own thread and its own scratch directory
   (``$KISS_HOME/cron/runs/<job_id>-<random>``, removed when the run
-  ends) so simultaneous jobs never share a working directory.  The
+  ends; an ``in_chat`` job's chat keeps ``$KISS_HOME/cron/chats/<job_id>``)
+  so simultaneous jobs never share a working directory.  The
   scheduler thread does not wait for the jobs: a tick that overlaps
   runs from a previous tick is not skipped — it simply leaves the
   jobs that are still running alone (they stay due and are picked up
@@ -97,6 +98,7 @@ import yaml
 
 from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar._concurrency import locked_call
+from kiss.agents.sorcar.history_columns import CRON_TASK_MARKER
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
@@ -550,7 +552,10 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
 
 
 PROMPT_PREAMBLE = (
-    "You are running as an unattended scheduled automation (cron job). "
+    # The first sentence is CRON_TASK_MARKER: the history migration
+    # (history_columns.backfill_is_cron) recognises a prompt job's row by
+    # it, so reword the rest of the preamble freely but keep that one.
+    CRON_TASK_MARKER + " "
     "Nobody can answer questions; never ask the user anything. Do not "
     "create, modify, or remove scheduled jobs during this run. Your "
     "final summary is delivered verbatim to the job's delivery targets; "
@@ -607,8 +612,32 @@ def is_unattended(agent: Any) -> bool:
     Args:
         agent: A running agent (see :func:`_current_task_text`).
     """
-    text = _current_task_text(agent)
+    return is_unattended_text(_current_task_text(agent))
+
+
+def is_unattended_text(text: str) -> bool:
+    """True when *text* is the task of a cron prompt job or of its sub-task.
+
+    Args:
+        text: A task text as the daemon receives it (the appended
+            per-run suffix included).
+    """
     return text.startswith(PROMPT_PREAMBLE.strip()) or text.endswith(UNATTENDED_CHILD_PREAMBLE)
+
+
+def is_cron_run(agent: Any) -> bool:
+    """True when *agent* is a cron-launched task or a descendant of one.
+
+    The daemon stamps ``is_cron_job`` on the agent at launch
+    (``task_runner``: the ``cronJob`` wire flag of an in-chat job, or an
+    unattended task text); ``dispatch_command`` passes the flag on to
+    every sub-task so the whole run is hidden or shown together by the
+    CHATS list's Cron chip.
+
+    Args:
+        agent: A running agent, or None.
+    """
+    return bool(getattr(agent, "is_cron_job", False))
 
 
 def unattended_child_suffix(append_to_prompt: str) -> str:
@@ -630,13 +659,43 @@ def _job_work_dir(job: dict[str, Any], scratch_dir: Path) -> Path:
     """Return the directory a run of *job* works in.
 
     Args:
-        job: The job dict (uses the optional ``work_dir`` field).
+        job: The job dict (uses the optional ``work_dir`` field and
+            ``in_chat``).
         scratch_dir: The run's private scratch directory.
 
     Returns:
-        The job's ``work_dir`` when set, otherwise *scratch_dir*.
+        The job's ``work_dir`` when set; otherwise, for an ``in_chat``
+        job, its own ``$KISS_HOME/cron/chats/<job_id>`` (created when
+        absent): the chat the user continues in after the run (see
+        :func:`_run_in_chat_job`) keeps its work directory, which
+        *scratch_dir* — removed when the run ends — could not be.  Any
+        other job runs in *scratch_dir*.
     """
-    return Path(str(job.get("work_dir") or "") or scratch_dir)
+    if job.get("work_dir"):
+        return Path(str(job["work_dir"]))
+    if not job.get("in_chat"):
+        return scratch_dir
+    chat_dir = _cron_dir() / "chats" / str(job["id"])
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    return chat_dir
+
+
+def _run_outcome(text: str, success: bool) -> tuple[str, str | None]:
+    """Turn a run's summary into the ``(status, summary)`` a prompt job reports.
+
+    Args:
+        text: The run's summary text (may be empty).
+        success: Whether the run succeeded.
+
+    Returns:
+        ``("silent", None)`` for an empty or ``[SILENT]`` summary,
+        otherwise ``("ok" | "error", summary)`` where a failed run with
+        no text reads ``"Task failed"``.
+    """
+    summary = text or ("" if success else "Task failed")
+    if not summary or _is_silent(summary):
+        return "silent", None
+    return ("ok" if success else "error"), summary
 
 
 def _job_timeout(job: dict[str, Any], default: float) -> float:
@@ -701,6 +760,9 @@ def _run_in_chat_job(
             timeout=timeout,
             stop_on_timeout=True,
             endpoint_file=daemon_endpoint_file(),
+            # The prompt runs verbatim (no preamble), so the row is
+            # marked as a cron run explicitly.
+            cron_job=True,
         )
     except daemon_client.StopUnconfirmedTimeoutError as exc:
         raise TimeoutError(
@@ -709,10 +771,7 @@ def _run_in_chat_job(
         ) from exc
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
-    summary = result.text or ("" if result.success else "Task failed")
-    if not summary or _is_silent(summary):
-        return "silent", None
-    return ("ok" if result.success else "error"), summary
+    return _run_outcome(result.text, result.success)
 
 
 def _run_prompt_job(
@@ -828,11 +887,7 @@ def _run_prompt_job(
     result = yaml.safe_load(reply)
     if not isinstance(result, dict):
         return "error", f"unexpected run_agent reply: {reply}"
-    success = bool(result.get("success"))
-    summary = str(result.get("summary") or "") or ("" if success else "Task failed")
-    if not summary or _is_silent(summary):
-        return "silent", None
-    return ("ok" if success else "error"), summary
+    return _run_outcome(str(result.get("summary") or ""), bool(result.get("success")))
 
 
 def _proc_descendants(root_pid: int) -> set[int]:
@@ -1003,13 +1058,13 @@ def _execute_job(job: dict[str, Any]) -> None:
     The run gets a fresh private scratch directory under
     :func:`_runs_dir` — its working directory for a command job, the
     daemon session's ``work_dir`` for a prompt job (unless the job
-    names its own ``work_dir``, which then takes that role) — so jobs
-    running
-    concurrently never share one; the directory is removed when the
-    run ends, whatever the outcome, so stale run directories never
-    accumulate.  The one exception is a timed-out prompt job whose
-    stop the daemon never confirmed: the task may still be running
-    from the directory, so it is kept and its path reported.
+    names its own ``work_dir`` or is an ``in_chat`` job, see
+    :func:`_job_work_dir`) — so jobs running concurrently never share
+    one; the directory is removed when the run ends, whatever the
+    outcome, so stale run directories never accumulate.  The one
+    exception is a timed-out prompt job whose stop the daemon never
+    confirmed: the task may still be running from the directory, so it
+    is kept and its path reported.
 
     Never raises: failures are recorded in the job's ``last_status`` /
     ``last_summary`` fields.  Errors are still delivered (so the user
@@ -1025,12 +1080,13 @@ def _execute_job(job: dict[str, Any]) -> None:
     """
     _runs_dir().mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix=f"{job['id']}-", dir=_runs_dir()))
-    run_dir = _job_work_dir(job, work_dir)
     is_command = bool(str(job.get("command", "")).strip())
     keep_work_dir = False
     try:
-        # Inside the try: a malformed stored timeout is recorded as the
-        # run's error like any other failure.
+        # Inside the try: a malformed stored timeout, or an in_chat
+        # directory that cannot be created, is recorded as the run's error
+        # like any other failure (and the scratch directory still removed).
+        run_dir = _job_work_dir(job, work_dir)
         timeout = _job_timeout(
             job, COMMAND_TIMEOUT_SECONDS if is_command else PROMPT_TIMEOUT_SECONDS,
         )
@@ -1267,12 +1323,12 @@ def start_scheduler_thread(
 
 DEFAULT_JOBS: list[dict[str, str]] = [
     {
-        "name": "Recommendations: five suggested tasks from the last 24 hours",
+        "name": "Recommendations: ten suggested tasks from your recent work and apps",
         "prompt": "/recommendations now",
         "schedule": "0 */6 * * *",
         "deliver": "none",
-        "max_budget": "1",
-        "timeout": "600",
+        "max_budget": "2",
+        "timeout": "900",
     },
     {
         "name": "Good morning: greeting, your recommendations, and what to do today",
@@ -1296,6 +1352,22 @@ in that chat.
 """
 
 
+FORMER_DEFAULT_NAMES: dict[str, str] = {
+    "Recommendations: five suggested tasks from the last 24 hours": DEFAULT_JOBS[0]["name"],
+}
+"""Earlier names of the default jobs, by the name they carry now.
+
+A home that seeded a default under its earlier name, or still runs the
+job under it, has that default: :func:`seed_default_jobs` never seeds
+it again beside the old one or after the user removed it.
+"""
+
+
+def _current_default_name(name: str) -> str:
+    """Return the current name of the default job *name* names (itself when not renamed)."""
+    return FORMER_DEFAULT_NAMES.get(name, name)
+
+
 def _seeded_defaults_path() -> Path:
     """The file naming the default jobs this home has already been given."""
     return _cron_dir() / "default-jobs-seeded.json"
@@ -1310,16 +1382,21 @@ def seed_default_jobs() -> list[str]:
     per home, recorded in :func:`_seeded_defaults_path`: a job the user
     later removes, pauses or edits is theirs and is never re-created or
     reset, and a job the user already has under a default's name (paused
-    or not) stands untouched.  Never raises: a store that cannot be
-    read, parsed, locked or written is left as it is and the defaults
-    wait for a later start.
+    or not) stands untouched.  A default renamed by a later version is
+    still the same default: its former names
+    (:data:`FORMER_DEFAULT_NAMES`) count in the record and in the store.
+    Never raises: a store that cannot be read, parsed, locked or written
+    is left as it is and the defaults wait for a later start.
 
     Returns:
         The names of the jobs seeded on this call (empty when every
         default was seeded before, or the store is not writable).
     """
     try:
-        seeded = {str(n) for n in json.loads(_seeded_defaults_path().read_text("utf-8"))}
+        seeded = {
+            _current_default_name(str(n))
+            for n in json.loads(_seeded_defaults_path().read_text("utf-8"))
+        }
     except (OSError, ValueError, TypeError):
         seeded = set()
     pending = [spec for spec in DEFAULT_JOBS if spec["name"] not in seeded]
@@ -1335,7 +1412,7 @@ def seed_default_jobs() -> list[str]:
         ):
             raise ValueError("the cron job store is not a JSON list")
         for spec in pending:
-            if any(j.get("name") == spec["name"] for j in load_jobs()):
+            if any(_current_default_name(str(j.get("name"))) == spec["name"] for j in load_jobs()):
                 done.append(spec["name"])  # the user's own job under that name stands
                 continue
             result = _create_or_ensure(
@@ -1907,14 +1984,13 @@ def cron_job(
         return _dump({"error": error} if error else {action: job_id})
 
     if action == "run_now":
-        match = [job for job in load_jobs() if job["id"] == job_id]
-        if not match:
-            return _dump({"error": f"no job with id {job_id!r}"})
-        # Registered like a tick's run thread in the CANONICAL module's
-        # registry (a dispatched cron session runs a synthetic copy of
-        # this module, see ``_daemon_endpoint_file``), under the store
-        # lock the tick holds from its running-jobs snapshot through
-        # its launches: a tick skips the job meanwhile and a second
+        # The job is loaded and registered like a tick's run thread in
+        # the CANONICAL module's registry (a dispatched cron session
+        # runs a synthetic copy of this module, see
+        # ``_daemon_endpoint_file``), under the store lock the tick
+        # holds from its running-jobs snapshot through its launches: an
+        # edit or removal committed before the lock is taken is what
+        # runs (or refuses), a tick skips the job meanwhile and a second
         # run_now is refused.
         canonical = importlib.import_module("kiss.agents.sorcar.cron_agent")
         me = threading.current_thread()
@@ -1927,9 +2003,12 @@ def cron_job(
         # would leak a plain ``with`` (CPython gh-74174).
         try:
             with _jobs_lock(blocking=True):
-                claimed = locked_call(
+                match = [job for job in load_jobs() if job["id"] == job_id]
+                claimed = bool(match) and locked_call(
                     canonical._running_lock, _claim_run, canonical._running, job_id, me,
                 )
+            if not match:
+                return _dump({"error": f"no job with id {job_id!r}"})
             if not claimed:
                 return _dump({"error": f"job {job_id!r} is already running"})
             _execute_job(match[0])

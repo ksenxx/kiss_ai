@@ -25,9 +25,7 @@ per call:
   (:data:`_DECISIONS_KIND_CRITERIA`) — through the same ``decide`` tool
   the agents use (:mod:`kiss.agents.sorcar.decide_tool`), and maps the
   chosen kind to the verdict (:data:`_KIND_VERDICTS`).  It is a
-  non-generative call: ~0.2 s, ~$0.00003 per task, and it cannot execute
-  the task, so it also classifies for the run-to-completion CLI models
-  (``cc/*``, ``codex/*``) the LLM classifier must skip.  Measured on
+  non-generative call: ~0.2 s, ~$0.00003 per task.  Measured on
   a benchmark of 415 real and synthetic prompts,
   its verdicts agreed with the hand labels more often than any of the
   four LLM classifiers measured (89% against 84% for the best), at
@@ -79,8 +77,8 @@ Classification is best-effort and optional.  It runs only when
 :func:`classification_enabled` says so (the ``classify_tasks`` config
 key, toggleable in the settings panel, and the
 ``KISS_DISABLE_TASK_CLASSIFIER`` environment kill switch the test
-suite sets).  Any failure — model error, budget, a run-to-completion
-CLI model, an unparseable verdict — yields ``classification=None`` and
+suite sets).  Any failure — model error, budget, an unparseable
+verdict — yields ``classification=None`` and
 the agent behaves exactly as it did without a classifier.
 """
 
@@ -820,24 +818,6 @@ def _attempt_decisions_classification(
     return classification, budget, tokens
 
 
-def _model_runs_task_to_completion(model_name: str) -> bool:
-    """Whether *model_name* is a run-to-completion CLI model (cc/codex).
-
-    Args:
-        model_name: The classifying model.
-
-    Returns:
-        ``True`` for models classification must skip; ``False`` for
-        every other model and for names the registry cannot resolve.
-    """
-    from kiss.core.models.model_info import model_runs_task_to_completion
-
-    try:
-        return bool(model_runs_task_to_completion(model_name))
-    except Exception:
-        return False
-
-
 def _truncate_task(task: str) -> str:
     """Return *task* cut to :data:`CLASSIFIER_TASK_MAX_CHARS` for the classifier.
 
@@ -962,19 +942,6 @@ def _classify_with_llm(
     Returns:
         The :class:`ClassifierRun`; see :func:`classify_task`.
     """
-    if _model_runs_task_to_completion(model_name):
-        # cc/* and codex/* models are full coding agents with native
-        # host tools: KISSAgent hands them the whole prompt in one CLI
-        # invocation, so such a model could actually EXECUTE the
-        # embedded task (editing files outside any worktree) instead of
-        # classifying it.  Classification is skipped for them entirely.
-        logger.info(
-            "Skipping task classification: %s runs tasks to completion",
-            model_name,
-        )
-        return ClassifierRun(
-            classification=None, budget_used=0.0, tokens_used=0, steps=0,
-        )
     cached = cached_classification(task, model_name, model_config)
     if cached is not None:
         return _cached_run(cached)

@@ -24,10 +24,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
 from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -39,8 +36,8 @@ from kiss.agents.third_party_agents.signal.signal_sea import (
     SignalChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
-from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
 # Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
@@ -85,17 +82,12 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         # callbacks run even when a later line of ``setUp`` raises, whereas
         # ``tearDown`` would not, which could leave the destructive fake
         # ``signal-cli`` first on PATH for every later test in the process.
-        self._tmpdir = tempfile.mkdtemp(prefix="rr-review-signal-")
-        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
-        tmp = Path(self._tmpdir)
-        install_cli_script(tmp / "signal-cli", _SPOOL_CLI)
+        tmp = install_cli_on_path(self, "signal-cli", _SPOOL_CLI)
+        self._tmpdir = str(tmp)
         self._spool = tmp / "spool.jsonl"
         self._sends = tmp / "sends.log"
         self._spool.write_text("", encoding="utf-8")
         self._state_path = tmp / "channel_state.json"
-        old_path = os.environ["PATH"]
-        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
-        os.environ["PATH"] = self._tmpdir + os.pathsep + old_path
         self.addCleanup(os.environ.pop, "KISS_TEST_SPOOL", None)
         os.environ["KISS_TEST_SPOOL"] = str(self._spool)
         self.addCleanup(os.environ.pop, "KISS_TEST_SENDS", None)
@@ -141,9 +133,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
 
     def test_foreign_sender_triggers_no_launch_and_no_reply(self) -> None:
         """A foreign sender's message is parked: no task, no reply leak."""
-        self._spool.write_text(
-            _envelope("+1EVE", 111, "attacker text") + "\n", encoding="utf-8"
-        )
+        self._spool.write_text(_envelope("+1EVE", 111, "attacker text") + "\n", encoding="utf-8")
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 0)
@@ -166,9 +156,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
 
     def test_matching_sender_is_handled_and_replied(self) -> None:
         """The configured contact's message launches a task and gets a reply."""
-        self._spool.write_text(
-            _envelope("+1AAA", 222, "hello bot") + "\n", encoding="utf-8"
-        )
+        self._spool.write_text(_envelope("+1AAA", 222, "hello bot") + "\n", encoding="utf-8")
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
@@ -204,9 +192,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
     def test_parked_matching_envelope_is_delivered_next_tick(self) -> None:
         """A matching envelope parked by an earlier tick is handled later."""
         state = load_channel_state(self._state_path)
-        state["pending_envelopes"] = [
-            {"ts": "400", "user": "+1AAA", "text": "parked question"}
-        ]
+        state["pending_envelopes"] = [{"ts": "400", "user": "+1AAA", "text": "parked question"}]
         save_channel_state(self._state_path, state)
         runner = self._make_runner()
         processed = runner.run_once()

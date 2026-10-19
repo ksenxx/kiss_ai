@@ -1472,6 +1472,23 @@ def _widen_content_pane(page) -> None:
     )
 
 
+def _wait_pdf_canvas_width(page, min_width: float) -> None:
+    """Wait until the first PDF page's canvas is at least *min_width* px wide.
+
+    The viewer drops and redraws a page's canvas while it re-renders, so
+    the predicate must survive a moment without any canvas: a thrown
+    ``TypeError`` would fail ``wait_for_function`` outright instead of
+    being polled again.
+    """
+    page.wait_for_function(
+        f"""() => {{
+            const canvas = document.querySelector('{_PDF_PAGE} canvas');
+            return canvas !== null && canvas.width >= {min_width};
+        }}""",
+        timeout=15000,
+    )
+
+
 def _wait_pdf_rendered(page) -> None:
     """Wait for the pdf.js viewer to draw the first page.  A viewer error
     fails the test unless the pdf.js CDN really is unreachable from the
@@ -1607,10 +1624,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
             f" - {fit_width * 1.25}) <= 1.5",
             timeout=10000,
         )
-        page.wait_for_function(
-            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
-            timeout=15000,
-        )
+        _wait_pdf_canvas_width(page, fit_width * 1.25 - 2)
         # Zoom out twice: a quarter smaller than fit width.
         page.click(_PDF_VIEWER + " .pdf-zoom-out")
         page.click(_PDF_VIEWER + " .pdf-zoom-out")
@@ -1676,10 +1690,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         page.locator("#content-tab-list .chat-tab", has_text="report2.pdf").first.click()
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         page.click(_PDF_VIEWER + " .pdf-zoom-in")
-        page.wait_for_function(
-            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
-            timeout=15000,
-        )
+        _wait_pdf_canvas_width(page, fit_width * 1.25 - 2)
         # Closing a PDF tab removes its viewer.
         page.locator("#content-tab-list .chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 1)

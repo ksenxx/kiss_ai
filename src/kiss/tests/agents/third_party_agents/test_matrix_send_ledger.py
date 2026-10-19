@@ -112,9 +112,7 @@ class TestSendMessageLedgerContract:
 
     def test_send_message_raises_on_error_response(self) -> None:
         """A returned RoomSendError-style response surfaces as RuntimeError."""
-        backend, client = _backend_with(
-            _SendErrorResponse("Too Many Requests", "M_LIMIT_EXCEEDED")
-        )
+        backend, client = _backend_with(_SendErrorResponse("Too Many Requests", "M_LIMIT_EXCEEDED"))
         try:
             with pytest.raises(RuntimeError) as excinfo:
                 backend.send_message("!room:example.org", "hello")

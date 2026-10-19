@@ -38,16 +38,10 @@ class BotApiServer(RecordingServer):
 class _BotApiHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802
         server = cast(BotApiServer, self.server)
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+        body = self._read_raw()
         server.requests.append({"path": self.path, "json": json.loads(body.decode("utf-8"))})
         ok = server.response_status == 200
-        payload = json.dumps({"ok": ok, "result": server.updates}).encode("utf-8")
-        self.send_response(server.response_status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._json(server.response_status, {"ok": ok, "result": server.updates})
 
 
 def serve_bot_api() -> Iterator[BotApiServer]:

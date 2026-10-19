@@ -18,7 +18,7 @@
    booleans for numeric keys, and the function's own contract says a
    non-numeric value falls back to ``DEFAULTS['max_budget']``.
 
-3. ``user_assets.ensure_user_asset_from_default`` seeded the asset
+3. ``tricks.ensure_user_asset_from_default`` seeded the asset
    with a plain ``Path.write_text`` — ``open('w')`` truncates first,
    so a concurrent reader (e.g. the autocomplete worker thread calling
    ``read_tricks`` while a command-handler thread seeds
@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 from kiss.agents.sorcar.commit_message import clean_llm_output
-from kiss.server.user_assets import ensure_user_asset_from_default
+from kiss.server.tricks import ensure_user_asset_from_default
 
 
 def _unlink_when_free(path: Path) -> None:

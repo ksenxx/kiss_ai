@@ -19,6 +19,7 @@ from openai.resources.chat.completions import Completions
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked
 from kiss.core.models.model import (
@@ -35,7 +36,11 @@ from kiss.core.models.model import (
     accepted_request_params,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    stop_error,
+    stop_or_stall_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,7 @@ def _openai_fast_multiplier(model_name: str) -> float:
             return factor
     return _OPENAI_FAST_MULTIPLIER
 
+
 # Streaming requests get a per-request ``httpx.Timeout`` instead of the
 # client's scalar 1800 s, so the wait for the response headers is bounded
 # by the stall timeout too (see ``stream_abort.CONNECT_TIMEOUT``).
@@ -166,6 +172,7 @@ def _model_thinking_level(model_name: str) -> str | None:
         ``MODEL_INFO`` entry sets one, otherwise ``None``.
     """
     from kiss.core.models.model_info import MODEL_INFO
+
     info = MODEL_INFO.get(model_name)
     return info.thinking if info is not None else None
 
@@ -447,9 +454,7 @@ def _accumulate_tool_call_deltas(
         tool_call_deltas: The ``delta.tool_calls`` entries of one chunk.
     """
     for tc_delta in tool_call_deltas:
-        slot = accum.setdefault(
-            tc_delta.index, {"id": "", "name": "", "arguments": ""}
-        )
+        slot = accum.setdefault(tc_delta.index, {"id": "", "name": "", "arguments": ""})
         if tc_delta.id:
             slot["id"] = tc_delta.id
         if tc_delta.function:
@@ -509,9 +514,7 @@ class OpenAICompatibleBase(Model):
         self._client_inputs: tuple[Any, ...] | None = None
         thinking_level = _model_thinking_level(self.model_name)
         reasoning_cfg = self.model_config.get("reasoning")
-        has_native_effort = (
-            isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
-        )
+        has_native_effort = isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
         if (
             thinking_level is not None
             and "reasoning_effort" not in self.model_config
@@ -522,10 +525,7 @@ class OpenAICompatibleBase(Model):
 
     def __str__(self) -> str:
         """Return a debug string showing the class, model and endpoint."""
-        return (
-            f"{self.__class__.__name__}"
-            f"(name={self.model_name}, base_url={self.base_url})"
-        )
+        return f"{self.__class__.__name__}(name={self.model_name}, base_url={self.base_url})"
 
     __repr__ = __str__
 
@@ -574,9 +574,7 @@ class OpenAICompatibleBase(Model):
             return list(response.data[0].embedding)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
-            raise KISSError(
-                f"Embedding generation failed for model {model_to_use}: {e}"
-            ) from e
+            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
 
     def get_embeddings(
         self, texts: list[str], embedding_model: str | None = None
@@ -603,9 +601,7 @@ class OpenAICompatibleBase(Model):
             return [list(item.embedding) for item in ordered]
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
-            raise KISSError(
-                f"Embedding generation failed for model {model_to_use}: {e}"
-            ) from e
+            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
 
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
@@ -626,9 +622,7 @@ class OpenAICompatibleBase(Model):
         raise NotImplementedError  # pragma: no cover – overridden by both transports
 
     @classmethod
-    def _attachments_to_content_parts(
-        cls, attachments: list[Attachment]
-    ) -> list[dict[str, Any]]:
+    def _attachments_to_content_parts(cls, attachments: list[Attachment]) -> list[dict[str, Any]]:
         """Convert attachments to a list of content-part dicts.
 
         Unsupported MIME types are dropped (with a warning from
@@ -660,8 +654,15 @@ class OpenAICompatibleBase(Model):
         return self._api_model_name in DEEPSEEK_REASONING_MODELS
 
     def _is_openrouter_anthropic(self) -> bool:
-        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
-        return self.model_name.startswith("openrouter/anthropic/")
+        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter).
+
+        Matches both the direct form (``openrouter/anthropic/...``) and the alias
+        form (``openrouter/~anthropic/claude-*-latest``), the same prefixes
+        ``model_info`` prices with Anthropic cache rates.
+        """
+        from kiss.core.models.model_info import _ANTHROPIC_OPENROUTER_PREFIXES
+
+        return self.model_name.startswith(_ANTHROPIC_OPENROUTER_PREFIXES)
 
     def _base_url_is_openrouter(self) -> bool:
         """Whether this adapter's endpoint host is OpenRouter (any ``openrouter.ai`` host)."""
@@ -865,9 +866,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         )
         return None
 
-    def _deliver_tool_result_attachments(
-        self, attachments: list[Attachment]
-    ) -> None:
+    def _deliver_tool_result_attachments(self, attachments: list[Attachment]) -> None:
         """Re-attach tool-result bytes as Chat Completions content parts.
 
         The ``tool`` role only accepts string content, so binary payloads a
@@ -1106,8 +1105,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             A tuple of (function_calls, raw_tool_calls) for conversation storage.
         """
         entries = [
-            (accum[idx]["id"], accum[idx]["name"], accum[idx]["arguments"])
-            for idx in sorted(accum)
+            (accum[idx]["id"], accum[idx]["name"], accum[idx]["arguments"]) for idx in sorted(accum)
         ]
         return OpenAICompatibleModel._build_tool_call_lists(entries)
 
@@ -1125,10 +1123,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         if not message.tool_calls:
             return [], []
-        entries = [
-            (tc.id, tc.function.name, tc.function.arguments)
-            for tc in message.tool_calls
-        ]
+        entries = [(tc.id, tc.function.name, tc.function.arguments) for tc in message.tool_calls]
         return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
@@ -1189,11 +1184,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         )
         if err is None:
             return ""
-        message = (
-            err.get("message")
-            if isinstance(err, dict)
-            else getattr(err, "message", None)
-        )
+        message = err.get("message") if isinstance(err, dict) else getattr(err, "message", None)
         return str(message or err)
 
     def _raise_for_finish_reason(self, finish_reason: str | None, response: Any) -> None:
@@ -1246,8 +1237,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             # Any usage the gateway reported alongside the error was billed.
             self._rejected_response = response
             raise KISSError(
-                "Chat Completions returned no choices"
-                + (f": {message}" if message else "")
+                "Chat Completions returned no choices" + (f": {message}" if message else "")
             )
         self._raise_for_finish_reason(getattr(choices[0], "finish_reason", None), response)
 
@@ -1287,18 +1277,14 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
-        kwargs["timeout"] = httpx.Timeout(
-            self._stream_stall_timeout, connect=CONNECT_TIMEOUT
-        )
+        kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
         content = ""
         tool_calls_accum: dict[int, dict[str, str]] = {}
         response = None
         last_chunk = None
         finish_reason: str | None = None
         watchdog_name = (
-            "openai-tools-stream-abort-watchdog"
-            if adaptive
-            else "openai-stream-abort-watchdog"
+            "openai-tools-stream-abort-watchdog" if adaptive else "openai-stream-abort-watchdog"
         )
         try:
             stream = (
@@ -1323,25 +1309,33 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                         # may put the usage on a chunk that also carries
                         # content and a callback may raise (Stop) on it.
                         response = self._rejected_response = chunk
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    if getattr(choice, "finish_reason", None):
-                        finish_reason = choice.finish_reason
-                    delta = choice.delta
-                    if not delta:
-                        continue
-                    reasoning = _delta_reasoning_text(delta)
-                    if reasoning:
-                        self._open_thinking_if_closed()
-                        self._invoke_token_callback(reasoning)
-                    if delta.content:
-                        self._close_thinking_if_open()
-                        content += delta.content
-                        self._invoke_token_callback(delta.content)
-                    if delta.tool_calls:
-                        self._close_thinking_if_open()
-                        _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
+                    delta = None
+                    if chunk.choices:
+                        choice = chunk.choices[0]
+                        if getattr(choice, "finish_reason", None):
+                            finish_reason = choice.finish_reason
+                        delta = choice.delta
+                    if delta:
+                        reasoning = _delta_reasoning_text(delta)
+                        if reasoning:
+                            self._open_thinking_if_closed()
+                            self._invoke_token_callback(reasoning)
+                        if delta.content:
+                            self._close_thinking_if_open()
+                            content += delta.content
+                            self._invoke_token_callback(delta.content)
+                        if delta.tool_calls:
+                            self._close_thinking_if_open()
+                            _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
+                    if finish_reason is not None and response is not None:
+                        # The answer and its billing are both complete; only
+                        # ``[DONE]`` can follow.  Waiting for it let a
+                        # connection that went silent here trip the stall
+                        # watchdog, and the retry billed the finished turn
+                        # again.  Leaving the loop closes the stream (the
+                        # watched generator's cleanup), as v2 does on
+                        # ``response.completed``.
+                        break
             except (httpx.TimeoutException, APITimeoutError) as err:
                 # The per-request clock fired (no headers, or no bytes
                 # between events) before the watchdog did.  A Stop pressed
@@ -1369,6 +1363,14 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     finish_reason,
                     err,
                 )
+        # Leaving the loop early skips the post-loop stop check inside
+        # ``stop_aware_events`` (closing the generator runs only its
+        # cleanup), so a Stop pressed during the stream is honoured here;
+        # the usage already recorded above is billed to the stopped run via
+        # ``take_partial_usage_response``.  A no-op after a normal EOF,
+        # where that check already ran.
+        if stop_signal.stop_requested():
+            raise stop_error()
         self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
@@ -1424,6 +1426,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
     def _normalized_conversation_checked(self) -> list[dict[str, Any]]:
         """Normalize the conversation for the API, raising when nothing remains.
 
+        ``initialize()`` stores the configured ``system_instruction`` as the
+        first conversation message, but a conversation handed over from a
+        Responses / Anthropic / Gemini model (``set_model``, the fallback
+        switch) carries none: those transports send the prompt out of band.
+        The prompt is re-inserted here so every request carries it.
+
         Returns:
             The normalized conversation messages.
 
@@ -1437,6 +1445,11 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 "content that was filtered out. At least one message with "
                 "non-whitespace content is required."
             )
+        system_instruction = self.system_instruction_text()
+        if system_instruction and not any(
+            message.get("role") == "system" for message in normalized
+        ):
+            normalized.insert(0, {"role": "system", "content": system_instruction})
         return normalized
 
     def generate(self) -> tuple[str, Any]:
@@ -1673,9 +1686,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             elif ptype == "image_url":
                 url = (part.get("image_url") or {}).get("url", "")
                 if url:
-                    converted.append(
-                        {"type": "input_image", "image_url": url, "detail": "auto"}
-                    )
+                    converted.append({"type": "input_image", "image_url": url, "detail": "auto"})
             elif ptype == "file":
                 file_info = part.get("file") or {}
                 file_data = file_info.get("file_data", "")
@@ -1691,8 +1702,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 converted.append(part)
             else:
                 logger.warning(
-                    "Dropping unconvertible content part %r for the "
-                    "Responses API.",
+                    "Dropping unconvertible content part %r for the Responses API.",
                     ptype,
                 )
         return converted
@@ -1712,11 +1722,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
           ``function_call`` items.
         * Content-part lists are mapped to ``input_*`` parts.
 
+        The conversation goes through :meth:`_normalized_conversation_checked`
+        so a hand-off conversation without a system message gets the
+        configured prompt as its first item: the delegate is built without
+        ``system_instruction`` and sends no ``instructions``, so this item
+        is the only copy of the prompt the request carries.
+
         Returns:
             The Responses-API ``input`` array.
         """
         items: list[dict[str, Any]] = []
-        for msg in self._normalize_conversation_for_api(self.conversation):
+        for msg in self._normalized_conversation_checked():
             tool_calls = msg.get("tool_calls") or []
             if msg.get("role") == "assistant" and tool_calls:
                 cached = self._delegate_raw_items.get(tool_calls[0].get("id", ""))
@@ -1727,9 +1743,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         return items
 
     @classmethod
-    def _chat_message_to_responses_items(
-        cls, msg: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _chat_message_to_responses_items(cls, msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Convert one Chat-Completions message to Responses ``input`` items.
 
         * ``role="tool"`` messages become ``function_call_output`` items.
@@ -1776,9 +1790,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                         "type": "function_call",
                         "call_id": tc.get("id", ""),
                         "name": fn.get("name", ""),
-                        "arguments": args
-                        if isinstance(args, str)
-                        else json.dumps(args or {}),
+                        "arguments": args if isinstance(args, str) else json.dumps(args or {}),
                     }
                 )
             return items
@@ -1817,7 +1829,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ``(function_calls, content, response)`` matching
             :meth:`generate_and_process_with_tools`.
         """
-        from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+        import kiss.core.models as models
+
+        # The lazy import, serialized by ``import_provider_module``.
+        model2_cls = models.OpenAICompatibleModel2
 
         delegate = self._responses_delegate
         if delegate is None:
@@ -1826,7 +1841,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 for k, v in self.model_config.items()
                 if k not in ("system_instruction", "use_responses_api")
             }
-            delegate = OpenAICompatibleModel2(
+            delegate = model2_cls(
                 model_name=self.model_name,
                 base_url=self.base_url,
                 api_key=self.api_key,
@@ -1875,12 +1890,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 self._rejected_response = rejected
             raise
 
-        new_items = [
-            item
-            for item in delegate.conversation[len(input_items) :]
-            if isinstance(item, dict)
-            and item.get("type") != "_kiss_pending_tool_result_attachment"
-        ]
+        # Everything the delegate appended is this turn's native output
+        # (message / reasoning / function_call items); only its
+        # add_function_results, never called here, appends anything else.
+        new_items = list(delegate.conversation[len(input_items) :])
         raw_tool_calls = [
             {
                 "id": fc["id"],
@@ -1996,9 +2009,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         if self._responses_delegate is not None:
             usage_obj = _get_attr_or_key(response, "usage")
             if _get_attr_or_key(usage_obj, "input_tokens") is not None:
-                return (
-                    self._responses_delegate
-                    .extract_input_output_token_counts_from_response(response)
+                return self._responses_delegate.extract_input_output_token_counts_from_response(
+                    response
                 )
         if hasattr(response, "usage") and response.usage:
             usage = response.usage

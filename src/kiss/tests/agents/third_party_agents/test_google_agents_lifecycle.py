@@ -34,6 +34,7 @@ import kiss.agents.third_party_agents.gdocs.gdocs_sea as gdocs_mod
 import kiss.agents.third_party_agents.gdrive.gdrive_sea as gdrive_mod
 import kiss.agents.third_party_agents.gsheets.gsheets_sea as gsheets_mod
 from kiss.tests.agents.third_party_agents.composio_test_utils import FakeComposioServer, connect
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 
 
 @dataclass(frozen=True)
@@ -170,10 +171,6 @@ def _tool_names(agent: Any) -> list[str]:
     return [t.__name__ for t in agent._get_tools()]
 
 
-def _tools(agent: Any) -> dict[str, Any]:
-    return {t.__name__: t for t in agent._get_tools()}
-
-
 @pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
 def test_unauthenticated_agent_exposes_only_auth_tools(spec: _GoogleAgent) -> None:
     """A fresh agent is unauthenticated and exposes exactly the four auth tools."""
@@ -189,7 +186,7 @@ def test_check_auth_unauthenticated_explains_setup(
 ) -> None:
     """check_*_auth names the authenticate tool and the missing Composio key."""
     monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
-    msg = _tools(spec.agent())[f"check_{spec.service}_auth"]()
+    msg = tools_by_name(spec.agent())[f"check_{spec.service}_auth"]()
     assert f"Not authenticated with {spec.label}" in msg
     assert f"authenticate_{spec.service}" in msg
     assert "No Composio API key" in msg
@@ -201,7 +198,7 @@ def test_connect_link_flow_authenticates_agent(
 ) -> None:
     """authenticate -> user approves -> finish unlocks the backend tools."""
     agent = spec.agent()
-    tools = _tools(agent)
+    tools = tools_by_name(agent)
     started = json.loads(tools[f"authenticate_{spec.service}"]())
     assert started["status"] == "consent_required"
     composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
@@ -214,7 +211,7 @@ def test_connect_link_flow_authenticates_agent(
     # Channel protocol methods are not LLM tools.
     assert "connect" not in names
     assert "poll_messages" not in names
-    assert json.loads(_tools(agent)[f"check_{spec.service}_auth"]())["ok"] is True
+    assert json.loads(tools_by_name(agent)[f"check_{spec.service}_auth"]())["ok"] is True
 
 
 @pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
@@ -224,7 +221,7 @@ def test_clear_auth_removes_connection_and_relocks_tools(
     """clear_*_auth deletes the Composio connection and re-locks the backend tools."""
     account = connect(composio, spec.service)
     agent = spec.agent()
-    result = _tools(agent)[f"clear_{spec.service}_auth"]()
+    result = tools_by_name(agent)[f"clear_{spec.service}_auth"]()
     assert "cleared" in result.lower()
     assert composio.deleted == [account]
     assert agent._is_authenticated() is False

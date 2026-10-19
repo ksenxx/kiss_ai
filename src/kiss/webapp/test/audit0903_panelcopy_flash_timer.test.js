@@ -148,10 +148,59 @@ async function testFallbackCopyStillFlashes() {
   console.log('  ok - the execCommand fallback flashes');
 }
 
+// Race: the async clipboard write of a first click settled AFTER a
+// faster second click's, so its (stale) outcome overwrote the button:
+// a slow failing first copy painted "Copy failed" over the second
+// click's check mark.  Each click takes a new generation and only the
+// latest one's outcome reaches the button.
+async function testStaleClipboardResultIsDropped() {
+  const {win} = makePage();
+  let rejectFirst = null;
+  let calls = 0;
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: () => {
+        calls += 1;
+        // The first write hangs until the test fails it; the second
+        // succeeds at once.
+        if (calls === 1) return new Promise((_res, rej) => { rejectFirst = rej; });
+        return Promise.resolve();
+      },
+    },
+  });
+  // Both the slow write's fallback and the second click's succeed or
+  // fail on their own: the fallback of the first is made to fail.
+  win.document.execCommand = () => false;
+  const panel = win.document.getElementById('panel');
+  panel.textContent = 'raced text';
+  win.PanelCopy.addCopyButton(panel);
+  const btn = panel.querySelector('.panel-copy-btn');
+
+  click(win, btn);
+  click(win, btn);
+  await sleep(0);
+  assert.strictEqual(calls, 2);
+  assert.ok(isCheck(btn) && btn.classList.contains('copied'), 'the second click flashed its check');
+
+  // The first click's write now fails (and its fallback too).
+  rejectFirst(new Error('denied'));
+  await sleep(0);
+  await sleep(0);
+  assert.ok(
+    isCheck(btn) && btn.classList.contains('copied') && !btn.classList.contains('copy-failed'),
+    "a stale first-click failure must not overwrite the second click's check mark",
+  );
+  assert.strictEqual(btn.title, 'Copied');
+  win.close();
+  console.log('  ok - a stale clipboard outcome is dropped');
+}
+
 async function main() {
   await testStaleTimerDoesNotEndSecondFlash();
   await testSecondPanelFlashesIndependently();
   await testFallbackCopyStillFlashes();
+  await testStaleClipboardResultIsDropped();
   console.log('audit0903_panelcopy_flash_timer.test.js: all passed.');
 }
 

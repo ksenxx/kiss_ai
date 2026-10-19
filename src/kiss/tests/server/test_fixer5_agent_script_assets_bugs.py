@@ -30,7 +30,7 @@ from typing import Any
 
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import SeaError
-from kiss.server.user_assets import ensure_user_asset_from_default
+from kiss.server.tricks import ensure_user_asset_from_default
 
 
 def _load_tools(sea_path: Any) -> list:

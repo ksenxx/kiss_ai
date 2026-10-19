@@ -102,7 +102,7 @@ def bedrock_stream(sse_chunks: list[bytes]) -> list[bytes]:
     for chunk in sse_chunks:
         for line in chunk.decode().splitlines():
             if line.startswith("data: "):
-                data = line[len("data: "):].encode()
+                data = line[len("data: ") :].encode()
                 payload = json.dumps({"bytes": base64.b64encode(data).decode()})
                 frames.append(_event_stream_frame(payload.encode()))
     return frames
@@ -328,6 +328,154 @@ def test_configured_providers_tracks_bedrock_credentials(monkeypatch) -> None:
     _set_aws(monkeypatch, AWS_ACCESS_KEY_ID="AKIA")
     assert model_info.bedrock_credentials_configured() is False
     _set_aws(monkeypatch, AWS_ACCESS_KEY_ID="AKIA", AWS_SECRET_ACCESS_KEY="secret")
+    assert model_info.bedrock_credentials_configured() is True
+
+
+def test_ambient_irsa_token_configures_bedrock(monkeypatch, tmp_path) -> None:
+    """An EKS/IRSA web-identity token counts only together with its role ARN."""
+    _set_aws(monkeypatch)
+    token = tmp_path / "token"
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(token))
+    monkeypatch.setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/s10s")
+    assert model_info.bedrock_credentials_configured() is False  # token file missing
+    token.write_text("jwt", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.delenv("AWS_ROLE_ARN")  # botocore raises InvalidConfigError here
+    assert model_info.bedrock_credentials_configured() is False
+    # The profile form of the same configuration (role_arn + token file).
+    config = tmp_path / "config"
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE")
+    config.write_text(
+        f"[default]\nrole_arn = arn:aws:iam::1:role/r\nweb_identity_token_file = {token}\n",
+        encoding="utf-8",
+    )
+    assert model_info.bedrock_credentials_configured() is True
+    # The environment wins over the profile, even when it is exported empty.
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "")
+    assert model_info.bedrock_credentials_configured() is False
+    config.write_text(
+        "[default]\nrole_arn = arn:aws:iam::1:role/r\nweb_identity_token_file = /nonexistent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(token))
+    assert model_info.bedrock_credentials_configured() is True
+    # IRSA comes before the shared files in the chain: a stale half pair there is irrelevant.
+    credentials = tmp_path / "credentials"
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+    credentials.write_text("[default]\naws_access_key_id = stale\n", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE")
+    config.unlink()
+    assert model_info.bedrock_credentials_configured() is False  # now the half pair aborts
+
+
+def test_ambient_container_and_env_pair_configure_bedrock(monkeypatch) -> None:
+    """ECS container credentials and an exported key pair count."""
+    _set_aws(monkeypatch)
+    assert model_info.bedrock_credentials_configured() is False
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials/id")
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials")
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "")  # exported empty: no endpoint
+    assert model_info.bedrock_credentials_configured() is False
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+    assert model_info.bedrock_credentials_configured() is False  # half a pair: botocore refuses
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    assert model_info.bedrock_credentials_configured() is True
+
+
+def test_ambient_profile_configures_bedrock(monkeypatch, tmp_path) -> None:
+    """``AWS_PROFILE`` counts when the selected profile can source credentials."""
+    _set_aws(monkeypatch)
+    config = tmp_path / "config"
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_PROFILE", "dev")
+    assert model_info.bedrock_credentials_configured() is False  # ProfileNotFound
+    config.write_text("[profile dev]\nregion = us-west-2\n", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is False  # region alone
+    config.write_text(
+        "[profile dev]\nsso_session = corp\n[sso-session corp]\nsso_region = us-east-1\n",
+        encoding="utf-8",
+    )
+    assert model_info.bedrock_credentials_configured() is False  # botocore skips SSO here
+    config.write_text(
+        "[profile dev]\nsso_session = corp\nsso_account_id = 1\nsso_role_name = r\n",
+        encoding="utf-8",
+    )
+    assert model_info.bedrock_credentials_configured() is True
+    config.write_text(
+        "[profile dev]\ncredential_process = /usr/bin/get-creds\naws_access_key_id = half\n",
+        encoding="utf-8",
+    )
+    # The process is NOT run, and it precedes the config-file provider that
+    # would choke on the half pair.
+    assert model_info.bedrock_credentials_configured() is True
+    config.write_text(
+        "[profile dev]\nrole_arn = arn:aws:iam::1:role/r\nsource_profile = base\n", encoding="utf-8"
+    )
+    assert model_info.bedrock_credentials_configured() is True
+
+
+def test_ambient_shared_files_follow_botocore(monkeypatch, tmp_path) -> None:
+    """The shared files are read the way botocore reads them, not by keyword."""
+    _set_aws(monkeypatch)
+    config = tmp_path / "config"
+    credentials = tmp_path / "credentials"
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+    config.write_text(
+        "[default]\nregion = us-west-2\n# credential_process = unused\n", encoding="utf-8"
+    )
+    assert model_info.bedrock_credentials_configured() is False  # a comment is not a directive
+    credentials.write_text(
+        "[prod]\naws_access_key_id = AKIA\naws_secret_access_key = s\n", encoding="utf-8"
+    )
+    assert model_info.bedrock_credentials_configured() is False  # an unselected profile
+    credentials.write_text(
+        "[default]\nAWS_ACCESS_KEY_ID = AKIA\nAWS_SECRET_ACCESS_KEY = s\n", encoding="utf-8"
+    )
+    assert model_info.bedrock_credentials_configured() is True  # botocore lower-cases keys
+    credentials.write_text("[default\nbroken", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is False  # unparsable file
+    # ``$HOME`` in an override is expanded; an EMPTY override is a missing file.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "$HOME/credentials")
+    credentials.write_text(
+        "[default]\naws_access_key_id = AKIA\naws_secret_access_key = s\n", encoding="utf-8"
+    )
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "")
+    assert model_info.bedrock_credentials_configured() is False
+
+
+def test_ambient_legacy_credential_files_configure_bedrock(monkeypatch, tmp_path) -> None:
+    """The legacy EC2 credential file and boto config are part of the chain too."""
+    _set_aws(monkeypatch)
+    legacy = tmp_path / "ec2-credentials"
+    monkeypatch.setenv("AWS_CREDENTIAL_FILE", str(legacy))
+    assert model_info.bedrock_credentials_configured() is False
+    legacy.write_text("AWSAccessKeyId=AKIA\n", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is False  # botocore: KeyError
+    legacy.write_text("AWSAccessKeyId=AKIA\nAWSSecretKey=s\n", encoding="utf-8")
+    assert model_info.bedrock_credentials_configured() is True
+    monkeypatch.setenv("AWS_CREDENTIAL_EXPIRATION", "not-a-date")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+    assert model_info.bedrock_credentials_configured() is False  # botocore: ParserError
+    monkeypatch.delenv("AWS_CREDENTIAL_EXPIRATION")
+    assert model_info.bedrock_credentials_configured() is True
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(name)
+    monkeypatch.delenv("AWS_CREDENTIAL_FILE")
+    boto = tmp_path / "boto.cfg"
+    monkeypatch.setenv("BOTO_CONFIG", str(boto))
+    boto.write_text(
+        "[Credentials]\naws_access_key_id = AKIA\naws_secret_access_key = s\n", encoding="utf-8"
+    )
     assert model_info.bedrock_credentials_configured() is True
 
 
@@ -573,10 +721,14 @@ def test_region_selects_endpoint_and_defaults_to_us_east_1(monkeypatch) -> None:
     _set_aws(monkeypatch, AWS_BEARER_TOKEN_BEDROCK="b")
     adapter = AnthropicModel(_OPUS, api_key="b", bedrock=True)
     adapter.initialize("hi")
-    assert str(adapter.client.base_url).startswith("https://bedrock-runtime.us-east-1.amazonaws.com")
+    assert str(adapter.client.base_url).startswith(
+        "https://bedrock-runtime.us-east-1.amazonaws.com"
+    )
     _set_aws(monkeypatch, AWS_BEARER_TOKEN_BEDROCK="b", AWS_REGION="eu-central-1")
     adapter.initialize("hi")
-    assert str(adapter.client.base_url).startswith("https://bedrock-runtime.eu-central-1.amazonaws.com")
+    assert str(adapter.client.base_url).startswith(
+        "https://bedrock-runtime.eu-central-1.amazonaws.com"
+    )
 
 
 def test_client_reused_until_credentials_change(monkeypatch) -> None:
@@ -874,10 +1026,16 @@ def test_hand_written_bedrock_entry_gets_the_anthropic_cache_rules(monkeypatch, 
     path.write_text(
         json.dumps(
             {
-                name: {"context_length": 500000, "input_price_per_1M": 4.0,
-                       "output_price_per_1M": 20.0},
-                haiku: {"context_length": 1000000, "input_price_per_1M": 0.1,
-                        "output_price_per_1M": 0.5},
+                name: {
+                    "context_length": 500000,
+                    "input_price_per_1M": 4.0,
+                    "output_price_per_1M": 20.0,
+                },
+                haiku: {
+                    "context_length": 1000000,
+                    "input_price_per_1M": 0.1,
+                    "output_price_per_1M": 0.5,
+                },
             }
         )
     )
@@ -978,8 +1136,11 @@ def test_cold_import_reprices_old_seeds_and_keeps_unknown_bedrock_entries(tmp_pa
                     "input_price_per_1M": claude.input_price_per_1M,
                     "output_price_per_1M": claude.output_price_per_1M,
                 },
-                unknown: {"context_length": 1000, "input_price_per_1M": 7.0,
-                          "output_price_per_1M": 70.0},
+                unknown: {
+                    "context_length": 1000,
+                    "input_price_per_1M": 7.0,
+                    "output_price_per_1M": 70.0,
+                },
             }
         )
     )

@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents.notion.notion_sea import (
     NotionChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -326,7 +327,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_notion_auth explains how to configure when unauthenticated."""
     agent = NotionAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_notion_auth"]()
     assert "authenticate_notion" in msg
     assert "https://www.notion.so/profile/integrations" in msg
@@ -336,7 +337,7 @@ def test_check_auth_unauthenticated_message() -> None:
 def test_authenticate_persists_config_and_exposes_tools() -> None:
     """authenticate_notion persists config (0600) and unlocks backend tools."""
     agent = NotionAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_notion"](f"  {_TOKEN} "))
     assert result["ok"] is True
 
@@ -370,7 +371,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
     tools still locked.
     """
     agent = NotionAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     config_dir = _config.path.parent
     if config_dir.is_dir():
         shutil.rmtree(config_dir)
@@ -390,7 +391,7 @@ def test_authenticate_persistence_failure_returns_ok_false() -> None:
 def test_authenticate_rejects_empty_token() -> None:
     """authenticate_notion refuses an empty or whitespace token."""
     agent = NotionAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cannot be empty" in tools["authenticate_notion"]("   ")
     assert not _config.path.exists()
 

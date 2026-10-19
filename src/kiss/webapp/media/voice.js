@@ -12,14 +12,11 @@
   const inp = document.getElementById('task-input');
   if (!btn || !inp) return;
 
-  // "Hey" + in-vocabulary sound-alikes of "Sorcar" (mirrors
-  // _TRANSCRIPT_WAKE_ALIASES in kiss/server/speech.py).
-  const WAKE_ALIASES = [
-    'hey sorcar',
-    'hey sir car',
-    'hey sore car',
-    'hey sar car',
-  ];
+  // The wake word (mirrors WAKE_WORD in kiss/server/speech.py).  It is
+  // in the Vosk model's vocabulary, long and rare in conversation, so
+  // the grammar cannot force-fit everyday speech ("hey soccer", "sorry
+  // car", ...) onto it the way the earlier "Hey Sorcar" allowed.
+  const WAKE_ALIASES = ['abracadabra'];
   const COOLDOWN_MS = 2000;
   const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
@@ -213,7 +210,7 @@
   let voskLoadPromise = null;
 
   let lastUiState = 'off';
-  let lastUiTip = "Voice trigger: listen for the words 'Hey Sorcar'";
+  let lastUiTip = "Voice trigger: listen for the word 'Abracadabra'";
   let lastFlashCls = null;
 
   function applyUiClasses() {
@@ -310,8 +307,8 @@
     let tip;
     if (state === 'listening') {
       tip =
-        "Voice trigger on: say 'Hey Sorcar' and pause briefly " +
-        '(click to turn off)';
+        "Voice trigger on: say 'Abracadabra' and pause " +
+        'briefly (click to turn off)';
       notifyUser(null, null);
     } else if (state === 'loading') {
       tip = 'Voice trigger: starting ...';
@@ -320,7 +317,7 @@
       tip = 'Voice trigger error: ' + plain;
       notifyUser('error', plain);
     } else {
-      tip = "Voice trigger: listen for the words 'Hey Sorcar'";
+      tip = "Voice trigger: listen for the word 'Abracadabra'";
     }
     lastUiState = state;
     lastUiTip = tip;
@@ -390,6 +387,17 @@
     if (!wrap) return;
     if (on) wrap.classList.add('listening');
     else wrap.classList.remove('listening');
+  }
+
+  /**
+   * Show "transcribing" for up to 60 s while a posted round still
+   * awaits its transcript (that timer retires the round when none
+   * comes), else clear the flash; a wake's overlay comes down either
+   * way.
+   */
+  function flashPendingRounds() {
+    if (roundOwners.length > 0) flash('voice-transcribing', 60000);
+    else flash(null);
   }
 
   function flash(cls, timeoutMs) {
@@ -622,8 +630,7 @@
       // NEWEST one (this capture's own), never the oldest, which
       // is still waiting for its words.
       retireNewestRound();
-      if (roundOwners.length > 0) flash('voice-transcribing', 60000);
-      else flash(null);
+      flashPendingRounds();
       return;
     }
     flash('voice-transcribing', 60000);
@@ -686,12 +693,12 @@
   }
 
   // How long a speech-model load may take before it is declared failed.
-  // The vendored createModel settles only when its worker posts a 'load'
-  // message; a worker that fails to boot at all (its blob: URL blocked by
-  // CSP, a top-level script/WASM crash) fires only a Worker 'error' event
-  // that nobody listens for, so without a bound the promise never settles,
-  // `busy` stays true for the page lifetime, and the mic is wedged on
-  // 'loading' with every re-enable deferring to `busy`.
+  // The vendored createModel settles when its worker posts 'load' or
+  // fires a Worker 'error' event; a worker that does neither (the model
+  // fetch hangs on a dead tunnel, WASM init stalls) leaves the promise
+  // pending for ever, so without a bound `busy` stays true for the page
+  // lifetime and the mic is wedged on 'loading' with every re-enable
+  // deferring to `busy`.
   const MODEL_LOAD_TIMEOUT_MS =
     typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
       ? cfg.modelLoadTimeoutMs
@@ -731,7 +738,7 @@
           clearTimeout(timer);
           // Realm-agnostic error check (`instanceof Error` fails across
           // window boundaries): anything carrying a message is reported
-          // as-is, the vendored bare reject() gets a message of its own.
+          // as-is; a rejection without one gets a message of its own.
           reject(
             err && err.message ? err : new Error('failed to load speech model'),
           );
@@ -750,13 +757,15 @@
    * bumped the generation and torn that pipeline down already: then
    * there is nothing to do.  A wake's "Listening ..." overlay and
    * flash come down with the pipeline; the rounds whose audio was
-   * already posted keep their owners, their transcripts still stand.
+   * already posted keep their owners (and the 60 s "transcribing"
+   * timer that retires them if no transcript comes), their
+   * transcripts still stand.
    */
   function onMicEnded(gen) {
     if (gen !== voiceGen) return;
     ++voiceGen;
     stopBrowserPipeline();
-    flash(null);
+    flashPendingRounds();
     enabled = false;
     persist();
     setUi(

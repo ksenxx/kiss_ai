@@ -228,7 +228,12 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         """Cancel waits for ``STATE_LOCK`` in the executor, so the loop keeps serving."""
         reader, writer = await self._arm()
         held = threading.Event()
-        holder = threading.Thread(target=_hold_state_lock, args=(0.6, held), daemon=True)
+        # A long hold with a bound at half of it: a loop blocked behind
+        # the lock stalls for the rest of the hold, while a loaded box
+        # (40 pytest processes on Windows) has descheduled this process
+        # for 0.9 s between two heartbeats.
+        hold = 3.0
+        holder = threading.Thread(target=_hold_state_lock, args=(hold, held), daemon=True)
         holder.start()
         self.assertTrue(held.wait(2.0))
         await self._send(writer, {"type": "updateWhenIdle", "cancel": True})
@@ -244,7 +249,7 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
             before = loop.time()
             await asyncio.sleep(0.02)
             worst_gap = max(worst_gap, loop.time() - before - 0.02)
-        self.assertLess(worst_gap, 0.25, "the event loop stalled behind the lock holder")
+        self.assertLess(worst_gap, hold / 2, "the event loop stalled behind the lock holder")
 
         await self._wait_pending_idle(reader, False)
         self.assertIsNone(self.server._update_when_idle_task)

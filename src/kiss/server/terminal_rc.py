@@ -40,6 +40,7 @@ import os
 from pathlib import Path
 
 from kiss.core.config import kiss_home
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -219,10 +220,10 @@ def _write(path: Path, text: str) -> None:
             return
     except OSError:
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # Staged and renamed into place (unique temp name, so two daemons
+    # sharing the home never clobber each other's staging file); the
+    # shell is the only reader, so the private default mode is fine.
+    atomic_write_text(path, text)
 
 
 def with_persistent_history(argv: list[str]) -> tuple[list[str], dict[str, str]]:

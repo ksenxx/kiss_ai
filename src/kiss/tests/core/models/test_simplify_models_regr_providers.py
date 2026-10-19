@@ -47,7 +47,6 @@ from kiss.core.models.gemini_model import (
     _tool_result_response_dict,
 )
 from kiss.core.models.model import (
-    CLI_SYSTEM_PROMPT_HEADER,
     Attachment,
     encode_binary_attachment,
 )
@@ -704,16 +703,13 @@ class TestCodexModel:
         m.initialize("q1")
         m.conversation.append({"role": "assistant", "content": "a1"})
         m.conversation.append({"role": "tool", "content": "t1"})
-        assert m._build_prompt() == (
-            "[User]: q1\n\n[Assistant]: a1\n\n[Tool Result]: t1"
-            + CLI_SYSTEM_PROMPT_HEADER
-            + "SYS"
-        )
+        assert m._build_prompt() == "[User]: q1\n\n[Assistant]: a1\n\n[Tool Result]: t1"
 
     def test_build_prompt_single_turn_with_system(self) -> None:
+        """The system instruction goes to the instructions file, not the prompt."""
         m = CodexModel("codex/gpt-5-codex", model_config={"system_instruction": "SYS"})
         m.initialize("q1")
-        assert m._build_prompt() == "q1" + CLI_SYSTEM_PROMPT_HEADER + "SYS"
+        assert m._build_prompt() == "q1"
 
     def test_find_in_candidate_paths(self, tmp_path) -> None:
         exe = tmp_path / "codex"
@@ -739,11 +735,6 @@ class TestCodexModel:
         events = [
             {"type": "thread.started", "thread_id": "th_1"},
             {"type": "turn.started"},
-            {"type": "item.started", "item": {"type": "command_execution", "command": "ls"}},
-            {
-                "type": "item.completed",
-                "item": {"type": "command_execution", "aggregated_output": "file.txt"},
-            },
             {"type": "item.completed", "item": {"type": "agent_reasoning", "text": "hmm"}},
             {"type": "item.completed", "item": {"type": "agent_message", "text": "Hello"}},
             {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 4}},
@@ -757,10 +748,8 @@ class TestCodexModel:
             "usage": {"input_tokens": 3, "output_tokens": 4},
         }
         assert "Hello" in tokens
-        assert "$ ls\n" in tokens
-        assert "file.txt" in tokens
         assert "hmm" in tokens
-        assert thinking == [True, False, True, False, True, False]
+        assert thinking == [True, False]
 
     def test_parse_stream_events_ignores_unknown_event_types(self) -> None:
         """Event types ``codex exec --json`` never emits are skipped.
@@ -860,7 +849,6 @@ class TestClaudeCodeModel:
         content, result = m._parse_stream_events(json.dumps(e) for e in events)
         assert content == "partial"
         assert result["usage"] == {"input_tokens": 1}
-        assert m._pre_result_content == "partial"
 
         m2 = self.make_cc()
         events2 = [

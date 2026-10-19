@@ -41,7 +41,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _persisted_task_id,
 )
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
-from kiss.server import agent_state
+from kiss.server import agent_state, sidebar_panels
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import stamp_event_ts
 
@@ -166,6 +166,7 @@ class _MergeFlowMixin:
         message: str,
         commit_message: str | None = None,
         work_dir: str = "",
+        reply_to: str = "",
     ) -> dict[str, Any]:
         """Report the outcome of a manual Git Commit and return the event.
 
@@ -183,6 +184,10 @@ class _MergeFlowMixin:
             commit_message: Full commit message (only when committed).
             work_dir: The working directory the commit targeted
                 (carried as ``workDir``).
+            reply_to: The connection id of a daemon-link peer whose
+                forwarded Git Commit this is: the event goes to that
+                connection alone, as the reply to its request, and
+                nothing is broadcast here.
 
         Returns:
             The event dict.
@@ -190,13 +195,6 @@ class _MergeFlowMixin:
         # Same stable id as the "Auto-generating commit message…"
         # toast, so the outcome replaces it in place (the page
         # dedups toasts by id) instead of stacking a second one.
-        self.printer.broadcast({
-            "type": "notification",
-            "id": f"manual-commit:{tab_id}",
-            "severity": "info" if success else "error",
-            "message": message,
-            "tabId": tab_id,
-        })
         event: dict[str, Any] = {
             "type": "autocommit_done",
             "success": success,
@@ -209,10 +207,25 @@ class _MergeFlowMixin:
             event["commitMessage"] = commit_message
         if work_dir:
             event["workDir"] = work_dir
+        if reply_to:
+            # Another daemon's forwarded commit: the outcome is its
+            # reply alone, and that daemon tells its own clients (a
+            # tab of its bound to this machine relays this daemon's
+            # tab-stamped events, so a broadcast here would reach them
+            # a second time).
+            self.printer.broadcast({**event, "connId": reply_to})
+            return event
+        self.printer.broadcast({
+            "type": "notification",
+            "id": f"manual-commit:{tab_id}",
+            "severity": "info" if success else "error",
+            "message": message,
+            "tabId": tab_id,
+        })
         self.printer.broadcast(event)
         return event
 
-    def _commit_main_tree(self, tab_id: str, work_dir: str = "") -> None:
+    def _commit_main_tree(self, tab_id: str, work_dir: str = "", reply_to: str = "") -> None:
         """Stage-all + generate-message + commit the tab's working tree.
 
         Serves the settings panel's Git Commit button: stages
@@ -228,6 +241,10 @@ class _MergeFlowMixin:
                 different — possibly non-git — folder).  A path under
                 a now-deleted ``.kiss-worktrees/kiss_wt-*`` checkout
                 is remapped to the parent repository.
+            reply_to: The connection id of a daemon-link peer that
+                forwarded the command (another daemon's tab picked
+                onto this machine), or ``""``; see
+                :meth:`_broadcast_autocommit_done`.
         """
         requested_dir = work_dir or self.work_dir
         try:
@@ -236,7 +253,7 @@ class _MergeFlowMixin:
             if repo is None:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message="Not a git repository.", work_dir=requested_dir,
+                    message="Not a git repository.", work_dir=requested_dir, reply_to=reply_to,
                 )
                 return
             with repo_lock(repo):
@@ -245,23 +262,24 @@ class _MergeFlowMixin:
                     self._broadcast_autocommit_done(
                         tab_id, success=False, committed=False,
                         message="Staging failed: " + _git_error_line(add_result, "git add failed"),
-                        work_dir=requested_dir,
+                        work_dir=requested_dir, reply_to=reply_to,
                     )
                     return
                 diff_text = GitWorktreeOps.staged_diff(work_path)
                 if not diff_text:
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
-                        message="Nothing to commit.", work_dir=requested_dir,
+                        message="Nothing to commit.", work_dir=requested_dir, reply_to=reply_to,
                     )
                     return
-                self.printer.broadcast({
-                    "type": "notification",
-                    "id": f"manual-commit:{tab_id}",
-                    "severity": "info",
-                    "message": "Auto-generating commit message…",
-                    "tabId": tab_id,
-                })
+                if not reply_to:
+                    self.printer.broadcast({
+                        "type": "notification",
+                        "id": f"manual-commit:{tab_id}",
+                        "severity": "info",
+                        "message": "Auto-generating commit message…",
+                        "tabId": tab_id,
+                    })
                 msg = generate_commit_message_from_diff(diff_text)
                 # Commit directly (the staged diff was verified
                 # non-empty above) so a failure's actual git output —
@@ -272,7 +290,7 @@ class _MergeFlowMixin:
                 self._broadcast_autocommit_done(
                     tab_id, success=True, committed=True,
                     message=f"Committed: {_commit_subject(msg)}",
-                    commit_message=msg, work_dir=requested_dir,
+                    commit_message=msg, work_dir=requested_dir, reply_to=reply_to,
                 )
             else:
                 self._broadcast_autocommit_done(
@@ -281,14 +299,53 @@ class _MergeFlowMixin:
                         "git commit failed: "
                         + _git_error_line(commit_result, "pre-commit hook?")
                     ),
-                    work_dir=requested_dir,
+                    work_dir=requested_dir, reply_to=reply_to,
                 )
         except Exception as e:  # pragma: no cover — unexpected git/LLM error
             logger.debug("Manual commit failed", exc_info=True)
             self._broadcast_autocommit_done(
                 tab_id, success=False, committed=False,
-                message=str(e), work_dir=requested_dir,
+                message=str(e), work_dir=requested_dir, reply_to=reply_to,
             )
+
+    def _commit_on_machine(self, tab_id: str, machine: str, work_dir: str) -> None:
+        """Run the tab's Git Commit on registered *machine* and report its outcome here.
+
+        The Git Commit button of a tab whose drop-down names another
+        machine commits that machine's folder: the command goes to its
+        daemon (:func:`~kiss.server.sidebar_panels.machine_autocommit`),
+        which stages, writes the message and commits there, and its
+        ``autocommit_done`` is re-broadcast to this daemon's clients
+        through :meth:`_broadcast_autocommit_done` (toast plus the
+        event that re-arms the button).
+
+        Args:
+            tab_id: The tab that pressed the button.
+            machine: The registered machine's name.
+            work_dir: The folder to commit on the machine; empty for
+                the machine's own configured folder.
+        """
+        self.printer.broadcast({
+            "type": "notification",
+            "id": f"manual-commit:{tab_id}",
+            "severity": "info",
+            "message": f"Committing on {machine}…",
+            "tabId": tab_id,
+        })
+        reply = sidebar_panels.machine_autocommit(
+            machine, {"type": "autocommitAction", "tabId": tab_id, "workDir": work_dir},
+        )
+        # A link error already names the machine ("box (https://…) did
+        # not answer: …"); the machine's own outcome is prefixed with it.
+        error = str(reply.get("error") or "")
+        self._broadcast_autocommit_done(
+            tab_id,
+            success=bool(reply.get("success")) and not error,
+            committed=bool(reply.get("committed")),
+            message=error or f"{machine}: {reply.get('message') or ''}",
+            commit_message=reply.get("commitMessage"),
+            work_dir=str(reply.get("workDir") or work_dir),
+        )
 
     # ------------------------------------------------------------------
     # Pending worktree presentation

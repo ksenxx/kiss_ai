@@ -24,6 +24,7 @@ Only the standard library plus PyYAML (already a project dependency) is used.
 import os
 import re
 import uuid
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from typing import Any
 
 import yaml
 
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 # Page filenames: ASCII lowercase letters, digits and hyphens, starting and
@@ -317,40 +319,63 @@ class MemoryDir:
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
         frontmatter: dict[str, Any] = {}
-        try:
-            existing = read_page_text(path)
-        except FileNotFoundError:
-            # Missing, or deleted by another process just now: create semantics.
-            existing = ""
-        if existing:
-            frontmatter = split_frontmatter(existing)[0]
-            for identity_key in ("uuid", "created"):
-                if identity_key in frontmatter:
-                    incoming.pop(identity_key, None)
-        frontmatter.update({k: v for k, v in incoming.items() if v not in (None, "")})
-        if extra:
-            frontmatter.update(extra)
-        if title:
-            frontmatter["title"] = title
-        if summary:
-            frontmatter["summary"] = summary
-        frontmatter.setdefault("title", path.stem.replace("-", " "))
-        frontmatter.setdefault("uuid", str(uuid.uuid4()))
-        frontmatter.setdefault("created", now_iso())
-        frontmatter["updated"] = now_iso()
-        raw = render_page(frontmatter, body)
-        # Atomic publish (stage + os.replace): the memory directory is shared
-        # by parallel sub-agents and other daemon processes, whose
-        # memory_read / memory_pull / index sync would otherwise observe the
-        # empty or half-written file a plain truncate-then-write exposes.
-        # create_mode=0o666: pages are deliberately plain documents — a new
-        # page gets Path.write_text's umask-derived bits (helper default
-        # 0o600 is for secret-bearing files); an existing page keeps its mode.
-        atomic_write_text(path, raw, create_mode=0o666)
-        # The page is back: a tombstone left by an earlier deletion would
-        # otherwise delete it again on the next sync with another machine.
-        tombstone.unlink(missing_ok=True)
+        with self._mutation_lock():
+            try:
+                existing = read_page_text(path)
+            except FileNotFoundError:
+                existing = ""  # create semantics
+            if existing:
+                frontmatter = split_frontmatter(existing)[0]
+                for identity_key in ("uuid", "created"):
+                    if identity_key in frontmatter:
+                        incoming.pop(identity_key, None)
+            frontmatter.update({k: v for k, v in incoming.items() if v not in (None, "")})
+            if extra:
+                frontmatter.update(extra)
+            if title:
+                frontmatter["title"] = title
+            if summary:
+                frontmatter["summary"] = summary
+            frontmatter.setdefault("title", path.stem.replace("-", " "))
+            frontmatter.setdefault("uuid", str(uuid.uuid4()))
+            frontmatter.setdefault("created", now_iso())
+            frontmatter["updated"] = now_iso()
+            raw = render_page(frontmatter, body)
+            # Atomic publish (stage + os.replace): the memory directory is
+            # shared by parallel sub-agents and other daemon processes, whose
+            # memory_read / memory_pull / index sync would otherwise observe
+            # the empty or half-written file a plain truncate-then-write
+            # exposes.  create_mode=0o666: pages are deliberately plain
+            # documents — a new page gets Path.write_text's umask-derived bits
+            # (helper default 0o600 is for secret-bearing files); an existing
+            # page keeps its mode.
+            atomic_write_text(path, raw, create_mode=0o666)
+            # The page is back: a tombstone left by an earlier deletion would
+            # otherwise delete it again on the next sync with another machine.
+            # Cleared only AFTER the page is published: a write that fails or
+            # is interrupted in between leaves the page beside a stale
+            # tombstone, which the merge resolves in favour of the page --
+            # never a deleted page with no tombstone, the one state a sync
+            # cannot tell from "never existed" and undoes by bringing the
+            # old page back from the other machine.
+            tombstone.unlink(missing_ok=True)
         return Page(name=path.stem, frontmatter=frontmatter, body=body, raw=raw)
+
+    def _mutation_lock(self) -> AbstractContextManager[bool]:
+        """Hold the lock that serialises :meth:`write` and :meth:`delete` on this memory.
+
+        An inter-process file lock, ``<root>.lock`` beside the memory
+        directory (the convention of the Chromium profile lock; inside the
+        directory it would show up in listings of the memory's files),
+        since the memory is shared by every task thread of the daemon,
+        other daemon processes and the sync script.  Without it a write
+        and a delete of the same page could interleave into a deleted page
+        with no tombstone (W publishes the page, D unlinks it and writes
+        the tombstone, W unlinks the tombstone), and two writes of one page
+        could lose an update between reading the old frontmatter and
+        publishing the new page.
+        """
+        return exclusive_file_lock(Path(f"{self.root}.lock"))
 
     def tombstone_path(self, name: str) -> Path:
         """Return where the tombstone of page *name* lives once the page is deleted.
@@ -384,6 +409,15 @@ class MemoryDir:
                 placed (see :meth:`tombstone_path`); the page is then kept.
         """
         tombstone = self.tombstone_path(name)
-        self.page_path(name).unlink()
-        tombstone.parent.mkdir(exist_ok=True)
-        atomic_write_text(tombstone, now_iso() + "\n", create_mode=0o666)
+        path = self.page_path(name)
+        with self._mutation_lock():
+            if not path.is_file():
+                raise FileNotFoundError(f"Page {path.name} does not exist.")
+            # Tombstone first, page second: a delete that fails or is
+            # interrupted in between leaves the page beside a stale
+            # tombstone, which the merge resolves in favour of the page
+            # (see :meth:`write`) -- never a vanished page with no record
+            # of the deletion.
+            tombstone.parent.mkdir(exist_ok=True)
+            atomic_write_text(tombstone, now_iso() + "\n", create_mode=0o666)
+            path.unlink()

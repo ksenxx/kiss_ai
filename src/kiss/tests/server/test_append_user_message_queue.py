@@ -37,6 +37,7 @@ import time
 from typing import Any
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.models.model import Model
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
@@ -292,6 +293,9 @@ class _PreStepHookRecordingModel:
     any real LLM.  Before returning it snapshots the current
     ``conversation`` so the test can verify the hook ran first.
     """
+
+    serves_tools_natively = False  # no native tool set is built for it
+    native_tools_exposed = Model.native_tools_exposed  # the base no-op
 
     def __init__(self) -> None:
         self.model_name = "gpt-4o-mini"

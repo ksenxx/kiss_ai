@@ -809,6 +809,22 @@ class JsonPrinter(Printer):
             getattr(self._thread_local, "task_id", None),
         )
 
+    def thread_binding(self) -> str:
+        """Return the calling thread's task id, the key every event is routed by.
+
+        Returns:
+            The thread-local task key (``""`` when the thread runs no task).
+        """
+        return self._task_key()
+
+    def adopt_thread_binding(self, binding: Any) -> None:
+        """Route the calling thread's events to the task *binding* names.
+
+        Args:
+            binding: A task id from :meth:`thread_binding`.
+        """
+        self._thread_local.task_id = self._coerce_task_id(binding)
+
     def subscribe_tab(
         self, task_id: Any, tab_id: str,
     ) -> list[dict[str, Any]] | None:

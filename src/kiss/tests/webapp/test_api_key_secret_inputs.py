@@ -35,6 +35,8 @@ API_KEY_INPUT_IDS = [
     "cfg-key-AWS_ACCESS_KEY_ID",
     "cfg-key-AWS_SECRET_ACCESS_KEY",
     "cfg-key-AWS_SESSION_TOKEN",
+    "cfg-key-CLAUDE_CODE_OAUTH_TOKEN",
+    "cfg-key-CODEX_ACCESS_TOKEN",
     "cfg-custom-api-key",
 ]
 

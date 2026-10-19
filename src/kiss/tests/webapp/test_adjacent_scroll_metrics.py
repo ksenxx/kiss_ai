@@ -94,29 +94,13 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
 
 
     def test_render_adjacent_task_saves_status_steps(self) -> None:
-        """The adjacent-task replay must save statusSteps before replay and
-        restore it after, so the adjacent task doesn't clobber the
-        current task's step count."""
+        """The adjacent-task replay must borrow a detached status row
+        before replay and return it after, so the adjacent task doesn't
+        clobber the current task's step count."""
         body = self._render_adjacent_replay_body()
-        self.assertIn(
-            "savedSteps",
-            body,
-            "the adjacent-task replay does not save statusSteps",
-        )
         replay_pos = body.index("replayEventsInto")
-        save_pos = body.index("savedSteps")
-        self.assertLess(
-            save_pos,
-            replay_pos,
-            "savedSteps must be captured before replayEventsInto",
-        )
-        restore_match = re.search(
-            r"statusSteps\b.*=\s*savedSteps", body[replay_pos:]
-        )
-        self.assertIsNotNone(
-            restore_match,
-            "statusSteps is not restored from savedSteps after replay",
-        )
+        self.assertLess(body.index("const lent = borrowStatusRow('', '', '')"), replay_pos)
+        self.assertIn("returnStatusRow(lent)", body[replay_pos:])
 
 
     def test_render_adjacent_task_stores_dataset_metrics(self) -> None:

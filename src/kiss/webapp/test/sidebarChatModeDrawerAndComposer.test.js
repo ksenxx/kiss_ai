@@ -162,6 +162,10 @@ function drawerOpen(win) {
   return win.document.getElementById('meta-panel').classList.contains('open');
 }
 
+function overlayOpen(win) {
+  return win.document.getElementById('meta-overlay').classList.contains('open');
+}
+
 function polls(wv) {
   return wv.posted.filter(m => m.type === 'getTaskUpdate');
 }
@@ -271,6 +275,18 @@ async function main() {
       const {win} = makePage();
       const btn = win.document.getElementById('meta-drawer-btn');
       const panel = win.document.getElementById('meta-panel');
+      assert.ok(btn, 'the toggle exists in the composer footer');
+      assert.strictEqual(
+        btn.parentElement.id,
+        'footer-tools',
+        'the toggle is a composer footer icon (there is no main tab row)',
+      );
+      assert.strictEqual(
+        btn.previousElementSibling && btn.previousElementSibling.id,
+        'menu-btn',
+        'it sits right after the chats burger',
+      );
+      assert.strictEqual(btn.getAttribute('aria-expanded'), 'false');
       assert.ok(!drawerOpen(win));
       assert.ok(
         panel.hasAttribute('inert'),
@@ -279,17 +295,22 @@ async function main() {
       );
       click(win, 'meta-drawer-btn');
       assert.ok(drawerOpen(win), 'button opens the drawer');
+      assert.ok(overlayOpen(win), 'the backdrop opens with the drawer');
       assert.strictEqual(btn.getAttribute('aria-expanded'), 'true');
       assert.ok(!panel.hasAttribute('inert'), 'an open drawer is usable');
       click(win, 'meta-close');
       assert.ok(!drawerOpen(win), 'the close button dismisses the drawer');
+      assert.ok(!overlayOpen(win));
+      assert.strictEqual(btn.getAttribute('aria-expanded'), 'false');
       assert.ok(
         panel.hasAttribute('inert'),
         'the closed drawer leaves the keyboard tab order',
       );
       click(win, 'meta-drawer-btn');
+      assert.ok(drawerOpen(win));
       click(win, 'meta-overlay');
       assert.ok(!drawerOpen(win), 'the backdrop dismisses the drawer');
+      assert.ok(!overlayOpen(win));
       click(win, 'meta-drawer-btn');
       win.document.dispatchEvent(
         new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
@@ -329,10 +350,11 @@ async function main() {
         'type',
       ]);
       assert.ok(!('workDir' in poll), 'the poll names a tab, not a workdir');
+      assert.strictEqual(typeof poll.tabId, 'string');
       assert.ok(poll.tabId, 'the poll targets the visible chat tab');
       assert.strictEqual(poll.knownSig, '');
       assert.strictEqual(typeof poll.token, 'string');
-      assert.strictEqual(poll.refresh, false);
+      assert.strictEqual(poll.refresh, false, 'a timer poll is not a refresh');
       wv.tick(POLL_MS - 1);
       assert.strictEqual(pollCount(wv), 1, 'no poll before the interval');
       wv.tick(1);
@@ -356,16 +378,33 @@ async function main() {
       assert.ok(/^Updated \d/.test(status), status);
       assert.ok(status.endsWith(' \u00b7 $0.12'), status);
       wv.tick(POLL_MS);
-      assert.strictEqual(lastPoll(wv).knownSig, '5:9');
-      reply(win, lastPoll(wv), {unchanged: true});
-      assert.ok(content.innerHTML.includes('<strong>it</strong>'));
+      assert.strictEqual(
+        lastPoll(wv).knownSig,
+        '5:9',
+        "the next poll carries the reply's sig",
+      );
+      reply(win, lastPoll(wv), {unchanged: true, sig: 'ignored'});
+      assert.ok(
+        content.innerHTML.includes('<strong>it</strong>'),
+        'an unchanged reply leaves the report alone',
+      );
       reply(win, lastPoll(wv), {
         sig: '6:0',
-        content: '<p>Report <b>html</b></p><script>alert(1)</script>',
+        content:
+          '  <p>Report <b>html</b></p><img src=x onerror="alert(1)">' +
+          '<script>alert(2)</script>',
         updatedAt: Date.now(),
       });
       assert.ok(content.innerHTML.includes('<b>html</b>'), 'HTML as-is');
       assert.ok(!content.innerHTML.includes('<script'), 'scripts stripped');
+      assert.ok(
+        !content.innerHTML.includes('onerror'),
+        'event handlers are stripped',
+      );
+
+      reply(win, lastPoll(wv), {exists: false});
+      assert.ok(!info.classList.contains('visible'), 'exists:false hides it');
+      assert.strictEqual(content.innerHTML, '');
 
       click(win, 'meta-close');
       const count = pollCount(wv);
@@ -385,11 +424,17 @@ async function main() {
     () => {
       const wv = makePage();
       const win = wv.win;
+      send(win, {
+        type: 'configData',
+        config: {work_dir: '/cfg/dir', max_budget: 42},
+        apiKeys: {},
+      });
       send(win, {type: 'status', running: true});
       click(win, 'meta-drawer-btn');
       const btn = win.document.getElementById('meta-info-refresh');
       const status = win.document.getElementById('meta-info-status');
       const content = win.document.getElementById('meta-info-content');
+      assert.ok(btn, 'the refresh button sits in the subpanel header');
       assert.strictEqual(
         btn.parentElement.parentElement.id,
         'meta-info',
@@ -426,6 +471,19 @@ async function main() {
       assert.ok(/^Updated \d/.test(status.textContent), status.textContent);
       assert.ok(status.textContent.endsWith(' \u00b7 $0.05'));
       assert.ok(content.innerHTML.includes('<em>done</em>'));
+
+      reply(win, lastPoll(wv), {
+        sig: 'r3',
+        running: false,
+        content: '<p>Half <em>done</em></p>',
+        error: 'budget exceeded',
+        updatedAt: Date.now(),
+      });
+      assert.ok(
+        status.textContent.endsWith(' \u00b7 Last run failed: budget exceeded'),
+        status.textContent,
+      );
+      assert.strictEqual(btn.disabled, false);
 
       send(win, {type: 'status', running: false});
       assert.ok(

@@ -137,7 +137,7 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
     Args:
         db: Open connection inside the caller's transaction, whose
             ``chat_summaries`` table has the ``last_finished`` column
-            (:func:`add_last_finished_column`).
+            (``history_columns.ADDED_SUMMARY_COLUMNS``).
         chat_id: The chat session id.
     """
     first = db.execute(
@@ -163,17 +163,3 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
             int(end_ts or 0),
         ),
     )
-
-
-def add_last_finished_column(db: sqlite3.Connection) -> None:
-    """Add ``last_finished`` to a ``chat_summaries`` table from before the column existed.
-
-    Idempotent; the rows it extends read 0 (unknown) until their chat's
-    next recompute.
-
-    Args:
-        db: Open connection whose database has a ``chat_summaries`` table.
-    """
-    columns = {r[1] for r in db.execute("PRAGMA table_info(chat_summaries)").fetchall()}
-    if "last_finished" not in columns:
-        db.execute("ALTER TABLE chat_summaries ADD COLUMN last_finished INTEGER DEFAULT 0")

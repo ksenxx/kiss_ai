@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.server.user_assets``.
+"""End-to-end tests for ``kiss.server.tricks.ensure_user_asset_from_default``.
 
 Locks in the **runtime** contract of the
 :func:`ensure_user_asset_from_default` helper used for
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.user_assets import ensure_user_asset_from_default
+from kiss.server.tricks import ensure_user_asset_from_default
 from kiss.tests.conftest import is_root, posix_only
 
 

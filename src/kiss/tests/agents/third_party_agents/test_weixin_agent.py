@@ -27,6 +27,8 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
     WeixinChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.conftest import connect_on_ephemeral_port
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -82,8 +84,7 @@ class _WeixinApiHandler(RecordingHandler):
         """Serve the custom-send endpoint."""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        body = json.loads(self._read_raw().decode("utf-8"))
         if parsed.path == "/cgi-bin/message/custom/send":
             assert params.get("access_token") == ["WXTOKEN"]
             self.api.requests.append(body)
@@ -108,7 +109,7 @@ def _authenticated_agent(
 ) -> WeixinAgent:
     """Authenticate a fresh agent against the given API base."""
     agent = WeixinAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools["authenticate_weixin"](
         appid="wx_app",
         appsecret="wx_secret",
@@ -130,14 +131,8 @@ def _connected_backend(callback_token: str = "cbtok") -> tuple[WeixinChannelBack
     really bound port is read back from the live server.
     """
     _authenticated_agent(api_base="http://127.0.0.1:1/", callback_token=callback_token)
-    cfg = _config.load()
-    assert cfg is not None
-    cfg["port"] = "0"
-    _config.save(cfg)
     backend = WeixinChannelBackend()
-    assert backend.connect() is True
-    assert backend._callback_server is not None
-    return backend, int(backend._callback_server.server_address[1])
+    return backend, connect_on_ephemeral_port(_config, backend, "_callback_server")
 
 
 def test_unauthenticated_state() -> None:
@@ -147,7 +142,7 @@ def test_unauthenticated_state() -> None:
     assert agent._is_authenticated() is False
     tools = {t.__name__ for t in agent._get_tools()}
     assert tools == {"check_weixin_auth", "authenticate_weixin", "clear_weixin_auth"}
-    check = {t.__name__: t for t in agent._get_tools()}["check_weixin_auth"]
+    check = tools_by_name(agent)["check_weixin_auth"]
     assert "not configured" in check().lower()
 
 
@@ -161,7 +156,7 @@ def test_auth_trio_persistence() -> None:
     assert saved["appid"] == "wx_app"
     assert saved["api_base"] == "http://127.0.0.1:1"
 
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     check = json.loads(tools["check_weixin_auth"]())
     assert check["ok"] is True and check["appid"] == "wx_app"
     assert {"send_text_message", "get_user_info"} <= set(tools)
@@ -336,7 +331,7 @@ def test_send_fails_on_http_error_status(api: _WeixinApi) -> None:
 def test_authenticate_rejects_invalid_port() -> None:
     """authenticate_weixin rejects non-numeric and out-of-range ports."""
     agent = WeixinAgent()
-    authenticate = {t.__name__: t for t in agent._get_tools()}["authenticate_weixin"]
+    authenticate = tools_by_name(agent)["authenticate_weixin"]
     for bad_port in ("abc", "0", "-1", "65536", "1.5", "1e3"):
         result = authenticate(appid="wx_app", appsecret="wx_secret", port=bad_port)
         assert "invalid port" in result.lower(), bad_port

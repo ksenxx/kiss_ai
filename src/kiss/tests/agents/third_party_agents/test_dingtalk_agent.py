@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
     DingTalkChannelBackend,
     DingtalkSea,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
     raw_post_status,
@@ -96,7 +97,7 @@ def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
 def test_authenticate_persists_and_clear_removes() -> None:
     """authenticate_dingtalk persists 0600 config; clear removes it."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools["authenticate_dingtalk"](
         "https://oapi.dingtalk.com/robot/send?access_token=x",
         secret="SECabc",
@@ -129,7 +130,7 @@ def test_authenticate_persists_and_clear_removes() -> None:
 def test_authenticate_rejects_empty_url_and_bad_port() -> None:
     """Bad authenticate arguments are rejected without persisting config."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "empty" in tools["authenticate_dingtalk"]("   ")
     assert "port" in tools["authenticate_dingtalk"]("https://x", port="not-a-number")
     assert not dingtalk_mod._config.path.exists()
@@ -138,7 +139,7 @@ def test_authenticate_rejects_empty_url_and_bad_port() -> None:
 def test_authenticate_rejects_out_of_range_port() -> None:
     """Out-of-range ports are rejected without mutating state or persisting."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     for bad_port in ("0", "-1", "65536", "999999"):
         result = tools["authenticate_dingtalk"]("https://x", port=bad_port)
         assert "1..65535" in result
@@ -149,7 +150,7 @@ def test_authenticate_rejects_out_of_range_port() -> None:
 def test_fresh_agent_loads_persisted_config() -> None:
     """A new agent instance picks up the persisted config."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_dingtalk"]("https://x?access_token=1", secret="s")
     fresh = DingTalkAgent()
     assert fresh._is_authenticated() is True
@@ -164,7 +165,7 @@ def test_tools_module_function() -> None:
 def test_post_message_shape_and_signed_query(receiver: JsonWebhookServer) -> None:
     """post_message sends the DingTalk text payload with a valid HMAC signature."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_dingtalk"](_webhook_url(receiver), secret="SECret123")
 
     before_ms = int(time.time() * 1000)
@@ -188,7 +189,7 @@ def test_post_message_shape_and_signed_query(receiver: JsonWebhookServer) -> Non
 def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
     """post_markdown sends the DingTalk markdown payload."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_dingtalk"](_webhook_url(receiver), secret="s2")
 
     assert json.loads(agent._backend.post_markdown("Title", "# body"))["ok"] is True
@@ -200,7 +201,7 @@ def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
 def test_send_message_unsigned_without_secret(receiver: JsonWebhookServer) -> None:
     """Without a secret, send_message posts to the raw webhook URL."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_dingtalk"](_webhook_url(receiver))
 
     agent._backend.send_message("ignored-channel", "plain text")
@@ -213,7 +214,7 @@ def test_send_message_unsigned_without_secret(receiver: JsonWebhookServer) -> No
 def test_errcode_nonzero_raises_and_tools_report(receiver: JsonWebhookServer) -> None:
     """A non-zero errcode raises from send_message and yields ok:false tools."""
     agent = DingTalkAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     tools["authenticate_dingtalk"](_webhook_url(receiver))
     receiver.response_body = {"errcode": 310000, "errmsg": "sign not match"}
 

@@ -59,7 +59,10 @@ _STYLE_TAGS = {
     "summary": "bold",
 }
 
-_SKIP_TAGS = {"script", "style", "head", "title", "meta", "link"}
+# Only container tags: void elements (meta, link) get no end-tag event, so
+# counting them here would leave the parser skipping for the rest of the
+# document.  A <head> parent already hides them.
+_SKIP_TAGS = {"script", "style", "head", "title"}
 
 
 class _HtmlToRichParser(HTMLParser):

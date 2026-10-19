@@ -22,6 +22,8 @@ import json
 import re
 from pathlib import Path
 
+from kiss.core._version import __version__
+
 _MEDIA_DIR = Path(__file__).resolve().parents[1] / "webapp" / "media"
 BRAND_FILE = _MEDIA_DIR / "brand.json"
 
@@ -29,10 +31,15 @@ DEFAULT_BRAND: dict[str, str] = {
     "product_name": "KISS Sorcar",
     "short_name": "KISS",
     "tagline": "Your AI assistant. Ask me anything!",
+    # The whole brand-specific part of the prompt's identity line: who the
+    # agent is and where its code and website live.  A white-label brand
+    # replaces the sentence wholesale, so none of the stock URLs leak into
+    # its prompt.
     "identity": (
         "You are KISS Sorcar, an AI Assistant and a general-purpose multi-model, "
         "multi-modal, multi-agent AI Agent Framework researched and developed by "
-        "Koushik Sen (ksen@berkeley.edu)."
+        "Koushik Sen (ksen@berkeley.edu). Repo: https://github.com/ksenxx/kiss_ai. "
+        "Website: https://kisssorcar.github.io/."
     ),
     # Name of the per-user state directory under $HOME (config.json,
     # history.db, memories, ...).  ``KISS_HOME`` in the environment
@@ -43,7 +50,9 @@ DEFAULT_BRAND: dict[str, str] = {
     "home_dir": ".kiss",
 }
 
-_PLACEHOLDER_RE = re.compile(r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR)\}\}")
+_PLACEHOLDER_RE = re.compile(
+    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR|VERSION)\}\}"
+)
 
 
 def _is_dir_name(value: str) -> bool:
@@ -86,11 +95,13 @@ def render_brand(text: str, brand: dict[str, str] = BRAND) -> str:
     """Fill the brand placeholders in *text*.
 
     Recognised tokens: ``{{PRODUCT_NAME}}``, ``{{SHORT_NAME}}``,
-    ``{{TAGLINE}}``, ``{{IDENTITY}}`` and ``{{HOME_DIR}}`` (the state
+    ``{{TAGLINE}}``, ``{{IDENTITY}}``, ``{{HOME_DIR}}`` (the state
     directory name, so ``~/{{HOME_DIR}}/history.db`` names the brand's
-    own file).  Used on the prompt files
-    (``SYSTEM.md``, ``SYSTEM_LITE.md``) whose
-    identity sentence is brand-specific.  Unknown ``{{...}}`` tokens are
-    left untouched so other templating in the same file is unaffected.
+    own file) and ``{{VERSION}}`` (the package version from
+    ``kiss.core._version``, the same for every brand).  Used on the
+    prompt files (``SYSTEM.md``, ``SYSTEM_LITE.md``) whose identity
+    sentence is brand-specific.  Unknown ``{{...}}`` tokens are left
+    untouched so other templating in the same file is unaffected.
     """
-    return _PLACEHOLDER_RE.sub(lambda m: brand[m.group(1).lower()], text)
+    values = {**brand, "version": __version__}
+    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(1).lower()], text)

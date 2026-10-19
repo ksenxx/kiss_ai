@@ -158,7 +158,6 @@ async function waitFor(predicate, message, timeoutMs = 3000) {
 }
 
 module.exports = {
-  chatHtml,
   newDom,
   makePage,
   makePreloadedPage,

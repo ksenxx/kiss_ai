@@ -110,6 +110,7 @@ EOF
                   scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
                   scripts/wait-for-public-url.sh \
                   src/kiss/scripts/sync_db.py src/kiss/agents/sorcar/chat_summary.py \
+                  src/kiss/agents/sorcar/history_columns.py \
                   src/kiss/scripts/relocate_work_dir.py \
                   src/kiss/scripts/carry_over_tables.py \
                   src/kiss/scripts/db_fingerprint.py \

@@ -75,7 +75,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,7 +90,7 @@ from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, recv_auth_rep
 from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
-from kiss.core.file_lock import exclusive_file_lock, lock_exclusive, unlock
+from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,13 @@ LINK_PING_TIMEOUT = 20.0
 """Seconds a keepalive ping may go unanswered before the socket counts as dead."""
 SSH_TIMEOUT = 30.0
 """Seconds an ``ssh`` login (the enrollment, opening a port-forward) may take."""
+REGISTRY_LOCK_TIMEOUT = 60.0
+"""Seconds :func:`registry_lock` waits for another holder before giving up.
+
+A holder rewrites the registry and closes the cached links and ssh
+tunnels; a tunnel being opened keeps its lock for up to
+:data:`SSH_TIMEOUT`, so a waiter gives up only after twice that.
+"""
 ENROLL_TIMEOUT = 30.0
 """Seconds :func:`add_machine` waits for the enrolled machine's first handshake.
 
@@ -343,16 +350,21 @@ def save_machines(machines: list[Machine]) -> None:
 
 
 @contextmanager
-def registry_lock() -> Iterator[None]:
-    """Hold the cross-process lock serialising registry read-modify-writes."""
+def registry_lock(timeout: float = REGISTRY_LOCK_TIMEOUT) -> Iterator[None]:
+    """Hold the cross-process lock serialising registry read-modify-writes.
+
+    Raises:
+        MachineError: When another holder kept the lock for *timeout*
+            seconds (the callers show it as the action's error text).
+    """
     path = machines_file().with_suffix(".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+", encoding="utf-8") as handle:
-        lock_exclusive(handle)
+    with ExitStack() as held:
         try:
-            yield
-        finally:
-            unlock(handle)
+            held.enter_context(exclusive_file_lock(path, timeout=timeout))
+        except TimeoutError as exc:
+            raise MachineError("the machine registry is busy, try again") from exc
+        yield
 
 
 def normalize_url(url: str) -> str:
@@ -875,6 +887,19 @@ def close_tunnels() -> None:
         tunnel.close()
 
 
+@dataclass
+class LinkHealth:
+    """A machine's back-off record: the last failure and when to dial again.
+
+    Shared by every lane's link to the machine (:func:`link_for`), so
+    a machine found down on one lane is reported down on the others
+    without each dialling it in turn.
+    """
+
+    retry_at: float = 0.0
+    last_error: str = ""
+
+
 class MachineLink:
     """One persistent, authenticated WebSocket to a remote daemon.
 
@@ -889,12 +914,15 @@ class MachineLink:
 
     def __init__(
         self, machine: Machine, cert_file: Path | None = None, tunnel: SshTunnel | None = None,
+        health: LinkHealth | None = None,
     ) -> None:
         """A link to *machine*, pinned to *cert_file* (its registered pin by default).
 
         *tunnel*, for an SSH machine, is a forward of the caller's own
         to dial instead of the login's shared one (:func:`tunnel_port`);
-        the caller opens nothing and closes it when done.
+        the caller opens nothing and closes it when done.  *health* is
+        the back-off record to share with the machine's other lanes
+        (:func:`link_for`); a link of its own by default.
         """
         self.machine = machine
         self._cert_file = cert_file if cert_file is not None else machine.cert_file()
@@ -902,9 +930,22 @@ class MachineLink:
         self._ws: ClientConnection | None = None
         self._lock = threading.RLock()  # see SshTunnel: taken through locked_call
         self._generation = 0
-        self._retry_at = 0.0
-        self._last_error = ""
+        self._health = health if health is not None else LinkHealth()
         self._retired = False
+
+    @property
+    def _retry_at(self) -> float:
+        """Monotonic time before which the link reports the last failure without dialling."""
+        return self._health.retry_at
+
+    @_retry_at.setter
+    def _retry_at(self, value: float) -> None:
+        self._health.retry_at = value
+
+    @property
+    def _last_error(self) -> str:
+        """The failure the link reports until :attr:`_retry_at`."""
+        return self._health.last_error
 
     def _check_available(self) -> None:
         """Raise the error a retired or backed-off link answers with, if any."""
@@ -915,8 +956,8 @@ class MachineLink:
 
     def _fail(self, message: str) -> MachineError:
         """Record *message* as the link's failure, start the backoff, return the error."""
-        self._retry_at = time.monotonic() + DOWN_BACKOFF
-        self._last_error = message
+        self._health.retry_at = time.monotonic() + DOWN_BACKOFF
+        self._health.last_error = message
         return MachineError(message)
 
     def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:
@@ -1055,21 +1096,51 @@ class MachineLink:
         before the machine counts as down, so a stale socket alone
         never starts the back-off.
 
+        The link's turn is waited for *timeout* seconds at most, too:
+        a request queued behind a slow one on the same link (the
+        remote app probe on the panels lane, say) fails as ``busy``
+        when its own budget is up instead of waiting for the whole
+        queue, so the thread it runs on is never held longer than its
+        caller allowed for.  That failure starts no back-off: the
+        machine is not down.
+
         Raises:
             MachineError: When the daemon is unreachable, rejects the
-                password, or does not answer within *timeout* seconds.
+                password, does not answer within *timeout* seconds,
+                or the link's turn did not come within them.
         """
-        return locked_call(
-            self._lock, self._request_locked, cmd, reply_type, timeout, errors,
-        )
+        # ``locked_call`` with a bounded acquire, in its exact shape:
+        # the ``acquire`` inside the ``try`` so a KeyboardInterrupt
+        # landing right after it still reaches the ``finally``, whose
+        # first instruction is the release (CPython gh-74174); after a
+        # missed acquire the release is refused with ``RuntimeError``.
+        try:
+            if not self._lock.acquire(timeout=timeout):
+                raise MachineError(
+                    f"{self.machine.name} ({self.machine.address()}) is busy: "
+                    f"no {reply_type} within {timeout:g}s"
+                )
+            return self._request_locked(cmd, reply_type, timeout, errors)
+        finally:
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass
 
     def _request_locked(
         self, cmd: dict[str, Any], reply_type: str, timeout: float, errors: bool,
     ) -> dict[str, Any]:
-        """:meth:`request`'s body, under the lock."""
+        """:meth:`request`'s body, under the lock.
+
+        The handshake, when the socket is not up, has
+        :data:`REQUEST_TIMEOUT` at most even for a longer *timeout*: a
+        host that drops packets makes a reachable daemon's handshake
+        no longer, and the long budget of a slow exchange must not keep
+        the request's thread in a dial that will not succeed.
+        """
         kept = self._ws is not None
         if self._ws is None:
-            self._ws = self._connect(timeout)
+            self._ws = self._connect(min(timeout, REQUEST_TIMEOUT))
         deadline = time.monotonic() + timeout
         try:
             return self._exchange(cmd, reply_type, deadline, timeout, errors)
@@ -1081,7 +1152,7 @@ class MachineLink:
                 ) from exc
             logger.info("%s: the link's socket had closed, reconnecting", self.machine.name)
             self._drop()
-            self._ws = self._connect(_remaining(deadline))
+            self._ws = self._connect(min(_remaining(deadline), REQUEST_TIMEOUT))
             try:
                 return self._exchange(cmd, reply_type, deadline, timeout, errors)
             except ConnectionClosed as again:
@@ -1206,16 +1277,22 @@ class MachineLink:
     def retire(self) -> None:
         """Close for good: every later :meth:`request` fails instead of re-connecting.
 
-        Waits for a request in flight to finish.  Used when the link
-        leaves the daemon-wide cache, so a caller that fetched it just
-        before cannot re-open a socket nothing closes any more.
+        Used when the link leaves the daemon-wide cache, so a caller
+        that fetched it just before cannot re-open a socket nothing
+        closes any more.  Does not wait for a request in flight: the
+        socket is closed first, outside the lock, which wakes the
+        request's read with ``ConnectionClosed`` (its re-connect then
+        finds the link retired), and only then the lock is taken to
+        forget the socket.  A request still in its handshake, which
+        the close cannot reach, is waited for (:data:`REQUEST_TIMEOUT`
+        at most, plus its exchange).
         """
-        locked_call(self._lock, self._retire_locked)
-
-    def _retire_locked(self) -> None:
-        """:meth:`retire`'s body, under the lock."""
         self._retired = True
-        self._drop()
+        ws = self._ws
+        if ws is not None:
+            with suppress(Exception):
+                ws.close()
+        locked_call(self._lock, self._drop)
 
 
 def _remaining(deadline: float) -> float:
@@ -1223,22 +1300,44 @@ def _remaining(deadline: float) -> float:
     return max(0.001, deadline - time.monotonic())
 
 
-_links: dict[tuple[str, str, str, str], MachineLink] = {}
+_links: dict[tuple[str, str, str, str, str], MachineLink] = {}
 _links_lock = threading.RLock()
 
 
-def _cached_link(machine: Machine) -> MachineLink:
-    """Return the cached link to *machine*, made on first use (under the lock)."""
-    key = (machine.name, machine.url, machine.password, machine.ssh)
+def _cached_link(machine: Machine, lane: str) -> MachineLink:
+    """Return the cached *lane* link to *machine*, made on first use (under the lock).
+
+    A new lane's link shares the machine's back-off record with the
+    lanes already cached, so a machine found down on one lane is not
+    dialled again by each of the others.
+    """
+    key = (machine.name, machine.url, machine.password, machine.ssh, lane)
     link = _links.get(key)
     if link is None:
-        link = _links[key] = MachineLink(machine)
+        health = next(
+            (other._health for other_key, other in _links.items() if other_key[:4] == key[:4]),
+            None,
+        )
+        link = _links[key] = MachineLink(machine, health=health)
     return link
 
 
-def link_for(machine: Machine) -> MachineLink:
-    """Return the daemon-wide cached link to *machine*."""
-    return locked_call(_links_lock, _cached_link, machine)
+def link_for(machine: Machine, lane: str = "") -> MachineLink:
+    """Return the daemon-wide cached link to *machine*.
+
+    A link answers one request at a time, so a slow exchange (a
+    machine's app probe, a long spend report) holds up every other
+    request behind it.  *lane* names a separate link of its own for
+    such traffic (the sidebar subpanels' polls use ``"panels"``), so
+    the interactive requests (a submit's stream, the settings sheet,
+    the Explorer) on the default lane never wait for it.  Every lane
+    is retired together by :func:`close_links`.
+
+    Args:
+        machine: The registered machine.
+        lane: The link's lane; "" for the default one.
+    """
+    return locked_call(_links_lock, _cached_link, machine, lane)
 
 
 def close_links() -> None:

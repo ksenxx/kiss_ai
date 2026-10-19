@@ -77,8 +77,7 @@ class _CalendarRequestHandler(RecordingHandler):
     """Emulates the Google Calendar v3 REST API and records requests."""
 
     def _read_body(self) -> dict[str, Any] | None:
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
+        raw = self._read_raw()
         if not raw:
             return None
         try:
@@ -108,11 +107,7 @@ class _CalendarRequestHandler(RecordingHandler):
             self._reply(500, json.dumps({"error": {"code": 500, "message": "boom"}}))
         elif self.command == "GET" and path == "/plaintext":
             payload = b"pong"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._reply(200, payload, "text/plain")
         elif self.command == "GET" and path == "/users/me/calendarList":
             self._reply(200, json.dumps(_CALENDARS))
         elif self.command == "GET" and path.endswith("/events"):
@@ -137,17 +132,7 @@ class _CalendarRequestHandler(RecordingHandler):
         else:
             self._reply(404, json.dumps({"error": {"code": 404, "message": "Not found"}}))
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
-
-    def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._handle()
+    do_GET = do_POST = do_PATCH = do_DELETE = _handle  # noqa: N815
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")

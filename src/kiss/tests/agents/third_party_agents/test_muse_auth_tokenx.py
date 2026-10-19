@@ -121,7 +121,7 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
 from kiss.agents.third_party_agents.telegram.telegram_sea import _make_backend as tg_make_backend
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
+    loopback_policy,
     teardown_muse_env,
     wait_until,
 )
@@ -154,8 +154,7 @@ class _TokenXApiHandler(RecordingHandler):
         self.wfile.write(payload)
 
     def _serve(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
+        body = self._read_raw()
         self.server.requests.append(
             {
                 "method": self.command,
@@ -341,13 +340,7 @@ class _TokenXApiHandler(RecordingHandler):
         result = results.get(api_method, True)
         self._send(200, json.dumps({"ok": True, "result": result}).encode())
 
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a GET request."""
-        self._serve()
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a POST request."""
-        self._serve()
+    do_GET = do_POST = _serve  # noqa: N815
 
 
 class _TokenXApiServer(RecordingServer):
@@ -368,15 +361,6 @@ class _TokenXApiServer(RecordingServer):
         self.token_redirect_to: str = ""
         self.token_error_echo: bool = False
 
-    @property
-    def port(self) -> int:
-        """Return the bound TCP port."""
-        return int(self.server_address[1])
-
-    def base(self, suffix: str = "") -> str:
-        """Return the server's loopback base URL plus *suffix*."""
-        return f"http://127.0.0.1:{self.port}{suffix}"
-
 
 @pytest.fixture()
 def api_server() -> Any:
@@ -390,38 +374,24 @@ def rogue_server() -> Any:
     yield from serve_recording(_TokenXApiHandler, _TokenXApiServer)
 
 
-@pytest.fixture()
-def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Enable Muse-auth inside an isolated ``KISS_HOME`` with a live daemon.
-
-    Both services have fixed cloud hosts, so the loopback emulators are
-    reached through per-service ``extra_hosts`` policy entries (any
-    port — the redirect tests rely on the second emulator's different
-    port being a different, but still allowlisted, origin).
-    """
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            # The scratch candidate-validation enrollments
-            # (``msteams-pending-<hex>``, ``telegram-pending-<hex>``)
-            # inherit these root ``extra_hosts`` via service_root.
-            "msteams": {"extra_hosts": ["127.0.0.1"]},
-            "telegram": {"extra_hosts": ["127.0.0.1"]},
-        },
-    }
-    setup_muse_env(monkeypatch, policy)
-    yield isolated_kiss_home
-    teardown_muse_env()
+# Both services have fixed cloud hosts, so the loopback emulators are
+# reached through per-service ``extra_hosts`` policy entries (any
+# port: the redirect tests rely on the second emulator's different
+# port being a different, but still allowlisted, origin).  The scratch
+# candidate-validation enrollments (``msteams-pending-<hex>``,
+# ``telegram-pending-<hex>``) inherit these root ``extra_hosts`` via
+# service_root.
+MUSE_POLICY = loopback_policy("msteams", "telegram")
 
 
 def _ms_env(monkeypatch: pytest.MonkeyPatch, api_server: _TokenXApiServer) -> None:
     """Point the composed Azure token URL at the emulator."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", api_server.base())
+    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", api_server.base_url)
 
 
 def _ms_backend(api_server: _TokenXApiServer) -> MSTeamsChannelBackend:
     """Create an MS Teams backend whose Graph base is the emulator."""
-    return MSTeamsChannelBackend(graph_base=api_server.base("/v1.0"))
+    return MSTeamsChannelBackend(graph_base=api_server.base_url + "/v1.0")
 
 
 def _client_credential_info(base: str, secret: str = _REAL_MS_SECRET) -> dict[str, str]:
@@ -437,13 +407,13 @@ def _client_credential_info(base: str, secret: str = _REAL_MS_SECRET) -> dict[st
 
 def _ms_enroll(api_server: _TokenXApiServer, secret: str = _REAL_MS_SECRET) -> None:
     """Enroll a client-credentials entry for ``msteams`` against the emulator."""
-    store_credentials("msteams", _client_credential_info(api_server.base(), secret), [])
+    store_credentials("msteams", _client_credential_info(api_server.base_url, secret), [])
 
 
 def _tg_backend(api_server: _TokenXApiServer) -> TelegramChannelBackend:
     """Create a Telegram backend pointed at the emulator."""
     backend = TelegramChannelBackend()
-    backend._api_base = api_server.base()
+    backend._api_base = api_server.base_url
     return backend
 
 
@@ -738,7 +708,7 @@ def test_telegram_redirects_scrub_and_pin_the_path_credential(
     # Same-origin absolute Location echoing the REAL token: followed,
     # re-injected (still the real token on the wire), one origin only.
     resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/redirectEcho", headers=headers
+        "GET", f"{api_server.base_url}/bot{surrogate}/redirectEcho", headers=headers
     )
     assert resp.status_code == 200
     assert json.loads(resp.content)["result"]["username"] == "kissbot"
@@ -746,16 +716,16 @@ def test_telegram_redirects_scrub_and_pin_the_path_credential(
     # Same-origin relative Location: resolved against the credential-
     # free URL, then re-injected.
     resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/redirectRelative", headers=headers
+        "GET", f"{api_server.base_url}/bot{surrogate}/redirectRelative", headers=headers
     )
     assert resp.status_code == 200
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
     # Cross-origin hop to a separately allowlisted origin (same host,
     # different port): followed WITHOUT the credential — the rogue
     # origin sees a redacted path, never the token or the surrogate.
-    api_server.offsite_location = f"{rogue_server.base()}/bot{_REAL_TG_TOKEN}/getMe"
+    api_server.offsite_location = f"{rogue_server.base_url}/bot{_REAL_TG_TOKEN}/getMe"
     resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/redirectOffsite", headers=headers
+        "GET", f"{api_server.base_url}/bot{surrogate}/redirectOffsite", headers=headers
     )
     assert resp.status_code == 401  # rogue emulator rejects the redacted token
     assert rogue_server.requests[-1]["path"] == "/botmuse-redacted/getMe"
@@ -780,14 +750,14 @@ def test_telegram_boundary_requires_the_surrogate_in_the_path(
     with pytest.raises(MuseAuthError, match="does not reference the surrogate"):
         session.request(
             "GET",
-            f"{api_server.base()}/botSOMETHINGELSE/getMe",
+            f"{api_server.base_url}/botSOMETHINGELSE/getMe",
             headers={"Authorization": f"Bearer {surrogate}"},
         )
     # A surrogate only in the query is not a path reference either.
     with pytest.raises(MuseAuthError, match="does not reference the surrogate"):
         session.request(
             "GET",
-            f"{api_server.base()}/bot/getMe?x={surrogate}",
+            f"{api_server.base_url}/bot/getMe?x={surrogate}",
             headers={"Authorization": f"Bearer {surrogate}"},
         )
 
@@ -871,7 +841,7 @@ def test_telegram_agent_and_make_backend_wire_from_vault(
     assert agent._is_authenticated() is True
     wired = tg_make_backend()
     assert wired._muse is True
-    wired._api_base = api_server.base()
+    wired._api_base = api_server.base_url
     messages, cursor = wired.poll_messages("", "0")
     assert messages and cursor == "6"
 
@@ -1021,7 +991,7 @@ def test_agents_construct_and_fail_closed(
     clear_credentials("msteams")
     tg_config.save({"bot_token": "bad\ntoken"})
     tg_agent = TelegramAgent()
-    tg_agent._backend._api_base = api_server.base()
+    tg_agent._backend._api_base = api_server.base_url
     before = len(api_server.requests)
     for _ in range(2):  # the first use and a retry both fail closed
         with pytest.raises(MuseAuthError, match="invalid path credential token"):
@@ -1130,7 +1100,7 @@ def test_telegram_legacy_tools_without_sdk(
     assert accepted["ok"] is True and accepted["username"] == "kissbot"
     polled = tg_make_backend()
     assert polled._muse is False
-    polled._api_base = api_server.base()
+    polled._api_base = api_server.base_url
     messages, cursor = polled.poll_messages("", "0")
     assert messages and cursor == "6"
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getUpdates"
@@ -1157,7 +1127,7 @@ def test_daemon_refuses_a_tampered_unsafe_path_credential(
     with pytest.raises(MuseAuthError, match="not path-splice-safe"):
         session.request(
             "GET",
-            f"{api_server.base()}/bot{handle.token}/getMe",
+            f"{api_server.base_url}/bot{handle.token}/getMe",
             headers={"Authorization": f"Bearer {handle.token}"},
         )
 
@@ -1213,10 +1183,12 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
         grant("telegram", "write", "session")
         surrogate = backend._bot.token
         # 127.0.0.2 is NOT in the telegram allowlist (only 127.0.0.1 is).
-        api_server.offsite_location = f"http://127.0.0.2:{rogue.port}/bot{_REAL_TG_TOKEN}/getMe"
+        api_server.offsite_location = (
+            f"http://127.0.0.2:{rogue.server_address[1]}/bot{_REAL_TG_TOKEN}/getMe"
+        )
         resp = MuseBoundarySession("telegram").request(
             "GET",
-            f"{api_server.base()}/bot{surrogate}/redirectOffsite",
+            f"{api_server.base_url}/bot{surrogate}/redirectOffsite",
             headers={"Authorization": f"Bearer {surrogate}"},
         )
         # The bodyless GET hop is followed without any credential.
@@ -1235,7 +1207,7 @@ def test_vault_client_credentials_cache_edges(
     # A scope-less enrollment sends no scope field to the endpoint.
     info = {
         "kind": "oauth2_client_credentials",
-        "token_url": f"{api_server.base()}/{_MS_TENANT}/oauth2/v2.0/token",
+        "token_url": f"{api_server.base_url}/{_MS_TENANT}/oauth2/v2.0/token",
         "client_id": _MS_CLIENT_ID,
         "client_secret": _REAL_MS_SECRET,
     }
@@ -1273,7 +1245,7 @@ def test_token_exchange_refuses_redirecting_endpoint(
 ) -> None:
     """A 307 from the token endpoint never forwards the secret-bearing POST."""
     _ms_env(monkeypatch, api_server)
-    api_server.token_redirect_to = rogue_server.base("/stolen/oauth2/v2.0/token")
+    api_server.token_redirect_to = rogue_server.base_url + "/stolen/oauth2/v2.0/token"
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is False
@@ -1355,10 +1327,10 @@ def test_lowercase_percent_escapes_cannot_smuggle_the_token(
     grant("telegram", "write", "session")
     surrogate = backend._bot.token
     encoded = _REAL_TG_TOKEN.replace(":", "%3a")
-    api_server.lowercase_location = f"{rogue_server.base()}/bot{encoded}/getMe"
+    api_server.lowercase_location = f"{rogue_server.base_url}/bot{encoded}/getMe"
     resp = MuseBoundarySession("telegram").request(
         "GET",
-        f"{api_server.base()}/bot{surrogate}/redirectLowercase",
+        f"{api_server.base_url}/bot{surrogate}/redirectLowercase",
         headers={"Authorization": f"Bearer {surrogate}"},
     )
     assert resp.status_code == 401  # rogue origin got no usable credential
@@ -1383,10 +1355,10 @@ def test_odd_percent_encoding_is_scrubbed_per_segment(
     # Encode a normally-safe 'A' as %41 so no whole-string spelling of
     # the token matches; only decoding each path segment reveals it.
     odd = _REAL_TG_TOKEN.replace("A", "%41", 1)
-    api_server.odd_location = f"{rogue_server.base()}/bot{odd}/getMe"
+    api_server.odd_location = f"{rogue_server.base_url}/bot{odd}/getMe"
     resp = MuseBoundarySession("telegram").request(
         "GET",
-        f"{api_server.base()}/bot{surrogate}/redirectOddEncoding",
+        f"{api_server.base_url}/bot{surrogate}/redirectOddEncoding",
         headers={"Authorization": f"Bearer {surrogate}"},
     )
     assert resp.status_code == 401
@@ -1410,14 +1382,14 @@ def test_reply_echoes_are_normalized_to_the_surrogate(
     session = MuseBoundarySession("telegram")
     headers = {"Authorization": f"Bearer {surrogate}"}
     # An ordinary API error echoing the credentialed request path.
-    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/echoBody", headers=headers)
+    resp = session.request("GET", f"{api_server.base_url}/bot{surrogate}/echoBody", headers=headers)
     assert resp.status_code == 404
     assert _REAL_TG_TOKEN not in resp.text
     assert quote(_REAL_TG_TOKEN, safe="") not in resp.text
     assert surrogate in resp.text  # the echo is normalized, not dropped
     # A chain longer than the redirect limit: the returned (still
     # redirecting) response's Location is normalized too.
-    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/chain1", headers=headers)
+    resp = session.request("GET", f"{api_server.base_url}/bot{surrogate}/chain1", headers=headers)
     assert resp.status_code == 302
     location = resp.headers.get("Location", "")
     assert _REAL_TG_TOKEN not in location
@@ -1551,14 +1523,16 @@ def test_odd_encoded_response_echoes_are_scrubbed(
     session = MuseBoundarySession("telegram")
     headers = {"Authorization": f"Bearer {surrogate}"}
     # Body, header, and reason all echo the token with a %41 escape.
-    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/echoOdd", headers=headers)
+    resp = session.request("GET", f"{api_server.base_url}/bot{surrogate}/echoOdd", headers=headers)
     assert resp.status_code == 418
     odd = _REAL_TG_TOKEN.replace("A", "%41", 1)
     for surface in (resp.text, resp.reason, resp.headers.get("X-Echoed-Path", "")):
         assert _REAL_TG_TOKEN not in surface
         assert odd not in surface
     # The terminal Location of an over-limit chain is scrubbed too.
-    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/oddChain1", headers=headers)
+    resp = session.request(
+        "GET", f"{api_server.base_url}/bot{surrogate}/oddChain1", headers=headers
+    )
     assert resp.status_code == 302
     location = resp.headers.get("Location", "")
     assert _REAL_TG_TOKEN not in location
@@ -1600,10 +1574,10 @@ def test_double_encoded_echo_cannot_smuggle_the_token(
     grant("telegram", "write", "session")
     surrogate = backend._bot.token
     double = _REAL_TG_TOKEN.replace(":", "%253A")
-    api_server.lowercase_location = f"{rogue_server.base()}/bot{double}/getMe"
+    api_server.lowercase_location = f"{rogue_server.base_url}/bot{double}/getMe"
     resp = MuseBoundarySession("telegram").request(
         "GET",
-        f"{api_server.base()}/bot{surrogate}/redirectLowercase",
+        f"{api_server.base_url}/bot{surrogate}/redirectLowercase",
         headers={"Authorization": f"Bearer {surrogate}"},
     )
     assert resp.status_code == 401
@@ -1648,7 +1622,7 @@ def test_prefix_infinity_cache_is_not_trusted(
 ) -> None:
     """A persisted expires_at=inf (from an older build) forces re-exchange."""
     _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info(api_server.base()), [])
+    store_credentials("msteams", _client_credential_info(api_server.base_url), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
     payload["cached_token"] = {"access_token": "stale-immortal", "expires_at": float("inf")}
@@ -1778,7 +1752,7 @@ def test_huge_finite_cache_expiry_is_not_trusted(
 ) -> None:
     """A persisted expires_at=1e308 forces a fresh exchange."""
     _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info(api_server.base()), [])
+    store_credentials("msteams", _client_credential_info(api_server.base_url), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
     payload["cached_token"] = {"access_token": "stale-huge", "expires_at": 1e308}
@@ -1820,7 +1794,7 @@ def test_stale_boundary_surrogate_reports_reconnect(
     with pytest.raises(MuseAuthError, match="re-connect the agent backend"):
         session.request(
             "GET",
-            f"{api_server.base()}/bot{handle.token}/getMe",
+            f"{api_server.base_url}/bot{handle.token}/getMe",
             headers={"Authorization": f"Bearer {handle.token}"},
         )
 

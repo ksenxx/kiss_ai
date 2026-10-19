@@ -32,6 +32,7 @@ from kiss.agents.third_party_agents.postgres.postgres_sea import (
     _config,
 )
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 
 # Nothing listens on the discard port, so this URI is always unreachable.
 _UNREACHABLE_URI = "postgresql://user:x@127.0.0.1:9/db"
@@ -65,7 +66,7 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_check_auth_unauthenticated_message() -> None:
     """check_postgres_auth explains how to configure when unauthenticated."""
     agent = PostgresAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     msg = tools["check_postgres_auth"]()
     assert "authenticate_postgres" in msg
     assert "postgresql://" in msg
@@ -74,7 +75,7 @@ def test_check_auth_unauthenticated_message() -> None:
 def test_authenticate_rejects_empty_uri() -> None:
     """authenticate_postgres refuses an empty or whitespace URI."""
     agent = PostgresAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     assert "cannot be empty" in tools["authenticate_postgres"]("")
     assert "cannot be empty" in tools["authenticate_postgres"]("   ")
     assert not _config.path.exists()
@@ -83,7 +84,7 @@ def test_authenticate_rejects_empty_uri() -> None:
 def test_authenticate_unreachable_saves_nothing() -> None:
     """An unreachable database yields ok:false and persists no config."""
     agent = PostgresAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = json.loads(tools["authenticate_postgres"](_UNREACHABLE_URI))
     assert result["ok"] is False
     assert "Connection failed" in result["error"]
@@ -111,7 +112,7 @@ def test_persisted_config_loaded_by_new_agent() -> None:
         "pg_explain",
     } <= names
 
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     cleared = tools["clear_postgres_auth"]()
     assert "cleared" in cleared.lower()
     assert not _config.path.exists()
@@ -291,13 +292,13 @@ class TestPostgresLive:
     def test_authenticate_against_live_server_persists(self, pg_uri: str) -> None:
         """authenticate_postgres verifies SELECT 1 and persists the config."""
         agent = PostgresAgent()
-        tools = {t.__name__: t for t in agent._get_tools()}
+        tools = tools_by_name(agent)
         result = json.loads(tools["authenticate_postgres"](pg_uri, False))
         assert result["ok"] is True
         assert "read-write" in result["message"]
         saved = json.loads(_config.path.read_text(encoding="utf-8"))
         assert saved == {"database_uri": pg_uri, "read_only": "false"}
-        tools = {t.__name__: t for t in agent._get_tools()}
+        tools = tools_by_name(agent)
         checked = json.loads(tools["check_postgres_auth"]())
         assert checked == {"ok": True, "read_only": False}
 
@@ -315,7 +316,7 @@ class TestPostgresLive:
         config_dir.write_text("blocker", encoding="utf-8")
         try:
             agent = PostgresAgent()
-            tools = {t.__name__: t for t in agent._get_tools()}
+            tools = tools_by_name(agent)
             result = json.loads(tools["authenticate_postgres"](pg_uri, False))
             assert result["ok"] is False
             assert "could not save config" in result["error"]

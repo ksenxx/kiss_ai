@@ -381,6 +381,49 @@ class Config(BaseModel):
             "(can also be set via AWS_REGION env var)"
         ),
     )
+    # Claude Code (``cc/<model>``): the ``claude`` CLI bills the user's
+    # Claude subscription when it finds no API key in its environment.
+    CLAUDE_CODE_OAUTH_TOKEN: str = Field(
+        default_factory=lambda: os.getenv("CLAUDE_CODE_OAUTH_TOKEN", ""),
+        description=(
+            "Long-lived Claude subscription token from `claude setup-token`, "
+            "for cc/ models on a machine without a `claude login` "
+            "(can also be set via CLAUDE_CODE_OAUTH_TOKEN env var)"
+        ),
+    )
+    claude_code_use_subscription: bool = Field(
+        default_factory=lambda: _env_flag("KISS_CLAUDE_CODE_USE_SUBSCRIPTION", True),
+        description=(
+            "cc/ models bill the Claude subscription the `claude` CLI is logged "
+            "in to (or CLAUDE_CODE_OAUTH_TOKEN): ANTHROPIC_API_KEY and "
+            "ANTHROPIC_AUTH_TOKEN are kept out of the CLI's environment.  Off, "
+            "the CLI inherits the environment and an API key bills tokens "
+            "(KISS_CLAUDE_CODE_USE_SUBSCRIPTION=0; the settings panel's "
+            "Claude Code switch overrides it)."
+        ),
+    )
+    # Codex (``codex/<model>``): the ``codex`` CLI bills the user's ChatGPT
+    # subscription when it finds no API key in its environment.
+    CODEX_ACCESS_TOKEN: str = Field(
+        default_factory=lambda: os.getenv("CODEX_ACCESS_TOKEN", ""),
+        description=(
+            "Codex access token (ChatGPT Business/Enterprise, from "
+            "chatgpt.com/admin/access-tokens) for codex/ models on a machine "
+            "without a `codex login` (can also be set via CODEX_ACCESS_TOKEN "
+            "env var)"
+        ),
+    )
+    codex_use_subscription: bool = Field(
+        default_factory=lambda: _env_flag("KISS_CODEX_USE_SUBSCRIPTION", True),
+        description=(
+            "codex/ models bill the ChatGPT subscription the `codex` CLI is "
+            "logged in to (or CODEX_ACCESS_TOKEN): OPENAI_API_KEY and "
+            "CODEX_API_KEY are kept out of the CLI's environment.  Off, the "
+            "CLI inherits the environment and an API key bills tokens "
+            "(KISS_CODEX_USE_SUBSCRIPTION=0; the settings panel's Codex "
+            "switch overrides it)."
+        ),
+    )
     # Token-cost levers (projects/cost-levers-implementation-plan.md).
     # Each is a plain toggle read from a ``KISS_*`` environment
     # variable so a regression is a flag flip, not a revert.

@@ -812,8 +812,8 @@ becomes a run of the SEA on the model its
 commands and runs that already carry an `seaPath` keep their agent,
 with the picker's methods folded in first (see
 [Extending a SEA](#extending-a-sea-python-inheritance)).  The bundled
-`autorouter` and `bestrouter`
-are such SEAs; `bestrouter` is three methods besides `description()`:
+`autorouter`, `bestrouter` and their OpenRouter-only twins `orautorouter` and
+`orbestrouter` are such SEAs; `bestrouter` is three methods besides `description()`:
 
 ```python
 class BestrouterSea(BaseSea):
@@ -1008,8 +1008,11 @@ The `run()` parameters without a `settings()` key (the allowlist is
   a settings key).  Without it the prompt is the daemon's: with task
   classification enabled (the default) a task classified as
   simple runs on the reduced `SYSTEM_LITE.md`, everything else on the
-  full `SYSTEM.md`.  Both files are loaded with their `{{IDENTITY}}`
-  brand placeholder filled in (`kiss.core.brand.render_brand`); the
+  full `SYSTEM.md`.  Both files are loaded with their `{{IDENTITY}}`,
+  `{{HOME_DIR}}` and `{{VERSION}}` placeholders filled in
+  (`kiss.core.brand.render_brand`: the brand's identity sentence, which
+  for the stock brand also names the repo and website, the brand's state
+  directory, and the package version from `_version.py`); the
   string `system_prompt()` returns is used verbatim, with no
   placeholder rendering.  Either way the agent still appends its
   per-run operational instructions after the prompt
@@ -1069,8 +1072,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   `use_memory`, or the daemon process's `KISS_USE_MEMORY` environment
   variable).  The override is inherited by `run_agent` / `run_parallel`
   sub-tasks and never bypasses the memory safety gates: a run without the basic
-  toolset, a Docker run, a run-to-completion CLI model (`cc/*`,
-  `codex/*`), or a caller-supplied
+  toolset, a Docker run, or a caller-supplied
   `model_config["system_instruction"]` stays memory-free even with
   `True`.  Pages live in the directory named by the `memory_dir`
   setting, or `$KISS_HOME/memories` when unset;
@@ -1126,11 +1128,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   host.
   `run_agent` / `run_parallel` sub-tasks share the task's container
   (`container:<id>`); `bash_job`
-  and persistent memory are unavailable in a Docker run.  A
-  run-to-completion CLI model (`cc/*`, `codex/*`) executes its own
-  tools on the host, so a non-empty `docker_image` with such a
-  model fails the task with a `KISSError` instead of silently
-  bypassing the container.  The bundled `seas/coding/coding_sea.py`'s
+  and persistent memory are unavailable in a Docker run.  The bundled `seas/coding/coding_sea.py`'s
   `ContainerHarness` is the reference user of the attach form: its
   `settings()` returns `docker_image: "container:<id>"` for the trial
   container it is given, and the generated per-trial SEAs merge that
@@ -1742,7 +1740,10 @@ class TaskResult:
   that will finish it; its `settings()` fixes the routing session's model to
   `autorouter_sea.ROUTER_MODEL`, `openrouter/moonshotai/kimi-k3`, with
   `auto_classify` off and `use_web_tools` and `use_memory` on), `/bestrouter` (runs a task on
-  `claude-fable-5-1` and has `gpt-6-astra` review it), the hidden
+  `claude-fable-5-1` and has `gpt-6-astra` review it), `/orautorouter` and `/orbestrouter`
+  (the same two routers with every candidate taken from the OpenRouter vendor:
+  `openrouter/...` tiers, and `openrouter/anthropic/claude-fable-5.1` reviewed by
+  `openrouter/openai/gpt-6-astra`), the hidden
   `coding` SEA (unattended coding in a Docker container for benchmark
   trials; its `settings()` is `{"hidden": True}`, so there is no
   `/coding` command: the trial runners load the generated per-trial
@@ -1813,8 +1814,9 @@ class TaskResult:
   the machine's daemon over the link and its reply, stamped `machine`,
   sent back -- `sidebar_panels.MACHINE_WORKSPACE_REPLIES`; the
   settings sheet opens for the machine too, so its commands
-  (`getConfig`, `saveConfig`, `getMyModels`, `saveMyModel`,
-  `deleteMyModel` -- `sidebar_panels.MACHINE_SETTINGS_REPLIES`) stamped
+  (`getConfig`, `saveConfig`, `getMyModels`, `getClaudeCodeStatus`,
+  `getCodexStatus`, `startCodexLogin`, `saveMyModel`, `deleteMyModel` --
+  `sidebar_panels.MACHINE_SETTINGS_REPLIES`) stamped
   `machine` are forwarded the same way, their replies stamped `machine`
   and `forwarded`, a machine's `error` frame coming back as the reply's
   `error`, and a `saveConfig` that changes a password-registered
@@ -1829,11 +1831,15 @@ class TaskResult:
   daemon that has no remote password set and is reached on a loopback
   port), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits
-  only when asked), `/recommendations` (a `WorkerSea` whose only tools are
-  `finish`, `recent_tasks` and `save_recommendations`: it reads your own
-  top-level tasks of the last 24 hours (`persistence.user_tasks_since`;
-  cron runs and its own runs are dropped), picks five concrete follow-ups,
-  or five starter tasks for a new project when there are none,
+  only when asked), `/recommendations` (a `WorkerSea` whose tools are
+  `finish`, `recent_tasks`, `connected_apps`, read-only memory and
+  `save_recommendations`: it reads your own top-level tasks
+  (`persistence.user_tasks_since`; the last 24 hours and, further back,
+  enough older tasks to review at least 20 completed ones; cron runs and
+  its own runs are dropped), asks the auth-status probe which third-party
+  apps you are signed in to and memory what you did in them, picks ten
+  concrete follow-ups, at least three of them combining the signed-in
+  apps, or ten starter tasks for a new project when there are none,
   and stores them in `$KISS_HOME/recommendations.json`, which the
   sidebar's RECOMMENDATIONS subpanel shows; `/recommendations now` runs it
   once, and the 6-hourly default cron job keeps the file fresh; both
@@ -1858,7 +1864,17 @@ class TaskResult:
   conflicts is left in progress for the agent to resolve with the
   `shell+edit` tools and finish with a second `git_sync` call; its
   `prompt()` supplies a default task, so a bare `/sync` runs it, and
-  `/sync <remote>/<branch>` merges another remote branch),
+  `/sync <remote>/<branch>` merges another remote branch; when machines
+  are registered the `prompt()` also lists them and the agent then
+  syncs each one in turn through `run_agent(agent="sync",
+  machine=<name>, task="<ref> this machine only", max_budget="2",
+  options={"work_dir": <the same path>})`, waiting for each before the next, and calls
+  `git_sync` here once more; the words "this machine only" in a task
+  (what the sub-task sent to a machine says, or `/sync this machine
+  only` typed by the user) keep that run on its own checkout, so the
+  machines registered there are not synced in turn; the budget is
+  $2 per checkout, this one and one per machine, since a sub-task's
+  spend counts in the caller's),
   `/task_update` (reports what a running task has done so far),
   `/write` (writes prose for a general audience in concise, professional
   American English that reads as human-written; it defines only

@@ -22,23 +22,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function byId(win, id) {
-  const el = win.document.getElementById(id);
-  assert.ok(el, `#${id} must exist`);
-  return el;
-}
+const {lastMsg, click, byId} = require('./settings_helpers');
 
 function label(win, id) {
   return byId(win, id).querySelector('.more-item-label').textContent;
@@ -72,8 +56,14 @@ function testBedrockSubpanel() {
   ).map(el => el.id);
   assert.deepStrictEqual(
     subpanels,
-    ['api-keys-subpanel', 'custom-models-subpanel', 'bedrock-subpanel'],
-    'Bedrock is the subpanel after Custom Models',
+    [
+      'api-keys-subpanel',
+      'custom-models-subpanel',
+      'bedrock-subpanel',
+      'claude-code-subpanel',
+      'codex-subpanel',
+    ],
+    'Bedrock is the subpanel after Custom Models, Claude Code after it, Codex last',
   );
   const bedrockBody = byId(win, 'bedrock-body');
   const apiKeysBody = byId(win, 'api-keys-body');

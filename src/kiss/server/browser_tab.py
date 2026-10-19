@@ -52,6 +52,7 @@ from urllib.parse import quote
 from kiss.agents.sorcar.web_stealth import disabled_blink_features, virtual_display
 from kiss.core.browser_handoff import is_headless_environment
 from kiss.core.default_browser import ResolvedBrowser, resolve_browser
+from kiss.core.locked import locked_call
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, CDPSession, Page, Playwright
@@ -174,7 +175,11 @@ class BrowserTabService:
         """
         self._printer = printer
         self._profile_dir = profile_dir
-        self._lock = threading.Lock()
+        # Reached from agent task threads (``open_for_agent``,
+        # ``tab_for_target``), where the runner's Stop injects
+        # ``KeyboardInterrupt``: those entries go through ``locked_call``
+        # on a reentrant lock, never a plain ``with``.
+        self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._playwright: Playwright | None = None
@@ -266,10 +271,12 @@ class BrowserTabService:
 
     def tab_for_target(self, target_id: str) -> str | None:
         """The tab id of the attached page whose Chromium target id is *target_id*, if any."""
-        with self._lock:
-            for rec in self._pages.values():
-                if rec.target_id == target_id and rec.cdp is not None:
-                    return rec.tab_id
+        return locked_call(self._lock, self._tab_for_target_locked, target_id)
+
+    def _tab_for_target_locked(self, target_id: str) -> str | None:
+        for rec in self._pages.values():
+            if rec.target_id == target_id and rec.cdp is not None:
+                return rec.tab_id
         return None
 
     def interrupt(self, tab_id: str) -> None:
@@ -349,17 +356,19 @@ class BrowserTabService:
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         """Start the private event loop thread on first use."""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("The browser service is shut down.")
-            if self._loop is None:
-                loop = asyncio.new_event_loop()
-                thread = threading.Thread(
-                    target=loop.run_forever, name="kiss-browser-tab", daemon=True
-                )
-                thread.start()
-                self._loop, self._thread = loop, thread
-            return self._loop
+        return locked_call(self._lock, self._ensure_loop_locked)
+
+    def _ensure_loop_locked(self) -> asyncio.AbstractEventLoop:
+        if self._closed:
+            raise RuntimeError("The browser service is shut down.")
+        if self._loop is None:
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever, name="kiss-browser-tab", daemon=True
+            )
+            thread.start()
+            self._loop, self._thread = loop, thread
+        return self._loop
 
     def _submit(self, coro: Any) -> None:
         """Run *coro* on the private loop without waiting; log failures."""
@@ -574,9 +583,16 @@ class BrowserTabService:
             return rec if rec.cdp is not None else None
         try:
             cdp = await page.context.new_cdp_session(page)
+            rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+            # Checked AFTER the last await: the transport dispatches every
+            # message it has buffered without yielding, so the page's
+            # ``close`` can be delivered (with no listener yet) between
+            # the ``getTargetInfo`` reply and this coroutine resuming.
+            # A record completed for such a page would be a tab nobody
+            # can close.  Nothing yields between here and ``page.on``
+            # below, so a close that arrives later reaches the listener.
             if page.is_closed():
                 raise RuntimeError("page closed while attaching")
-            rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
         except BaseException as exc:  # noqa: BLE001 — a vanished popup is not an error
             # ``BaseException``: the ``asyncio.wait_for`` around
             # :meth:`_open` cancels this coroutine on timeout, and a

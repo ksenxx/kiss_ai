@@ -5,19 +5,40 @@
 
 // Frontend test for the SEA slash-command autocomplete popup.
 //
-// The daemon pushes a ``seaCommands`` event on every ready and on
-// every registry rescan.  Typing ``/`` (or ``/xxx``) at the very start
-// of the composer must show a dropdown of matching commands; selecting
-// one must replace the composer text with ``/<name> `` (a trailing
-// space) so the user can type the task text right after.
+// The daemon pushes a ``seaCommands`` event on every ready, on every
+// registry rescan and in reply to the page's own ``getSeaCommands``.
+// Typing ``/`` (or ``/xxx``) at the start of a word -- the start of
+// the composer, or after a space or a line break anywhere in it --
+// must show a dropdown of matching commands; selecting one must put
+// ``/<name> `` (a trailing space) at the slash so the user can type
+// the task text right after.
+//
+// The dropdown lists the event's ``recent`` commands first (the three
+// most recently run), then its ``frequent`` ones, then the rest in
+// name order; opening it asks the daemon for a fresh list once.
 //
 // Also pins that a plain ``/`` with no matches hides the dropdown, and
-// that a slash typed on a later line is NOT treated as a command.
+// that a slash inside a path (``src/``) is NOT treated as a command.
 
 'use strict';
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness.js');
+
+function keydown(win, inp, key) {
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {key, bubbles: true, cancelable: true}),
+  );
+}
+
+function selectedText(win) {
+  const sel = picker(win).querySelector('.ac-item.sel');
+  return sel ? sel.dataset.text : null;
+}
+
+function seaCommandRequests(posted) {
+  return posted.filter(m => m.type === 'getSeaCommands').length;
+}
 
 function picker(win) {
   return win.document.getElementById('autocomplete');
@@ -105,22 +126,160 @@ function main() {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
     setInput(win, '/zzz');
-    assert.strictEqual(
-      isPickerOpen(win),
-      false,
-      'popup hides with no matches',
-    );
+    assert.strictEqual(isPickerOpen(win), false, 'popup hides with no matches');
   }
 
-  // A slash on a later line is NOT a command ------------------------
+  // A slash anywhere in the text opens the popup -----------------------
+  // ... after a space, and accepting keeps the text before the slash.
+  {
+    const {win} = makePage();
+    send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
+    const inp = setInput(win, 'please fix this /gm');
+    assert.ok(isPickerOpen(win), 'slash after a space opens the popup');
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['gmail'],
+    );
+    seaCommandItems(win)[0].click();
+    assert.strictEqual(inp.value, 'please fix this /gmail ');
+    assert.strictEqual(inp.selectionStart, inp.value.length);
+    assert.strictEqual(isPickerOpen(win), false);
+  }
+  // ... on a later line, with text after the cursor left untouched.
   {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack']});
-    setInput(win, 'plain text\n/slack');
-    assert.strictEqual(
-      isPickerOpen(win),
-      false,
-      'slash on line 2 does not trigger command popup',
+    const inp = win.document.getElementById('task-input');
+    inp.value = 'plain text\n/sl tail';
+    inp.setSelectionRange(14, 14);
+    fireInput(inp);
+    assert.ok(isPickerOpen(win), 'slash on line 2 opens the popup');
+    seaCommandItems(win)[0].click();
+    // The text after the cursor already starts with a space: no
+    // second one is added.
+    assert.strictEqual(inp.value, 'plain text\n/slack tail');
+    assert.strictEqual(inp.selectionStart, 'plain text\n/slack'.length);
+  }
+  // ... but a slash inside a path or an @-mention is NOT a command.
+  {
+    const {win} = makePage();
+    send(win, {type: 'seaCommands', commands: ['slack', 'src']});
+    setInput(win, 'look at src/');
+    assert.strictEqual(isPickerOpen(win), false, 'src/ is a path');
+    setInput(win, 'look at src/s');
+    assert.strictEqual(isPickerOpen(win), false, 'src/s is a path');
+    setInput(win, 'see @docs/s');
+    assert.strictEqual(isPickerOpen(win), false, '@docs/s is a mention');
+  }
+
+  // Recent, then frequent, then the rest --------------------------------
+  {
+    const {win} = makePage();
+    send(win, {
+      type: 'seaCommands',
+      // The daemon sends the names sorted; the rest keeps that order.
+      commands: ['alpha', 'beta', 'delta', 'eps', 'gamma', 'zeta'],
+      // ``gone`` is no longer registered and must be ignored; ``zeta``
+      // is both recent and frequent and must be listed once.
+      recent: ['zeta', 'gone', 'beta'],
+      frequent: ['delta', 'zeta', 'alpha'],
+    });
+    setInput(win, '/');
+    assert.deepStrictEqual(seaCommandSectionLabels(win), [
+      'Recent',
+      'Frequent',
+      'Commands',
+    ]);
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['zeta', 'beta', 'delta', 'alpha', 'eps', 'gamma'],
+    );
+    // The most recent command is preselected.
+    assert.strictEqual(selectedText(win), 'zeta');
+    // Filtering applies to every group; empty groups drop their header.
+    setInput(win, '/a');
+    assert.deepStrictEqual(seaCommandSectionLabels(win), [
+      'Recent',
+      'Frequent',
+      'Commands',
+    ]);
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['zeta', 'beta', 'delta', 'alpha', 'gamma'],
+    );
+    setInput(win, '/eps');
+    assert.deepStrictEqual(seaCommandSectionLabels(win), ['Commands']);
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['eps'],
+    );
+  }
+
+  // Opening the popup asks the daemon for a fresh list ONCE -----------
+  {
+    const {win, posted} = makePage();
+    send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
+    const before = seaCommandRequests(posted);
+    const inp = setInput(win, '/');
+    assert.strictEqual(seaCommandRequests(posted), before + 1);
+    // Narrowing the same word does not ask again, nor does the
+    // identical reply to the request.
+    setInput(win, '/g');
+    send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
+    assert.strictEqual(seaCommandRequests(posted), before + 1);
+    assert.ok(isPickerOpen(win));
+    // Escape dismisses the popup; typing on reopens it and asks again.
+    keydown(win, inp, 'Escape');
+    assert.strictEqual(isPickerOpen(win), false);
+    setInput(win, '/gm');
+    assert.ok(isPickerOpen(win));
+    assert.strictEqual(seaCommandRequests(posted), before + 2);
+    // A word with no matches asks once, not on every keystroke.
+    setInput(win, '/zz');
+    assert.strictEqual(isPickerOpen(win), false);
+    setInput(win, '/zzz');
+    assert.strictEqual(seaCommandRequests(posted), before + 2);
+  }
+
+  // A reply with the same lists keeps the arrow-key selection; -------
+  // a reply with a new ranking reflows the popup.
+  {
+    const {win, posted} = makePage();
+    const event = {
+      type: 'seaCommands',
+      commands: ['alpha', 'beta', 'gamma'],
+      recent: ['gamma'],
+      frequent: [],
+    };
+    send(win, event);
+    const inp = setInput(win, '/');
+    keydown(win, inp, 'ArrowDown');
+    assert.strictEqual(selectedText(win), 'alpha');
+    send(win, event);
+    assert.strictEqual(selectedText(win), 'alpha', 'same reply: no reset');
+    send(win, Object.assign({}, event, {recent: ['beta']}));
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['beta', 'alpha', 'gamma'],
+    );
+    assert.strictEqual(selectedText(win), 'beta');
+    // A reply landing after Escape must not reopen the dismissed
+    // popup (the slash word is still in the composer) nor ask again.
+    keydown(win, inp, 'Escape');
+    assert.strictEqual(isPickerOpen(win), false);
+    const requests = seaCommandRequests(posted);
+    send(win, Object.assign({}, event, {recent: ['alpha']}));
+    assert.strictEqual(isPickerOpen(win), false, 'dismissed stays dismissed');
+    assert.strictEqual(seaCommandRequests(posted), requests);
+    // The next keystroke shows the new ranking (alpha is now recent).
+    setInput(win, '/a');
+    assert.deepStrictEqual(seaCommandSectionLabels(win), [
+      'Recent',
+      'Commands',
+    ]);
+    assert.deepStrictEqual(
+      seaCommandItems(win).map(el => el.dataset.text),
+      ['alpha', 'beta', 'gamma'],
     );
   }
 

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<!--
+  Author: Koushik Sen (ksen@berkeley.edu)
+  Contributors:
+  Koushik Sen (ksen@berkeley.edu)
+  add your name here
+
+  The page kiss-app opens as the Chromium "app" window on macOS
+  (kiss.server.standalone_app).  It opens the webapp named by its
+  ?url= query as a popup window of the same size and position, then
+  closes itself, so the window the user keeps is a popup, not an app
+  window: Chromium's macOS Dock-click handler ignores app windows and
+  opens a new browser window when it finds none to focus, while a
+  popup is focused like any other window.  The popup gets the bounds
+  appWindow.js last saved for it (localStorage, same origin as this
+  page), else this window's own.  Should the popup be blocked, this
+  window shows the webapp itself.  ?title= names this window while it
+  is on screen.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title></title>
+  <script>
+    (function () {
+      'use strict';
+      var params = new URLSearchParams(location.search);
+      var url = params.get('url');
+      document.title = params.get('title') || '';
+      if (!url) return;
+      var bounds = null;
+      try {
+        bounds = JSON.parse(localStorage.getItem('kissAppWindowBounds'));
+      } catch (e) {
+        bounds = null;
+      }
+      if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) {
+        bounds = {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
+      }
+      var features = 'popup,left=' + bounds.left + ',top=' + bounds.top +
+        ',width=' + bounds.width + ',height=' + bounds.height;
+      if (window.open(url, 'kiss-app-window', features)) {
+        window.close();
+      } else {
+        location.replace(url);
+      }
+    })();
+  </script>
+</head>
+<body></body>
+</html>

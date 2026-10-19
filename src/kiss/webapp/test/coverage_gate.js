@@ -23,6 +23,9 @@ const path = require('path');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const CHILD_TIMEOUT_MS = 5 * 60 * 1000;
+// spawnSync's default is 1 MiB, after which the child is SIGKILLed with
+// ENOBUFS and a passing but chatty suite would look like a failure.
+const CHILD_MAX_OUTPUT = 64 * 1024 * 1024;
 
 // Node 24+ enables the Maglev compiler and background Sparkplug compilation;
 // either can hang `process.exit()` (nodejs/node#64274), which is why
@@ -53,18 +56,22 @@ function runCovered(testFile, mark) {
       encoding: 'utf-8',
       timeout: CHILD_TIMEOUT_MS,
       killSignal: 'SIGKILL',
+      maxBuffer: CHILD_MAX_OUTPUT,
     },
   );
   process.stdout.write(res.stdout || '');
   process.stderr.write(res.stderr || '');
   if (res.status !== 0) {
     fs.rmSync(covDir, {recursive: true, force: true});
-    console.error(
-      res.error && res.error.code === 'ETIMEDOUT'
-        ? 'coverage gate: the functional test did not exit within ' +
-            `${CHILD_TIMEOUT_MS / 1000}s, killed`
-        : 'coverage gate: the functional test itself FAILED',
-    );
+    let why = 'the functional test itself FAILED';
+    if (res.error && res.error.code === 'ETIMEDOUT') {
+      why =
+        'the functional test did not exit within ' +
+        `${CHILD_TIMEOUT_MS / 1000}s, killed`;
+    } else if (res.error) {
+      why = `could not run the functional test: ${res.error}`;
+    }
+    console.error(`coverage gate: ${why}`);
     process.exit(res.status || 1);
   }
   const reports = fs
@@ -158,16 +165,21 @@ function isCodeLine(line) {
 }
 
 /**
- * Line coverage of every `mark` region of one target file.  A line counts
- * as hit when any of its non-whitespace bytes executed, or, with
- * `everyByte`, only when all of them did (V8 gives an untaken `return;`
- * or `||` operand a zero count even when it shares a line with run code).
+ * Line coverage of every `mark` region of one target file, or of the
+ * whole file when `target.wholeFile` is set.  A line counts as hit when
+ * any of its non-whitespace bytes executed, or, with `everyByte`, only
+ * when all of them did (V8 gives an untaken `return;` or `||` operand a
+ * zero count even when it shares a line with run code).  Returns the
+ * counts, the missed lines, and the file's text with its covered-byte
+ * map for gates that also inspect branches.
  */
 function measure(target, mark, reports, everyByte) {
   const name = target.file;
   const src = fs.readFileSync(path.join(MEDIA, target.file), 'utf-8');
   const lines = src.split('\n');
-  const regions = findRegions(lines, mark, name, target);
+  const regions = target.wholeFile
+    ? [[0, lines.length]]
+    : findRegions(lines, mark, name, target);
   const {covered, instances} = collectCoverage(
     reports,
     target.sourceUrl,
@@ -204,7 +216,16 @@ function measure(target, mark, reports, everyByte) {
     }
   }
   assert.ok(total > 0, `${name} ${mark} regions must not be empty`);
-  return {name, total, hit, missed, instances, regions: regions.length};
+  return {
+    name,
+    total,
+    hit,
+    missed,
+    instances,
+    regions: regions.length,
+    src,
+    covered,
+  };
 }
 
 /**
@@ -244,4 +265,4 @@ function gateRegions(opts) {
   );
 }
 
-module.exports = {MEDIA, runCovered, paintInstance, gateRegions};
+module.exports = {runCovered, measure, gateRegions};

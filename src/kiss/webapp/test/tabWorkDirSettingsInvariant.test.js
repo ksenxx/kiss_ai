@@ -20,13 +20,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
+const {lastMsg} = require('./settings_helpers');
 
 function initialTabId(posted) {
   const ready = posted.find(m => m && m.type === 'ready');

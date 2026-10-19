@@ -27,6 +27,8 @@ from kiss.agents.third_party_agents.qq.qq_sea import (
     _config,
     _derive_signing_key,
 )
+from kiss.tests.agents.third_party_agents.conftest import connect_on_ephemeral_port
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -37,25 +39,6 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 _SECRET = "kiss-qq-test-secret"
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
-
-
-def _connect_on_ephemeral_port(backend: QQChannelBackend) -> int:
-    """Connect through the PUBLIC ``connect()`` on an ephemeral port.
-
-    Rewrites the persisted config's port to ``"0"`` (``authenticate_qq``
-    deliberately rejects port 0, so the test adjusts the stored config
-    directly), then drives the public ``connect()`` end to end — config
-    loading, ``_apply_config`` and the webhook server start included —
-    and reads the OS-assigned port back from the bound server (no
-    reserve-close-rebind race).
-    """
-    cfg = _config.load()
-    assert cfg is not None
-    cfg["port"] = "0"
-    _config.save(cfg)
-    assert backend.connect() is True
-    assert backend._webhook_server is not None
-    return int(backend._webhook_server.server_address[1])
 
 
 def _test_key() -> Ed25519PrivateKey:
@@ -87,8 +70,7 @@ class _QQApiHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve the token endpoint and the v2 message endpoints."""
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        body = json.loads(self._read_raw().decode("utf-8"))
         authorization = self.headers.get("Authorization", "")
         server = cast(RecordingServer, self.server)
         server.requests.append({"path": self.path, "authorization": authorization, "body": body})
@@ -115,7 +97,7 @@ def _sent(api: RecordingServer) -> list[tuple[str, str, dict[str, Any]]]:
 def _authenticated_agent(api_base: str = "", token_url: str = "", port: str = "") -> QQAgent:
     """Authenticate a fresh agent against the given endpoints."""
     agent = QQAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     result = tools["authenticate_qq"](
         appid="qq_app",
         secret=_SECRET,
@@ -134,7 +116,7 @@ def test_unauthenticated_state() -> None:
     assert agent._is_authenticated() is False
     tools = {t.__name__ for t in agent._get_tools()}
     assert tools == {"check_qq_auth", "authenticate_qq", "clear_qq_auth"}
-    check = {t.__name__: t for t in agent._get_tools()}["check_qq_auth"]
+    check = tools_by_name(agent)["check_qq_auth"]
     assert "not configured" in check().lower()
 
 
@@ -148,7 +130,7 @@ def test_auth_trio_persistence() -> None:
     assert saved["appid"] == "qq_app"
     assert saved["api_base"] == "http://127.0.0.1:1"
 
-    tools = {t.__name__: t for t in agent._get_tools()}
+    tools = tools_by_name(agent)
     check = json.loads(tools["check_qq_auth"]())
     assert check["ok"] is True and check["appid"] == "qq_app"
     assert {"send_group_message", "send_c2c_message"} <= set(tools)
@@ -176,7 +158,7 @@ def test_webhook_validation_challenge() -> None:
     """The op-13 challenge response verifies with the derived public key."""
     _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    port = _connect_on_ephemeral_port(backend)
+    port = connect_on_ephemeral_port(_config, backend, "_webhook_server")
     try:
         challenge = json.dumps(
             {"op": 13, "d": {"plain_token": "PT0kEn", "event_ts": "1712345678"}}
@@ -205,7 +187,7 @@ def test_webhook_signed_events_and_bad_signature() -> None:
     """Signed events are queued and polled; bad signatures get 401."""
     _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    port = _connect_on_ephemeral_port(backend)
+    port = connect_on_ephemeral_port(_config, backend, "_webhook_server")
     try:
         url = f"http://127.0.0.1:{port}/"
 
@@ -298,7 +280,7 @@ def test_webhook_bad_content_length() -> None:
     """Missing/negative/non-decimal Content-Length gets 400; oversized gets 413."""
     _authenticated_agent(api_base="http://127.0.0.1:1/")
     backend = QQChannelBackend()
-    port = _connect_on_ephemeral_port(backend)
+    port = connect_on_ephemeral_port(_config, backend, "_webhook_server")
     try:
         assert raw_post_status(port, "") == 400
         assert raw_post_status(port, "Content-Length: -5\r\n") == 400
@@ -313,7 +295,7 @@ def test_webhook_bad_content_length() -> None:
 def test_authenticate_rejects_invalid_port() -> None:
     """authenticate_qq rejects non-numeric and out-of-range ports."""
     agent = QQAgent()
-    authenticate = {t.__name__: t for t in agent._get_tools()}["authenticate_qq"]
+    authenticate = tools_by_name(agent)["authenticate_qq"]
     for bad_port in ("abc", "0", "-1", "65536", "1.5", "1e3"):
         result = authenticate(appid="qq_app", secret=_SECRET, port=bad_port)
         assert "invalid port" in result.lower(), bad_port

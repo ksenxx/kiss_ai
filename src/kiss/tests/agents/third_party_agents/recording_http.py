@@ -194,23 +194,28 @@ class RecordingHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence request logging."""
 
-    def _reply(self, status: int, body: str, content_type: str = "application/json") -> None:
-        """Send *body* (UTF-8) with *status* and a ``Content-Length``."""
-        payload = body.encode("utf-8")
+    def _reply(
+        self, status: int, body: str | bytes, content_type: str = "application/json"
+    ) -> None:
+        """Send *body* (a ``str`` is UTF-8 encoded) with *status* and a ``Content-Length``."""
+        payload = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
-    def _json(self, status: int, body: Any) -> None:
+    def _json(self, status: int, body: Any, content_type: str = "application/json") -> None:
         """Send *body* as a JSON response."""
-        self._reply(status, json.dumps(body))
+        self._reply(status, json.dumps(body), content_type)
+
+    def _read_raw(self) -> bytes:
+        """Return the request body announced by ``Content-Length`` (``b""`` when absent)."""
+        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
 
     def _read_body(self) -> Any:
         """Return the request's JSON body: ``{}`` when empty, ``None`` when malformed."""
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
+        raw = self._read_raw()
         try:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except ValueError:
@@ -223,13 +228,12 @@ class JsonWebhookHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802
         """Record the JSON body and reply with the server's ``response_body``."""
         server = cast(JsonWebhookServer, self.server)
-        length = int(self.headers.get("Content-Length", 0))
         split = urlsplit(self.path)
         server.requests.append(
             {
                 "path": split.path,
                 "query": parse_qs(split.query),
-                "json": json.loads(self.rfile.read(length).decode("utf-8")),
+                "json": json.loads(self._read_raw().decode("utf-8")),
             }
         )
         self._json(200, server.response_body)

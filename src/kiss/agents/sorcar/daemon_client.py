@@ -476,6 +476,7 @@ def run_command(
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
     side_channel: bool = False,
+    cron_job: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -534,6 +535,7 @@ def run_command(
         "parentTabId": parent_tab_id,
         "parentReviewer": parent_reviewer,
         "sideChannel": side_channel,
+        "cronJob": cron_job,
         "model": model,
         "systemPrompt": system_prompt,
         "seaPath": sea_path,
@@ -569,6 +571,7 @@ def run(
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
     side_channel: bool = False,
+    cron_job: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -649,6 +652,10 @@ def run(
             never re-opened by a replay.  Persisted on the child's
             history row; only meaningful with *parent_task_id*; no
             SEA setting.
+        cron_job: Whether the cron scheduler launched the run (an
+            in-chat job; prompt jobs are recognised by their preamble).
+            Persisted as the history row's ``is_cron`` flag, which the
+            CHATS list hides unless its Cron chip is on; no SEA setting.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -815,8 +822,7 @@ def run(
             daemon process's ``KISS_USE_MEMORY`` environment
             variable).  A boolean override never bypasses the memory
             safety gates: a run without the basic toolset (the
-            ``none`` tool profile), a Docker run, a
-            run-to-completion CLI model (``cc/*``, ``codex/*``), or a
+            ``none`` tool profile), a Docker run, or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
         is_parallel: Whether the agent gets the ``run_parallel`` tool
@@ -1049,6 +1055,7 @@ def run(
             parent_tab_id=parent_tab_id,
             parent_reviewer=parent_reviewer,
             side_channel=side_channel,
+            cron_job=cron_job,
             model=model,
             chat_id=chat_id,
             system_prompt=system_prompt,

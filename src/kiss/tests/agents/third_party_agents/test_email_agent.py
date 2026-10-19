@@ -29,6 +29,7 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _is_automated_mail,
     _normalize_mail,
 )
+from kiss.tests.agents.third_party_agents.email_test_utils import raw_plain
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
 _BACKEND_TOOLS = {"send_email", "list_unread_emails", "read_email", "mark_email_read"}
@@ -54,21 +55,6 @@ def _authenticate(agent: EmailAgent) -> None:
         password="app-password",
     )
     assert json.loads(result)["ok"] is True
-
-
-def _raw_plain(**overrides: str) -> bytes:
-    """Build a plain-text RFC822 message, allowing header overrides."""
-    headers = {
-        "From": "Alice Example <alice@example.com>",
-        "To": "bot@example.com",
-        "Subject": "Hello there",
-        "Date": "Mon, 01 Jan 2024 12:00:00 +0000",
-        "Message-ID": "<abc123@example.com>",
-        "Content-Type": 'text/plain; charset="utf-8"',
-    }
-    headers.update(overrides)
-    lines = [f"{k}: {v}" for k, v in headers.items() if v]
-    return ("\r\n".join(lines) + "\r\n\r\nHi bot, please help.\r\n").encode("utf-8")
 
 
 _RAW_MULTIPART = b"""\
@@ -187,7 +173,7 @@ class TestMailNormalization:
 
     def test_plain_message(self) -> None:
         """A plain-text mail normalizes to the channel message shape."""
-        msg = email.message_from_bytes(_raw_plain())
+        msg = email.message_from_bytes(raw_plain())
         normalized = _normalize_mail(msg, "INBOX")
         assert normalized["user"] == "alice@example.com"
         assert normalized["username"] == "Alice Example"
@@ -208,7 +194,7 @@ class TestMailNormalization:
 
     def test_missing_headers_are_tolerated(self) -> None:
         """Mail without Date/Message-ID/Subject still normalizes."""
-        msg = email.message_from_bytes(_raw_plain(Date="", Subject="", **{"Message-ID": ""}))
+        msg = email.message_from_bytes(raw_plain(Date="", Subject="", **{"Message-ID": ""}))
         normalized = _normalize_mail(msg, "INBOX")
         assert normalized["ts"] == ""
         assert normalized["thread_ts"] == ""
@@ -220,7 +206,7 @@ class TestAutomatedMailFiltering:
 
     def test_human_mail_is_not_automated(self) -> None:
         """Ordinary human mail passes the filter."""
-        assert _is_automated_mail(email.message_from_bytes(_raw_plain())) is False
+        assert _is_automated_mail(email.message_from_bytes(raw_plain())) is False
 
     @pytest.mark.parametrize(
         "sender",
@@ -234,29 +220,29 @@ class TestAutomatedMailFiltering:
     )
     def test_noreply_senders(self, sender: str) -> None:
         """No-reply style From addresses are automated."""
-        assert _is_automated_mail(email.message_from_bytes(_raw_plain(From=sender))) is True
+        assert _is_automated_mail(email.message_from_bytes(raw_plain(From=sender))) is True
 
     def test_auto_submitted(self) -> None:
         """Auto-Submitted != 'no' is automated; 'no' is not."""
-        auto = email.message_from_bytes(_raw_plain(**{"Auto-Submitted": "auto-generated"}))
+        auto = email.message_from_bytes(raw_plain(**{"Auto-Submitted": "auto-generated"}))
         assert _is_automated_mail(auto) is True
-        manual = email.message_from_bytes(_raw_plain(**{"Auto-Submitted": "No"}))
+        manual = email.message_from_bytes(raw_plain(**{"Auto-Submitted": "No"}))
         assert _is_automated_mail(manual) is False
 
     @pytest.mark.parametrize("precedence", ["bulk", "junk", "list", "Bulk"])
     def test_precedence(self, precedence: str) -> None:
         """Precedence bulk/junk/list is automated."""
-        msg = email.message_from_bytes(_raw_plain(Precedence=precedence))
+        msg = email.message_from_bytes(raw_plain(Precedence=precedence))
         assert _is_automated_mail(msg) is True
 
     def test_precedence_first_class_is_fine(self) -> None:
         """Other Precedence values are not automated."""
-        msg = email.message_from_bytes(_raw_plain(Precedence="first-class"))
+        msg = email.message_from_bytes(raw_plain(Precedence="first-class"))
         assert _is_automated_mail(msg) is False
 
     def test_list_id(self) -> None:
         """A List-Id header marks mailing-list mail as automated."""
-        msg = email.message_from_bytes(_raw_plain(**{"List-Id": "<dev.lists.example.com>"}))
+        msg = email.message_from_bytes(raw_plain(**{"List-Id": "<dev.lists.example.com>"}))
         assert _is_automated_mail(msg) is True
 
 

@@ -34,6 +34,7 @@ from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.core import user_config
 from kiss.tests.agents.seas.conftest import persist_task
+from kiss.tests.agents.seas.sea_contract import system_message
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -148,8 +149,8 @@ class ReplayInCloneTest(DaemonLocalHarness):
         assert row["cost"] > 0 and row["steps"] == result["steps"]
         agentic = [r for r in self.requests if r.get("tools")]
         assert len(agentic) == 2, [list(r) for r in self.requests]
-        system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-        assert str(system["content"]).startswith("You are the demo agent.")
+        system = system_message(agentic[0])
+        assert system.startswith("You are the demo agent.")
         user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
         assert out["task"] in str(user["content"])
 
@@ -187,7 +188,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         assert row is not None and row["work_dir"] == str(clone) and not row["sea"], row
         agentic = [r for r in self.requests if r.get("tools")]
         assert len(agentic) == 2, [list(r) for r in self.requests]
-        system = str(next(m for m in agentic[0]["messages"] if m["role"] == "system")["content"])
+        system = system_message(agentic[0])
         assert system.startswith("You are KISS Sorcar") and marker in system, system[:300]
         assert "{{IDENTITY}}" not in system
 
@@ -220,7 +221,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         assert row["model"] == STANDIN_MODEL
         agentic = [r for r in self.requests if r.get("tools")]
         assert len(agentic) == 2, [list(r) for r in self.requests]
-        system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-        assert str(system["content"]).startswith("You are the demo agent.")
+        system = system_message(agentic[0])
+        assert system.startswith("You are the demo agent.")
         user = str(next(m for m in agentic[0]["messages"] if m["role"] == "user")["content"])
         assert task in user

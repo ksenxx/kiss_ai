@@ -257,6 +257,29 @@ def replace_waiting_for_readers(tmp: str | Path, target: Path) -> None:
             time.sleep(_SHARING_RETRY_INTERVAL)
 
 
+def unlink_waiting_for_holders(path: Path) -> None:
+    """``Path.unlink(missing_ok=True)`` that, on Windows, waits out a concurrent holder.
+
+    Windows keeps a file's name visible, and makes ``DeleteFile`` on it
+    fail with ``PermissionError``, while another handle is on it: a
+    second thread or process unlinking the same file at the same moment
+    (the file is pending deletion until its handle closes), a reader
+    opened without ``FILE_SHARE_DELETE``, or the antivirus filter.
+    Retrying for :data:`SHARING_RETRY_SECONDS` turns that into the POSIX
+    outcome -- the file is gone, whoever removed it; a holder that never
+    lets go still raises, as does a directory at *path*.
+    """
+    deadline = time.monotonic() + SHARING_RETRY_SECONDS
+    while True:
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if not _sharing_violation_may_clear(path, deadline):
+                raise
+            time.sleep(_SHARING_RETRY_INTERVAL)
+
+
 def read_bytes_waiting_for_writer(path: Path) -> bytes:
     """``Path.read_bytes`` that, on Windows, waits out an in-flight replace.
 

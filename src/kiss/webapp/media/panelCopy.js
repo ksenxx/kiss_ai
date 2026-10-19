@@ -314,11 +314,16 @@
     // copy: a bare setTimeout let a rapid second click's flash be cut
     // short by the first click's stale timer.
     let flashTimer = null;
+    // Each click takes a new generation; only the latest click's
+    // clipboard outcome reaches the button, so a slow first copy that
+    // fails cannot overwrite the check mark of a faster second one.
+    let copyGen = 0;
     // Show the copy outcome on the button for 1.5 s: a check mark
     // (`copied`) or, when both the async clipboard and the execCommand
     // fallback failed, a cross with a "Copy failed" title (`copy-failed`)
     // so the failure is never silent.
-    const flash = ok => {
+    const flash = (ok, gen) => {
+      if (gen !== copyGen) return;
       btn.innerHTML = ok ? PANEL_CHECK_SVG : PANEL_FAIL_SVG;
       btn.classList.toggle('copied', ok);
       btn.classList.toggle('copy-failed', !ok);
@@ -336,7 +341,8 @@
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
-      copyText(normalise(getRawText(panelEl)), doc).then(flash);
+      const gen = ++copyGen;
+      copyText(normalise(getRawText(panelEl)), doc).then(ok => flash(ok, gen));
     });
     panelEl.appendChild(btn);
   }
@@ -517,7 +523,6 @@
     setPanelCost: setPanelCost,
     PANEL_COPY_SVG: PANEL_COPY_SVG,
     PANEL_CHECK_SVG: PANEL_CHECK_SVG,
-    PANEL_STOP_SVG: PANEL_STOP_SVG,
   };
 
   if (root && typeof root === 'object') {

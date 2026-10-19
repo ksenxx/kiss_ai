@@ -57,8 +57,7 @@ class _TokenHandler(RecordingHandler):
     """Records every POSTed form and answers with the configured reply."""
 
     def do_POST(self) -> None:  # noqa: N802 - http.server naming
-        length = int(self.headers.get("Content-Length") or 0)
-        form = dict(parse_qsl(self.rfile.read(length).decode()))
+        form = dict(parse_qsl(self._read_raw().decode()))
         server = cast(_TokenServer, self.server)
         server.forms.append(form)
         status, body = server.reply

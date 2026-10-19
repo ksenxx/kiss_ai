@@ -91,6 +91,7 @@ class FakeComposioServer(ThreadedHTTPServer):
         self.status_holds: dict[str, threading.Event] = {}
         self.status_held: defaultdict[str, threading.Event] = defaultdict(threading.Event)
         self._counter = 0
+        self._lock = threading.Lock()
 
     @property
     def base_url(self) -> str:
@@ -98,9 +99,10 @@ class FakeComposioServer(ThreadedHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}"
 
     def next_id(self, prefix: str) -> str:
-        """Return a fresh object ID with *prefix*."""
-        self._counter += 1
-        return f"{prefix}_{self._counter}"
+        """Return a fresh object ID with *prefix* (unique across concurrent handler threads)."""
+        with self._lock:
+            self._counter += 1
+            return f"{prefix}_{self._counter}"
 
     def paths(self, method: str) -> list[str]:
         """Return the paths of every recorded request made with *method*."""
@@ -124,7 +126,7 @@ class _Handler(RecordingHandler):
     server: FakeComposioServer  # type: ignore[assignment]
 
     def _route(self) -> None:
-        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        raw = self._read_raw()
         body: Any = json.loads(raw) if raw else None
         server = self.server
         parts = urlsplit(self.path)
@@ -188,11 +190,7 @@ class _Handler(RecordingHandler):
             self._json(404, {"error": {"message": "no such download"}})
             return
         content_type, data = self.server.downloads[index]
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._reply(200, data, content_type)
 
     def _account(self, account: str, api_key: str) -> None:
         server = self.server

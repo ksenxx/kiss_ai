@@ -39,6 +39,12 @@
 #     when the other machine does not have its id; a row both machines have
 #     is left alone, no row is ever deleted or updated, and no table other
 #     than ``task_history``, ``events`` and ``chat_summaries`` is touched.
+#     The one write to existing rows is the web app's own schema migration:
+#     the two machines may be on different releases, so a column one
+#     database lacks is added to it with the other's declaration (as the web
+#     app adds it when it opens an older database), and ``is_cron`` is
+#     worked out, from the traces a cron run leaves, for the rows written
+#     before the column existed -- the flag is only ever set, never cleared.
 #     ``chat_summaries`` is a cache (one row per chat: a few-word summary and
 #     the launch time of the chat's newest task) that is neither append-only
 #     nor kept up to date incrementally -- the web app rewrites a chat's row
@@ -620,8 +626,8 @@ may_replace_remote_db() {
     fi
     incomplete "Refusing to replace the task database on $TARGET: its tasks" \
                "could not be brought here first, and nothing on either machine" \
-               "was changed. Start kiss-web on $TARGET once (it migrates its" \
-               "own database on open) and deploy again."
+               "was changed. Fix what the warning above reports and deploy" \
+               "again."
     return 1
 }
 

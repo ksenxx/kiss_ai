@@ -4,9 +4,10 @@
 # add your name here
 """Shared Muse-auth helpers for the ``test_muse_*`` modules.
 
-Each Muse test module keeps its own tiny ``muse_env`` fixture (the
-per-module policy documents which services get loopback ``extra_hosts``
-entries) but delegates the common setup and teardown here:
+Each Muse test module declares a ``MUSE_POLICY`` (built with
+``loopback_policy``: it documents which services get loopback
+``extra_hosts`` entries) that the shared ``muse_env`` fixture in
+``conftest.py`` installs through the helpers here:
 ``setup_muse_env`` enables Muse-auth and writes the policy file inside
 the isolated ``KISS_HOME``, and ``teardown_muse_env`` stops the daemon
 subprocess and waits for its socket to vanish and its process to exit so
@@ -37,7 +38,8 @@ from kiss.agents.third_party_agents.muse_auth.client import stop_daemon
 _DAEMON_SKIP_REASON = "Linux-only: the Muse-auth daemon authenticates clients with SO_PEERCRED"
 
 requires_muse_daemon = pytest.mark.skipif(
-    not platform_supports_muse_daemon(), reason=_DAEMON_SKIP_REASON,
+    not platform_supports_muse_daemon(),
+    reason=_DAEMON_SKIP_REASON,
 )
 """Skip marker for tests that spawn the real daemon outside ``muse_env``."""
 
@@ -56,8 +58,8 @@ def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> N
     ``LOCAL_PEERCRED`` instead, Windows has no ``AF_UNIX`` at all), so
     the product deliberately does not run it elsewhere
     (:func:`platform_supports_muse_daemon`).  Every daemon-backed test
-    is therefore skipped here, in the one place all six ``muse_env``
-    fixtures pass through; without the skip each one waited ~40 s for
+    is therefore skipped here, the one place the shared ``muse_env``
+    fixture passes through; without the skip each test waited ~40 s for
     a daemon that cannot start.
 
     Args:
@@ -160,3 +162,36 @@ def auth_tools(agent: Any) -> dict[str, Any]:
         A mapping from tool function name to the tool callable.
     """
     return {tool.__name__: tool for tool in agent._get_auth_tools()}
+
+
+def tools_by_name(agent: Any) -> dict[str, Any]:
+    """Return ``agent``'s tools (``_get_tools()``) keyed by function name.
+
+    Args:
+        agent: Any agent exposing ``_get_tools``.
+
+    Returns:
+        A mapping from tool function name to the tool callable.
+    """
+    return {tool.__name__: tool for tool in agent._get_tools()}
+
+
+def loopback_policy(*services: str) -> dict[str, Any]:
+    """Return the Muse-auth policy a test module's ``MUSE_POLICY`` is built from.
+
+    Reads are allowed, writes ask the user, and every *service* gets an
+    ``extra_hosts`` entry for ``127.0.0.1`` so a loopback emulator of
+    that service (whose real host is a fixed cloud endpoint) passes the
+    daemon's host allow-list.  Services left out are origin-bound at
+    enrollment, which their tests then prove.
+
+    Args:
+        services: Muse-auth service names whose hosts include loopback.
+
+    Returns:
+        The policy document the shared ``muse_env`` fixture installs.
+    """
+    return {
+        "defaults": {"read": "allow", "write": "ask"},
+        "services": {service: {"extra_hosts": ["127.0.0.1"]} for service in services},
+    }

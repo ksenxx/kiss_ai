@@ -53,8 +53,7 @@ class _SlackHandler(RecordingHandler):
     server: RecordingServer  # type: ignore[assignment]
 
     def _record_and_respond(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+        body = self._read_raw().decode("utf-8", errors="replace")
         parsed = urllib.parse.urlparse(self.path)
         self.server.requests.append({"path": parsed.path, "query": parsed.query, "body": body})
         port = self.server.server_address[1]
@@ -83,20 +82,9 @@ class _SlackHandler(RecordingHandler):
             payload = {"ok": True, "files": [{"id": "F1", "title": "a.txt"}]}
         else:
             payload = {"ok": True}
-        data = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._json(200, payload)
 
-    def do_GET(self) -> None:  # noqa: N802
-        """Handle GET requests (e.g. conversations.list)."""
-        self._record_and_respond()
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Handle POST requests (e.g. files.completeUploadExternal)."""
-        self._record_and_respond()
+    do_GET = do_POST = _record_and_respond  # noqa: N815
 
 
 def _all_sent_params(requests: list[dict[str, str]]) -> set[str]:
@@ -130,7 +118,7 @@ class TestSlackRenameBugs:
         self.backend = SlackChannelBackend()
         self.backend._client = WebClient(
             token="xoxb-test",
-            base_url=f"http://127.0.0.1:{slack_server.server_address[1]}/",
+            base_url=f"{slack_server.base_url}/",
             retry_handlers=[],
         )
         self.backend._bot_user_id = "UBOT"

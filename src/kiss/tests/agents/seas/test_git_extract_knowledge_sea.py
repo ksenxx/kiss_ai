@@ -50,7 +50,7 @@ from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.conftest import git, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -1074,8 +1074,8 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
     expected = {"index_repo", "write_knowledge_page", "knowledge_search", "Bash", "Read", "finish"}
     assert expected <= names
     assert "memory_search" not in names and "go_to_url" not in names
-    system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-    assert str(system["content"]).startswith(sea.SYSTEM_PROMPT[:200])
+    system = system_message(agentic[0])
+    assert system.startswith(sea.SYSTEM_PROMPT[:200])
     results = [str(m["content"]) for m in agentic[3]["messages"] if m["role"] == "tool"]
     assert "mode: full" in results[0] and f"repository: {repo}" in results[0]
     assert results[1].startswith("Wrote ledger/overview.md")

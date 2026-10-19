@@ -87,13 +87,14 @@ carries to the owning user, so no password is involved.
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import logging
 import math
 import secrets
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -129,28 +130,6 @@ from kiss.server.vscode_retired import NOTICE_ID as VSCODE_RETIRED_NOTICE_ID
 from kiss.server.vscode_retired import dismiss_vscode_retired_notice
 
 logger = logging.getLogger(__name__)
-
-# In-flight background replies (``appsStatus``, ``machines``) and
-# detached commands (``worktreeAction``): the event loop keeps only weak
-# references to tasks.
-_BACKGROUND_REPLIES: set[asyncio.Task[None]] = set()
-
-
-def _spawn_reply(reply: Coroutine[Any, Any, None]) -> None:
-    """Run *reply* as a background task that outlives the command that asked for it.
-
-    For replies that take seconds (app probes, machine pings): each
-    connection's commands are dispatched one at a time, so producing
-    them inline would hold up a ``submit`` or ``stop`` sent right after
-    the poll.
-
-    Args:
-        reply: The coroutine that sends the direct reply.
-    """
-    task = asyncio.create_task(reply)
-    _BACKGROUND_REPLIES.add(task)
-    task.add_done_callback(_BACKGROUND_REPLIES.discard)
-
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
     """Create (``opt_out``) or remove the tips opt-out marker file.
@@ -298,6 +277,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
     ApiCommand("getMyModels"),
+    ApiCommand("getClaudeCodeStatus"),
+    ApiCommand("getCodexStatus"),
+    ApiCommand("startCodexLogin"),
     ApiCommand("saveMyModel", required=("name",)),
     ApiCommand("deleteMyModel", required=("name",)),
     ApiCommand("addTrick", required=("text",)),
@@ -351,7 +333,7 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",), handler="worktree_action"),
-    ApiCommand("autocommitAction"),
+    ApiCommand("autocommitAction", handler="autocommit_action"),
     ApiCommand("auth", handler="auth"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("updateModels", handler="update_models"),
@@ -678,7 +660,7 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], endpoint: Any = None,
     ) -> None: ...
 
-    async def _send_welcome_info(self) -> None: ...
+    async def _send_welcome_info(self, conn_id: str = "") -> None: ...
 
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
 
@@ -754,6 +736,19 @@ class ServerApi:
         self._backend = backend
         self.remote_tabs = RemoteTabs(backend)
         self.remote_views = RemoteViews(backend)
+        # In-flight background replies (``appsStatus``, ``machines``,
+        # the subpanel forwards) and detached commands
+        # (``worktreeAction``): the event loop keeps only weak
+        # references to tasks.
+        self._background_replies: set[asyncio.Task[None]] = set()
+        # The subpanel forward in flight per (connection, command,
+        # machine): a poll repeated while its predecessor is still
+        # waiting on the machine is dropped (see ``_spawn_panel_reply``).
+        self._panel_replies: dict[tuple[str, str, str], asyncio.Task[None]] = {}
+        # Set by ``cancel_background_replies``: from then on no reply
+        # is spawned (a frame can still arrive while the cancelled
+        # tasks are awaited, before the listeners close).
+        self._closing = False
         for spec in API.values():
             if not callable(
                 getattr(self, spec.handler, None)
@@ -793,10 +788,13 @@ class ServerApi:
            that machine (:class:`~kiss.server.remote_tabs.RemoteTabs`),
            and a workspace command stamped ``machine`` (the Explorer,
            Source Control view, folder picker and file editor of such
-           a tab: :data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`)
-           or a settings command stamped ``machine`` (the settings
+           a tab: :data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`),
+           a settings command stamped ``machine`` (the settings
            sheet opened for the machine:
            :data:`kiss.server.sidebar_panels.MACHINE_SETTINGS_REPLIES`)
+           or a subpanel command stamped ``machine`` (the Schedule,
+           Apps, Spend and Recommendations subpanels shown for it:
+           :data:`kiss.server.sidebar_panels.MACHINE_PANEL_REPLIES`)
            to the machine's daemon, answering the sender with its
            reply.
         7. Invokes the :class:`ServerApi` method named by the
@@ -807,23 +805,29 @@ class ServerApi:
                 guarantees a dict).
             ctx: The transport context of this call.
         """
-        tab_id = cmd.get("tabId", "")
+        tab_id = cmd.get("tabId")
         if isinstance(tab_id, str):
             # Canonicalise ONCE, before validation and every handler:
             # ``TabRegistry`` strips ids it stores and broadcasts, so
             # a handler keying ``AgentState`` / ``_tab_chat_views`` /
             # local-tab counts by the raw string gave one wire tab two
             # identities, and closing the canonical id leaked the rest.
+            # Only a PRESENT field is written back: writing ``""`` for
+            # an absent one made ``validate_command`` see it as present,
+            # so the catalog's ``required=("tabId",)`` never fired and a
+            # ``tabId``-less ``closeTab`` got no reply (conc1018 H2-F2).
             tab_id = tab_id.strip()
             cmd["tabId"] = tab_id
+        else:
+            tab_id = ""
         error = validate_command(cmd)
         if error:
             reply: dict[str, Any] = {"type": "error", "text": error}
-            if isinstance(tab_id, str) and tab_id:
+            if tab_id:
                 reply["tabId"] = tab_id
             await self._backend._endpoint_send(ctx.endpoint, json.dumps(reply))
             return
-        if isinstance(tab_id, str) and tab_id:
+        if tab_id:
             self._record_tab(tab_id, ctx)
         cmd["connId"] = ctx.conn_state["conn_id"]
         name = cmd["type"]
@@ -854,15 +858,33 @@ class ServerApi:
             return
         # The Explorer, Source Control view, folder picker and file
         # editor of such a tab browse the machine's working directory,
-        # and the settings sheet opened for the machine shows and saves
-        # its config, API keys and custom models: a workspace or
-        # settings command stamped ``machine`` is answered by that
-        # machine's daemon.
+        # the settings sheet opened for the machine shows and saves
+        # its config, API keys and custom models, and the Schedule,
+        # Apps, Spend and Recommendations subpanels show the machine
+        # the chat header has picked: a workspace, settings or subpanel
+        # command stamped ``machine`` is answered by that machine's
+        # daemon.  The subpanels poll, and a machine's app probe takes
+        # seconds, as does its Codex device login: their replies are
+        # produced in the background (and travel on link lanes of
+        # their own, see
+        # :func:`~kiss.server.sidebar_panels.machine_panel_reply` and
+        # :func:`~kiss.server.sidebar_panels.machine_settings_reply`)
+        # so a ``submit`` or ``stop`` sent right after them is not held
+        # up behind them, on this connection or on the machine's link.
         machine = str(cmd.get("machine") or "")
         forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
         if forwarder is not None:
-            reply = await asyncio.to_thread(forwarder, machine, cmd)
-            await self._backend._reply_direct(ctx.endpoint, reply, name)
+            forwarded = self._forwarded_reply(ctx.endpoint, forwarder, machine, cmd)
+            if name in ("cronAction", "startCodexLogin"):
+                # A user's own action, never dropped; slow (the device
+                # login's CLI may take a minute to print its code) but
+                # in the background, so it holds up none of the
+                # sender's later commands.
+                self._spawn_reply(forwarded)
+            elif name in sidebar_panels.MACHINE_PANEL_REPLIES:
+                self._spawn_panel_reply((cmd["connId"], name, machine), forwarded)
+            else:
+                await forwarded
             return
         await getattr(self, handler)(cmd, ctx)
         if name == "ready":
@@ -870,6 +892,95 @@ class ServerApi:
             # remote machines to it.
             await asyncio.to_thread(self.remote_tabs.replay_to, cmd["connId"])
             await asyncio.to_thread(self.remote_views.replay_to, cmd["connId"])
+
+    def _spawn_reply(self, reply: Coroutine[Any, Any, None]) -> asyncio.Task[None] | None:
+        """Run *reply* as a background task that outlives the command that asked for it.
+
+        For replies that take seconds (app probes, machine pings): each
+        connection's commands are dispatched one at a time, so producing
+        them inline would hold up a ``submit`` or ``stop`` sent right after
+        the poll.  :meth:`cancel_background_replies` ends them at shutdown,
+        after which *reply* is closed unrun instead.
+
+        Args:
+            reply: The coroutine that sends the direct reply.
+
+        Returns:
+            The task, or ``None`` once the server is shutting down.
+        """
+        if self._closing:
+            reply.close()
+            return None
+        task = asyncio.create_task(reply)
+        self._background_replies.add(task)
+        task.add_done_callback(self._background_replies.discard)
+        return task
+
+    def _spawn_panel_reply(
+        self, key: tuple[str, str, str], reply: Coroutine[Any, Any, None],
+    ) -> None:
+        """Run the subpanel forward *reply* in the background unless one like it is in flight.
+
+        The subpanels poll every 30 s and a machine's answer can take
+        longer (its app probe, a black-holed host's handshake); the
+        forwards run on the default executor, which every client
+        command shares.  A repeat of a poll whose predecessor is still
+        waiting on the machine is dropped: the predecessor's reply is
+        the answer the sender is waiting for, and the queue of
+        forwards, and the executor threads they would hold, stay
+        bounded by the number of connections.
+
+        Args:
+            key: ``(connection id, command, machine)`` of the forward.
+            reply: The coroutine that sends the reply.
+        """
+        pending = self._panel_replies.get(key)
+        if pending is not None and not pending.done():
+            reply.close()
+            logger.debug("%s for %s dropped: the previous one is still pending", *key[1:])
+            return
+        task = self._spawn_reply(reply)
+        if task is not None:
+            self._panel_replies[key] = task
+            task.add_done_callback(functools.partial(self._forget_panel_reply, key))
+
+    def _forget_panel_reply(self, key: tuple[str, str, str], task: asyncio.Task[None]) -> None:
+        """Drop the finished *task* from the in-flight subpanel forwards (if still *key*'s)."""
+        if self._panel_replies.get(key) is task:
+            del self._panel_replies[key]
+
+    async def cancel_background_replies(self) -> None:
+        """Cancel and await every background reply and detached command (at shutdown).
+
+        The threads they wait on (``asyncio.to_thread``) run to their
+        own bounds; only the tasks, which would otherwise hold the
+        loop open for a slow machine's answer, end here.  A command
+        dispatched from here on (one received while the cancelled
+        tasks are awaited) spawns no reply, so none outlives this.
+        """
+        self._closing = True
+        tasks = list(self._background_replies)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _forwarded_reply(
+        self, endpoint: Any, forwarder: Callable[[str, dict[str, Any]], dict[str, Any]],
+        machine: str, cmd: dict[str, Any],
+    ) -> None:
+        """Answer *cmd*, stamped *machine*, with the reply of *forwarder* (run in a thread).
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            forwarder: The command's :data:`~kiss.server.sidebar_panels.MACHINE_FORWARDERS` entry.
+            machine: The registered machine the command names.
+            cmd: The command.
+        """
+        try:
+            reply = await asyncio.to_thread(forwarder, machine, cmd)
+            await self._backend._reply_direct(endpoint, reply, str(cmd["type"]))
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("forwarding %s to %s failed", cmd.get("type"), machine, exc_info=True)
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
@@ -1328,7 +1439,28 @@ class ServerApi:
             cmd: The ``worktreeAction`` command.
             ctx: The transport context of the current call (unused).
         """
-        _spawn_reply(self._forward_detached(cmd))
+        self._spawn_reply(self._forward_detached(cmd))
+
+    async def autocommit_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run the Git Commit button's command on the backend.
+
+        The backend reports through a tab-stamped ``autocommit_done``
+        broadcast, which a daemon-link peer is never sent.  Another
+        daemon forwards the Git Commit of a tab picked onto this
+        machine over such a link and waits for that event as the
+        reply, so a link's command is stamped ``replyTo`` with its
+        connection id and the backend sends that connection its own
+        copy of the outcome (``_commit_main_tree`` of
+        :mod:`kiss.server.merge_flow`).
+
+        Args:
+            cmd: The ``autocommitAction`` command.
+            ctx: The transport context of the current call.
+        """
+        # The stamp is this daemon's alone: a client's own ``replyTo``
+        # must not aim another connection's reply.
+        cmd["replyTo"] = cmd["connId"] if ctx.conn_state.get("link") else ""
+        await self.forward(cmd, ctx)
 
     async def _forward_detached(self, cmd: dict[str, Any]) -> None:
         """Run *cmd* on the backend; log a failure instead of dying silently.
@@ -1479,7 +1611,7 @@ class ServerApi:
             cmd: The ``getAppsStatus`` command (optional ``refresh``).
             ctx: The transport context of the current call.
         """
-        _spawn_reply(self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh"))))
+        self._spawn_reply(self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh"))))
 
     async def _reply_apps_status(self, endpoint: Any, refresh: bool) -> None:
         """Probe (or read the cache) and send the ``appsStatus`` reply.
@@ -1555,7 +1687,7 @@ class ServerApi:
             cmd: The ``getMachines`` command (optional ``refresh``).
             ctx: The transport context of the current call.
         """
-        _spawn_reply(
+        self._spawn_reply(
             self._reply_machines(ctx.endpoint, bool(cmd.get("refresh")), "", "", "getMachines")
         )
 
@@ -1915,7 +2047,7 @@ class ServerApi:
     ) -> None:
         """Transcribe a browser's post-wake utterance.
 
-        The chat page heard the "Hey Sorcar" wake word and captured the
+        The chat page heard the "Abracadabra" wake word and captured the
         utterance that followed.  The audio is translated by gpt-audio
         (:func:`kiss.server.speech.transcribe_pcm`) and answered with
         the ``voiceSpeech`` message ``voice.js`` handles.
@@ -1940,13 +2072,14 @@ class ServerApi:
     async def get_welcome_info(
         self, cmd: dict[str, Any], ctx: ApiContext,
     ) -> None:
-        """Broadcast the welcome-screen info (the active remote URL).
+        """Send the welcome-screen info (the active remote URL) to the asking client.
 
         Args:
             cmd: The ``getWelcomeInfo`` command (unused).
-            ctx: The transport context of the current call (unused).
+            ctx: The transport context of the current call (its
+                connection id addresses the reply).
         """
-        await self._backend._send_welcome_info()
+        await self._backend._send_welcome_info(ctx.conn_state["conn_id"])
 
     async def run_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Run the KISS Sorcar installer to update the checkout.

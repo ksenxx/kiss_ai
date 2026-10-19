@@ -91,12 +91,14 @@ class _DelegatingModel(BaseHTTPRequestHandler):
     its caller waits).  An ``agent_job`` call is completed with the job
     id of the last ``run_agent`` notice the model was shown.  The tool
     results the model was given are kept, so a test can read what the
-    calling model saw.  The counter is per test.
+    calling model saw, and so is every request body (``requests``: its
+    messages and the tools offered).  The counter is per test.
     """
 
     script: list[dict[str, Any]] = []
     calls = 0
     tool_results: list[str] = []
+    requests: list[dict[str, Any]] = []
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass
@@ -104,6 +106,7 @@ class _DelegatingModel(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0) or 0)))
         _DelegatingModel.calls += 1
+        _DelegatingModel.requests.append(body)
         for message in body.get("messages", []):
             if message.get("role") == "tool":
                 _DelegatingModel.tool_results.append(str(message.get("content", "")))
@@ -140,6 +143,22 @@ class _DelegatingModel(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _restore_config(saved: str | None) -> None:
+    """Put the user config.json back as it was before the test (or remove it)."""
+    if saved is None:
+        vc._config_path().unlink(missing_ok=True)
+    else:
+        vc._config_path().write_text(saved)
+
+
+def _restore_env(key: str, saved: str | None) -> None:
+    """Put the environment variable *key* back as it was before the test."""
+    if saved is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = saved
+
+
 def _remote_rows(home: Path) -> list[tuple[str, str]]:
     """The ``(task, parent_task_id)`` rows of the remote daemon's history."""
     with sqlite3.connect(home / "history.db") as db:
@@ -149,8 +168,12 @@ def _remote_rows(home: Path) -> list[tuple[str, str]]:
         ]
 
 
-class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
-    """One local daemon and one remote daemon (``box``), both on the fake model."""
+class TwoDaemonsCase(IsolatedAsyncioTestCase):
+    """One local daemon and one remote daemon (``box``), both on the fake model.
+
+    The set-up of :class:`TestRunAgentOnMachine`, shared with the tests
+    of SEAs that send sub-tasks to a machine (``/sync``).
+    """
 
     async def asyncSetUp(self) -> None:
         # The real path: the daemon canonicalises the work dir, and on
@@ -160,6 +183,7 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         _DelegatingModel.script = _default_script("box")
         _DelegatingModel.calls = 0
         _DelegatingModel.tool_results = []
+        _DelegatingModel.requests = []
         self.model_port = find_free_port()
         self.model_server = HTTPServer(("127.0.0.1", self.model_port), _DelegatingModel)
         self.model_thread = asyncio.get_running_loop().run_in_executor(
@@ -168,7 +192,12 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         endpoint = f"http://127.0.0.1:{self.model_port}/v1"
         self.model = "gpt-4o-mini"
         config = {"custom_endpoint": endpoint, "custom_api_key": "k", "max_budget": 100}
-        self.saved_config = vc._config_path().read_text() if vc._config_path().exists() else None
+        # Cleanups, not asyncTearDown, restore the config and the endpoint
+        # variable: unittest skips the tear-down when the set-up fails.
+        self.addCleanup(
+            _restore_config,
+            vc._config_path().read_text() if vc._config_path().exists() else None,
+        )
         vc.save_config(config)
         self.remote = await asyncio.to_thread(
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
@@ -180,7 +209,7 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         # The dispatcher inside the daemon reaches the daemon through its
         # endpoint file (``$KISS_SORCAR_LOCAL``), as a run_agent call does.
         endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
-        self.saved_endpoint_env = os.environ.get(LOCAL_ENDPOINT_ENV)
+        self.addCleanup(_restore_env, LOCAL_ENDPOINT_ENV, os.environ.get(LOCAL_ENDPOINT_ENV))
         os.environ[LOCAL_ENDPOINT_ENV] = str(endpoint_file)
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=find_free_port(), certfile=str(certfile),
@@ -202,14 +231,6 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         self.model_server.shutdown()
         await self.model_thread
         mach.save_machines([])
-        if self.saved_config is None:
-            vc._config_path().unlink(missing_ok=True)
-        else:
-            vc._config_path().write_text(self.saved_config)
-        if self.saved_endpoint_env is None:
-            os.environ.pop(LOCAL_ENDPOINT_ENV, None)
-        else:
-            os.environ[LOCAL_ENDPOINT_ENV] = self.saved_endpoint_env
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
@@ -236,8 +257,10 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         reply = await self._ask({"type": "getHistory", "machine": machine}, "history")
         return [str(s["title"]) for s in reply["sessions"]]
 
-    async def _delegate(self, tab: str, late: bool = False) -> tuple[list[dict[str, Any]], str]:
-        """Run the delegating task on *tab*; answer the relayed ``new_tab`` as a chat page does.
+    async def _delegate(
+        self, tab: str, late: bool = False, prompt: str = "Delegate to box", work_dir: str = "",
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Run *prompt* on *tab* in *work_dir*; answer the relayed ``new_tab`` as a chat page does.
 
         With *late*, a surface connects while the sub-agent runs and
         what it was told is kept in ``self.late`` (see :meth:`_late_surface`).
@@ -246,8 +269,8 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
         sub-agent tab id this client opened ("" when no ``new_tab`` came).
         """
         await self._send({
-            "type": "submit", "prompt": "Delegate to box", "tabId": tab,
-            "model": self.model, "workDir": self.tmpdir,
+            "type": "submit", "prompt": prompt, "tabId": tab,
+            "model": self.model, "workDir": work_dir or self.tmpdir,
         })
         seen: list[dict[str, Any]] = []
         child = ""
@@ -294,6 +317,10 @@ class TestRunAgentOnMachine(IsolatedAsyncioTestCase):
             raise AssertionError(f"incomplete late replay: {sorted(seen)}")
         finally:
             writer.close()
+
+
+class TestRunAgentOnMachine(TwoDaemonsCase):
+    """``run_agent(machine="box")`` from a task of the local daemon."""
 
     async def test_the_sub_agent_runs_on_the_machine_as_a_nested_tab(self) -> None:
         tab = "tab-caller"

@@ -32,15 +32,20 @@ import time
 import uuid
 import weakref
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
-from kiss.agents.sorcar.chat_summary import (
-    add_last_finished_column,
-    upsert_chat_summary,
+from kiss.agents.sorcar.chat_summary import upsert_chat_summary
+from kiss.agents.sorcar.history_columns import (
+    ADDED_SUMMARY_COLUMNS,
+    ADDED_TASK_COLUMNS,
+    CHAT_TABLE,
+    TASK_TABLE,
+    add_missing_columns,
+    complete_rows,
 )
 from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
@@ -742,6 +747,18 @@ _thread_local = threading.local()
 _db_generation: int = 0
 
 
+def _bump_db_generation() -> None:
+    """Retire every thread's cached connection lazily (caller holds ``_init_tables_lock``).
+
+    The two bumpers, sidecar recovery and :func:`_close_db`, both run
+    this under the same lock, so no bump is ever lost.  ``_get_db``
+    reads the counter without the lock (a stale read only costs one
+    extra reconnect).
+    """
+    global _db_generation
+    _db_generation += 1
+
+
 class _LockedCursor(sqlite3.Cursor):
     """Cursor of a :class:`_LockedConnection`.
 
@@ -994,7 +1011,7 @@ def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
     Returns:
         True when connections were recovered, False when nothing was to do.
     """
-    global _db_conn, _db_generation
+    global _db_conn
     if current_path not in _attached_shm:
         return False
     _prune_dead_thread_conns()
@@ -1050,7 +1067,7 @@ def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
                 pass
         _drop_open_conn_locked(key)
     _db_conn = None
-    _db_generation += 1
+    _bump_db_generation()
     busy = sum(1 for _c, _o, path in _open_conns.values() if path == current_path)
     if busy:
         # A connection opened now would join the dead mapping for
@@ -1112,15 +1129,20 @@ def _close_cached_thread_conn() -> sqlite3.Connection | None:
 def _close_db() -> None:
     """Close the calling thread's connection and invalidate cached handles.
 
-    Only the current thread's connection is closed eagerly.  Bumping
-    the generation counter invalidates every other thread's cached
-    connection *lazily*: each is detected as stale on that thread's
-    next ``_get_db()`` call and replaced (and closed) there.
+    The current thread's connection, and those of threads that have
+    already exited, are closed eagerly.  Bumping the generation counter
+    invalidates every live thread's cached connection *lazily*: each is
+    detected as stale on that thread's next ``_get_db()`` call and
+    replaced (and closed) there.  A dead thread never makes that call,
+    and its handle would otherwise keep the database file open (and,
+    on Windows, undeletable) until some thread opens a new connection.
     """
-    global _db_conn, _db_generation
+    global _db_conn
     _stop_event_writer()
-    _db_generation += 1
+    locked_call(_init_tables_lock, _bump_db_generation)
     _close_cached_thread_conn()
+    with _init_tables_lock:
+        _prune_dead_thread_conns()
     _db_conn = None
 
 
@@ -1145,7 +1167,7 @@ _HISTORY_SELECT = (
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, "
     "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
-    "is_side_channel, tags, sea, success "
+    "is_side_channel, tags, sea, success, is_cron "
     "FROM task_history "
 )
 
@@ -1254,6 +1276,8 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         for key in ("tags", "sea"):
             if row[key]:
                 payload[key] = _safe_str(row[key])
+        if row["is_cron"]:
+            payload["is_cron"] = True
         if row["parent_task_id"]:
             sub: dict[str, object] = {
                 "parent_task_id": _safe_str(row["parent_task_id"]),
@@ -1491,7 +1515,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- The agent's own finish() verdict: 0 for
             -- finish(success=False), 1 for success, NULL when the run
             -- returned no verdict (a crash, a stop, a legacy row).
-            success INTEGER
+            success INTEGER,
+            -- 1 when the cron scheduler launched the task (a prompt,
+            -- slash-command or in-chat job) or a sub-task of such a
+            -- run; the CHATS list hides these unless its Cron chip is on.
+            is_cron INTEGER DEFAULT 0
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did, the launch instant (epoch ms) of its latest task and
@@ -1567,47 +1595,28 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
 
     ``CREATE TABLE IF NOT EXISTS`` cannot extend an existing table, so
     every column added to :func:`_init_tables` after the first release
-    needs a matching ``ALTER TABLE`` here.  A concurrent process may
-    have added the same column between the ``PRAGMA`` and the
-    ``ALTER``; the resulting "duplicate column name" error is benign.
+    needs a matching ``ALTER TABLE`` here.  The columns and their
+    backfills live in :mod:`kiss.agents.sorcar.history_columns`, shared
+    with ``kiss.scripts.sync_db`` so that a database synced across two
+    releases comes out the same as one migrated here.
+
+    The columns and their backfill run as ONE transaction: the
+    connection is autocommit, and a column that landed without its
+    backfill (a Stop injected on the opening task thread, a crash)
+    would never be backfilled, since the next open finds it present.
+    SQLite's DDL is transactional, so the rollback drops the column
+    again and the next open redoes both.  A caller that already owns a
+    transaction (``backfill_task_metadata``'s ``with conn:``) covers
+    the atomicity itself, as in :func:`_repair_and_create_index`.
 
     Args:
-        conn: Connection whose ``task_history`` table to extend.
+        conn: Connection whose ``task_history`` and ``chat_summaries``
+            tables to extend.
     """
-    cols = {
-        r[1] for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
-    }
-    added_columns = (
-        ("owner", "TEXT DEFAULT ''"),
-        ("max_budget", "REAL DEFAULT 0.0"),
-        ("is_side_channel", "INTEGER DEFAULT 0"),
-        ("tags", "TEXT DEFAULT ''"),
-        ("sea", "TEXT DEFAULT ''"),
-        ("success", "INTEGER"),
-    )
-    for name, column_ddl in added_columns:
-        if name in cols:
-            continue
-        try:
-            conn.execute(
-                f"ALTER TABLE task_history ADD COLUMN {name} {column_ddl}"
-            )
-        except sqlite3.OperationalError:  # pragma: no cover — lost the race
-            logger.debug("%s column already present", name, exc_info=True)
-    summary_cols = {
-        r[1] for r in conn.execute("PRAGMA table_info(chat_summaries)").fetchall()
-    }
-    if "user_summary" not in summary_cols:
-        try:
-            conn.execute(
-                "ALTER TABLE chat_summaries ADD COLUMN user_summary TEXT DEFAULT ''"
-            )
-        except sqlite3.OperationalError:  # pragma: no cover — lost the race
-            logger.debug("user_summary column already present", exc_info=True)
-    try:
-        add_last_finished_column(conn)
-    except sqlite3.OperationalError:  # pragma: no cover — lost the race
-        logger.debug("last_finished column already present", exc_info=True)
+    txn = nullcontext() if conn.in_transaction else _immediate_txn(conn)
+    with txn:
+        complete_rows(conn, add_missing_columns(conn, TASK_TABLE, ADDED_TASK_COLUMNS))
+        add_missing_columns(conn, CHAT_TABLE, ADDED_SUMMARY_COLUMNS)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -1632,11 +1641,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         return False
     if cols.get("id") == "TEXT":
         return False
-
-    def _sx(v: object) -> str:
-        if v is None or v == "":
-            return ""
-        return v if isinstance(v, str) else str(v)
 
     def _bx(v: object, missing: int = 0) -> int:
         """Coerce a legacy ``extra`` value to a 0/1 column value.
@@ -1743,8 +1747,8 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                 (
                     id_map[old_id], r[1], r[2],
                     r[3] or 0, r[4] or "", r[5] or "",
-                    _sx(extra.get("model")), _sx(extra.get("work_dir")),
-                    _sx(extra.get("version")), _safe_int(extra.get("tokens")),
+                    _safe_str(extra.get("model")), _safe_str(extra.get("work_dir")),
+                    _safe_str(extra.get("version")), _safe_int(extra.get("tokens")),
                     _safe_float(extra.get("cost")),
                     _safe_int(extra.get("steps")),
                     _bx(extra.get("is_parallel"), missing=1),
@@ -2193,8 +2197,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "start_ts, end_ts, is_favorite, "
-            "parent_task_id, max_budget, owner, is_side_channel, sea) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner, is_side_channel, sea, is_cron) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -2213,6 +2217,7 @@ def _add_task(
                 _process_owner_token(),
                 is_side_channel,
                 _safe_str(payload.get("sea", "") or ""),
+                1 if payload.get("is_cron") else 0,
             ),
         )
     _invalidate_chat_context_cache(chat_id)
@@ -2644,6 +2649,47 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
             (int(limit),),
         ).fetchall()
     return [row["task"] for row in rows]
+
+
+# The ``/name`` head of a slash-command prompt: the same characters
+# ``sea_commands._split_slash_command`` accepts, followed by whitespace
+# or the end of the prompt (``/xxxfoo`` is not a command).
+_SLASH_COMMAND_HEAD_RE = re.compile(r"/([A-Za-z0-9_-]+)(?:\s|$)")
+
+
+def _load_slash_command_usage() -> dict[str, tuple[int, float]]:
+    """Return how often and how recently each slash command was run.
+
+    Reads the texts the user typed that are a ``/name ...`` slash
+    command and aggregates them by command name: the listable
+    ``task_history`` rows (sub-agent rows excluded; a slash run keeps
+    the raw ``/xxx text`` as its task text) and the ``steer_inputs``
+    rows (a ``/ask`` typed into a running chat lands only there; that
+    table holds one row per distinct text, so repeating the very same
+    message counts once).  Feeds the ordering of the composer's ``/``
+    command popup.  Thread-safe.
+
+    Returns:
+        ``{command_name: (run_count, last_run_timestamp)}``.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task, timestamp FROM ("
+            + _INPUT_TEXTS_SELECT
+            + f"WHERE task GLOB '/*' AND {_HISTORY_NOT_SUBAGENT} "
+            "UNION ALL "
+            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs "
+            "WHERE text GLOB '/*')"
+        ).fetchall()
+    usage: dict[str, tuple[int, float]] = {}
+    for row in rows:
+        m = _SLASH_COMMAND_HEAD_RE.match(str(row["task"] or ""))
+        if m is None:
+            continue
+        count, last = usage.get(m.group(1), (0, 0.0))
+        usage[m.group(1)] = (count + 1, max(last, float(row["timestamp"] or 0.0)))
+    return usage
 
 
 def _record_steer_input(text: str) -> None:
@@ -3460,6 +3506,7 @@ _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "endTs": ("end_ts", int, 0),
     "max_budget": ("max_budget", float, 0.0),
     "sea": ("sea", str, ""),
+    "is_cron": ("is_cron", lambda v: 1 if v else 0, 0),
 }
 
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import codecs
 import logging
+import math
 import os
 import queue
 import selectors
@@ -93,6 +94,10 @@ def _clamp_dim(value: Any, fallback: int) -> int:
     """Return *value* as a terminal dimension in ``1..1000``, else *fallback*."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return fallback
+    if isinstance(value, float) and not math.isfinite(value):
+        # ``json.loads`` accepts ``NaN`` and ``Infinity``; ``int()`` of
+        # either raises.
+        return fallback
     return max(1, min(_MAX_DIM, int(value)))
 
 
@@ -115,9 +120,6 @@ class _Session:
         default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
     )
     writes: queue.Queue[bytes | None] = field(default_factory=queue.Queue)
-    # ``time.monotonic()`` when the owning connection dropped; ``None``
-    # while a connection is attached.
-    detached_at: float | None = None
     # Hangs the shell up ``GRACE_SECONDS`` after the disconnect;
     # cancelled when the page re-attaches or the shell is hung up.
     grace_timer: threading.Timer | None = None
@@ -370,7 +372,6 @@ class TerminalService:
     def _detach_locked(self, session: _Session) -> None:
         """Mark *session* detached and start its grace timer (caller holds the lock)."""
         self._cancel_grace(session)
-        session.detached_at = time.monotonic()
         session.grace_timer = threading.Timer(GRACE_SECONDS, self._expire_detached, [session])
         session.grace_timer.daemon = True
         session.grace_timer.start()
@@ -456,8 +457,7 @@ class TerminalService:
             pass
 
     def _cancel_grace(self, session: _Session) -> None:
-        """Mark *session* attached and stop its grace timer (caller holds the lock)."""
-        session.detached_at = None
+        """Stop *session*'s grace timer, if any (caller holds the lock)."""
         if session.grace_timer is not None:
             session.grace_timer.cancel()
             session.grace_timer = None
@@ -531,11 +531,15 @@ class TerminalService:
         selector.close()
         with self._lock:
             self._sessions.pop(session.tab_id, None)
+            # Announced under the lock, like every other session-scoped
+            # event: a re-open of the tab registers and announces its new
+            # shell under it, so this exit can never reach the client
+            # after the new shell's ``terminalOpened`` and be taken for it.
+            self._emit(
+                {"type": "terminalExit", "tab_id": session.tab_id, "code": code},
+                session.conn_id,
+            )
         session.writes.put(None)
-        self._emit(
-            {"type": "terminalExit", "tab_id": session.tab_id, "code": code},
-            session.conn_id,
-        )
 
     def _read(self, session: _Session) -> bytes:
         try:

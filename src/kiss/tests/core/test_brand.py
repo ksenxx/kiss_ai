@@ -23,6 +23,7 @@ from pathlib import Path
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.core import brand as brand_module
+from kiss.core._version import __version__
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.brand import (
     BRAND,
@@ -36,8 +37,12 @@ from kiss.core.brand import (
 from kiss.server import web_server
 
 _PLACEHOLDER = re.compile(
-    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR|BRAND_JSON|BRAND_STYLE_HREF)\}\}",
+    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR|VERSION"
+    r"|BRAND_JSON|BRAND_STYLE_HREF)\}\}",
 )
+# Stock-brand strings that must reach the prompt only through the brand's
+# own ``identity`` sentence, never from the prompt template itself.
+_STOCK_ONLY = ("You are KISS Sorcar", "ksenxx/kiss_ai", "kisssorcar.github.io")
 
 
 def test_brand_module_reads_the_media_brand_file() -> None:
@@ -90,16 +95,16 @@ def test_render_brand_fills_known_tokens_only() -> None:
     """Known tokens are filled; foreign ``{{...}}`` tokens survive untouched."""
     text = (
         "{{IDENTITY}} {{PRODUCT_NAME}}/{{SHORT_NAME}} {{TAGLINE}} ~/{{HOME_DIR}}/x "
-        "{{VERSION_SUFFIX}}"
+        "v{{VERSION}} {{VERSION_SUFFIX}}"
     )
     rendered = render_brand(text)
     assert rendered == (
         f"{BRAND['identity']} {BRAND['product_name']}/{BRAND['short_name']} "
-        f"{BRAND['tagline']} ~/{BRAND['home_dir']}/x {{{{VERSION_SUFFIX}}}}"
+        f"{BRAND['tagline']} ~/{BRAND['home_dir']}/x v{__version__} {{{{VERSION_SUFFIX}}}}"
     )
     custom = dict(DEFAULT_BRAND, product_name="Seamless Loop", identity="You are Seamless Loop.")
-    assert render_brand("{{IDENTITY}} {{PRODUCT_NAME}}", custom) == (
-        "You are Seamless Loop. Seamless Loop"
+    assert render_brand("{{IDENTITY}} {{PRODUCT_NAME}} {{VERSION}}", custom) == (
+        f"You are Seamless Loop. Seamless Loop {__version__}"
     )
 
 
@@ -112,12 +117,23 @@ def test_prompt_files_carry_placeholder_and_prompts_are_rendered() -> None:
     for name in ("SYSTEM.md", "SYSTEM_LITE.md"):
         raw = (pkg / name).read_text(encoding="utf-8")
         assert "{{IDENTITY}}" in raw, name
-        assert "You are KISS Sorcar" not in raw, name
+        for stock in _STOCK_ONLY:
+            assert stock not in raw, (name, stock)
         assert "~/{{HOME_DIR}}/history.db" in raw, name
+    # The version is not hard-coded in the template: it comes from _version.py.
+    raw = (pkg / "SYSTEM.md").read_text(encoding="utf-8")
+    assert "Version: {{VERSION}}" in raw
+    assert not re.search(r"Version: \d", raw)
     for prompt in (SYSTEM_PROMPT, SYSTEM_PROMPT_LITE, ask_sea.AskSea().system_prompt("")):
         assert prompt.startswith("<identity>\n\n" + BRAND["identity"])
         assert not _PLACEHOLDER.search(prompt)
         assert f"~/{BRAND['home_dir']}/history.db" in prompt
+    assert f"Version: {__version__}" in SYSTEM_PROMPT
+    # Under the stock brand the identity sentence itself names the repo and
+    # website (rendered explicitly: the checkout may carry a custom brand).
+    stock_line = render_brand(raw, DEFAULT_BRAND).splitlines()[2]
+    for stock in _STOCK_ONLY:
+        assert stock in stock_line, stock
 
 
 def test_remote_webapp_page_is_branded() -> None:
@@ -206,6 +222,9 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
         "print('~/.s10s/history.db' in SYSTEM_PROMPT and '~/.kiss' not in SYSTEM_PROMPT)\n"
         "print(SYSTEM_PROMPT.splitlines()[2][:63])\n"
         "print(SYSTEM_PROMPT_LITE.splitlines()[2][:63])\n"
+        "print(not any(s in SYSTEM_PROMPT or s in SYSTEM_PROMPT_LITE\n"
+        f"              for s in {_STOCK_ONLY!r}))\n"
+        f"print('Version: {__version__}' in SYSTEM_PROMPT)\n"
         "page = web_server._build_html()\n"
         "print('<title>Seamless Loop: ' in page)\n"
         "print('Welcome to Seamless Loop</h2>' in page\n"
@@ -240,6 +259,8 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
         "True",
         "You are Seamless Loop (s10s), the AI assistant of SeamlessLabs.",
         "You are Seamless Loop (s10s), the AI assistant of SeamlessLabs.",
+        "True",
+        "True",
         "True",
         "True",
         "Seamless Loop Local CA",

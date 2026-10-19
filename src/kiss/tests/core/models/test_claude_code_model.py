@@ -4,6 +4,7 @@
 # add your name here
 """Tests for ClaudeCodeModel — Claude Code CLI backend."""
 
+import os
 import shutil
 
 import pytest
@@ -92,21 +93,31 @@ class TestModelRouting:
 
 
 class TestBuildCliArgs:
-    """Verify CLI argument construction — agentic mode, like CodexModel."""
+    """Verify CLI argument construction — a bare model, like CodexModel."""
 
-    def test_agentic_mode_enables_builtin_tools(self) -> None:
-        """Native tools stay enabled; permission prompts are bypassed.
-
-        Like ``codex exec --dangerously-bypass-approvals-and-sandbox``,
-        the ``claude`` CLI runs agentically (Bash/Edit/Read) with
-        ``--dangerously-skip-permissions``, so ``--tools`` must not
-        appear — an empty ``--tools ""`` would disable agentic mode.
+    def test_native_tools_and_customizations_are_off(self) -> None:
+        """``--tools ""`` removes the CLI's own tools; ``--safe-mode`` and
+        ``--strict-mcp-config`` drop the user's CLAUDE.md, skills, hooks
+        and MCP servers, so KISS's tools are the only ones the model has.
         """
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
         args = m._build_cli_args()
-        assert "--tools" not in args
-        assert "--dangerously-skip-permissions" in args
+        assert args[args.index("--tools") + 1] == ""
+        assert "--safe-mode" in args
+        assert "--strict-mcp-config" in args
+        assert "--dangerously-skip-permissions" not in args
+        assert "--bare" not in args  # --bare would also disable OAuth login
+
+    def test_system_instruction_replaces_the_cli_system_prompt(self) -> None:
+        """KISS's system prompt goes to ``--system-prompt`` (replace), not
+        ``--append-system-prompt``, and never into the user prompt."""
+        m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "be terse"})
+        m.initialize("do it")
+        args = m._build_cli_args()
+        assert args[args.index("--system-prompt") + 1] == "be terse"
+        assert "--append-system-prompt" not in args
+        assert m._build_prompt() == "do it"
 
     def test_no_session_persistence_flag_present(self) -> None:
         """``--no-session-persistence`` keeps each invocation self-contained."""
@@ -132,6 +143,18 @@ class TestModelInfoEntries:
 @pytest.mark.live_cli
 class TestGenerateIntegration:
     """Integration tests that actually call the claude CLI."""
+
+    @pytest.fixture(autouse=True)
+    def _bill_the_api_key_when_not_logged_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without a Claude login, run on ``ANTHROPIC_API_KEY`` or skip."""
+        from kiss.core.config import DEFAULT_CONFIG
+        from kiss.core.models.claude_code_model import claude_auth_status
+
+        if claude_auth_status()["loggedIn"]:
+            return
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            pytest.skip("claude is not logged in and ANTHROPIC_API_KEY is not set")
+        monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
 
     @pytest.mark.timeout(60)
     def test_generate_token_counts(self) -> None:

@@ -3,18 +3,14 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Sorcar-level end-to-end tests for run-to-completion CLI models.
+"""Sorcar-level end-to-end test for the CLI-backed models.
 
 Covers the wiring RelentlessAgent adds around
 :class:`~kiss.core.kiss_agent.KISSAgent` for ``cc/*`` / ``codex/*`` models:
-
-1. The task's ``work_dir`` reaches the CLI subprocess as its cwd (via the
-   framework-only ``model_config["work_dir"]`` key) — otherwise the CLI's
-   native tools would act on the daemon's cwd instead of the task's
-   (possibly worktree-redirected) work tree.
-2. ``docker_image`` is refused for these models: their native tools run
-   directly on the host, so the requested container isolation would be
-   silently bypassed.
+the task's ``work_dir`` reaches the CLI subprocess as its cwd (via the
+framework-only ``model_config["work_dir"]`` key), the CLI gets Sorcar's
+system prompt and tools as its system prompt, and its ``finish`` tool
+call (the text-based protocol) ends the run.
 
 Uses a real fake ``claude`` executable on PATH — no mocks.
 """
@@ -28,19 +24,34 @@ import pytest
 import yaml
 
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import posix_only
 
-FINAL_TEXT = "sorcar-run-to-completion done."
+FINAL_TEXT = "sorcar cli done."
+_FINISH_CALL = json.dumps(
+    {
+        "tool_calls": [
+            {
+                "name": "finish",
+                "arguments": {
+                    "success": True,
+                    "is_continue": False,
+                    "summary_in_html": FINAL_TEXT,
+                },
+            }
+        ]
+    }
+)
 
 _EVENTS = [
+    {"type": "message_start", "message": {"usage": {"input_tokens": 9, "output_tokens": 0}}},
+    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 4}},
     {
         "type": "assistant",
-        "message": {"content": [{"type": "text", "text": FINAL_TEXT}]},
+        "message": {"content": [{"type": "text", "text": _FINISH_CALL}]},
     },
     {
         "type": "result",
-        "result": FINAL_TEXT,
+        "result": _FINISH_CALL,
         "usage": {"input_tokens": 9, "output_tokens": 4},
     },
 ]
@@ -82,11 +93,12 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 def test_relentless_passes_work_dir_as_cli_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CLI child runs in the task's work_dir, and the run succeeds."""
+    """The CLI child runs in the task's work_dir with Sorcar's prompt and
+    tools as its system prompt, and its finish call ends the run."""
     record_dir = _install_fake_claude(tmp_path, monkeypatch)
     work_dir = tmp_path / "task-work"
     work_dir.mkdir()
-    agent = RelentlessAgent("sorcar run-to-completion cwd")
+    agent = RelentlessAgent("sorcar cli cwd")
     result = agent.run(
         model_name="cc/sonnet",
         prompt_template="Say done.",
@@ -99,20 +111,11 @@ def test_relentless_passes_work_dir_as_cli_cwd(
     ]
     assert len(calls) == 1
     assert Path(calls[0]["cwd"]).resolve() == work_dir.resolve()
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--tools") + 1] == ""
+    system_text = argv[argv.index("--system-prompt") + 1]
+    assert "finish" in system_text and "tool_calls" in system_text
+    assert "Say done." in calls[0]["prompt"]
     payload = yaml.safe_load(result)
     assert payload["success"] is True
     assert FINAL_TEXT in payload["summary"]
-
-
-def test_docker_image_is_refused_for_cli_models(tmp_path: Path) -> None:
-    """docker_image + cc/* raises instead of silently bypassing isolation."""
-    agent = RelentlessAgent("sorcar docker guard")
-    with pytest.raises(KISSError, match="cannot honor docker_image"):
-        agent.run(
-            model_name="cc/sonnet",
-            prompt_template="Say done.",
-            work_dir=str(tmp_path),
-            docker_image="ubuntu:latest",
-            max_sub_sessions=1,
-            verbose=False,
-        )

@@ -131,6 +131,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
         "src/kiss/agents/sorcar/cron_agent.py",
         "src/kiss/agents/sorcar/cron_prompt_sea.py",
         "src/kiss/agents/sorcar/chat_summary.py",
+        "src/kiss/agents/sorcar/history_columns.py",
         "src/kiss/scripts/sync_db.py",
         "src/kiss/core/_version.py",
     ):
@@ -145,6 +146,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
             in {
                 "src/kiss/agents/sorcar/cron_agent.py",
                 "src/kiss/agents/sorcar/chat_summary.py",
+                "src/kiss/agents/sorcar/history_columns.py",
                 "src/kiss/scripts/sync_db.py",
                 "src/kiss/core/_version.py",
             }
@@ -171,9 +173,10 @@ assert commands["slack"].name == "slack_sea.py"
 from kiss.agents.sorcar import agent_dispatch
 agents = Path(agent_dispatch.__file__).resolve().parents[1]
 load_sea(agents / "seas" / "sorcar" / "sorcar_sea.py")
-# sync_db ships its own source and chat_summary.py to the remote: both must be Python text.
+# sync_db ships its own source and the SHIPPED_MODULES to the remote: all must be Python text.
 from kiss.scripts import sync_db
-for source_path in (sync_db._script_path(), sync_db._chat_summary_path()):
+shipped = [sync_db._shipped_module_path(name) for name in sync_db.SHIPPED_MODULES]
+for source_path in (sync_db._script_path(), *shipped):
     compile(sync_db._read_source(source_path), source_path, "exec")
 print("ok", len(commands), w._read_version())
 """

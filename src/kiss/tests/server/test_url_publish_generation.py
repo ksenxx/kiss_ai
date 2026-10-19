@@ -28,6 +28,7 @@ from typing import Any
 
 from websockets.asyncio.client import connect
 
+from kiss.server.web_server import _cancel_task
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_local_lan_urls import _LiveServerCase
@@ -100,3 +101,48 @@ class TestUrlPublishGeneration(_LiveServerCase):
             urls = await self._remote_urls_within(ws, 1.0)
         self.assertEqual(urls, [NEW])
         self.assertEqual(self.server._active_url, NEW)
+
+    async def test_welcome_info_answers_the_asking_client_only(self) -> None:
+        """A client's ``getWelcomeInfo`` reaches that client and nobody else.
+
+        It used to be a broadcast: N tabs reconnecting after a daemon
+        restart each repainted every other tab's URL bars, N^2 sends
+        for ``remote_url`` and again for ``update_available``.  The
+        catch-up is no publication either: the URL generation stays,
+        so a publication in flight for everybody is not superseded.
+        """
+        # The start-up version check broadcasts ``update_available`` to
+        # everybody (correctly) whenever it completes; it must not
+        # complete while the two clients listen.
+        await _cancel_task(self.server._version_check_task)
+        self.server._version_check_task = None
+        self.server._active_url = NEW
+        self.server._latest_version = "0.0.1"
+        gen_before = self.server._url_publish_gen
+        async with (
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as asker,
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as other,
+        ):
+            await self._auth_ws(asker)
+            await self._auth_ws(other)
+            await self._send(asker, {"type": "getWelcomeInfo"})
+            asker_types = await self._event_types_within(asker, 1.0)
+            other_types = await self._event_types_within(other, 0.5)
+        self.assertIn("remote_url", asker_types)
+        self.assertIn("update_available", asker_types)
+        self.assertNotIn("remote_url", other_types)
+        self.assertNotIn("update_available", other_types)
+        self.assertEqual(self.server._url_publish_gen, gen_before)
+
+    async def _event_types_within(self, ws: Any, seconds: float) -> list[str]:
+        """Collect the ``type`` of every event for *seconds*."""
+        types: list[str] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while (remaining := deadline - loop.time()) > 0:
+            try:
+                ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+            except TimeoutError:
+                break
+            types.append(ev.get("type", ""))
+        return types

@@ -6,31 +6,23 @@
 """Claude Code model implementation — uses the ``claude`` CLI as an LLM backend.
 
 This lets you use Claude models through a Claude Code subscription at
-subsidized per-token pricing.  The model invokes
-``claude --print --dangerously-skip-permissions`` in single-shot mode and
-consumes the stream-json event stream emitted on stdout.  Like
-:class:`kiss.core.models.codex_model.CodexModel`, the CLI runs **agentically**:
-its native tools (Bash, Edit, …) stay enabled and permission prompts are
-bypassed because KISS is the outer agent and the user has already authorized
-KISS to act on their behalf; running claude with tools disabled would prevent
-any file modifications the user requested.  Tool activity (tool invocations
-and their results) is streamed to the UI as thinking blocks, the same way
-CodexModel surfaces ``command_execution`` events.
+subsidized per-token pricing.  With ``claude_code_use_subscription`` on
+(the default) the CLI runs in :func:`claude_subscription_env` — the
+daemon's environment minus ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``,
+plus the panel's ``CLAUDE_CODE_OAUTH_TOKEN`` — so a turn bills the plan the
+user is logged in to rather than API tokens.
 
-Claude Code is a full coding agent, so ``runs_task_to_completion``
-(inherited from :class:`~kiss.core.models.model.CLITextModel`) is True:
-:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task in one
-``generate()`` call and returns its final output, instead of driving a
-turn-by-turn KISS tool loop.  The KISS system prompt travels as a real
-system prompt through ``--append-system-prompt`` (unlike Codex, whose CLI
-has no such flag and gets it appended to the task after
-:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER`).
-
-For direct (non-KISSAgent) KISS-level tool calling, tool descriptions are
-injected into that system prompt and the model's text output is parsed for
-tool-call JSON — the same approach used by
-:class:`kiss.core.models.codex_model.CodexModel` and for DeepSeek R1 in
-:mod:`kiss.core.models.openai_compatible_model`.
+KISS drives Claude Code as a plain language model, not as a coding agent:
+the model invokes ``claude --print`` with ``--tools ""`` (no native
+tools), ``--safe-mode`` (no CLAUDE.md, skills, plugins, hooks or MCP
+servers from the user's settings), ``--strict-mcp-config`` and
+``--system-prompt`` carrying KISS's system prompt in place of Claude
+Code's own, and consumes the stream-json event stream emitted on stdout.
+KISS-level tools reach the model through the text-based ``tool_calls``
+protocol: tool descriptions are injected into that system prompt and the
+model's text output is parsed for tool-call JSON — the same approach used
+by :class:`kiss.core.models.codex_model.CodexModel` and for DeepSeek R1
+in :mod:`kiss.core.models.openai_compatible_model`.
 
 The subprocess supervision both CLI-backed adapters share
 (:class:`~kiss.core.models.model._CLIProcess`,
@@ -40,10 +32,10 @@ The subprocess supervision both CLI-backed adapters share
 :mod:`kiss.core.models.codex_model` both import it from.
 """
 
-import contextlib
 import json
 import logging
 import shutil
+import subprocess
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -57,10 +49,10 @@ from kiss.core.models.model import (
     _iter_jsonl,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
+    environ_without,
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 def _find_claude_cli() -> str:
@@ -79,6 +71,103 @@ def _find_claude_cli() -> str:
             "Install it from https://docs.anthropic.com/en/docs/claude-code"
         )
     return path
+
+
+# Credentials the ``claude`` CLI prefers over the subscription login: with
+# either in its environment a ``claude -p`` turn bills API tokens even when
+# the user is logged in to a Claude plan (code.claude.com/docs/en/authentication).
+_API_KEY_ENV_VARS: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+SUBSCRIPTION_HINT = (
+    "Claude Code is set to bill your Claude subscription (Settings > Claude "
+    "Code): run `claude login` on this machine, paste a `claude setup-token` "
+    "token into that panel, or turn the switch off to use ANTHROPIC_API_KEY."
+)
+
+
+def claude_subscription_env() -> dict[str, str] | None:
+    """Return the environment a ``cc/`` turn runs the CLI in.
+
+    ``None`` (inherit the daemon's environment) when
+    ``DEFAULT_CONFIG.claude_code_use_subscription`` is off.  Otherwise a
+    copy of ``os.environ`` without :data:`_API_KEY_ENV_VARS`, so the CLI
+    falls through to the subscription credentials — ``CLAUDE_CODE_OAUTH_TOKEN``
+    (set here from ``DEFAULT_CONFIG`` when the settings panel holds one)
+    or the ``claude login`` keychain entry.
+
+    Returns:
+        The child environment, or ``None`` to inherit.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    if not DEFAULT_CONFIG.claude_code_use_subscription:
+        return None
+    env = environ_without(_API_KEY_ENV_VARS)
+    token = DEFAULT_CONFIG.CLAUDE_CODE_OAUTH_TOKEN
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return env
+
+
+def claude_auth_status(timeout: float = 20.0) -> dict[str, Any]:
+    """Report how the ``claude`` CLI would authenticate a ``cc/`` turn.
+
+    Runs ``claude auth status`` in :func:`claude_subscription_env` and
+    returns its JSON (``loggedIn``, ``authMethod`` — ``claude.ai``,
+    ``oauth_token``, ``api_key``, ``none`` …, ``subscriptionType``,
+    ``email`` when logged in) plus ``installed`` (the CLI is on PATH),
+    ``useSubscription`` (the switch), ``hasToken`` (a
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is configured) and, when the CLI could not
+    be run or answered no JSON, ``error`` with the reason.  Never raises:
+    the settings panel shows whatever this returns.
+
+    Args:
+        timeout: Seconds to wait for the CLI.
+
+    Returns:
+        The status dict.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    status: dict[str, Any] = {
+        "installed": False,
+        "loggedIn": False,
+        "authMethod": "none",
+        "useSubscription": bool(DEFAULT_CONFIG.claude_code_use_subscription),
+        "hasToken": bool(DEFAULT_CONFIG.CLAUDE_CODE_OAUTH_TOKEN),
+    }
+    path = shutil.which("claude")
+    if path is None:
+        status["error"] = "Claude Code CLI ('claude') not found on PATH."
+        return status
+    status["installed"] = True
+    env = claude_subscription_env()
+    try:
+        proc = subprocess.run(
+            [path, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        status["error"] = f"`claude auth status` failed: {e}"
+        return status
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        detail = (proc.stderr or proc.stdout).strip()
+        status["error"] = (
+            f"`claude auth status` (exit {proc.returncode}) returned no JSON: {detail[:300]}"
+        )
+        return status
+    status.update(parsed)
+    status["loggedIn"] = bool(parsed.get("loggedIn"))
+    status["authMethod"] = str(parsed.get("authMethod") or "none")
+    return status
 
 
 def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
@@ -135,18 +224,84 @@ def _find_consecutive_tool_calls_end(content: str) -> int:
     return last_tc_end
 
 
-# Appended to the text-based tools prompt so the agentic CLI never tries to
-# invoke a KISS framework tool through its native tool-use mechanism (native
-# invocation of an unregistered tool fails, and weaker models then apologize
-# instead of falling back to the plain-text JSON protocol).
-_KISS_TOOLS_ARE_NOT_NATIVE_NOTE = """
+class _ObjectSpans:
+    """Balanced ``{...}`` spans of streamed text, fed one delta at a time.
 
-IMPORTANT: The tools listed above are provided by an outer framework and are
-NOT part of your native tool set. NEVER attempt to invoke them through your
-native tool-use mechanism — doing so fails with "no such tool". To call one,
-print the tool_calls JSON object above as plain text in your reply and stop.
-Your own native tools (Bash, Read, Edit, ...) remain available as usual.
-"""
+    Follows the candidate rule of
+    :func:`~kiss.core.models.model._iter_balanced_json_objects`: every
+    ``{`` outside a JSON string opens a candidate object and the ``}``
+    matching it closes one, at any depth.  That scanner retries from the
+    next ``{`` when an earlier candidate never closes, so a stray ``{``
+    in prose must not hide the tool-call object after it; here the
+    stray stays open on the stack while the inner object still closes.
+    A candidate whose first non-blank character is neither ``"`` nor
+    ``}`` cannot be a JSON object and is dropped at once, so prose
+    quotes after a prose brace do not poison the string state.  Quotes
+    outside every candidate are ignored, as in that scanner.
+
+    The streaming parser checks only the spans :meth:`feed` reports and
+    rescans the whole text only when one of them is a ``tool_calls``
+    object: rescanning per delta made a large streamed tool call (a
+    ``Write`` of a brace-heavy file) cost minutes of CPU after the CLI
+    had finished.
+    """
+
+    def __init__(self) -> None:
+        self.pos = 0
+        self.starts: list[int] = []
+        self.fresh = False
+        self.in_string = False
+        self.escaped = False
+
+    def feed(self, text: str) -> list[tuple[int, int]]:
+        """Consume *text*.
+
+        Args:
+            text: The next delta of the streamed text.
+
+        Returns:
+            ``(start, end_exclusive)`` offsets into the whole text of
+            every object that closed inside *text*, innermost first.
+        """
+        closed: list[tuple[int, int]] = []
+        for ch in text:
+            if self.fresh and not ch.isspace():
+                self.fresh = False
+                if ch not in '"}':
+                    self.starts.pop()
+            if not self.starts:
+                if ch == "{":
+                    self.starts.append(self.pos)
+                    self.fresh = True
+            elif self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                elif ch == "\\":
+                    self.escaped = True
+                elif ch == '"':
+                    self.in_string = False
+            elif ch == '"':
+                self.in_string = True
+            elif ch == "{":
+                self.starts.append(self.pos)
+                self.fresh = True
+            elif ch == "}":
+                closed.append((self.starts.pop(), self.pos + 1))
+            self.pos += 1
+        return closed
+
+
+def _is_tool_calls_object(text: str) -> bool:
+    """Return whether *text* is a JSON object carrying a ``tool_calls`` list.
+
+    Args:
+        text: One balanced ``{...}`` span of the streamed content.
+    """
+    try:
+        parsed = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        return False
+    return bool(_iter_tool_calls_lists(parsed))
 
 
 def _accumulate_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
@@ -192,30 +347,6 @@ def _overwrite_usage(current: dict[str, Any], usage: dict[str, Any]) -> None:
                     sub[sub_key] = sub_value
 
 
-def _tool_result_text(content: Any) -> str:
-    """Flatten a ``tool_result`` content payload to plain text.
-
-    The Claude CLI reports tool results either as a plain string or as a
-    list of content blocks (``{"type": "text", "text": …}``).
-
-    Args:
-        content: The ``content`` field of a ``tool_result`` block.
-
-    Returns:
-        The flattened text, or an empty string when nothing is textual.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
-        return "\n".join(part for part in parts if part)
-    return ""
-
-
 class ClaudeCodeModel(CLITextModel):
     """A model that delegates to the Claude Code CLI for LLM completions.
 
@@ -223,10 +354,9 @@ class ClaudeCodeModel(CLITextModel):
     as the ``--model`` flag to the ``claude`` CLI (e.g. ``cc/opus`` →
     ``--model opus``).
 
-    The CLI runs agentically (native tools enabled, permission checks
-    bypassed), mirroring :class:`~kiss.core.models.codex_model.CodexModel`.
-    Native tool invocations and their results are surfaced as thinking
-    blocks so the user sees real-time progress.
+    The CLI runs as a bare model (no native tools, KISS's system prompt
+    in place of its own; see :meth:`_build_cli_args`), mirroring
+    :class:`~kiss.core.models.codex_model.CodexModel`.
 
     KISS-level tool calling is supported via text-based prompting: tool
     descriptions are injected into the system prompt and the model's text
@@ -265,7 +395,6 @@ class ClaudeCodeModel(CLITextModel):
         )
         self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
         self._last_thinking_content: str = ""
-        self._pre_result_content: str = ""
         self._stopped_for_tool_calls: bool = False
         # Usage of the finished assistant messages of the current
         # generate() call, kept on the instance so a run that raises
@@ -281,9 +410,14 @@ class ClaudeCodeModel(CLITextModel):
         streamed incrementally and the process can be terminated early
         (e.g. when a KISS ``tool_calls`` block is detected).
 
-        The CLI runs agentically: its native tools stay enabled and
-        ``--dangerously-skip-permissions`` bypasses approval prompts,
-        matching the sandbox bypass CodexModel passes to ``codex exec``.
+        The CLI runs as a bare model: ``--tools ""`` removes its native
+        tools, ``--safe-mode`` and ``--strict-mcp-config`` (with no MCP
+        config) drop the user's CLAUDE.md, skills, plugins, hooks and MCP
+        servers, and ``--system-prompt`` replaces Claude Code's system
+        prompt with KISS's ``system_instruction`` — delivered as genuine
+        system text because Claude treats a "system prompt" arriving in
+        the user turn as a prompt injection and refuses the plain-text
+        ``tool_calls`` protocol.
 
         Returns:
             List of CLI arguments.
@@ -292,54 +426,37 @@ class ClaudeCodeModel(CLITextModel):
         args = [
             cli,
             "--print",
-            "--disable-slash-commands",
-            "--dangerously-skip-permissions",
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--tools",
+            "",
             "--no-session-persistence",
-            "--model", self._cli_model,
-            "--output-format", "stream-json",
+            "--model",
+            self._cli_model,
+            "--output-format",
+            "stream-json",
             "--verbose",
             "--include-partial-messages",
         ]
         system_instruction = self.system_instruction_text()
         if system_instruction:
-            args += ["--append-system-prompt", system_instruction]
+            args += ["--system-prompt", system_instruction]
         return args
-
-    def _build_prompt(self) -> str:
-        """Return the task text alone: the system instruction goes to the CLI.
-
-        ``claude --print`` accepts ``--append-system-prompt``, so KISS's
-        system prompt (and the KISS tool protocol on a tool-bearing turn)
-        is delivered as genuine system text by :meth:`_build_cli_args`
-        rather than embedded in the user prompt.  Claude models treat a
-        "system prompt" that arrives inside the user turn as a prompt
-        injection and refuse the plain-text ``tool_calls`` protocol.
-
-        Returns:
-            The task text (see :meth:`CLITextModel._task_text`).
-        """
-        return self._task_text()
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
 
-        Always uses streaming so tokens are delivered incrementally.  The
-        CLI runs agentically, so a single call may span several assistant
-        messages interleaved with native tool executions; text from every
-        assistant message is accumulated and native tool activity streams
-        as thinking blocks.
+        Always uses streaming so tokens are delivered incrementally; text
+        from every assistant message is accumulated.
 
         On a tool-bearing turn — one wrapped in
         :class:`~kiss.core.models.model._ToolCallFilteredStream`, which both
         CLI adapters install — the response is truncated at the end of the
         first run of complete ``tool_calls`` JSON blocks and parsing stops,
         so a reasoning model that keeps going cannot hallucinate its own
-        tool results into the content.  The CLI **is** killed at that
-        instant: with native tools enabled, draining the child to its
-        terminal ``result`` event (the old issue #34 usage rescue) would
-        let it keep executing tools after the framework already ended the
-        turn.  Usage for such a turn is instead aggregated from the
-        per-message ``message_delta`` events seen before the stop.
+        tool results into the content.  The CLI is killed at that
+        instant; usage for such a turn is aggregated from the per-message
+        ``message_delta`` events seen before the stop.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_json_response).
@@ -364,7 +481,13 @@ class ClaudeCodeModel(CLITextModel):
                 proc.lines(), stop_on_tool_calls=stop_on_tool_calls
             )
             if not self._stopped_for_tool_calls:
-                proc.raise_for_exit()
+                try:
+                    proc.raise_for_exit()
+                except KISSError as e:
+                    # In -p mode the CLI reports an auth failure as its
+                    # *result* on stdout (stderr is empty): surface it,
+                    # with the way out when the subscription switch is on.
+                    raise self._with_auth_hint(e, result_json) from None
 
         # The turn completed: its usage is in result_json, so the partial
         # snapshot must not be billed a second time by a later
@@ -373,6 +496,37 @@ class ClaudeCodeModel(CLITextModel):
         self._open_message_usage = {}
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
+
+    def _cli_env(self) -> dict[str, str] | None:
+        """The child environment: see :func:`claude_subscription_env`."""
+        return claude_subscription_env()
+
+    @staticmethod
+    def _with_auth_hint(error: KISSError, result_json: dict[str, Any]) -> KISSError:
+        """Return *error* enriched with the CLI's own failure text.
+
+        The ``result`` event of a failed turn carries ``is_error`` and
+        the message the CLI would print (``Not logged in · Please run
+        /login``, ``Invalid API key`` …).  That message is appended, and
+        when the subscription switch is on so is :data:`SUBSCRIPTION_HINT`.
+
+        Args:
+            error: The exit-status error from ``raise_for_exit``.
+            result_json: The turn's final ``result`` event (may be empty).
+
+        Returns:
+            *error* itself when the turn carried no error text, else a
+            new ``KISSError``.
+        """
+        from kiss.core.config import DEFAULT_CONFIG
+
+        detail = result_json.get("result") if result_json.get("is_error") else ""
+        if not isinstance(detail, str) or not detail.strip():
+            return error
+        message = f"{error}\n{detail.strip()}"
+        if DEFAULT_CONFIG.claude_code_use_subscription:
+            message = f"{message}\n{SUBSCRIPTION_HINT}"
+        return KISSError(message)
 
     def _close_open_message(self) -> None:
         """Fold the message still streaming into the per-call usage aggregate.
@@ -409,49 +563,17 @@ class ClaudeCodeModel(CLITextModel):
         self._partial_usage = {}
         return {"usage": usage}
 
-    def _emit_tool_use_as_thinking(
-        self, block: dict[str, Any], seen_tool_use_ids: set[str]
-    ) -> None:
-        """Surface a native ``tool_use`` block as a thinking-stream line.
-
-        Bash invocations render as ``$ command`` (matching CodexModel's
-        ``command_execution`` rendering); other tools render as
-        ``ToolName({...input...})``.  Repeated snapshots of the same block
-        (the CLI re-sends assistant messages as they grow) are deduplicated
-        by tool-use id.
-
-        Args:
-            block: The ``tool_use`` content block from an assistant event.
-            seen_tool_use_ids: Ids already emitted; updated in place.
-        """
-        tool_id = block.get("id")
-        if tool_id:
-            if tool_id in seen_tool_use_ids:
-                return
-            seen_tool_use_ids.add(tool_id)
-        name = block.get("name", "")
-        tool_input = block.get("input") or {}
-        if name == "Bash" and tool_input.get("command"):
-            self._emit_as_thinking(f"$ {tool_input['command']}\n")
-        elif name:
-            self._emit_as_thinking(f"{name}({json.dumps(tool_input)})\n")
-
     def _parse_stream_events(
         self,
         lines: Iterable[str],
         stop_on_tool_calls: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        """Parse stream-json events from an agentic Claude Code run.
+        """Parse stream-json events from a Claude Code run.
 
         Iterates over newline-delimited JSON events from the Claude CLI.
         Thinking blocks are streamed via the thinking callback, and text
-        blocks via the token callback.  An agentic run emits multiple
-        assistant messages interleaved with native tool activity; text from
-        every assistant message is accumulated.  Native ``tool_use`` blocks
-        and the ``tool_result`` payloads carried by ``user`` events are
-        forwarded via the token callback wrapped in thinking start/end
-        pairs — the same treatment CodexModel gives ``command_execution``
-        events — so the user sees real-time progress.
+        blocks via the token callback; text from every assistant message
+        is accumulated.
 
         Also handles ``content_block_start`` / ``content_block_delta`` /
         ``content_block_stop`` events emitted by the CLI with
@@ -477,22 +599,18 @@ class ClaudeCodeModel(CLITextModel):
         """
         content = ""
         thinking_content = ""
-        pre_result_content = ""
         result_json: dict[str, Any] = {}
         current_block_type = ""
         saw_content_block = False
-        thinking_started = False
         seen_tool_calls_hint = False
         found_tool_calls = False
         last_tc_end = -1
-        seen_tool_use_ids: set[str] = set()
+        object_spans = _ObjectSpans()
         # Usage is kept on the instance (``_partial_usage`` for finished
         # messages, ``_open_message_usage`` for the one streaming) so a
         # stream that raises mid-parse still leaves its observed usage
-        # billable (issue: a whole-task run timing out otherwise erased
-        # ALL of its known spend).
-        current_tool_block: dict[str, Any] | None = None
-        current_tool_json = ""
+        # billable (a run timing out otherwise erased all of its known
+        # spend).
 
         events = _iter_stream_json_events(lines)
         for event in events:
@@ -502,9 +620,7 @@ class ClaudeCodeModel(CLITextModel):
                 msg = event.get("message", {})
                 for block in msg.get("content", []):
                     block_type = block.get("type")
-                    if block_type == "tool_use":
-                        self._emit_tool_use_as_thinking(block, seen_tool_use_ids)
-                    elif saw_content_block:
+                    if saw_content_block:
                         continue
                     elif block_type == "thinking":
                         thinking_text = block.get("thinking", "")
@@ -515,6 +631,7 @@ class ClaudeCodeModel(CLITextModel):
                         text = block.get("text", "")
                         if text:
                             content += text
+                            object_spans.feed(text)
                             self._invoke_token_callback(text)
                 if stop_on_tool_calls and content:
                     tc_end = _find_consecutive_tool_calls_end(content)
@@ -526,11 +643,6 @@ class ClaudeCodeModel(CLITextModel):
                 saw_content_block = True
                 block = event.get("content_block", {})
                 current_block_type = block.get("type", "")
-                thinking_started = False
-                current_tool_json = ""
-                current_tool_block = (
-                    block if current_block_type == "tool_use" else None
-                )
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
                 delta_type = delta.get("type", "")
@@ -538,21 +650,26 @@ class ClaudeCodeModel(CLITextModel):
                     thinking_text = delta.get("thinking", "")
                     if thinking_text:
                         thinking_content += thinking_text
-                        if not thinking_started:
-                            self._invoke_thinking_callback(True)
-                            thinking_started = True
+                        self._open_thinking_if_closed()
                         self._invoke_token_callback(thinking_text)
-                elif delta_type == "input_json_delta":
-                    current_tool_json += delta.get("partial_json", "")
                 elif delta_type == "text_delta":
                     text = delta.get("text", "")
                     if text:
                         content += text
+                        closed_spans = object_spans.feed(text)
                         self._invoke_token_callback(text)
                         if stop_on_tool_calls:
-                            if not seen_tool_calls_hint and "tool_calls" in content:
-                                seen_tool_calls_hint = True
-                            if seen_tool_calls_hint and "}" in text:
+                            # The key may straddle two deltas: look at the
+                            # new text plus the tail it extends.
+                            if not seen_tool_calls_hint:
+                                window = content[-(len(text) + len("tool_calls")) :]
+                                seen_tool_calls_hint = "tool_calls" in window
+                            # Outermost span first: inside valid JSON only
+                            # the outer object carries ``tool_calls``.
+                            if seen_tool_calls_hint and any(
+                                _is_tool_calls_object(content[start:end])
+                                for start, end in reversed(closed_spans)
+                            ):
                                 tc_end = _find_consecutive_tool_calls_end(content)
                                 if tc_end > 0:
                                     last_tc_end = tc_end
@@ -564,36 +681,9 @@ class ClaudeCodeModel(CLITextModel):
                                     self._stopped_for_tool_calls = True
                                     break
             elif event_type == "content_block_stop":
-                if current_block_type == "thinking" and thinking_started:
-                    self._invoke_thinking_callback(False)
-                    thinking_started = False
-                elif current_block_type == "tool_use" and current_tool_block:
-                    # Streams that never send the complete assistant
-                    # snapshot still surface the tool call: reassemble the
-                    # input from the input_json_delta chunks.  The shared
-                    # id set deduplicates against snapshot-borne emissions
-                    # in either arrival order.
-                    if current_tool_block.get("id"):
-                        block = dict(current_tool_block)
-                        if current_tool_json:
-                            with contextlib.suppress(json.JSONDecodeError):
-                                block["input"] = json.loads(current_tool_json)
-                        self._emit_tool_use_as_thinking(block, seen_tool_use_ids)
-                    current_tool_block = None
-                    current_tool_json = ""
+                if current_block_type == "thinking":
+                    self._close_thinking_if_open()
                 current_block_type = ""
-            elif event_type == "user":
-                msg = event.get("message", {})
-                blocks = msg.get("content")
-                if isinstance(blocks, list):
-                    for block in blocks:
-                        if (
-                            isinstance(block, dict)
-                            and block.get("type") == "tool_result"
-                        ):
-                            output = _tool_result_text(block.get("content"))
-                            if output:
-                                self._emit_as_thinking(output)
             elif event_type == "message_start":
                 # A new assistant message: its input and cache counts are
                 # known now; output_tokens is a placeholder the cumulative
@@ -615,12 +705,10 @@ class ClaudeCodeModel(CLITextModel):
                 self._close_open_message()
             elif event_type == "result":
                 result_json = event
-                pre_result_content = content
                 if not found_tool_calls and not content.strip():
-                    # Fallback only: an agentic run's terminal ``result``
-                    # carries just the LAST assistant message, so replacing
-                    # accumulated multi-message text with it would silently
-                    # drop everything said before the final native tool use.
+                    # Fallback only: the terminal ``result`` carries just
+                    # the last assistant message, so it never replaces
+                    # text already streamed.
                     content = event.get("result", content)
 
         if found_tool_calls and not self._stopped_for_tool_calls:
@@ -629,18 +717,14 @@ class ClaudeCodeModel(CLITextModel):
 
         if self._stopped_for_tool_calls and not result_json:
             # The turn ended at the KISS tool_calls block, before the
-            # terminal ``result`` event.  The CLI child is agentic now, so
-            # it must be killed immediately — draining it to the terminal
-            # event (the old issue #34 rescue) would let it keep executing
-            # native tools after the framework already ended the turn.
-            # The per-message usage folded above (including the message
-            # cut short) keeps the token accounting instead.
+            # terminal ``result`` event, and the child is killed at once;
+            # the per-message usage folded above (including the message
+            # cut short) keeps the token accounting.
             self._close_open_message()
             if self._partial_usage:
                 result_json = {"usage": self._partial_usage}
 
         self._last_thinking_content = thinking_content
-        self._pre_result_content = pre_result_content
         return content, result_json
 
     def generate_and_process_with_tools(
@@ -652,9 +736,8 @@ class ClaudeCodeModel(CLITextModel):
 
         Tool descriptions are injected into the system prompt.  The model's
         text output is parsed for JSON ``tool_calls`` blocks, which are
-        returned to the framework for execution.  The CLI additionally runs
-        as an agent with its native tools enabled, exactly like
-        :class:`CodexModel`; KISS-level tools and native CLI tools coexist.
+        returned to the framework for execution; the CLI's own tools are
+        switched off, so these are the only tools the model can use.
 
         Thinking tokens stream to the callbacks as they arrive, but the
         assistant text is held back and re-emitted once the turn ends,
@@ -670,16 +753,12 @@ class ClaudeCodeModel(CLITextModel):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        with self._tools_prompt_installed(function_map, _KISS_TOOLS_ARE_NOT_NATIVE_NOTE):
+        with self._tools_prompt_installed(function_map):
             content, response = self.generate()
 
-        all_sources = [content]
-        if self._pre_result_content:
-            all_sources.append(self._pre_result_content)
-        if self._last_thinking_content:
-            all_sources.append(self._last_thinking_content)
-        combined = "\n".join(all_sources)
-        function_calls = _parse_text_based_tool_calls(combined)
+        function_calls = _parse_text_based_tool_calls(
+            "\n".join([content, self._last_thinking_content])
+        )
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
