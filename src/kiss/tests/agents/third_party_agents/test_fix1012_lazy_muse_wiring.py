@@ -28,7 +28,6 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -54,6 +53,8 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 _REAL = "real-secret-credential"
 _MS_ACCESS = "graph-access-token"
 _THREADS = 16
+_SETTLE_SECONDS = 0.5
+"""Best-effort pause for the threads to reach the wiring guard (see ``_fire_first_requests``)."""
 _SERVICES = (
     "homeassistant",
     "brave_search",
@@ -94,21 +95,14 @@ class _Handler(RecordingHandler):
 
     def _serve(self) -> None:
         body = self._read_raw()
-        split = urlsplit(self.path)
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": split.path,
-                "query": parse_qs(split.query),
-                "headers": dict(self.headers.items()),
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
-        if split.path.endswith("/oauth2/v2.0/token"):
+        path = self.record_request(
+            body.decode("utf-8", errors="replace"), headers=dict(self.headers.items())
+        )["path"]
+        if path.endswith("/oauth2/v2.0/token"):
             payload: dict[str, Any] = {"access_token": _MS_ACCESS, "expires_in": 3600}
-        elif split.path.endswith("/getMe"):
+        elif path.endswith("/getMe"):
             payload = {"ok": True, "result": {"id": 7, "username": "kissbot", "first_name": "k"}}
-        elif split.path.endswith("/getUpdates"):
+        elif path.endswith("/getUpdates"):
             payload = {"ok": True, "result": []}
         else:
             payload = _BODY
@@ -163,10 +157,17 @@ def _after_barrier(barrier: threading.Barrier, request: Any, agent: Any) -> Any:
 def _fire_first_requests(request: Any, agent: Any, n: int = _THREADS) -> list[Any]:
     """Fire *request* from *n* threads at once as the backend's very first request.
 
-    ``spawn.lock`` is held while the threads start, so every thread is
-    inside its first request before any daemon exists and the first
-    wiring cannot finish early; with unguarded wiring each thread then
-    enrols and mints on its own.
+    ``spawn.lock`` is held while the threads start, so the first wiring
+    (which spawns the daemon under that lock) cannot finish before the
+    lock is released; with unguarded wiring each thread then enrols and
+    mints on its own.
+
+    The ``_SETTLE_SECONDS`` pause is best effort, not a guarantee: nothing
+    in the backend signals "I have reached the wiring guard", so the pause
+    is what gives the other threads time to get there while the lock is
+    held.  On a loaded machine a late thread simply arrives after the
+    wiring is done and takes the "reuses the wiring" path, so the test
+    then checks less (a sequential wiring) but never fails spuriously.
 
     Args:
         request: ``request(agent)`` issues one read through the backend.
@@ -181,7 +182,7 @@ def _fire_first_requests(request: Any, agent: Any, n: int = _THREADS) -> list[An
     with ThreadPoolExecutor(max_workers=n) as pool:
         with exclusive_file_lock(muse_auth_dir() / "spawn.lock"):
             futures = [pool.submit(_after_barrier, barrier, request, agent) for _ in range(n)]
-            time.sleep(0.5)
+            time.sleep(_SETTLE_SECONDS)
         return [future.result(timeout=120) for future in futures]
 
 

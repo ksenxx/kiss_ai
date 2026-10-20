@@ -6,52 +6,15 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: buildPage, fakeMatchMedia} = require('./simplify2_harness');
-
-function makePage(opts) {
-  const {desktopMatches = true, storedWidth = null} = opts || {};
-  const captured = [];
-  const released = [];
-  const {win} = buildPage({
-    bodyClass: 'remote-chat',
-    beforeScripts: w => {
-      w.Element.prototype.setPointerCapture = function (id) {
-        captured.push(id);
-      };
-      w.Element.prototype.releasePointerCapture = function (id) {
-        released.push(id);
-      };
-      if (storedWidth !== null) {
-        w.localStorage.setItem('kiss-sidebar-w', storedWidth);
-      }
-      fakeMatchMedia(w, desktopMatches === true);
-    },
-  });
-  return {win, captured, released};
-}
+const {
+  makeResizePage: makePage,
+  panelW,
+  pointer,
+  drag,
+} = require('./panel_resize_helpers');
 
 function sidebarW(win) {
-  return win.document.documentElement.style.getPropertyValue('--sidebar-w');
-}
-
-function pointer(win, el, type, props) {
-  const ev = new win.MouseEvent(type, {
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    ...props,
-  });
-  if (props && props.pointerId !== undefined) {
-    Object.defineProperty(ev, 'pointerId', {value: props.pointerId});
-  }
-  el.dispatchEvent(ev);
-  return ev;
-}
-
-function drag(win, resizer, x0, x1) {
-  pointer(win, resizer, 'pointerdown', {clientX: x0, pointerId: 1});
-  pointer(win, resizer, 'pointermove', {clientX: x1, pointerId: 1});
-  pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
+  return panelW(win, '--sidebar-w');
 }
 
 // Resize bounds declared as --sidebar-min-w / --chat-min-w in
@@ -174,7 +137,7 @@ function testWidthPersistsAndRestores() {
   win.close();
   const second = makePage({
     desktopMatches: true,
-    storedWidth: '430',
+    stored: {'kiss-sidebar-w': '430'},
   });
   assert.strictEqual(
     sidebarW(second.win),
@@ -194,7 +157,7 @@ function testWidthPersistsAndRestores() {
 function testPersistedGarbageSanitized() {
   const garbage = makePage({
     desktopMatches: true,
-    storedWidth: 'abc',
+    stored: {'kiss-sidebar-w': 'abc'},
   });
   assert.strictEqual(
     sidebarW(garbage.win),
@@ -204,7 +167,7 @@ function testPersistedGarbageSanitized() {
   garbage.win.close();
   const huge = makePage({
     desktopMatches: true,
-    storedWidth: '9999',
+    stored: {'kiss-sidebar-w': '9999'},
   });
   assert.strictEqual(
     sidebarW(huge.win),
@@ -214,7 +177,7 @@ function testPersistedGarbageSanitized() {
   huge.win.close();
   const narrow = makePage({
     desktopMatches: true,
-    storedWidth: '240',
+    stored: {'kiss-sidebar-w': '240'},
   });
   assert.strictEqual(
     sidebarW(narrow.win),
@@ -224,7 +187,7 @@ function testPersistedGarbageSanitized() {
   narrow.win.close();
   const tiny = makePage({
     desktopMatches: true,
-    storedWidth: '4',
+    stored: {'kiss-sidebar-w': '4'},
   });
   assert.strictEqual(
     sidebarW(tiny.win),
@@ -422,7 +385,7 @@ function testWideWindowAllowsBeyondDefaultCap() {
 function testWidePreferenceSurvivesNarrowWindow() {
   const {win} = makePage({
     desktopMatches: true,
-    storedWidth: '1500',
+    stored: {'kiss-sidebar-w': '1500'},
   });
   assert.strictEqual(
     sidebarW(win),
@@ -448,7 +411,7 @@ function testWidePreferenceSurvivesNarrowWindow() {
 function testKeyboardStepsFromRenderedWidth() {
   const {win} = makePage({
     desktopMatches: true,
-    storedWidth: '1500',
+    stored: {'kiss-sidebar-w': '1500'},
   });
   const resizer = win.document.getElementById('sidebar-resizer');
   assert.strictEqual(sidebarW(win), `${MAX_W}px`);

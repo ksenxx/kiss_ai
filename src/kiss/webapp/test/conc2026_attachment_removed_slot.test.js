@@ -34,49 +34,10 @@
 'use strict';
 
 const assert = require('assert');
-const {paste} = require('./attachment_helpers');
-const {makePage: buildPage} = require('./simplify2_harness');
+const {makeWedgedDecoderPage, paste} = require('./attachment_helpers');
+const {sleep} = require('./simplify2_harness');
 
 const SHORT_DEADLINE_MS = 300;
-
-// A wedged decoder: every call parks for ever, so only the deadline
-// (or nothing) can settle a HEIC slot.
-function wedgeDecoder(win) {
-  let decodes = 0;
-  win.createImageBitmap = function () {
-    decodes += 1;
-    return new Promise(() => {});
-  };
-  return () => decodes;
-}
-
-function shortenDeadline(mainSrc) {
-  const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
-  assert.ok(
-    mainSrc.includes(needle),
-    'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
-  );
-  return mainSrc.replace(
-    needle,
-    `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
-  );
-}
-
-function makePage() {
-  let decodeCount;
-  const {win} = buildPage({
-    beforeScripts: w => {
-      decodeCount = wedgeDecoder(w);
-    },
-    mainSource: shortenDeadline,
-    sourceUrl: 'conc2026-attachment-removed-slot-main.js',
-  });
-  return {win, decodeCount};
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function chipText(win) {
   return win.document.getElementById('file-chips').textContent;
@@ -101,7 +62,10 @@ function removeChip(win, name) {
 }
 
 async function main() {
-  const {win, decodeCount} = makePage();
+  const {win, decodeCount} = makeWedgedDecoderPage(
+    SHORT_DEADLINE_MS,
+    'conc2026-attachment-removed-slot-main.js',
+  );
   win._testApi.endLaunch();
 
   // ---- Part 1: the bug. A pending HEIC whose decode is wedged is
@@ -111,7 +75,7 @@ async function main() {
     type: 'image/heic',
   });
   paste(win, heic);
-  await delay(30);
+  await sleep(30);
   assert.strictEqual(decodeCount(), 1, 'the HEIC reached the decoder');
   assert.match(chipText(win), /IMG_0001\.HEIC/, 'the pending chip shows');
 
@@ -125,7 +89,7 @@ async function main() {
   // Well past the deadline: the removed slot's withDeadline rejection
   // lands. Post-fix nothing is rendered; pre-fix a phantom error chip
   // "IMG_0001.HEIC: it could not be read within Ns" appears.
-  await delay(SHORT_DEADLINE_MS + 200);
+  await sleep(SHORT_DEADLINE_MS + 200);
   assert.strictEqual(
     errorChips(win).length,
     0,
@@ -143,11 +107,11 @@ async function main() {
     type: 'image/heic',
   });
   paste(win, heic2);
-  await delay(30);
+  await sleep(30);
   assert.strictEqual(decodeCount(), 2, 'the second HEIC reached the decoder');
   assert.match(chipText(win), /IMG_0002\.HEIC/, 'its pending chip shows');
 
-  await delay(SHORT_DEADLINE_MS + 200);
+  await sleep(SHORT_DEADLINE_MS + 200);
   assert.strictEqual(
     errorChips(win).length,
     1,

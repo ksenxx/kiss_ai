@@ -20,7 +20,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode
 
 import pytest
 
@@ -57,18 +57,9 @@ class _ResponderServer(RecordingServer):
 class _Handler(RecordingHandler):
     def _handle(self) -> None:
         srv = cast(_ResponderServer, self.server)
-        parsed = urlsplit(self.path)
         body = self._read_raw()
-        srv.requests.append(
-            {
-                "method": self.command,
-                "path": parsed.path,
-                "raw_path": self.path,
-                "query": parse_qs(parsed.query),
-                "body": body.decode("utf-8", "replace"),
-            }
-        )
-        status, payload = srv.responder(self.command, parsed.path, parse_qs(parsed.query), body)
+        entry = self.record_request(body.decode("utf-8", "replace"), raw_path=self.path)
+        status, payload = srv.responder(self.command, entry["path"], entry["query"], body)
         self._json(status, payload)
 
     do_GET = do_POST = do_PUT = do_DELETE = _handle  # noqa: N815

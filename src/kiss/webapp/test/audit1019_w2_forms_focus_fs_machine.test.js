@@ -32,7 +32,9 @@ const {
   stubRaf,
   fakeMatchMedia,
   stubMonaco,
+  pickMachine,
 } = require('./simplify2_harness');
+const {all, showSection, menuItem} = require('./ui_antipattern_harness');
 
 const openWindows = [];
 
@@ -63,22 +65,6 @@ function click(win, el) {
 
 function msgs(posted, type) {
   return posted.filter(m => m && m.type === type);
-}
-
-function all(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
-}
-
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function pickMachine(win, value) {
-  const select = byId(win, 'chat-machine');
-  select.value = value;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 /** Answer the last listDir for *p* (stamped *machine*, '' for none). */
@@ -112,12 +98,6 @@ function rightClick(win, el) {
       clientX: 10,
       clientY: 10,
     }),
-  );
-}
-
-function menuItem(win, label) {
-  return all(win, '#sidebar-context-menu .tree-ctx-item').find(
-    el => el.querySelector('.tree-ctx-label').textContent === label,
   );
 }
 

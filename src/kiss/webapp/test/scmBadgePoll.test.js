@@ -19,7 +19,9 @@ const {
   stubRaf,
   fakeMatchMedia,
   fakeIntervals,
+  ofType,
 } = require('./simplify2_harness');
+const {byId} = require('./ui_antipattern_harness');
 
 const WD = '/ws/repo';
 
@@ -36,14 +38,6 @@ function makePage(narrow) {
     },
   });
   return {win, posted, clock};
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 function statusReply(token, n) {

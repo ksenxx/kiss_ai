@@ -23,6 +23,8 @@ const {
   send,
   loadMainCss,
   MEDIA,
+  readyTabId,
+  output,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -32,22 +34,12 @@ function makePage() {
   return win;
 }
 
-function readyTabId(win) {
-  const ready = win.__posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
-  return ready.tabId;
-}
-
-function output(win) {
-  return win.document.getElementById('output');
-}
-
 function startTask(win, task) {
   send(win, {
     type: 'task_events',
     events: [],
     task,
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});

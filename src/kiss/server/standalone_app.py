@@ -633,27 +633,35 @@ def macos_bundle_browser(bundle: Path, browser: Path) -> Path | None:
     return exe_copy
 
 
-def macos_bundle_in_use(bundle: Path) -> bool:
-    """Whether a process runs from *bundle*: the browser or one of its helpers.
+def macos_bundle_processes(bundle: Path) -> list[tuple[int, str]]:
+    """Return ``(pid, command)`` of every process running from *bundle*.
 
-    Every executable of the clone sits under ``Contents/``, so a running
-    one names that directory in its command line.
+    Every executable of the clone sits under ``Contents/``: the browser
+    itself under ``Contents/MacOS/``, its helpers under
+    ``Contents/Frameworks/``.  A running one names that directory in
+    its command line.
     """
-    listing = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True)
-    return f"{bundle / 'Contents'}/" in listing.stdout
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    prefix = f"{bundle / 'Contents'}/"
+    processes = []
+    for line in listing.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if prefix in command:
+            processes.append((int(pid), command))
+    return processes
+
+
+def macos_bundle_in_use(bundle: Path) -> bool:
+    """Whether a process runs from *bundle*: the browser or one of its helpers."""
+    return bool(macos_bundle_processes(bundle))
 
 
 def macos_bundle_pid(bundle: Path) -> int | None:
-    """Return the pid of the browser process started from *bundle*, or None.
-
-    The browser itself is the one executable under ``Contents/MacOS/``;
-    its helpers run from ``Contents/Frameworks/``.
-    """
-    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
-    for line in listing.stdout.splitlines():
-        pid, _, command = line.strip().partition(" ")
-        if command.startswith(f"{bundle / 'Contents' / 'MacOS'}/"):
-            return int(pid)
+    """Return the pid of the browser process started from *bundle*, or None."""
+    prefix = f"{bundle / 'Contents' / 'MacOS'}/"
+    for pid, command in macos_bundle_processes(bundle):
+        if command.startswith(prefix):
+            return pid
     return None
 
 
@@ -730,6 +738,8 @@ def app_window_event(event: str) -> bool:
             timer = threading.Timer(
                 APP_WINDOW_QUIT_GRACE_SECS, quit_closed_app, args=(macos_bundle_path(),)
             )
+            # A daemon's exit must not wait out the grace period.
+            timer.daemon = True
             timer.start()
     else:
         return False
@@ -1026,8 +1036,13 @@ def macos_launch_browser(
     if clone is None and macos_browser_bundle(browser) is not None:
         try:
             clone = write_macos_launcher(
-                bundle.parent, BRAND, ICON_FILE, Path(sys.argv[0]).resolve(), kiss_home(),
-                browser, in_use,
+                bundle.parent,
+                BRAND,
+                ICON_FILE,
+                Path(sys.argv[0]).resolve(),
+                kiss_home(),
+                browser,
+                in_use,
             )
         except OSError as exc:
             print(f"Could not write {bundle}: {exc}", file=sys.stderr)

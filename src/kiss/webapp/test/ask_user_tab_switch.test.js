@@ -19,6 +19,7 @@ const {
   stubRaf,
   fakeMatchMedia,
   clickTab,
+  answering,
 } = require('./simplify2_harness');
 
 function makePage(opts) {
@@ -43,11 +44,6 @@ function tabElement(win, tabId) {
 // The record of an open tab, or null once it is closed.
 function tabRecord(win, tabId) {
   return win._testApi.openTabs().find(t => t.id === tabId) || null;
-}
-
-// The composer is in answer mode while the tab on screen has a question.
-function answering(win) {
-  return win.document.body.classList.contains('ask-answering');
 }
 
 // Whether the tab is flagged as waiting for an answer (the strip's "?"

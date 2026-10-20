@@ -11,45 +11,41 @@ const {makePage, send, waitFor} = require('./simplify2_harness');
 const RESTARTING_MESSAGE = 'Restarting the KISS Sorcar web server…';
 const COMPLETE_MESSAGE = 'KISS Sorcar web server restart complete.';
 
+const SERVER_RESET_NOTIFICATIONS = [
+  {id: 'server-reset-restarting', message: RESTARTING_MESSAGE},
+  {id: 'server-reset-complete', message: COMPLETE_MESSAGE},
+];
+
 async function runTests() {
-  {
+  for (const {id, message} of SERVER_RESET_NOTIFICATIONS) {
     const wv = makePage();
     try {
-      send(wv.win, {
-        type: 'notification',
-        id: 'server-reset-complete',
-        severity: 'info',
-        message: COMPLETE_MESSAGE,
-      });
+      send(wv.win, {type: 'notification', id, severity: 'info', message});
 
       const toast = await waitFor(
-        () =>
-          wv.win.document.querySelector(
-            '.kiss-notification[data-notification-id="server-reset-complete"]',
-          ),
-        '"Server restart complete" must render a .kiss-notification toast',
+        () => wv.win.document.querySelector('.kiss-notification'),
+        `"${id}" must render a .kiss-notification toast`,
       );
 
       assert.ok(
-        toast.textContent.includes(COMPLETE_MESSAGE),
-        'toast must show the "KISS Sorcar web server restart complete." message',
+        toast.textContent.includes(message),
+        `"${id}" toast must show the "${message}" message`,
       );
-
       assert.strictEqual(
         toast.getAttribute('data-notification-id'),
-        'server-reset-complete',
-        'toast must be stamped with id="server-reset-complete" so a repeat broadcast does not stack duplicates',
+        id,
+        `toast must be stamped with id="${id}" so a repeat broadcast does not stack duplicates`,
       );
       assert.ok(
         toast.classList.contains('kiss-notification-info'),
-        'toast must use the "info" severity styling',
+        `"${id}" toast must use the "info" severity styling`,
       );
 
-      const noteEls = wv.win.document.querySelectorAll('div.note');
-      for (const el of noteEls) {
+      for (const el of wv.win.document.querySelectorAll('div.note')) {
         assert.ok(
-          !el.textContent.includes(COMPLETE_MESSAGE),
-          '"Server restart complete" must NOT be rendered as a chat-output "Note: …" banner',
+          !el.textContent.includes('web server') &&
+            !el.textContent.toLowerCase().includes('restart'),
+          `"${id}" must NOT be rendered as a chat-output "Note: …" banner`,
         );
       }
     } finally {
@@ -72,6 +68,19 @@ async function runTests() {
             '.kiss-notification[data-notification-id="server-reset-restarting"]',
           ),
         'pre-condition: the "restarting" toast must be visible first',
+      );
+      send(wv.win, {
+        type: 'notification',
+        id: 'server-reset-restarting',
+        severity: 'info',
+        message: RESTARTING_MESSAGE,
+      });
+      assert.strictEqual(
+        wv.win.document.querySelectorAll(
+          '.kiss-notification[data-notification-id="server-reset-restarting"]',
+        ).length,
+        1,
+        'a repeat "server-reset-restarting" broadcast must not stack a duplicate toast',
       );
 
       send(wv.win, {

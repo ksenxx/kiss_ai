@@ -239,8 +239,6 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
     Raises:
         SeaError: An explicit value clashes with a locked setting.
     """
-    raw_prompt = cmd.get("prompt")
-    task = raw_prompt if isinstance(raw_prompt, str) else ""
     base_dir = calling_work_dir(cmd)
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
@@ -279,7 +277,7 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
         # script-pinned (the task runner's ``_worktreeDecided`` mark).
         if field in staged and asked is not None and asked != "" and asked != staged[field]:
             del staged[field]
-    if run.prompt != task:
+    if run.prompt != run.task:
         staged["prompt"] = run.prompt
     channel = is_channel(seas)
     if channel:

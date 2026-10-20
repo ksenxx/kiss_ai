@@ -812,9 +812,10 @@ def test_live_task_panel_typography_and_history_rows(
                     "injected history row despite the dispatch shield"
                 )
                 # History panels are collapsed by default: only the
-                # clamped task text shows, the metadata is hidden, and
-                # there is no delete button (replaced by the collapse
-                # chevron).
+                # clamped task text shows and the metadata is hidden.
+                # A finished task's row carries one delete button (its
+                # inline Delete / Cancel confirmation stays hidden) and
+                # one collapse chevron.
                 collapse_probe = page.evaluate(
                     """() => {
                         const row = document.querySelector(
@@ -844,8 +845,8 @@ def test_live_task_panel_typography_and_history_rows(
                 assert collapse_probe["infoDisplay"] == "none", (
                     "collapsed panel must hide the metadata block: " + repr(collapse_probe)
                 )
-                assert collapse_probe["deleteButtons"] == 0, (
-                    "history panels must not render a delete button: " + repr(collapse_probe)
+                assert collapse_probe["deleteButtons"] == 1, (
+                    "a finished task's panel renders one delete button: " + repr(collapse_probe)
                 )
                 assert collapse_probe["toggles"] == 1, (
                     "history panels must render one collapse toggle: " + repr(collapse_probe)
@@ -1105,7 +1106,10 @@ _PROBE_ACTION_ROW_JS = r"""(() => {
   const textBox = text.getBoundingClientRect();
   const actionsBox = actions.getBoundingClientRect();
   const rowCs = getComputedStyle(row);
-  const buttons = [...actions.querySelectorAll('button')];
+  // The strip's own icon buttons; the delete button's hidden Delete /
+  // Cancel confirmation (text buttons inside .sidebar-item-confirm) is
+  // not part of the rendered line.
+  const buttons = [...actions.querySelectorAll(':scope > button')];
   const measure = el => {
     const b = el.getBoundingClientRect();
     return [Math.round(b.width), Math.round(b.height)];
@@ -1175,7 +1179,8 @@ def _assert_action_row_layout(geometry: ActionRowGeometry, surface: str) -> None
 
     The strip keeps the full-width line of its own below the task text,
     but the buttons are drawn at the same size as every other sidebar
-    list: a 12x12 icon inside a 12x16 box.  The 18x18-in-18x24
+    list: a 12px-tall icon (12px wide, or 11px for the delete bin that
+    every sidebar list shares) inside a 16px-tall box.  The 18x18-in-18x24
     enlargement the panel briefly carried has been reverted.
     """
     assert geometry["buttonCount"] >= 2, (
@@ -1196,13 +1201,15 @@ def _assert_action_row_layout(geometry: ActionRowGeometry, surface: str) -> None
     assert geometry["stripWidth"] == geometry["contentWidth"], (
         f"{surface}: the action strip must span the panel's full content width: " + repr(geometry)
     )
-    assert geometry["buttons"] == [[12, 16]] * geometry["buttonCount"], (
+    assert all(w in (11, 12) and h == 16 for w, h in geometry["buttons"]), (
         f"{surface}: every action button must render at the compact "
-        "12x16 sidebar size, not the reverted 18x24 one: " + repr(geometry)
+        "12x16 (11x16 for the delete bin) sidebar size, not the reverted "
+        "18x24 one: " + repr(geometry)
     )
-    assert geometry["icons"] == [[12, 12]] * geometry["buttonCount"], (
+    assert all(w in (11, 12) and h == 12 for w, h in geometry["icons"]), (
         f"{surface}: every action icon must render at the compact 12x12 "
-        "sidebar size, not the reverted 18x18 one: " + repr(geometry)
+        "(11x12 for the delete bin) sidebar size, not the reverted 18x18 "
+        "one: " + repr(geometry)
     )
 
 

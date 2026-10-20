@@ -19,13 +19,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage} = require('./simplify2_harness');
-
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-}
+const {makePage, click} = require('./simplify2_harness');
 
 function testMenuHoldsEveryMovedAction() {
   const {win} = makePage();

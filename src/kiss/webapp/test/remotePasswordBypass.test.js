@@ -9,7 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM, VirtualConsole} = require('jsdom');
-const {sleep} = require('./simplify2_harness');
+const {fakeIntervals, sleep} = require('./simplify2_harness');
 const {
   installFakeWebSocket,
   readShimJs,
@@ -1591,12 +1591,13 @@ async function run() {
       cleared.push(id);
       return realClearTimeout(id);
     };
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     try {
       sockets[0].fireClose();
-      await sleep(1100);
+      clock.tick(1000);
       assert.strictEqual(
         doc.getElementById('kiss-server-loading-action'),
         null,
@@ -1606,7 +1607,8 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 9000;
       };
-      await sleep(1100);
+      clock.tick(1000);
+      await waitForSocket(sockets, 2);
       assert.match(
         msg.textContent,
         /^Still trying to reach the KISS Sorcar server \(\d+ s\)\. Check that it is running on this machine\.$/,
@@ -1665,6 +1667,7 @@ async function run() {
     const {window} = dom;
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     try {
       sockets[0].fireClose();
@@ -1672,7 +1675,7 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 9000;
       };
-      await sleep(1100);
+      clock.tick(1000);
       window.Date.now = realNow;
       assert.strictEqual(
         window.document.getElementById('kiss-server-loading-action'),
@@ -1985,6 +1988,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
@@ -1997,14 +2001,13 @@ async function run() {
         'Too many wrong passwords from this network. You can try again in 2 s.',
       );
       sockets[0].fireClose();
-      // The 1 s tick is due exactly where ceil() flips from 2 to 1, so
-      // a 1 ms disagreement between the timer clock (libuv's truncated
-      // monotonic ms) and Date.now() shows "2 s" (seen on Windows).
-      // Half a second of clock skew puts the tick mid-band.
+      // The overlay tick runs on the fake interval clock, so Date.now()
+      // carries the elapsed time itself: 1.6 s puts the tick mid-band
+      // (400 ms left), clear of the edge where ceil() flips from 2 to 1.
       window.Date.now = function () {
-        return realNow() + 500;
+        return realNow() + 1600;
       };
-      await sleep(1100);
+      clock.tick(1000);
       assert.strictEqual(
         msg.textContent,
         'Too many wrong passwords from this network. You can try again in 1 s.',
@@ -2013,7 +2016,8 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 2000;
       };
-      await sleep(1100);
+      clock.tick(1000);
+      await waitForSocket(sockets, 2);
       assert.ok(
         sockets.length >= 2,
         'the reconnect scheduled for the lockout end was attempted',
@@ -2031,7 +2035,7 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 10000;
       };
-      await sleep(1100);
+      clock.tick(1000);
       assert.match(
         msg.textContent,
         /^Still trying to reach the KISS Sorcar server \(\d+ s\)\. Check that it is running on this machine\.$/,
@@ -2080,6 +2084,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
@@ -2104,7 +2109,7 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 10000;
       };
-      await sleep(1100);
+      clock.tick(1000);
       assert.strictEqual(
         msg.textContent,
         'A password is needed to use this server.',
@@ -2113,7 +2118,7 @@ async function run() {
       const enter = doc.getElementById('kiss-server-loading-action');
       assert.ok(enter, 'the Enter password button is back');
       assert.strictEqual(enter.textContent, 'Enter password');
-      await sleep(1100);
+      clock.tick(1000);
       assert.strictEqual(
         msg.textContent,
         'A password is needed to use this server.',
@@ -2141,6 +2146,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
@@ -2151,7 +2157,7 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 2000;
       };
-      await sleep(1100);
+      clock.tick(1000);
       assert.match(
         msg.textContent,
         /try again in 1 s/,
@@ -2183,6 +2189,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
+    const clock = fakeIntervals(window);
     evalShim(window, shimJs);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
@@ -2198,7 +2205,7 @@ async function run() {
       window.Date.now = function () {
         return realNow() + 10000;
       };
-      await sleep(1100);
+      clock.tick(1000);
       assert.match(
         msg.textContent,
         /^Still trying to reach the KISS Sorcar server \(\d+ s\)/,

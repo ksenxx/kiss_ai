@@ -27,7 +27,6 @@ import json
 from email import message_from_bytes
 from email.message import Message
 from typing import Any, cast
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -103,13 +102,9 @@ class _GmailHandler(RecordingHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve profile, message list/get and thread get."""
-        parts = urlsplit(self.path)
-        query = parse_qs(parts.query, keep_blank_values=True)
-        wanted = query.get("metadataHeaders", [])
-        cast(RecordingServer, self.server).requests.append(
-            {"method": "GET", "path": parts.path, "query": query}
-        )
-        tail = parts.path.split("/users/me/", 1)[1]
+        entry = self.record_request(None)
+        wanted = entry["query"].get("metadataHeaders", [])
+        tail = entry["path"].split("/users/me/", 1)[1]
         if tail == "profile":
             self._send(200, {"emailAddress": "me@example.com"})
         elif tail == "messages":
@@ -144,11 +139,7 @@ class _GmailHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802
         """Record ``drafts.create`` / ``messages.send`` and answer in the requested thread."""
         body = self._read_body()
-        parts = urlsplit(self.path)
-        cast(RecordingServer, self.server).requests.append(
-            {"method": "POST", "path": parts.path, "body": body}
-        )
-        if parts.path.endswith("/messages/send"):
+        if self.record_request(body)["path"].endswith("/messages/send"):
             self._send(200, {"id": "sent-1", "threadId": body.get("threadId", "sent-1")})
             return
         message = body.get("message", {})

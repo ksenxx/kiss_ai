@@ -150,6 +150,7 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
                 self._complete_worker = None
                 self._complete_seq_latest = {}
                 self._file_index = registry
+                self._files_latest_request = {}
 
         srv = FakeServer()
         # Build the index up front so every fuzzed query is answered

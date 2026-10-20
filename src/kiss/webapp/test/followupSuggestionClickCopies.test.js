@@ -23,11 +23,7 @@
 // are covered here too.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
+const {makePage, send, click} = require('./simplify2_harness');
 
 function inputBox(win) {
   return win.document.getElementById('task-input');
@@ -52,7 +48,7 @@ function assertClickCopies(win, bar, text, surface) {
 
 function testLiveFollowupClickCopies() {
   const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   send(win, {type: 'followup_suggestion', text: 'live next step', tabId});
   const bar = win.document.querySelector('#output .followup-bar');
@@ -63,7 +59,7 @@ function testLiveFollowupClickCopies() {
 
 function testActiveTabReplayFollowupClickCopies() {
   const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   // A page reload replays the newest task through task_events.
   send(win, {
@@ -86,7 +82,7 @@ function testActiveTabReplayFollowupClickCopies() {
 
 function testAdjacentTaskFollowupClickCopies() {
   const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   // The reload scenario of the bug report: the newest task is replayed,
   // then the user scrolls up and an EARLIER task of the chat is spliced
@@ -97,9 +93,7 @@ function testAdjacentTaskFollowupClickCopies() {
     chat_id: 'chat-1',
     task_id: '42',
     task: 'Newest task',
-    events: [
-      {type: 'system_output', text: 'newest output\n'},
-    ],
+    events: [{type: 'system_output', text: 'newest output\n'}],
   });
   send(win, {
     type: 'adjacent_task_events',
@@ -130,7 +124,7 @@ function testAdjacentTaskFollowupClickCopies() {
 
 function testBackgroundTabReplayFollowupClickCopies() {
   const {win, posted} = makePage();
-  const firstTabId = posted.find((m) => m.type === 'ready').tabId;
+  const firstTabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   win._testApi.endLaunch();
   // Open a second tab; the first becomes a background tab whose
@@ -152,7 +146,7 @@ function testBackgroundTabReplayFollowupClickCopies() {
   // Switch back to the first chat, as a pick in the Chats panel would
   // (chats have no tab row of their own any more).
   assert.ok(
-    win._testApi.openTabs().some((t) => t.id === firstTabId),
+    win._testApi.openTabs().some(t => t.id === firstTabId),
     'the background chat must still be open',
   );
   win._testApi.switchToTab(firstTabId);

@@ -21,7 +21,6 @@ the daemon process exits and nothing re-creates the directory.
 from __future__ import annotations
 
 import shutil
-import time
 from pathlib import Path
 
 import pytest
@@ -54,9 +53,7 @@ def test_daemon_exits_when_its_home_is_deleted(
             "the daemon kept running after its KISS_HOME was deleted"
         )
         assert not socket_path().exists(), "the daemon left its socket behind"
-        # Long enough for a periodic sweep in the (now gone) loop to have
-        # run had the daemon survived the accept timeout.
-        time.sleep(0.6)
+        # The daemon process is gone, so nothing can re-create the home.
         assert not isolated_kiss_home.exists(), "something re-created the deleted KISS_HOME"
     finally:
         teardown_muse_env()

@@ -323,7 +323,7 @@ class MemoryDir:
                 :data:`MUTATION_LOCK_TIMEOUT`; nothing is written.
         """
         path = self.page_path(name)
-        tombstone = self.tombstone_path(path.stem)
+        tombstone = self._tombstone_dir() / path.stem
         incoming, body = split_frontmatter(body)
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
@@ -398,10 +398,14 @@ class MemoryDir:
                 the tombstone directory is a symlink -- a write through it
                 would land outside the memory.
         """
+        return self._tombstone_dir() / self.page_path(name).stem
+
+    def _tombstone_dir(self) -> Path:
+        """Return the tombstone directory, refusing one that is a symlink."""
         directory = self.root / TOMBSTONES_DIR
         if directory.is_symlink():
             raise ValueError(f"{directory} is a symlink; the tombstone directory must not be.")
-        return directory / self.page_path(name).stem
+        return directory
 
     def delete(self, name: str) -> None:
         """Delete page *name*, leaving a tombstone that records when.
@@ -420,8 +424,8 @@ class MemoryDir:
             TimeoutError: If another process holds the memory's lock past
                 :data:`MUTATION_LOCK_TIMEOUT`; the page is then kept.
         """
-        tombstone = self.tombstone_path(name)
         path = self.page_path(name)
+        tombstone = self._tombstone_dir() / path.stem
         with self._mutation_lock():
             if not path.is_file():
                 raise FileNotFoundError(f"Page {path.name} does not exist.")

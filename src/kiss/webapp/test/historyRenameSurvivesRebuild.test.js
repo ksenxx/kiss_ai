@@ -13,7 +13,7 @@
 // Runs with: node test/historyRenameSurvivesRebuild.test.js
 
 const assert = require('assert');
-const {makePage: buildPage, send} = require('./simplify2_harness');
+const {makePage: buildPage, send, ofType} = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted} = buildPage({bodyClass: 'remote-chat'});
@@ -71,10 +71,6 @@ function title(win, chatId) {
     .querySelector(':scope > .history-chat-title');
 }
 
-function byType(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
 function key(win, el, k) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
 }
@@ -109,7 +105,7 @@ async function testRenameBoxSurvivesChangedRows() {
 
   key(win, input, 'Enter');
   assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(byType(posted, 'setChatSummary'))),
+    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
     [{type: 'setChatSummary', chatId: 'A', summary: 'Login fix'}],
   );
   await tick();
@@ -141,7 +137,7 @@ async function testEscapeLandsTheParkedPage() {
   assert.strictEqual(group(win, 'B'), null, 'setup: the page is parked');
   key(win, input, 'Escape');
   await tick();
-  assert.strictEqual(byType(posted, 'setChatSummary').length, 0);
+  assert.strictEqual(ofType(posted, 'setChatSummary').length, 0);
   assert.ok(group(win, 'B'), 'Escape lands the parked page');
   assert.strictEqual(title(win, 'A').textContent, 'Fix the login bug');
   win.close();

@@ -2149,13 +2149,10 @@ def _open_db_connection(current_path: str) -> _LockedConnection:
     # leftover sidecar of a deleted-and-recreated database safely: a
     # WAL whose salt/checksums do not match is ignored and reset on
     # the first write, so no cleanup is needed for correctness.
-    conn = _LockedConnection(
-        current_path,
-        check_same_thread=False,
-        timeout=10,
-        isolation_level=None,
-    )
+    conn = _LockedConnection(current_path, check_same_thread=False, isolation_level=None)
     try:
+        # The one busy handler; ``sqlite3.connect(timeout=...)`` would
+        # install another that this pragma immediately replaces.
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
@@ -3257,14 +3254,7 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
         f"UPDATE task_history SET result = ? "
         f"WHERE id IN ({placeholders}) AND result = ?"
     )
-    affected_chat_ids: list[str] = []
     with _rw_lock.write_lock(), _immediate_txn(db):
-        rows = db.execute(
-            f"SELECT chat_id FROM task_history "
-            f"WHERE id IN ({placeholders}) AND result = ?",
-            [*id_list, "Agent Failed Abruptly"],
-        ).fetchall()
-        affected_chat_ids = [r["chat_id"] or "" for r in rows]
         cursor = db.execute(
             sql,
             ["Task interrupted by server restart/shutdown",
@@ -3276,8 +3266,9 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
             "Pre-emptively persisted shutdown result for %d in-flight task(s)",
             rowcount,
         )
-        for chat_id in set(affected_chat_ids):
-            _invalidate_chat_context_cache(chat_id)
+        # The process is shutting down: clearing the whole chat-context
+        # cache is as good as finding the affected chats.
+        _invalidate_chat_context_cache("")
     return rowcount
 
 
@@ -3685,6 +3676,120 @@ def _set_chat_summary(chat_id: str, summary: str) -> bool:
             (chat_id, summary),
         )
     return True
+
+
+def _task_tree_ids(db: sqlite3.Connection, root_ids: list[str]) -> list[str]:
+    """The ids of *root_ids* and every sub-task under them, by ``parent_task_id``."""
+    found: list[str] = []
+    seen: set[str] = set()
+    frontier = [tid for tid in root_ids if tid]
+    while frontier:
+        batch = [tid for tid in frontier if tid not in seen]
+        if not batch:
+            break
+        seen.update(batch)
+        found.extend(batch)
+        marks = ",".join("?" * len(batch))
+        rows = db.execute(
+            f"SELECT id FROM task_history WHERE parent_task_id IN ({marks})", batch
+        ).fetchall()
+        frontier = [str(row["id"]) for row in rows]
+    return found
+
+
+def _chat_tree_ids(db: sqlite3.Connection, chat_id: str) -> list[str]:
+    """The ids of chat *chat_id*'s tasks and every sub-task under them."""
+    rows = db.execute("SELECT id FROM task_history WHERE chat_id = ?", (chat_id,)).fetchall()
+    return _task_tree_ids(db, [str(row["id"]) for row in rows])
+
+
+def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str = "") -> int:
+    """Under the write lock: drop *task_ids* and their events in one transaction.
+
+    When *chat_id* is set, the chat's ``chat_summaries`` row goes in
+    the same transaction.
+
+    Returns:
+        The number of ``task_history`` rows removed.
+    """
+    removed = 0
+    marks = ",".join("?" * len(task_ids))
+    with _immediate_txn(db):
+        if task_ids:
+            db.execute(f"DELETE FROM events WHERE task_id IN ({marks})", task_ids)
+            cursor = db.execute(f"DELETE FROM task_history WHERE id IN ({marks})", task_ids)
+            removed = cursor.rowcount or 0
+        if chat_id:
+            db.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    locked_call(_caches_lock, _drop_event_caches, set(task_ids))
+    return removed
+
+
+def _task_tree(task_id: str) -> list[str]:
+    """The ids :func:`_delete_task` would remove: *task_id* and its sub-tasks.
+
+    Args:
+        task_id: A ``task_history`` row id (``""`` yields ``[]``).
+    """
+    if not task_id:
+        return []
+    with _rw_lock.read_lock():
+        return _task_tree_ids(_get_db(), [task_id])
+
+
+def _chat_task_tree(chat_id: str) -> list[str]:
+    """The ids :func:`_delete_chat` would remove: the chat's tasks and their sub-tasks.
+
+    Args:
+        chat_id: The chat session id (``""`` yields ``[]``).
+    """
+    if not chat_id:
+        return []
+    with _rw_lock.read_lock():
+        return _chat_tree_ids(_get_db(), chat_id)
+
+
+def _delete_task(task_id: str) -> int:
+    """Delete task *task_id*, its sub-tasks and all their events from the database.
+
+    Sub-tasks are the rows whose ``parent_task_id`` chain leads to
+    *task_id* (a ``run_parallel`` child's trajectory is meaningless
+    without its parent).  The chat's ``chat_summaries`` row is kept:
+    the chat may still hold other tasks.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row to delete.
+
+    Returns:
+        The number of ``task_history`` rows removed (0 when no such task).
+    """
+    if not task_id:
+        return 0
+    _flush_chat_events(task_id)
+    db = _get_db()
+    with _rw_lock.write_lock():
+        removed = _delete_task_rows(db, _task_tree_ids(db, [task_id]))
+    _invalidate_chat_context_cache("")
+    return removed
+
+
+def _delete_chat(chat_id: str) -> int:
+    """Delete chat *chat_id*: every task of the chat, their events and its summary.
+
+    Args:
+        chat_id: The chat session id.
+
+    Returns:
+        The number of ``task_history`` rows removed (0 for an unknown chat).
+    """
+    if not chat_id:
+        return 0
+    _flush_chat_events()
+    db = _get_db()
+    with _rw_lock.write_lock():
+        removed = _delete_task_rows(db, _chat_tree_ids(db, chat_id), chat_id)
+    _invalidate_chat_context_cache(chat_id)
+    return removed
 
 
 _event_queue: queue.Queue = queue.Queue()

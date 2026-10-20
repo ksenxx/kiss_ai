@@ -7,8 +7,10 @@
 ``SlackOAuthState`` answers Slack's ``oauth.v2.access`` endpoint the way
 Slack does for a PKCE public client with a localhost redirect: the code
 exchange nests a rotating user token under ``authed_user``; the refresh
-grant answers with top-level fields.  ``SlackApiServer`` is a real
-loopback HTTP server exposing that endpoint plus a minimal Web API.
+grant answers with top-level fields.  ``SlackApiServer`` is a
+``RecordingServer`` exposing that endpoint plus a minimal Web API through
+``SlackApiHandler``; serve it with ``serve_recording(SlackApiHandler,
+SlackApiServer)``.
 ``sign_in`` drives ``authenticate_slack()`` / ``finish_slack_auth()``
 end to end by replaying the browser's redirect to the loopback port.
 """
@@ -23,8 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, RecordingServer
 
 CLIENT_ID = "kiss-test-slack-client"
 
@@ -99,14 +100,15 @@ class SlackOAuthState:
         }
 
 
-class _Handler(RecordingHandler):
+class SlackApiHandler(RecordingHandler):
+    """Serve ``oauth.v2.access`` from the server's ``oauth`` state and a minimal Web API."""
+
     server: Any
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve the token endpoint and the Web API."""
         body = self._read_raw().decode()
-        auth = self.headers.get("Authorization", "")
-        self.server.requests.append((self.path, auth))
+        auth = self.record_request(body)["authorization"]
         if self.path == "/api/oauth.v2.access":
             data = self.server.oauth.answer(body)
         elif auth.startswith("Bearer xoxp-access-") and not auth.endswith("-invalid"):
@@ -116,19 +118,12 @@ class _Handler(RecordingHandler):
         self._json(200, data, "application/json; charset=utf-8")
 
 
-class SlackApiServer(ThreadedHTTPServer):
-    """Loopback Slack emulator recording ``(path, Authorization)`` pairs."""
+class SlackApiServer(RecordingServer):
+    """Loopback Slack emulator whose token endpoint is driven by ``oauth``."""
 
-    def __init__(self, oauth: SlackOAuthState) -> None:
-        super().__init__(("127.0.0.1", 0), _Handler)
-        self.oauth = oauth
-        self.requests: list[tuple[str, str]] = []
-        self.base_url = f"http://127.0.0.1:{self.server_address[1]}"
-        self._thread = start_serving(self)
-
-    def stop(self) -> None:
-        """Shut the server down."""
-        stop_http_server(self, self._thread)
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.oauth = SlackOAuthState()
 
 
 def start_sign_in(tools: dict[str, Any], oauth: SlackOAuthState) -> dict[str, Any]:

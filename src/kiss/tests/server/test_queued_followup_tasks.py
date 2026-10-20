@@ -34,6 +34,7 @@ Drives the real ``AgentServer._run_task`` lifecycle with a real
 
 from __future__ import annotations
 
+import base64
 import threading
 from pathlib import Path
 from typing import Any
@@ -213,9 +214,12 @@ class _QueueScriptedAgent(ChatSorcarAgent):
     def __init__(self) -> None:
         super().__init__("Sorcar")
         self.prompts: list[str] = []
+        # The ``attachments`` each run was given (the files' bytes).
+        self.files: list[list[bytes]] = []
         self.server: AgentServer | None = None
         self.tab: str = ""
         self.steer_prompt: str = ""
+        self.steer_attachments: list[dict[str, str]] = []
         self.raise_on_first: bool = False
 
     def run(self, *args: Any, **kwargs: Any) -> str:
@@ -223,6 +227,7 @@ class _QueueScriptedAgent(ChatSorcarAgent):
         del args
         prompt_template = str(kwargs.get("prompt_template", ""))
         self.prompts.append(prompt_template)
+        self.files.append([a.data for a in kwargs.get("attachments") or []])
         task_id, self._chat_id = _add_task(
             prompt_template, chat_id=self._chat_id or "",
         )
@@ -230,9 +235,11 @@ class _QueueScriptedAgent(ChatSorcarAgent):
             self._last_task_id = task_id
         if len(self.prompts) == 1:
             if self.steer_prompt and self.server is not None:
-                self.server._cmd_append_user_message(
-                    {"tabId": self.tab, "prompt": self.steer_prompt},
-                )
+                self.server._cmd_append_user_message({
+                    "tabId": self.tab,
+                    "prompt": self.steer_prompt,
+                    "attachments": self.steer_attachments,
+                })
             if self.raise_on_first:
                 raise RuntimeError("scripted failure")
         return finish(True, summary_in_html=f"<p>done {prompt_template}</p>")
@@ -259,6 +266,8 @@ def _run_with_steering(
     *,
     raise_on_first: bool = False,
     append_to_prompt: str = "",
+    attachments: list[dict[str, str]] | None = None,
+    steer_attachments: list[dict[str, str]] | None = None,
 ) -> tuple[_QueueScriptedAgent, AgentState, AgentServer]:
     """Run *prompt* through the real ``_run_task`` with mid-run steering.
 
@@ -275,6 +284,7 @@ def _run_with_steering(
     agent.server = server
     agent.tab = tab_id
     agent.steer_prompt = steer_prompt
+    agent.steer_attachments = list(steer_attachments or [])
     agent.raise_on_first = raise_on_first
     state = AgentState(
         f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
@@ -291,8 +301,14 @@ def _run_with_steering(
     }
     if append_to_prompt:
         cmd["appendToPrompt"] = append_to_prompt
+    if attachments:
+        cmd["attachments"] = attachments
     server._run_task(cmd)
     return agent, state, server
+
+
+def _wire_file(data: bytes, mime: str) -> dict[str, str]:
+    return {"name": "f", "mimeType": mime, "data": base64.b64encode(data).decode("ascii")}
 
 
 class TestRunnerDrainsQueuedTasks:
@@ -325,6 +341,24 @@ class TestRunnerDrainsQueuedTasks:
         # The final drain closed the queue: a later <task> message
         # takes the steering path instead of being silently dropped.
         assert state.followup_queue_closed is True
+
+    def test_queued_tasks_run_with_the_messages_files(self, tmp_path: Path) -> None:
+        """Each queued task gets the files of the message that queued it, not the run's."""
+        first = b"%PDF-1.4 first"
+        later = bytes([137, 80, 78, 71, 13, 10, 26, 10]) + b"\x00" * 8
+        agent, state, _server = _run_with_steering(
+            tmp_path,
+            f"{self.PREFIX}-files",
+            "original task",
+            "<task>second task</task>\n<task>third task</task>",
+            attachments=[_wire_file(first, "application/pdf")],
+            steer_attachments=[_wire_file(later, "image/png")],
+        )
+        assert agent.prompts == ["original task", "second task", "third task"]
+        assert agent.files == [[first], [later], [later]]
+        assert state.queued_followup_tasks == []
+        assert state.queued_followup_files == []
+        assert state.pending_user_attachments == []
 
     def test_append_to_prompt_suffix_applied_to_queued_tasks(
         self, tmp_path: Path,

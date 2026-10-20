@@ -831,14 +831,19 @@ _tunnels: dict[str, SshTunnel] = {}
 _tunnels_lock = threading.RLock()
 
 
-def _cached_tunnel(ssh: str, remote_port: int) -> SshTunnel:
-    """Return *ssh*'s cached tunnel, a fresh one when its remote port changed (under the lock)."""
+def _cached_tunnel(ssh: str, remote_port: int) -> tuple[SshTunnel, SshTunnel | None]:
+    """Return *ssh*'s cached tunnel and the one it replaced (under the lock).
+
+    A fresh tunnel replaces the cached one when its remote port changed;
+    the replaced tunnel is returned for the caller to close outside the
+    lock, as :func:`_evict_tunnels` leaves closing to :func:`close_tunnels`:
+    its ``close`` waits for a forward that may be mid-login.
+    """
     tunnel = _tunnels.get(ssh)
-    if tunnel is None or tunnel.remote_port != remote_port:
-        if tunnel is not None:
-            tunnel.close()
-        tunnel = _tunnels[ssh] = SshTunnel(ssh, remote_port)
-    return tunnel
+    if tunnel is not None and tunnel.remote_port == remote_port:
+        return tunnel, None
+    fresh = _tunnels[ssh] = SshTunnel(ssh, remote_port)
+    return fresh, tunnel
 
 
 def _evict_tunnels(kept: set[str]) -> list[SshTunnel]:
@@ -867,7 +872,9 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
             :meth:`SshTunnel.open`) or the registry changed while it
             was opening.
     """
-    tunnel = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
+    tunnel, stale = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
+    if stale is not None:
+        stale.close()
     # Test hook (no-op in production): widens the window between the
     # lookup and the open so the close_tunnels race is deterministic
     # under KISS_RACE_DELAY.
@@ -958,9 +965,16 @@ class MachineLink:
             raise MachineError(self._last_error)
 
     def _fail(self, message: str) -> MachineError:
-        """Record *message* as the link's failure, start the backoff, return the error."""
-        self._health.retry_at = time.monotonic() + DOWN_BACKOFF
+        """Record *message* as the link's failure, start the backoff, return the error.
+
+        The message is stored before the back-off: the machine's other
+        lanes read :class:`LinkHealth` without a lock, in the order
+        :meth:`_check_available` reads it, so one that sees the new
+        back-off never reports the previous (on a first failure, empty)
+        message.
+        """
         self._health.last_error = message
+        self._health.retry_at = time.monotonic() + DOWN_BACKOFF
         return MachineError(message)
 
     def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:

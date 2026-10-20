@@ -8,7 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  answering,
+} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
@@ -29,12 +34,6 @@ function makePage() {
 function taskInput(win) {
   return win.document.getElementById('task-input');
 }
-
-// The composer is in answer mode while the tab on screen has a question.
-function answering(win) {
-  return win.document.body.classList.contains('ask-answering');
-}
-
 
 test('a pending question puts the composer into answer mode', () => {
   const {win} = makePage();

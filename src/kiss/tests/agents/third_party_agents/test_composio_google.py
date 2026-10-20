@@ -304,10 +304,11 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
     composio.accounts["ca_new"] = "INACTIVE"
     composio.undeletable.add("ca_new")
     started_b: dict[str, Any] = {}
+    polled_a = composio.expect_status_poll(API_KEY)
 
     def start_b_then_activate_a() -> None:
         # Inject only once finish_connect(A) has polled A, i.e. holds A as pending.
-        started_b["polled"] = composio.status_polled[API_KEY].wait(timeout=10.0)
+        started_b["polled"] = polled_a.wait(timeout=10.0)
         composio.next_account = "ca_b"
         started_b.update(cg.start_connect("gmail", "Gmail"))
         composio.accounts["ca_new"] = "ACTIVE"
@@ -359,19 +360,19 @@ def test_overlapping_finish_calls_keep_the_recorded_account(
     # first status poll (sent after it read A as pending, before any SDK
     # wait deadline exists) is the one held.  The second finish uses its
     # own API key so the fake can tell its polls apart.
-    release_first = threading.Event()
-    composio.status_holds[API_KEY] = release_first
+    held_first, release_first = composio.hold_status_polls(API_KEY)
+    polled_second = composio.expect_status_poll("second-key")
     finishers = [
         threading.Thread(target=finish_into, args=(first,)),
         threading.Thread(target=finish_into, args=(second,)),
     ]
     try:
         finishers[0].start()
-        assert composio.status_held[API_KEY].wait(timeout=10.0)
+        assert held_first.wait(timeout=10.0)
         composio.api_keys.add("second-key")
         monkeypatch.setenv("COMPOSIO_API_KEY", "second-key")
         finishers[1].start()
-        assert composio.status_polled["second-key"].wait(timeout=10.0)
+        assert polled_second.wait(timeout=10.0)
         composio.accounts["ca_new"] = "ACTIVE"
         finishers[1].join(timeout=15.0)
         assert not finishers[1].is_alive()

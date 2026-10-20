@@ -35,7 +35,6 @@ The subprocess supervision both CLI-backed adapters share
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 from collections.abc import Iterable, Iterator
@@ -54,10 +53,6 @@ from kiss.core.models.model import (
 )
 
 logger = logging.getLogger(__name__)
-
-# A dated snapshot id (``claude-sonnet-4-5-20250929``) prices as its
-# undated catalog entry.
-_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 
 
 def _find_claude_cli() -> str:
@@ -765,6 +760,9 @@ class ClaudeCodeModel(CLITextModel):
         ``message_start`` and ``assistant`` event (``message.model``) and
         in the terminal ``result``'s ``modelUsage`` map (keyed by id).
         The last one seen wins; the turn's response is stamped with it.
+        A ``modelUsage`` naming several models (the CLI ran a helper
+        model, e.g. Haiku, beside the main one) does not say which is
+        the main one, so it does not replace the stream's model.
 
         Args:
             event: One parsed ``stream-json`` event.
@@ -777,7 +775,7 @@ class ClaudeCodeModel(CLITextModel):
             model = (event.get("message") or {}).get("model")
         elif event_type == "result":
             model_usage = event.get("modelUsage")
-            if isinstance(model_usage, dict) and model_usage:
+            if isinstance(model_usage, dict) and len(model_usage) == 1:
                 model = next(iter(model_usage))
         if isinstance(model, str) and model:
             self._api_model = model
@@ -796,7 +794,9 @@ class ClaudeCodeModel(CLITextModel):
         turn (see ``single_request``).  A model id the catalog does not
         know (new snapshot) is billed at the CLI's own ``total_cost_usd``
         estimate when the result carries one; otherwise
-        :func:`calculate_cost` raises.
+        :func:`calculate_cost` raises.  So is a turn whose ``modelUsage``
+        names several models: the CLI priced each model's share at its
+        own rate, which one catalog price cannot.
 
         Args:
             response: The dict returned by :meth:`generate` or
@@ -805,16 +805,24 @@ class ClaudeCodeModel(CLITextModel):
         Returns:
             The turn's USD cost, or ``None`` to bill the catalog entry.
         """
-        from kiss.core.models.model_info import calculate_cost, is_known_model
+        from kiss.core.models.model_info import (
+            _CLAUDE_DATE_SUFFIX_RE,
+            calculate_cost,
+            is_known_model,
+        )
 
         if not isinstance(response, dict) or not response.get("api_billed"):
             return None
         counts = self.extract_input_output_token_counts_from_response(response)
         model = response.get("model") or self._cli_model
         if not is_known_model(model):
-            model = _DATE_SUFFIX_RE.sub("", model)
+            # A dated snapshot id (``claude-sonnet-4-5-20250929``) prices
+            # as its undated catalog entry.
+            model = _CLAUDE_DATE_SUFFIX_RE.sub("", model)
         reported = response.get("total_cost_usd")
-        if not is_known_model(model) and isinstance(reported, int | float):
+        model_usage = response.get("modelUsage")
+        several = isinstance(model_usage, dict) and len(model_usage) > 1
+        if (several or not is_known_model(model)) and isinstance(reported, int | float):
             return float(reported)
         return calculate_cost(model, *counts, single_request=response.get("requests", 1) <= 1)
 

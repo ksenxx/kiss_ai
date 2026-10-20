@@ -31,22 +31,16 @@ const {
   sleep,
   stubRaf,
   fakeMatchMedia,
+  ofType,
 } = require('./simplify2_harness');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
+const {
+  all,
+  showSection,
+  menuItem,
+  rightClick,
+} = require('./ui_antipattern_harness');
 
 function makePage(beforeMain) {
   const copied = [];
@@ -85,17 +79,6 @@ function makePage(beforeMain) {
 const WD = '/ws/repo';
 const OTHER = '/data/other';
 
-function rightClick(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
-}
-
 function key(win, el, name, extra) {
   el.dispatchEvent(
     new win.KeyboardEvent(
@@ -103,25 +86,6 @@ function key(win, el, name, extra) {
       Object.assign({key: name, bubbles: true, cancelable: true}, extra || {}),
     ),
   );
-}
-
-/**
- * Bring a workspace section of the task-info panel (meta-explorer /
- * meta-scm) on screen: expand it if it is collapsed.  An expanded
- * section is already live (the workspace pin loads it).
- */
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
-}
-
-function all(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
 }
 
 /** Answer the in-page Delete question (it replaced window.confirm). */
@@ -134,12 +98,6 @@ function confirmDelete(win) {
     toast.querySelectorAll('.kiss-notification-action'),
   ).find(b => b.textContent.trim() === 'Delete');
   click(win, btn);
-}
-
-function menuItem(win, label) {
-  return all(win, '#sidebar-context-menu .tree-ctx-item').find(
-    el => el.querySelector('.tree-ctx-label').textContent === label,
-  );
 }
 
 function menuLabels(win) {
@@ -3142,8 +3100,8 @@ async function main() {
     win.close();
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  process.exit(failures.length ? 1 : 0);
+  report('explorerRootsHistoryGroups');
+  process.exit(0);
 }
 
 main().catch(e => {

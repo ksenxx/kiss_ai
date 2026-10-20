@@ -13,22 +13,10 @@ const {
   send,
   stubRaf,
   MEDIA,
+  readyTabId,
 } = require('./simplify2_harness');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 function makePage() {
   let clipboardText = null;
@@ -52,12 +40,6 @@ function makePage() {
     },
   });
   return {win, posted, getClipboard: () => clipboardText};
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function flushMicrotasks() {
@@ -140,7 +122,7 @@ function assertNoBadge(panel, what) {
 
 async function runFullTranscript(wv, contextName) {
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const output = win.document.getElementById('output');
   const now = Date.now();
 
@@ -289,7 +271,7 @@ async function run() {
   await test('events without ts render no badge', () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     send(win, {type: 'clear', chat_id: 'chat-nots', tabId: TAB});
     send(win, {
@@ -311,7 +293,7 @@ async function run() {
   await test('top-level tool_result panels (no owning tool_call) keep their badge', async () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const now = Date.now();
     send(win, {type: 'clear', chat_id: 'chat-toplevel-tr', tabId: TAB});
@@ -342,7 +324,7 @@ async function run() {
   await test('replayed task_events show the original event date + time', async () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const oldTs = new Date(2021, 2, 5, 14, 7).getTime();
     send(win, {
@@ -443,7 +425,7 @@ async function run() {
   await test('legacy replayed events with only _timestamp show the badge', async () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const legacySec = new Date(2020, 6, 4, 9, 30).getTime() / 1000;
     const explicitTs = new Date(2022, 1, 2, 8, 15).getTime();
@@ -491,7 +473,7 @@ async function run() {
   await test('copy button payload excludes the timestamp badge', async () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const now = Date.now();
     send(win, {type: 'clear', chat_id: 'chat-copy', tabId: TAB});
@@ -531,7 +513,7 @@ async function run() {
   await test('collapsed header preview excludes the timestamp badge', () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const now = Date.now();
     send(win, {type: 'clear', chat_id: 'chat-prev', tabId: TAB});
@@ -567,7 +549,7 @@ async function run() {
   await test('early prompt replacement re-stamps exactly one badge', async () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const output = win.document.getElementById('output');
     const earlyTs = Date.now() - 5000;
     const realTs = Date.now();
@@ -766,17 +748,8 @@ async function run() {
     );
   });
 
-  console.log('');
-  if (failures.length === 0) {
-    console.log(`All ${passed} panelEventTimestamp tests passed.`);
-    process.exit(0);
-  } else {
-    console.log(`${failures.length} test(s) failed (${passed} passed):`);
-    for (const f of failures) {
-      console.log(`  - ${f.name}: ${f.error.stack || f.error.message}`);
-    }
-    process.exit(1);
-  }
+  report('panelEventTimestamp');
+  process.exit(0);
 }
 
 run().catch(e => {

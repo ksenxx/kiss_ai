@@ -7,11 +7,11 @@
 ``ChatSorcarAgent._keep_for_review`` (sorcar_agent.py)
 used to read ``_merge_conflict_warning`` under ``_warning_lock``,
 RELEASE the lock, and then write the concatenation back through
-``_set_warnings`` — two separate lock holds around one
+a locked setter — two separate lock holds around one
 read-modify-write.  A ``_flush_warnings`` landing in between (a server
 teardown flushing while the agent thread parks a worktree) took and
 broadcast the old warning, after which the write put it back, so the
-same warning reached the user twice.  Symmetrically, a ``_set_warnings``
+same warning reached the user twice.  Symmetrically, a set
 landing in between was silently overwritten.
 
 The test drives the real failure path with a real git repository:
@@ -74,7 +74,7 @@ def test_prior_warning_is_broadcast_exactly_once_under_concurrent_flush(
     agent = ChatSorcarAgent("keep-for-review-race")
     printer = _RecordingPrinter()
     prior = "PRIOR-WARNING"
-    agent._set_warnings(merge=prior)
+    agent.add_warning(prior)
 
     keep_done = threading.Event()
     keep_result: list[bool] = []

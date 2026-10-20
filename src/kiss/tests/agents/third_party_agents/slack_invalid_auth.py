@@ -7,24 +7,26 @@
 Returns exactly what ``https://slack.com/api/auth.test`` returns for a bad
 token, so ``SlackChannelBackend.connect()`` follows its real
 ``SlackApiError`` path offline.  Serve it with
-``recording_server(InvalidAuthHandler)``; every request is recorded as
-``{"method", "path"}`` in ``server.requests``.
+``recording_server(InvalidAuthHandler)``; every request is recorded by
+``RecordingHandler.record_request`` (``{"method", "path", "query",
+"authorization", "body"}``) in ``server.requests``.
 """
 
 from __future__ import annotations
 
-from typing import cast
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler
 
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, RecordingServer
+
+def slack_method(path: str) -> str:
+    """Return the Slack Web API method name (``conversations.info``) of a request *path*."""
+    return path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
 
 
 class InvalidAuthHandler(RecordingHandler):
     """Record the request and reply 200 with Slack's invalid-token error body."""
 
     def _respond(self) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {"method": self.command, "path": self.path.split("?", 1)[0]}
-        )
+        self.record_request(None)
         self._read_raw()
         self._json(200, {"ok": False, "error": "invalid_auth"})
 

@@ -83,19 +83,7 @@ function lateFollowup(win, clock, tabId, text) {
   send(win, {type: 'followup_suggestion', tabId, text, ts: clock.now});
 }
 
-let passed = 0;
-const failures = [];
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 test('a bar arriving 18 s after task_done survives the report tab taking focus', () => {
   const {win, clock} = makePage();
@@ -219,5 +207,4 @@ test('a late bar for a closed tab is dropped without error', () => {
   win.close();
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-if (failures.length) process.exit(1);
+report('followupLateAfterReportFocus');

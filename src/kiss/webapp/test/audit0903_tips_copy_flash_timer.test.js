@@ -21,7 +21,7 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const {sleep} = require('./simplify2_harness');
+const {sleep, click} = require('./simplify2_harness');
 
 // The 1500 ms revert timers are recorded instead of waited for: the
 // test fires them by hand, so no wall-clock sleep decides whether the
@@ -79,12 +79,6 @@ function openTipWithCode(win) {
   return btn;
 }
 
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-}
-
 async function testStaleTimerDoesNotEndSecondFlash() {
   const writes = [];
   const {win, timers} = makePage({
@@ -105,7 +99,11 @@ async function testStaleTimerDoesNotEndSecondFlash() {
   click(win, btn);
   await sleep(20);
   assert.strictEqual(btn.textContent, 'Copied!');
-  assert.strictEqual(timers.length, 2, 'the second click arms its own revert timer');
+  assert.strictEqual(
+    timers.length,
+    2,
+    'the second click arms its own revert timer',
+  );
 
   // 1500 ms after the FIRST click: whatever the first click left armed
   // fires now, before the second click's timer is due.
@@ -175,7 +173,11 @@ async function testStaleCompletionDoesNotOverwriteLatest() {
   );
 
   // And the revert timer belongs to the latest click, not the stale one.
-  assert.strictEqual(timers.length, 1, 'only the latest click arms a revert timer');
+  assert.strictEqual(
+    timers.length,
+    1,
+    'only the latest click arms a revert timer',
+  );
   fireFlashTimers(timers);
   assert.strictEqual(btn.textContent, 'Copy');
   win.close();

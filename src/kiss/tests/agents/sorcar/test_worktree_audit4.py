@@ -10,7 +10,7 @@ BUG-12: squash_merge_from_baseline now checks commit return code
 BUG-13 / BUG-18 (obsolete): covered the auto-release merge on the next
          task (``_release_worktree``), removed with the auto-merge; a
          pending worktree is now committed and kept for review instead
-BUG-14: _new_chat surfaces _stash_pop_warning and _merge_conflict_warning
+BUG-14: _new_chat surfaces the pending _merge_conflict_warning
 BUG-15: concurrent worktree operations use per-repo locking
 BUG-16: _finalize_worktree preserves worktree when the commit fails
 BUG-17 (obsolete): covered _save_untracked_base, removed together with

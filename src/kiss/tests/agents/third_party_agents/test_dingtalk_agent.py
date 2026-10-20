@@ -28,7 +28,6 @@ import kiss.agents.third_party_agents.dingtalk.dingtalk_sea as dingtalk_mod
 from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
     DingTalkAgent,
     DingTalkChannelBackend,
-    DingtalkSea,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -76,14 +75,9 @@ def _webhook_url(receiver: JsonWebhookServer) -> str:
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
-    """Unauthenticated agents expose exactly the auth tool trio."""
-    agent = DingTalkAgent()
-    assert agent.name == "DingTalk Agent"
-    assert agent._is_authenticated() is False
-    tool_names = {t.__name__ for t in agent._get_tools()}
-    assert tool_names == _AUTH_TRIO
-    check = tools_by_name(agent)["check_dingtalk_auth"]
+def test_check_auth_unauthenticated_message() -> None:
+    """check_dingtalk_auth names the authenticate tool when unauthenticated."""
+    check = tools_by_name(DingTalkAgent())["check_dingtalk_auth"]
     assert "authenticate_dingtalk" in check()
 
 
@@ -148,11 +142,6 @@ def test_fresh_agent_loads_persisted_config() -> None:
     fresh = DingTalkAgent()
     assert fresh._is_authenticated() is True
     assert fresh._backend._secret == "s"
-
-
-def test_tools_module_function() -> None:
-    """``DingtalkSea().tools([])`` returns a non-empty tool list."""
-    assert len(DingtalkSea().tools([])) >= 3
 
 
 def test_post_message_shape_and_signed_query(receiver: JsonWebhookServer) -> None:

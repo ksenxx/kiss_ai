@@ -66,6 +66,8 @@ print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
 ```
 
+`evolve()` builds variants in a temporary directory that is deleted when it returns, so `best_variant.folder_path` no longer exists afterwards. A copy survives in `evolver.optimal_dir` (`<artifact_dir>/optimal_agent`, with `artifact_dir` from `kiss.core.config`): during initialization each newly evaluated initial variant is copied there as it is evaluated (whether or not the frontier accepted it), and after each later generation that successfully creates a variant the current best variant is copied there; a generation whose mutation or crossover fails copies nothing. Call `evolver.save_state(path)` if you need the frontier metadata as well.
+
 ## Components
 
 ### ImproverAgent
@@ -75,8 +77,10 @@ The `ImproverAgent` optimizes existing agent code by analyzing and improving it 
 **Methods:**
 
 - `create_initial(task_description, work_dir, evolve_to_solve_task=False)`: Create a new agent from scratch (used by `AgentEvolver` for the initial population)
-- `improve(source_folder, work_dir, task_description, report_path)`: Improve an agent's code
-- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, work_dir, task_description)`: Combine ideas from two agents
+- `improve(source_folder, work_dir, task_description, report_path=None, evolve_to_solve_task=False)`: Improve an agent's code
+- `crossover_improve(primary_folder, primary_report_path, secondary_report_path, work_dir, task_description, evolve_to_solve_task=False)`: Combine ideas from two agents
+
+All three return `(success, report)`. They return `(False, None)` when the coding agent raises (in which case `work_dir` is deleted) or, for `improve`/`crossover_improve`, when the source folder does not exist. The report's `metrics` are measured from the improver run itself (`tokens_used`, `cost`, `execution_time`).
 
 ### AgentEvolver
 
@@ -212,17 +216,20 @@ Data Structures:
 
 Algorithm EVOLVE():
     1. INITIALIZE
-       - Create temporary work_dir for variants
-       - Set optimal_dir for storing best agent
+       - Create temporary work_dir for variants (tempfile.mkdtemp())
+       - Set optimal_dir = <artifact_dir>/optimal_agent for storing best agent
        - Initialize empty pareto_frontier
 
     2. CREATE INITIAL AGENTS
        - WHILE len(pareto_frontier) < initial_frontier_size:
            - Use coding agent to generate agent files from task_description
            - Agent must implement agent_run(task) -> {metrics: {...}}
-           - Evaluate agent by calling agent_run(task_description)
+           - Evaluate agent: copy it to a scratch dir and call
+             agent_run(task_description) in a separate Python subprocess;
+             a crash or non-JSON output counts as
+             {success: 1, tokens_used: 0, execution_time: 0.0}
            - Update pareto_frontier (may reject if dominated)
-           - Copy current best variant (min score) to optimal_dir
+           - Copy this initial variant to optimal_dir (even if rejected)
 
     3. FOR generation = 1 TO max_generations:
        a. SELECT OPERATION
@@ -237,7 +244,7 @@ Algorithm EVOLVE():
               new_variant = ImproverAgent.crossover_improve(primary, secondary)
 
        b. IF new_variant created successfully:
-          - Evaluate: load agent.py, call agent_run(task_description)
+          - Evaluate: run agent.py's agent_run(task_description) in a subprocess (as in step 2)
           - Update pareto_frontier:
               - Reject if dominated by any existing variant
               - Remove variants dominated by new_variant
