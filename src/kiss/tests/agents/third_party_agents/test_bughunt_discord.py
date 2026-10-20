@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -37,19 +36,8 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 class _DiscordHandler(RecordingHandler):
     """Serves Discord-shaped JSON responses and records requests."""
 
-    def _record(self, body: Any = None) -> None:
-        parts = urlsplit(self.path)
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": parts.path,
-                "params": {k: v[0] for k, v in parse_qs(parts.query).items()},
-                "body": body,
-            }
-        )
-
     def do_GET(self) -> None:  # noqa: N802
-        self._record()
+        self.record_request(None)
         path = urlsplit(self.path).path
         if path == "/users/@me":
             self._json(200, {"id": "BOT1", "username": "bot", "discriminator": "0001"})
@@ -81,7 +69,7 @@ class _DiscordHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802
         raw = self._read_raw()
         body = json.loads(raw) if raw else None
-        self._record(body)
+        self.record_request(body)
         path = urlsplit(self.path).path
         if path.startswith("/channels/") and path.endswith("/messages"):
             self._json(200, {"id": "M1", "channel_id": path.split("/")[2]})
@@ -89,7 +77,7 @@ class _DiscordHandler(RecordingHandler):
             self._json(404, {"message": "404: Not Found", "code": 0})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        self._record()
+        self.record_request(None)
         self._json(403, {"message": "Missing Permissions", "code": 50013})
 
 
@@ -138,13 +126,12 @@ class TestDiscordBackendBugs:
     def test_poll_messages_treats_zero_as_no_cursor(self) -> None:
         """oldest='0' must not be forwarded as after=0 (oldest-history fetch)."""
         self.backend.poll_messages("111", "0", limit=50)
-        params = self.server.requests[0]["params"]
-        assert params.get("after") != "0"
+        assert self.server.requests[0]["query"].get("after") != ["0"]
 
     def test_poll_messages_forwards_real_cursor(self) -> None:
         """A genuine snowflake cursor must still be sent as the after param."""
         self.backend.poll_messages("111", "12345", limit=50)
-        assert self.server.requests[0]["params"]["after"] == "12345"
+        assert self.server.requests[0]["query"]["after"] == ["12345"]
 
     def test_poll_messages_ts_is_snowflake_id(self) -> None:
         """Each message's ts must be its snowflake id (usable as reply target)."""

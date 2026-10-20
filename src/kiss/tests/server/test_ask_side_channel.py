@@ -204,6 +204,8 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "owner_agent": st.agent,
         "chat_id": "chat-1",
         "question": "why did the last step fail?",
+        # No file was sent with the question.
+        "attachments": None,
     }]
     # The user's typed line is echoed into the tab so it shows up in
     # the transcript above where the answer will land.

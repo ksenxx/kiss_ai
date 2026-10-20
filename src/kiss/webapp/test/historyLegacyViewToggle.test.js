@@ -31,20 +31,8 @@ const {
 
 const VIEW_KEY = 'kissSorcar.historyLegacyView';
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
+const {byId, all} = require('./ui_antipattern_harness');
 
 function makePage(beforeMain) {
   function beforeScripts(win) {
@@ -61,14 +49,6 @@ function makePage(beforeMain) {
       'treeContextMenu.js',
     ],
   });
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-function all(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
 }
 
 const DAY = 86400;
@@ -359,5 +339,5 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
   win.close();
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length ? 1 : 0);
+report('historyLegacyViewToggle');
+process.exit(0);

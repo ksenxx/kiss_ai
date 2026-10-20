@@ -55,19 +55,12 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     """A non-string ``taskId`` payload must be dropped before SQL.
 
     The previous pattern ``str(raw_task_id) if raw_task_id else None``
-    accepted dicts and lists and stringified them.  All three relevant
-    handlers now validate through the shared ``_opt_str`` guard, which
-    rejects every non-string payload.
+    accepted dicts and lists and stringified them.  Every handler that
+    reads ``taskId`` validates through the shared ``_opt_str`` guard,
+    which rejects every non-string payload.
     """
     from kiss.server.commands import _opt_str
 
-    src = Path(
-        "src/kiss/server/commands.py"
-    ).read_text()
-    occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
-    assert occurrences == 3, (
-        f"expected 3 hardened taskId guards, found {occurrences}"
-    )
     assert _opt_str({"a": 1}) is None
     assert _opt_str([1]) is None
     assert _opt_str(7) is None

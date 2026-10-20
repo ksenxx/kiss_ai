@@ -26,7 +26,6 @@ from pathlib import Path
 import pytest
 import requests
 
-import kiss.agents.third_party_agents.webhook.webhook_sea as webhook_agent_mod
 from kiss.agents.third_party_agents.webhook.webhook_sea import (
     _RATE_LIMIT_EVENTS,
     _RATE_LIMIT_WINDOW_SECONDS,
@@ -120,13 +119,6 @@ def test_auth_trio_roundtrip_and_persistence() -> None:
     assert "cleared" in tools["clear_webhook_auth"]().lower()
     assert not path.exists()
     assert agent._is_authenticated() is False
-
-
-def test_module_add_to_tools_nonempty() -> None:
-    """``WebhookSea().tools([])`` returns the webhook tools."""
-    tools = webhook_agent_mod.WebhookSea().tools([])
-    assert tools
-    assert _AUTH_TRIO <= {t.__name__ for t in tools}
 
 
 def test_route_add_list_remove_persistence() -> None:

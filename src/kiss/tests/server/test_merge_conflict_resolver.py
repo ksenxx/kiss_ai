@@ -225,7 +225,7 @@ class TestResolveMergeConflictThroughMerge:
 
         assert self._branch_exists()
         assert not (self.repo / "notes.txt").exists()
-        warning = self.agent._stash_pop_warning or ""
+        warning = self.agent._merge_conflict_warning or ""
         assert "git stash pop" in warning and "interrupted merge" in warning
 
     def test_rogue_committing_runner_is_undone_and_branch_kept(self) -> None:

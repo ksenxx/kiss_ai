@@ -884,8 +884,9 @@ class SeaRun:
     """What a run takes from its SEAs (:func:`evaluate_sea`).
 
     Attributes:
+        task: The task text the run was submitted with.
         settings: The effective settings (:func:`base_settings`).
-        prompt: The task text after every ``prompt`` method,
+        prompt: ``task`` after every ``prompt`` method,
             ``{task_id}`` replaced by the calling task's id.
         system_prompt_hook: ``system_prompt -> system_prompt``
             (:func:`base_system_prompt`).
@@ -896,6 +897,7 @@ class SeaRun:
             (:func:`base_tool_call_hook`).
     """
 
+    task: str
     settings: dict[str, Any]
     prompt: str
     system_prompt_hook: Callable[[str], str]
@@ -929,6 +931,7 @@ def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
     for name in ("system_prompt", "tools", "llm_call_hook", "tool_call_hook"):
         _chain(seas, name)  # a non-method attribute fails now, not at the hook's first call
     return SeaRun(
+        task,
         base_settings(seas),
         base_prompt(seas, task, task_id),
         functools.partial(base_system_prompt, seas),
@@ -938,12 +941,24 @@ def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
     )
 
 
+def _reject(label: str, value: Any, expected: str) -> SeaError:
+    """Return the :exc:`SeaError` for a method result *value* that is not *expected*.
+
+    An ``async def`` method returns a coroutine: it is closed here, so
+    the GC does not add ``RuntimeWarning: coroutine ... was never
+    awaited`` on stderr to the error the caller gets.
+    """
+    if inspect.iscoroutine(value):
+        value.close()
+    return SeaError(f"{label} must return {expected}, got {type(value).__name__}")
+
+
 def _check_verdict(label: str, value: Any) -> Verdict:
     """Return *value* as a :class:`Verdict`, or raise :exc:`SeaError`."""
     if not isinstance(value, Verdict):
-        raise SeaError(
-            f"{label} must return a Verdict (ALLOW, or refuse(text), from "
-            f"kiss.agents.seas.base.base_sea), got {type(value).__name__}"
+        raise _reject(
+            label, value,
+            "a Verdict (ALLOW, or refuse(text), from kiss.agents.seas.base.base_sea)",
         )
     return value
 
@@ -956,7 +971,7 @@ def _check_text(label: str, value: Any) -> str:
     cannot run script code.
     """
     if not isinstance(value, str):
-        raise SeaError(f"{label} must return a string, got {type(value).__name__}")
+        raise _reject(label, value, "a string")
     try:
         return str(value)
     except BaseException as exc:  # noqa: BLE001 — an untrusted str subclass may raise
@@ -966,16 +981,14 @@ def _check_text(label: str, value: Any) -> str:
 def _check_dict(label: str, value: Any) -> dict[str, Any]:
     """Return *value* as a dict, or raise :exc:`SeaError`."""
     if not isinstance(value, dict):
-        if inspect.iscoroutine(value):
-            value.close()  # an ``async def settings``: never awaited, keep the GC quiet
-        raise SeaError(f"{label} must return a dict, got {type(value).__name__}")
+        raise _reject(label, value, "a dict")
     return value
 
 
 def _check_list(label: str, value: Any) -> list[Any]:
     """Return *value* as a list, or raise :exc:`SeaError`."""
     if not isinstance(value, list):
-        raise SeaError(f"{label} must return a list, got {type(value).__name__}")
+        raise _reject(label, value, "a list")
     return value
 
 
@@ -986,10 +999,7 @@ def _check_tools(label: str, value: Any) -> list[Callable[..., Any]]:
             return value
     except BaseException as exc:  # noqa: BLE001 — an untrusted list may raise while iterated
         raise SeaError(f"{label} returned a broken list: {safe_message(exc)}") from exc
-    raise SeaError(
-        f"{label} must return a list of tool callables (not a file path), "
-        f"got {type(value).__name__}"
-    )
+    raise _reject(label, value, "a list of tool callables (not a file path)")
 
 
 PICKED_HOOK_TIMEOUT_SECONDS = 15.0
@@ -997,12 +1007,17 @@ PICKED_HOOK_TIMEOUT_SECONDS = 15.0
 
 
 def _log_picked_hook(model: str, work_dir: str, sea: BaseSea | None) -> None:
-    """Run ``on_picked_as_model(work_dir)`` of the SEA picked as *model*; log note or failure."""
-    sea_path = model_sea(model)
-    if sea_path is None:
-        return
+    """Run ``on_picked_as_model(work_dir)`` of *sea*, else of the SEA registered as *model*; log it.
+
+    Runs on the hook thread, so a ``sea`` of ``None`` costs the caller
+    no registry lookup; a given ``sea`` runs as it was loaded, whether
+    or not the registry still lists it when the thread gets to it.
+    """
     try:
         if sea is None:
+            sea_path = model_sea(model)
+            if sea_path is None:
+                return
             sea = load_sea(sea_path)
         note = _call(_method(sea, "on_picked_as_model"), work_dir)
     except SeaError:
@@ -1041,7 +1056,9 @@ def run_picked_hook(
             ``False`` returns at once (the picker handler must not stall
             the daemon's command loop).
         sea: The already-loaded SEA (a run loads the file once and
-            shares it); ``None`` loads the file.
+            shares it; its hook runs even when the registry drops the
+            entry meanwhile); ``None`` resolves *model* through
+            :func:`model_sea` and loads the file, on the hook thread.
     """
     thread = threading.Thread(
         target=_log_picked_hook, args=(model, work_dir, sea),
@@ -1194,8 +1211,10 @@ def check_sea(sea_path: Path, require_description: bool = True) -> SeaCheck:
     reads the run command from those frames works; then the hooks are
     applied to sample values and the ``description()`` and
     model-picker methods are checked.  Each method runs as often as a
-    run makes it run: the result carries the settings and tools so the
-    callers need not run them again.
+    run makes it run; the result carries the merged settings and the
+    tools (what a run gets), not the per-class ``settings`` dicts
+    (``own_settings`` / ``inherited_settings`` run those again when the
+    linter needs them).
 
     Args:
         sea_path: The SEA's file.

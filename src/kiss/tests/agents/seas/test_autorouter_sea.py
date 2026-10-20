@@ -51,7 +51,11 @@ from kiss.tests.agents.sorcar.local_model_server import (
 
 _SEA_PATH = Path(autorouter_sea.__file__).resolve()
 _TOOL_NAMES = {
-    "model_menu", "pick_model", "estimate_cost", "observed_call_costs", "log_decision",
+    "model_menu",
+    "pick_model",
+    "estimate_cost",
+    "observed_call_costs",
+    "log_decision",
 }
 
 
@@ -92,14 +96,17 @@ def test_sea_methods_follow_the_contract() -> None:
     }
     # The SEA's keys win over what the caller declared below it.
     assert sea.settings({"model": "x", "max_budget": 3.0}) == {
-        "max_budget": 3.0, **sea.settings({})
+        "max_budget": 3.0,
+        **sea.settings({}),
     }
     # A ``BaseSea`` (which lays no defaults): the resolved settings are the
     # four keys above, so the caller's budget and tool profile win.  The
     # protocol is ADDED to the default prompt, never a replacement.
     assert isinstance(sea, BaseSea) and not isinstance(sea, WorkerSea)
-    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == (
-        sea.settings({})
+    assert (
+        sea_commands.base_settings([sea])
+        == resolve_settings(sea.settings({}))
+        == (sea.settings({}))
     )
     assert_no_removed_getters(autorouter_sea)
 
@@ -114,7 +121,9 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     """``/autorouter <task>`` resolves to the task text and this file (run directly)."""
     assert sea_commands.get_command("autorouter") == _SEA_PATH
     assert sea_commands.slash_command_task("/autorouter add a --json flag") == (
-        "add a --json flag", _SEA_PATH)
+        "add a --json flag",
+        _SEA_PATH,
+    )
     assert sea_commands.sea_settings(_SEA_PATH) == AutorouterSea().settings({})
     assert sea_commands.help_text_if_command("/autorouter help") == AutorouterSea().description()
 
@@ -340,9 +349,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     monkeypatch.setenv("KISS_HOME", str(home))
     runnable = runnable_candidates(autorouter_sea.TIERS, "medium")
     model = runnable[0] if runnable else autorouter_sea.TIERS["medium"][0][0]
-    run = sea_commands.evaluate_sea(
-        [AutorouterSea()], "add a --json flag to the export command"
-    )
+    run = sea_commands.evaluate_sea([AutorouterSea()], "add a --json flag to the export command")
     script = [
         tool_call_body("pick_model", {"tier": "medium"}, prompt_tokens=500),
         tool_call_body(
@@ -368,7 +375,12 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         names = tool_names(request)
         assert _TOOL_NAMES <= names, names
         assert {
-            "run_agent", "run_parallel", "set_model", "Bash", "run_commands_parallel", "finish",
+            "run_agent",
+            "run_parallel",
+            "set_model",
+            "Bash",
+            "run_commands_parallel",
+            "finish",
         } <= names, names
         assert {"go_to_url", "click", "screenshot", "memory_search"} <= names, names
         system = system_message(request)
@@ -447,7 +459,8 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     assert job["work_dir"] == _OWNER
     assert job["max_budget"] == 30.0 and job["timeout"] == 7800.0
     assert job["model_name"] in (
-        autorouter_sea.RSI7D_JOB_MODEL, autorouter_sea.orchestrator_model(),
+        autorouter_sea.RSI7D_JOB_MODEL,
+        autorouter_sea.orchestrator_model(),
     )
     assert job["model_name"] in get_available_models()
     prompt = job["prompt"]
@@ -511,7 +524,7 @@ def test_kiss_checkout_resolves_a_linked_worktree_to_its_owning_checkout(tmp_pat
 
 
 def test_concurrent_first_picks_schedule_a_single_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reset_registry: None
 ) -> None:
     """Picks racing from a checkout and from a scratch dir create one job, not one each.
 
@@ -522,7 +535,6 @@ def test_concurrent_first_picks_schedule_a_single_job(
     from kiss.agents.sorcar.cron_agent import load_jobs
 
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
-    sea_commands._reset_for_tests()
     assert sea_commands.model_sea("autorouter") == _SEA_PATH
     barrier = threading.Barrier(8, timeout=30)
 
@@ -557,7 +569,10 @@ def test_kiss_checkout_resolves_a_relative_gitdir_against_the_worktree(tmp_path:
 
 
 def test_hook_thread_that_cannot_start_is_logged_and_the_caller_goes_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_registry: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """With the process out of threads, ``run_picked_hook`` logs a warning instead of raising."""
     from kiss.agents.sorcar.cron_agent import load_jobs
@@ -566,7 +581,6 @@ def test_hook_thread_that_cannot_start_is_logged_and_the_caller_goes_on(
     if not thread_start_can_be_starved():
         pytest.skip("RLIMIT_NPROC does not starve Thread.start here (Windows or root)")
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
-    sea_commands._reset_for_tests()
     with nproc_limit_lowered_to_one(), caplog.at_level("WARNING", logger="kiss.sea_commands"):
         sea_commands.run_picked_hook("autorouter", str(tmp_path))
     assert any("on_picked_as_model() not run" in r.getMessage() for r in caplog.records)

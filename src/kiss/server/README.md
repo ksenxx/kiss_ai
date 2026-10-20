@@ -253,10 +253,11 @@ without a key to drop it.  Every key but `timeout`, `locked` and
 `sorcar.run()` and lands on that parameter's wire field
 (`sea_apply.SETTING_FIELDS`); the wire name is the keyword in camelCase
 (`sea_settings.wire_field`: `use_web_tools` → `useWebTools`), with
-three aliases kept from the wire protocol's earlier vocabulary
-(`auto_classify` → `classifyTasks`, `add_to_prompt` → `appendToPrompt`,
-`add_to_system_prompt` → `appendToSystemPrompt`), so no hand-kept
-table is needed.
+one alias kept from the wire protocol's earlier vocabulary
+(`auto_classify` → `classifyTasks`, `sea_settings._WIRE_ALIASES`), so
+no hand-kept table is needed.  (The prompt suffixes `add_to_prompt`
+and `add_to_system_prompt` are not settings; `daemon_client` spells
+them `appendToPrompt` / `appendToSystemPrompt`.)
 Extra tools have no `run()` parameter at all (a callable cannot travel
 the wire): they come from the `tools(tools)` method (see below).  The
 bundled `/sh` agent is the whole pattern:
@@ -540,8 +541,15 @@ agent: its model (and its
 was launched with and the script's `model` setting does not pick the
 model, because the script names none or the call passes `model`
 itself: a script-chosen model runs with default provider routing),
-its remaining budget divided by N+1 for N sub-tasks (half for one
-`run_agent` call; the last share stays reserved for the caller), its
+its remaining budget, less what its still-running sub-tasks hold,
+divided by N+1 for N sub-tasks (half for one `run_agent` call; the
+last share stays reserved for the caller; a `wait="false"` child or
+a job left behind by an expired `timeout` keeps the budget it was
+given reserved until it finishes, `AgentJob.budget` read by
+`agent_dispatch.reserved_budget` from `live_agent_jobs` once per
+call, so two concurrent children never each get the whole remainder,
+and a call made while running children hold all of it is refused
+with `BudgetExceededError`), its
 chat id (so the sub-task sees the conversation's earlier
 tasks and results), its own replacement system prompt and appended
 system-prompt text (the `system_prompt` / `add_to_system_prompt`
@@ -660,12 +668,25 @@ the error is the answer), or a 30 s start grace
 (`agent_dispatch._JOB_START_GRACE_SECONDS`) has passed; the dispatch
 runs in a daemon thread
 of the calling process (`agent_dispatch.start_agent_job`), its spend
-is bound to the calling run's usage epoch, and only the calling
-agent's `agent_job` tool sees the job: `agent_job(job_id, "wait")`
+is bound to the calling run's usage epoch (a finished child's cost
+is folded into the caller's task, and the `Budget:` figure of the
+usage line the caller's model reads reports the task's cumulative
+spend, earlier sessions and sub-agents included, against the task's
+cap; `RelentlessAgent._budget_status`, installed as
+`KISSAgent.budget_status_hook`, recomputes it after every tool call,
+so a SEA's prompt must not add a child's reported cost again), the budget
+it was given stays reserved against the caller's remainder until it
+finishes (`AgentJob.budget`, see [Precedence](#precedence)), and only
+the calling agent's `agent_job` tool sees the job: `agent_job(job_id, "wait")`
 blocks for its result, `"tail"` reports whether it still runs,
 `"kill"` sets the job's cancel event, which `daemon_client.run`'s read
 loop turns into a stop of the sub-task confirmed by its terminal
 status (an unconfirmed stop is reported as such, never as "stopped").
+When the `run_agent` or `run_parallel` call itself is interrupted,
+by its Stop button or because the calling task stops, every child it
+started is cancelled too (`agent_dispatch._abandon_job`); the call
+does not wait for them, so the Stop stays prompt, and the run's end
+(`kill_jobs_of`) collects what is left.
 `agent` names WHICH agent to run; every spelling resolves to one
 SEA path and takes the same dispatch
 (`agent_dispatch.resolve_agent` tries, in order):
@@ -996,6 +1017,22 @@ The `run()` parameters without a `settings()` key (the allowlist is
   command for).  How a run on a `machine` names a SEA the machine has
   under its own paths; `run_agent` sets it when `agent` is a command
   name and `machine` is given.  Empty (the default) sends `sea_path`.
+- **`cron_job`** — whether the cron scheduler launched the run (an
+  in-chat job; a prompt job is recognised by its unattended preamble
+  in the submitted text, and a cron run's sub-tasks say so on the
+  wire), sent as `cronJob` and persisted as the history row's
+  `is_cron` flag, which the CHATS list hides unless its Cron chip is
+  on.  No SEA setting.
+- **`attachments`** — the files sent with the prompt (an image or
+  PDF the user attached), each `{"mimeType", "data"}` with base64
+  `data`, the webapp's `submit` wire shape; sent as the wire field
+  `attachments` only when non-empty.  The `/ask` side channel passes
+  the files attached to the question on to its answering run this
+  way.  A message with files sent to a running task is queued for
+  that task instead of starting a run: a steering message's files
+  reach the live agent with its text, a `<task>` follow-up's become
+  the follow-up run's attachments (one entry per block), and leftover
+  prompts re-submitted after the run keep theirs (`task_runner`).
 
 ### Setting semantics
 
@@ -1107,7 +1144,17 @@ The `run()` parameters without a `settings()` key (the allowlist is
   squash-merges it into the original branch; a conflicting merge is
   resolved by the bundled `/merge` SEA run as a sub-agent.  The commit
   message is generated from the diff and stamped with the user's
-  prompt and the task's result (`kiss.agents.sorcar.commit_message`).
+  prompt and the task's result (`kiss.agents.sorcar.commit_message`);
+  the model call that writes it is billed to the task it commits for
+  (`bill_to`), and when a worktree is retired after that task's row
+  is already saved (a new task, a new chat, a tab disposal) the spend
+  is added to the row and its finished ancestors with a persisted
+  `usage_info` event (`_retire_after_task_saved`).  A Stop during the
+  merge rolls back a half-applied squash and pops the stash the merge
+  made of the user's uncommitted changes (when that pop fails, the
+  task's result carries a warning telling the user to run
+  `git stash pop`), and a `git status` that fails keeps the worktree
+  instead of deleting it.
   Both tools belong to the `edit` tool group; `WorkerSea.tools()`
   strips them, so a worker edits the caller's tree in place.  A
   worktree the agent created but never merged is presented to the
@@ -1139,7 +1186,12 @@ The `run()` parameters without a `settings()` key (the allowlist is
   tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
   execute in: an image name starts a fresh container that is removed
   when the task ends (the task's `work_dir` is bind-mounted at the
-  same path and is the container's working directory),
+  same path and is the container's working directory; the container
+  is created, then started, under a `kiss-<12 hex>` name chosen
+  beforehand, so a Stop landing inside the create call leaves nothing
+  unreachable: cleanup force-removes whatever was made by handle or by
+  name, and a removal that fails keeps the name on the manager so a
+  later `close()` retries),
   `container:<name-or-id>` attaches to a container the caller already
   runs (commands run in its own working directory, nothing extra is
   mounted, it is left running afterwards), `""` runs the tools on the
@@ -1650,6 +1702,7 @@ def run(
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
     side_channel: bool = False,
+    cron_job: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -1676,6 +1729,7 @@ def run(
     running: threading.Event | None = None,
     machine: str = "",
     sea_command: str = "",
+    attachments: list[dict[str, str]] | None = None,
 ) -> TaskResult
 ```
 
@@ -1689,7 +1743,20 @@ class TaskResult:
     steps: int        # total agent steps taken
     chat_id: str = ""  # daemon chat session id (for continuation)
     task_id: str = ""  # persisted task_history row id
+    settings: dict[str, Any] = field(default_factory=dict)  # the run's task_settings event payload
 ```
+
+`settings` is the run's `task_settings` event (its effective model,
+work directory, budget, SEA, kind, tool profile, timeout, inherited
+and overridden values; `kiss.agents.sorcar.run_config`), empty when
+the run ended before the daemon emitted it.  `cost` is the exact
+figure the daemon's final `result` event carries as `cost_usd` next
+to its four-decimal `cost` display string (`daemon_client._event_cost`;
+a later `usage_info` event, say a side channel's spend that lands
+after the row was saved, updates the totals, and a delta the daemon
+has already banked on a waiting ancestor, `ancestor_charged`, is not
+folded in twice); the daemon persists the task's final cost unrounded
+as well, so a parent row sums its children's exact spend.
 
 
 ## Tips
@@ -1745,7 +1812,7 @@ class TaskResult:
   earlier ones, the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` come next, so a `SEAS.md` folder can shadow
   them, and the built-in `cron` (`sea_commands.BUILTIN_COMMANDS`) has
-  the lowest precedence of all.  Of the 21 bundled SEA folders, 19 register
+  the lowest precedence of all.  Of the 23 bundled SEA folders, 21 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events; its only
@@ -1753,7 +1820,8 @@ class TaskResult:
   files or shell; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
   `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
-  command, and the task-info panel's Task update is the same agent
+  command, with the files attached to the question forwarded as the
+  answering run's `attachments`, and the task-info panel's Task update is the same agent
   run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
   that will finish it; its `settings()` fixes the routing session's model to
   `autorouter_sea.ROUTER_MODEL`, `openrouter/moonshotai/kimi-k3`, with

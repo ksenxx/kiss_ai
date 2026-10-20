@@ -4420,7 +4420,9 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-item-actions > .sidebar-item-copy,
 .sidebar-item-actions > .sidebar-item-collapse,
-.sidebar-item-actions > .sidebar-item-favorite {
+.sidebar-item-actions > .sidebar-item-favorite,
+.sidebar-item-actions > .sidebar-item-delete,
+.sidebar-item-actions > .sidebar-item-confirm {
   margin-left: 0;
 }
 
@@ -4500,7 +4502,10 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .sidebar-confirm-yes { color: var(--status-fail); }
-.sidebar-confirm-yes:hover { background: color-mix(in srgb, var(--status-fail) 12%, var(--surface2)); border-color: var(--status-fail); }
+.sidebar-confirm-yes:hover:not(:disabled) { background: color-mix(in srgb, var(--status-fail) 12%, var(--surface2)); border-color: var(--status-fail); }
+
+/* A spent Delete (its delete is posted and the row waits for the daemon's refetch). */
+.sidebar-confirm-yes:disabled { opacity: 0.4; cursor: default; }
 
 .sidebar-confirm-no { color: var(--status-ok); }
 .sidebar-confirm-no:hover { background: color-mix(in srgb, var(--status-ok) 12%, var(--surface2)); border-color: var(--status-ok); }
@@ -4558,6 +4563,31 @@ body.remote-chat .running-item.history-active-task:hover {
 .server-reset-confirm-ok {
   background: var(--accent); border: 1px solid var(--accent);
   color: var(--theme-button-foreground);
+}
+
+/* The sign-in window (chat.html#signin-modal): the auth modal's scrim,
+   box and buttons, with one full-width provider button per row. */
+#signin-modal {
+  position: fixed; inset: 0; background: var(--scrim-strong);
+  display: flex; align-items: center; justify-content: center; z-index: var(--z-modal);
+}
+.signin-modal-buttons { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
+
+.signin-modal-buttons .auth-modal-btn { width: 100%; padding: var(--space-2-5) var(--space-3); font-size: var(--fs-lg); }
+
+.signin-modal-note {
+  min-height: 1.2em; margin-bottom: var(--space-3); line-height: 1.5;
+  font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 83%, transparent);
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.signin-modal-note.signin-modal-error { color: var(--error); }
+
+.signin-modal-paste { margin-bottom: var(--space-3); }
+
+.signin-modal-paste-label {
+  display: block; margin-bottom: var(--space-1-5); font-size: var(--fs-base);
+  color: color-mix(in srgb, var(--fg) 83%, transparent); line-height: 1.5;
 }
 
 #server-reset-confirm-modal {

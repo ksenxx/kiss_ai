@@ -6,7 +6,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  sendEmptyWorkDir,
+} = require('./simplify2_harness');
 
 function makePage(initialState) {
   return makeChatPage({initialState});
@@ -28,10 +32,6 @@ function historyRows(win) {
   return Array.from(
     win.document.querySelectorAll('#history-list .sidebar-item'),
   );
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
 }
 
 function countMessages(posted, type) {

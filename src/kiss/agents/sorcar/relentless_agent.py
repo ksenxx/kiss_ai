@@ -1269,6 +1269,18 @@ class RelentlessAgent(Base):
         """
         return self.live_usage_snapshot()[0]
 
+    def _budget_status(self) -> tuple[float, float]:
+        """Return the task's ``(spent, max_budget)`` in USD.
+
+        Installed as :attr:`KISSAgent.budget_status_hook` on every
+        per-session executor, so the ``Budget:`` usage line the model
+        sees reports the task's cumulative spend (earlier sessions and
+        sub-agents included, :meth:`_live_budget_used`) against the
+        task's cap, not the session's own spend against its remaining
+        allowance.
+        """
+        return self._live_budget_used(), self.max_budget
+
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
 
@@ -1439,55 +1451,51 @@ class RelentlessAgent(Base):
                 # shown to the previous session's model is visible now.
                 self.context_reset_hook()
             executor.budget_check_hook = self._check_total_budget
+            executor.budget_status_hook = self._budget_status
             self._current_executor = executor
-            # Every exit below banks the session BEFORE dropping it from
-            # ``_current_executor``: a server-thread reader summing
-            # "banked + live" (``_live_agent_usage``) between the two
-            # statements then sees the session twice for a few
-            # bytecodes rather than not at all, and a re-read of a
-            # banked session is exact (``_accumulate_usage`` dedups by
-            # session key).
+            # Every exit of the run, a stop-injected ``KeyboardInterrupt``
+            # included, banks the session BEFORE dropping it from
+            # ``_current_executor`` and before any recovery work: the
+            # runner's terminal ``result`` event and the persisted
+            # ``task_history`` row read these counters
+            # (``_subtask_metrics``), and ``_summarize_failed_session``'s
+            # budget math subtracts only ``self.budget_used``, which
+            # must already include the failed session's spend.  A
+            # server-thread reader summing "banked + live"
+            # (``_live_agent_usage``) between the two statements sees
+            # the session twice for a few bytecodes rather than not at
+            # all, and a re-read of a banked session is exact
+            # (``_accumulate_usage`` dedups by session key).
             try:
-                result = executor.run(
-                    model_name=self.model_name,
-                    prompt_template=TASK_PROMPT,
-                    arguments={
-                        "task_description": self.task_description,
-                        "previous_progress": progress_section,
-                    },
-                    system_prompt=system_prompt,
-                    tools=all_tools,
-                    max_steps=self.max_steps,
-                    max_budget=remaining_budget,
-                    model_config=self._executor_model_config(),
-                    printer=self.printer,
-                    verbose=self.verbose,
-                    attachments=attachments if session == 0 else None,
-                    llm_call_hook=self.llm_call_hook,
-                    tool_call_hook=self.tool_call_hook,
-                )
-                self._accumulate_usage(executor)
-                self._current_executor = None
+                try:
+                    result = executor.run(
+                        model_name=self.model_name,
+                        prompt_template=TASK_PROMPT,
+                        arguments={
+                            "task_description": self.task_description,
+                            "previous_progress": progress_section,
+                        },
+                        system_prompt=system_prompt,
+                        tools=all_tools,
+                        max_steps=self.max_steps,
+                        max_budget=remaining_budget,
+                        model_config=self._executor_model_config(),
+                        printer=self.printer,
+                        verbose=self.verbose,
+                        attachments=attachments if session == 0 else None,
+                        llm_call_hook=self.llm_call_hook,
+                        tool_call_hook=self.tool_call_hook,
+                    )
+                finally:
+                    self._accumulate_usage(executor)
+                    self._current_executor = None
             except BudgetExceededError as exc:
-                self._accumulate_usage(executor)
-                self._current_executor = None
                 partial = self._budget_exhausted_result(executor, summaries, exc)
                 if partial is None:
                     raise
                 return partial
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
-                # Bank the failed session's spend BEFORE any recovery
-                # work: a stop (``KeyboardInterrupt``) landing inside
-                # the trajectory summarizer below must not lose it —
-                # the runner's terminal ``result`` event and the
-                # persisted ``task_history`` row read these counters
-                # (``_subtask_metrics``). ``_summarize_failed_session``
-                # relies on this: its budget math subtracts only
-                # ``self.budget_used``, which now includes the failed
-                # executor's spend.
-                self._accumulate_usage(executor)
-                self._current_executor = None
                 is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
                     not is_context_overflow
@@ -1518,17 +1526,6 @@ class RelentlessAgent(Base):
                         True,
                         self._summarize_failed_session(executor, session, exc),
                     )
-            except BaseException:
-                # A stop-injected ``KeyboardInterrupt`` (or any other
-                # non-``Exception`` exit) must not lose the live
-                # session's spend: the runner's terminal
-                # stopped/failed ``result`` event and the persisted
-                # ``task_history`` row read these counters
-                # (``_subtask_metrics``), which otherwise report a
-                # $0.0000 cost for a task that burned real money.
-                self._accumulate_usage(executor)
-                self._current_executor = None
-                raise
 
             try:
                 payload = yaml.safe_load(result)

@@ -1303,7 +1303,9 @@ def test_macos_stale_clone_in_use_is_left_alone(tmp_path: Path) -> None:
     _write_stub_browser(exe_copy, tmp_path / "log", sleep=30)
     window = subprocess.Popen([str(exe_copy), "--app=http://127.0.0.1:1/"])
     try:
-        assert standalone_app.macos_bundle_in_use(bundle)
+        # Popen returns once the child has exec'd, but the kernel publishes
+        # the new command line a moment later; `ps` can still miss it.
+        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle))
         newer = _fake_browser_app(tmp_path / "newer", version="141.0.7400.1")
         launcher_before = (bundle / "Contents" / "MacOS" / "launcher").read_text()
         assert standalone_app.macos_launch_browser(newer, home=tmp_path) == newer
@@ -1367,7 +1369,7 @@ def test_macos_activate_running_needs_a_window_open_can_reach(tmp_path: Path) ->
     _write_stub_browser(exe, tmp_path / "log", sleep=30)
     window = subprocess.Popen([str(exe), "--app=http://127.0.0.1:1/"])
     try:
-        assert standalone_app.macos_bundle_in_use(bundle)
+        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle))
         assert not standalone_app.macos_activate_running(bundle)
     finally:
         window.kill()

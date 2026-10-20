@@ -13,7 +13,13 @@
 // Runs with: node test/sidebarCopyButtonFailure.test.js
 
 const assert = require('assert');
-const {makePage: makeHarnessPage, send, sleep} = require('./simplify2_harness');
+const {
+  makePage: makeHarnessPage,
+  send,
+  sleep,
+  captureTimers,
+  click,
+} = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted} = makeHarnessPage({bodyClass: 'remote-chat'});
@@ -50,12 +56,6 @@ function makePage() {
   return {win, btn};
 }
 
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-}
-
 async function testFailureIsVisible() {
   const {win, btn} = makePage();
   // jsdom: no navigator.clipboard, execCommand undefined -> both fail.
@@ -82,6 +82,7 @@ async function testSuccessFlashesAndReverts() {
   };
   const idle = btn.innerHTML;
   assert.strictEqual(btn.hasAttribute('title'), false, 'no native title');
+  const timers = captureTimers(win);
   click(win, btn);
   await sleep(5);
   assert.deepStrictEqual(copied, ['task one'], 'the row text was copied');
@@ -89,7 +90,8 @@ async function testSuccessFlashesAndReverts() {
   assert.ok(!btn.classList.contains('copy-failed'));
   assert.ok(btn.querySelector('polyline'), 'the check mark confirms');
   assert.strictEqual(btn.title, 'Copied');
-  await sleep(1600);
+  // The 1500 ms revert timer is fired instead of waited for.
+  timers.find(t => t.ms === 1500).cb();
   assert.strictEqual(btn.innerHTML, idle, 'the copy icon is back');
   assert.ok(!btn.classList.contains('copied'));
   assert.strictEqual(btn.hasAttribute('title'), false, 'no title again');

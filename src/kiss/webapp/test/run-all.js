@@ -50,10 +50,20 @@ const SUITE_TIMEOUT_MS = 2 * 60 * 1000;
 // suite of their own).
 const MAX_JOBS = 32;
 
+// Every *.test.js and *.coverage.js suite.  A *.coverage.js gate runs its
+// *.test.js as a child (under NODE_V8_COVERAGE) and fails when that child
+// fails, so a suite with a gate is run through the gate only.
 function testFiles() {
-  return fs
-    .readdirSync(TEST_DIR)
+  const files = fs.readdirSync(TEST_DIR);
+  return files
     .filter(f => f.endsWith('.test.js') || f.endsWith('.coverage.js'))
+    .filter(
+      f =>
+        !(
+          f.endsWith('.test.js') &&
+          files.includes(f.replace(/\.test\.js$/, '.coverage.js'))
+        ),
+    )
     .sort();
 }
 
@@ -150,6 +160,15 @@ function runSuite(file, index, total, done) {
   child.on('exit', code => {
     if (timedOut) report(code);
   });
+  // The process could not be started (EAGAIN, EMFILE, ...): a failure of
+  // this suite, not of the runner.
+  child.on('error', err => {
+    output.push({
+      stream: process.stderr,
+      chunk: Buffer.from(`${file}: ${err}\n`),
+    });
+    report(1);
+  });
 }
 
 /**
@@ -215,6 +234,11 @@ function main() {
   console.log(`running ${files.length} suites, ${jobs} at a time`);
   process.on('SIGINT', killAllAndExit);
   process.on('SIGTERM', killAllAndExit);
+  // A runner bug must not leave the detached suites running as orphans.
+  process.on('uncaughtException', err => {
+    console.error(err);
+    killAllAndExit('SIGTERM');
+  });
   startSuites();
 }
 

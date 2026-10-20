@@ -22,6 +22,7 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, sleep, stubRaf} = require('./simplify2_harness');
+const {micBtn} = require('./voice_page_helpers');
 
 const recognizers = [];
 
@@ -122,10 +123,6 @@ function makePage() {
     extraScripts: ['voice.js'],
   });
   return {win, log, tracks, posted};
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
 }
 
 async function main() {

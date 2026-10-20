@@ -289,6 +289,12 @@ class KISSAgent(Base):
         continuation session that only called ``finish`` made no
         progress."""
         self.budget_check_hook: Callable[[], None] | None = None
+        self.budget_status_hook: Callable[[], tuple[float, float]] | None = None
+        """Returns ``(spent, max)`` in USD of the task this agent runs a
+        session of, for the ``Budget:`` part of the usage line the model
+        sees; ``None`` shows this agent's own spend and cap.
+        ``RelentlessAgent`` installs it so the line counts earlier
+        sessions and sub-agent spend, as its budget check does."""
         self.context_reset_hook: Callable[[], None] | None = None
         """Called after old tool outputs were compacted out of the
         conversation, so tools that assume the model still sees an
@@ -912,6 +918,10 @@ class KISSAgent(Base):
             )
             return finish_result
 
+        # Re-read after the tools ran: a tool may have spent (a sub-agent
+        # whose cost was folded into the task), and the line appended to
+        # these results is what the model reads next.
+        self.model.set_usage_info_for_messages(self._get_usage_info_string())
         self.model.add_function_results_to_conversation_and_return(function_results)
         return None
 
@@ -1485,11 +1495,15 @@ class KISSAgent(Base):
         """Returns a compact single-line usage information string."""
         try:
             max_tokens = get_max_context_length(self.model.model_name)
+            if self.budget_status_hook is not None:
+                spent, cap = self.budget_status_hook()
+            else:
+                spent, cap = self.budget_used, self.max_budget
             return (
                 f"Steps: {self.step_count}/{self.max_steps}, "
                 f"Context: {self.context_tokens_used:,}/{max_tokens:,} tokens, "
                 f"Total tokens: {self.total_tokens_used:,}, "
-                f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
+                f"Budget: ${spent:.4f}/${cap:.2f}, "
             )
         except Exception:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)

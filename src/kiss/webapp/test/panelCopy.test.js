@@ -11,26 +11,13 @@ const {JSDOM} = require('jsdom');
 
 const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 function makeWindow() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body></body></html>',
-    {runScripts: 'dangerously', pretendToBeVisual: true},
-  );
+  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+  });
   const win = dom.window;
   let clipboardText = null;
   Object.defineProperty(win.navigator, 'clipboard', {
@@ -59,10 +46,12 @@ function makeWindow() {
 function clickFirst(el, selector) {
   const btn = el.querySelector(selector);
   assert.ok(btn, `expected to find ${selector} inside panel`);
-  btn.dispatchEvent(new btn.ownerDocument.defaultView.MouseEvent('click', {
-    bubbles: true,
-    cancelable: true,
-  }));
+  btn.dispatchEvent(
+    new btn.ownerDocument.defaultView.MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
 }
 
 function flushMicrotasks() {
@@ -79,8 +68,7 @@ async function run() {
   await test('getRawText honours data-raw-text override', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
-    panel.innerHTML =
-      '<h3>Heading</h3><p><strong>bold</strong> text</p>';
+    panel.innerHTML = '<h3>Heading</h3><p><strong>bold</strong> text</p>';
     panel.dataset.rawText = '# Heading\n\n**bold** text';
     assert.strictEqual(
       PanelCopy.getRawText(panel),
@@ -120,10 +108,7 @@ async function run() {
     body.dataset.rawText = '# Hello\n\nWorld';
     panel.appendChild(header);
     panel.appendChild(body);
-    assert.strictEqual(
-      PanelCopy.getRawText(panel),
-      'Result\n# Hello\n\nWorld',
-    );
+    assert.strictEqual(PanelCopy.getRawText(panel), 'Result\n# Hello\n\nWorld');
   });
 
   await test('addCopyButton attaches a single button (idempotent)', () => {
@@ -137,71 +122,62 @@ async function run() {
     assert.ok(panel.classList.contains('copyable'));
   });
 
-  await test(
-    'clicking copy on a Result panel copies the raw markdown',
-    async () => {
-      const {document, PanelCopy, getClipboard} = makeWindow();
-      const rc = document.createElement('div');
-      rc.className = 'ev rc';
-      rc.innerHTML =
-        '<div class="rc-h"><h3>Result</h3></div>' +
-        '<div class="rc-body md-body">' +
-        '<h1>Hello</h1><p><strong>World</strong></p>' +
-        '</div>';
-      const rawMd = '# Hello\n\n**World**';
-      rc.dataset.rawText = rawMd;
-      document.body.appendChild(rc);
+  await test('clicking copy on a Result panel copies the raw markdown', async () => {
+    const {document, PanelCopy, getClipboard} = makeWindow();
+    const rc = document.createElement('div');
+    rc.className = 'ev rc';
+    rc.innerHTML =
+      '<div class="rc-h"><h3>Result</h3></div>' +
+      '<div class="rc-body md-body">' +
+      '<h1>Hello</h1><p><strong>World</strong></p>' +
+      '</div>';
+    const rawMd = '# Hello\n\n**World**';
+    rc.dataset.rawText = rawMd;
+    document.body.appendChild(rc);
 
-      PanelCopy.addCopyButton(rc);
-      clickFirst(rc, '.panel-copy-btn');
-      await flushMicrotasks();
+    PanelCopy.addCopyButton(rc);
+    clickFirst(rc, '.panel-copy-btn');
+    await flushMicrotasks();
 
-      assert.strictEqual(getClipboard(), rawMd);
-      assert.notStrictEqual(getClipboard(), 'Result Hello World');
-    },
-  );
+    assert.strictEqual(getClipboard(), rawMd);
+    assert.notStrictEqual(getClipboard(), 'Result Hello World');
+  });
 
-  await test(
-    'clicking copy on a Prompt panel copies the raw markdown',
-    async () => {
-      const {document, PanelCopy, getClipboard} = makeWindow();
-      const el = document.createElement('div');
-      el.className = 'ev prompt';
-      el.innerHTML =
-        '<div class="prompt-h">Prompt</div>' +
-        '<div class="prompt-body md-body"><h2>Hi</h2></div>';
-      const raw = '## Hi';
-      el.dataset.rawText = raw;
-      document.body.appendChild(el);
+  await test('clicking copy on a Prompt panel copies the raw markdown', async () => {
+    const {document, PanelCopy, getClipboard} = makeWindow();
+    const el = document.createElement('div');
+    el.className = 'ev prompt';
+    el.innerHTML =
+      '<div class="prompt-h">Prompt</div>' +
+      '<div class="prompt-body md-body"><h2>Hi</h2></div>';
+    const raw = '## Hi';
+    el.dataset.rawText = raw;
+    document.body.appendChild(el);
 
-      PanelCopy.addCopyButton(el);
-      clickFirst(el, '.panel-copy-btn');
-      await flushMicrotasks();
+    PanelCopy.addCopyButton(el);
+    clickFirst(el, '.panel-copy-btn');
+    await flushMicrotasks();
 
-      assert.strictEqual(getClipboard(), raw);
-    },
-  );
+    assert.strictEqual(getClipboard(), raw);
+  });
 
-  await test(
-    'clicking copy on a bash output panel preserves whitespace',
-    async () => {
-      const {document, PanelCopy, getClipboard} = makeWindow();
-      const op = document.createElement('div');
-      op.className = 'bash-panel';
-      const opContent = document.createElement('div');
-      opContent.className = 'bash-panel-content';
-      const bashOut = 'line one\nline two with    spaces\n  indented';
-      opContent.textContent = bashOut;
-      op.appendChild(opContent);
-      document.body.appendChild(op);
+  await test('clicking copy on a bash output panel preserves whitespace', async () => {
+    const {document, PanelCopy, getClipboard} = makeWindow();
+    const op = document.createElement('div');
+    op.className = 'bash-panel';
+    const opContent = document.createElement('div');
+    opContent.className = 'bash-panel-content';
+    const bashOut = 'line one\nline two with    spaces\n  indented';
+    opContent.textContent = bashOut;
+    op.appendChild(opContent);
+    document.body.appendChild(op);
 
-      PanelCopy.addCopyButton(op);
-      clickFirst(op, '.panel-copy-btn');
-      await flushMicrotasks();
+    PanelCopy.addCopyButton(op);
+    clickFirst(op, '.panel-copy-btn');
+    await flushMicrotasks();
 
-      assert.strictEqual(getClipboard(), bashOut);
-    },
-  );
+    assert.strictEqual(getClipboard(), bashOut);
+  });
 
   await test(
     'clicking copy on a Thoughts container with a nested text block ' +
@@ -247,8 +223,10 @@ async function run() {
       await flushMicrotasks();
 
       const got = getClipboard();
-      assert.ok(got && got.includes('no markdown here'),
-        `expected fallback walk to include the body text, got: ${JSON.stringify(got)}`);
+      assert.ok(
+        got && got.includes('no markdown here'),
+        `expected fallback walk to include the body text, got: ${JSON.stringify(got)}`,
+      );
     },
   );
 
@@ -266,17 +244,8 @@ async function run() {
     assert.strictEqual(ancestorClicks, 0);
   });
 
-  console.log('');
-  if (failures.length === 0) {
-    console.log(`All ${passed} panelCopy tests passed.`);
-    process.exit(0);
-  } else {
-    console.log(`${failures.length} test(s) failed (${passed} passed):`);
-    for (const f of failures) {
-      console.log(`  - ${f.name}: ${f.error.stack || f.error.message}`);
-    }
-    process.exit(1);
-  }
+  report('panelCopy');
+  process.exit(0);
 }
 
 run().catch(e => {

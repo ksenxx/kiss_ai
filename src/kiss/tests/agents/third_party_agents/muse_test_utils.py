@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.client import stop_daemon
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler
 
 _DAEMON_SKIP_REASON = "Linux-only: the Muse-auth daemon authenticates clients with SO_PEERCRED"
 
@@ -166,6 +167,54 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
+
+
+class MuseApiHandler(RecordingHandler):
+    """Base for the loopback API emulators the Muse-auth daemon is pointed at.
+
+    Every request is recorded as ``{"method", "path", "headers", "body"}``
+    (the full header dict, so a test can prove which credential crossed
+    the wire); :func:`bearer_of` reads the credential back out of a
+    recorded entry.
+    """
+
+    server: Any
+
+    def record_full_request(self) -> bytes:
+        """Read the body, append this request to ``server.requests`` and return the raw body."""
+        body = self._read_raw()
+        self.server.requests.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "headers": dict(self.headers.items()),
+                "body": body.decode("utf-8", errors="replace"),
+            }
+        )
+        return body
+
+    def authorization(self) -> str:
+        """Return the request's ``Authorization`` header (``""`` when absent)."""
+        return self.headers.get("Authorization", "")
+
+    def redirect(self, status: int, location: str) -> None:
+        """Send an empty-bodied *status* redirect to *location*."""
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def bearer_of(request: dict[str, Any]) -> str:
+    """Return the ``Authorization`` header of a request recorded by :class:`MuseApiHandler`.
+
+    Args:
+        request: One entry of ``server.requests``.
+
+    Returns:
+        The header value, or ``""`` when the request carried none.
+    """
+    return next((v for k, v in request["headers"].items() if k.lower() == "authorization"), "")
 
 
 def auth_tools(agent: Any) -> dict[str, Any]:

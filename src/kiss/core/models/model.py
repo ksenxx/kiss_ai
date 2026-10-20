@@ -19,7 +19,6 @@ import importlib
 import inspect
 import json
 import logging
-import mimetypes
 import os
 import queue
 import re
@@ -41,7 +40,6 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked_call
 from kiss.core.models.heif import (
     HEIF_MIME_TYPES,
-    HEIF_SUFFIXES,
     heif_to_jpeg,
     is_heif,
 )
@@ -266,31 +264,6 @@ class Attachment:
         # that accepts HEIF natively; a correct label beats a wrong one.
         return Attachment(data=data, mime_type="image/heic")
 
-    @staticmethod
-    def from_file(path: str) -> "Attachment":
-        """Create an Attachment from a file path.
-
-        Args:
-            path: Path to the file to attach.
-
-        Returns:
-            An Attachment with the file's bytes and detected MIME type; a
-            HEIF/HEIC photo is transcoded to JPEG (see :meth:`from_bytes`).
-
-        Raises:
-            ValueError: If the MIME type is not supported.
-            FileNotFoundError: If the file does not exist.
-        """
-        file_path = Path(path)
-        mime_type = mimetypes.guess_type(str(file_path))[0] or ""
-        heif = mime_type in HEIF_MIME_TYPES or file_path.suffix.lower() in HEIF_SUFFIXES
-        if not heif and mime_type not in SUPPORTED_MIME_TYPES:
-            raise ValueError(
-                f"Unsupported MIME type '{mime_type}' for file '{path}'. "
-                f"Supported: {sorted(SUPPORTED_MIME_TYPES)}"
-            )
-        return Attachment.from_bytes(file_path.read_bytes(), mime_type)
-
     def to_base64(self) -> str:
         """Return the file data as a base64-encoded string."""
         return base64.b64encode(self.data).decode("ascii")
@@ -505,9 +478,7 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
         raise ValueError("OpenAI API key is required for audio transcription")
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
-    client = openai.OpenAI(
-        api_key=key, timeout=httpx.Timeout(120.0, connect=10.0), max_retries=2
-    )
+    client = openai.OpenAI(api_key=key, timeout=httpx.Timeout(120.0, connect=10.0), max_retries=2)
     try:
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -998,12 +969,11 @@ class Model(ABC):
         """Point this model's streaming callbacks at a new printer.
 
         The hook ``KISSAgent._reset`` calls when it reuses an existing
-        adapter instance for a new run.  Assigning the two attributes
-        from outside reaches only the attributes themselves, which
-        silently misses any sub-model or per-turn state a subclass owns:
-        a transport that delegates a turn to a cached sub-model must
-        override this and re-bind that delegate too, or the delegated
-        turn keeps streaming into the *previous* run's printer.
+        adapter instance for a new run.  Only the two attributes are
+        rebound; a transport that delegates a turn to a cached sub-model
+        (``OpenAICompatibleModel``'s Responses delegate) copies them to
+        that delegate at the start of every delegated turn, so the
+        delegate never streams into the *previous* run's printer.
 
         Args:
             token_callback: The new printer's token callback, or ``None``.
@@ -1274,16 +1244,24 @@ class Model(ABC):
         if pending:
             self._deliver_tool_result_attachments(pending)
 
-    def add_message_to_conversation(self, role: str, content: str) -> None:
+    def add_message_to_conversation(
+        self, role: str, content: str, attachments: list[Attachment] | None = None
+    ) -> None:
         """Adds a message to the conversation state.
 
         Args:
             role: The role of the message sender (e.g., 'user', 'assistant').
             content: The message content.
+            attachments: Files to carry with a ``user`` message; every
+                adapter renders them as image / file / audio content
+                parts, as it does for the files a tool result returns.
         """
         if role == "user" and self.usage_info_for_messages:  # pragma: no branch
             content = f"{content}\n\n{self.usage_info_for_messages}"
-        self.conversation.append({"role": role, "content": content})
+        message: dict[str, Any] = {"role": role, "content": content}
+        if attachments:
+            message["attachments"] = list(attachments)
+        self.conversation.append(message)
 
     @abstractmethod
     def extract_input_output_token_counts_from_response(
@@ -2071,7 +2049,7 @@ class _CLIProcess:
         # alive, so nothing to join, but it still runs.
         self._writer: threading.Thread | None = None
         self._writer_cancel = threading.Event()
-        self._stdin_lock = threading.Lock()
+        self._stdin_lock = threading.RLock()
 
     def __enter__(self) -> "_CLIProcess":
         """Return the running process supervisor."""
@@ -2202,7 +2180,11 @@ class _CLIProcess:
             raise error
 
     def _remaining(self) -> float:
-        """Return the seconds left before the inactivity deadline, after :meth:`_raise_for_caller`.
+        """Return the seconds left before the inactivity deadline.
+
+        A passed deadline is reported first; otherwise
+        :meth:`_raise_for_caller` gets to raise before the value is
+        returned.
 
         Raises:
             _StreamReadTimeoutError: The deadline has passed.
@@ -2414,6 +2396,12 @@ class _CLIProcess:
         if status not in (0, None):
             raise KISSError(f"{self._label} failed (exit {status}): {self.stderr_text().strip()}")
 
+    def _close_stdin(self) -> None:
+        """Close the prompt pipe; runs under ``_stdin_lock`` from :meth:`close`."""
+        assert self._proc.stdin is not None  # every pipe is subprocess.PIPE
+        with contextlib.suppress(OSError):
+            self._proc.stdin.close()
+
     def close(self) -> None:
         """Terminate the child, reap it, and release its pipes.
 
@@ -2423,7 +2411,9 @@ class _CLIProcess:
         not alive and has nothing to join), and stdin is closed under
         ``_stdin_lock`` so a writer still inside ``Thread.start()`` when
         the Stop landed cannot write through the closed descriptor
-        afterwards.  An output pipe is closed only once the
+        afterwards (through :func:`locked_call`: this runs on the task
+        thread, where a second Stop landing right after the acquire
+        would leak a plain ``with``).  An output pipe is closed only once the
         thread moving bytes through it has finished.  A grandchild that
         inherited stdout or stderr keeps it open after the child is
         gone, leaving that reader parked inside ``read(2)`` holding the
@@ -2448,9 +2438,7 @@ class _CLIProcess:
         self._writer_cancel.set()
         if self._writer is not None and self._writer.is_alive():
             self._writer.join()
-        assert proc.stdin is not None  # every pipe is subprocess.PIPE
-        with self._stdin_lock, contextlib.suppress(OSError):
-            proc.stdin.close()
+        locked_call(self._stdin_lock, self._close_stdin)
         attached = (
             (proc.stdout, self._readers[0]),
             (proc.stderr, self._readers[1]),

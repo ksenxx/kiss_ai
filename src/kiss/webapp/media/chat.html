@@ -59,7 +59,7 @@
 
     <div id="tab-status-bar">
       <div class="status">
-        <span class="status-side status-side-left"><span id="status-text">Ready</span></span>
+        <span class="status-side"><span id="status-text">Ready</span></span>
         <span id="status-machine" title="Server machine"></span>
         <span class="status-side status-side-right">
           <span id="status-tokens" class="status-metric"></span>
@@ -201,7 +201,7 @@
            task-info panel (#meta-explorer / #meta-scm below). -->
       <div id="sidebar-body">
         <div id="sidebar-views">
-      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-view">
+      <div id="sidebar-tab-history-panel" class="sidebar-section">
         <div class="sidebar-hdr">Chats</div>
         <div class="history-search-row">
           <div class="search-wrap">
@@ -745,6 +745,35 @@
       </div>
     </div>
     <div id="settings-overlay"></div>
+
+    <!--
+      Sign-in window: shown by the daemon's `signin` event while the
+      brand's sign-in hook ($KISS_HOME/signin) says the user is not logged
+      in (kiss/server/signin.py).  One button per provider; a click sends
+      `signinLogin` and the sign-in page the daemon answers with opens in
+      a new tab.  The paste row is for a browser on another machine, whose
+      redirect to the daemon's loopback port cannot land.
+    -->
+    <div id="signin-modal" style="display:none;" role="dialog" aria-modal="true"
+         aria-labelledby="signin-modal-title" aria-describedby="signin-modal-note">
+      <div class="auth-modal-content">
+        <div class="auth-modal-title" id="signin-modal-title">Sign in</div>
+        <div id="signin-modal-buttons" class="signin-modal-buttons"></div>
+        <div id="signin-modal-note" class="signin-modal-note" role="status"></div>
+        <div id="signin-modal-paste" class="signin-modal-paste" style="display:none;">
+          <label for="signin-modal-paste-input" class="signin-modal-paste-label">
+            Signed in, but the browser ended on a page that would not load? Paste that page's address (or the code it showed) here:
+          </label>
+          <input type="text" id="signin-modal-paste-input" class="auth-modal-input" autocomplete="off" spellcheck="false">
+          <div class="auth-modal-actions">
+            <button type="button" id="signin-modal-paste-btn" class="auth-modal-btn auth-modal-ok">Finish sign-in</button>
+          </div>
+        </div>
+        <div class="auth-modal-actions">
+          <button type="button" id="signin-modal-later" class="auth-modal-btn auth-modal-cancel">Not now</button>
+        </div>
+      </div>
+    </div>
 
 {{AUTH_MODAL}}  </div>
 

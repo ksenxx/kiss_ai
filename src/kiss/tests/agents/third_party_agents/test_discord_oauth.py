@@ -35,7 +35,6 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _oauth_apps
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents.discord.discord_sea import (
     DiscordAgent,
@@ -50,7 +49,11 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
     tools_by_name,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serving,
+)
 from kiss.tests.conftest import IS_WINDOWS
 
 _USER_TOKEN = "user-access-token"
@@ -94,12 +97,11 @@ class _DiscordHandler(RecordingHandler):
             self._json(404, {"message": "Unknown"})
 
 
-class _DiscordServer(ThreadedHTTPServer):
+class _DiscordServer(RecordingServer):
     """Local Discord emulator with recorded requests."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _DiscordHandler)
-        self.base = f"http://127.0.0.1:{self.server_address[1]}"
         self.token_forms: list[dict[str, str]] = []
         self.webhook_posts: list[tuple[str, dict[str, Any]]] = []
         self.auth_headers: list[str] = []
@@ -114,7 +116,7 @@ class _DiscordServer(ThreadedHTTPServer):
                 "token": "hook-secret-token",
                 "channel_id": "555",
                 "guild_id": "777",
-                "url": f"{self.base}{_HOOK_PATH}",
+                "url": f"{self.base_url}{_HOOK_PATH}",
             },
         }
 
@@ -128,8 +130,8 @@ def discord_server(
     The redirect listener runs on the test's own ephemeral port.
     """
     with serving(_DiscordServer()) as server:
-        monkeypatch.setenv("DISCORD_OAUTH_BASE", server.base)
-        monkeypatch.setenv("DISCORD_API_BASE", f"{server.base}/api/v10")
+        monkeypatch.setenv("DISCORD_OAUTH_BASE", server.base_url)
+        monkeypatch.setenv("DISCORD_API_BASE", f"{server.base_url}/api/v10")
         monkeypatch.setenv("KISS_DISCORD_CLIENT_ID", "kiss-discord-app")
         monkeypatch.setenv("KISS_HEADLESS", "1")
         monkeypatch.setenv("KISS_MUSE_AUTH", "0")
@@ -294,7 +296,7 @@ def test_webhook_failures_hide_the_url(discord_server: _DiscordServer, refusing_
     _approve(_start(tools))
     assert json.loads(tools["finish_discord_auth"]())["ok"] is True
     for url in (
-        f"{discord_server.base}/api/webhooks/901/wrong-secret",
+        f"{discord_server.base_url}/api/webhooks/901/wrong-secret",
         f"http://127.0.0.1:{refusing_port}/api/webhooks/901/refused-secret",
     ):
         _webhook_config.save({"url": url, "channel_id": "555", "guild_id": "777"})
@@ -574,7 +576,7 @@ def test_muse_migrates_refreshable_legacy_sign_in(
         stored = json.loads((muse_auth_dir() / "vault" / "discord.json").read_text())
         info = stored["authorized_user_info"]
         assert info["kind"] == "oauth2_refresh_token"
-        assert info["token_url"] == f"{discord_server.base}/api/oauth2/token"
+        assert info["token_url"] == f"{discord_server.base_url}/api/oauth2/token"
         assert info["client_id"] == "kiss-discord-app"
         assert info["access_token"] == _USER_TOKEN
         assert info["refresh_token"] == "user-refresh-token"

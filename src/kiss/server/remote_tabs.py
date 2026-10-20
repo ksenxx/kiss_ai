@@ -78,16 +78,24 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from typing import Any
 
 from kiss.agents.sorcar.machines import Machine, MachineError, load_machines
 from kiss.server.machine_stream import DROPPED_FIELDS, MachineStream
 from kiss.server.remote_views import RemoteViews
 
-FORWARDED_COMMANDS = frozenset({
-    "submit", "run", "stop", "userAnswer", "appendUserMessage", "interruptTool",
-    "selectModel",
-})
+FORWARDED_COMMANDS = frozenset(
+    {
+        "submit",
+        "run",
+        "stop",
+        "userAnswer",
+        "appendUserMessage",
+        "interruptTool",
+        "selectModel",
+    }
+)
 """Tab commands a bound tab sends to its machine instead of running here."""
 
 BINDING_COMMANDS = frozenset({"submit", "run"})
@@ -148,16 +156,26 @@ class RemoteTab(MachineStream):
             latest task: a surface connecting later is replayed at it.
             Cleared by a submit, whose task becomes the latest; never
             set by a relayed frame, whose replay may predate a submit.
-        replay_sinks: Per tab, the connections waiting for a
-            ``task_events`` replay, one per forwarded ``resumeSession``,
-            answered in order (the socket keeps the remote's order).
-        replay_conn: Per tab, the connection its last replay went to:
-            the ``openSubagentTab`` announcements and child transcripts
-            a replay goes on with reach that connection alone.
+        replay_sinks: By replay id, the connection waiting for the
+            answer to the forwarded ``resumeSession`` stamped with it
+            (:meth:`stamp_replay`).  The remote echoes the id on every
+            frame of the answer (the ``task_events`` transcript, or
+            ``status running:false`` alone for a chat it has no row
+            for and nothing running, or ``subagentDone`` for a
+            sub-agent that is over, and the ``openSubagentTab``
+            announcements and child transcripts a replay goes on
+            with) and ends it with ``replayDone``, which releases the
+            sink.  A frame of the tab carrying no id (the task's own
+            lifecycle, a transcript nobody here asked for) goes to
+            every client, whatever replays are pending.
     """
 
     def __init__(
-        self, tab_id: str, machine: Machine, owner: RemoteTabs, subagent: bool = False,
+        self,
+        tab_id: str,
+        machine: Machine,
+        owner: RemoteTabs,
+        subagent: bool = False,
     ) -> None:
         """Connect to *machine* and start relaying its frames for *tab_id*.
 
@@ -175,32 +193,54 @@ class RemoteTab(MachineStream):
         self.spawn = ""
         self.chat_id = ""
         self.shown_task_id = ""
-        self.replay_sinks: dict[str, list[str]] = {}
-        self.replay_conn: dict[str, str] = {}
+        self.replay_sinks: dict[str, str] = {}
         super().__init__(machine, owner, f"remote-tab-{tab_id}")
 
     def _dropped_fields(self, cmd: dict[str, Any]) -> tuple[str, ...]:
         """:data:`_DROPPED_FIELDS`, except that a ``run`` keeps its ``workDir``."""
         return _DROPPED_RUN_FIELDS if cmd.get("type") == "run" else _DROPPED_FIELDS
 
+    def stamp_replay(self, cmd: dict[str, Any], conn_id: str) -> None:
+        """Stamp the ``resumeSession`` *cmd* with a replay id whose answer is *conn_id*'s alone.
+
+        Called under ``lock``, before the command is forwarded: the
+        remote echoes the id on every frame of the answer
+        (:attr:`replay_sinks`).
+
+        Args:
+            cmd: The ``resumeSession`` command about to be forwarded
+                (mutated in place).
+            conn_id: The connection the answer goes to.
+        """
+        replay_id = uuid.uuid4().hex
+        self.replay_sinks[replay_id] = conn_id
+        cmd["replayId"] = replay_id
+
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
         """Deliver one decoded frame when it belongs to this stream's tabs.
 
-        A ``task_events`` of a tab with replay sinks answers the oldest
-        one; an ``openSubagentTab`` (a replay announcing a running
-        sub-agent) adopts the sub-agent tab and follows its parent's
-        replay to that connection; everything else goes to every client.
+        A frame echoing the id of a pending replay goes to the
+        connection that asked for it (``replayDone`` releases the sink
+        and reaches nobody); an ``openSubagentTab`` (a replay
+        announcing a running sub-agent) adopts the sub-agent tab;
+        everything else goes to every client.
         """
         kind = msg.get("type")
         parent = str(msg.get("parent_tab_id") or "")
         sub_tab = str(msg.get("tab_id") or "")
+        replay_id = str(msg.get("replayId") or "")
         to: list[str] | None = []  # [] = every client, [conn] = that one, None = nobody
         adopt = ""
         spawn = ""  # the run's own new_tab, learnt to be ours by this frame
         with self.lock:
             if self.retired:
                 return
-            if kind == "new_tab" and self._owns_sub_tab(parent):
+            if replay_id in self.replay_sinks:
+                to = [self.replay_sinks[replay_id]]
+            if kind == "replayDone":
+                self.replay_sinks.pop(replay_id, None)
+                to = None
+            elif kind == "new_tab" and self._owns_sub_tab(parent):
                 if msg.get("task_id"):
                     self.task_ids.add(str(msg["task_id"]))
                     self.announced[str(msg["task_id"])] = _sub_tab_id(msg)
@@ -223,20 +263,13 @@ class RemoteTab(MachineStream):
                     to = None
             elif kind == "openSubagentTab" and parent in self.tab_ids and sub_tab:
                 # Announced by a replay: the sub-agent tab's own (a
-                # client resumed it: the oldest sink gets it, and keeps
-                # waiting for the transcript) or its parent's (a client
-                # that just got the parent's replay learns of a running
-                # sub-agent: its transcript follows).
+                # client resumed it: the transcript follows) or its
+                # parent's (a client that just got the parent's replay
+                # learns of a running sub-agent).
                 if sub_tab not in self.tab_ids:
                     self.tab_ids.add(sub_tab)
                     self.announced.pop(_sub_task_id(sub_tab), None)
                     adopt = sub_tab
-                if self.replay_sinks.get(sub_tab):
-                    to = [self.replay_sinks[sub_tab][0]]
-                elif self.replay_conn.get(parent, ""):
-                    conn = self.replay_conn[parent]
-                    to = [conn]
-                    self.replay_sinks.setdefault(sub_tab, []).append(conn)
             elif kind == "subagentDone" and self._owns_sub_tab(sub_tab):
                 self.announced.pop(_sub_task_id(sub_tab), None)
             elif msg.get("tabId") in self.tab_ids:
@@ -245,10 +278,6 @@ class RemoteTab(MachineStream):
                     self.chat_id = str(msg["chat_id"])
                 if tab_id == self.tab_id and self.subagent:
                     spawn = self._own_run_frame(kind, msg)
-                if kind == "task_events" and self.replay_sinks.get(tab_id):
-                    conn = self.replay_sinks[tab_id].pop(0)
-                    self.replay_conn[tab_id] = conn
-                    to = [conn]
             else:
                 to = None
         if to is None:
@@ -406,7 +435,11 @@ class RemoteTabs:
                 self._backend._agent_server._refuse_run(tab_id, str(exc))
 
     def _bind(
-        self, tab_id: str, machine_name: str, cmd: dict[str, Any], title: str,
+        self,
+        tab_id: str,
+        machine_name: str,
+        cmd: dict[str, Any],
+        title: str,
     ) -> RemoteTab | None:
         """Bind *tab_id* to the registered machine *machine_name* (None when refused).
 
@@ -426,7 +459,8 @@ class RemoteTabs:
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
             self._backend._agent_server._refuse_run(
-                tab_id, f"{machine_name} is not a registered machine",
+                tab_id,
+                f"{machine_name} is not a registered machine",
             )
             return None
         with self._lock:
@@ -442,7 +476,10 @@ class RemoteTabs:
             if tab is None:
                 try:
                     tab = RemoteTab(
-                        tab_id, machine, self, subagent=bool(cmd.get("parentTaskId")),
+                        tab_id,
+                        machine,
+                        self,
+                        subagent=bool(cmd.get("parentTaskId")),
                     )
                 except MachineError as exc:
                     self._backend._agent_server._refuse_run(tab_id, str(exc))
@@ -473,7 +510,8 @@ class RemoteTabs:
                     return None
                 if lost:
                     self._backend._agent_server._refuse_run(
-                        tab_id, f"lost the connection to {machine.name}",
+                        tab_id,
+                        f"lost the connection to {machine.name}",
                     )
                     return None
                 if same is not None:
@@ -547,8 +585,6 @@ class RemoteTabs:
         del self._tabs[tab_id]
         with tab.lock:
             tab.tab_ids.discard(tab_id)
-            tab.replay_sinks.pop(tab_id, None)
-            tab.replay_conn.pop(tab_id, None)
         return None, []
 
     def _end_stream(self, tab: RemoteTab, tab_ids: list[str]) -> None:
@@ -577,9 +613,12 @@ class RemoteTabs:
         with self._lock:
             for sub_tab_id in tab_ids:
                 if sub_tab_id != tab.tab_id and sub_tab_id not in self._tabs:
-                    self.deliver("", json.dumps(
-                        {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
-                    ))
+                    self.deliver(
+                        "",
+                        json.dumps(
+                            {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
+                        ),
+                    )
         self._announce(tab.tab_id, None)
         self._views.release(tab.machine.name)
 
@@ -635,14 +674,15 @@ class RemoteTabs:
                 tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
                 tab.shown_task_id = str(cmd.get("taskId") or "")
                 if cmd.get("scoped") and conn_id:
-                    tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
+                    tab.stamp_replay(cmd, conn_id)
             self._forward(tab, tab_id, cmd)
             return True
         ended: RemoteTab | None = None
         orphans: list[str] = []
         with self._lock:
             tab = next(
-                (t for t in self._tabs.values() if task_id and task_id in t.task_ids), None,
+                (t for t in self._tabs.values() if task_id and task_id in t.task_ids),
+                None,
             )
             if tab is None and task_id:
                 tab = self._tabs.get(str(cmd.get("parentTabId", "") or ""))
@@ -661,7 +701,8 @@ class RemoteTabs:
                     tab.tab_ids.add(tab_id)
                     tab.task_ids.add(task_id)
                     tab.announced.pop(task_id, None)
-                    tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
+                    if conn_id:
+                        tab.stamp_replay(cmd, conn_id)
         if ended is not None:
             self._end_stream(ended, orphans)
         if tab is None:
@@ -689,16 +730,14 @@ class RemoteTabs:
                         self.deliver_to(conn_id, tab.spawn)
                 continue
             self._replay_binding(conn_id, tab_id, tab)
+            resume: dict[str, Any] = {"type": "resumeSession", "tabId": tab_id}
             with tab.lock:
-                chat_id = tab.chat_id
-                task_id = tab.shown_task_id
-                if chat_id:
-                    tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
-            if not chat_id:
-                continue
-            resume: dict[str, Any] = {"type": "resumeSession", "chatId": chat_id, "tabId": tab_id}
-            if task_id:
-                resume["taskId"] = task_id
+                if not tab.chat_id:
+                    continue
+                resume["chatId"] = tab.chat_id
+                if tab.shown_task_id:
+                    resume["taskId"] = tab.shown_task_id
+                tab.stamp_replay(resume, conn_id)
             try:
                 tab.send(resume)
             except MachineError:
@@ -758,7 +797,8 @@ class RemoteTabs:
             tab_ids = self._retire(tab)
         if lost and registered:
             self._backend._agent_server._refuse_run(
-                tab.tab_id, f"lost the connection to {tab.machine.name}",
+                tab.tab_id,
+                f"lost the connection to {tab.machine.name}",
             )
             self._end_stream(tab, tab_ids)
 

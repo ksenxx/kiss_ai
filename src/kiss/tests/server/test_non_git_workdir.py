@@ -168,13 +168,12 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         evt = self._events_of("adjacent_task_events")
         assert evt and evt[-1]["task"] == ""
 
-    def test_delete_task_is_unknown_command(self) -> None:
+    def test_delete_task_with_non_string_id_is_ignored(self) -> None:
         self.server._handle_command(
             {"type": "deleteTask", "taskId": 999_999_999},
         )
-        assert self._events_of("error"), (
-            "deleteTask was removed and must be reported as unknown"
-        )
+        assert not self._events_of("error")
+        assert not self._events_of("tasks_updated")
 
     def test_get_config(self) -> None:
         self.server._handle_command({"type": "getConfig"})

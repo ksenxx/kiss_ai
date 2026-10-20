@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import sqlite3
+from array import array
 from contextlib import closing
 from pathlib import Path
 
@@ -17,7 +18,6 @@ from kiss.core.memoryfield.index import (
     SyncReport,
     VectorIndex,
     default_embedder,
-    deserialize_float32,
     hashed_embedding,
     model_code_for_filename,
     normalize,
@@ -61,7 +61,9 @@ def test_normalize_and_float32_roundtrip() -> None:
     assert unit == pytest.approx([0.6, 0.8])
     blob = serialize_float32(unit)
     assert len(blob) == 8
-    assert deserialize_float32(blob) == pytest.approx(unit, abs=1e-7)
+    unpacked = array("f")
+    unpacked.frombytes(blob)
+    assert unpacked.tolist() == pytest.approx(unit, abs=1e-7)
 
 
 def test_model_code_for_filename() -> None:

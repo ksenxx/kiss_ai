@@ -681,9 +681,14 @@ class CodexModel(CLITextModel):
         Called once per launch, so this is where the turn's billing is
         decided for good: a ``CODEX_API_KEY`` in the child environment
         makes the turn API spend, whatever the switch says afterwards.
+        So does a key saved by ``codex login --with-api-key``
+        (:func:`codex_api_key_login`) when the child has neither a key
+        variable nor a ``CODEX_ACCESS_TOKEN``, which the CLI reads first.
         """
         env = codex_cli_env()
-        self._api_billed = bool(env.get("CODEX_API_KEY"))
+        self._api_billed = bool(env.get("CODEX_API_KEY")) or (
+            not env.get("CODEX_ACCESS_TOKEN") and codex_api_key_login()
+        )
         return env
 
     def generate(self) -> tuple[str, Any]:

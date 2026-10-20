@@ -32,14 +32,11 @@
 
 const assert = require('assert');
 const {makeWebappClient} = require('./transport_page_helpers');
+const {send} = require('./simplify2_harness');
 
 // ---------------------------------------------------------------------------
 // scenario helpers
 // ---------------------------------------------------------------------------
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
 
 /**
  * Boot a client, run a one-task fan-out and answer the client's

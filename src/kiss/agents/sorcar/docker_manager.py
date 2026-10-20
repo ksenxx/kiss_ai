@@ -26,7 +26,11 @@ from docker.models.containers import Container  # type: ignore[assignment]
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
-from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
+from kiss.agents.sorcar.useful_tools import (
+    _stop_requested,
+    _truncate_output,
+    run_commands_pool,
+)
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
@@ -37,6 +41,11 @@ logger = logging.getLogger(__name__)
 #: ``UsefulTools.Bash``.  Without it an unbounded ``pip install`` log goes
 #: straight into the conversation and blows the model's context window.
 MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_max_chars
+
+#: Last line of a ``Bash`` result whose command was killed by a task
+#: Stop or a tool-panel Stop; ``DockerTools`` reads it to know that a
+#: follow-up command would be killed the same way.
+STOPPED_MESSAGE = "Killed: the task was stopped."
 
 #: Environment variable used to tag an exec — and every process
 #: it spawns — so a timed-out command can be killed by matching
@@ -97,22 +106,6 @@ def _new_utf8_decoder() -> Any:
         ``decoder.decode(chunk)`` and flush with ``decoder.decode(b"", True)``.
     """
     return codecs.getincrementaldecoder("utf-8")("replace")
-
-
-def _stop_requested(cancel: threading.Event | None) -> bool:
-    """Return whether *cancel* fired or the calling thread's tool call was interrupted.
-
-    :meth:`DockerManager._exec` polls this in 0.2 s slices (like the
-    host Bash tool) so a task Stop and a tool-panel Stop end a command
-    promptly instead of after its whole timeout.
-
-    Args:
-        cancel: The task's stop event, or ``None`` when there is none.
-    """
-    interrupt = tool_interrupt.current_tool_interrupt_event()
-    return (cancel is not None and cancel.is_set()) or (
-        interrupt is not None and interrupt.is_set()
-    )
 
 
 def _drain_exec_stream(
@@ -448,6 +441,13 @@ class DockerManager:
         """
         self.client = docker.from_env()
         self.container: Container | None = None
+        # The unique name ``open()`` gives the container it creates, chosen
+        # before the create call: the container is recoverable by it from
+        # the moment the daemon makes it, even when a Stop lands inside
+        # ``containers.create()`` (between its create API call and the GET
+        # that returns the handle) and leaves ``container`` None.  Cleared
+        # once the container is removed.
+        self.container_name: str | None = None
         # Serialises open()/close(): guard, shared-dir creation, the
         # (slow) container start, publication and teardown.  Without it
         # two concurrent open() calls both passed the "already open"
@@ -553,15 +553,26 @@ class DockerManager:
             container_kwargs["volumes"] = mounts
         if self.ports:
             container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
+        # create() and start() are separate calls, under a name chosen
+        # here, so the manager owns the container from the moment it
+        # exists: docker-py's ``run()`` never removes a container whose
+        # start() failed, and a Stop injected into this thread while
+        # create() or run() was still executing (after the daemon made
+        # the container, before the handle came back) would orphan a
+        # container nothing references.
+        self.container_name = f"kiss-{uuid.uuid4().hex[:12]}"
+        container_kwargs["name"] = self.container_name
         try:
-            self.container = self.client.containers.run(
+            self.container = self.client.containers.create(
                 full_image_name, **container_kwargs,
             )
+            self.container.start()
         except BaseException:
-            # The daemon rejected or failed the container: the shared
-            # volume dir created above would otherwise leak, and
-            # ``close()`` (which returns early with no container) would
-            # never remove it.
+            # The daemon rejected or failed the container, or a Stop
+            # landed: whatever it created is removed by handle or by
+            # name, and the shared volume dir created above with it
+            # (``close()`` returns early with no container).
+            self._discard_container()
             self._remove_shared_volume_dir()
             raise
         assert self.container is not None
@@ -802,7 +813,7 @@ class DockerManager:
         if stopped or timed_out or run.exit_code is None:
             run.cancel()
             if stopped:
-                return -1, "\n".join(filter(None, (output, "Killed: the task was stopped.")))
+                return -1, "\n".join(filter(None, (output, STOPPED_MESSAGE)))
             return None, output
         return run.exit_code, output
 
@@ -919,6 +930,9 @@ class DockerManager:
     def _close_locked(self) -> None:
         """Body of :meth:`close`; the caller holds ``_lifecycle_lock``."""
         if self.container is None:
+            # A create() a Stop interrupted (and whose cleanup a second
+            # Stop interrupted) may still have made the named container.
+            self._discard_container()
             print("No container to close.")
             self._remove_shared_volume_dir()
             return
@@ -943,8 +957,35 @@ class DockerManager:
             print(f"Failed to remove container {container_id}: {e}")
 
         self.container = None
+        self.container_name = None
         self._remove_shared_volume_dir()
         print("Container closed successfully")
+
+    def _discard_container(self) -> None:
+        """Force-remove the container :meth:`open` created, by handle or by its name.
+
+        The failure path of :meth:`open` and the no-handle path of
+        :meth:`close`: a container the daemon made but whose handle
+        never reached ``self.container`` (a Stop inside
+        ``containers.create()``) is found by ``container_name``.  A
+        name the daemon never created (the create call itself failed)
+        is a no-op; any other failure to remove is reported and leaves
+        the name on the manager, so a later :meth:`close` retries.
+        """
+        if self.container_name is None:
+            return
+        try:
+            container = self.container or self.client.containers.get(self.container_name)
+            container.remove(force=True)
+        except docker.errors.NotFound:  # type: ignore[attr-defined]
+            logger.debug("Exception caught", exc_info=True)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            print(f"Failed to remove container {self.container_name}: {e}")
+            self.container = None
+            return
+        self.container = None
+        self.container_name = None
 
     def _remove_shared_volume_dir(self) -> None:
         """Delete the host side of the shared volume, if one was created.

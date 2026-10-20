@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
+from functools import partial
 
 import psycopg
 import pytest
@@ -32,10 +33,10 @@ from kiss.agents.third_party_agents.postgres.postgres_sea import (
     _config,
 )
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
-from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name, wait_until
 
-# Nothing listens on the discard port, so this URI is always unreachable.
-_UNREACHABLE_URI = "postgresql://user:x@127.0.0.1:9/db"
+# A syntactically valid URI for tests that must never open a connection.
+_UNUSED_URI = "postgresql://user:x@127.0.0.1:5432/db"
 
 
 # The live fixture drives the container through the ``docker`` CLI, so a
@@ -44,6 +45,11 @@ _DOCKER_OK = is_docker_available() and shutil.which("docker") is not None
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
+
+
+def _refused_uri(port: int) -> str:
+    """A URI on the test's ``refusing_port``: every connect fails at once."""
+    return f"postgresql://user:x@127.0.0.1:{port}/db"
 
 
 def _backend(uri: str, read_only: bool) -> PostgresChannelBackend:
@@ -81,11 +87,11 @@ def test_authenticate_rejects_empty_uri() -> None:
     assert not _config.path.exists()
 
 
-def test_authenticate_unreachable_saves_nothing() -> None:
+def test_authenticate_unreachable_saves_nothing(refusing_port: int) -> None:
     """An unreachable database yields ok:false and persists no config."""
     agent = PostgresAgent()
     tools = tools_by_name(agent)
-    result = json.loads(tools["authenticate_postgres"](_UNREACHABLE_URI))
+    result = json.loads(tools["authenticate_postgres"](_refused_uri(refusing_port)))
     assert result["ok"] is False
     assert "Connection failed" in result["error"]
     assert not _config.path.exists()
@@ -94,12 +100,12 @@ def test_authenticate_unreachable_saves_nothing() -> None:
 
 def test_persisted_config_loaded_by_new_agent() -> None:
     """A new agent picks up a persisted config (written 0600)."""
-    _config.save({"database_uri": _UNREACHABLE_URI, "read_only": "false"})
+    _config.save({"database_uri": _UNUSED_URI, "read_only": "false"})
     if sys.platform != "win32":
         assert stat.S_IMODE(_config.path.stat().st_mode) == 0o600
     agent = PostgresAgent()
     assert agent._is_authenticated() is True
-    assert agent._backend._database_uri == _UNREACHABLE_URI
+    assert agent._backend._database_uri == _UNUSED_URI
     assert agent._backend._read_only is False
     names = {t.__name__ for t in agent._get_tools()}
     assert {
@@ -123,7 +129,7 @@ def test_persisted_config_loaded_by_new_agent() -> None:
 
 def test_read_only_defaults_to_true_when_key_missing() -> None:
     """A config without the read_only key loads as read-only."""
-    _config.save({"database_uri": _UNREACHABLE_URI})
+    _config.save({"database_uri": _UNUSED_URI})
     agent = PostgresAgent()
     assert agent._backend._read_only is True
 
@@ -137,17 +143,17 @@ def test_connect_without_config_fails() -> None:
 
 def test_connect_with_config_succeeds() -> None:
     """connect() loads the persisted URI and mode into the backend."""
-    _config.save({"database_uri": _UNREACHABLE_URI, "read_only": "false"})
+    _config.save({"database_uri": _UNUSED_URI, "read_only": "false"})
     b = PostgresChannelBackend()
     assert b.connect() is True
-    assert b._database_uri == _UNREACHABLE_URI
+    assert b._database_uri == _UNUSED_URI
     assert b._read_only is False
     assert "read-write" in b.connection_info
 
 
 def test_poll_messages_returns_empty() -> None:
     """poll_messages returns no messages: PostgreSQL has no inbound stream."""
-    b = _backend(_UNREACHABLE_URI, read_only=True)
+    b = _backend(_UNUSED_URI, read_only=True)
     messages, cursor = b.poll_messages("anything", "42", limit=5)
     assert messages == []
     assert cursor == "42"
@@ -156,11 +162,10 @@ def test_poll_messages_returns_empty() -> None:
 def test_pg_execute_read_only_refusal_without_connecting() -> None:
     """In read-only mode pg_execute refuses BEFORE any connection attempt.
 
-    The URI is unreachable, so a connection attempt would produce a
-    connection error — the exact 'read-only mode' message proves no
-    connection was tried.
+    A connection attempt would produce a connection error — the exact
+    'read-only mode' message proves no connection was tried.
     """
-    b = _backend(_UNREACHABLE_URI, read_only=True)
+    b = _backend(_UNUSED_URI, read_only=True)
     start = time.monotonic()
     result = json.loads(b.pg_execute("INSERT INTO t VALUES (1)"))
     assert result == {"ok": False, "error": "Postgres agent is in read-only mode"}
@@ -169,7 +174,7 @@ def test_pg_execute_read_only_refusal_without_connecting() -> None:
 
 def test_pg_explain_analyze_refused_in_read_only() -> None:
     """pg_explain(analyze=True) is refused in read-only mode without connecting."""
-    b = _backend(_UNREACHABLE_URI, read_only=True)
+    b = _backend(_UNUSED_URI, read_only=True)
     result = json.loads(b.pg_explain("SELECT 1", analyze=True))
     assert result["ok"] is False
     assert "read-only" in result["error"]
@@ -178,7 +183,7 @@ def test_pg_explain_analyze_refused_in_read_only() -> None:
 
 def test_params_json_validation_errors() -> None:
     """Malformed or non-array params_json yields ok:false before connecting."""
-    b = _backend(_UNREACHABLE_URI, read_only=False)
+    b = _backend(_UNUSED_URI, read_only=False)
     result = json.loads(b.pg_query("SELECT %s", "{not json"))
     assert result["ok"] is False
     assert "not valid JSON" in result["error"]
@@ -191,9 +196,9 @@ def test_params_json_validation_errors() -> None:
     assert result == {"ok": False, "error": "params_json must be a JSON array"}
 
 
-def test_every_tool_returns_ok_false_when_unreachable() -> None:
+def test_every_tool_returns_ok_false_when_unreachable(refusing_port: int) -> None:
     """Every tool returns ok:false against an unreachable server — never raises."""
-    b = _backend(_UNREACHABLE_URI, read_only=False)
+    b = _backend(_refused_uri(refusing_port), read_only=False)
     for call in (
         lambda: b.pg_query("SELECT 1"),
         lambda: b.pg_execute("CREATE TABLE t (x int)"),
@@ -206,6 +211,16 @@ def test_every_tool_returns_ok_false_when_unreachable() -> None:
         result = json.loads(call())
         assert result["ok"] is False
         assert result["error"]
+
+
+def _pg_ready(uri: str) -> bool:
+    """True once the server at *uri* accepts a connection and answers a query."""
+    try:
+        with psycopg.connect(uri, connect_timeout=3) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+    except psycopg.OperationalError:
+        return False
+    return True
 
 
 @pytest.mark.skipif(not _DOCKER_OK, reason="docker daemon or docker CLI not available")
@@ -269,17 +284,7 @@ class TestPostgresLive:
             ).stdout.strip()
             port = int(mapping.splitlines()[0].rsplit(":", 1)[1])
             uri = f"postgresql://postgres:kisstest@127.0.0.1:{port}/postgres"
-            deadline = time.monotonic() + 120
-            while True:
-                try:
-                    with psycopg.connect(uri, connect_timeout=3) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT 1")
-                    break
-                except psycopg.OperationalError:
-                    if time.monotonic() > deadline:
-                        raise
-                    time.sleep(1)
+            assert wait_until(partial(_pg_ready, uri), timeout=120), f"{name} never became ready"
             yield uri
         finally:
             subprocess.run(

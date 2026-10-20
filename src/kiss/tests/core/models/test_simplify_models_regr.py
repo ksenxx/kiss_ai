@@ -90,8 +90,16 @@ def test_model_routing_by_prefix() -> None:
     # special case for a model that is not in the catalog (audit 01, F5).
     # Every ``text-embedding-*`` name now routes by its prefix, to OpenAI.
     assert type(model("text-embedding-004")).__name__ == "OpenAICompatibleModel"
-    for name in ("gpt-4o", "openrouter/foo/bar", "glm-4", "kimi-k2", "moonshot-v1",
-                 "meta-llama/Llama-3", "Qwen/qwen-x", "o3-mini"):
+    for name in (
+        "gpt-4o",
+        "openrouter/foo/bar",
+        "glm-4",
+        "kimi-k2",
+        "moonshot-v1",
+        "meta-llama/Llama-3",
+        "Qwen/qwen-x",
+        "o3-mini",
+    ):
         info = MODEL_INFO.get(name)
         expected = (
             "OpenAICompatibleModel2"
@@ -103,8 +111,10 @@ def test_model_routing_by_prefix() -> None:
 
 def test_model_base_url_override_bypasses_routing() -> None:
     """A base_url in model_config forces an OpenAICompatibleModel."""
-    m = model("claude-test-model", model_config={"base_url": "http://localhost:1/v1",
-                                                 "api_key": "k", "extra": 1})
+    m = model(
+        "claude-test-model",
+        model_config={"base_url": "http://localhost:1/v1", "api_key": "k", "extra": 1},
+    )
     from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
     assert isinstance(m, OpenAICompatibleModel)
@@ -209,14 +219,13 @@ def test_provider_registry_lookup() -> None:
     assert _provider_name(_match_openai_compatible_provider("openrouter/x")) == "openrouter"
     assert _provider_name(_match_openai_compatible_provider("gpt-4o")) == "openai"
     assert _provider_name(_match_openai_compatible_provider("openai/gpt-oss-120b")) == "together"
-    assert _provider_name(
-        _match_openai_compatible_provider("text-embedding-004")
-    ) == "openai"
+    assert _provider_name(_match_openai_compatible_provider("text-embedding-004")) == "openai"
     assert _match_openai_compatible_provider("codex/default") is None
     assert _match_openai_compatible_provider("claude-x") is None
-    assert _provider_name(
-        openai_compatible_provider_for_base_url("https://openrouter.ai/api/v1")
-    ) == "openrouter"
+    assert (
+        _provider_name(openai_compatible_provider_for_base_url("https://openrouter.ai/api/v1"))
+        == "openrouter"
+    )
     assert openai_compatible_provider_for_base_url("http://my-gateway.local/v1") is None
 
 
@@ -239,8 +248,10 @@ def test_get_model_provider_labels() -> None:
 def test_calculate_cost_cache_pricing() -> None:
     """Cache read/write tokens are billed at the ModelInfo cache prices."""
     name = next(
-        n for n, i in MODEL_INFO.items()
-        if n.startswith("claude-") and i.is_generation_supported
+        n
+        for n, i in MODEL_INFO.items()
+        if n.startswith("claude-")
+        and i.is_generation_supported
         and i.cache_read_price_per_1M is not None
     )
     info = MODEL_INFO[name]
@@ -264,9 +275,9 @@ def test_anthropic_and_openai_cache_multipliers() -> None:
 
     raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text())
     claude = next(
-        n for n, e in raw.items()
-        if n.startswith("claude-") and e.get("gen", True)
-        and "cache_read_price_per_1M" not in e
+        n
+        for n, e in raw.items()
+        if n.startswith("claude-") and e.get("gen", True) and "cache_read_price_per_1M" not in e
     )
     info = MODEL_INFO[claude]
     inp = info.input_price_per_1M
@@ -274,9 +285,9 @@ def test_anthropic_and_openai_cache_multipliers() -> None:
     assert info.cache_write_price_per_1M == pytest.approx(inp * 1.25)
     assert info.cache_write_1h_price_per_1M == pytest.approx(inp * 2.0)
     gpt = next(
-        n for n, e in raw.items()
-        if n.startswith("gpt-4o") and e.get("gen", True)
-        and "cache_read_price_per_1M" not in e
+        n
+        for n, e in raw.items()
+        if n.startswith("gpt-4o") and e.get("gen", True) and "cache_read_price_per_1M" not in e
     )
     ginfo = MODEL_INFO[gpt]
     assert ginfo.cache_read_price_per_1M == pytest.approx(ginfo.input_price_per_1M * 0.5)
@@ -286,9 +297,11 @@ def test_anthropic_and_openai_cache_multipliers() -> None:
 def test_long_context_pricing_gpt55() -> None:
     """gpt-5.5 (non-pro) switches to long-context prices above 272k prompt tokens."""
     name = next(
-        (n for n in MODEL_INFO
-         if n.startswith("gpt-5.5") and "-pro" not in n
-         and MODEL_INFO[n].is_generation_supported),
+        (
+            n
+            for n in MODEL_INFO
+            if n.startswith("gpt-5.5") and "-pro" not in n and MODEL_INFO[n].is_generation_supported
+        ),
         None,
     )
     if name is None:
@@ -308,8 +321,14 @@ def test_default_fast_model_pickers() -> None:
 
 def test_lazy_class_imports() -> None:
     """Every advertised model class is importable lazily; bad names raise."""
-    for cls_name in ("AnthropicModel", "ClaudeCodeModel", "CodexModel",
-                     "OpenAICompatibleModel", "OpenAICompatibleModel2", "GeminiModel"):
+    for cls_name in (
+        "AnthropicModel",
+        "ClaudeCodeModel",
+        "CodexModel",
+        "OpenAICompatibleModel",
+        "OpenAICompatibleModel2",
+        "GeminiModel",
+    ):
         cls = getattr(models_pkg, cls_name)
         assert cls is not None and cls.__name__ == cls_name
     with pytest.raises(AttributeError):
@@ -326,7 +345,8 @@ def test_parse_text_based_tool_calls() -> None:
     )
     calls = _parse_text_based_tool_calls(content)
     assert [(c["name"], c["arguments"]) for c in calls] == [
-        ("a", {"x": [1, {"y": "}"}]}), ("b", {}),
+        ("a", {"x": [1, {"y": "}"}]}),
+        ("b", {}),
     ]
     assert all(c["id"].startswith("call_") for c in calls)
     assert _parse_text_based_tool_calls("no json here {broken") == []
@@ -355,7 +375,9 @@ def test_function_to_openai_tool_schema() -> None:
     assert props["path"] == {"type": "string", "description": "The file path to read."}
     assert props["count"] == {"type": "integer", "description": "How many lines."}
     assert props["tags"] == {
-        "type": "array", "items": {"type": "string"}, "description": "Optional tag list.",
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Optional tag list.",
     }
     assert fn["parameters"]["required"] == ["path"]
     assert m._resolve_openai_tools_schema({}, schema) is schema
@@ -384,7 +406,11 @@ def test_function_to_openai_tool_resolves_pep563_string_annotations() -> None:
 
     # Simulate PEP 563: the raw annotations become unevaluated strings.
     pep563_tool.__annotations__ = {
-        "path": "str", "count": "int", "deep": "bool", "ratio": "float", "return": "str",
+        "path": "str",
+        "count": "int",
+        "deep": "bool",
+        "ratio": "float",
+        "return": "str",
     }
     m = _ConcreteModel("m")
     props = m._function_to_openai_tool(pep563_tool)["function"]["parameters"]["properties"]
@@ -440,8 +466,10 @@ def test_tool_call_id_matching_and_results() -> None:
     m.add_message_to_conversation("assistant", "calling")
     m._replace_last_assistant_with_tool_calls(
         "calling",
-        [{"id": "id1", "name": "f", "arguments": {"a": 1}},
-         {"id": "id2", "name": "g", "arguments": {}}],
+        [
+            {"id": "id1", "name": "f", "arguments": {"a": 1}},
+            {"id": "id2", "name": "g", "arguments": {}},
+        ],
     )
     last = m.conversation[-1]
     assert last["role"] == "assistant" and last["content"] == "calling"
@@ -453,7 +481,9 @@ def test_tool_call_id_matching_and_results() -> None:
     )
     tools = m.conversation[-3:]
     assert [(t["role"], t["tool_call_id"], t["content"]) for t in tools] == [
-        ("tool", "id1", "r1"), ("tool", "id2", "r2"), ("tool", "call_h_2", "r3"),
+        ("tool", "id1", "r1"),
+        ("tool", "id2", "r2"),
+        ("tool", "call_h_2", "r3"),
     ]
 
 
@@ -469,10 +499,13 @@ def test_find_tool_calls_from_responses_items() -> None:
     ]
     assert m._find_tool_call_ids_from_last_assistant() == [("g", "c2")]
     m.conversation = [
-        {"role": "assistant", "content": [
-            {"type": "text", "text": "hi"},
-            {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
-        ]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
+            ],
+        },
     ]
     assert m._find_tool_call_ids_from_last_assistant() == [("f", "t1")]
     m.conversation = [{"role": "assistant", "content": "plain"}]
@@ -482,11 +515,13 @@ def test_find_tool_calls_from_responses_items() -> None:
 def test_responses_items_to_chat_messages() -> None:
     """Responses-API items convert to Chat-Completions messages losslessly."""
     conv = [
-        {"type": "message", "role": "user",
-         "content": [{"type": "input_text", "text": "hello"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
         {"type": "reasoning", "summary": []},
-        {"type": "message", "role": "assistant",
-         "content": [{"type": "output_text", "text": "calling"}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "calling"}],
+        },
         {"type": "function_call", "call_id": "c1", "name": "f", "arguments": '{"a": 1}'},
         {"type": "function_call_output", "call_id": "c1", "output": "res"},
         {"role": "assistant", "content": "already chat format"},
@@ -495,7 +530,8 @@ def test_responses_items_to_chat_messages() -> None:
     assert out[0] == {"role": "user", "content": [{"type": "text", "text": "hello"}]}
     assert out[1]["role"] == "assistant"
     assert out[1]["tool_calls"][0] == {
-        "id": "c1", "type": "function",
+        "id": "c1",
+        "type": "function",
         "function": {"name": "f", "arguments": '{"a": 1}'},
     }
     assert out[2] == {"role": "tool", "tool_call_id": "c1", "content": "res"}
@@ -513,17 +549,10 @@ def test_binary_attachment_roundtrip() -> None:
     assert parse_binary_attachments("no sentinels") == ("no sentinels", [])
 
 
-def test_attachment_from_file(tmp_path) -> None:
-    """Attachment.from_file detects MIME type and builds data URLs."""
-    png = tmp_path / "pic.png"
-    png.write_bytes(b"pngdata")
-    att = Attachment.from_file(str(png))
-    assert att.mime_type == "image/png" and att.data == b"pngdata"
+def test_attachment_data_url() -> None:
+    """Attachment.to_data_url wraps the base64 payload with its MIME type."""
+    att = Attachment(data=b"pngdata", mime_type="image/png")
     assert att.to_data_url() == "data:image/png;base64," + att.to_base64()
-    bad = tmp_path / "notes.xyz123"
-    bad.write_bytes(b"x")
-    with pytest.raises(ValueError, match="Unsupported MIME type"):
-        Attachment.from_file(str(bad))
 
 
 def test_flatten_content_to_text() -> None:

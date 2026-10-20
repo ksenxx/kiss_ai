@@ -13,6 +13,7 @@ depend on itself and ``kiss.core``.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
@@ -58,6 +59,7 @@ def generate_commit_message_from_diff(
     diff_text: str,
     user_prompt: str | None = None,
     task_result: str | None = None,
+    bill_to: Any = None,
 ) -> str:
     """Generate a git commit message from a diff via LLM.
 
@@ -78,6 +80,10 @@ def generate_commit_message_from_diff(
             commit-message generation from the UI).
         task_result: The task's result summary to append to the
             commit message, or ``None`` when not available.
+        bill_to: The :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent`
+            whose task the commit is made for; the model call's spend
+            and tokens are attributed to it.  ``None`` (a manual commit
+            outside any task) leaves the spend unattributed.
 
     Returns:
         The cleaned commit-message string, or
@@ -85,7 +91,7 @@ def generate_commit_message_from_diff(
     """
     subject = FALLBACK_SUBJECT
     if diff_text:
-        subject = _commit_message_from_llm(diff_text, user_prompt, subject)
+        subject = _commit_message_from_llm(diff_text, user_prompt, subject, bill_to)
     return _with_trailers(subject, user_prompt, task_result)
 
 
@@ -121,7 +127,9 @@ def _with_trailers(
     return msg
 
 
-def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: str) -> str:
+def _commit_message_from_llm(
+    diff_text: str, user_prompt: str | None, fallback: str, bill_to: Any,
+) -> str:
     """Ask the fast model for a commit message describing *diff_text*.
 
     Args:
@@ -129,6 +137,7 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: 
         user_prompt: The task prompt behind the diff, when known; the
             model is told to phrase the subject after its intent.
         fallback: Returned when no model is available or the call fails.
+        bill_to: The agent the call's spend is attributed to, or ``None``.
     """
     if user_prompt:
         context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
@@ -150,8 +159,9 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: 
     )
     from kiss.core.kiss_agent import KISSAgent
 
+    generator = KISSAgent("Commit Message Generator")
     try:
-        raw = KISSAgent("Commit Message Generator").run(
+        raw = generator.run(
             model_name=get_fast_model(),
             prompt_template=template,
             arguments={"context": context},
@@ -162,6 +172,14 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: 
     except Exception:
         logger.debug("Commit message generation failed", exc_info=True)
         return fallback
+    finally:
+        if bill_to is not None and (generator.budget_used > 0 or generator.total_tokens_used > 0):
+            from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+
+            # Steps stay the task's own: the call is not one of its steps.
+            _attribute_sub_usage(
+                bill_to, generator.budget_used, generator.total_tokens_used, 0,
+            )
 
 
 def _append_user_prompt(message: str, user_prompt: str) -> str:

@@ -41,12 +41,7 @@ const {
   pick,
   errorNotifications,
 } = require('./workdir_helpers');
-
-function pickMachine(win, value) {
-  const select = byId(win, 'chat-machine');
-  select.value = value;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
+const {pickMachine} = require('./simplify2_harness');
 
 const NOW = Date.now() / 1000;
 const LOCAL_RECENTS = [

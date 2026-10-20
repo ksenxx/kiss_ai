@@ -6,7 +6,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  rowsByTitle,
+} = require('./simplify2_harness');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
@@ -114,18 +118,6 @@ const SESSIONS_FIXTURE = [
     endTs: 0,
   },
 ];
-
-function rowsByTitle(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
-}
 
 function metricsText(row) {
   const m = row.querySelector('.running-item-metrics');

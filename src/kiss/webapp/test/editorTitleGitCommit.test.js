@@ -19,11 +19,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, click} = require('./simplify2_harness');
-
-function byType(posted, type) {
-  return posted.filter(m => m.type === type);
-}
+const {makePage, send, click, ofType} = require('./simplify2_harness');
 
 const {win, posted} = makePage({bodyClass: 'remote-chat'});
 const ROOT = win._testApi.getActiveTabId();
@@ -43,7 +39,7 @@ assert.ok(
 );
 
 click(win, autocommitBtn);
-let actions = byType(posted, 'autocommitAction');
+let actions = ofType(posted, 'autocommitAction');
 assert.strictEqual(actions.length, 1, 'one autocommitAction posted');
 assert.strictEqual(actions[0].tabId, ROOT, 'commits the active chat tab');
 assert.strictEqual(
@@ -63,7 +59,7 @@ assert.strictEqual(
 
 // --- a duplicate while in flight is dropped -------------------------------
 click(win, autocommitBtn);
-actions = byType(posted, 'autocommitAction');
+actions = ofType(posted, 'autocommitAction');
 assert.strictEqual(
   actions.length,
   1,
@@ -85,7 +81,7 @@ assert.strictEqual(
 );
 
 click(win, autocommitBtn);
-actions = byType(posted, 'autocommitAction');
+actions = ofType(posted, 'autocommitAction');
 assert.strictEqual(actions.length, 2, 'a re-armed click commits again');
 assert.strictEqual(actions[1].tabId, ROOT);
 assert.strictEqual(autocommitBtn.disabled, true, 'and disables in flight');

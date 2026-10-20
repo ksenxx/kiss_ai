@@ -131,6 +131,15 @@ class RemoteViewStream(MachineStream):
     Attributes:
         terminals: By terminal tab id, the connection that opened it
             (the one its output goes to).
+        opening: The terminal tab ids whose ``terminalOpen`` the machine
+            has not answered with ``terminalOpened`` yet: a
+            ``terminalExit`` arriving meanwhile is the previous shell's
+            (one a hang-up closed just before the re-open) and goes to
+            nobody.  The replies carry no request id, so an open
+            answered only after a close and re-open of its tab (a
+            round trip's window) is taken for the re-open's answer and
+            lets the old exit through; the page then shows an exit
+            note its fresh shell clears.
         openers: The connections whose ``browserOpen`` awaits its
             reply (the focused ``openBrowserTab`` or a ``browserError``
             addressed to the stream), oldest first.
@@ -160,6 +169,7 @@ class RemoteViewStream(MachineStream):
                 password.
         """
         self.terminals: dict[str, str] = {}
+        self.opening: set[str] = set()
         self.openers: list[str] = []
         self.browser_tabs: dict[str, dict[str, Any]] = {}
         self.viewers: dict[str, set[str]] = {}
@@ -220,9 +230,14 @@ class RemoteViewStream(MachineStream):
     def _relay_terminal(self, msg: dict[str, Any]) -> None:
         """A terminal event goes to the connection that opened the terminal."""
         tab_id = str(msg.get("tab_id") or "")
+        kind = msg.get("type")
         with self.lock:
             if self.retired:
                 return
+            if kind == "terminalOpened":
+                self.opening.discard(tab_id)
+            elif kind == "terminalExit" and tab_id in self.opening:
+                return  # the shell closed just before the re-open; not the new one's
             conn_id = self.terminals.get(tab_id, "")
             if conn_id:
                 self._owner.deliver_to(conn_id, json.dumps(self._stamped(msg)))
@@ -444,11 +459,13 @@ class RemoteViews:
                 return False
             if name == "terminalOpen":
                 stream.terminals[tab_id] = conn_id
+                stream.opening.add(tab_id)
             elif name in TERMINAL_COMMANDS:
                 if stream.terminals.get(tab_id) != conn_id:
                     return False
                 if name == "terminalClose":
                     del stream.terminals[tab_id]
+                    stream.opening.discard(tab_id)
             elif name == "browserOpen":
                 stream.openers.append(conn_id)
             elif name == "browserViewport":
@@ -613,6 +630,7 @@ class RemoteViews:
                 if stream.retired or stream.terminals.get(tab_id) != conn_id:
                     return
                 del stream.terminals[tab_id]
+                stream.opening.discard(tab_id)
             self._send_quietly(stream, {"type": "terminalClose", "tab_id": tab_id})
         self.close_if_idle(stream)
 
@@ -665,6 +683,7 @@ class RemoteViews:
                         "machine": name,
                     }))
             stream.terminals.clear()
+            stream.opening.clear()
             stream.openers.clear()
             stream.browser_tabs.clear()
             stream.viewers.clear()

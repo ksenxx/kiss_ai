@@ -339,35 +339,21 @@ function testActionsStillWork() {
 
 function testNoTimerWithoutLabels() {
   const {execFileSync} = require('child_process');
-  const script = [
-    "const fs = require('fs');",
-    "const path = require('path');",
-    "const {JSDOM} = require('jsdom');",
-    'const MEDIA = ' + JSON.stringify(MEDIA) + ';',
-    "let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');",
-    "html = html.replace(/\\{\\{MODEL_NAME\\}\\}/g, 'test-model');",
-    "html = html.replace(/\\{\\{[A-Z_]+\\}\\}/g, '');",
-    "html = html.replace(/<script[^>]*>[\\s\\S]*?<\\/script>/g, '');",
-    'const dom = new JSDOM(html, {',
-    "  runScripts: 'dangerously',",
-    "  url: 'https://localhost/',",
-    '});',
-    'const win = dom.window;',
-    'win.Element.prototype.scrollIntoView = function () {};',
-    'win.acquireTransport = function () {',
-    '  return {postMessage() {}, getState() {}, setState() {}};',
-    '};',
-    "win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));",
-    "win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));",
-    "win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));",
-    '// Deliberately NO win.close(): the process must exit by itself.',
-    "console.log('loaded');",
-  ].join('\n');
-  const out = execFileSync(process.execPath, ['-e', script], {
-    cwd: path.join(__dirname, '..'),
-    timeout: 20000,
-    encoding: 'utf8',
-  });
+  // The page is built the way every suite builds it; deliberately NO
+  // win.close(): the process must exit by itself.  The runner's V8 flags
+  // (process.execArgv) are passed on, since they are what keeps a node
+  // process from hanging at exit.
+  const script =
+    "require('./test/simplify2_harness').makePage(); console.log('loaded');";
+  const out = execFileSync(
+    process.execPath,
+    [...process.execArgv, '-e', script],
+    {
+      cwd: path.join(__dirname, '..'),
+      timeout: 20000,
+      encoding: 'utf8',
+    },
+  );
   assert.ok(
     out.indexOf('loaded') !== -1,
     'the probe process ran main.js to completion',

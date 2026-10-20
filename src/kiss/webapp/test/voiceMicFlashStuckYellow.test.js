@@ -20,10 +20,11 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {send} = require('./simplify2_harness');
+const {micBtn} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-
 
 class FakeRecognizer {
   constructor() {
@@ -131,10 +132,6 @@ function tick() {
   return new Promise(resolve => setTimeout(resolve, 20));
 }
 
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
-}
-
 /** Turn the mic on and let the (instantly granted) pipeline come up. */
 async function startMic(page) {
   micBtn(page.win).click();
@@ -143,10 +140,6 @@ async function startMic(page) {
     micBtn(page.win).classList.contains('voice-listening'),
     `pipeline must be live: ${micBtn(page.win).className}`,
   );
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 /** One onaudioprocess block: 4096 samples at 16 kHz = 256 ms. */

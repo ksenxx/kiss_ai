@@ -61,8 +61,8 @@ _INJECT_AFTER_SECONDS = 1.0
 _DRAIN_SECONDS = 1.0
 """How long :func:`drain_pending_interrupt` waits for an injected exception.
 
-Delivery normally takes microseconds: the wait loop's backward jump is
-an eval-breaker check.
+Delivery normally takes under a millisecond: the return from the wait
+loop's ``sleep`` and its backward jump are eval-breaker checks.
 """
 
 
@@ -221,18 +221,20 @@ def drain_pending_interrupt() -> None:
     Left alone, the exception would surface at some later bytecode
     boundary — inside the agent loop, the next model call, or an
     ``except`` handler an explicit raise entered — and be misattributed.
-    A busy loop's backward jump is an eval-breaker check, so the
-    exception lands here within microseconds; if it does not (a tool
-    that swallowed it with ``except BaseException``), the same exception
-    is raised explicitly, so the user's Stop is honored either way.  No
-    lock is held while waiting.
+    The return from each 1 ms ``sleep`` (a C call) and the loop's
+    backward jump are eval-breaker checks, so the exception lands here
+    within a millisecond; if it does not (a tool that swallowed it with
+    ``except BaseException``), the loop idles out :data:`_DRAIN_SECONDS`
+    without burning a core and the same exception is raised explicitly,
+    so the user's Stop is honored either way.  No lock is held while
+    waiting.
 
     Raises:
         ToolCallInterrupted: Always — asynchronously or explicitly.
     """
     deadline = time.monotonic() + _DRAIN_SECONDS
     while time.monotonic() < deadline:
-        pass
+        time.sleep(0.001)
     raise ToolCallInterrupted(USER_INTERRUPTED_MESSAGE)
 
 

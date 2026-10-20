@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import shutil
 import tempfile
 import urllib.request
@@ -124,10 +125,12 @@ class TestAppWindowConnection(IsolatedAsyncioTestCase):
         self.assertIs(await self._open(), False)
         await self._close(other)
         self.assertIs(await self._open(), False)
-        # Nothing runs from the (absent) brand bundle under this HOME, so
-        # the quit check, armed for that bundle, has nothing to do.
-        self.assertIsNone(standalone_app.macos_bundle_pid(standalone_app.macos_bundle_path()))
-        await asyncio.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 0.5)
+        # On macOS the last close armed the quit check for the brand bundle;
+        # nothing runs from the (absent) bundle under this HOME, so the
+        # check has nothing to do.  Wait for it to run before HOME goes.
+        if platform.system() == "Darwin":
+            self.assertIsNone(standalone_app.macos_bundle_pid(standalone_app.macos_bundle_path()))
+            await asyncio.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 0.5)
 
     async def test_a_daemon_that_does_not_answer_gives_no_verdict(self) -> None:
         """kiss-app gets None (not False) from a URL that serves no JSON state."""

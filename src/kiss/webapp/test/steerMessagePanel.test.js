@@ -14,6 +14,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {readyTabId, output} = harness;
 
 /** The harness page with main.css applied; `win.__posted` is its ledger. */
 function makePage() {
@@ -25,22 +26,12 @@ function makePage() {
 
 const send = harness.send;
 
-function readyTabId(win) {
-  const ready = win.__posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
-  return ready.tabId;
-}
-
-function output(win) {
-  return win.document.getElementById('output');
-}
-
 function startTask(win, task) {
   send(win, {
     type: 'task_events',
     events: [],
     task,
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});
@@ -51,8 +42,18 @@ function sendStep(win, i) {
   send(win, {type: 'thinking_start'});
   send(win, {type: 'thinking_delta', text: 'thought ' + i});
   send(win, {type: 'thinking_end'});
-  send(win, {type: 'tool_call', name: 'Bash', command: 'echo ' + i, description: 'step ' + i});
-  send(win, {type: 'tool_result', name: 'Bash', output: String(i), success: true});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'echo ' + i,
+    description: 'step ' + i,
+  });
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    output: String(i),
+    success: true,
+  });
 }
 
 /** The stylesheet rule whose selector list names *selector*. */
@@ -62,7 +63,13 @@ function ruleFor(win, selector) {
     const rules = sheets[s].cssRules;
     for (let r = 0; r < rules.length; r++) {
       const sel = rules[r].selectorText || '';
-      if (sel.split(',').map(x => x.trim()).includes(selector)) return rules[r];
+      if (
+        sel
+          .split(',')
+          .map(x => x.trim())
+          .includes(selector)
+      )
+        return rules[r];
     }
   }
   return null;
@@ -72,16 +79,32 @@ function testSteerPromptRendersLikeTaskPanel() {
   const win = makePage();
   startTask(win, 'Fix the login bug');
   sendStep(win, 1);
-  send(win, {type: 'prompt', text: 'Also check the logout path\nand the tests', steer: true, ts: 1767225600000});
+  send(win, {
+    type: 'prompt',
+    text: 'Also check the logout path\nand the tests',
+    steer: true,
+    ts: 1767225600000,
+  });
   const msg = output(win).querySelector('.ev.user-msg');
   assert.ok(msg, 'the steering message renders a .ev.user-msg panel');
   assert.ok(msg.classList.contains('collapsible'), 'it is a collapsible panel');
   const hdr = msg.querySelector('.task-panel-h');
-  assert.ok(hdr && hdr.classList.contains('collapse-header'), 'its header is the task panel header');
+  assert.ok(
+    hdr && hdr.classList.contains('collapse-header'),
+    'its header is the task panel header',
+  );
   assert.strictEqual(hdr.firstChild.textContent, 'Message', 'headed "Message"');
   const body = msg.querySelector('.task-panel-text');
-  assert.strictEqual(body.textContent, 'Also check the logout path\nand the tests', 'plain text body');
-  assert.strictEqual(msg.dataset.rawText, 'Also check the logout path\nand the tests', 'copyable raw text');
+  assert.strictEqual(
+    body.textContent,
+    'Also check the logout path\nand the tests',
+    'plain text body',
+  );
+  assert.strictEqual(
+    msg.dataset.rawText,
+    'Also check the logout path\nand the tests',
+    'copyable raw text',
+  );
   assert.strictEqual(
     output(win).querySelectorAll('.ev.prompt').length,
     1,
@@ -91,7 +114,11 @@ function testSteerPromptRendersLikeTaskPanel() {
   const task = output(win).querySelector('.ev.task-panel');
   assert.ok(task, 'the task panel is on screen');
   const rule = ruleFor(win, '.ev.user-msg');
-  assert.ok(rule && rule.selectorText.includes('.ev.task-panel'), 'the task panel rule also names .ev.user-msg: ' + (rule && rule.selectorText));
+  assert.ok(
+    rule && rule.selectorText.includes('.ev.task-panel'),
+    'the task panel rule also names .ev.user-msg: ' +
+      (rule && rule.selectorText),
+  );
   assert.strictEqual(
     win.getComputedStyle(msg).backgroundColor,
     win.getComputedStyle(task).backgroundColor,
@@ -102,16 +129,25 @@ function testSteerPromptRendersLikeTaskPanel() {
     win.getComputedStyle(task.querySelector('.task-panel-text')).whiteSpace,
     'same text layout as the task panel',
   );
-  assert.ok(msg.querySelector('.panel-ts'), 'the message carries its event timestamp');
+  assert.ok(
+    msg.querySelector('.panel-ts'),
+    'the message carries its event timestamp',
+  );
   win.close();
-  console.log('  ok - a steer prompt renders as a "Message" panel like the task panel');
+  console.log(
+    '  ok - a steer prompt renders as a "Message" panel like the task panel',
+  );
 }
 
 function testPlainPromptStaysPromptPanel() {
   const win = makePage();
   startTask(win, 'Plain prompt');
   send(win, {type: 'prompt', text: 'authoritative prompt text'});
-  assert.strictEqual(output(win).querySelectorAll('.ev.user-msg').length, 0, 'no Message panel');
+  assert.strictEqual(
+    output(win).querySelectorAll('.ev.user-msg').length,
+    0,
+    'no Message panel',
+  );
   const prompts = output(win).querySelectorAll('.ev.prompt');
   assert.ok(prompts.length >= 1, 'the plain prompt renders a Prompt panel');
   win.close();
@@ -125,7 +161,10 @@ function testMessagePanelNeverAutoFolded() {
   send(win, {type: 'prompt', text: 'steer one', steer: true});
   for (let i = 2; i <= 5; i++) sendStep(win, i);
   let msg = output(win).querySelector('.ev.user-msg');
-  assert.ok(!msg.classList.contains('collapsed'), 'the streaming sweep leaves the message open');
+  assert.ok(
+    !msg.classList.contains('collapsed'),
+    'the streaming sweep leaves the message open',
+  );
   assert.ok(
     output(win).querySelector('.tc-bash').classList.contains('collapsed'),
     'while the older tool panels fold',
@@ -133,7 +172,10 @@ function testMessagePanelNeverAutoFolded() {
   // A summary tool call adopts the tool panels but leaves the message.
   send(win, {type: 'tool_call', name: 'summary', description: 'five steps'});
   msg = output(win).querySelector('.ev.user-msg');
-  assert.ok(!msg.closest('.summary-sub'), 'a summary does not adopt the message');
+  assert.ok(
+    !msg.closest('.summary-sub'),
+    'a summary does not adopt the message',
+  );
   assert.strictEqual(msg.parentElement, output(win), 'it stays top-level');
   assert.ok(!msg.classList.contains('collapsed'));
   win.close();
@@ -142,23 +184,47 @@ function testMessagePanelNeverAutoFolded() {
   const win2 = makePage();
   const events = [{type: 'prompt', text: 'replayed'}];
   for (let i = 1; i <= 2; i++) {
-    events.push({type: 'tool_call', name: 'Bash', command: 'x', description: 'd' + i});
-    events.push({type: 'tool_result', name: 'Bash', output: 'y', success: true});
+    events.push({
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'x',
+      description: 'd' + i,
+    });
+    events.push({
+      type: 'tool_result',
+      name: 'Bash',
+      output: 'y',
+      success: true,
+    });
     events.push({type: 'prompt', text: 'steer ' + i, steer: true});
   }
   events.push({type: 'result', text: 'done', success: true});
-  send(win2, {type: 'task_events', events, task: 'replayed', tabId: readyTabId(win2), chat_id: 'c-replay'});
+  send(win2, {
+    type: 'task_events',
+    events,
+    task: 'replayed',
+    tabId: readyTabId(win2.__posted),
+    chat_id: 'c-replay',
+  });
   send(win2, {type: 'status', running: false});
   send(win2, {type: 'usage_info', text: 'Steps: 2/10'});
   const msgs = Array.from(output(win2).querySelectorAll('.ev.user-msg'));
   assert.strictEqual(msgs.length, 2, 'both replayed messages render');
   for (const m of msgs) {
     assert.ok(!m.classList.contains('collapsed'), 'a replayed message is open');
-    assert.ok(!m.classList.contains('chv-hidden'), 'and not hidden by the digest');
-    assert.strictEqual(m.querySelector('.task-panel-h').firstChild.textContent, 'Message');
+    assert.ok(
+      !m.classList.contains('chv-hidden'),
+      'and not hidden by the digest',
+    );
+    assert.strictEqual(
+      m.querySelector('.task-panel-h').firstChild.textContent,
+      'Message',
+    );
   }
   assert.ok(
-    Array.from(output(win2).querySelectorAll('.tc-bash')).every(p => p.classList.contains('collapsed')),
+    Array.from(output(win2).querySelectorAll('.tc-bash')).every(p =>
+      p.classList.contains('collapsed'),
+    ),
     'the replay folds the tool panels',
   );
   win2.close();
@@ -173,8 +239,16 @@ function testMessagePanelFoldsByClick() {
   const hdr = msg.querySelector('.collapse-header');
   hdr.click();
   assert.ok(msg.classList.contains('collapsed'), 'the header click folds it');
-  assert.strictEqual(win.getComputedStyle(msg.querySelector('.task-panel-text')).display, 'none', 'the text hides');
-  assert.strictEqual(hdr.querySelector('.collapse-preview').textContent, 'fold me please', 'the header previews the message');
+  assert.strictEqual(
+    win.getComputedStyle(msg.querySelector('.task-panel-text')).display,
+    'none',
+    'the text hides',
+  );
+  assert.strictEqual(
+    hdr.querySelector('.collapse-preview').textContent,
+    'fold me please',
+    'the header previews the message',
+  );
   hdr.click();
   assert.ok(!msg.classList.contains('collapsed'), 'a second click unfolds it');
   win.close();

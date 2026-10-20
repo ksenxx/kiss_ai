@@ -19,6 +19,7 @@ const {
   makePage: makeChatPage,
   send,
   fakeMatchMedia,
+  sendEmptyWorkDir,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -73,10 +74,6 @@ function countMessages(posted, type) {
 function lastMessage(posted, type) {
   const msgs = posted.filter(msg => msg && msg.type === type);
   return msgs.length ? msgs[msgs.length - 1] : null;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
 }
 
 function openSidebar(win) {

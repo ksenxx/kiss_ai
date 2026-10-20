@@ -35,7 +35,6 @@ import requests
 from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
-    WhatsappSea,
     _bridge_log_path,
     _bridge_pid_path,
     _config,
@@ -47,6 +46,7 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     _write_qr_html,
     main,
 )
+from kiss.tests.agents.third_party_agents.channel_agent_registry import EXPECTED_AUTH_TOOLS
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import JsonWebhookServer
 from kiss.tests.agents.third_party_agents.whatsapp_bridge import bridge_server
@@ -424,8 +424,8 @@ class TestChannelProtocol:
             with pytest.raises(RuntimeError, match="not on WhatsApp"):
                 backend.send_message("14155550001", "hello")
 
-    def test_send_message_raises_when_bridge_down(self, tmp_path: Path) -> None:
-        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=1)
+    def test_send_message_raises_when_bridge_down(self, tmp_path: Path, refusing_port: int) -> None:
+        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=refusing_port)
         with pytest.raises(RuntimeError, match="start_whatsapp_bridge"):
             backend.send_message("14155550001", "hello")
 
@@ -435,10 +435,10 @@ class TestChannelProtocol:
         assert backend.connect() is False
         assert "not paired" in backend.connection_info
 
-    def test_connect_paired_but_bridge_down(self, tmp_path: Path) -> None:
+    def test_connect_paired_but_bridge_down(self, tmp_path: Path, refusing_port: int) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
-        _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
+        _config.save({"repo_dir": str(tmp_path), "bridge_port": str(refusing_port)})
         backend = WhatsAppChannelBackend()
         assert backend.connect() is False
         assert "not running" in backend.connection_info
@@ -542,14 +542,14 @@ class TestRestTools:
         assert (request["method"], request["path"]) == ("POST", "/api/download")
         assert request["json"] == {"message_id": "m3", "chat_jid": _ALICE}
 
-    def test_download_whatsapp_media_bridge_down(self) -> None:
-        backend = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=1)
+    def test_download_whatsapp_media_bridge_down(self, refusing_port: int) -> None:
+        backend = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=refusing_port)
         data = json.loads(backend.download_whatsapp_media("m3", _ALICE))
         assert data["ok"] is False
 
-    def test_bridge_running_requires_405(self) -> None:
+    def test_bridge_running_requires_405(self, refusing_port: int) -> None:
         assert self.backend._bridge_running() is True
-        down = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=1)
+        down = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=refusing_port)
         assert down._bridge_running() is False
 
     def test_bridge_stand_in_accepts_only_post(self) -> None:
@@ -562,18 +562,8 @@ class TestRestTools:
 
 
 # ----------------------------------------------------------------------
-# Agent, auth tools, and WhatsappSea().tools([]) contract
+# Agent and auth tools
 # ----------------------------------------------------------------------
-
-_AUTH_TOOL_NAMES = [
-    "check_whatsapp_auth",
-    "authenticate_whatsapp",
-    "start_whatsapp_bridge",
-    "get_whatsapp_qr_code",
-    "wait_for_whatsapp_pairing",
-    "stop_whatsapp_bridge",
-    "clear_whatsapp_auth",
-]
 
 
 class TestAgentAndAuthTools:
@@ -581,7 +571,7 @@ class TestAgentAndAuthTools:
         _config.save({"repo_dir": str(tmp_path / "nowhere")})
         agent = WhatsAppAgent()
         assert agent._is_authenticated() is False
-        assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
+        assert [t.__name__ for t in agent._get_tools()] == EXPECTED_AUTH_TOOLS["WhatsAppAgent"]
 
     def test_paired_agent_exposes_backend_tools(self, tmp_path: Path) -> None:
         _make_db(tmp_path)
@@ -594,12 +584,6 @@ class TestAgentAndAuthTools:
         assert "send_whatsapp_message" in names
         assert "list_whatsapp_chats" in names
         assert "download_whatsapp_media" in names
-
-    def test_tools_module_contract(self, tmp_path: Path) -> None:
-        _config.save({"repo_dir": str(tmp_path / "nowhere")})
-        names = [t.__name__ for t in WhatsappSea().tools([])]
-        assert names == _AUTH_TOOL_NAMES
-        assert callable(main)
 
     def test_check_auth_reports_setup_needed(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "1"})

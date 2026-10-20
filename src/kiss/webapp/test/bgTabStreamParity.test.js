@@ -63,12 +63,14 @@ const RECORDER_PROBE = [
  */
 function recordAsDaemon(events) {
   // `uv run` takes the project lock, so a concurrent `uv sync` elsewhere
-  // can stall it; the probe itself runs in about a second.
+  // can stall it; the probe itself runs in about a second.  The timeout
+  // stays well under the runner's two-minute cap on the whole suite, so a
+  // stalled `uv` is reported by the assertion below, not as a hung suite.
   const res = spawnSync('uv', ['run', 'python', '-c', RECORDER_PROBE], {
     cwd: REPO_ROOT,
     input: JSON.stringify(events),
     encoding: 'utf8',
-    timeout: 120000,
+    timeout: 30000,
   });
   assert.ok(
     !res.error && res.status === 0,

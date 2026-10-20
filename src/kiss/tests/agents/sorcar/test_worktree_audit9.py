@@ -12,7 +12,7 @@ BUG-39: `is_running_non_wt` flag is now cleared at the very start of
 BUG-40 / INC-4: `_do_merge` now returns `(MergeResult.CHECKOUT_FAILED, "")`
     instead of `(None, checkout_error_str)`.  `merge` checks
     `result == MergeResult.CHECKOUT_FAILED` instead of `result is None`,
-    so the checkout error is never misattributed to `_stash_pop_warning`.
+    so the checkout error is never misattributed to the pending warning.
 
 BUG-41 / RED-6 (obsolete): covered `_start_merge_session`, removed
     together with the interactive diff/merge review workflow.
@@ -74,13 +74,13 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
 class TestBug40Inc4Fix:
     """BUG-40/INC-4 FIX: _do_merge returns MergeResult.CHECKOUT_FAILED
     instead of (None, err), and merge() never misattributes checkout
-    errors to _stash_pop_warning."""
+    errors to the pending warning."""
 
 
 
 
     def test_checkout_error_not_stored_as_stash_warning(self, tmp_path):
-        """Checkout failure does NOT set _stash_pop_warning."""
+        """Checkout failure does NOT set the pending warning."""
         repo = _make_repo(tmp_path)
         agent = ChatSorcarAgent("test")
         agent._chat_id = "bug40"
@@ -102,8 +102,8 @@ class TestBug40Inc4Fix:
 
         message = agent.merge()
 
-        assert agent._stash_pop_warning is None, (
-            "Checkout error must NOT be stored in _stash_pop_warning"
+        assert agent._merge_conflict_warning is None, (
+            "Checkout error must NOT be stored in the pending warning"
         )
         assert "checkout" in message.lower()
         assert agent._wt is not None, "the branch must be kept after CHECKOUT_FAILED"

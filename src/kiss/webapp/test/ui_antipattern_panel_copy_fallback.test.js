@@ -15,7 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep, waitFor} = require('./simplify2_harness');
+const {sleep, waitFor, click} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
@@ -46,12 +46,6 @@ function makePage(writeTextImpl) {
   return {win, btn};
 }
 
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-}
-
 function isCheck(btn) {
   return !!btn.querySelector('svg polyline');
 }
@@ -59,7 +53,6 @@ function isCheck(btn) {
 function isCross(btn) {
   return btn.querySelectorAll('svg line').length === 2;
 }
-
 
 async function main() {
   await test('a rejected writeText falls back to execCommand and reports success', async () => {

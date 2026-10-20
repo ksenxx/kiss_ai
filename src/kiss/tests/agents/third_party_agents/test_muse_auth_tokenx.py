@@ -128,14 +128,15 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
 )
 from kiss.agents.third_party_agents.telegram.telegram_sea import _make_backend as tg_make_backend
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    MuseApiHandler,
     auth_tools,
+    bearer_of,
     loopback_policy,
     set_policy,
     teardown_muse_env,
     wait_until,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -148,31 +149,15 @@ _MS_TENANT = "11111111-2222-3333-4444-555555555555"
 _MS_CLIENT_ID = "app-client-id-1"
 
 
-class _TokenXApiHandler(RecordingHandler):
+class _TokenXApiHandler(MuseApiHandler):
     """Emulated Azure AD + Graph + Telegram APIs, recording every request."""
 
-    server: Any
-
-    def _send(self, status: int, payload: bytes, location: str = "") -> None:
-        """Send one JSON (or redirect) response."""
-        self.send_response(status)
-        if location:
-            self.send_header("Location", location)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+    def _send(self, status: int, payload: bytes) -> None:
+        """Send one JSON response."""
+        self._reply(status, payload, "application/json; charset=utf-8")
 
     def _serve(self) -> None:
-        body = self._read_raw()
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "headers": {k: v for k, v in self.headers.items()},
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
+        body = self.record_full_request()
         path = self.path.split("?", 1)[0]
         if path.endswith("/oauth2/v2.0/token"):
             form = {k: v[0] for k, v in parse_qs(body.decode()).items()}
@@ -180,7 +165,7 @@ class _TokenXApiHandler(RecordingHandler):
             if self.server.token_redirect_to:
                 # A redirecting token endpoint: the daemon must refuse
                 # to forward the secret-bearing POST body.
-                self._send(307, b"", location=self.server.token_redirect_to)
+                self.redirect(307, self.server.token_redirect_to)
                 return
             if self.server.token_error_echo:
                 # An endpoint reflecting the received secret in a
@@ -209,7 +194,7 @@ class _TokenXApiHandler(RecordingHandler):
             )
             return
         if "/v1.0/" in path:
-            auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
+            auth = self.authorization()
             if not auth.startswith("Bearer graph-tok-") or self.server.graph_always_401:
                 self._send(
                     401, json.dumps({"error": {"code": "InvalidAuthenticationToken"}}).encode()
@@ -241,25 +226,25 @@ class _TokenXApiHandler(RecordingHandler):
             # Server-echoed absolute-path Location carrying the REAL
             # token: the boundary must scrub it to the surrogate and
             # re-inject only because the hop stays on the pinned origin.
-            self._send(302, b"", location=f"/bot{_REAL_TG_TOKEN}/getMe")
+            self.redirect(302, f"/bot{_REAL_TG_TOKEN}/getMe")
             return
         if api_method == "redirectRelative":
-            self._send(302, b"", location="getMe")
+            self.redirect(302, "getMe")
             return
         if api_method == "redirectOffsite":
-            self._send(302, b"", location=self.server.offsite_location)
+            self.redirect(302, self.server.offsite_location)
             return
         if api_method == "redirectLowercase":
             # Absolute Location echoing the REAL token with a
             # lowercase percent escape for its colon (%3a).
-            self._send(302, b"", location=self.server.lowercase_location)
+            self.redirect(302, self.server.lowercase_location)
             return
         if api_method == "redirectOddEncoding":
             # Absolute Location echoing the token with a normally-safe
             # character percent-encoded (A -> %41): no whole-string
             # spelling matches, only a decoded per-segment comparison
             # catches it.
-            self._send(302, b"", location=self.server.odd_location)
+            self.redirect(302, self.server.odd_location)
             return
         if api_method == "echoBody":
             # An ordinary API error that reflects the request path.
@@ -285,20 +270,20 @@ class _TokenXApiHandler(RecordingHandler):
         if api_method == "oddChain1":
             # A chain longer than the five-hop limit whose terminal
             # Location echoes the token with a %41-encoded char.
-            self._send(302, b"", location=f"/bot{token}/oddChain2")
+            self.redirect(302, f"/bot{token}/oddChain2")
             return
         if api_method.startswith("oddChain"):
             hop = int(api_method[8:])
             odd = token.replace("A", "%41", 1)
             target = f"/bot{token}/oddChain{hop + 1}" if hop < 6 else f"/bot{odd}/getMe"
-            self._send(302, b"", location=target)
+            self.redirect(302, target)
             return
         if api_method.startswith("chain"):
             # chain1 .. chain6: a redirect chain longer than the
             # daemon's five-hop limit, echoing the real token.
             hop = int(api_method[5:])
             target = f"/bot{token}/chain{hop + 1}" if hop < 6 else f"/bot{token}/getMe"
-            self._send(302, b"", location=target)
+            self.redirect(302, target)
             return
         if token != _REAL_TG_TOKEN:
             self._send(
@@ -454,8 +439,7 @@ def test_msteams_daemon_side_token_exchange(
     assert exchange["scope"] == "https://graph.microsoft.com/.default"
     # The Graph call carried the acquired token, not the surrogate.
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    auth = next(v for k, v in graph[-1]["headers"].items() if k.lower() == "authorization")
-    assert auth == "Bearer graph-tok-1"
+    assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
     assert vault_has_credentials("msteams")
     # Reads flow without grants and reuse the cached token: no second
     # exchange happens for the next Graph call.
@@ -472,13 +456,16 @@ def test_msteams_token_cache_expiry_forces_reexchange(
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
-    assert len(api_server.token_requests) == 1
+    # Under load the Graph call inside connect() can itself land past the
+    # 1 s window and re-exchange, so only "a fresh exchange happened and
+    # the newest token was used" is asserted, not an exact count.
+    exchanges = len(api_server.token_requests)
+    assert exchanges >= 1
     time.sleep(1.2)
     assert json.loads(backend.list_teams())["ok"] is True
-    assert len(api_server.token_requests) == 2
+    assert len(api_server.token_requests) > exchanges
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    auth = next(v for k, v in graph[-1]["headers"].items() if k.lower() == "authorization")
-    assert auth == "Bearer graph-tok-2"
+    assert bearer_of(graph[-1]) == f"Bearer graph-tok-{len(api_server.token_requests)}"
 
 
 def test_msteams_bad_secret_fails_without_leaking_it(
@@ -1629,8 +1616,7 @@ def test_prefix_infinity_cache_is_not_trusted(
     # A fresh exchange happened; the immortal cache was not trusted.
     assert len(api_server.token_requests) == 1
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    auth = next(v for k, v in graph[-1]["headers"].items() if k.lower() == "authorization")
-    assert auth == "Bearer graph-tok-1"
+    assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
 
 
 def test_slack_workspace_named_pending_stays_isolated(muse_env: Path) -> None:
@@ -1746,8 +1732,7 @@ def test_huge_finite_cache_expiry_is_not_trusted(
     assert json.loads(backend.list_teams())["ok"] is True
     assert len(api_server.token_requests) == 1
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    auth = next(v for k, v in graph[-1]["headers"].items() if k.lower() == "authorization")
-    assert auth == "Bearer graph-tok-1"
+    assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
 
 
 def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:

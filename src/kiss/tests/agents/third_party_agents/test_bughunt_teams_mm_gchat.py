@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from typing import cast
 
 import pytest
 
@@ -40,15 +39,12 @@ class _GraphHandler(RecordingHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a recorded GET with a Graph list payload."""
-        cast(RecordingServer, self.server).requests.append({"method": "GET", "path": self.path})
+        self.record_request(None)
         self._json(200, {"value": [dict(_GRAPH_MESSAGE)]})
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Serve a recorded POST with a Graph create payload."""
-        body = self._read_raw().decode()
-        cast(RecordingServer, self.server).requests.append(
-            {"method": "POST", "path": self.path, "body": body}
-        )
+        self.record_request(self._read_raw().decode())
         self._json(200, {"id": "NEW1"})
 
 
@@ -73,10 +69,10 @@ def test_msteams_poll_uses_channels_url_and_message_ids(graph_server) -> None:
     """poll_messages must hit /channels/ and emit message ids as ts/thread_ts."""
     backend = _make_backend(graph_server)
     msgs, cursor = backend.poll_messages("team1:chan1", "0", limit=5)
-    path = _paths(graph_server)[0]
-    assert "/teams/team1/channels/chan1/messages" in path
-    assert "third_party_agents" not in path
-    assert "filter" not in path
+    req = graph_server.requests[0]
+    assert "/teams/team1/channels/chan1/messages" in req["path"]
+    assert "third_party_agents" not in req["path"]
+    assert "$filter" not in req["query"]
     assert len(msgs) == 1
     assert msgs[0]["ts"] == "MSG1"
     assert msgs[0]["thread_ts"] == "MSG1"
@@ -88,9 +84,7 @@ def test_msteams_poll_applies_filter_for_real_cursor(graph_server) -> None:
     """A genuine datetime cursor still produces a $filter query."""
     backend = _make_backend(graph_server)
     backend.poll_messages("team1:chan1", "2024-01-01T00:00:00Z", limit=5)
-    path = _paths(graph_server)[0]
-    assert "filter" in path
-    assert "2024-01-01" in path
+    assert "2024-01-01" in graph_server.requests[0]["query"]["$filter"][0]
 
 
 def test_msteams_send_message_reply_targets_message_id(graph_server) -> None:
@@ -118,7 +112,7 @@ def test_msteams_tool_urls_use_channels(graph_server) -> None:
     assert json.loads(backend.post_channel_message("team1", "chan1", "x"))["ok"]
     assert json.loads(backend.reply_to_message("team1", "chan1", "MSG1", "y"))["ok"]
     paths = _paths(graph_server)
-    assert any(p.split("?")[0].endswith("/teams/team1/channels") for p in paths)
+    assert any(p.endswith("/teams/team1/channels") for p in paths)
     assert any("/teams/team1/channels/chan1/messages" in p for p in paths)
     assert any("/teams/team1/channels/chan1/messages/MSG1/replies" in p for p in paths)
     assert all("third_party_agents" not in p for p in paths)
@@ -131,9 +125,9 @@ def test_msteams_poll_channel_runner_contract(graph_server) -> None:
     msg = msgs[0]
     thread_ts = msg.get("thread_ts", msg.get("ts", ""))
     backend.send_message("team1:chan1", "reply", thread_ts)
-    reply_path = _paths(graph_server)[-1]
-    assert "/messages/MSG1/replies" in reply_path
-    assert "2024-05-01" not in reply_path
+    reply = graph_server.requests[-1]
+    assert "/messages/MSG1/replies" in reply["path"]
+    assert "2024-05-01" not in reply["path"] + str(reply["query"])
 
 
 def test_mattermost_connect_returns_false_on_malformed_port() -> None:

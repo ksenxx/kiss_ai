@@ -14,7 +14,7 @@
   that ``sea_check`` and ``lint_sea`` read instead of re-running the
   SEA's ``settings()`` and ``tools()``;
 * the one parse cache behind ``declares_hidden`` / ``declares_channel``
-  / ``declared_literal`` / ``declared_bases`` sees an edit, and the
+  / ``parsed_sea`` sees an edit, and the
   model-picker detector follows an aliased base import.
 
 Every test isolates :mod:`kiss.agents.sorcar.sea_commands` like
@@ -291,22 +291,22 @@ class Sea(ChannelSea):
 
 
 def test_parse_cache_sees_an_edit_in_every_reader(tmp_path: Path) -> None:
-    """``declares_hidden``, ``declares_channel`` and ``declared_bases`` follow a rewrite."""
+    """``declares_hidden``, ``declares_channel`` and ``parsed_sea`` follow a rewrite."""
     sea = _write_sea(tmp_path / "seas", "flip", _FLIPPING_HIDDEN)
     assert sea_settings.declares_hidden(sea) is True
     assert sea_settings.declares_channel(sea) is False
-    assert sea_settings.declared_bases(sea) == {"BaseSea"}
-    assert sea_settings.declared_literal(sea, "timeout") is None
+    assert sea_settings.parsed_sea(sea).bases == {"BaseSea"}
+    assert sea_settings.parsed_sea(sea).literals.get("timeout") is None
     time.sleep(0.01)
     sea.write_text(_FLIPPING_CHANNEL, encoding="utf-8")
     assert sea_settings.declares_hidden(sea) is False
     assert sea_settings.declares_channel(sea) is True
-    assert sea_settings.declared_bases(sea) == {"ChannelSea"}
-    assert sea_settings.declared_literal(sea, "timeout") == 5
+    assert sea_settings.parsed_sea(sea).bases == {"ChannelSea"}
+    assert sea_settings.parsed_sea(sea).literals.get("timeout") == 5
     sea.write_text("def (\n", encoding="utf-8")
     assert sea_settings.declares_hidden(sea) is False
-    assert sea_settings.declared_bases(sea) == set()
-    assert sea_settings.declared_literal(sea, "timeout") is None
+    assert sea_settings.parsed_sea(sea).bases == set()
+    assert sea_settings.parsed_sea(sea).literals == {}
     # A broken revision is memoised too: the watcher must not re-read
     # it on every poll (the entry carries the revision's stamp).
     broken_stat = sea.stat()
@@ -321,7 +321,7 @@ def test_parse_cache_sees_an_edit_in_every_reader(tmp_path: Path) -> None:
         "class Sea(sea_class('picker'), b.BaseSea):\n    pass\n",
         encoding="utf-8",
     )
-    assert sea_settings.declared_bases(sea) == {"sea_class('picker')", "BaseSea"}
+    assert sea_settings.parsed_sea(sea).bases == {"sea_class('picker')", "BaseSea"}
 
 
 _ALIASED_ROUTER = """\
