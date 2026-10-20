@@ -53,6 +53,18 @@ _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # ``with``'s ``__enter__`` would leak it for every later config access.
 _config_lock = threading.RLock()
 
+_LOCK_TIMEOUT_S = 30.0
+"""Longest wait for another process's ``.config.lock``, store or RC lock.
+
+The cross-process ``flock`` blocks in C, so a holder wedged in a
+debugger or on a slow filesystem would otherwise stall the writer for
+good — and, since the writer also holds ``_config_lock``, every config
+read in the daemon with it.  A legitimate holder is done in well under a
+second (the legacy-key migration's RC sourcing, the slowest, in five),
+so a wait past this bound is a wedged holder: the ``TimeoutError`` is
+the writer's error.
+"""
+
 if TYPE_CHECKING:
     CONFIG_DIR: Path
     CONFIG_PATH: Path
@@ -127,6 +139,10 @@ DEFAULTS: dict[str, Any] = {
     "codex_use_subscription": _env_flag("KISS_CODEX_USE_SUBSCRIPTION", True),
     "work_dir": "",
     "last_model": "",
+    # The chat header's machine drop-down pick: the registered machine a
+    # new chat's tasks run on ("" = this machine), one global setting
+    # for every surface (``setMachine`` / ``machineChanged``).
+    "last_machine": "",
 }
 
 RETIRED_KEYS: frozenset[str] = frozenset(
@@ -312,17 +328,55 @@ def save_config(data: dict[str, Any]) -> None:
 
     Args:
         data: Configuration dict.
+
+    Raises:
+        TimeoutError: another process held ``.config.lock`` for longer
+            than :data:`_LOCK_TIMEOUT_S`; nothing was written.
     """
-    locked_call(_config_lock, _save_config_locked, sanitize_config(data))
+    locked_call(_config_lock, _save_config_locked, sanitize_config(data), False)
 
 
-def _save_config_locked(data: dict[str, Any]) -> None:
-    """Merge *data* into ``config.json`` under its flock; the caller holds ``_config_lock``."""
+def setdefault_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Store the entries of *data* whose key is unset and return the stored config.
+
+    Like :func:`save_config`, but an entry whose key already has a
+    truthy value in ``config.json`` is left alone.  "Has a value" is
+    judged on the stored value as :func:`load_config` reads it: a
+    hand-edited junk-typed value that sanitizes to a falsy default (a
+    number where a string belongs) counts as unset, so the entry stored
+    here is always the one later reads return.  The read, the decision
+    and the write happen in one ``.config.lock`` section, so two
+    processes that both find a key unset (two ``install.sh`` runs
+    storing a first ``remote_password``) cannot both write their own
+    value: the second sees the first's and returns it.
+
+    Args:
+        data: Entries to store unless already set.
+
+    Returns:
+        The stored configuration after the write (raw file contents,
+        without :data:`DEFAULTS`).
+
+    Raises:
+        TimeoutError: another process held ``.config.lock`` for longer
+            than :data:`_LOCK_TIMEOUT_S`; nothing was written.
+    """
+    return locked_call(_config_lock, _save_config_locked, sanitize_config(data), True)
+
+
+def _save_config_locked(data: dict[str, Any], only_unset: bool) -> dict[str, Any]:
+    """Merge *data* into ``config.json`` under its flock; the caller holds ``_config_lock``.
+
+    With *only_unset*, an entry whose key already has a truthy stored
+    value (as sanitized, i.e. as :func:`load_config` reads it) is
+    skipped.  Returns the stored configuration after the write.
+    """
     cfg_path = _config_path()
-    with exclusive_file_lock(_config_dir() / ".config.lock"):
+    with exclusive_file_lock(_config_dir() / ".config.lock", timeout=_LOCK_TIMEOUT_S):
         existing = _read_stored_config(cfg_path)
+        readable = sanitize_config(existing)
         for k, v in data.items():
-            if k not in API_KEY_ENV_VARS:
+            if k not in API_KEY_ENV_VARS and not (only_unset and readable.get(k)):
                 existing[k] = v
         for k in RETIRED_KEYS:
             existing.pop(k, None)
@@ -335,6 +389,7 @@ def _save_config_locked(data: dict[str, Any]) -> None:
         # it must never be group/world-readable — and forcing it also
         # repairs a config.json a prior release published as 0644.
         atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
+    return existing
 
 
 # How many recently opened working directories ``config.json`` keeps.
@@ -648,7 +703,8 @@ def _api_keys_store_flock() -> Iterator[None]:
     already holding it.
     """
     env_path = api_keys_env_path()
-    with exclusive_file_lock(env_path.with_name("." + env_path.name + ".kiss.lock")):
+    lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
+    with exclusive_file_lock(lock_path, timeout=_LOCK_TIMEOUT_S):
         yield
 
 
@@ -805,7 +861,8 @@ def _save_api_key_locked(key_name: str, key_value: str, user_shell: str) -> None
             install_hook = bool(key_value) and shell == user_shell
             if not rc.exists() and not install_hook:
                 continue
-            with exclusive_file_lock(rc.with_name(rc.name + ".kiss.lock")):
+            rc_lock = rc.with_name(rc.name + ".kiss.lock")
+            with exclusive_file_lock(rc_lock, timeout=_LOCK_TIMEOUT_S):
                 _update_rc_for_key(rc, shell, key_name, install_hook=install_hook)
         if key_value:
             os.environ[key_name] = key_value
@@ -1097,8 +1154,15 @@ def load_api_keys() -> None:
     just-deleted key was resurrected).  The lock must span the snapshot
     itself, not just the import: a snapshot taken before the save but
     applied after it is exactly the lost update.
+
+    The migration is best effort: a store lock another process holds past
+    :data:`_LOCK_TIMEOUT_S` is logged and skipped, and the daemon starts
+    with whatever the store already holds.
     """
-    _migrate_legacy_rc_keys()
+    try:
+        _migrate_legacy_rc_keys()
+    except TimeoutError as exc:
+        logger.warning("Skipping legacy RC key migration: %s", exc)
     _remove_systemd_mirror()
     with _config_lock:
         _import_api_keys_store()
@@ -1106,6 +1170,14 @@ def load_api_keys() -> None:
 
 _MIGRATION_TIMEOUT_S = 5.0
 """How long the migration's RC-sourcing shell may run before it is killed."""
+
+_RC_SOURCED_MARKER = "# shell RC sourced once for legacy API keys (kiss)"
+"""Comment line :func:`_migrate_legacy_rc_keys` appends to the store after sourcing.
+
+A comment, so the shell hook that sources the store and every
+assignment parser ignore it, and :func:`_edit_api_keys_env_file_locked`
+passes it through untouched.
+"""
 
 _FISH_ASSIGNMENT_RE = re.compile(
     r"^\s*set\s+-gx\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.*)$",
@@ -1229,10 +1301,19 @@ def _migrate_legacy_rc_keys() -> None:
     a shell RC and re-sourced that RC at every daemon start.  For each
     :data:`API_KEY_ENV_VARS` variable *absent* from the canonical file,
     this looks in every supported RC — first textually (which sees past
-    a stock ``.bashrc``'s non-interactive ``return`` guard), then by
-    sourcing the user's shell RC once for values assembled indirectly —
-    and copies what it finds into the file.  Keys already in the file
-    are never touched, and when nothing is missing no RC is read at all.
+    a stock ``.bashrc``'s non-interactive ``return`` guard), then, only
+    when some RC *names* a key the scan could not import (a value
+    assembled indirectly), by sourcing the user's shell RC — and copies
+    what it finds into the file.  Keys already in the file are never
+    touched, and when nothing is missing no RC is read at all.
+
+    Sourcing runs arbitrary RC code for up to :data:`_MIGRATION_TIMEOUT_S`
+    while holding both locks below, so it happens **at most once per
+    store**: :data:`_RC_SOURCED_MARKER` is appended to the store
+    afterwards and later starts never spawn the shell again, even when
+    the RC keeps naming a key it does not set.  (Almost every store
+    lacks some of the sixteen :data:`API_KEY_ENV_VARS`, so "some key is
+    missing" alone would mean sourcing on every start.)
 
     The whole read-source-write transaction holds :data:`_config_lock`
     **and** the canonical store's cross-process flock
@@ -1243,38 +1324,46 @@ def _migrate_legacy_rc_keys() -> None:
     RC observation would resurrect the key the user just deleted.
     :func:`save_api_key` holds the same flock across its own store edit
     plus RC scrub, so the two compound operations serialize in either
-    order and a completed deletion stays deleted.  Holding the flock
-    while sourcing the RC can block a concurrent saver for up to
-    :data:`_MIGRATION_TIMEOUT_S`; migration only reaches the sourcing
-    path on a first startup with keys missing from the store, so the
-    cost is a one-time startup pause, not a steady-state stall.
+    order and a completed deletion stays deleted.
     """
     with _config_lock, _api_keys_store_flock():
         env_path = api_keys_env_path()
-        present: set[str] = set()
+        store_text = ""
         if env_path.exists():
             try:
-                for line in env_path.read_text(encoding="utf-8").splitlines():
-                    m = _ENV_ASSIGNMENT_RE.match(line)
-                    if m is not None:
-                        present.add(m.group(1))
+                store_text = env_path.read_text(encoding="utf-8")
             except OSError:
                 logger.warning("Failed to read %s", env_path, exc_info=True)
                 return
+        present = {
+            m.group(1) for line in store_text.splitlines()
+            if (m := _ENV_ASSIGNMENT_RE.match(line)) is not None
+        }
         missing = set(API_KEY_ENV_VARS) - present
         if not missing:
             return
         found: dict[str, str] = {}
+        rc_texts: list[str] = []
         for shell in ("bash", "zsh", "fish"):
             rc = _shell_rc_path(shell)
             try:
                 text = rc.read_text(encoding="utf-8")
             except OSError:
                 continue
+            rc_texts.append(text)
             found.update(_scan_rc_text_for_keys(text, shell, missing))
         still_missing = missing - set(found)
-        if still_missing:
+        sourcing = (
+            _RC_SOURCED_MARKER not in store_text
+            and any(name in text for text in rc_texts for name in still_missing)
+        )
+        if sourcing:
             found.update(_source_rc_for_keys(still_missing))
         if found:
             mutations: dict[str, str | None] = dict(found)
             _edit_api_keys_env_file_locked(mutations)
+        if sourcing:
+            text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            atomic_write_text(env_path, text + _RC_SOURCED_MARKER + "\n", mode=0o600)

@@ -72,7 +72,7 @@ class _UsageReportingAgent(SorcarAgent):
 
     usage: tuple[float, int, int] = (5e-06, 15, 3)
 
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
+    def run(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
         self._launch_model_name = self._resolve_model_name(kwargs.get("model_name"))
         self.model_name = self._launch_model_name
         self._is_parallel = bool(kwargs.get("is_parallel", True))

@@ -887,10 +887,15 @@ def _kill_job_group(process: subprocess.Popen) -> None:
     means the number was recycled and the group is a stranger's.  (POSIX
     fork() never hands out a pid equal to an ACTIVE process group id, so
     while our orphans live the number cannot become a new group.)
+
+    The orphan sweep runs whatever the first check found: a shell seen
+    running may exit, and be reaped by its watcher thread, before
+    :func:`_kill_process_group` signals the group, which then declines
+    to signal a reaped pid and leaves the descendants alive.
     """
     if process.poll() is None:
         _kill_process_group(process)
-    elif not pid_alive(process.pid):
+    if process.poll() is not None and not pid_alive(process.pid):
         with suppress(OSError):
             kill_process_group(process.pid, SIGKILL)
 
@@ -1439,18 +1444,17 @@ class UsefulTools:
         if background:
             return self._start_background_job(command)
 
-        if self.stream_callback:
+        try:
+            returncode, output = self._bash_streaming(command, timeout_seconds)
+        except Exception as e:
             # Contract (see test_bash_background_pipe_hang): an exception
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
             # swallowed into an "Error:" string like internal failures are.
-            returncode, output = self._bash_streaming(command, timeout_seconds)
-        else:
-            try:
-                returncode, output = self._bash_streaming(command, timeout_seconds)
-            except Exception as e:  # pragma: no cover
-                logger.debug("Exception caught", exc_info=True)
-                return f"Error: {e}"
+            if self.stream_callback:
+                raise
+            logger.debug("Exception caught", exc_info=True)  # pragma: no cover
+            return f"Error: {e}"  # pragma: no cover
         if returncode is None:
             return _format_bash_timeout(output, timeout_seconds, max_output_chars)
         return _format_bash_result(returncode, output, max_output_chars)

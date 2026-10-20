@@ -51,13 +51,13 @@ from kiss.agents.sorcar.persistence import (
     _history_date_range,
     _is_failed_result,
     _load_chat_events_by_task_id,
+    _load_history,
     _load_input_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
     _load_subagent_rows_by_parent_task_id,
     _recover_orphaned_tasks,
-    _search_history,
 )
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -545,6 +545,14 @@ class AgentServer(
         self._autocommit_tabs: set[str] = set()
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
+        # The newest ``selectModel`` pick as ``(generation, model)``
+        # (set under ``_state_lock``), and the count of picks whose
+        # write to the file is still in flight: ``_refresh_default_model``
+        # adopts the persisted model only when no pick is pending and
+        # none landed while it read the file, and a pick's own write
+        # ends by writing the newest pick when a later one superseded it.
+        self._model_pick: tuple[int, str] = (0, "")
+        self._model_picks_pending = 0
         self._state_lock = agent_state.STATE_LOCK
         # Raised (under ``_state_lock``) by the graceful-shutdown
         # sweep (``RemoteAccessServer._stop_active_agent_tasks``):
@@ -965,19 +973,29 @@ class AgentServer(
         persisted in ``config.json`` and must
         take precedence over this process's stale in-memory default.
 
-        The persisted value is read INSIDE ``_state_lock`` (an RLock,
-        so callers already holding it may call this freely) so a
-        concurrent ``_cmd_select_model`` — which persists under the
-        same lock — cannot leave us with a stale on-disk value that
-        would clobber the user's just-picked in-memory selection.
+        The file is read OUTSIDE ``_state_lock`` (the lock is on the
+        path of every tab's commands, and ``_cmd_select_model`` must
+        not hold it while its write waits for the history database);
+        call this before taking the lock, not under it.  The in-memory
+        default is newer than the file while a pick of this process is
+        still being persisted, and a pick that lands while the file is
+        read replaces ``_model_pick``: in both cases the file is left
+        alone, so it never clobbers a fresh pick.
 
         Args:
             valid: When given, adopt the persisted model only when it
                 is in this set of currently-runnable model names.
         """
         with self._state_lock:
-            persisted = _load_last_model()
-            if persisted and (valid is None or persisted in valid):
+            if self._model_picks_pending:
+                return
+            pick = self._model_pick
+        persisted = _load_last_model()
+        with self._state_lock:
+            if (
+                persisted and (valid is None or persisted in valid)
+                and self._model_pick == pick
+            ):
                 self._default_model = persisted
 
     def _printer_cleanup_tab(self, tab_id: str, keep_task_id: str = "") -> None:
@@ -1067,9 +1085,8 @@ class AgentServer(
         # head the list.
         routers = sea_commands.model_seas() if catalog_names else {}
         available_names = {m["name"] for m in models_list} | set(routers)
+        self._refresh_default_model(available_names)
         with self._state_lock:
-            self._refresh_default_model(available_names)
-
             if self._default_model not in available_names:
                 refreshed = get_default_model()
                 if refreshed in available_names:
@@ -1224,11 +1241,11 @@ class AgentServer(
         entries = (
             []
             if remote_only
-            else _search_history(
-                query or "",
+            else _load_history(
                 limit=limit,
                 offset=local_offset,
                 tag=tag,
+                query=query or "",
                 work_dir=work_dir,
                 running_task_ids=running_task_ids,
             )
@@ -2047,8 +2064,8 @@ class AgentServer(
         if not tab_id:
             logger.debug("newChat ignored: empty tabId")
             return
+        self._refresh_default_model()
         with self._state_lock:
-            self._refresh_default_model()
             self._tab_models[tab_id] = self._default_model
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)

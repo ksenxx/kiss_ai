@@ -50,7 +50,12 @@ from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.conftest import git, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -194,12 +199,9 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
 def test_slash_command_resolves_to_the_bundled_sea() -> None:
     """``/git_extract_knowledge <repo>`` resolves to the repo text and this SEA."""
     assert sea_commands.get_command("git_extract_knowledge") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/git_extract_knowledge /tmp/repo")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "/tmp/repo"
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings(
+    assert sea_commands.slash_command_task("/git_extract_knowledge /tmp/repo") == (
+        "/tmp/repo", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings(
         [GitExtractKnowledgeSea()]
     )
     assert sea_commands.help_text_if_command("/git_extract_knowledge help") == (
@@ -1070,13 +1072,13 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
     parsed, agentic = run_sea(run, script, tmp_path, max_steps=6)
     assert parsed["success"] is True and parsed["summary"] == "<h3>Memory built</h3>"
     assert len(agentic) == 4
-    names = {t["function"]["name"] for t in agentic[0]["tools"]}
+    names = tool_names(agentic[0])
     expected = {"index_repo", "write_knowledge_page", "knowledge_search", "Bash", "Read", "finish"}
     assert expected <= names
     assert "memory_search" not in names and "go_to_url" not in names
     system = system_message(agentic[0])
     assert system.startswith(sea.SYSTEM_PROMPT[:200])
-    results = [str(m["content"]) for m in agentic[3]["messages"] if m["role"] == "tool"]
+    results = tool_results(agentic[3])
     assert "mode: full" in results[0] and f"repository: {repo}" in results[0]
     assert results[1].startswith("Wrote ledger/overview.md")
     assert results[2].startswith("1. note:overview")

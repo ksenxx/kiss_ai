@@ -232,7 +232,9 @@ def start_connect(service: str, label: str) -> dict[str, Any]:
     }
 
 
-def finish_connect(service: str, label: str) -> dict[str, Any]:
+def finish_connect(
+    service: str, label: str, wait_seconds: float = _FINISH_WAIT_SECONDS
+) -> dict[str, Any]:
     """Wait briefly for the pending connection to become ``ACTIVE``.
 
     On success the new connected account replaces the previous one,
@@ -241,6 +243,8 @@ def finish_connect(service: str, label: str) -> dict[str, Any]:
     Args:
         service: KISS service name.
         label: Human-readable service label.
+        wait_seconds: How long to wait for the user to finish the sign-in
+            before answering ``pending``.
 
     Returns:
         ``{"ok": True, ...}`` once active, ``{"ok": False, "status":
@@ -260,7 +264,7 @@ def finish_connect(service: str, label: str) -> dict[str, Any]:
         if status in _WAITABLE_STATUSES:
             try:
                 account = client.connected_accounts.wait_for_connection(
-                    pending, timeout=_FINISH_WAIT_SECONDS
+                    pending, timeout=wait_seconds
                 )
             except Exception as e:
                 if "Timeout" in type(e).__name__:

@@ -5,54 +5,22 @@
 //
 // Audit 2026-10-12 (mainjs-1): a chat tab closed on ANOTHER surface
 // (it vanishes from the daemon's `tabs_state` snapshot, reconcileTabs
-// drops it) must forget its machine pick exactly like a tab closed
-// here does (closeTab deletes the tabMachines / tabMachinePicked
-// entries).  Otherwise every remotely closed tab leaves a pick behind
-// in the persisted page state, forever: the maps are written back
-// on every persistTabState and re-read on every reload.
+// drops it) must forget its unsent machine pick exactly like a tab
+// closed here does (closeTab deletes the tabMachinePicks entry).
+// Otherwise every remotely closed tab leaves a pick behind in the
+// persisted page state, forever: the map is written back on every
+// persistTabState and re-read on every reload.
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send} = require('./simplify2_harness');
 
 function makePage(state) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted, getState} = makeChatPage({
+    bodyClass: 'remote-chat',
+    initialState: state || undefined,
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let saved = state || undefined;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => saved,
-      setState: s => {
-        saved = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted, state: () => saved};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  return {win, posted, state: getState};
 }
 
 const MACHINES = [
@@ -67,11 +35,7 @@ function pick(win, value) {
 }
 
 function persistedPicks(state) {
-  return JSON.parse(JSON.stringify(state().tabMachines));
-}
-
-function persistedPicked(state) {
-  return JSON.parse(JSON.stringify(state().tabMachinePicked)).sort();
+  return JSON.parse(JSON.stringify(state().tabMachinePicks));
 }
 
 function testRemotelyClosedTabForgetsItsPick() {
@@ -82,6 +46,10 @@ function testRemotelyClosedTabForgetsItsPick() {
   const first = api.getActiveTabId();
   api.createNewTab();
   const second = api.getActiveTabId();
+  // The second chat ran a task here; gpu-box is picked for its next.
+  win.document.getElementById('task-input').value = 'two';
+  win.document.getElementById('send-btn').click();
+  send(win, {type: 'status', running: false, tabId: second});
   pick(win, 'gpu-box');
   // The registry lists both tabs: both are now mirrored tabs.
   send(win, {
@@ -92,7 +60,6 @@ function testRemotelyClosedTabForgetsItsPick() {
     ],
   });
   assert.deepStrictEqual(persistedPicks(state), {[second]: 'gpu-box'});
-  assert.deepStrictEqual(persistedPicked(state), [second]);
   // Another surface closes the second tab: the next snapshot omits it.
   send(win, {type: 'tabs_state', tabs: [{tabId: first, title: 'one'}]});
   assert.ok(!api.openTabs().some(t => t.id === second), 'the tab is gone');
@@ -100,11 +67,6 @@ function testRemotelyClosedTabForgetsItsPick() {
     persistedPicks(state),
     {},
     'a tab closed on another surface forgets its machine pick',
-  );
-  assert.deepStrictEqual(
-    persistedPicked(state),
-    [],
-    'and its "picked here" mark',
   );
   win.close();
   console.log('  ok - a tab closed on another surface forgets its pick');

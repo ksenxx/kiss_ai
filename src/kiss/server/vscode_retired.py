@@ -31,7 +31,7 @@ VSCODE_RETIRED_FLAG = ".vscode-retired"
 """Basename, under ``$KISS_HOME``, of the flag ``install.sh`` writes."""
 
 VSCODE_RETIRED_DISMISSED = ".vscode-retired-dismissed"
-"""Basename, under ``$KISS_HOME``, of the "Do not show this" marker."""
+"""Basename, under ``$KISS_HOME``, of the "Do not show this again" marker."""
 
 NOTICE_ID = "vscode-retired"
 """The notification id: one toast per page, replaced on reconnect."""
@@ -41,7 +41,7 @@ def vscode_retired_notice(loopback_url: str) -> dict[str, Any] | None:
     """The sticky ``notification`` event for a fresh flag, else ``None``.
 
     Fresh means written within :data:`kiss.server.install_problems.NOTICE_DAYS`.
-    ``None`` also once the user ticked "Do not show this" (see
+    ``None`` also once the user ticked "Do not show this again" (see
     :func:`dismiss_vscode_retired_notice`).
 
     Args:
@@ -67,7 +67,7 @@ def vscode_retired_notice(loopback_url: str) -> dict[str, Any] | None:
 
 
 def dismiss_vscode_retired_notice() -> None:
-    """Record the "Do not show this" choice: write the dismissal marker.
+    """Record the "Do not show this again" choice: write the dismissal marker.
 
     Best-effort, like the tips opt-out: an unwritable ``$KISS_HOME``
     only means the notice may show again until the flag goes stale.

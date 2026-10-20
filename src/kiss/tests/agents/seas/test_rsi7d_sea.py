@@ -43,11 +43,11 @@ from kiss.tests.agents.seas.conftest import (
     persist_task,
     registered,
     run_sea,
+    seed_repo,
 )
-from kiss.tests.agents.seas.sea_contract import system_message
+from kiss.tests.agents.seas.sea_contract import system_message, tool_names, tool_results
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.server.conftest import init_repo
 
 _SEA_PATH = Path(sea.__file__).resolve()
 _SEAS_DIR = _SEA_PATH.parents[1]
@@ -222,8 +222,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
     assert sea_commands.get_command("rsi7d") == _SEA_PATH
     assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
-    hit = sea_commands.slash_command_task("/rsi7d all")
-    assert hit == ("all", _SEA_PATH)
+    assert sea_commands.slash_command_task("/rsi7d all") == ("all", _SEA_PATH)
     assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(declared)
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
     assert run.prompt == "all" and run.settings == resolve_settings(declared)
@@ -868,7 +867,7 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     (old_layout / "rsi7d_sea.py").write_text("SYSTEM_PROMPT = 'x'\n", encoding="utf-8")
     assert sea._checkout_seas_dir() == old_layout.resolve()
     assert sea._editable_path("sh") is None
-    init_repo(tmp_path)  # from a sub-directory of a checkout, the checkout's seas dir wins
+    seed_repo(tmp_path)  # from a sub-directory of a checkout, the checkout's seas dir wins
     (tmp_path / "docs").mkdir()
     monkeypatch.chdir(tmp_path / "docs")
     assert sea._checkout_seas_dir() == old_layout.resolve()
@@ -945,7 +944,7 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
 def _tool_results(agentic: list[Any]) -> list[str]:
     """Return the last tool result the model saw before each request after the first."""
     return [
-        str([m for m in request["messages"] if m["role"] == "tool"][-1]["content"]).split(
+        tool_results(request)[-1].split(
             "\n\nSteps: "
         )[0]
         for request in agentic[1:]
@@ -977,7 +976,7 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     parsed, agentic = _run_rsi7d("demo fdemo. Patch demo only.", script, tmp_path)
     assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>", parsed
     assert len(agentic) == 4
-    names = {t["function"]["name"] for t in agentic[0]["tools"]}
+    names = tool_names(agentic[0])
     assert {t.__name__ for t in sea.Rsi7dSea().tools([])} <= names
     # ``decide`` is not asserted: the Jev tool follows the "Use Jev"
     # setting and the OpenRouter key, not the SEA's tool list.
@@ -1082,7 +1081,7 @@ def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     of the clone.  A second preparation replaces the clone.
     """
     repo = tmp_path  # the clone under tmp/rsi7d/replays is inside the repository
-    init_repo(repo)
+    seed_repo(repo)
     worktree = repo / ".kiss-worktrees" / "kiss_wt-gone"
     commit(repo, "seed paper", {"docs/paper.tex": "v1\n"})
     task = f"Update the paper at {worktree}/docs/paper.tex  with the results\nin {repo}/results.md"
@@ -1125,10 +1124,10 @@ def test_task_tree_resolves_live_dirs_through_git_and_removed_worktrees_by_name(
 ) -> None:
     """An existing directory is its own checkout (nested repos, live worktrees, sub-dirs)."""
     outer = tmp_path / "outer"
-    init_repo(outer)
+    seed_repo(outer)
     (outer / "docs").mkdir()
     inner = outer / "tmp" / "inner"
-    init_repo(inner)
+    seed_repo(inner)
     git(outer, "worktree", "add", "-q", "-b", "wt", ".kiss-worktrees/kiss_wt-live")
     live = outer / ".kiss-worktrees" / "kiss_wt-live"
     (live / "docs").mkdir()
@@ -1139,7 +1138,7 @@ def test_task_tree_resolves_live_dirs_through_git_and_removed_worktrees_by_name(
     assert sea._task_tree(str(live)) == (resolved, live.resolve(), Path("."))
     assert sea._task_tree(str(live / "docs")) == (resolved, live.resolve(), Path("docs"))
     nested = live / "tmp" / "nested"
-    init_repo(nested)  # an independent repository under a live worktree is its own tree
+    seed_repo(nested)  # an independent repository under a live worktree is its own tree
     assert sea._task_tree(str(nested)) == (nested.resolve(), nested.resolve(), Path("."))
     gone = outer / ".kiss-worktrees" / "kiss_wt-gone"
     assert sea._task_tree(str(gone / "a" / "b")) == (resolved, gone, Path("a") / "b")
@@ -1153,7 +1152,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
 ) -> None:
     """Without an auto-commit the repository HEAD at the task's start is used; bad runs error."""
     repo = tmp_path / "repo"
-    init_repo(repo)
+    seed_repo(repo)
     head = commit(repo, "second", {"notes.md": "n\n"})
     future = int(time.time() * 1000) + 10_000
     task_id = persist_task(
@@ -1257,7 +1256,7 @@ def test_prepare_replay_clone_reports_a_failed_git_command(
 ) -> None:
     """A git failure while making the clone is reported, not raised."""
     repo = tmp_path / "repo"
-    init_repo(repo)
+    seed_repo(repo)
     task_id = persist_task(
         "Describe the seed", [], work_dir=str(repo), sea="demo_sea",
         startTs=int(time.time() * 1000) + 10_000,

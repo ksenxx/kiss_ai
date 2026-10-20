@@ -87,11 +87,15 @@ function sleep(ms) {
  *
  * @param {Function} [until] Predicate that becomes true once the awaited
  *   side effect has happened.
+ * @throws {Error} When `until` is still false at the deadline, so the
+ *   failure names the side effect that did not happen instead of
+ *   surfacing through whatever assertion the caller makes next.
  */
 async function settle(until) {
   if (until) {
     const deadline = Date.now() + 3000;
     while (!until() && Date.now() < deadline) await sleep(10);
+    if (!until()) throw new Error('settle: condition not met within 3 s');
   }
   await sleep(50);
 }

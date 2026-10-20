@@ -254,9 +254,9 @@ class ConsolePrinterRegression(unittest.TestCase):
         self.assertFalse(p._mid_line)
         self.assertEqual(p._current_block_type, "")
 
-    def test_unknown_type_returns_empty(self) -> None:
+    def test_unknown_type_is_a_no_op(self) -> None:
         p, buf = _make_printer()
-        self.assertEqual(p.print("x", type="does_not_exist"), "")
+        p.print("x", type="does_not_exist")
         self.assertEqual(buf.getvalue(), "")
 
 

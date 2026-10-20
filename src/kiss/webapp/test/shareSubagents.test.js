@@ -26,69 +26,21 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  MEDIA,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    beforeScripts: stubRaf,
+    sourceUrl: 'sharesub-main.js',
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=sharesub-main.js',
-  );
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function tabIdOf(wv) {
@@ -231,9 +183,7 @@ function tabsOf(win) {
 }
 
 function tabLabels(win) {
-  return tabsOf(win).map(
-    el => el.querySelector('.chat-tab-label').textContent,
-  );
+  return tabsOf(win).map(el => el.querySelector('.chat-tab-label').textContent);
 }
 
 function sectionByTask(win, taskId) {
@@ -301,9 +251,7 @@ async function run() {
     const html = exportFanoutChat();
     const dom = new JSDOM('<div id="app">' + html + '</div>');
     const doc = dom.window.document;
-    const taskSection = doc.querySelector(
-      '.share-task:not(.share-subagent)',
-    );
+    const taskSection = doc.querySelector('.share-task:not(.share-subagent)');
     const livePanel = taskSection.querySelector('.tc-run-parallel');
     assert.strictEqual(
       livePanel.getAttribute('data-rp-subagents'),
@@ -440,10 +388,7 @@ async function run() {
     );
     assert.ok(!sectionByTask(win, 'sub-1').hasAttribute('hidden'));
     assert.ok(sectionByTask(win, 'sub-2').hasAttribute('hidden'));
-    assert.strictEqual(
-      tabsOf(win)[1].getAttribute('aria-selected'),
-      'true',
-    );
+    assert.strictEqual(tabsOf(win)[1].getAttribute('aria-selected'), 'true');
     click(tabsOf(win)[0]); // back to the chat
     assert.ok(
       !doc
@@ -554,10 +499,7 @@ async function run() {
         .hasAttribute('hidden'),
       'the chat comes back on screen',
     );
-    assert.strictEqual(
-      tabsOf(win)[0].getAttribute('aria-selected'),
-      'true',
-    );
+    assert.strictEqual(tabsOf(win)[0].getAttribute('aria-selected'), 'true');
   });
 
   await test('a run_agent child gets an always-open orphan tab', () => {
@@ -577,17 +519,13 @@ async function run() {
     assert.ok(msg);
     const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
     const doc = dom.window.document;
-    const orphan = doc.querySelector(
-      '.share-subagent[data-task-id="agent-1"]',
-    );
+    const orphan = doc.querySelector('.share-subagent[data-task-id="agent-1"]');
     assert.ok(orphan, 'the run_agent child is exported too');
     assert.ok(
       orphan.hasAttribute('data-sub-orphan'),
       'no fan-out declared it, so it is marked an orphan',
     );
-    const taskSection = doc.querySelector(
-      '.share-task:not(.share-subagent)',
-    );
+    const taskSection = doc.querySelector('.share-task:not(.share-subagent)');
     assert.strictEqual(
       taskSection
         .querySelector('.tc-run-parallel')
@@ -714,10 +652,10 @@ async function run() {
     assert.deepStrictEqual(failToasts, ['Share failed: disk full']);
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
+  report('shareSubagents');
   // The JSDOM windows above loaded main.js, whose live timers would
   // otherwise keep the process alive until the runner's timeout.
-  process.exit(failures.length > 0 ? 1 : 0);
+  process.exit(0);
 }
 
 run();

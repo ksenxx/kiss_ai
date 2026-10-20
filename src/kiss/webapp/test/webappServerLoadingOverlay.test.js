@@ -8,15 +8,15 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  newAuthDom,
+  bootShim,
+  installFakeWebSocket,
+  waitForSocket,
+} = require('./transport_page_helpers');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CHAT_HTML = path.join(PROJECT_ROOT, 'media', 'chat.html');
-const TRANSPORT_JS = path.join(PROJECT_ROOT, 'media', 'transport.js');
-
-function readShimJs() {
-  return fs.readFileSync(TRANSPORT_JS, 'utf-8');
-}
 
 function ok(msg) {
   console.log('  ok -', msg);
@@ -26,61 +26,6 @@ function fail(msg, err) {
   console.error('  FAIL -', msg);
   if (err) console.error('       ', err.message || err);
   process.exit(1);
-}
-
-function buildDom() {
-  const html = `<!DOCTYPE html><html><head></head><body>
-    <div id="kiss-server-loading" role="status"><div id="kiss-server-loading-msg" class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div></div>
-    <div id="app" style="display:none;"></div>
-    <div id="auth-modal" style="display:none;">
-      <input id="auth-modal-input" type="password">
-      <button id="auth-modal-ok"></button>
-      <button id="auth-modal-cancel"></button>
-    </div>
-  </body></html>`;
-  return new JSDOM(html, {
-    url: 'https://example.test/',
-    runScripts: 'outside-only',
-  });
-}
-
-function installFakeWebSocket(window, sockets) {
-  function FakeWebSocket(url) {
-    this.url = url;
-    this.readyState = 0;
-    this.sent = [];
-    this.onopen = null;
-    this.onmessage = null;
-    this.onclose = null;
-    this.onerror = null;
-    sockets.push(this);
-  }
-  FakeWebSocket.CONNECTING = 0;
-  FakeWebSocket.OPEN = 1;
-  FakeWebSocket.CLOSING = 2;
-  FakeWebSocket.CLOSED = 3;
-  FakeWebSocket.prototype.send = function (data) {
-    this.sent.push(data);
-  };
-  FakeWebSocket.prototype.close = function () {
-    this.readyState = FakeWebSocket.CLOSED;
-    if (typeof this.onclose === 'function') this.onclose();
-  };
-  FakeWebSocket.prototype.fireOpen = function () {
-    this.readyState = FakeWebSocket.OPEN;
-    if (typeof this.onopen === 'function') this.onopen();
-  };
-  FakeWebSocket.prototype.fireMessage = function (msg) {
-    if (typeof this.onmessage === 'function') {
-      this.onmessage({data: JSON.stringify(msg)});
-    }
-  };
-  FakeWebSocket.prototype.fireClose = function () {
-    this.readyState = FakeWebSocket.CLOSED;
-    if (typeof this.onclose === 'function') this.onclose();
-  };
-  window.WebSocket = FakeWebSocket;
-  return FakeWebSocket;
 }
 
 function setupSimulatedSetServerLoading(window) {
@@ -99,8 +44,6 @@ function setupSimulatedSetServerLoading(window) {
 }
 
 async function run() {
-  const shimJs = readShimJs();
-
   const tpl = fs.readFileSync(CHAT_HTML, 'utf-8');
   try {
     assert.ok(
@@ -121,8 +64,7 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
@@ -134,14 +76,7 @@ async function run() {
       }
     });
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
 
     assert.strictEqual(
       sockets.length,
@@ -202,8 +137,7 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
@@ -215,14 +149,7 @@ async function run() {
       }
     });
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
@@ -259,8 +186,7 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
@@ -272,14 +198,7 @@ async function run() {
       }
     });
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -319,20 +238,12 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -363,8 +274,7 @@ async function run() {
     // A page the service worker served from its cache (the server was
     // unreachable) is a reconnect from the user's point of view: the
     // worker only has the copy because the server was up before.
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
@@ -372,14 +282,7 @@ async function run() {
     meta.setAttribute('name', 'kiss-offline-shell');
     window.document.head.appendChild(meta);
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
 
     const msg = window.document.getElementById('kiss-server-loading-msg');
     try {
@@ -407,20 +310,12 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -432,20 +327,12 @@ async function run() {
     // transport.js reconnects after onclose: _scheduleReconnect arms
     // the first backoff at 500-1000 ms (jittered), and the wake-up
     // listeners (pageshow, which jsdom fires right after load, and
-    // visibilitychange / online) reconnect at once.  Poll for the
-    // second socket with a deadline that covers the full backoff.
-    const deadline = Date.now() + 1500;
-    while (sockets.length < 2 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-
+    // visibilitychange / online) reconnect at once.  The second socket
+    // is awaited with a bound well past the backoff, so a busy box
+    // cannot turn the backoff's jitter into a spurious failure.
     try {
-      assert.strictEqual(
-        sockets.length,
-        2,
-        'shim must open a second WebSocket within 1500ms after onclose',
-      );
-      ok('onclose reconnects: a 2nd socket is opened (was 3000ms before)');
+      await waitForSocket(sockets, 2);
+      ok('onclose reconnects: a 2nd socket is opened');
     } catch (err) {
       fail('reconnect regression: no 2nd socket after onclose', err);
     }
@@ -454,20 +341,12 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
+    const {window} = newAuthDom();
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
 
-    window.eval(shimJs);
-    // The shim defers app-bound dispatches until the parser finishes
-    // (DOMContentLoaded) so none are lost while main.js is still being
-    // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-    // so fire it now to switch the shim to direct dispatch.
-    window.document.dispatchEvent(
-      new window.Event('DOMContentLoaded', {bubbles: true}),
-    );
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();

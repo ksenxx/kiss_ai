@@ -217,12 +217,14 @@
         return false;
       }
       // Keep the browser's copy/paste chords: Ctrl/Cmd+Shift+C copies
-      // the selection, Ctrl/Cmd+Shift+V pastes through the textarea's
+      // the selection (through PanelCopy, whose execCommand fallback
+      // covers a clipboard API that refuses, e.g. an unfocused
+      // document), Ctrl/Cmd+Shift+V pastes through the textarea's
       // native paste event (which xterm handles).
       if (!ev.shiftKey || !(ev.ctrlKey || ev.metaKey)) return true;
       if (ev.key === 'C' || ev.key === 'c') {
         const sel = term.getSelection();
-        if (sel && navigator.clipboard) navigator.clipboard.writeText(sel);
+        if (sel) global.PanelCopy.copyText(sel);
         return false;
       }
       return !(ev.key === 'V' || ev.key === 'v');

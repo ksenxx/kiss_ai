@@ -42,123 +42,36 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const POLL_MS = 5000;
 
-let passed = 0;
-const failures = [];
+const {
+  makePage: makeChatPage,
+  click,
+  send,
+  stubRaf,
+  fakeIntervals,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
-
-/**
- * Replace the window's setInterval / clearInterval with a virtual
- * clock so a test fires the 5 s poll deterministically. Returns the
- * clock: advance(ms) runs every due interval callback in time order.
- */
-function installFakeIntervals(win) {
-  const intervals = new Map();
-  let nextId = 1;
-  let now = 0;
-  win.setInterval = function (fn, ms, ...args) {
-    const id = nextId++;
-    const period = Math.max(1, Number(ms) || 0);
-    intervals.set(id, {fn, period, due: now + period, args});
-    return id;
-  };
-  win.clearInterval = function (id) {
-    intervals.delete(id);
-  };
-  function nextDue(limit) {
-    let best = null;
-    for (const [id, t] of intervals) {
-      if (t.due <= limit && (best === null || t.due < best.t.due)) {
-        best = {id, t};
-      }
-    }
-    return best;
-  }
-  return {
-    advance(ms) {
-      const end = now + ms;
-      for (let hit = nextDue(end); hit; hit = nextDue(end)) {
-        now = hit.t.due;
-        hit.t.due += hit.t.period;
-        hit.t.fn(...hit.t.args);
-      }
-      now = end;
-    },
-  };
-}
+const {test, report} = makeRunner();
 
 function makePage(opts) {
   const {desktopMatches = true} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  let clock;
+  function beforeScripts(win) {
+    clock = fakeIntervals(win);
+    stubRaf(win);
+    fakeMatchMedia(win, desktopMatches);
+  }
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts,
+    extraScripts: ['marked.min.js'],
+    sourceUrl: 'metainfo-main.js',
   });
-  const win = dom.window;
-  const clock = installFakeIntervals(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)' ? desktopMatches : false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=metainfo-main.js',
-  );
   return {win, posted, clock};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function tabIdOf(wv) {
@@ -178,9 +91,7 @@ function setRunning(win, running) {
 
 /** Whether the #meta-info subpanel (header included) is shown. */
 function infoVisible(win) {
-  return win.document
-    .getElementById('meta-info')
-    .classList.contains('visible');
+  return win.document.getElementById('meta-info').classList.contains('visible');
 }
 
 /** Every getTaskUpdate message posted so far, oldest first. */
@@ -204,10 +115,6 @@ function statusText(win) {
 
 function refreshBtn(win) {
   return win.document.getElementById('meta-info-refresh');
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 /** The HH:MM clock time main.js renders for an epoch-ms stamp. */
@@ -315,11 +222,11 @@ async function main() {
       const win = wv.win;
       const TAB = tabIdOf(wv);
       assert.strictEqual(polls(wv).length, 1, 'a run start polls at once');
-      wv.clock.advance(POLL_MS - 1);
+      wv.clock.tick(POLL_MS - 1);
       assert.strictEqual(polls(wv).length, 1, 'no poll before 5 s');
-      wv.clock.advance(1);
+      wv.clock.tick(1);
       assert.strictEqual(polls(wv).length, 2, 'the 5 s interval polls');
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.strictEqual(polls(wv).length, 3, 'and keeps polling');
       assert.strictEqual(
         win.document.querySelector('#meta-info .sidebar-hdr span').textContent,
@@ -367,7 +274,7 @@ async function main() {
       );
 
       // The next poll must carry the adopted signature.
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.strictEqual(lastPoll(wv).knownSig, '100:20');
       assert.strictEqual(lastPoll(wv).token, tok);
 
@@ -397,7 +304,7 @@ async function main() {
       assert.strictEqual(content.innerHTML, '');
       assert.strictEqual(statusText(win), '');
       assert.ok(!infoVisible(win), 'exists:false hides the subpanel');
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.strictEqual(lastPoll(wv).knownSig, '', 'signature dropped');
 
       // And it may reappear with new contents.
@@ -418,7 +325,7 @@ async function main() {
       assert.ok(content.textContent.includes('plain line'), 'report kept');
       assert.ok(infoVisible(win), 'subpanel still shown');
       assert.strictEqual(polls(wv).length, before, 'no repoll on workdir');
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.strictEqual(lastPoll(wv).token, tok, 'same generation');
       assert.strictEqual(lastPoll(wv).knownSig, '200:5');
     },
@@ -570,57 +477,54 @@ async function main() {
     },
   );
 
-  await test(
-    'a failed run shows "Last run failed: …" in the status line',
-    () => {
-      const wv = runningPage();
-      const win = wv.win;
-      const poll = lastPoll(wv);
-      const content = contentEl(win);
+  await test('a failed run shows "Last run failed: …" in the status line', () => {
+    const wv = runningPage();
+    const win = wv.win;
+    const poll = lastPoll(wv);
+    const content = contentEl(win);
 
-      // No report at all yet: the failure is the whole status line and
-      // the body says so.
-      reply(win, poll, {sig: 'err-1', error: 'budget exceeded'});
-      assert.strictEqual(statusText(win), 'Last run failed: budget exceeded');
-      assert.strictEqual(
-        content.querySelector('p.meta-info-pending').textContent,
-        'No update yet.',
-      );
-      assert.ok(infoVisible(win), 'an error alone shows the subpanel');
-      assert.strictEqual(refreshBtn(win).disabled, false);
+    // No report at all yet: the failure is the whole status line and
+    // the body says so.
+    reply(win, poll, {sig: 'err-1', error: 'budget exceeded'});
+    assert.strictEqual(statusText(win), 'Last run failed: budget exceeded');
+    assert.strictEqual(
+      content.querySelector('p.meta-info-pending').textContent,
+      'No update yet.',
+    );
+    assert.ok(infoVisible(win), 'an error alone shows the subpanel');
+    assert.strictEqual(refreshBtn(win).disabled, false);
 
-      // A failure after an earlier successful run: separator after the
-      // time and cost, the earlier report stays on screen.
-      const at = 1700000000000;
-      reply(win, poll, {
-        sig: 'err-2',
-        content: '<p>earlier report</p>',
-        error: 'model timed out',
-        cost: 1.5,
-        updatedAt: at,
-      });
-      assert.ok(content.textContent.includes('earlier report'));
-      assert.strictEqual(
-        statusText(win),
-        updatedLabel(win, at) +
-          ' \u00b7 $1.50 \u00b7 Last run failed: model timed out',
-      );
+    // A failure after an earlier successful run: separator after the
+    // time and cost, the earlier report stays on screen.
+    const at = 1700000000000;
+    reply(win, poll, {
+      sig: 'err-2',
+      content: '<p>earlier report</p>',
+      error: 'model timed out',
+      cost: 1.5,
+      updatedAt: at,
+    });
+    assert.ok(content.textContent.includes('earlier report'));
+    assert.strictEqual(
+      statusText(win),
+      updatedLabel(win, at) +
+        ' \u00b7 $1.50 \u00b7 Last run failed: model timed out',
+    );
 
-      // Failure while a rerun is in flight: "Updating…" comes first.
-      reply(win, poll, {
-        sig: 'err-3',
-        content: '<p>earlier report</p>',
-        error: 'model timed out',
-        running: true,
-        updatedAt: at,
-      });
-      assert.strictEqual(
-        statusText(win),
-        'Updating\u2026 \u00b7 Last run failed: model timed out',
-      );
-      assert.strictEqual(refreshBtn(win).disabled, true);
-    },
-  );
+    // Failure while a rerun is in flight: "Updating…" comes first.
+    reply(win, poll, {
+      sig: 'err-3',
+      content: '<p>earlier report</p>',
+      error: 'model timed out',
+      running: true,
+      updatedAt: at,
+    });
+    assert.strictEqual(
+      statusText(win),
+      'Updating\u2026 \u00b7 Last run failed: model timed out',
+    );
+    assert.strictEqual(refreshBtn(win).disabled, true);
+  });
 
   await test(
     'the refresh button posts getTaskUpdate with refresh:true under the ' +
@@ -642,9 +546,13 @@ async function main() {
       assert.strictEqual(manual.knownSig, 'r-1');
       assert.ok(!('workDir' in manual));
 
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.strictEqual(polls(wv).length, before + 2);
-      assert.strictEqual(lastPoll(wv).refresh, false, 'interval polls stay normal');
+      assert.strictEqual(
+        lastPoll(wv).refresh,
+        false,
+        'interval polls stay normal',
+      );
 
       // With no running task the button is inert: no poll is posted.
       setRunning(win, false);
@@ -705,81 +613,78 @@ async function main() {
     assert.strictEqual(rowText(win, 'meta-max-budget'), '$3.00');
   });
 
-  await test(
-    'a configData repaint keeps the neighbour the panel is lent to',
-    () => {
-      const wv = makePage();
-      const win = wv.win;
-      const TAB = tabIdOf(wv);
-      win._testApi.hideWelcome();
-      send(win, {
-        type: 'configData',
-        config: {work_dir: '/cfg/dir', max_budget: 42},
-        apiKeys: {},
-      });
-      send(win, {
-        type: 'task_events',
-        tabId: TAB,
-        chat_id: 'chat-n',
-        task_id: 'task-2',
-        task: 'live task',
-        events: [
-          {
-            type: 'task_settings',
-            settings: {
-              work_dir: '/live/dir',
-              max_budget: 5,
-              task_id: 'task-2',
-              chat_id: 'chat-n',
-            },
+  await test('a configData repaint keeps the neighbour the panel is lent to', () => {
+    const wv = makePage();
+    const win = wv.win;
+    const TAB = tabIdOf(wv);
+    win._testApi.hideWelcome();
+    send(win, {
+      type: 'configData',
+      config: {work_dir: '/cfg/dir', max_budget: 42},
+      apiKeys: {},
+    });
+    send(win, {
+      type: 'task_events',
+      tabId: TAB,
+      chat_id: 'chat-n',
+      task_id: 'task-2',
+      task: 'live task',
+      events: [
+        {
+          type: 'task_settings',
+          settings: {
+            work_dir: '/live/dir',
+            max_budget: 5,
+            task_id: 'task-2',
+            chat_id: 'chat-n',
           },
-          {type: 'system_output', text: 'live\n'},
-        ],
-      });
-      assert.strictEqual(rowText(win, 'meta-workdir'), '/live/dir');
-      assert.strictEqual(rowText(win, 'meta-max-budget'), '$5.00');
+        },
+        {type: 'system_output', text: 'live\n'},
+      ],
+    });
+    assert.strictEqual(rowText(win, 'meta-workdir'), '/live/dir');
+    assert.strictEqual(rowText(win, 'meta-max-budget'), '$5.00');
 
-      // Scroll onto a PREV neighbour: the panel is lent to it.
-      send(win, {
-        type: 'adjacent_task_events',
-        tabId: TAB,
-        direction: 'prev',
-        task: 'older neighbour',
-        task_id: 'task-1',
-        events: [
-          {
-            type: 'task_settings',
-            settings: {
-              work_dir: '/old/dir',
-              max_budget: 9,
-              task_id: 'task-1',
-              chat_id: 'chat-n',
-            },
+    // Scroll onto a PREV neighbour: the panel is lent to it.
+    send(win, {
+      type: 'adjacent_task_events',
+      tabId: TAB,
+      direction: 'prev',
+      task: 'older neighbour',
+      task_id: 'task-1',
+      events: [
+        {
+          type: 'task_settings',
+          settings: {
+            work_dir: '/old/dir',
+            max_budget: 9,
+            task_id: 'task-1',
+            chat_id: 'chat-n',
           },
-          {type: 'system_output', text: 'older\n'},
-        ],
-      });
-      assert.strictEqual(rowText(win, 'meta-workdir'), '/old/dir');
-      assert.strictEqual(rowText(win, 'meta-max-budget'), '$9.00');
+        },
+        {type: 'system_output', text: 'older\n'},
+      ],
+    });
+    assert.strictEqual(rowText(win, 'meta-workdir'), '/old/dir');
+    assert.strictEqual(rowText(win, 'meta-max-budget'), '$9.00');
 
-      // A settings reload must repaint the SAME lent-out task, not
-      // jump back to the tab's own.
-      send(win, {
-        type: 'configData',
-        config: {work_dir: '/cfg/dir', max_budget: 42},
-        apiKeys: {},
-      });
-      assert.strictEqual(rowText(win, 'meta-workdir'), '/old/dir');
-      assert.strictEqual(rowText(win, 'meta-max-budget'), '$9.00');
-    },
-  );
+    // A settings reload must repaint the SAME lent-out task, not
+    // jump back to the tab's own.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: '/cfg/dir', max_budget: 42},
+      apiKeys: {},
+    });
+    assert.strictEqual(rowText(win, 'meta-workdir'), '/old/dir');
+    assert.strictEqual(rowText(win, 'meta-max-budget'), '$9.00');
+  });
 
   await test('no getTaskUpdate poll outside remote desktop mode', () => {
     const wv = makePage({desktopMatches: false});
     const win = wv.win;
     assert.ok(!win.document.body.classList.contains('remote-desktop'));
     setRunning(win, true);
-    wv.clock.advance(POLL_MS * 3);
+    wv.clock.tick(POLL_MS * 3);
     assert.strictEqual(
       polls(wv).length,
       0,
@@ -795,7 +700,7 @@ async function main() {
       config: {work_dir: '/cfg/dir', max_budget: 42},
       apiKeys: {},
     });
-    wv.clock.advance(POLL_MS * 3);
+    wv.clock.tick(POLL_MS * 3);
     assert.strictEqual(
       polls(wv).length,
       0,
@@ -835,7 +740,7 @@ async function main() {
       assert.strictEqual(content.innerHTML, '', 'late reply ignored');
       // … and the poll loop stays quiet while idle.
       const idleFrom = polls(wv).length;
-      wv.clock.advance(POLL_MS * 3);
+      wv.clock.tick(POLL_MS * 3);
       assert.strictEqual(polls(wv).length, idleFrom, 'no polls while idle');
 
       // A new task starts: an immediate fresh-signature poll under a
@@ -942,7 +847,7 @@ async function main() {
         'opening a file view keeps the report on screen',
       );
       const before = polls(wv).length;
-      wv.clock.advance(POLL_MS);
+      wv.clock.tick(POLL_MS);
       assert.ok(polls(wv).length > before, 'the poll keeps running');
       const poll = lastPoll(wv);
       assert.strictEqual(poll.tabId, TAB1, 'polls name the chat tab');
@@ -961,8 +866,7 @@ async function main() {
     },
   );
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length > 0) process.exit(1);
+  report('remoteMetaPanelInfo');
   process.exit(0);
 }
 

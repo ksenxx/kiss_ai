@@ -11,66 +11,31 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const AUTO_SUBMIT_KEY = 'kissVoiceAutoSubmit';
 
 function makePage(options) {
   const opts = options || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-
-  if (opts.stored !== undefined) {
-    win.localStorage.setItem(AUTO_SUBMIT_KEY, opts.stored);
-  }
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
   // The "working on it" ack is an audio clip the page plays itself.
   const played = [];
-  win.Audio = function (src) {
-    return {src, play: () => (played.push(src), Promise.resolve())};
-  };
-
-  win.__VOICE__ = {ackAudioUrl: '/media/working-on-it.mp3'};
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
+  function beforeScripts(win) {
+    stubRaf(win);
+    if (opts.stored !== undefined) {
+      win.localStorage.setItem(AUTO_SUBMIT_KEY, opts.stored);
+    }
+    win.Audio = function (src) {
+      return {src, play: () => (played.push(src), Promise.resolve())};
+    };
+    win.__VOICE__ = {ackAudioUrl: '/media/working-on-it.mp3'};
+  }
+  const {win, posted} = makeChatPage({
+    beforeScripts,
+    extraScripts: ['voice.js'],
+  });
   return {win, posted, played};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function input(win) {
@@ -90,21 +55,6 @@ function setToggle(win, value) {
 function caret(win, start, end) {
   const inp = input(win);
   inp.setSelectionRange(start, end === undefined ? start : end);
-}
-
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
 }
 
 test('the settings panel exposes an "Auto submit spoken task" select', () => {
@@ -351,5 +301,5 @@ test('an unrelated storage key never disturbs the setting', () => {
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length > 0 ? 1 : 0);
+report('voiceAutoSubmitToggle');
+process.exit(0);

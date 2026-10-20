@@ -30,9 +30,8 @@ import json
 import unittest
 from importlib.util import find_spec
 
-from kiss.agents.third_party_agents.signal.signal_sea import _config as _signal_config
-from kiss.agents.third_party_agents.sms.sms_sea import _config as _sms_config
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+import pytest
+
 from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -66,13 +65,13 @@ sys.exit(0)
 """
 
 
+@pytest.mark.usefixtures("isolated_kiss_home")
 class TestSignalBackend(unittest.TestCase):
     """End-to-end tests driving SignalChannelBackend through a real fake signal-cli."""
 
     def setUp(self) -> None:
         """Install a real executable signal-cli script on PATH and a test config."""
         install_cli_on_path(self, "signal-cli", _FAKE_SIGNAL_CLI)
-        self.enterContext(config_backup(_signal_config.path))
         from kiss.agents.third_party_agents.signal.signal_sea import (
             SignalChannelBackend,
             _config,
@@ -157,12 +156,12 @@ class TestSignalBackend(unittest.TestCase):
         self.assertEqual(len(result["messages"]), 3)
 
 
+@pytest.mark.usefixtures("isolated_kiss_home")
 class TestSMSBackend(unittest.TestCase):
     """Tests for SMSChannelBackend config contract and bot detection."""
 
     def setUp(self) -> None:
         """Back up any existing SMS config; it is restored at cleanup."""
-        self.enterContext(config_backup(_sms_config.path))
 
     def test_config_without_from_number_is_invalid(self) -> None:
         """A legacy config lacking from_number must be rejected by connect()."""

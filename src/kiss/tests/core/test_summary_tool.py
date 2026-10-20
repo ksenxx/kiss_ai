@@ -21,19 +21,15 @@ class _RecordingPrinter(Printer):
     def __init__(self) -> None:
         self.events: list[tuple[str, Any, dict[str, Any]]] = []
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
-        """Record the event and return no streamed text.
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
+        """Record the event.
 
         Args:
             content: The content to display.
             type: Content type (e.g. "tool_call", "tool_result").
             **kwargs: Type-specific options (e.g. ``tool_input``).
-
-        Returns:
-            An empty string (no streamed text extracted).
         """
         self.events.append((type, content, kwargs))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Ignore streamed tokens.

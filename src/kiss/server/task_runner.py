@@ -76,6 +76,7 @@ from kiss.core.models.model_info import (
     is_known_model,
 )
 from kiss.core.printer import parse_result_yaml
+from kiss.core.tool_verdict import Verdict
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
@@ -430,6 +431,26 @@ def _client_task_id_of(cmd: dict[str, Any]) -> str:
     """
     raw = cmd.get("taskId", "")
     return raw if isinstance(raw, str) else ""
+
+
+def _staged_hook(cmd: dict[str, Any], key: str) -> Any:
+    """Return the SEA hook ``apply_sea`` staged on a ``run`` command, or ``None``.
+
+    The hook fields (``systemPromptHook``, ``toolsHook``, ``llmCallHook``,
+    ``toolCallHook``) hold the SEA's bound methods and never travel the
+    wire as callables, so a (buggy or malicious) client that sends one as
+    a JSON value must not crash the executor: anything non-callable means
+    "no hook".  The caller declares the hook's precise signature.
+
+    Args:
+        cmd: The ``run`` command dict.
+        key: The wire field name of the hook.
+
+    Returns:
+        The staged callable, or ``None``.
+    """
+    value = cmd.get(key)
+    return value if callable(value) else None
 
 
 def _parent_extra_tools(parent_task_id: str) -> list[Callable[..., Any]]:
@@ -801,7 +822,7 @@ class _TaskRunnerMixin:
             tab_id: str,
             *,
             discard_if_empty: bool = True,
-        ) -> None: ...
+        ) -> bool: ...
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
@@ -1978,18 +1999,12 @@ class _TaskRunnerMixin:
             _docker_image = _raw_docker if isinstance(_raw_docker, str) else ""
             # Agent-script hooks (``llm_call_hook`` /
             # ``tool_call_hook``), staged onto the command dict by
-            # ``apply_sea``.  Guarded with ``callable``:
-            # the fields never travel the wire as callables, so a
-            # (buggy or malicious) client that sends them as JSON
-            # values must not crash the executor — anything
-            # non-callable means "no hook".
-            _raw_llm_hook = cmd.get("llmCallHook")
-            _llm_call_hook = (
-                _raw_llm_hook if callable(_raw_llm_hook) else None
+            # ``apply_sea``; the signatures are ``ChatSorcarAgent.run``'s.
+            _llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = (
+                _staged_hook(cmd, "llmCallHook")
             )
-            _raw_tool_hook = cmd.get("toolCallHook")
-            _tool_call_hook = (
-                _raw_tool_hook if callable(_raw_tool_hook) else None
+            _tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = _staged_hook(
+                cmd, "toolCallHook"
             )
 
             on_task_id_allocated = partial(
@@ -2005,12 +2020,12 @@ class _TaskRunnerMixin:
             # assembles its system prompt and builds its toolset.  The
             # ``none`` tool profile strips the run to ``finish`` plus
             # what ``tools()`` returns.
-            _raw_system_prompt_hook = cmd.get("systemPromptHook")
-            _system_prompt_hook = (
-                _raw_system_prompt_hook if callable(_raw_system_prompt_hook) else None
+            _system_prompt_hook: Callable[[str], str] | None = _staged_hook(
+                cmd, "systemPromptHook"
             )
-            _raw_tools_hook = cmd.get("toolsHook")
-            _tools_hook = _raw_tools_hook if callable(_raw_tools_hook) else None
+            _tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = (
+                _staged_hook(cmd, "toolsHook")
+            )
             _append_basic_tools = _tool_profile != NO_TOOLS_PROFILE
             # A ``run_agent`` sub-task (wire field ``inheritTools``)
             # also gets the extra tools of the calling task — the
@@ -2032,6 +2047,13 @@ class _TaskRunnerMixin:
             subtask_index = 0
             while subtask_index < len(subtasks):
                 task_prompt = subtasks[subtask_index]
+                # Each subtask's row and failure banner carry that
+                # subtask's OWN usage: ``agent.run`` zeroes the
+                # counters in its ``_reset`` anyway, and zeroing here
+                # first keeps a run that fails anywhere before
+                # ``_reset`` (the prompt bookkeeping below included)
+                # from reporting the previous run's numbers.
+                _zero_usage_counters(agent)
                 # A slash command keeps the tab's ``last_user_prompt``
                 # on the raw ``/xxx text`` the user typed, so the tab
                 # title / history rebind / merge flow all still show
@@ -2044,12 +2066,10 @@ class _TaskRunnerMixin:
                 suggested_next_task = ""
                 if subtask_index > 0:
                     sub_start_ms = int(time.time() * 1000)
-                # Each subtask's row and failure banner carry that
-                # subtask's OWN usage: ``agent.run`` zeroes the
-                # counters in its ``_reset`` anyway, and zeroing here
-                # too keeps a run that fails before ``_reset`` from
-                # reporting the previous subtask's numbers.
-                _zero_usage_counters(agent)
+                # ``agent.last_task_id`` keeps naming the previous
+                # run's (or subtask's) row until this run allocates
+                # its own; the comparison below tells the two apart.
+                row_before_run = getattr(agent, "last_task_id", "") or None
                 subtask_failed = False
                 subtask_exc: BaseException | None = None
                 try:
@@ -2110,6 +2130,30 @@ class _TaskRunnerMixin:
                         result_summary = str(_run_parsed["summary"])
                     else:
                         result_summary = self._extract_result_summary() or "No summary available"
+                    if (
+                        _run_parsed
+                        and _run_parsed.get("success") is False
+                        and not self._task_printed_a_result(agent)
+                    ):
+                        # The agent returned a failure without printing
+                        # its terminal ``result`` event: only the agent
+                        # loop's ``finish`` prints one, and
+                        # ``SorcarAgent.run``'s catch-all answers
+                        # ``success: False / summary: Task failed with
+                        # error: ...`` for an error raised before the
+                        # loop started (a work dir that cannot be
+                        # created, say). Broadcast it here, as the
+                        # raise path below does, else the viewer tab and
+                        # a ``run_agent`` caller — local or on another
+                        # machine: ``daemon_client`` reads the sub-task's
+                        # text from this event — see a bare "Task failed"
+                        # with the reason lost.
+                        self._broadcast_failure_result(
+                            agent=agent,
+                            result_summary=result_summary,
+                            task_history_id=getattr(agent, "last_task_id", "") or None,
+                            tab_id=tab_id,
+                        )
                     suggested_next_task = str(
                         (_run_parsed or {}).get("suggested_next_task") or "",
                     ).strip()
@@ -2167,13 +2211,16 @@ class _TaskRunnerMixin:
                             exc_info=True,
                         )
                 finally:
-                    # ``or None`` keeps this local on the ``is not
-                    # None`` protocol the teardown below relies on:
-                    # the property answers ``""`` for an agent that
-                    # has not published a row yet, and an empty id
-                    # must not reach ``printer.cleanup_task``.
+                    # The row is this subtask's only when the run
+                    # allocated one (ids never repeat).  A run that
+                    # failed earlier (a Stop injected inside
+                    # ``_add_task``, a setup error) leaves the property
+                    # on the previous row, which is already persisted:
+                    # ``None`` keeps the teardown below off it, as for
+                    # an agent that has never published a row.
+                    row_after_run = getattr(agent, "last_task_id", "") or None
                     task_history_id = (
-                        getattr(agent, "last_task_id", "") or None
+                        row_after_run if row_after_run != row_before_run else None
                     )
                     state.last_result_summary = result_summary
                 if subtask_failed:
@@ -2230,12 +2277,6 @@ class _TaskRunnerMixin:
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
-                        # A slash command stored the raw ``/xxx text``
-                        # in the DB (see the ``_history_prompt`` branch
-                        # of ``ChatSorcarAgent.run``); the fallback
-                        # id-resolver for legacy callers must resolve
-                        # by that same string, not by the SEA's task text.
-                        task_prompt=display_prompt if _is_slash_run else task_prompt,
                         result_summary=result_summary,
                         model=model,
                         work_dir=work_dir,
@@ -2319,7 +2360,6 @@ class _TaskRunnerMixin:
                 self._persist_subtask_row(
                     state,
                     task_id=task_history_id,
-                    task_prompt=display_prompt,
                     result_summary=result_summary,
                     model=model,
                     work_dir=work_dir,
@@ -2341,11 +2381,7 @@ class _TaskRunnerMixin:
                     # checkout; a failed rescue is reported and leaves
                     # the worktree pending (the next run preserves it).
                     try:
-                        if self._get_worktree_changed_files(tab_id):
-                            self._present_pending_worktree(
-                                tab_id, discard_if_empty=False,
-                            )
-                        else:
+                        if not self._present_pending_worktree(tab_id, discard_if_empty=False):
                             branch = agent._wt_branch
                             message = agent.discard(rescue_ignored=True)
                             self.printer.broadcast({
@@ -2494,7 +2530,6 @@ class _TaskRunnerMixin:
         state: AgentState,
         *,
         task_id: str | None,
-        task_prompt: str,
         result_summary: str,
         model: str,
         work_dir: str,
@@ -2521,11 +2556,18 @@ class _TaskRunnerMixin:
         must not abort the remaining subtasks, and one for the final
         row must not skip the worktree presentation.
 
+        A run that unwound before ``ChatSorcarAgent.run`` allocated
+        its row (an unknown tool profile, a stop during setup) has
+        ``task_id=None`` and nothing to persist: its failure was
+        already broadcast, and the persistence helpers' missing-id
+        fallback would write onto the latest row of the same prompt
+        or of the whole table.  Every row the runner finishes has an
+        id, so the helpers are never given a prompt to resolve by.
+
         Args:
             state: The owning agent state.
             task_id: The just-finished subtask's ``task_history`` row
-                id.
-            task_prompt: The subtask's own prompt text.
+                id, or ``None`` for a run that never allocated one.
             result_summary: The subtask's result summary.
             model: Model name used for the task.
             work_dir: Working directory the task ran from.
@@ -2542,15 +2584,16 @@ class _TaskRunnerMixin:
                 ``cleanup_task`` after persisting, also when persisting
                 fails.
         """
+        if task_id is None:
+            return
         try:
             if end_event is None:
                 end_event = {"type": "task_done"}
-            _append_chat_event(end_event, task_id=task_id, task=task_prompt)
+            _append_chat_event(end_event, task_id=task_id)
             verdict = end_event.get("success")
             _save_task_result(
                 result=result_summary,
                 task_id=task_id,
-                task=task_prompt,
                 success=verdict if isinstance(verdict, bool) else None,
             )
             # Read and saved under TASK_USAGE_LOCK, so a sub-task's late
@@ -2577,7 +2620,7 @@ class _TaskRunnerMixin:
             # Even when persisting failed: the run moves on to its next
             # subtask, and the end-of-run cleanup frees only the last
             # subtask's id, so this one's retired recording would leak.
-            if cleanup and task_id is not None:
+            if cleanup:
                 self.printer.cleanup_task(task_id)
 
     def _finish_sea_help_task(
@@ -2645,6 +2688,27 @@ class _TaskRunnerMixin:
         _save_task_result(result=text, task_id=task_id, task=prompt, success=success)
         self.printer.cleanup_task(str(task_id))
 
+    def _task_printed_a_result(self, agent: object) -> bool:
+        """Return whether the run of *agent* that just returned printed a ``result`` event.
+
+        Looked up in the task's own recording, by its id: the run
+        retired the recording (``stop_recording``) and restored the
+        worker thread's previous task binding before returning, so the
+        thread-keyed :meth:`_extract_result_summary` would read another
+        task's recording, or none.  The recording of a retired task is
+        kept until ``cleanup_task`` (the end of :meth:`_run_task_inner`).
+        ``True`` when the agent allocated no task id: nothing to
+        broadcast to then.
+
+        Args:
+            agent: The agent whose ``run`` returned.
+        """
+        task_id = getattr(agent, "last_task_id", "") or ""
+        if not task_id:
+            return True
+        events = self.printer.peek_recording_for_task(str(task_id))
+        return any(event.get("type") == "result" for event in events)
+
     def _broadcast_failure_result(
         self,
         *,
@@ -2660,7 +2724,12 @@ class _TaskRunnerMixin:
         the failed subtask's own usage.  The event is
         addressed by task id when one was allocated — so it reaches
         every viewer tab subscribed to the task — and falls back to
-        the launcher tab id otherwise.
+        the launcher tab id otherwise.  As ``print(type="result")``
+        does for the agent's own result, the task's buffered bash
+        output is flushed first, so a stopped command's trailing
+        ``system_output`` never lands after the ``result``; keyed by
+        the task id because the worker thread's task binding is
+        already restored by now.
 
         Args:
             agent: The (possibly ``None``) agent to read counters from.
@@ -2672,6 +2741,7 @@ class _TaskRunnerMixin:
         failure_result = _result_event(result_summary, success=False, agent=agent)
         if task_history_id:
             failure_result["taskId"] = str(task_history_id)
+            self.printer.flush_bash_output(task_history_id)
         else:
             failure_result["tabId"] = tab_id
         self.printer.broadcast(failure_result)

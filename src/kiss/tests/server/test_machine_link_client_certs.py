@@ -15,6 +15,7 @@ daemons are in :mod:`kiss.tests.agents.sorcar.test_machines`.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import os
@@ -169,6 +170,6 @@ def test_enrolled_cas_are_loaded_into_a_live_context_once_each(
         assert len(ctx.get_ca_certs()) == 2 and len(loaded) == 3
         # A connection that is not TLS (or not a connection at all) has no client CA.
         server = ws.RemoteAccessServer.__new__(ws.RemoteAccessServer)
-        assert server._peer_client_ca(object()) == ""
+        assert asyncio.run(server._peer_client_ca(object())) == ""
     finally:
         ws._TLS_DIR = saved

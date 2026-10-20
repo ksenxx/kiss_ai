@@ -44,7 +44,10 @@ from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.email.email_sea import EmailChannelBackend, _config
 from kiss.agents.third_party_agents.irc import irc_sea
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.third_party_agents.recording_daemon import (
+    RecordingDaemon,
+    serve_recording_daemon,
+)
 
 _REPLY_TEXT = "handled your request"
 # Idle limit on every accepted connection: a peer that connects and then
@@ -324,7 +327,7 @@ class _SmtpLiteServer(_TlsLiteServer):
 
 
 @pytest.fixture()
-def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+def daemon() -> Iterator[RecordingDaemon]:
     """A recording daemon every real ``ChannelRunner._launch_task`` reaches.
 
     ``run_agent_via_kiss_web`` resolves its endpoint file from the
@@ -332,12 +335,10 @@ def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
     none, so the runner's launch travels the real wire to this stand-in,
     which answers every task with ``_REPLY_TEXT``.
     """
-    stand_in = RecordingDaemon(text=_REPLY_TEXT, chat_id="chat-email")
-    monkeypatch.setattr(_kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", str(stand_in.endpoint_file))
-    try:
+    with serve_recording_daemon(
+        _kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", text=_REPLY_TEXT, chat_id="chat-email"
+    ) as stand_in:
         yield stand_in
-    finally:
-        stand_in.close()
 
 
 @pytest.fixture()

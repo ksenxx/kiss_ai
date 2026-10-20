@@ -3,10 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// The "Do not show this" checkbox of a notification that offers it
-// (`dontShowAgain: true`, today the "VS Code extension removed" notice):
+// The "Do not show this again" checkbox of a notification that offers it
+// (`dontShowAgain: true`: the "VS Code extension removed" notice and the
+// phone swipe hint, see swipeHintOnMobile.test.js):
 //
-// * The toast renders a checkbox labelled "Do not show this" under its
+// * The toast renders a checkbox labelled "Do not show this again" under its
 //   message; a toast without the flag has none.
 // * Ticking it posts `{type: 'dismissNotice', id}` to the daemon and
 //   removes the toast at once.
@@ -45,7 +46,7 @@ async function runTests() {
       );
       const label = toast.querySelector('label.kiss-notification-opt-out');
       assert.ok(label, 'the toast must carry the opt-out label');
-      assert.strictEqual(label.textContent.trim(), 'Do not show this');
+      assert.strictEqual(label.textContent.trim(), 'Do not show this again');
       const box = label.querySelector('input[type="checkbox"]');
       assert.ok(box, 'the label must wrap a checkbox');
       assert.strictEqual(box.checked, false, 'the box starts unticked');

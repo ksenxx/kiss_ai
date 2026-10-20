@@ -16,75 +16,20 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.resolve(__dirname, '..', 'media');
-const shimJs = fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf-8');
-
-function installFakeWebSocket(window, sockets) {
-  function FakeWebSocket(url) {
-    this.url = url;
-    this.readyState = FakeWebSocket.CONNECTING;
-    this.sent = [];
-    this.closed = false;
-    this.onopen = null;
-    this.onmessage = null;
-    this.onclose = null;
-    this.onerror = null;
-    sockets.push(this);
-  }
-  FakeWebSocket.CONNECTING = 0;
-  FakeWebSocket.OPEN = 1;
-  FakeWebSocket.CLOSING = 2;
-  FakeWebSocket.CLOSED = 3;
-  FakeWebSocket.prototype.send = function (data) {
-    this.sent.push(data);
-  };
-  FakeWebSocket.prototype.close = function () {
-    this.closed = true;
-    this.readyState = FakeWebSocket.CLOSED;
-  };
-  FakeWebSocket.prototype.fireOpen = function () {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen();
-  };
-  FakeWebSocket.prototype.fireMessage = function (msg) {
-    this.onmessage({data: JSON.stringify(msg)});
-  };
-  FakeWebSocket.prototype.fireClose = function () {
-    this.readyState = FakeWebSocket.CLOSED;
-    if (typeof this.onclose === 'function') this.onclose();
-  };
-  window.WebSocket = FakeWebSocket;
-}
+const {
+  newAuthDom,
+  bootShim,
+  installFakeWebSocket,
+} = require('./transport_page_helpers');
 
 // A page with fake timers, fake intervals and a fake clock.
 function page() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><head></head><body>' +
-      '<div id="kiss-server-loading" role="status">' +
-      '<div id="kiss-server-loading-msg"></div></div>' +
-      '<div id="app" style="display:none;">' +
-      '<div id="auth-modal" style="display:none;">' +
-      '<input id="auth-modal-input" type="password">' +
-      '<div id="auth-modal-error" role="alert"></div>' +
-      '<button id="auth-modal-ok"></button>' +
-      '<button id="auth-modal-cancel"></button></div>' +
-      '</div></body></html>',
-    {
-      runScripts: 'outside-only',
-      pretendToBeVisual: true,
-      url: 'https://example.test/',
-    },
-  );
-  const {window} = dom;
+  const {window} = newAuthDom();
   const sockets = [];
   const timers = [];
   const intervals = [];
   const clock = {now: 1000000};
-  installFakeWebSocket(window, sockets);
+  installFakeWebSocket(window, sockets, {halfOpen: true});
   window.setTimeout = function (fn, ms) {
     timers.push({fn, ms});
     return timers.length;
@@ -98,11 +43,7 @@ function page() {
     if (intervals[id - 1]) intervals[id - 1].cleared = true;
   };
   window.Date.now = () => clock.now;
-  window.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
-  window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
-  window.document.dispatchEvent(
-    new window.Event('DOMContentLoaded', {bubbles: true}),
-  );
+  bootShim(window);
   return {window, sockets, timers, intervals, clock};
 }
 

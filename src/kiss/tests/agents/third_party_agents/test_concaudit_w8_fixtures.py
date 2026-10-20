@@ -8,7 +8,7 @@
 several "unreachable server" tests used; the tests here prove the two
 properties those callers rely on: connects are refused for the whole test,
 and no other socket can take the port meanwhile. ``isolated_kiss_home``
-replaces five identical per-module fixtures; the test proves channel
+replaces the per-module config fixtures; the test proves channel
 configs really land under the returned directory.
 """
 
@@ -23,7 +23,6 @@ import pytest
 
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelConfig
 from kiss.core.config import kiss_home
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.conftest import IS_WINDOWS
 
 
@@ -53,23 +52,3 @@ def test_isolated_kiss_home_redirects_channel_configs(isolated_kiss_home: Path) 
     config.save({"k": "v"})
     assert config.load() == {"k": "v"}
     assert (isolated_kiss_home / "third_party_agents" / "w8audit" / "config.json").is_file()
-
-
-@pytest.mark.skipif(IS_WINDOWS, reason="POSIX file modes")
-def test_config_backup_restores_contents_mode_and_absence(tmp_path: Path) -> None:
-    """``config_backup`` puts back the exact file (text and 0600 mode) or its absence."""
-    path = tmp_path / "chan" / "config.json"
-    path.parent.mkdir()
-    path.write_text('{"token": "real"}')
-    path.chmod(0o600)
-    with pytest.raises(RuntimeError, match="setup failed"):
-        with config_backup(path):
-            assert not path.exists()
-            path.write_text('{"token": "test"}')
-            raise RuntimeError("setup failed")
-    assert path.read_text() == '{"token": "real"}'
-    assert path.stat().st_mode & 0o777 == 0o600
-    path.unlink()
-    with config_backup(path):
-        path.write_text('{"token": "test"}')
-    assert not path.exists()

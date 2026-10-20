@@ -29,16 +29,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, click, openSettings, closeSettings} = require('./settings_helpers');
+const {lastMsg, click, openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-function typeInto(win, id, value) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
 
 function boxValues(win) {
   const el = id => win.document.getElementById(id);

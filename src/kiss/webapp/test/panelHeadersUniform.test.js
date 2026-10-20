@@ -63,40 +63,39 @@ function testBashHeaderMatchesTheOtherToolHeaders() {
   console.log('  ok - the Bash header matches the other tool headers');
 }
 
+// Every collapsible header the transcript renders, by its markup
+// (`.tr .rl` is the result label inside a tool-result panel).
+const HEADER_MARKUP = [
+  '<div class="tc-h">Read</div>',
+  '<div class="tr"><span class="rl">Result</span></div>',
+  '<div class="system-prompt-h">System prompt</div>',
+  '<div class="prompt-h">Prompt</div>',
+  '<div class="llm-panel-hdr">Thoughts</div>',
+  '<span class="ask-answer-label">Answer</span>',
+  '<div class="tc-h tc-h-bash">Bash</div>',
+];
+
 function testNoCollapsibleHeaderIsBold() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const headerSelectors = [
-    '.tc-h',
-    '.tr .rl',
-    '.system-prompt-h, .prompt-h',
-    '.llm-panel-hdr',
-    '.ask-answer-label',
-  ];
-  // The headers share one rule block (its selector list names them all),
-  // so a header's declarations are those of the block whose selector
-  // list contains every selector of `sel`.
-  const blocks = [];
-  const blockRe = /([^{}]+)\{([^}]*)\}/g;
-  let bm;
-  while ((bm = blockRe.exec(css))) {
-    blocks.push({
-      selectors: bm[1].split(',').map(x => x.trim().split('\n').pop().trim()),
-      body: bm[2],
-    });
-  }
-  for (const sel of headerSelectors) {
-    const wanted = sel.split(',').map(x => x.trim());
-    const m = blocks.find(b => wanted.every(w => b.selectors.includes(w)));
-    assert.ok(m, `main.css declares ${sel}`);
+  const {win} = makePage();
+  injectMainCss(win);
+  const output = win.document.getElementById('output');
+  for (const markup of HEADER_MARKUP) {
+    output.insertAdjacentHTML('beforeend', markup);
+    const el = output.lastElementChild.matches('.tr')
+      ? output.lastElementChild.firstElementChild
+      : output.lastElementChild;
+    const style = win.getComputedStyle(el);
+    assert.strictEqual(
+      style.getPropertyValue('font-weight'),
+      '400',
+      `${markup} is not bold`,
+    );
     assert.ok(
-      /font-weight:\s*400/.test(m.body),
-      `${sel} is font-weight 400, got: ${m.body.trim()}`,
+      !/var\(\s*--accent/.test(style.getPropertyValue('color')),
+      `${markup} is not painted in the accent: ${style.getPropertyValue('color')}`,
     );
   }
-  assert.ok(
-    !/tc-h-bash[^{]*\{[^}]*--accent/.test(css),
-    'no rule paints .tc-h-bash in the accent',
-  );
+  win.close();
   console.log('  ok - no collapsible panel header is bold');
 }
 

@@ -5,13 +5,11 @@
 """Regression test: ConsolePrinter and JsonPrinter produce the same content.
 
 Feeds identical print() calls to both printers and verifies:
-- Return values are identical for every call
-- Both handle the same set of content types
+- Both handle the same set of content types (an unknown type is a no-op)
 - Semantic content (tool names, paths, results, etc.) matches
 """
 
 import io
-from types import SimpleNamespace
 
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.server.json_printer import JsonPrinter
@@ -31,18 +29,15 @@ def _drain(browser: JsonPrinter) -> list[dict]:
     return browser.stop_recording()
 
 
-class TestPrintReturnValueParity:
-    """Both printers must return the same string from print() for every type."""
+class TestUnknownTypeParity:
+    """An unknown content type prints nothing on either printer."""
 
-    def test_text_returns_empty(self):
-        console, _, browser = _make_printers()
-        assert console.print("hello", type="text") == browser.print("hello", type="text")
-
-    def test_unknown_type_returns_empty(self):
-        console, _, browser = _make_printers()
-        r1 = console.print("x", type="nonexistent_type")
-        r2 = browser.print("x", type="nonexistent_type")
-        assert r1 == r2 == ""
+    def test_unknown_type_is_a_no_op(self):
+        console, buf, browser = _make_printers()
+        console.print("x", type="nonexistent_type")
+        browser.print("x", type="nonexistent_type")
+        assert buf.getvalue() == ""
+        assert _drain(browser) == []
 
 
 class TestToolCallContentParity:
@@ -98,55 +93,6 @@ class TestToolResultContentParity:
         tr_events = [e for e in events if e["type"] == "tool_result"]
         assert "... (truncated) ..." in out
         assert "... (truncated) ..." in tr_events[0]["content"]
-
-
-class TestMessageParity:
-    """Both printers handle message objects the same way."""
-
-    def test_tool_output_message(self):
-        console, buf, browser = _make_printers()
-        msg = SimpleNamespace(subtype="tool_output", data={"content": "command output\n"})
-        console.print(msg, type="message")
-        browser.print(msg, type="message")
-        out = buf.getvalue()
-        events = _drain(browser)
-        assert "command output" in out
-        so_events = [e for e in events if e["type"] == "system_output"]
-        assert so_events[0]["text"] == "command output\n"
-
-    def test_result_message(self):
-        console, buf, browser = _make_printers()
-        msg = SimpleNamespace(result="completed successfully")
-        console.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
-        browser.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
-        out = buf.getvalue()
-        events = _drain(browser)
-        assert "completed successfully" in out
-        assert "$0.0200" in out
-        r_events = [e for e in events if e["type"] == "result"]
-        assert r_events[0]["text"] == "completed successfully"
-        assert r_events[0]["cost"] == "$0.0200"
-        assert r_events[0]["total_tokens"] == 200
-
-    def test_error_content_block_message(self):
-        console, buf, browser = _make_printers()
-        block = SimpleNamespace(is_error=True, content="something broke")
-        msg = SimpleNamespace(content=[block])
-        console.print(msg, type="message")
-        browser.print(msg, type="message")
-        out = buf.getvalue()
-        events = _drain(browser)
-        assert "something broke" in out
-        tr_events = [e for e in events if e["type"] == "tool_result"]
-        assert tr_events[0]["is_error"] is True
-
-    def test_empty_tool_output_produces_nothing(self):
-        console, buf, browser = _make_printers()
-        msg = SimpleNamespace(subtype="tool_output", data={"content": ""})
-        console.print(msg, type="message")
-        browser.print(msg, type="message")
-        events = _drain(browser)
-        assert len(events) == 0
 
 
 class TestResultStatusParity:

@@ -25,7 +25,12 @@ from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands, task_digest
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import persist_task, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -87,12 +92,8 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
 def test_slash_task_update_resolves_to_the_bundled_sea() -> None:
     """``/task_update <id>`` resolves to the id and this SEA, which the chat runs directly."""
     assert sea_commands.get_command("task_update") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/task_update deadbeef")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "deadbeef"
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings([TaskUpdateSea()])
+    assert sea_commands.slash_command_task("/task_update deadbeef") == ("deadbeef", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([TaskUpdateSea()])
     assert sea_commands.help_text_if_command("/task_update help") == (
         TaskUpdateSea().description()
     )
@@ -267,15 +268,15 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
 
     assert len(agentic) == 2
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert names == {"Bash", "finish", "task_transcript"}, names
         system = system_message(request)
         assert system.startswith(sea.SYSTEM_PROMPT)
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert sea.build_prompt(task_id) in str(user["content"])
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1
-    digest = str(tool_results[0]["content"])
+    results = tool_results(agentic[1])
+    assert len(results) == 1
+    digest = results[0]
     assert f"Task id: {task_id}" in digest
     assert "Task prompt: Refactor the parser" in digest
     assert '[0] TOOL CALL Read({"path": "parser.py"})' in digest

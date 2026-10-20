@@ -351,6 +351,50 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         )
         self.assertEqual(event["tasks"][1]["events"][1]["command"], "pwd")
 
+    def test_every_entry_carries_the_rows_run_metrics(self) -> None:
+        # The saved page prints the Task Info rows under every task;
+        # its Tokens / Cost / Steps / Time rows come from the row's
+        # typed columns (the end time is in no transcript event).
+        done = self._seed("chat-m", "finished task", "ls")
+        th._save_task_extra(
+            {
+                "tokens": 4321,
+                "cost": 0.4242,
+                "steps": 7,
+                "startTs": 1_700_000_000_000,
+                "endTs": 1_700_000_125_000,
+            },
+            task_id=done,
+        )
+        running = self._seed("chat-m", "running task", "pwd")
+        sub = self._seed("chat-m", "sub task", "echo sub")
+        th._save_task_extra(
+            {"parent_task_id": running, "tokens": 10, "steps": 1},
+            task_id=sub,
+        )
+        event = self._tasks(chatId="chat-m")
+        self.assertEqual(
+            event["tasks"][0]["metrics"],
+            {
+                "tokens": 4321,
+                "cost": 0.4242,
+                "steps": 7,
+                "start_ts": 1_700_000_000_000,
+                "end_ts": 1_700_000_125_000,
+            },
+        )
+        live = event["tasks"][1]["metrics"]
+        self.assertEqual(
+            (live["tokens"], live["cost"], live["steps"], live["end_ts"]),
+            (0, 0.0, 0, 0),
+            "a row without totals or an end reads as zero, not as missing",
+        )
+        self.assertGreater(
+            live["start_ts"], 0, "the start falls back to the row's stamp"
+        )
+        sub_metrics = event["tasks"][1]["subagents"][0]["metrics"]
+        self.assertEqual((sub_metrics["tokens"], sub_metrics["steps"]), (10, 1))
+
     def test_subagent_rows_are_not_chat_tasks(self) -> None:
         parent = self._seed("chat-s", "parent task", "ls")
         sub = self._seed("chat-s", "sub-agent task", "internal")

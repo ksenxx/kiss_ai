@@ -21,32 +21,23 @@ the tests verify the actual HTTP traffic the typing indicator produces:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import cast
-from urllib.parse import urlsplit
 
 import pytest
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
+    JsonWebhookHandler,
     RecordingServer,
     serve_recording,
 )
 
 
-class _TypingHandler(RecordingHandler):
+class _TypingHandler(JsonWebhookHandler):
     """Records requests; 204 for typing endpoints, 500 for channel ERR."""
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlsplit(self.path).path
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": path,
-                "authorization": self.headers.get("Authorization", ""),
-            }
-        )
-        if path == "/channels/ERR/typing":
+        """Answer the typing endpoint, failing channel ``ERR`` like the Discord API."""
+        if self.record()["path"] == "/channels/ERR/typing":
             self._json(500, {"message": "Internal Server Error", "code": 0})
         else:
             self.send_response(204)
@@ -78,7 +69,7 @@ def test_send_typing_posts_typing_endpoint_with_auth(
     req = server.requests[0]
     assert req["method"] == "POST"
     assert req["path"] == "/channels/111/typing"
-    assert req["authorization"] == "Bot test-token"
+    assert server.header("Authorization") == "Bot test-token"
 
 
 def test_send_typing_with_thread_ts_targets_channel(

@@ -23,6 +23,7 @@ from kiss.agents.seas.base.base_sea import (
 )
 from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.tests.agents.seas.conftest import run_sea
+from kiss.tests.agents.seas.sea_contract import tool_results
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 
@@ -38,11 +39,6 @@ def _run(tmp_path: Path, script: list[bytes], tool_profile: str) -> tuple[Any, l
     return run_sea(run, script, tmp_path, max_steps=20, tool_profile=tool_profile)
 
 
-def _tool_results(agentic: list[dict[str, Any]]) -> list[str]:
-    """The tool-result message contents of the last agentic request, in order."""
-    return [str(m["content"]) for m in agentic[-1]["messages"] if m["role"] == "tool"]
-
-
 def test_tenth_step_tool_call_is_refused_until_summary_runs(tmp_path: Path) -> None:
     """Steps 1-9 run Bash; step 10's Bash is refused; summary at 11 clears it; 12's Bash runs."""
     script = [_bash(step) for step in range(1, 11)]
@@ -51,7 +47,7 @@ def test_tenth_step_tool_call_is_refused_until_summary_runs(tmp_path: Path) -> N
     script.append(finish_body("<p>done</p>", prompt_tokens=900))
     parsed, requests = _run(tmp_path, script, "shell+control")
     assert parsed["success"] is True
-    results = _tool_results(requests)
+    results = tool_results(requests[-1])
     assert len(results) == 12, results
     for step in range(9):
         assert f"step-{step + 1}" in results[step], results[step]
@@ -78,7 +74,7 @@ def test_without_the_summary_tool_nothing_is_refused(tmp_path: Path) -> None:
     script.append(finish_body("<p>done</p>", prompt_tokens=900))
     parsed, requests = _run(tmp_path, script, "bash")
     assert parsed["success"] is True
-    results = _tool_results(requests)
+    results = tool_results(requests[-1])
     assert len(results) == 11, results
     assert "step-10" in results[9], results[9]
 
@@ -98,7 +94,7 @@ def test_a_second_run_on_the_same_hooks_starts_its_count_afresh(tmp_path: Path) 
     results = []
     for script in (first, second):
         _, requests = run_sea(run, script, tmp_path, max_steps=20, tool_profile="shell+control")
-        results.append(_tool_results(requests))
+        results.append(tool_results(requests[-1]))
     assert len(results[0]) == 9 and "step-9" in results[0][8], results[0]
     assert len(results[1]) == 2, results[1]
     assert "step-1" in results[1][0] and "step-2" in results[1][1], results[1]

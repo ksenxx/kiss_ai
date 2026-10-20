@@ -22,11 +22,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const VIEW_KEY = 'kissSorcar.historyLegacyView';
 
 let passed = 0;
@@ -45,61 +47,20 @@ function test(name, fn) {
 }
 
 function makePage(beforeMain) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  function beforeScripts(win) {
+    stubRaf(win);
+    fakeMatchMedia(win, true);
+    if (beforeMain) beforeMain(win);
+  }
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts,
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  if (beforeMain) beforeMain(win);
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=history-legacy-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function byId(win, id) {
@@ -285,7 +246,11 @@ test('the view toggle sits right of the search box and swaps grouped <-> flat wi
 
   // No per-chat colour: the flat rows carry no inline style at all.
   all(win, '#history-list > .sidebar-item').forEach(r => {
-    assert.strictEqual(r.getAttribute('style'), null, 'flat rows carry no colour');
+    assert.strictEqual(
+      r.getAttribute('style'),
+      null,
+      'flat rows carry no colour',
+    );
   });
 
   // An identical refresh keeps the flat rows (fast path, same view).
@@ -318,12 +283,21 @@ test('the flat list is remembered across loads and used for the first page', () 
   assert.deepStrictEqual(listShape(win), FLAT);
   // Later pages extend the flat list in order.
   sendHistory(win, posted, 5, [session('D', 'd1', todayNoon - 3 * DAY)]);
-  assert.deepStrictEqual(listShape(win), FLAT.concat([dateSeparator(3), 'row:task d1']));
+  assert.deepStrictEqual(
+    listShape(win),
+    FLAT.concat([dateSeparator(3), 'row:task d1']),
+  );
   // A row without a chat id is listed like any other.
   sendHistory(win, posted, 6, [session('', 'e1', todayNoon - 4 * DAY)]);
-  assert.deepStrictEqual(listShape(win), FLAT.concat([
-    dateSeparator(3), 'row:task d1', dateSeparator(4), 'row:task e1',
-  ]));
+  assert.deepStrictEqual(
+    listShape(win),
+    FLAT.concat([
+      dateSeparator(3),
+      'row:task d1',
+      dateSeparator(4),
+      'row:task e1',
+    ]),
+  );
   win.close();
 });
 
@@ -342,13 +316,22 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
     Object.assign(session('A', 'a1', todayNoon - 1200), {is_running: true}),
   ]);
   assert.deepStrictEqual(listShape(win), [
-    'sep:Running', 'row:task a1', 'sep:Today', 'row:task a2', 'row:task b1',
+    'sep:Running',
+    'row:task a1',
+    'sep:Today',
+    'row:task a2',
+    'row:task b1',
   ]);
   // The "Errored" chip hides the failed row only.
   const hfErrors = byId(win, 'hf-errors');
   hfErrors.checked = false;
   hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
-  assert.deepStrictEqual(listShape(win), ['sep:Running', 'row:task a1', 'sep:Today', 'row:task a2']);
+  assert.deepStrictEqual(listShape(win), [
+    'sep:Running',
+    'row:task a1',
+    'sep:Today',
+    'row:task a2',
+  ]);
   hfErrors.checked = true;
   hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
   // Keyboard focus on a row survives a changed-data rebuild.

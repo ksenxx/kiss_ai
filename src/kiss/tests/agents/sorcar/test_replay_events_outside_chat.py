@@ -68,7 +68,7 @@ class _CannedModelAgent(SorcarAgent):
     broadcast_result_event = False
     canned_result = _CANNED_RESULT
 
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
+    def run(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
         printer = kwargs.get("printer")
         if self.broadcast_result_event and printer is not None:
             printer.broadcast({"type": "result", "text": self.canned_result})

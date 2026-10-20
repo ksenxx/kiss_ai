@@ -28,6 +28,7 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
+    _save_last_model,
     _set_chat_summary,
     _set_task_favorite,
 )
@@ -85,35 +86,6 @@ def _reruns_after_teardown(owner: AgentState) -> bool:
         and not owner.is_subagent
         and not owner.frontend_closed
     )
-
-
-def _task_accepts_input(state: AgentState | None) -> bool:
-    """True when *state* has a live task that can drain queued input.
-
-    The worker thread raises ``is_task_active`` only AFTER
-    ``_cmd_run`` installs and starts ``task_thread``, so a follow-up
-    typed during that startup window used to be silently dropped
-    (S3-05).  Treating an alive worker thread as live closes the
-    window; the same predicate is used by the reattachment logic in
-    ``server.py``.  MUST be called while holding
-    :data:`agent_state.STATE_LOCK`.
-
-    Delegates to :meth:`AgentState.running`, whose thread-liveness
-    half deliberately counts a created-but-not-yet-started thread
-    (``ident is None``, ``is_alive()`` False) as alive: ``_cmd_run``
-    installs ``task_thread`` and broadcasts before ``thread.start()``,
-    so an ``appendUserMessage`` from another connection in that window
-    must still be accepted — a raw ``is_alive()`` check here reopened
-    the exact S3-05 drop this predicate exists to close.
-
-    Args:
-        state: The agent state to inspect (``None`` accepted).
-
-    Returns:
-        True when the state's task is active or its worker thread is
-        still alive.
-    """
-    return state is not None and state.running()
 
 
 # How many of the most recently run commands the ``/`` popup lists
@@ -289,6 +261,8 @@ class _CommandsMixin:
         _state_lock: threading.RLock
         _shutdown_stopping: bool
         _default_model: str
+        _model_pick: tuple[int, str]
+        _model_picks_pending: int
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
         _complete_queue: (
@@ -882,11 +856,27 @@ class _CommandsMixin:
             if not model:
                 return
             self._default_model = model
-            # Persisted under the lock on purpose: ``_refresh_default_model``
-            # re-reads the on-disk last model under the same lock, so a
-            # concurrent ``getModels`` / ``newChat`` can never observe the
-            # stale file and revert the pick that was just made.
+            self._model_pick = (self._model_pick[0] + 1, model)
+            self._model_picks_pending += 1
+        # Persisted after the lock is released: the write waits for the
+        # history database's writer turn (behind a long ``getHistory``,
+        # say), and ``_state_lock`` is on the path of every other tab's
+        # commands.  The pending count and the pick generation keep a
+        # concurrent ``_refresh_default_model`` from reverting the pick
+        # with the still-stale file.  Overlapping picks write the file
+        # in no particular order: once its own write is done, a pick
+        # that a later one has superseded writes that newest pick
+        # again, so the last write of every pick names the newest and
+        # the file cannot end up with an older pick than memory.
+        try:
             _record_model_usage(model)
+            with self._state_lock:
+                newest = self._model_pick[1]
+            if newest != model:
+                _save_last_model(newest)
+        finally:
+            with self._state_lock:
+                self._model_picks_pending -= 1
         # A real model name runs no hook; the registry look-up that tells
         # happens on the hook's thread, so a changed SEA's re-import never
         # stalls the command loop.
@@ -1542,12 +1532,16 @@ class _CommandsMixin:
         prompt = cmd.get("prompt", "")
         if not isinstance(prompt, str) or not prompt.strip():
             return
+        # ``running()`` (not a raw ``is_alive()``) so a follow-up typed
+        # while ``_cmd_run`` has installed but not yet started the
+        # worker thread is queued instead of silently dropped.
         with self._state_lock:
             owner = agent_state.find_by_tab(tab_id)
-            if not _task_accepts_input(owner):
+            if owner is not None and not owner.running():
                 owner = None
+            if owner is None:
                 for candidate in self._find_viewer_task_states(tab_id):
-                    if _task_accepts_input(candidate):
+                    if candidate.running():
                         owner = candidate
                         break
             if owner is None:
@@ -1669,22 +1663,6 @@ class _CommandsMixin:
             conn_id=conn_id,
         )
 
-    def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
-        """Broadcast the canonical ``tabs_state`` snapshot on request.
-
-        Sent by a daemon link (``MachineLink``) on every (re)connect.
-        The daemon otherwise emits snapshots only after registry
-        mutations and ``ready`` syncs, so a peer with no chat page
-        would have no baseline — the next mutation would be the FIRST
-        snapshot it ever sees, and a reconnecting peer would never
-        learn of tabs created during the outage.  The reply is a
-        normal broadcast: snapshots
-        are idempotent and every client reconciles against the full
-        list, so answering all clients is as cheap as answering one.
-        """
-        del cmd
-        self._publish_tabs_state()
-
     def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
         """Register a client-opened tab in the shared tab registry.
 
@@ -1770,6 +1748,15 @@ class _CommandsMixin:
             max(0, _parse_int(cmd.get("height")) or 0),
             bool(cmd.get("visible", True)),
         )
+
+    def _cmd_browser_list(self, cmd: dict[str, Any]) -> None:
+        """Tell the sender every live browser page (the ``browserTabs`` snapshot a ``ready`` gets).
+
+        Sent by another daemon's :class:`~kiss.server.remote_views.RemoteViewStream`
+        when it opens, so the pages open here before the stream are
+        shown on that daemon's surfaces too.
+        """
+        self._broadcast_to_conn(self.browser_tabs.snapshot_event(), cmd.get("connId", ""))
 
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
@@ -1900,53 +1887,17 @@ class _CommandsMixin:
             tab_id,
         )
 
-    def _start_tab_job(
-        self,
-        in_flight: set[str],
-        tab_id: str,
-        job: Callable[[], None],
-    ) -> None:
-        """Run *job* on a daemon thread as *tab_id*'s in-flight entry of *in_flight*.
+    def _run_autocommit_job(self, tab_id: str, job: Callable[[], None]) -> None:
+        """Run *job*, then release *tab_id*'s ``_autocommit_tabs`` claim.
 
-        The caller added *tab_id* to *in_flight* under ``_state_lock``,
-        in the same critical section as the duplicate / busy checks
-        the job needs.  The entry is released when the job returns
-        (see :meth:`_finish_tab_job`) — or right here when the thread
-        cannot be started, so a failed spawn never leaves the tab
-        dropping every later request as a duplicate.
-
-        Args:
-            in_flight: The per-tab claim set (``_autocommit_tabs``).
-            tab_id: Frontend tab that requested the job.
-            job: The work to run on the thread.
-        """
-        try:
-            threading.Thread(
-                target=self._finish_tab_job,
-                args=(in_flight, tab_id, job),
-                daemon=True,
-            ).start()
-        except BaseException:
-            with self._state_lock:
-                in_flight.discard(tab_id)
-            raise
-
-    def _finish_tab_job(
-        self,
-        in_flight: set[str],
-        tab_id: str,
-        job: Callable[[], None],
-    ) -> None:
-        """Run *job*, then release *tab_id*'s entry in *in_flight*.
-
-        Body of the thread :meth:`_start_tab_job` spawns; the
-        ``finally`` makes a failed job re-arm the tab.
+        Thread body spawned by :meth:`_cmd_autocommit_action`; the
+        ``finally`` makes a failed commit re-arm the tab.
         """
         try:
             job()
         finally:
             with self._state_lock:
-                in_flight.discard(tab_id)
+                self._autocommit_tabs.discard(tab_id)
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Stage-all + commit the tab's working tree in the background.
@@ -2002,7 +1953,17 @@ class _CommandsMixin:
                     message="A Git Commit of this tab is already running.", reply_to=requester,
                 )
             return
-        self._start_tab_job(self._autocommit_tabs, tab_id, job)
+        # The claim is released when the job returns, or right here
+        # when the thread cannot be started, so a failed spawn never
+        # leaves the tab refusing every later click as a duplicate.
+        try:
+            threading.Thread(
+                target=self._run_autocommit_job, args=(tab_id, job), daemon=True,
+            ).start()
+        except BaseException:
+            with self._state_lock:
+                self._autocommit_tabs.discard(tab_id)
+            raise
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -2167,7 +2128,7 @@ class _CommandsMixin:
         from kiss.core.models.claude_code_model import claude_auth_status
 
         self._reply_from_thread(
-            "claudeCodeStatus", claude_auth_status, [cmd.get("connId", "")], "claude-code-status",
+            "claudeCodeStatus", claude_auth_status, cmd.get("connId", ""), "claude-code-status",
         )
 
     def _cmd_get_codex_status(self, cmd: dict[str, Any]) -> None:
@@ -2180,7 +2141,7 @@ class _CommandsMixin:
         from kiss.core.models.codex_model import codex_auth_status
 
         self._reply_from_thread(
-            "codexStatus", codex_auth_status, [cmd.get("connId", "")], "codex-status",
+            "codexStatus", codex_auth_status, cmd.get("connId", ""), "codex-status",
         )
 
     def _cmd_start_codex_login(self, cmd: dict[str, Any]) -> None:
@@ -2204,14 +2165,13 @@ class _CommandsMixin:
 
         self._reply_from_thread(
             "codexLogin", functools.partial(codex_device_login, fresh=bool(cmd.get("fresh"))),
-            [cmd.get("connId", "")], "codex-login",
+            cmd.get("connId", ""), "codex-login",
         )
 
     def _reply_from_thread(
-        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_ids: list[str],
-        name: str,
+        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_id: str, name: str,
     ) -> None:
-        """Answer the connections *conn_ids* with a *reply_type* event built by *report*.
+        """Answer connection *conn_id* with a *reply_type* event built by *report*.
 
         For the settings sheet's CLI probes (``claude auth status``,
         ``codex login status``, ``codex login --device-auth``): each a
@@ -2224,28 +2184,25 @@ class _CommandsMixin:
         Args:
             reply_type: The event type of the reply.
             report: Builds the reply's fields (never raises).
-            conn_ids: The ``connId`` of every sender to answer.
+            conn_id: The ``connId`` of the sender to answer.
             name: The thread's name.
         """
         try:
             threading.Thread(
-                target=self._report_from_thread, args=(reply_type, report, conn_ids),
+                target=self._report_from_thread, args=(reply_type, report, conn_id),
                 name=name, daemon=True,
             ).start()
         except RuntimeError as exc:
             logger.exception("%s thread could not start", name)
-            self._send_report(reply_type, {"error": f"{name} could not start: {exc}"}, conn_ids)
+            self._broadcast_to_conn(
+                {"type": reply_type, "error": f"{name} could not start: {exc}"}, conn_id,
+            )
 
     def _report_from_thread(
-        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_ids: list[str],
+        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_id: str,
     ) -> None:
         """Thread body of :meth:`_reply_from_thread`."""
-        self._send_report(reply_type, report(), conn_ids)
-
-    def _send_report(self, reply_type: str, fields: dict[str, Any], conn_ids: list[str]) -> None:
-        """Send the *reply_type* event with *fields* to each connection of *conn_ids*."""
-        for conn_id in conn_ids:
-            self._broadcast_to_conn({"type": reply_type, **fields}, conn_id)
+        self._broadcast_to_conn({"type": reply_type, **report()}, conn_id)
 
     def _broadcast_my_models(self) -> None:
         """Broadcast the current custom-model list to every client.
@@ -2453,6 +2410,32 @@ class _CommandsMixin:
         if cmd.get("reply"):
             self._cmd_get_config(cmd)
 
+    def _cmd_set_machine(self, cmd: dict[str, Any]) -> None:
+        """Make ``machine`` the global machine new chats run on.
+
+        Sent when the user picks a machine in any surface's chat-header
+        drop-down: the pick is ONE global setting (a new chat on every
+        surface runs there; a chat that already shows a task keeps that
+        task's machine).  Persisted as ``config.json`` ``last_machine``
+        (``configData`` carries it on load) and broadcast as
+        ``machineChanged`` to every client, so the surfaces agree.
+        ``""`` is this machine.  A pick that is not a string, or the
+        machine already picked, changes nothing.  The broadcast goes
+        out under the config lock, so two picks racing on the thread
+        pool reach every client in the order they were persisted (the
+        last broadcast names the persisted pick).
+        """
+        machine = cmd.get("machine", "")
+        if not isinstance(machine, str):
+            return
+        from kiss.core.user_config import load_config, save_config
+
+        with _CommandsMixin._save_config_lock:
+            if load_config().get("last_machine", "") == machine:
+                return
+            save_config({"last_machine": machine})
+            self.printer.broadcast({"type": "machineChanged", "machine": machine})
+
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
@@ -2468,7 +2451,6 @@ class _CommandsMixin:
         "appendUserMessage": _cmd_append_user_message,
         "resumeSession": _cmd_resume_session,
         "openTab": _cmd_open_tab,
-        "getTabsState": _cmd_get_tabs_state,
         "closeTab": _cmd_close_tab,
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
@@ -2478,6 +2460,7 @@ class _CommandsMixin:
         "autocommitAction": _cmd_autocommit_action,
         "worktreeAction": _cmd_worktree_action,
         "setWorkDir": _cmd_set_work_dir,
+        "setMachine": _cmd_set_machine,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
         "getMyModels": _cmd_get_my_models,
@@ -2494,4 +2477,5 @@ class _CommandsMixin:
         "browserNavigate": _cmd_browser_navigate,
         "browserInput": _cmd_browser_input,
         "browserViewport": _cmd_browser_viewport,
+        "browserList": _cmd_browser_list,
     }

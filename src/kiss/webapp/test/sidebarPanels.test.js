@@ -31,22 +31,17 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  fakeMatchMedia,
+  MEDIA,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-let failures = 0;
-
-async function test(name, fn) {
-  try {
-    await fn();
-    console.log(`  ok - ${name}`);
-  } catch (e) {
-    failures++;
-    console.log(`  FAIL - ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 /**
  * Boot a chat page with the given body attributes.  setInterval is
@@ -56,76 +51,34 @@ async function test(name, fn) {
  */
 function makePage(opts) {
   const {desktop = true} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
   const intervals = [];
-  win.setInterval = function (fn, ms) {
-    intervals.push({fn, ms});
-    return intervals.length;
-  };
-  win.clearInterval = function () {};
   // jsdom has no ResizeObserver: record the observers so a test can
   // fire a resize by hand.
   const observers = [];
-  win.ResizeObserver = class {
-    constructor(fn) {
-      this.fn = fn;
-      observers.push(this);
-    }
-    observe(target) {
-      this.target = target;
-    }
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)' && desktop,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=sidebarpanels-main.js',
-  );
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['marked.min.js'],
+    sourceUrl: 'sidebarpanels-main.js',
+    beforeScripts(win) {
+      stubRaf(win);
+      win.setInterval = function (fn, ms) {
+        intervals.push({fn, ms});
+        return intervals.length;
+      };
+      win.clearInterval = function () {};
+      win.ResizeObserver = class {
+        constructor(fn) {
+          this.fn = fn;
+          observers.push(this);
+        }
+        observe(target) {
+          this.target = target;
+        }
+      };
+      fakeMatchMedia(win, desktop);
+    },
+  });
   return {win, posted, intervals, observers};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 /** deepStrictEqual across realms: jsdom objects have foreign prototypes. */
@@ -327,7 +280,8 @@ async function main() {
     // one the `daemonStatus connected` handler makes (transport.js
     // announces it once the socket is authenticated), so every
     // subpanel was asked twice at page load.
-    const panelPosts = () => posted.filter(m => PANEL_COMMANDS.includes(m.type));
+    const panelPosts = () =>
+      posted.filter(m => PANEL_COMMANDS.includes(m.type));
     eq(panelPosts(), [], 'nothing is asked before the daemon is up');
     send(win, {type: 'daemonStatus', connected: true});
     eq(panelPosts(), [
@@ -1408,27 +1362,47 @@ async function main() {
     // repainted) opened a second connect chat for the same app.
     const {win, posted} = makePage();
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-    const slackRow = () => win.document.querySelector('.app-row[data-app="slack"] button');
+    const slackRow = () =>
+      win.document.querySelector('.app-row[data-app="slack"] button');
     const submits = () => posted.filter(m => m.type === 'submit');
     slackRow().click();
-    assert.strictEqual(submits().length, 1, 'the first click opens the connect chat');
+    assert.strictEqual(
+      submits().length,
+      1,
+      'the first click opens the connect chat',
+    );
     assert.ok(slackRow().disabled, 'the row is disabled while the task runs');
-    assert.strictEqual(slackRow().querySelector('.app-state').textContent, 'Connecting\u2026');
+    assert.strictEqual(
+      slackRow().querySelector('.app-state').textContent,
+      'Connecting\u2026',
+    );
     assert.strictEqual(slackRow().title, 'A task is connecting Slack');
     // A scripted activation of the disabled row (a `click()` is a
     // no-op on it) launches nothing either.
     slackRow().dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    assert.strictEqual(submits().length, 1, 'REGRESSION: a second click launched another task');
+    assert.strictEqual(
+      submits().length,
+      1,
+      'REGRESSION: a second click launched another task',
+    );
     // The next probe repaints the row still waiting ...
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 2});
     assert.ok(slackRow().disabled);
-    assert.strictEqual(slackRow().querySelector('.app-state').textContent, 'Connecting\u2026');
+    assert.strictEqual(
+      slackRow().querySelector('.app-state').textContent,
+      'Connecting\u2026',
+    );
     slackRow().click();
     assert.strictEqual(submits().length, 1);
     // ... and the other apps' rows are untouched.
-    const matrix = win.document.querySelector('.app-row[data-app="matrix"] button');
+    const matrix = win.document.querySelector(
+      '.app-row[data-app="matrix"] button',
+    );
     assert.ok(!matrix.disabled);
-    assert.strictEqual(matrix.querySelector('.app-state').textContent, 'Connect');
+    assert.strictEqual(
+      matrix.querySelector('.app-state').textContent,
+      'Connect',
+    );
     // Slack found connected ends the wait: its row is the plain state.
     const connected = APPS.map(a =>
       a.name === 'slack' ? Object.assign({}, a, {authenticated: true}) : a,
@@ -1436,7 +1410,8 @@ async function main() {
     send(win, {type: 'appsStatus', apps: connected, checkedAt: 3});
     assert.strictEqual(slackRow(), null, 'a connected app has no button');
     assert.strictEqual(
-      win.document.querySelector('.app-row[data-app="slack"] .app-state').textContent,
+      win.document.querySelector('.app-row[data-app="slack"] .app-state')
+        .textContent,
       'Connected',
     );
     // Disconnected again later (a revoked token): Connect works again.
@@ -1453,22 +1428,45 @@ async function main() {
     // wait lapsed; it also left the prompt in a new chat's composer.
     const {win, posted} = makePage();
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-    const slackRow = () => win.document.querySelector('.app-row[data-app="slack"] button');
+    const slackRow = () =>
+      win.document.querySelector('.app-row[data-app="slack"] button');
     const submits = () => posted.filter(m => m.type === 'submit');
     send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
     const activeTab = win._testApi.getActiveTabId();
     slackRow().click();
-    assert.strictEqual(submits().length, 0, 'nothing is submitted while the daemon is away');
-    assert.ok(!slackRow().disabled, 'REGRESSION: the row says Connecting without a task');
-    assert.strictEqual(slackRow().querySelector('.app-state').textContent, 'Connect');
-    assert.strictEqual(win._testApi.getActiveTabId(), activeTab, 'no chat is opened');
-    assert.strictEqual(el(win, 'task-input').value, '', 'the composer is untouched');
+    assert.strictEqual(
+      submits().length,
+      0,
+      'nothing is submitted while the daemon is away',
+    );
+    assert.ok(
+      !slackRow().disabled,
+      'REGRESSION: the row says Connecting without a task',
+    );
+    assert.strictEqual(
+      slackRow().querySelector('.app-state').textContent,
+      'Connect',
+    );
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      activeTab,
+      'no chat is opened',
+    );
+    assert.strictEqual(
+      el(win, 'task-input').value,
+      '',
+      'the composer is untouched',
+    );
     // The reconnect's probe repaints the row enabled, and Connect works.
     send(win, {type: 'daemonStatus', connected: true});
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 2});
     assert.ok(!slackRow().disabled);
     slackRow().click();
-    assert.strictEqual(submits().length, 1, 'REGRESSION: Connect stayed dead after the reconnect');
+    assert.strictEqual(
+      submits().length,
+      1,
+      'REGRESSION: Connect stayed dead after the reconnect',
+    );
     assert.ok(slackRow().disabled);
   });
 
@@ -1554,9 +1552,14 @@ async function main() {
     // and again on `auth_ok`; each announcement requested every
     // subpanel, so a password-required startup asked twice.
     const {win, posted} = makePage();
-    const panelPosts = () => posted.filter(m => PANEL_COMMANDS.includes(m.type));
+    const panelPosts = () =>
+      posted.filter(m => PANEL_COMMANDS.includes(m.type));
     send(win, {type: 'daemonStatus', connected: true});
-    assert.strictEqual(panelPosts().length, PANEL_COMMANDS.length, 'one request each on the first announcement');
+    assert.strictEqual(
+      panelPosts().length,
+      PANEL_COMMANDS.length,
+      'one request each on the first announcement',
+    );
     send(win, {type: 'daemonStatus', connected: true});
     assert.strictEqual(
       panelPosts().length,
@@ -1566,7 +1569,11 @@ async function main() {
     // An outage and the reconnect still refresh them.
     send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
     send(win, {type: 'daemonStatus', connected: true});
-    assert.strictEqual(panelPosts().length, 2 * PANEL_COMMANDS.length, 'the reconnect asks once');
+    assert.strictEqual(
+      panelPosts().length,
+      2 * PANEL_COMMANDS.length,
+      'the reconnect asks once',
+    );
     eq(types(panelPosts()), PANEL_COMMANDS.concat(PANEL_COMMANDS));
   });
 
@@ -2085,7 +2092,11 @@ async function main() {
 
     // A tab the daemon never bound checks on this daemon: no machine.
     posted.length = 0;
-    send(win, {type: 'prompt', text: 'see src/local.py please', tabId: 'home1'});
+    send(win, {
+      type: 'prompt',
+      text: 'see src/local.py please',
+      tabId: 'home1',
+    });
     send(win, {type: 'text_end', tabId: 'home1'});
     const home = posted.filter(m => m.type === 'checkPaths');
     assert.strictEqual(home.length, 1);
@@ -2110,10 +2121,17 @@ async function main() {
     send(win, {type: 'daemonStatus', connected: true});
     send(win, {type: 'configData', config: {}, machine: 'laptop'});
     send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
     send(win, {type: 'spendReport', ...spendReport()});
-    send(win, {type: 'recommendations', generatedAt: Date.now(), tasks: FIVE_TASKS});
+    send(win, {
+      type: 'recommendations',
+      generatedAt: Date.now(),
+      tasks: FIVE_TASKS,
+    });
     const pick = value => {
       const select = el(win, 'chat-machine');
       select.value = value;
@@ -2123,9 +2141,11 @@ async function main() {
   }
 
   const jobNames = win =>
-    Array.from(win.document.querySelectorAll('#meta-schedule-list .sched-row .sidebar-panel-name')).map(
-      n => n.textContent,
-    );
+    Array.from(
+      win.document.querySelectorAll(
+        '#meta-schedule-list .sched-row .sidebar-panel-name',
+      ),
+    ).map(n => n.textContent);
 
   await test('Machines: picking a machine empties the four subpanels and asks for its data', () => {
     const {win, posted, pick} = pageShowingThisMachine();
@@ -2139,10 +2159,22 @@ async function main() {
     assert.strictEqual(appRows(win).length, 0);
     assert.strictEqual(recommendationRows(win).length, 0);
     assert.strictEqual(el(win, 'meta-spend-graph').childElementCount, 0);
-    assert.strictEqual(el(win, 'meta-schedule-status').textContent, 'Loading\u2026');
-    assert.strictEqual(el(win, 'meta-apps-status').textContent, 'Checking\u2026');
-    assert.strictEqual(el(win, 'meta-spend-status').textContent, 'Loading\u2026');
-    assert.strictEqual(el(win, 'meta-recommendations-status').textContent, 'Loading\u2026');
+    assert.strictEqual(
+      el(win, 'meta-schedule-status').textContent,
+      'Loading\u2026',
+    );
+    assert.strictEqual(
+      el(win, 'meta-apps-status').textContent,
+      'Checking\u2026',
+    );
+    assert.strictEqual(
+      el(win, 'meta-spend-status').textContent,
+      'Loading\u2026',
+    );
+    assert.strictEqual(
+      el(win, 'meta-recommendations-status').textContent,
+      'Loading\u2026',
+    );
     // Four commands stamped with the machine; the Machines list is
     // this daemon's registry and is not.
     eq(panelRequests(posted, from), [
@@ -2158,44 +2190,101 @@ async function main() {
     eq(panelRequests(posted, again), []);
   });
 
-  await test('Machines: only the shown machine\'s replies are painted', () => {
+  await test("Machines: only the shown machine's replies are painted", () => {
     const {win, pick} = pageShowingThisMachine();
     pick('gpu-box');
     // This daemon's own reply (a poll answered late, a push) is dropped.
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     eq(jobNames(win), []);
-    assert.strictEqual(el(win, 'meta-schedule-status').textContent, 'Loading\u2026');
+    assert.strictEqual(
+      el(win, 'meta-schedule-status').textContent,
+      'Loading\u2026',
+    );
     // Another machine's forwarded reply is dropped too.
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'office', jobs: [job({name: 'Office job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'office',
+      jobs: [job({name: 'Office job'})],
+    });
     eq(jobNames(win), []);
     // gpu-box's reply is the one shown.
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     eq(jobNames(win), ['GPU job']);
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 2});
-    assert.strictEqual(appRows(win).length, 0, 'this daemon\'s apps are not gpu-box\'s');
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: APPS.slice(0, 2), checkedAt: 2});
+    assert.strictEqual(
+      appRows(win).length,
+      0,
+      "this daemon's apps are not gpu-box's",
+    );
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: APPS.slice(0, 2),
+      checkedAt: 2,
+    });
     assert.strictEqual(appRows(win).length, 2);
-    send(win, {type: 'recommendations', generatedAt: Date.now(), tasks: FIVE_TASKS});
+    send(win, {
+      type: 'recommendations',
+      generatedAt: Date.now(),
+      tasks: FIVE_TASKS,
+    });
     assert.strictEqual(recommendationRows(win).length, 0);
-    send(win, {type: 'recommendations', forwarded: true, machine: 'gpu-box', generatedAt: Date.now(), tasks: FIVE_TASKS.slice(0, 1)});
+    send(win, {
+      type: 'recommendations',
+      forwarded: true,
+      machine: 'gpu-box',
+      generatedAt: Date.now(),
+      tasks: FIVE_TASKS.slice(0, 1),
+    });
     assert.strictEqual(recommendationRows(win).length, 1);
     send(win, {type: 'spendReport', ...spendReport()});
     assert.strictEqual(el(win, 'meta-spend-graph').childElementCount, 0);
-    send(win, {type: 'spendReport', forwarded: true, machine: 'gpu-box', ...spendReport()});
-    assert.ok(el(win, 'meta-spend-graph').querySelector('.spend-total'), 'gpu-box\'s spend is drawn');
+    send(win, {
+      type: 'spendReport',
+      forwarded: true,
+      machine: 'gpu-box',
+      ...spendReport(),
+    });
+    assert.ok(
+      el(win, 'meta-spend-graph').querySelector('.spend-total'),
+      "gpu-box's spend is drawn",
+    );
     // Back on this machine: the forwarded replies are the ones dropped.
     pick('');
     eq(jobNames(win), []);
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     eq(jobNames(win), []);
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     eq(jobNames(win), ['Home job']);
   });
 
   await test('Machines: the refresh buttons, the poll and the Schedule actions go to the shown machine', () => {
     const {win, posted, intervals, pick} = pageShowingThisMachine();
     pick('gpu-box');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     let from = posted.length;
     el(win, 'meta-schedule-refresh').click();
     el(win, 'meta-apps-refresh').click();
@@ -2214,7 +2303,9 @@ async function main() {
     from = posted.length;
     intervals[0].fn();
     assert.ok(
-      panelRequests(posted, from).every(m => m.type === 'getMachines' || m.machine === 'gpu-box'),
+      panelRequests(posted, from).every(
+        m => m.type === 'getMachines' || m.machine === 'gpu-box',
+      ),
       'the poll asks gpu-box',
     );
     from = posted.length;
@@ -2223,18 +2314,27 @@ async function main() {
     eq(
       posted.slice(from).filter(m => m.type === 'cronAction'),
       [
-        {type: 'cronAction', action: 'run_now', jobId: 'g1', machine: 'gpu-box'},
+        {
+          type: 'cronAction',
+          action: 'run_now',
+          jobId: 'g1',
+          machine: 'gpu-box',
+        },
         {type: 'cronAction', action: 'pause', jobId: 'g1', machine: 'gpu-box'},
       ],
     );
     // The add form creates the job on the machine.
     from = posted.length;
     el(win, 'meta-schedule-add').click();
-    const form = win.document.querySelector('#meta-schedule-list .sidebar-inline-form');
+    const form = win.document.querySelector(
+      '#meta-schedule-list .sidebar-inline-form',
+    );
     form.elements.name.value = 'Nightly';
     form.elements.schedule.value = 'every 1d';
     form.elements.what.value = 'clean up';
-    form.dispatchEvent(new win.Event('submit', {bubbles: true, cancelable: true}));
+    form.dispatchEvent(
+      new win.Event('submit', {bubbles: true, cancelable: true}),
+    );
     const create = posted.slice(from).find(m => m.type === 'cronAction');
     assert.strictEqual(create.action, 'create');
     assert.strictEqual(create.machine, 'gpu-box');
@@ -2244,42 +2344,115 @@ async function main() {
   await test('Machines: a machine that did not answer is reported on each subpanel', () => {
     const {win, pick} = pageShowingThisMachine();
     pick('gpu-box');
-    const error = "gpu-box did not answer";
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [], error});
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: [], checkedAt: 0, error});
-    send(win, {type: 'spendReport', forwarded: true, machine: 'gpu-box', error});
-    send(win, {type: 'recommendations', forwarded: true, machine: 'gpu-box', generatedAt: 0, tasks: [], error});
-    for (const id of ['meta-schedule-status', 'meta-apps-status', 'meta-spend-status', 'meta-recommendations-status']) {
+    const error = 'gpu-box did not answer';
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [],
+      error,
+    });
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: [],
+      checkedAt: 0,
+      error,
+    });
+    send(win, {
+      type: 'spendReport',
+      forwarded: true,
+      machine: 'gpu-box',
+      error,
+    });
+    send(win, {
+      type: 'recommendations',
+      forwarded: true,
+      machine: 'gpu-box',
+      generatedAt: 0,
+      tasks: [],
+      error,
+    });
+    for (const id of [
+      'meta-schedule-status',
+      'meta-apps-status',
+      'meta-spend-status',
+      'meta-recommendations-status',
+    ]) {
       assert.strictEqual(el(win, id).textContent, error, id);
       assert.ok(el(win, id).classList.contains('is-error'), id + ' is red');
     }
     // Once the machine answers, the lines are plain again.
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: APPS, checkedAt: 2});
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: APPS,
+      checkedAt: 2,
+    });
     assert.ok(!el(win, 'meta-apps-status').classList.contains('is-error'));
-    send(win, {type: 'spendReport', forwarded: true, machine: 'gpu-box', ...spendReport()});
+    send(win, {
+      type: 'spendReport',
+      forwarded: true,
+      machine: 'gpu-box',
+      ...spendReport(),
+    });
     assert.ok(!el(win, 'meta-spend-status').classList.contains('is-error'));
-    send(win, {type: 'recommendations', forwarded: true, machine: 'gpu-box', generatedAt: Date.now(), tasks: FIVE_TASKS});
-    assert.ok(!el(win, 'meta-recommendations-status').classList.contains('is-error'));
+    send(win, {
+      type: 'recommendations',
+      forwarded: true,
+      machine: 'gpu-box',
+      generatedAt: Date.now(),
+      tasks: FIVE_TASKS,
+    });
+    assert.ok(
+      !el(win, 'meta-recommendations-status').classList.contains('is-error'),
+    );
   });
 
-  await test('Machines: an app connected from a machine\'s subpanel, or its recommendation, opens a chat on that machine', () => {
+  await test("Machines: an app connected from a machine's subpanel, or its recommendation, opens a chat on that machine", () => {
     const {win, posted, pick} = pageShowingThisMachine();
     el(win, 'meta-panel').classList.add('open');
     pick('gpu-box');
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: APPS, checkedAt: 2});
-    send(win, {type: 'recommendations', forwarded: true, machine: 'gpu-box', generatedAt: Date.now(), tasks: FIVE_TASKS});
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: APPS,
+      checkedAt: 2,
+    });
+    send(win, {
+      type: 'recommendations',
+      forwarded: true,
+      machine: 'gpu-box',
+      generatedAt: Date.now(),
+      tasks: FIVE_TASKS,
+    });
     const firstTab = win._testApi.getActiveTabId();
     let from = posted.length;
     win.document.querySelector('.app-row[data-app="slack"] button').click();
     const submit = posted.slice(from).find(m => m.type === 'submit');
-    assert.strictEqual(submit.machine, 'gpu-box', 'the connect task runs on gpu-box');
+    assert.strictEqual(
+      submit.machine,
+      'gpu-box',
+      'the connect task runs on gpu-box',
+    );
     assert.notStrictEqual(win._testApi.getActiveTabId(), firstTab);
-    assert.strictEqual(el(win, 'chat-machine').value, 'gpu-box', 'the new chat shows gpu-box picked');
+    assert.strictEqual(
+      el(win, 'chat-machine').value,
+      'gpu-box',
+      'the new chat shows gpu-box picked',
+    );
     // The subpanels still show gpu-box: nothing was asked again.
     eq(panelRequests(posted, from), []);
     from = posted.length;
     recommendationRows(win)[0].click();
-    assert.strictEqual(posted.slice(from).find(m => m.type === 'submit'), undefined, 'a recommendation is not sent');
+    assert.strictEqual(
+      posted.slice(from).find(m => m.type === 'submit'),
+      undefined,
+      'a recommendation is not sent',
+    );
     assert.strictEqual(el(win, 'chat-machine').value, 'gpu-box');
     assert.strictEqual(el(win, 'task-input').value, FIVE_TASKS[0]);
     eq(panelRequests(posted, from), []);
@@ -2288,15 +2461,31 @@ async function main() {
   await test('Machines: a machine change while the daemon is away empties the subpanels; the reconnect asks once', () => {
     const {win, posted, pick} = pageShowingThisMachine();
     pick('gpu-box');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
-    // A new chat (this machine) during the outage: gpu-box's rows go,
-    // but nothing is posted (the shim would queue it and send it on
+    // Back to this machine during the outage (a new chat follows the
+    // global pick, so the user picks it): gpu-box's rows go, but no
+    // panel request is posted (the shim would queue it and send it on
     // top of the reconnect's own request).
     let from = posted.length;
     win._testApi.createNewTab();
+    assert.strictEqual(
+      el(win, 'chat-machine').value,
+      'gpu-box',
+      'a new chat follows the global pick',
+    );
+    eq(jobNames(win), ['GPU job']);
+    pick('');
     eq(jobNames(win), []);
-    assert.strictEqual(el(win, 'meta-schedule-status').textContent, 'Loading\u2026');
+    assert.strictEqual(
+      el(win, 'meta-schedule-status').textContent,
+      'Loading\u2026',
+    );
     eq(panelRequests(posted, from), []);
     from = posted.length;
     send(win, {type: 'daemonStatus', connected: true});
@@ -2308,36 +2497,81 @@ async function main() {
       {type: 'getRecommendations'},
     ]);
     // gpu-box's late reply is not this machine's.
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     eq(jobNames(win), []);
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     eq(jobNames(win), ['Home job']);
   });
 
-  await test('Machines: a tab switch and the daemon\'s binding move the subpanels too', () => {
-    const {win, posted, pick} = pageShowingThisMachine();
+  await test("Machines: a tab switch and the daemon's binding move the subpanels too", () => {
+    const {win, posted} = pageShowingThisMachine();
     const home = win._testApi.getActiveTabId();
-    pick('gpu-box');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
-    // A new chat (this machine) brings the panels home ...
+    // The chat ran a task on gpu-box (the daemon's binding): the
+    // subpanels show gpu-box.
+    send(win, {type: 'tabMachine', tabId: home, machine: 'gpu-box'});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
+    // A new chat (the global pick: this machine) brings the panels home ...
     let from = posted.length;
     win._testApi.createNewTab();
     eq(jobNames(win), []);
-    assert.ok(panelRequests(posted, from).some(m => m.type === 'getCronJobs' && m.machine === undefined));
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    assert.ok(
+      panelRequests(posted, from).some(
+        m => m.type === 'getCronJobs' && m.machine === undefined,
+      ),
+    );
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     eq(jobNames(win), ['Home job']);
     // ... and switching back to the gpu-box chat asks gpu-box again.
     from = posted.length;
     win._testApi.switchToTab(home);
     eq(jobNames(win), []);
-    assert.ok(panelRequests(posted, from).some(m => m.type === 'getCronJobs' && m.machine === 'gpu-box'));
+    assert.ok(
+      panelRequests(posted, from).some(
+        m => m.type === 'getCronJobs' && m.machine === 'gpu-box',
+      ),
+    );
+    // The global pick changing on another surface moves a new chat's
+    // panels (a chat that shows a task keeps its own machine).
+    const blank = win._testApi.openTabs().find(t => t.id !== home).id;
+    from = posted.length;
+    send(win, {type: 'machineChanged', machine: 'gpu-box'});
+    eq(panelRequests(posted, from), [], 'the gpu-box chat is unmoved');
+    win._testApi.switchToTab(blank);
+    assert.strictEqual(el(win, 'chat-machine').value, 'gpu-box');
+    send(win, {type: 'machineChanged', machine: ''});
+    assert.strictEqual(el(win, 'chat-machine').value, '');
+    assert.ok(
+      panelRequests(posted, from).some(
+        m => m.type === 'getCronJobs' && m.machine === undefined,
+      ),
+    );
     // The daemon binding the active tab elsewhere (another surface's
     // submit of a chat with no pick of its own here) moves them as well.
     const fresh = win._testApi.openTabs().find(t => t.id !== home).id;
     win._testApi.switchToTab(fresh);
     from = posted.length;
     send(win, {type: 'tabMachine', tabId: fresh, machine: 'office'});
-    assert.ok(panelRequests(posted, from).some(m => m.type === 'getCronJobs' && m.machine === 'office'));
+    assert.ok(
+      panelRequests(posted, from).some(
+        m => m.type === 'getCronJobs' && m.machine === 'office',
+      ),
+    );
     assert.strictEqual(el(win, 'chat-machine').value, 'office');
   });
 
@@ -2348,7 +2582,8 @@ async function main() {
     const {win, posted, pick} = pageShowingThisMachine();
     const list = el(win, 'meta-schedule-list');
     const topForm = () =>
-      list.firstElementChild && list.firstElementChild.classList.contains('sched-add-row')
+      list.firstElementChild &&
+      list.firstElementChild.classList.contains('sched-add-row')
         ? list.firstElementChild.querySelector('form.sidebar-inline-form')
         : null;
     const active = win._testApi.getActiveTabId();
@@ -2361,11 +2596,21 @@ async function main() {
     // The daemon binds the tab to office (a submit on another surface).
     send(win, {type: 'tabMachine', tabId: active, machine: 'office'});
     eq(jobNames(win), [], 'the subpanel is emptied');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'office', jobs: [job({id: 'o1', name: 'Office job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'office',
+      jobs: [job({id: 'o1', name: 'Office job'})],
+    });
     form = topForm();
     assert.ok(form, 'REGRESSION: the add form is gone with the draft');
     eq(
-      [form.elements.name.value, form.elements.schedule.value, form.elements.kind.value, form.elements.what.value],
+      [
+        form.elements.name.value,
+        form.elements.schedule.value,
+        form.elements.kind.value,
+        form.elements.what.value,
+      ],
       ['Nightly', 'every 1d', 'command', 'echo night'],
       'the typed values are back',
     );
@@ -2373,26 +2618,58 @@ async function main() {
     // Saved now, the job is created on office, where the form shows.
     posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted.map(m => ({type: m.type, action: m.action, machine: m.machine, name: m.name})), [
-      {type: 'cronAction', action: 'create', machine: 'office', name: 'Nightly'},
-    ]);
-    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled, 'the create is in flight');
+    eq(
+      posted.map(m => ({
+        type: m.type,
+        action: m.action,
+        machine: m.machine,
+        name: m.name,
+      })),
+      [
+        {
+          type: 'cronAction',
+          action: 'create',
+          machine: 'office',
+          name: 'Nightly',
+        },
+      ],
+    );
+    assert.ok(
+      form.querySelector('.sidebar-inline-form-save').disabled,
+      'the create is in flight',
+    );
     // A new chat (this machine) while that create is in flight:
     // office's reply is dropped here, so Save works again once home
     // answers, with the draft; a second change before any reply
     // (back to the office chat) keeps it as well.
     win._testApi.createNewTab();
-    assert.strictEqual(topForm(), null, 'nothing is painted while the machine answers');
+    assert.strictEqual(
+      topForm(),
+      null,
+      'nothing is painted while the machine answers',
+    );
     win._testApi.switchToTab(active);
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'office', jobs: [], action: 'create'});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'office',
+      jobs: [],
+      action: 'create',
+    });
     form = topForm();
     assert.strictEqual(form.elements.name.value, 'Nightly');
-    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled, 'Save works again');
+    assert.ok(
+      !form.querySelector('.sidebar-inline-form-save').disabled,
+      'Save works again',
+    );
     // Cancel drops the draft for good: the next change re-opens nothing.
     form.querySelector('.sidebar-confirm-no').click();
     const fresh = win._testApi.openTabs().find(t => t.id !== active).id;
     win._testApi.switchToTab(fresh);
-    send(win, {type: 'cronJobs', jobs: [job({id: 'home-job', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'home-job', name: 'Home job'})],
+    });
     assert.strictEqual(topForm(), null);
     // A user's pick keeps the draft too (the job may well be meant for
     // the machine just picked); a row's editor edits a job of the
@@ -2400,14 +2677,31 @@ async function main() {
     el(win, 'meta-schedule-add').click();
     topForm().elements.name.value = 'Picked';
     pick('gpu-box');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     assert.strictEqual(topForm().elements.name.value, 'Picked');
     topForm().querySelector('.sidebar-confirm-no').click();
     list.children[0].querySelector('[aria-label="Edit the job"]').click();
-    assert.ok(list.querySelector('form.sidebar-inline-form'), 'the editor is open');
+    assert.ok(
+      list.querySelector('form.sidebar-inline-form'),
+      'the editor is open',
+    );
     win._testApi.switchToTab(active);
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'office', jobs: [job({id: 'o1', name: 'Office job'})]});
-    assert.strictEqual(list.querySelector('form.sidebar-inline-form'), null, 'no editor on office');
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'office',
+      jobs: [job({id: 'o1', name: 'Office job'})],
+    });
+    assert.strictEqual(
+      list.querySelector('form.sidebar-inline-form'),
+      null,
+      'no editor on office',
+    );
     eq(jobNames(win), ['Office job']);
   });
 
@@ -2417,10 +2711,18 @@ async function main() {
     const home = win._testApi.getActiveTabId();
     const poll = intervals.find(i => i.ms === 30000);
     pick('gpu-box');
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: APPS, checkedAt: 2});
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: APPS,
+      checkedAt: 2,
+    });
     // A draft keeps the home chat open when the connect chat opens.
     el(win, 'task-input').value = 'my draft';
-    el(win, 'task-input').dispatchEvent(new win.Event('input', {bubbles: true}));
+    el(win, 'task-input').dispatchEvent(
+      new win.Event('input', {bubbles: true}),
+    );
     win.document.querySelector('.app-row[data-app="slack"] button').click();
     // The connect chat (on gpu-box) is shown: its polls re-probe gpu-box.
     const connectTab = win._testApi.getActiveTabId();
@@ -2453,7 +2755,13 @@ async function main() {
       [{type: 'getAppsStatus', refresh: true, machine: 'gpu-box'}],
     );
     // gpu-box reporting Slack connected ends the wait.
-    send(win, {type: 'appsStatus', forwarded: true, machine: 'gpu-box', apps: connected, checkedAt: 4});
+    send(win, {
+      type: 'appsStatus',
+      forwarded: true,
+      machine: 'gpu-box',
+      apps: connected,
+      checkedAt: 4,
+    });
     from = posted.length;
     poll.fn();
     eq(
@@ -2468,46 +2776,83 @@ async function main() {
     // refresh of the panels; the next poll must not leave this
     // daemon's rows actionable against that machine.  (The stacked
     // layout: there a content tab outlives its owner chat.)
-    const {win, posted, intervals, pick} = pageShowingThisMachine({desktop: false});
+    const {win, posted, intervals, pick} = pageShowingThisMachine({
+      desktop: false,
+    });
     el(win, 'meta-panel').classList.add('open');
     const poll = intervals.find(i => i.ms === 30000);
     const home = win._testApi.getActiveTabId();
     pick('gpu-box');
-    send(win, {type: 'machineWorkDirs', machine: 'gpu-box', workDir: '/srv/proj', recentWorkDirs: [], error: ''});
-    send(win, {type: 'tabs_state', tabs: [{tabId: home, chatId: 'c-home', title: 'home', workDir: '/ws'}]});
+    send(win, {
+      type: 'machineWorkDirs',
+      machine: 'gpu-box',
+      workDir: '/srv/proj',
+      recentWorkDirs: [],
+      error: '',
+    });
+    send(win, {
+      type: 'tabs_state',
+      tabs: [{tabId: home, chatId: 'c-home', title: 'home', workDir: '/ws'}],
+    });
     // A file of the gpu-box chat opens as a content tab owned by it.
     send(win, {
-      type: 'fileContent', tabId: home, machine: 'gpu-box', path: '/srv/proj/notes.txt',
-      name: 'notes.txt', content: 'hi\n', version: 'v1',
+      type: 'fileContent',
+      tabId: home,
+      machine: 'gpu-box',
+      path: '/srv/proj/notes.txt',
+      name: 'notes.txt',
+      content: 'hi\n',
+      version: 'v1',
     });
     const report = win._testApi.openTabs().find(t => t.isContentTab);
     assert.ok(report, 'the file opened as a content tab');
     // Its owner is brought home while the report is shown ...
     win._testApi.switchToTab(home);
     pick('');
-    send(win, {type: 'cronJobs', jobs: [job({id: 'local-only', name: 'Home job'})]});
+    send(win, {
+      type: 'cronJobs',
+      jobs: [job({id: 'local-only', name: 'Home job'})],
+    });
     eq(jobNames(win), ['Home job']);
     win._testApi.switchToTab(report.id);
-    eq(jobNames(win), ['Home job'], 'a content tab keeps its owner chat\'s machine');
+    eq(
+      jobNames(win),
+      ['Home job'],
+      "a content tab keeps its owner chat's machine",
+    );
     // ... then closed elsewhere: the report keeps the machine it was
     // opened on, and the next poll targets gpu-box.
     send(win, {type: 'tabs_state', tabs: []});
-    assert.strictEqual(win._testApi.getActiveTabId(), report.id, 'the report survives');
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      report.id,
+      'the report survives',
+    );
     const from = posted.length;
     poll.fn();
-    const asked = panelRequests(posted, from).find(m => m.type === 'getCronJobs');
-    assert.strictEqual(asked.machine, 'gpu-box', 'the poll asks the file\'s machine');
-    eq(jobNames(win), [], 'this daemon\'s rows are gone before gpu-box answers');
-    assert.strictEqual(el(win, 'meta-schedule-status').textContent, 'Loading\u2026');
-    send(win, {type: 'cronJobs', forwarded: true, machine: 'gpu-box', jobs: [job({id: 'g1', name: 'GPU job'})]});
+    const asked = panelRequests(posted, from).find(
+      m => m.type === 'getCronJobs',
+    );
+    assert.strictEqual(
+      asked.machine,
+      'gpu-box',
+      "the poll asks the file's machine",
+    );
+    eq(jobNames(win), [], "this daemon's rows are gone before gpu-box answers");
+    assert.strictEqual(
+      el(win, 'meta-schedule-status').textContent,
+      'Loading\u2026',
+    );
+    send(win, {
+      type: 'cronJobs',
+      forwarded: true,
+      machine: 'gpu-box',
+      jobs: [job({id: 'g1', name: 'GPU job'})],
+    });
     eq(jobNames(win), ['GPU job']);
   });
 
-  if (failures) {
-    console.log(`\n${failures} test(s) failed`);
-    process.exit(1);
-  }
-  console.log('\nall sidebarPanels tests passed');
+  report('sidebarPanels');
   process.exit(0);
 }
 

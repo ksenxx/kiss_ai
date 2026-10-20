@@ -29,7 +29,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_history,
-    _search_history,
     _set_task_favorite,
 )
 
@@ -92,7 +91,7 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
 
         assert "plain row" in [e["task"] for e in _load_history()]
         assert "plain row" in [
-            e["task"] for e in _search_history("plain")
+            e["task"] for e in _load_history(query="plain")
         ]
         assert not self._row(task_id)["parent_task_id"]
         assert self._is_favorite(task_id)

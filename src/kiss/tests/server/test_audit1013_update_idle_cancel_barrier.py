@@ -2,8 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests: cancelling "Update when idle" never leaves the run barrier up
-and never stalls the event loop.
+"""End-to-end tests: cancelling "Update when idle" never leaves the run barrier up.
 
 The idle poller checks for idle in an executor thread
 (:meth:`RemoteAccessServer._arm_update_barrier_if_idle`, which raises
@@ -15,20 +14,21 @@ nobody: no installer owned it, no exit watcher would lower it, and every
 later ``run`` was refused with "An update is being installed" until the
 daemon restarted.
 
-The fix makes the thread's arming conditional on
-``_update_when_idle_armed`` inside the same ``STATE_LOCK`` section, and
-Cancel clears that flag under the lock — in the executor
-(:meth:`RemoteAccessServer._disarm_update_when_idle`), because a task
-thread may hold the lock for a while and the event loop must not wait
-behind it (the second test here).
+The thread's arming is conditional on the armed generation
+(``_update_when_idle_armed``) inside the same ``STATE_LOCK`` section, and
+Cancel clears it under the lock.  A generation rather than a flag,
+because a Cancel followed by a fresh "Update when idle" during that
+same wait arms a NEW poller: the parked check of the cancelled one must
+not consume that arming (its verdict goes to a cancelled task, so the
+barrier would stay up and the new poller would wait forever), which is
+the second test here.
 
 Both tests drive the real daemon (local WSS transport, fake PyPI
-endpoint).  The first holds ``STATE_LOCK`` — an ``RLock`` — on the
-event-loop thread so Cancel's disarm and then the poller's idle check
-park on it in that order (parked waiters are woken first-in first-out),
-then releases it: the disarm runs first and the check must stand down.
-The admitted ``run`` that proves the barrier is down uses a model name
-that is not configured, so the runner exits at its own "No model
+endpoint) and hold ``STATE_LOCK`` — an ``RLock`` — on the event-loop
+thread, so the poller's idle check parks on it in its executor thread
+while the Cancel (and re-arm) handlers, on the loop, re-enter the lock at
+once.  The admitted ``run`` that proves the barrier is down uses a model
+name that is not configured, so the runner exits at its own "No model
 available" check and nothing is patched.
 """
 
@@ -37,8 +37,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import threading
-import time
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -51,37 +49,22 @@ from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 TAB = "tab-a1013-idle-cancel"
 _UNKNOWN_MODEL = "audit1013-idle-cancel-no-such-model"
 
-# Never expected to run; records a launch so a wrong one is visible.
+# Records every launch so a wrong (or a missing) one is visible.
 INSTALL_SH = """#!/bin/bash
 echo launched >> "{marker}"
 exit 0
 """
 
 
-def _thread_inside(function_name: str) -> bool:
-    """Return whether some thread is executing the function *function_name*."""
+def _poller_thread_inside_arm() -> bool:
+    """Return whether some thread is executing ``_arm_update_barrier_if_idle``."""
     for top in sys._current_frames().values():
         frame: FrameType | None = top
         while frame is not None:
-            if frame.f_code.co_name == function_name:
+            if frame.f_code.co_name == "_arm_update_barrier_if_idle":
                 return True
             frame = frame.f_back
     return False
-
-
-def _poller_thread_inside_arm() -> bool:
-    return _thread_inside("_arm_update_barrier_if_idle")
-
-
-def _cancel_thread_inside_disarm() -> bool:
-    return _thread_inside("_disarm_update_when_idle")
-
-
-def _hold_state_lock(seconds: float, held: threading.Event) -> None:
-    """Hold ``STATE_LOCK`` for *seconds* on a helper thread, as a busy task thread would."""
-    with agent_state.STATE_LOCK:
-        held.set()
-        time.sleep(seconds)
 
 
 class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
@@ -110,6 +93,10 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         if self._lock_held:
             agent_state.STATE_LOCK.release()
         agent_state.unregister(self.busy.task_id, self.busy)
+        proc = self.server._update_proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
         await self._wait_tab_idle()
         with agent_state.STATE_LOCK:
             stale = [st.task_id for st in agent_state.snapshot() if st.tab_id == TAB]
@@ -167,10 +154,32 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         await self._wait_pending_idle(reader, True)
         # The poller's first idle check runs at once (and finds the
         # busy task); give it time to finish before the lock is taken
-        # so the next one parks behind the cancel's disarm.
+        # so the next one parks on it.
         await asyncio.sleep(0.1)
         self.assertFalse(_poller_thread_inside_arm())
         return reader, writer
+
+    async def _park_idle_check(self) -> tuple[LocalReader, LocalWriter]:
+        """Arm, then hold ``STATE_LOCK`` on the loop with the poller's check parked on it.
+
+        The task the check would find is gone, so without the
+        generation check the parked check WOULD arm once it gets the
+        lock.
+        """
+        reader, writer = await self._arm()
+        agent_state.STATE_LOCK.acquire()
+        self._lock_held = True
+        self.busy.is_task_active = False
+        await self._wait_until(
+            _poller_thread_inside_arm, "the poller's idle check to start",
+        )
+        self.assertTrue(self.server._update_when_idle_armed)
+        self.assertFalse(self._barrier_up())
+        return reader, writer
+
+    def _release_lock(self) -> None:
+        agent_state.STATE_LOCK.release()
+        self._lock_held = False
 
     async def _run_is_admitted(self, reader: LocalReader, writer: LocalWriter) -> None:
         """The real consumer: a fresh run reaches the runner's own model check."""
@@ -187,36 +196,21 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         result = await self._wait_for_event(reader, "result")
         self.assertEqual(result.get("tabId"), TAB)
         self.assertIn("No model available", str(result.get("text")))
-        self.assertFalse(self.marker.exists())
 
     async def test_cancel_while_idle_check_waits_for_the_lock(self) -> None:
-        reader, writer = await self._arm()
+        reader, writer = await self._park_idle_check()
 
-        # Hold the registry lock on the loop thread: Cancel's disarm
-        # (an executor thread) parks on it, then the poller's next idle
-        # check parks behind it.  The task the check would find is
-        # gone, so without the flag the check WOULD arm.
-        agent_state.STATE_LOCK.acquire()
-        self._lock_held = True
-        self.busy.is_task_active = False
+        # Cancel runs on the loop, re-enters the held lock and disarms
+        # while the check is still parked.
         await self._send(writer, {"type": "updateWhenIdle", "cancel": True})
-        await self._wait_until(
-            _cancel_thread_inside_disarm, "the cancel's disarm to park on the lock",
-        )
-        await self._wait_until(
-            _poller_thread_inside_arm, "the poller's idle check to start",
-        )
-        self.assertTrue(self.server._update_when_idle_armed)
-        self.assertFalse(self._barrier_up())
-
-        # Release: the disarm clears the flag first, then the check
-        # gets the lock and must not raise the barrier for a cancelled
-        # update.
-        agent_state.STATE_LOCK.release()
-        self._lock_held = False
         await self._wait_pending_idle(reader, False)
-        self.assertIsNone(self.server._update_when_idle_task)
         self.assertFalse(self.server._update_when_idle_armed)
+        self.assertIsNone(self.server._update_when_idle_task)
+        self.assertTrue(_poller_thread_inside_arm())
+
+        # Release: the check gets the lock and must not raise the
+        # barrier for a cancelled update.
+        self._release_lock()
         await self._wait_until(
             lambda: not _poller_thread_inside_arm(), "the idle check to finish",
         )
@@ -224,34 +218,31 @@ class TestUpdateIdleCancelBarrier(_UpdateCheckTestBase):
         self.assertFalse(self.marker.exists())
         await self._run_is_admitted(reader, writer)
 
-    async def test_cancel_does_not_stall_the_loop_behind_a_lock_holder(self) -> None:
-        """Cancel waits for ``STATE_LOCK`` in the executor, so the loop keeps serving."""
-        reader, writer = await self._arm()
-        held = threading.Event()
-        # A long hold with a bound at half of it: a loop blocked behind
-        # the lock stalls for the rest of the hold, while a loaded box
-        # (40 pytest processes on Windows) has descheduled this process
-        # for 0.9 s between two heartbeats.
-        hold = 3.0
-        holder = threading.Thread(target=_hold_state_lock, args=(hold, held), daemon=True)
-        holder.start()
-        self.assertTrue(held.wait(2.0))
+    async def test_rearm_during_parked_check_belongs_to_the_new_poller(self) -> None:
+        reader, writer = await self._park_idle_check()
+        first_gen = self.server._update_when_idle_armed
+
+        # Cancel, then arm again, both while the first poller's check
+        # is parked: the arming now belongs to a second poller.
         await self._send(writer, {"type": "updateWhenIdle", "cancel": True})
-        await self._wait_until(
-            _cancel_thread_inside_disarm, "the cancel's disarm to park on the lock",
-        )
-
-        # Heartbeat on the loop while the holder keeps the lock: before
-        # the fix the cancel handler blocked the loop for the whole hold.
-        loop = asyncio.get_running_loop()
-        worst_gap = 0.0
-        while holder.is_alive():
-            before = loop.time()
-            await asyncio.sleep(0.02)
-            worst_gap = max(worst_gap, loop.time() - before - 0.02)
-        self.assertLess(worst_gap, hold / 2, "the event loop stalled behind the lock holder")
-
         await self._wait_pending_idle(reader, False)
-        self.assertIsNone(self.server._update_when_idle_task)
-        self.assertFalse(self._barrier_up())
+        await self._send(writer, {"type": "updateWhenIdle"})
+        await self._wait_pending_idle(reader, True)
+        self.assertNotEqual(self.server._update_when_idle_armed, first_gen)
+        second_task = self.server._update_when_idle_task
+        self.assertIsNotNone(second_task)
+
+        # Release: the stale check must stand down and the second
+        # poller's own check must find idle and launch the installer,
+        # exactly once; its exit watcher lowers the barrier again.
+        self._release_lock()
+        await self._wait_until(
+            lambda: self.marker.exists() and not self._barrier_up(),
+            "the second poller to launch the installer and the barrier to drop",
+            timeout=15.0,
+        )
+        self.assertEqual(self.marker.read_text().count("launched"), 1)
+        await self._wait_until(
+            lambda: self.server._update_when_idle_task is None, "the second poller to finish",
+        )
         await self._run_is_admitted(reader, writer)

@@ -39,3 +39,28 @@ class TestCliHelpers:
             assert kwargs["web_tools"] is None  # not given; ``--no-web`` makes it False
             args = parser.parse_args(["-t", "x", "-w", d, "--no-web"])
             assert _build_run_kwargs(args)["web_tools"] is False
+
+    def test_build_run_kwargs_headers(self) -> None:
+        """Repeated ``--header Key:Value`` become ``model_config["extra_headers"]``."""
+        parser = _build_arg_parser()
+        args = parser.parse_args(
+            [
+                "-t",
+                "x",
+                "-e",
+                "http://localhost:8080/v1",
+                "--header",
+                "X-Custom:value1",
+                "--header",
+                "Authorization:Bearer tok",
+            ]
+        )
+        kwargs = _build_run_kwargs(args)
+        assert kwargs["model_config"]["base_url"] == "http://localhost:8080/v1"
+        assert kwargs["model_config"]["extra_headers"] == {
+            "X-Custom": "value1",
+            "Authorization": "Bearer tok",
+        }
+        # Nothing given: no override at all, so the daemon keeps the
+        # endpoint registered for the model.
+        assert _build_run_kwargs(parser.parse_args(["-t", "x"]))["model_config"] is None

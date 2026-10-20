@@ -34,6 +34,8 @@ from kiss.tests.agents.third_party_agents.telegram_bot_api import (
     serve_bot_api,
 )
 
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
+
 
 @pytest.fixture()
 def receiver() -> Iterator[BotApiServer]:
@@ -42,9 +44,9 @@ def receiver() -> Iterator[BotApiServer]:
 
 
 @pytest.fixture()
-def backend(receiver: BotApiServer) -> Iterator[TelegramChannelBackend]:
-    """Yield a backend with a persisted token, pointed at the local receiver."""
-    yield from configured_backend(receiver)
+def backend(receiver: BotApiServer) -> TelegramChannelBackend:
+    """A backend with a persisted token, pointed at the local receiver."""
+    return configured_backend(receiver)
 
 
 def _update(update_id: int, chat_id: int, message_id: int, text: str) -> dict[str, Any]:
@@ -124,14 +126,11 @@ def test_unreachable_server_returns_empty_and_cursor_without_raising(
 ) -> None:
     """An unreachable API host (refused port) yields ([], oldest) and never raises."""
     _config.save({"bot_token": TOKEN})
-    try:
-        backend = TelegramChannelBackend()
-        backend._api_base = f"http://127.0.0.1:{refusing_port}"
-        messages, new_cursor = backend.poll_messages("42", "7", limit=10)
-        assert messages == []
-        assert new_cursor == "7"
-    finally:
-        _config.clear()
+    backend = TelegramChannelBackend()
+    backend._api_base = f"http://127.0.0.1:{refusing_port}"
+    messages, new_cursor = backend.poll_messages("42", "7", limit=10)
+    assert messages == []
+    assert new_cursor == "7"
 
 
 def test_process_local_cursor_stays_monotonic_with_stale_oldest(

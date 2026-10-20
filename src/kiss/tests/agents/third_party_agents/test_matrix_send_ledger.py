@@ -11,15 +11,11 @@ auth failures) by *returning* an error response object rather than raising,
 so ``MatrixChannelBackend.send_message`` must convert error responses into
 exceptions — otherwise the reply is silently lost.
 
-matrix-nio is an optional dependency and is not installed in the test
-environment, so these tests exercise ``_raise_on_send_error`` (the extracted
-response-checking helper) and ``send_message`` with real minimal stand-in
-response objects that carry nio's data contract: error responses
-(``nio.responses.ErrorResponse`` / ``RoomSendError``) have ``message`` and
-``status_code`` attributes, success responses (``RoomSendResponse``) have
-``event_id`` and neither error attribute.  The stand-ins are test data, not
-mocks of KISS code; ``send_message`` runs on the backend's real persistent
-background event loop.
+These tests exercise ``_raise_on_send_error`` (the extracted
+response-checking helper) and ``send_message`` with nio's real response
+classes (``RoomSendError`` / ``RoomSendResponse``) returned by a canned
+client that records the send arguments; ``send_message`` runs on the
+backend's real persistent background event loop.
 """
 
 from __future__ import annotations
@@ -27,27 +23,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from nio.responses import RoomSendError, RoomSendResponse
 
 from kiss.agents.third_party_agents.matrix.matrix_sea import (
     MatrixChannelBackend,
     _raise_on_send_error,
 )
-
-
-class _SendErrorResponse:
-    """Stand-in for ``nio.responses.RoomSendError`` (nio's error data contract)."""
-
-    def __init__(self, message: str, status_code: str | None) -> None:
-        self.message = message
-        self.status_code = status_code
-
-
-class _SendSuccessResponse:
-    """Stand-in for ``nio.responses.RoomSendResponse`` (nio's success contract)."""
-
-    def __init__(self, event_id: str) -> None:
-        self.event_id = event_id
-        self.room_id = "!room:example.org"
 
 
 class _SendingClient:
@@ -83,7 +64,7 @@ class TestRaiseOnSendErrorHelper:
 
     def test_error_response_raises_with_details(self) -> None:
         """An error response raises RuntimeError carrying status and message."""
-        resp = _SendErrorResponse("Too Many Requests", "M_LIMIT_EXCEEDED")
+        resp = RoomSendError("Too Many Requests", "M_LIMIT_EXCEEDED")
         with pytest.raises(RuntimeError) as excinfo:
             _raise_on_send_error(resp, "!room:example.org")
         text = str(excinfo.value)
@@ -93,7 +74,7 @@ class TestRaiseOnSendErrorHelper:
 
     def test_error_response_without_status_code_uses_unknown(self) -> None:
         """A None status_code is reported as 'unknown' instead of 'None'."""
-        resp = _SendErrorResponse("Invalid token", None)
+        resp = RoomSendError("Invalid token", None)
         with pytest.raises(RuntimeError) as excinfo:
             _raise_on_send_error(resp, "!room:example.org")
         text = str(excinfo.value)
@@ -103,7 +84,7 @@ class TestRaiseOnSendErrorHelper:
 
     def test_success_response_is_returned_unchanged(self) -> None:
         """A success response passes through without raising."""
-        resp = _SendSuccessResponse("$event1")
+        resp = RoomSendResponse("$event1", "!room:example.org")
         assert _raise_on_send_error(resp, "!room:example.org") is resp
 
 
@@ -112,7 +93,7 @@ class TestSendMessageLedgerContract:
 
     def test_send_message_raises_on_error_response(self) -> None:
         """A returned RoomSendError-style response surfaces as RuntimeError."""
-        backend, client = _backend_with(_SendErrorResponse("Too Many Requests", "M_LIMIT_EXCEEDED"))
+        backend, client = _backend_with(RoomSendError("Too Many Requests", "M_LIMIT_EXCEEDED"))
         try:
             with pytest.raises(RuntimeError) as excinfo:
                 backend.send_message("!room:example.org", "hello")
@@ -123,7 +104,7 @@ class TestSendMessageLedgerContract:
 
     def test_send_message_success_does_not_raise(self) -> None:
         """A success response completes silently with the message on the wire."""
-        backend, client = _backend_with(_SendSuccessResponse("$event1"))
+        backend, client = _backend_with(RoomSendResponse("$event1", "!room:example.org"))
         try:
             backend.send_message("!room:example.org", "hello")
             assert client.sent == [

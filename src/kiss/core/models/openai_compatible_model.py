@@ -424,7 +424,9 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     return "" if content is None else str(content)
 
 
-def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
+def _merge_tools_prompt_into_content(
+    content: Any, tools_prompt: str, part_type: str = "text"
+) -> Any:
     """Append *tools_prompt* to a user message content of either shape.
 
     The first user message's ``content`` is a plain string in the common
@@ -434,13 +436,24 @@ def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
     Args:
         content: The existing message content (str or list of parts).
         tools_prompt: The text-based tools prompt to append.
+        part_type: The text part type of the API in use: ``"text"`` for
+            Chat Completions, ``"input_text"`` for Responses.
 
     Returns:
         The merged content in the same shape as the input.
     """
     if isinstance(content, list):
-        return [*content, {"type": "text", "text": tools_prompt}]
+        return [*content, {"type": part_type, "text": tools_prompt}]
     return str(content) + "\n" + tools_prompt
+
+
+def _decode_tool_call_arguments(args_json: str) -> Any:
+    """Return the JSON-decoded tool-call *args_json*, or ``{}`` when it is not valid JSON."""
+    try:
+        return json.loads(args_json)
+    except json.JSONDecodeError:
+        logger.debug("Failed to decode tool-call args", exc_info=True)
+        return {}
 
 
 def _accumulate_tool_call_deltas(
@@ -1077,12 +1090,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         function_calls: list[dict[str, Any]] = []
         raw_tool_calls: list[dict[str, Any]] = []
         for call_id, name, args_json in entries:
-            try:
-                arguments = json.loads(args_json)
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                arguments = {}
-            function_calls.append({"id": call_id, "name": name, "arguments": arguments})
+            function_calls.append(
+                {"id": call_id, "name": name, "arguments": _decode_tool_call_arguments(args_json)}
+            )
             raw_tool_calls.append(
                 {
                     "id": call_id,
@@ -1292,77 +1302,81 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 if adaptive
                 else self.client.chat.completions.create(**kwargs)
             )
+            # The transport handler sits inside the watched block so that
+            # the generator and the thinking bracket are closed only after
+            # it ran: an error raised by that cleanup is not a transport
+            # failure.
+            with self._watched_events(stream, watchdog_name) as events:
+                try:
+                    for chunk in events:
+                        last_chunk = chunk
+                        if chunk.usage is not None:
+                            # Billed already: kept for
+                            # take_partial_usage_response if the stream
+                            # fails before it ends.  Recorded before the
+                            # callbacks below run, since a provider may put
+                            # the usage on a chunk that also carries content
+                            # and a callback may raise (Stop) on it.
+                            response = self._rejected_response = chunk
+                        delta = None
+                        if chunk.choices:
+                            choice = chunk.choices[0]
+                            if getattr(choice, "finish_reason", None):
+                                finish_reason = choice.finish_reason
+                            delta = choice.delta
+                        if delta:
+                            reasoning = _delta_reasoning_text(delta)
+                            if reasoning:
+                                self._open_thinking_if_closed()
+                                self._invoke_token_callback(reasoning)
+                            if delta.content:
+                                self._close_thinking_if_open()
+                                content += delta.content
+                                self._invoke_token_callback(delta.content)
+                            if delta.tool_calls:
+                                self._close_thinking_if_open()
+                                _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
+                        if finish_reason is not None and response is not None:
+                            # The answer and its billing are both complete;
+                            # only ``[DONE]`` can follow.  Waiting for it let
+                            # a connection that went silent here trip the
+                            # stall watchdog, and the retry billed the
+                            # finished turn again.  Leaving the loop closes
+                            # the stream (the watched generator's cleanup),
+                            # as v2 does on ``response.completed``.
+                            break
+                except (httpx.HTTPError, APIConnectionError) as err:
+                    # A transport failure AFTER ``finish_reason`` arrived
+                    # lost only the stream's tail (the usage chunk /
+                    # ``[DONE]``); the answer itself — text and tool-call
+                    # arguments — is complete.  Raising here would make the
+                    # agent loop re-send the whole conversation and the
+                    # provider regenerate (and bill) the same answer, which
+                    # the user sees as a repeated request and response.  A
+                    # failure BEFORE ``finish_reason`` means real content
+                    # was lost, so it still propagates for the agent-level
+                    # retry.  Timeouts are subclasses of these and belong to
+                    # the outer handler.  Stops (``KeyboardInterrupt``) and
+                    # stalls (``TimeoutError``) raised by
+                    # ``stop_aware_events`` are not transport errors and are
+                    # never swallowed.
+                    if finish_reason is None or isinstance(
+                        err, httpx.TimeoutException | APITimeoutError
+                    ):
+                        raise
+                    logger.warning(
+                        "Stream connection lost after finish_reason=%r; keeping "
+                        "the complete response instead of retrying: %s",
+                        finish_reason,
+                        err,
+                    )
         except (httpx.TimeoutException, APITimeoutError) as err:
-            # No headers before the per-request clock fired; see below.
+            # The per-request clock fired (no headers, or no bytes between
+            # events) before the watchdog did.  A Stop pressed while the
+            # headers were still pending has no watchdog to act on it, so
+            # ask the thread's stop signal before calling this a stall: a
+            # stall is retried, a stop must not be.
             raise stop_or_stall_error(self._stream_stall_timeout) from err
-        # The transport handlers sit inside the watched block so that the
-        # generator and the thinking bracket are closed only after they
-        # ran: an error raised by that cleanup is not a transport failure.
-        with self._watched_events(stream, watchdog_name) as events:
-            try:
-                for chunk in events:
-                    last_chunk = chunk
-                    if chunk.usage is not None:
-                        # Billed already: kept for take_partial_usage_response
-                        # if the stream fails before it ends.  Recorded
-                        # before the callbacks below run, since a provider
-                        # may put the usage on a chunk that also carries
-                        # content and a callback may raise (Stop) on it.
-                        response = self._rejected_response = chunk
-                    delta = None
-                    if chunk.choices:
-                        choice = chunk.choices[0]
-                        if getattr(choice, "finish_reason", None):
-                            finish_reason = choice.finish_reason
-                        delta = choice.delta
-                    if delta:
-                        reasoning = _delta_reasoning_text(delta)
-                        if reasoning:
-                            self._open_thinking_if_closed()
-                            self._invoke_token_callback(reasoning)
-                        if delta.content:
-                            self._close_thinking_if_open()
-                            content += delta.content
-                            self._invoke_token_callback(delta.content)
-                        if delta.tool_calls:
-                            self._close_thinking_if_open()
-                            _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
-                    if finish_reason is not None and response is not None:
-                        # The answer and its billing are both complete; only
-                        # ``[DONE]`` can follow.  Waiting for it let a
-                        # connection that went silent here trip the stall
-                        # watchdog, and the retry billed the finished turn
-                        # again.  Leaving the loop closes the stream (the
-                        # watched generator's cleanup), as v2 does on
-                        # ``response.completed``.
-                        break
-            except (httpx.TimeoutException, APITimeoutError) as err:
-                # The per-request clock fired (no headers, or no bytes
-                # between events) before the watchdog did.  A Stop pressed
-                # while the headers were still pending has no watchdog to
-                # act on it, so ask the thread's stop signal before calling
-                # this a stall: a stall is retried, a stop must not be.
-                raise stop_or_stall_error(self._stream_stall_timeout) from err
-            except (httpx.HTTPError, APIConnectionError) as err:
-                # A transport failure AFTER ``finish_reason`` arrived lost
-                # only the stream's tail (the usage chunk / ``[DONE]``); the
-                # answer itself — text and tool-call arguments — is
-                # complete.  Raising here would make the agent loop re-send
-                # the whole conversation and the provider regenerate (and
-                # bill) the same answer, which the user sees as a repeated
-                # request and response.  A failure BEFORE ``finish_reason``
-                # means real content was lost, so it still propagates for
-                # the agent-level retry.  Stops (``KeyboardInterrupt``) and
-                # stalls (``TimeoutError``) raised by ``stop_aware_events``
-                # are not transport errors and are never swallowed.
-                if finish_reason is None:
-                    raise
-                logger.warning(
-                    "Stream connection lost after finish_reason=%r; keeping "
-                    "the complete response instead of retrying: %s",
-                    finish_reason,
-                    err,
-                )
         # Leaving the loop early skips the post-loop stop check inside
         # ``stop_aware_events`` (closing the generator runs only its
         # cleanup), so a Stop pressed during the stream is honoured here;
@@ -1834,13 +1848,13 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # The lazy import, serialized by ``import_provider_module``.
         model2_cls = models.OpenAICompatibleModel2
 
+        delegate_config = {
+            k: v
+            for k, v in self.model_config.items()
+            if k not in ("system_instruction", "use_responses_api")
+        }
         delegate = self._responses_delegate
         if delegate is None:
-            delegate_config = {
-                k: v
-                for k, v in self.model_config.items()
-                if k not in ("system_instruction", "use_responses_api")
-            }
             delegate = model2_cls(
                 model_name=self.model_name,
                 base_url=self.base_url,
@@ -1858,20 +1872,16 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         delegate.token_callback = self.token_callback
         delegate.thinking_callback = self.thinking_callback
         # The endpoint inputs have to be re-synced for the same reason:
-        # this model's base_url / api_key / extra_headers can be
-        # reconfigured between turns (the very change that rebuilds this
-        # model's own client), and a delegate frozen at construction
-        # time would keep sending tool turns to the OLD endpoint with
-        # the OLD credentials.  _ensure_client compares exactly these
-        # inputs, so mirroring them makes the delegate rebuild its
-        # client precisely when they changed.
+        # this model's base_url / api_key / model_config (its
+        # ``extra_headers``) can be reconfigured between turns (the very
+        # change that rebuilds this model's own client), and a delegate
+        # frozen at construction time would keep sending tool turns to
+        # the OLD endpoint with the OLD credentials.  _ensure_client
+        # compares exactly these inputs, so mirroring them makes the
+        # delegate rebuild its client precisely when they changed.
         delegate.base_url = self.base_url
         delegate.api_key = self.api_key
-        extra_headers = self.model_config.get("extra_headers")
-        if extra_headers is None:
-            delegate.model_config.pop("extra_headers", None)
-        else:
-            delegate.model_config["extra_headers"] = extra_headers
+        delegate.model_config = delegate_config
         delegate._ensure_client()
         delegate.reset_conversation()
         input_items = self._chat_conversation_to_responses_input()

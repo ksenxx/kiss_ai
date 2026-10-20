@@ -18,6 +18,10 @@ import pytest
 
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 
+# Every channel's ChannelConfig resolves KISS_HOME lazily, so each test
+# starts from an empty per-test home and leaves nothing behind.
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
+
 _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
     {
         "module": "kiss.agents.third_party_agents.telegram.telegram_sea",
@@ -375,24 +379,12 @@ def _load(info: dict) -> tuple:
     return mod, agent_cls, backend_cls
 
 
-def _reset_config(mod) -> None:
-    """Clear any leftover persisted config so the agent starts unauthenticated.
-
-    Every channel agent module exposes its ``ChannelConfig`` as the
-    module-level ``_config``; googlechat keeps no config and is skipped.
-    """
-    config = getattr(mod, "_config", None)
-    if config is not None:
-        config.clear()
-
-
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_check_auth_unauthenticated(info: dict) -> None:
     """check_*_auth() returns a helpful message when not configured."""
     if info.get("macos_only") and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
     mod, agent_cls, _ = _load(info)
-    _reset_config(mod)
     agent = agent_cls()
     tools = tools_by_name(agent)
     result = tools[info["auth_check"]]()
@@ -409,7 +401,6 @@ def test_check_auth_unauthenticated(info: dict) -> None:
 def test_clear_auth_when_not_authenticated(info: dict) -> None:
     """clear_*_auth() works without error even when not authenticated."""
     mod, agent_cls, _ = _load(info)
-    _reset_config(mod)
     agent = agent_cls()
     tools = tools_by_name(agent)
     result = tools[info["auth_clear"]]()
@@ -426,37 +417,19 @@ def test_config_roundtrip(info: dict) -> None:
     if config is None:
         pytest.skip(f"{info['module']} keeps no module-level ChannelConfig")
     path = config.path
-    load_fn = config.load
-    clear_fn = config.clear
-    backup = None
-    if path.exists():
-        backup = path.read_text()
+    config.clear()
+    assert config.load() is None
+    assert not path.exists()
 
-    try:
-        clear_fn()
-        assert load_fn() is None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{bad json!!")
+    assert config.load() is None
 
-        if path.exists():
-            path.unlink()
-        assert load_fn() is None
+    path.write_text('"just a string"')
+    assert config.load() is None
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{bad json!!")
-        assert load_fn() is None
-
-        path.write_text('"just a string"')
-        assert load_fn() is None
-
-        if path.exists():
-            path.unlink()
-        clear_fn()
-
-    finally:
-        if backup is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(backup)
-        elif path.exists():
-            path.unlink()
+    config.clear()
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)

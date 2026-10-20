@@ -1078,14 +1078,17 @@ def _execute_job(job: dict[str, Any]) -> None:
     Args:
         job: The job dict to execute.
     """
-    _runs_dir().mkdir(parents=True, exist_ok=True)
-    work_dir = Path(tempfile.mkdtemp(prefix=f"{job['id']}-", dir=_runs_dir()))
     is_command = bool(str(job.get("command", "")).strip())
+    work_dir: Path | None = None
     keep_work_dir = False
     try:
-        # Inside the try: a malformed stored timeout, or an in_chat
-        # directory that cannot be created, is recorded as the run's error
-        # like any other failure (and the scratch directory still removed).
+        # Inside the try: a scratch directory that cannot be created (a
+        # file in the way of the runs directory, a read-only or full
+        # disk), a malformed stored timeout, or an in_chat directory
+        # that cannot be created, is recorded as the run's error like
+        # any other failure (and the scratch directory still removed).
+        _runs_dir().mkdir(parents=True, exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(prefix=f"{job['id']}-", dir=_runs_dir()))
         run_dir = _job_work_dir(job, work_dir)
         timeout = _job_timeout(
             job, COMMAND_TIMEOUT_SECONDS if is_command else PROMPT_TIMEOUT_SECONDS,
@@ -1104,7 +1107,7 @@ def _execute_job(job: dict[str, Any]) -> None:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
         status, text = "error", f"{type(e).__name__}: {e}"
     finally:
-        if not keep_work_dir:
+        if work_dir is not None and not keep_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
     notes: list[str] = []
     if text is not None:
@@ -1238,13 +1241,17 @@ def tick(now: float | None = None, wait: bool = True) -> int:
         if changed:
             save_jobs(jobs)
         # Launched while holding the store lock: a job that finishes
-        # instantly merely waits for it before recording its outcome.
+        # instantly merely waits for it before recording its outcome,
+        # and a job that cannot start is recorded as such before the
+        # lock is released.  One failed launch does not cost the others.
         with _running_lock:
-            threads = [_launch(job) for job in due]
+            threads = [thread for thread in map(_launch_or_record, due) if thread is not None]
+        if len(threads) < len(due):
+            save_jobs(jobs)
     if wait:
         for thread in threads:
             thread.join()
-    return len(due)
+    return len(threads)
 
 
 def run_scheduler(
@@ -1582,8 +1589,38 @@ def _launch(job: dict[str, Any]) -> threading.Thread:
         name=f"kiss-cron-job-{job['id']}", daemon=True,
     )
     _running[job["id"]] = thread
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        # A thread the process cannot start (its thread limit) must not
+        # sit in the registry as a job that looks launched.
+        del _running[job["id"]]
+        raise
     return thread
+
+
+def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
+    """Launch *job* as :func:`_launch` does, recording a start failure on *job*.
+
+    The caller holds :data:`_running_lock` and the store lock, and
+    saves the store when this returns ``None``: the job's occurrence
+    was already consumed by the tick (``last_run_at`` set,
+    ``next_run_at`` advanced), so its ``last_status`` /
+    ``last_summary`` are the only record that it never ran.
+
+    Args:
+        job: The stored job record to execute.
+
+    Returns:
+        The started thread, or ``None`` when it could not start.
+    """
+    try:
+        return _launch(job)
+    except Exception as e:
+        logger.error("Cron job %s could not start: %s", job["id"], e, exc_info=True)
+        job["last_status"] = "error"
+        job["last_summary"] = f"could not start: {type(e).__name__}: {e}"
+        return None
 
 
 def start_job(job: dict[str, Any]) -> str:

@@ -525,13 +525,13 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
             "/app/data.csv", "/app/sub/keep.txt", "/app/gone.txt", "/app/mine.py",
             "/app/real.txt", "/app/extra.txt", "/app/last.txt"}
 
-        def shell(command: str, exited: str | None = None) -> dict[str, Any]:
-            """Run *command* as one tool call; *exited* names a process that must be gone
-            from the container before the post-call snapshot is taken."""
+        def shell(command: str, *exited: str) -> dict[str, Any]:
+            """Run *command* as one tool call; *exited* names the processes that must be
+            gone from the container before the post-call snapshot is taken."""
             assert harness.on_tool_call("Bash", {"command": command}) == ALLOW
             live.exec_run(["sh", "-c", command])
-            if exited is not None:
-                _wait_until(harness, exited, present=False)
+            for wanted in exited:
+                _wait_until(harness, wanted, present=False)
             result = {"role": "tool", "content": "ran"}
             harness.on_llm_call([result])
             return result
@@ -548,20 +548,21 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         assert "sleep 300" in result["content"]
         # A kill that lands: nothing left to report.
         result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q '^sleep 300' && echo ${d#/proc/}; done); sleep 0.2")
+                       "| grep -q '^sleep 300' && echo ${d#/proc/}; done)", "sleep 300")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # Children a reported process spawns later (a build's compiler steps) are tracked
         # silently: no note per turn, but a missed kill lists them with their parent.
         result = shell("cd /app && nohup sh -c 'sleep 1; sleep 301' >/dev/null 2>&1 &")
         assert "started by your last shell command(s)" in result["content"]
         assert "sleep 1; sleep 301" in result["content"]
-        assert shell("sleep 1.5")["content"] == "ran"
-        assert any(cmd.startswith("sleep 301") for _pid, cmd in harness.process_snapshot().values())
+        _wait_until(harness, "sleep 301", present=True)
+        assert shell("true")["content"] == "ran"
         result = shell("kill 999999 2>/dev/null; true")
         assert "still running after your last shell" in result["content"]
         assert "sleep 301" in result["content"]
         result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q 'sleep 301' && echo ${d#/proc/}; done) 2>/dev/null; sleep 0.2")
+                       "| grep -q 'sleep 301' && echo ${d#/proc/}; done) 2>/dev/null",
+                       "sleep 301")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # A child born between turns is adopted at the next call's start, so it stays
         # tracked when its parent exits during that call and is orphaned to pid 1; a
@@ -583,7 +584,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         live.exec_run(["touch", "/tmp/go1"])
         _wait_until(harness, "sleep 303", present=True)
         _wait_until(harness, "sleep 302", present=True)
-        result = shell("touch /tmp/go2", exited="sh -c while [ ! -f /tmp/go1 ]")
+        result = shell("touch /tmp/go2", "sh -c while [ ! -f /tmp/go1 ]")
         assert result["content"] == "ran"
         assert [cmd for _pid, cmd in harness.process_snapshot().values()
                 if cmd.startswith("sleep 303")]
@@ -592,7 +593,8 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         assert "sleep 303 (parent 1)" in result["content"]
         assert "sleep 302 (parent 1)" in result["content"]
         result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q 'sleep 30[23]' && echo ${d#/proc/}; done) 2>/dev/null; sleep 0.2")
+                       "| grep -q 'sleep 30[23]' && echo ${d#/proc/}; done) 2>/dev/null",
+                       "sleep 302", "sleep 303")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # Pre-existing files changed or deleted by the shell are named once, with the size change.
         result = shell("printf '1,2\\n3,4\\n5,6\\n' > /app/data.csv && rm /app/gone.txt")

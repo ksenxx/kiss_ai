@@ -23,11 +23,11 @@ Covered behavior:
   browser window, and ``#app`` clears it.
 * The meta values render as bullet items (a real ``<ul>`` with
   ``list-style-type: disc``): the live status values (Tokens / Cost /
-  Steps / Time / Workdir / Max budget) followed by the task's own
-  settings (Date / Base model / Chat id / Task id / Parent task, the
-  last hidden until a parent id arrives).  Neither the machine name
-  nor the parallel mode is a row: the machine name sits in the chat
-  header's machine drop-down instead.
+  Steps / Time), the Machine row (the machine the chat's tasks run
+  on: the tab's bound machine, else this daemon's), Workdir / Max
+  budget, then the task's own settings (Date / Base model / Chat id /
+  Task id / Parent task, the last hidden until a parent id arrives).
+  The parallel mode is not a row.
 * Whatever the app writes into the status-bar spans (tokens, cost,
   steps, the running timer text and its color) is mirrored live into
   the panel.
@@ -136,7 +136,7 @@ _READ_MIRROR_JS = """
   timeColor: getComputedStyle(
     document.getElementById('meta-time'),
   ).color,
-  machineRow: document.getElementById('meta-machine'),
+  machine: document.getElementById('meta-machine').textContent,
   listText: document.getElementById('meta-list').textContent,
 })
 """
@@ -236,11 +236,11 @@ def test_meta_values_render_as_a_bulleted_list(
     remote_url: str,
 ) -> None:
     """The panel lists the live status values (Tokens / Cost / Steps /
-    Time / Workdir / Max budget) followed by the task's own settings
-    (Date / Base model / Chat id / Task id / Parent task / Agent) as
-    real ``<ul>`` bullet items, with neither a Machine nor a Parallel
-    mode row.  The Parent-task row starts hidden until a parent id
-    arrives; the Agent row stays hidden for a plain run."""
+    Time), the Machine row, Workdir / Max budget, then the task's own
+    settings (Date / Base model / Chat id / Task id / Parent task /
+    Agent) as real ``<ul>`` bullet items, with no Parallel mode row.
+    The Parent-task row starts hidden until a parent id arrives; the
+    Agent row stays hidden for a plain run."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -251,12 +251,13 @@ def test_meta_values_render_as_a_bulleted_list(
         )
         # Every row bar the initially-hidden Parent-task and Agent rows
         # renders as a bullet; the hidden rows collapse to display:none.
-        assert listing["displays"] == ["list-item"] * 10 + ["none"] * 2, listing
+        assert listing["displays"] == ["list-item"] * 11 + ["none"] * 2, listing
         assert listing["labels"] == [
             "Tokens:",
             "Cost:",
             "Steps:",
             "Time:",
+            "Machine:",
             "Workdir:",
             "Max budget:",
             "Date:",
@@ -270,7 +271,12 @@ def test_meta_values_render_as_a_bulleted_list(
         # placeholder and the time mirrors the "Ready" status.
         assert listing["values"][:3] == ["\u2014"] * 3, listing
         assert listing["values"][3] == "Ready", listing
-        # No value is bold: the bold Machine row is gone.
+        # The Machine row names the machine the chat's tasks run on
+        # (the tab's bound machine, else this daemon's, from the
+        # daemon's replies); this static page gets no reply, so it
+        # shows the placeholder.
+        assert listing["values"][4] == "\u2014", listing
+        # No value is bold.
         assert set(listing["weights"]) == {"400"}, listing
     finally:
         page.close()
@@ -282,8 +288,10 @@ def test_status_values_mirror_live_into_the_panel(
 ) -> None:
     """Writes to the status-bar spans (as the app does while a task
     runs) appear in the panel's bullets, with labels stripped and the
-    timer color carried over.  The status bar's machine name is NOT
-    mirrored: the panel has no Machine row."""
+    timer color carried over.  The status bar's machine span is NOT
+    mirrored: the Machine row is painted from the daemon's configData
+    / tabMachine replies (taskPanelSettingsInfo.test.js), so a bare
+    DOM write to the span leaves the row alone."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         page.evaluate(_WRITE_STATUS_JS)
@@ -300,7 +308,7 @@ def test_status_values_mirror_live_into_the_panel(
             "the running/done color of the timer must carry over: "
             f"{mirrored}"
         )
-        assert mirrored["machineRow"] is None, mirrored
+        assert mirrored["machine"] == "\u2014", mirrored
         assert "build-host-42" not in mirrored["listText"], mirrored
     finally:
         page.close()

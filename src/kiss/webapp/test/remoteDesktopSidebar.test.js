@@ -6,75 +6,25 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
 function makePage(opts) {
   const {desktopMatches = true} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  const listeners = [];
-  const mql = {
-    matches: desktopMatches === true,
-    media: '(min-width: 900px)',
-    addEventListener: (ev, fn) => {
-      if (ev === 'change') listeners.push(fn);
+  // desktopMatches === null: no window.matchMedia at all.
+  let fireChange = null;
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: win => {
+      if (desktopMatches !== null) {
+        fireChange = fakeMatchMedia(win, desktopMatches === true);
+      }
     },
-    removeEventListener: () => {},
-    addListener: fn => listeners.push(fn),
-    removeListener: () => {},
-  };
-  if (desktopMatches !== null) {
-    win.matchMedia = function (query) {
-      if (query === '(min-width: 900px)') return mql;
-      return {
-        matches: false,
-        media: query,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-        addListener: () => {},
-        removeListener: () => {},
-      };
-    };
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  function fireChange(matches) {
-    mql.matches = matches;
-    listeners.forEach(fn => fn(mql));
-  }
+  });
   return {win, posted, fireChange};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function getHistoryMsgs(posted) {

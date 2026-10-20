@@ -31,13 +31,23 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
-from kiss.tests.agents.seas.conftest import git, registered, run_sea, runnable_candidates
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.conftest import (
+    git,
+    registered,
+    run_sea,
+    runnable_candidates,
+    seed_repo,
+)
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
 )
-from kiss.tests.server.conftest import init_repo
 
 _SEA_PATH = Path(autorouter_sea.__file__).resolve()
 _TOOL_NAMES = {
@@ -103,12 +113,9 @@ def test_autorouter_is_a_model_picker_sea() -> None:
 def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     """``/autorouter <task>`` resolves to the task text and this file (run directly)."""
     assert sea_commands.get_command("autorouter") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/autorouter add a --json flag")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "add a --json flag"
-    assert sea_commands.sea_settings(path) == AutorouterSea().settings({})
+    assert sea_commands.slash_command_task("/autorouter add a --json flag") == (
+        "add a --json flag", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == AutorouterSea().settings({})
     assert sea_commands.help_text_if_command("/autorouter help") == AutorouterSea().description()
 
 
@@ -358,7 +365,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
 
     assert len(agentic) == 3
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert _TOOL_NAMES <= names, names
         assert {
             "run_agent", "run_parallel", "set_model", "Bash", "run_commands_parallel", "finish",
@@ -369,16 +376,16 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         assert system.startswith("<identity>"), system[:200]
     # Step 2 carries the real pick; step 3 carries the ledger path.
     # Tool results carry a "Steps: ..." status footer after a blank line.
-    pick_result = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
+    pick_result = tool_results(agentic[1])
     assert len(pick_result) == 1, agentic[1]["messages"]
-    pick_text = str(pick_result[0]["content"]).split("\n\nSteps:")[0]
+    pick_text = pick_result[0].split("\n\nSteps:")[0]
     if runnable:
         assert json.loads(pick_text)["model"] == model
     else:
         assert pick_text.startswith("Error: no runnable model in tier 'medium'")
     ledger = home / "MODEL_DECISIONS.md"
-    log_result = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
-    assert str(log_result[-1]["content"]).split("\n\nSteps:")[0] == f"logged to {ledger}"
+    log_result = tool_results(agentic[2])
+    assert log_result[-1].split("\n\nSteps:")[0] == f"logged to {ledger}"
     task_id = agent.last_task_id
     assert task_id
     rows = ledger.read_text(encoding="utf-8").splitlines()
@@ -486,7 +493,7 @@ def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
 def test_kiss_checkout_resolves_a_linked_worktree_to_its_owning_checkout(tmp_path: Path) -> None:
     """A task worktree (``.git`` file) is discarded later, so the durable checkout is returned."""
     repo = tmp_path / "repo"
-    init_repo(repo)
+    seed_repo(repo)
     (repo / autorouter_sea.RSI7D_SEA_RELATIVE).parent.mkdir(parents=True)
     (repo / autorouter_sea.RSI7D_SEA_RELATIVE).write_text("", encoding="utf-8")
     git(repo, "add", ".")

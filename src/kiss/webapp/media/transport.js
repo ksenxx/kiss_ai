@@ -150,7 +150,7 @@
       Math.floor(elapsed / 1000) +
       ' s). ' +
       'Check that it is running on this machine.';
-    _setOverlayAction('Retry now', _retryNow);
+    _setOverlayAction('Retry now', _reconnectNowIfNeeded);
   }
 
   /**
@@ -178,22 +178,6 @@
     if (_outageSince) return;
     _outageSince = until;
     _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
-  }
-
-  /**
-   * "Retry now" on the overlay: drop the backoff and reconnect at once.
-   *
-   * The escalated text and the button stay (the tick keeps the
-   * seconds current); ``auth_ok`` or ``auth_required`` clears them.
-   */
-  function _retryNow() {
-    if (_ws && _ws.readyState === WebSocket.OPEN) return;
-    if (_reconnectTimer) {
-      clearTimeout(_reconnectTimer);
-      _reconnectTimer = null;
-    }
-    _reconnectAttempt = 0;
-    connect();
   }
 
   // Non-zero while the server has told us (via an ``auth_locked``
@@ -410,9 +394,13 @@
   function _reconnectNowIfNeeded() {
     // Called from visibilitychange / pageshow / online handlers so a
     // user who left Safari for another app does not wait the full
-    // backoff after returning.  We treat CONNECTING as "in flight,
-    // don't disturb"; CLOSED / CLOSING / null all warrant an
-    // immediate attempt.
+    // backoff after returning, and by the overlay's "Retry now"
+    // button (the escalated text and the button stay, the tick keeps
+    // the seconds current; auth_ok or auth_required clears them).  We
+    // treat CONNECTING as "in flight, don't disturb": connect() closes
+    // the current socket first, so restarting a slow handshake on
+    // every click would keep it from ever finishing.  CLOSED / CLOSING
+    // / null all warrant an immediate attempt.
     if (
       _ws &&
       (_ws.readyState === WebSocket.OPEN ||
@@ -778,8 +766,12 @@
     _stopStaleCheck();
     // Plain ``ws://`` on a plain ``http://`` page (the daemon's own
     // machine, http://127.0.0.1:PORT); ``wss://`` everywhere else.
+    // The popup window of the macOS standalone app (kiss-app, named
+    // by media/appWindow.html) marks its connection: the daemon quits
+    // a browser whose popup closed (kiss.server.standalone_app).
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    _ws = new WebSocket(scheme + location.host + '/ws');
+    const query = window.name === 'kiss-app-window' ? '?appWindow=1' : '';
+    _ws = new WebSocket(scheme + location.host + '/ws' + query);
     _authenticated = false;
 
     _ws.onopen = function () {

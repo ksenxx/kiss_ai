@@ -8,10 +8,11 @@ Covers (real :class:`AgentServer`, real :class:`AgentState` registry,
 real threads, real on-disk git repos and worktrees — no mocks, patches
 or fakes):
 
-- D-RC1: ``_task_accepts_input`` must treat a created-but-not-yet-
-  started worker thread as live (``Thread.is_alive()`` is False before
-  ``start()``), so an ``appendUserMessage`` arriving in the
-  ``_cmd_run`` startup window is queued instead of dropped.
+- D-RC1: ``AgentState.running`` (the predicate ``appendUserMessage``
+  uses) must treat a created-but-not-yet-started worker thread as
+  live (``Thread.is_alive()`` is False before ``start()``), so an
+  ``appendUserMessage`` arriving in the ``_cmd_run`` startup window
+  is queued instead of dropped.
 - D-RC2: ``TabRegistry.open_tab`` decides opened/exists/full
   atomically under the registry lock; ``_cmd_open_tab`` no longer
   re-probes ``has_tab`` unlocked, so a concurrent ``closeTab`` can
@@ -33,7 +34,6 @@ from pathlib import Path
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.commands import _task_accepts_input
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.server import AgentServer
 from kiss.server.tab_registry import _MAX_TABS, OpenTabOutcome, TabRegistry
@@ -58,30 +58,27 @@ class TestDRC1TaskAcceptsInputStartupWindow:
             "precondition: an unstarted thread reports is_alive()=False"
         )
         with agent_state.STATE_LOCK:
-            assert _task_accepts_input(state) is True, (
+            assert state.running() is True, (
                 "a follow-up typed during the run-startup window was "
                 "treated as addressed to a dead task and dropped"
             )
 
-    def test_none_finished_and_active_states(self) -> None:
-        """Branch coverage: None, finished-thread, and active states."""
-        with agent_state.STATE_LOCK:
-            assert _task_accepts_input(None) is False
-
+    def test_finished_and_active_states(self) -> None:
+        """Branch coverage: finished-thread and active states."""
         finished = AgentState("rr-d-rc1-b", tab_id="rr-d-rc1-b-tab")
         thread = threading.Thread(target=_noop, daemon=True)
         thread.start()
         thread.join()
         finished.task_thread = thread
         with agent_state.STATE_LOCK:
-            assert _task_accepts_input(finished) is False, (
+            assert finished.running() is False, (
                 "a started-and-finished worker thread is a dead task"
             )
 
         active = AgentState("rr-d-rc1-c", tab_id="rr-d-rc1-c-tab")
         active.is_task_active = True
         with agent_state.STATE_LOCK:
-            assert _task_accepts_input(active) is True
+            assert active.running() is True
 
     def test_append_user_message_queued_during_startup_window(self) -> None:
         """End-to-end: ``appendUserMessage`` from another connection in

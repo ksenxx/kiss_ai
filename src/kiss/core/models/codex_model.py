@@ -58,7 +58,6 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     _iter_jsonl,
-    _parse_text_based_tool_calls,
     environ_without,
     parse_binary_attachments,
 )
@@ -556,6 +555,12 @@ class CodexModel(CLITextModel):
         # The MCP bridge serving the agent's tools, set for the duration
         # of a ``native_tools_exposed`` block.
         self._tool_bridge: ToolBridge | None = None
+        # Whether an API key pays for the current turn, decided when the
+        # CLI is launched (_cli_env), and whether
+        # extract_cost_from_response has logged that this API-billed
+        # model has no catalog price.
+        self._api_billed = False
+        self._warned_unpriced = False
 
     @contextlib.contextmanager
     def native_tools_exposed(
@@ -671,8 +676,15 @@ class CodexModel(CLITextModel):
         return args
 
     def _cli_env(self) -> dict[str, str] | None:
-        """The CLI's environment: :func:`codex_cli_env`."""
-        return codex_cli_env()
+        """The CLI's environment: :func:`codex_cli_env`.
+
+        Called once per launch, so this is where the turn's billing is
+        decided for good: a ``CODEX_API_KEY`` in the child environment
+        makes the turn API spend, whatever the switch says afterwards.
+        """
+        env = codex_cli_env()
+        self._api_billed = bool(env.get("CODEX_API_KEY"))
+        return env
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Codex CLI.
@@ -787,7 +799,13 @@ class CodexModel(CLITextModel):
             *error_message* is ``None`` on success.
         """
         content = ""
-        result_json: dict[str, Any] = {}
+        # What prices the turn (see extract_cost_from_response): whether
+        # an API key paid, decided at launch, and the API requests the
+        # turn made.  The CLI reports no request count; every tool item
+        # (command, file change, MCP call, ...) cost at least one more
+        # request after the first, so 1 + tool items bounds it from
+        # above, which is all the long-context rule needs.
+        result_json: dict[str, Any] = {"api_billed": self._api_billed, "requests": 1}
         error_message: str | None = None
 
         for event in _iter_jsonl(lines):
@@ -804,6 +822,8 @@ class CodexModel(CLITextModel):
                     self._invoke_token_callback(text)
                 elif item_type == "agent_reasoning" and text:
                     self._emit_as_thinking(text)
+                elif item_type not in ("agent_message", "agent_reasoning", "reasoning", "error"):
+                    result_json["requests"] += 1
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
             elif event_type in ("error", "turn.failed"):
@@ -816,45 +836,21 @@ class CodexModel(CLITextModel):
 
         return content, result_json, error_message
 
-    def generate_and_process_with_tools(
-        self,
-        function_map: dict[str, Callable[..., Any]],
-        tools_schema: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generate with text-based tool calling via the Codex CLI.
+    def _text_tools(
+        self, function_map: dict[str, Callable[..., Any]]
+    ) -> dict[str, Callable[..., Any]]:
+        """Leave the tools served over MCP out of the text-based prompt.
 
-        Tool descriptions are injected into ``system_instruction`` (which
-        :meth:`generate` hands to the CLI as its instructions file).  The
-        model's text output is parsed for JSON ``tool_calls`` blocks,
-        which are returned to the framework for execution; the CLI's own
-        tools are switched off.  Within a :meth:`native_tools_exposed`
-        block the tools served over MCP are left out of that prompt —
-        Codex calls them natively during the turn — so it describes only
-        the rest (``finish``).
-
-        Thinking tokens stream to the callbacks as they arrive; the
-        assistant text is held back and re-emitted once the turn ends,
-        stripped of the ``tool_calls`` JSON, so the raw block is never
-        rendered in the chat panel.
+        Within a :meth:`native_tools_exposed` block Codex calls those
+        natively during the turn (``system_instruction`` reaches it as
+        the instructions file), so the prompt describes only the rest
+        (``finish``).
 
         Args:
-            function_map: Dictionary mapping function names to callable functions.
-            tools_schema: Ignored — text-based tool calling builds its own prompt.
-
-        Returns:
-            Tuple of ``(function_calls, content, response)``.
+            function_map: Every tool the framework offers for the turn.
         """
         served = self._tool_bridge.tool_names if self._tool_bridge is not None else frozenset()
-        text_tools = {name: fn for name, fn in function_map.items() if name not in served}
-        with self._tools_prompt_installed(text_tools):
-            content, response = self.generate()
-
-        function_calls = _parse_text_based_tool_calls(content)
-
-        if function_calls:
-            self._replace_last_assistant_with_tool_calls(content, function_calls)
-
-        return function_calls, content, response
+        return {name: fn for name, fn in function_map.items() if name not in served}
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
@@ -889,3 +885,41 @@ class CodexModel(CLITextModel):
             cache_read,
             cache_write,
         )
+
+    def extract_cost_from_response(self, response: Any) -> float | None:
+        """Price the turn at the OpenAI model's rate when the API key pays.
+
+        A turn the ChatGPT plan paid for (the switch was on at launch, or
+        no API key was available) keeps the ``codex/*`` catalog price of
+        zero (``None`` here).  A turn a ``CODEX_API_KEY`` paid for is
+        billed by OpenAI at standard API rates, so its usage is priced
+        through :func:`calculate_cost` under the model named after
+        ``codex/`` (``codex/gpt-5.5`` -> ``gpt-5.5``); the per-request
+        long-context tier applies only to a single-request turn (see
+        ``single_request``).  ``codex/default`` and other names the
+        catalog cannot price stay at the catalog entry, with a warning
+        once per model instance.
+
+        Args:
+            response: The dict returned by :meth:`generate`.
+
+        Returns:
+            The turn's USD cost, or ``None`` to bill the catalog entry.
+        """
+        from kiss.core.models.model_info import calculate_cost, is_known_model
+
+        if not isinstance(response, dict) or not response.get("api_billed"):
+            return None
+        if not is_known_model(self._cli_model):
+            if not self._warned_unpriced:
+                self._warned_unpriced = True
+                logger.warning(
+                    "%s bills the OpenAI API (codex_use_subscription is off) but "
+                    "MODEL_INFO has no price for '%s': its cost is reported as $0.",
+                    self.model_name,
+                    self._cli_model,
+                )
+            return None
+        counts = self.extract_input_output_token_counts_from_response(response)
+        single_request = response.get("requests", 1) <= 1
+        return calculate_cost(self._cli_model, *counts, single_request=single_request)

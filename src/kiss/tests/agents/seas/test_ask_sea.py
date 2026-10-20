@@ -149,10 +149,6 @@ def test_system_prompt_ends_with_the_fixed_playbook() -> None:
     assert "history.db" in text and "read-only" in text
     assert "task_overview" not in text and "task_transcript" not in text
     assert ask_sea.ADD_TO_PROMPT == _EXPECTED_ADD_TO_PROMPT
-    # The earlier contracts' names are gone: the daemon reads only the
-    # class's ``system_prompt``, so the old names would be dead code.
-    assert not hasattr(ask_sea, "append_to_system_prompt")
-    assert not hasattr(ask_sea, "add_to_system_prompt")
 
 
 def test_settings_follow_the_contract() -> None:
@@ -225,16 +221,6 @@ def test_ask_sea_lives_in_seas_package() -> None:
     assert registered.resolve() == module_path
 
 
-def test_ask_command_is_registered_by_default() -> None:
-    """Refreshing the registry MUST expose /ask as a known command.
-
-    A regression here breaks the whole slash-command flow: no
-    registry entry, no resolution, no run.
-    """
-    commands = sea_commands.refresh_registry()
-    assert "ask" in commands
-
-
 # ---------------------------------------------------------------------------
 # 2. The slash-command resolver
 # ---------------------------------------------------------------------------
@@ -249,15 +235,10 @@ def test_slash_ask_resolves_to_the_question_and_the_bundled_sea() -> None:
     directive, no ``run_agent`` arguments, no placeholder.
     """
     sea_commands.refresh_registry()
-    hit = sea_commands.slash_command_task("/ask why did the last step fail?")
-    assert hit is not None
-    task_text, sea_path = hit
-    assert sea_path.name == "ask_sea.py"
-    assert sea_path.resolve() == Path(_ASK_PATH)
-    assert task_text == "why did the last step fail?"
-    assert _PLACEHOLDER not in task_text
+    assert sea_commands.slash_command_task("/ask why did the last step fail?") == (
+        "why did the last step fail?", Path(_ASK_PATH))
     # The settings the daemon will apply to that very run.
-    assert sea_commands.sea_settings(sea_path) == _EXPECTED_SETTINGS
+    assert sea_commands.sea_settings(Path(_ASK_PATH)) == _EXPECTED_SETTINGS
 
 
 def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -> None:
@@ -274,11 +255,8 @@ def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -
     (kiss_home() / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
 
-    hit = sea_commands.slash_command_task("/notify hello")
-    assert hit is not None
-    task_text, sea_path = hit
-    assert task_text == "hello"
-    assert sea_path == folder / "notify" / "notify_sea.py"
+    sea_path = folder / "notify" / "notify_sea.py"
+    assert sea_commands.slash_command_task("/notify hello") == ("hello", sea_path)
     assert sea_commands.sea_settings(sea_path) == {}
 
 
@@ -296,11 +274,8 @@ def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None
     (kiss_home() / "SEAS.md").write_text(str(shadow.parent) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
     assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
-    hit = sea_commands.slash_command_task("/ask what happened?")
-    assert hit is not None
-    task_text, sea_path = hit
-    assert sea_path == shadow / "ask_sea.py"
-    assert task_text == "what happened?"
+    sea_path = shadow / "ask_sea.py"
+    assert sea_commands.slash_command_task("/ask what happened?") == ("what happened?", sea_path)
     assert sea_commands.sea_settings(sea_path) == {}
 
 

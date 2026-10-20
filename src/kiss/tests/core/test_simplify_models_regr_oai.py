@@ -115,7 +115,7 @@ def test_validate_function_call_conversation() -> None:
     m = make_v2()
     m.initialize("hi")
     m.conversation.extend([_fc("c1"), _fco("c1"), _fc("c2")])
-    assert m._validate_function_call_conversation() == ["c2"]
+    assert m._validate_function_call_conversation() == [{"name": "f", "call_id": "c2"}]
 
     m2 = make_v2()
     m2.initialize("hi")

@@ -12,58 +12,19 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  waitFor,
+  clickTab,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const pages = [];
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  pages.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-// A tab on the group strip (#tab-list) is clicked there; a chat that is
-// not on it is picked the way the Chats panel does it.
-function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    '#tab-list ' + `.chat-tab[data-tab-id="${tabId}"]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
+  const page = makeChatPage({bodyClass: 'remote-chat'});
+  pages.push(page.win);
+  return page;
 }
 
 function contentTabId(win) {
@@ -85,13 +46,18 @@ function submitPrompt(win, posted, text) {
   return sent[sent.length - 1];
 }
 
-function requestGhost(win, text) {
+/** Type *text* into the composer and wait for the debounced ghost request. */
+function requestGhost(win, posted, text) {
+  const before = posted.filter(m => m.type === 'complete').length;
   const inp = win.document.getElementById('task-input');
   inp.value = text;
   inp.selectionStart = text.length;
   inp.selectionEnd = text.length;
   inp.dispatchEvent(new win.Event('input', {bubbles: true}));
-  return new Promise(r => setTimeout(r, 400));
+  return waitFor(
+    () => posted.filter(m => m.type === 'complete').length > before,
+    'a ghost request is posted',
+  );
 }
 
 function openChat(win) {
@@ -107,7 +73,7 @@ async function testViewedFileTabIsTheEditorContext() {
   // No file tab yet: neither message names a file.
   assert.strictEqual(submitPrompt(win, posted, 'hello').activeFile, undefined);
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'hel');
+  await requestGhost(win, posted, 'hel');
   let completes = posted.filter(m => m.type === 'complete');
   assert.ok(completes.length >= 1, 'a ghost request is posted');
   assert.strictEqual(
@@ -133,7 +99,7 @@ async function testViewedFileTabIsTheEditorContext() {
   assert.strictEqual(sub.activeFileContent, undefined, 'a run needs no buffer');
 
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'summ');
+  await requestGhost(win, posted, 'summ');
   completes = posted.filter(m => m.type === 'complete');
   const last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, '/ws/a/notes.md');
@@ -146,12 +112,19 @@ async function testViewedFileTabIsTheEditorContext() {
   // Closing the file tab ends the context.  The mobile chat screen lists
   // no content tabs, so the user goes to the file first and closes it
   // from its own strip entry; the chat is back on screen afterwards.
-  send(win, {type: 'tabs_state', tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws/a'}]});
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws/a'}],
+  });
   clickTab(win, fileTab);
   win.document
     .querySelector(`.chat-tab[data-tab-id="${fileTab}"] .chat-tab-close`)
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(win._testApi.getActiveTabId(), 'a1', 'the chat is on screen again');
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    'a1',
+    'the chat is on screen again',
+  );
   send(win, {type: 'status', running: false, tabId: 'a1'});
   assert.strictEqual(
     submitPrompt(win, posted, 'and now?').activeFile,
@@ -162,10 +135,13 @@ async function testViewedFileTabIsTheEditorContext() {
   // closed file's snapshot instead of keeping it (an absent activeFile
   // means "keep" there).
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'and n');
+  await requestGhost(win, posted, 'and n');
   completes = posted.filter(m => m.type === 'complete');
   assert.strictEqual(completes[completes.length - 1].activeFile, '');
-  assert.strictEqual(completes[completes.length - 1].activeFileContent, undefined);
+  assert.strictEqual(
+    completes[completes.length - 1].activeFileContent,
+    undefined,
+  );
 }
 
 async function testEmptiedBufferIsSentAsEmptyContent() {
@@ -184,11 +160,15 @@ async function testEmptiedBufferIsSentAsEmptyContent() {
   });
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'emp');
+  await requestGhost(win, posted, 'emp');
   const completes = posted.filter(m => m.type === 'complete');
   const last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, '/ws/a/empty.md');
-  assert.strictEqual(last.activeFileContent, '', 'an empty buffer is sent as ""');
+  assert.strictEqual(
+    last.activeFileContent,
+    '',
+    'an empty buffer is sent as ""',
+  );
 }
 
 async function testVirtualAndDirectoryTabsAreNoEditorContext() {
@@ -212,7 +192,7 @@ async function testVirtualAndDirectoryTabsAreNoEditorContext() {
     'a virtual git tab is not a file on disk',
   );
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'expl');
+  await requestGhost(win, posted, 'expl');
   let completes = posted.filter(m => m.type === 'complete');
   assert.strictEqual(completes[completes.length - 1].activeFile, '');
 
@@ -241,23 +221,39 @@ async function testVirtualAndDirectoryTabsAreNoEditorContext() {
     version: 'v1',
   });
   clickTab(win, 'a1');
-  assert.strictEqual(submitPrompt(win, posted, 'and a.py?').activeFile, '/ws/a/src/a.py');
+  assert.strictEqual(
+    submitPrompt(win, posted, 'and a.py?').activeFile,
+    '/ws/a/src/a.py',
+  );
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'and a');
+  await requestGhost(win, posted, 'and a');
   completes = posted.filter(m => m.type === 'complete');
-  assert.strictEqual(completes[completes.length - 1].activeFile, '/ws/a/src/a.py');
-  assert.strictEqual(completes[completes.length - 1].activeFileContent, 'x = 1\n');
+  assert.strictEqual(
+    completes[completes.length - 1].activeFile,
+    '/ws/a/src/a.py',
+  );
+  assert.strictEqual(
+    completes[completes.length - 1].activeFileContent,
+    'x = 1\n',
+  );
 }
 
 function writeReport(win, filePath, content) {
   const extra = {tabId: 'a1'};
-  send(win, Object.assign({type: 'tool_call', name: 'Write', path: filePath, content}, extra));
+  send(
+    win,
+    Object.assign(
+      {type: 'tool_call', name: 'Write', path: filePath, content},
+      extra,
+    ),
+  );
   send(
     win,
     Object.assign(
       {
         type: 'tool_result',
-        content: 'Successfully wrote ' + content.length + ' characters to ' + filePath,
+        content:
+          'Successfully wrote ' + content.length + ' characters to ' + filePath,
         is_error: false,
         tool_name: 'Write',
         path: filePath,
@@ -280,18 +276,21 @@ async function testReportTabReportsItsMarkdownSource() {
   contentTabId(win);
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'oldRe');
+  await requestGhost(win, posted, 'oldRe');
   let completes = posted.filter(m => m.type === 'complete');
   let last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, reportPath);
-  assert.strictEqual(last.activeFileContent, '# Report\n\noldReportIdentifier\n');
+  assert.strictEqual(
+    last.activeFileContent,
+    '# Report\n\noldReportIdentifier\n',
+  );
 
   send(win, {type: 'status', running: true, tabId: 'a1'});
   writeReport(win, reportPath, '# Report\n\nnewReportIdentifier\n');
   send(win, {type: 'task_done', success: true, tabId: 'a1'});
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, 'newRe');
+  await requestGhost(win, posted, 'newRe');
   completes = posted.filter(m => m.type === 'complete');
   last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, reportPath);
@@ -368,5 +367,7 @@ async function testBrowserTabIsNoEditorContext() {
     process.exitCode = 1;
     return;
   }
-  console.log('All ' + tests.length + ' editorContextFromContentTab tests passed');
+  console.log(
+    'All ' + tests.length + ' editorContextFromContentTab tests passed',
+  );
 })();

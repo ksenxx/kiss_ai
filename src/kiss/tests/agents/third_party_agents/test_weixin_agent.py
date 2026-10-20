@@ -48,11 +48,14 @@ def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, st
 class _WeixinApi(RecordingServer):
     """Recording server with the emulated WeChat API's response knobs.
 
-    ``requests`` holds the JSON payloads POSTed to the custom-send endpoint.
+    ``requests`` holds the JSON payloads POSTed to the custom-send
+    endpoint and ``queries`` the query parameters of every request, so
+    the test body checks the credentials each call carried.
     """
 
     def __init__(self, address: tuple[str, int], handler: type) -> None:
         super().__init__(address, handler)
+        self.queries: list[dict[str, list[str]]] = []
         self.token_hits = 0
         self.send_errcode = 0
         self.send_http_status = 200
@@ -66,17 +69,24 @@ class _WeixinApiHandler(RecordingHandler):
         """The owning emulator server."""
         return cast(_WeixinApi, self.server)
 
+    def _token_ok(self, params: dict[str, list[str]]) -> bool:
+        """Answer the real API's 40001 error unless the access token is ours."""
+        if params.get("access_token") == ["WXTOKEN"]:
+            return True
+        self._json(200, {"errcode": 40001, "errmsg": f"invalid credential {params}"})
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         """Serve the token and user-info endpoints."""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        self.api.queries.append(params)
         if parsed.path == "/cgi-bin/token":
             self.api.token_hits += 1
-            assert params.get("grant_type") == ["client_credential"]
             self._json(200, {"access_token": "WXTOKEN", "expires_in": 7200})
         elif parsed.path == "/cgi-bin/user/info":
-            assert params.get("access_token") == ["WXTOKEN"]
-            self._json(200, {"openid": params.get("openid", [""])[0], "nickname": "Alice"})
+            if self._token_ok(params):
+                self._json(200, {"openid": params.get("openid", [""])[0], "nickname": "Alice"})
         else:
             self._json(404, {"errcode": 404, "errmsg": "not found"})
 
@@ -84,9 +94,11 @@ class _WeixinApiHandler(RecordingHandler):
         """Serve the custom-send endpoint."""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        self.api.queries.append(params)
         body = json.loads(self._read_raw().decode("utf-8"))
         if parsed.path == "/cgi-bin/message/custom/send":
-            assert params.get("access_token") == ["WXTOKEN"]
+            if not self._token_ok(params):
+                return
             self.api.requests.append(body)
             if self.api.send_http_status != 200:
                 self._json(self.api.send_http_status, {})
@@ -173,6 +185,12 @@ def test_send_reuses_cached_token(api: _WeixinApi) -> None:
     assert json.loads(backend.send_text_message("openid1", "hi"))["ok"] is True
     assert json.loads(backend.send_text_message("openid2", "there"))["ok"] is True
     assert api.token_hits == 1
+    assert api.queries[0] == {
+        "grant_type": ["client_credential"],
+        "appid": ["wx_app"],
+        "secret": ["wx_secret"],
+    }
+    assert api.queries[1:] == [{"access_token": ["WXTOKEN"]}] * 2
     assert len(api.requests) == 2
     assert api.requests[0] == {
         "touser": "openid1",
@@ -196,6 +214,7 @@ def test_get_user_info(api: _WeixinApi) -> None:
     agent = _authenticated_agent(api_base=api.base_url)
     result = json.loads(agent._backend.get_user_info("openid9"))
     assert result["ok"] is True
+    assert api.queries[-1] == {"access_token": ["WXTOKEN"], "openid": ["openid9"], "lang": ["en"]}
     assert result["user"]["openid"] == "openid9"
     assert result["user"]["nickname"] == "Alice"
 
@@ -316,6 +335,22 @@ def test_callback_post_bad_content_length() -> None:
         assert messages == []
     finally:
         backend.disconnect()
+
+
+def test_emulator_names_wrong_access_token(api: _WeixinApi) -> None:
+    """The emulated API answers a wrong access token with errcode 40001 quoting it."""
+    info = requests.get(
+        api.base_url + "/cgi-bin/user/info", params={"access_token": "stale"}, timeout=10
+    ).json()
+    sent = requests.post(
+        api.base_url + "/cgi-bin/message/custom/send",
+        params={"access_token": "stale"},
+        json={"touser": "o"},
+        timeout=10,
+    ).json()
+    assert info["errcode"] == sent["errcode"] == 40001
+    assert "'stale'" in info["errmsg"] and "'stale'" in sent["errmsg"]
+    assert api.requests == []
 
 
 def test_send_fails_on_http_error_status(api: _WeixinApi) -> None:

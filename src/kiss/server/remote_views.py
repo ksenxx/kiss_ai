@@ -11,12 +11,24 @@ a page of the browser, on that same machine: ``terminalOpen`` and
 keeps one :class:`RemoteViewStream` per machine in use: an
 authenticated WebSocket to the machine's daemon
 (:meth:`~kiss.agents.sorcar.machines.MachineLink.open_connection`),
-opened on the first such command and closed once it carries no
-terminal or page any more (or when this daemon stops), over which the
-commands are forwarded and the machine's terminal and browser events
-are relayed to this daemon's clients.  The stream sends no ``ready``:
-the pages the machine's browser had open before the stream are not
-shown here; the ones announced over it are.
+opened on the first such command, or when a chat tab is bound to the
+machine (:meth:`RemoteViews.bind`, told by
+:class:`~kiss.server.remote_tabs.RemoteTabs`), and closed once it
+carries no terminal or page and no tab is bound to the machine any
+more (or when this daemon stops), over which the commands are
+forwarded and the machine's terminal and browser events are relayed
+to this daemon's clients.  A tab's binding keeps the stream because
+the agent of a task running on the machine may call for the user
+(``show_browser``, a sign-in hand-off): the page it opens is
+announced, focused, to every client of the machine's daemon, and the
+stream relays it to every surface here the same way.  A stream lost
+while a tab is still bound to its machine is opened again after
+:data:`REOPEN_DELAY` (a machine that drops every socket costs one
+connection per delay, not a connect loop).  A stream that opens asks
+the machine for the pages its browser already has open
+(``browserList``, answered with the ``browserTabs`` snapshot a
+``ready`` gets, or with an ``error`` by an older daemon) and shows
+them here, unfocused.
 
 The remote daemon owns the shells and the pages exactly as it would
 for its own surfaces; this daemon's clients see them as they see the
@@ -92,6 +104,13 @@ BROWSER_EVENTS = frozenset({
 
 _MACHINE_SEPARATOR = "@"
 
+REOPEN_DELAY = 3.0
+"""Seconds before a stream lost while a tab is still bound to its machine is opened again."""
+
+_PAGES_REQUEST = "browserList"
+_PAGES_UNKNOWN = f"Unknown command: {_PAGES_REQUEST}"
+"""The ``error`` an older daemon answers :meth:`RemoteViewStream.request_pages` with."""
+
 
 def namespaced(tab_id: str, machine_name: str) -> str:
     """The id a remote browser tab *tab_id* of *machine_name* has on this daemon."""
@@ -122,6 +141,11 @@ class RemoteViewStream(MachineStream):
         viewers: By the remote's own tab id, the connections watching
             the page (a visible ``browserViewport``): every frame of
             the page goes to each of them.
+        seen: The remote ids of the pages opened or closed over the
+            stream before the machine answered :meth:`request_pages`
+            (None once it has, or once it answered that it does not
+            know the command: an older daemon): the answer is older
+            than those events, so it may not resurrect them.
         lock: Guards the attributes above and ``retired``; relayed
             events are delivered under it, nothing is sent under it.
         send_lock: Makes a command's bookkeeping and its send one step
@@ -139,16 +163,59 @@ class RemoteViewStream(MachineStream):
         self.openers: list[str] = []
         self.browser_tabs: dict[str, dict[str, Any]] = {}
         self.viewers: dict[str, set[str]] = {}
+        self.seen: set[str] | None = set()
         self.send_lock = threading.Lock()
         super().__init__(machine, owner, f"remote-views-{machine.name}")
+
+    def request_pages(self) -> None:
+        """Ask the machine for the pages its browser has open (``browserList``).
+
+        Sent once the stream is the machine's registered one, so the
+        ``browserTabs`` answer (:meth:`_relay_snapshot`) is relayed by
+        a stream a ``ready`` snapshot sees too.  A stream lost this
+        early is reported by its relay thread.
+        """
+        with contextlib.suppress(MachineError):
+            self.send({"type": _PAGES_REQUEST})
 
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
         """Deliver one decoded frame when it is a terminal or browser event."""
         kind = str(msg.get("type") or "")
         if kind in TERMINAL_EVENTS:
             self._relay_terminal(msg)
+        elif kind == "browserTabs":
+            self._relay_snapshot(msg)
         elif kind in BROWSER_EVENTS:
             self._relay_browser(kind, msg)
+        elif kind == "error" and msg.get("text") == _PAGES_UNKNOWN:
+            # No snapshot is coming: nothing to hold back for it.
+            with self.lock:
+                self.seen = None
+
+    def _relay_snapshot(self, msg: dict[str, Any]) -> None:
+        """Show the pages of the machine's ``browserTabs`` snapshot here, unfocused.
+
+        The answer to :meth:`request_pages`, taken once: a page the
+        stream has seen opened or closed meanwhile (``seen``) is left
+        as the stream has it, as the machine took the snapshot before
+        it sent those events; any other page is cached and told to
+        every client as an unfocused ``openBrowserTab``.
+        """
+        with self.lock:
+            if self.retired or self.seen is None:
+                return
+            seen, self.seen = self.seen, None
+            for tab in msg.get("tabs") or ():
+                if not isinstance(tab, dict):
+                    continue
+                remote_id = str(tab.get("tab_id") or "")
+                if not remote_id or remote_id in seen or remote_id in self.browser_tabs:
+                    continue
+                event = self._stamped(tab)
+                event["tab_id"] = namespaced(remote_id, self.machine.name)
+                event["focus"] = False
+                self.browser_tabs[remote_id] = event
+                self._owner.deliver(json.dumps(event))
 
     def _relay_terminal(self, msg: dict[str, Any]) -> None:
         """A terminal event goes to the connection that opened the terminal."""
@@ -184,6 +251,8 @@ class RemoteViewStream(MachineStream):
         with self.lock:
             if self.retired:
                 return
+            if self.seen is not None and kind in ("openBrowserTab", "closeBrowserTab"):
+                self.seen.add(remote_id)
             if kind == "browserFrame":
                 to = list(self.viewers.get(remote_id, ()))
                 if not to:
@@ -204,8 +273,6 @@ class RemoteViewStream(MachineStream):
                     return
                 to = [self.openers.pop(0)]
                 answered = True
-            elif kind == "browserTabs":
-                return  # answers a ``ready``, which this stream never sends
             text = json.dumps(event)
             if to:
                 for conn_id in to:
@@ -229,7 +296,58 @@ class RemoteViews:
         """*backend* is the daemon (``ServerBackend``): its printer."""
         self._backend = backend
         self._streams: dict[str, RemoteViewStream] = {}
+        # By chat tab id, the machine the tab is bound to.
+        self._bound: dict[str, str] = {}
+        # Set by close_all: no stream is registered (or opened) from then on.
+        self._closing = False
         self._lock = threading.Lock()
+
+    def bind(self, tab_id: str, machine_name: str) -> None:
+        """Record that the chat tab *tab_id* is bound to *machine_name* ("" when not any more).
+
+        A stream to the machine stays open while a tab is bound to it,
+        so a page its agent opens for the user is shown here (see the
+        module).  Quick, under :class:`~kiss.server.remote_tabs.RemoteTabs`'
+        registry lock, as the registry changes (a tab registered, a
+        stream retired), so the bindings here are the registry's; the
+        caller then opens the machine's stream (:meth:`open_for`) or
+        releases the previous one (:meth:`release`) outside its lock.
+        """
+        with self._lock:
+            self._bound.pop(tab_id, None)
+            if machine_name:
+                self._bound[tab_id] = machine_name
+
+    def open_for(self, machine_name: str) -> None:
+        """Open (or keep) the stream of *machine_name* while a tab is bound to it.
+
+        Blocks on the handshake: a bound tab's task is forwarded only
+        once the stream is open, so the page its agent opens for the
+        user finds it subscribed.  Nothing is opened once the binding
+        is gone (an unbind while the reopen of :meth:`dropped` waited)
+        or the daemon is stopping; a stream opened for a binding that
+        an unbind took away while it was connecting is closed again
+        when idle.  A machine whose stream cannot be opened is logged
+        and left alone: the tab's own stream found it reachable just
+        now, and nothing of the user's is lost but the hand-off.
+        """
+        with self._lock:
+            wanted = not self._closing and machine_name in self._bound.values()
+        if not wanted:
+            return
+        try:
+            stream = self._stream_for(machine_name)
+        except MachineError as exc:
+            logger.warning("the browser pages of %s are not shown here: %s", machine_name, exc)
+            return
+        self.close_if_idle(stream)
+
+    def release(self, machine_name: str) -> None:
+        """Close the stream of *machine_name* once no tab is bound to it and it is idle."""
+        with self._lock:
+            stream = self._streams.get(machine_name)
+        if stream is not None:
+            self.close_if_idle(stream)
 
     def route(self, cmd: dict[str, Any]) -> bool:
         """Send *cmd* to its machine when it addresses a remote terminal or page.
@@ -361,16 +479,21 @@ class RemoteViews:
 
         Connecting blocks (up to the link's timeout) outside the lock;
         a stream another command opened meanwhile wins, and the one
-        opened here is closed.
+        opened here is closed, as it is when the daemon stopped
+        meanwhile (:meth:`close_all` leaves nothing behind).
 
         Raises:
             MachineError: When the machine is not registered,
-                unreachable, or rejects the password.
+                unreachable, or rejects the password, or the daemon is
+                stopping.
         """
         with self._lock:
             stream = self._streams.get(machine_name)
+            closing = self._closing
         if stream is not None:
             return stream
+        if closing:
+            raise MachineError(f"{machine_name}: this daemon is stopping")
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
             raise MachineError(f"{machine_name} is not a registered machine")
@@ -378,7 +501,8 @@ class RemoteViews:
         lost = False
         with self._lock:
             winner = self._streams.get(machine_name)
-            if winner is None:
+            closing = self._closing
+            if winner is None and not closing:
                 with stream.lock:
                     lost = stream.retired  # dropped before it could be registered
                 if not lost:
@@ -386,13 +510,22 @@ class RemoteViews:
         if winner is not None:
             stream.close()
             return winner
+        if closing:
+            stream.close()
+            raise MachineError(f"{machine.name}: this daemon is stopping")
         if lost:
             raise MachineError(f"lost the connection to {machine.name}")
+        stream.request_pages()
         return stream
 
     def close_if_idle(self, stream: RemoteViewStream) -> None:
-        """Close *stream* once it carries no terminal, page or pending open."""
+        """Close *stream* once it carries no terminal, page or pending open.
+
+        A stream whose machine a chat tab is bound to stays (see :meth:`bind`).
+        """
         with self._lock:
+            if stream.machine.name in self._bound.values():
+                return
             with stream.lock:
                 if stream.retired or stream.terminals or stream.browser_tabs or stream.openers:
                     return
@@ -499,12 +632,23 @@ class RemoteViews:
         self._backend._printer._send_to_conn(conn_id, text)
 
     def dropped(self, stream: RemoteViewStream, lost: bool) -> None:
-        """A stream ended: forget it, and when *lost* end its terminals, opens and pages here."""
+        """A stream ended: forget it, and when *lost* end its terminals, opens and pages here.
+
+        A stream lost while a tab is still bound to its machine is
+        opened again after :data:`REOPEN_DELAY`, if the tab is still
+        bound then (the machine may have dropped the socket alone; a
+        machine that is gone takes the tabs' own streams with it,
+        which unbinds them).
+        """
         name = stream.machine.name
         text = f"lost the connection to {name}"
         with self._lock, stream.lock:
-            if self._streams.get(name) is stream:
+            registered = self._streams.get(name) is stream
+            if registered:
                 del self._streams[name]
+            still_bound = (
+                lost and registered and not self._closing and name in self._bound.values()
+            )
             stream.retired = True
             if lost:
                 for tab_id, conn_id in stream.terminals.items():
@@ -524,10 +668,16 @@ class RemoteViews:
             stream.openers.clear()
             stream.browser_tabs.clear()
             stream.viewers.clear()
+        if still_bound:
+            timer = threading.Timer(REOPEN_DELAY, self.open_for, (name,))
+            timer.daemon = True
+            timer.start()
 
     def close_all(self) -> None:
-        """Close every stream (daemon shutdown)."""
+        """Close every stream (daemon shutdown); none is opened or registered from now on."""
         with self._lock:
+            self._closing = True
+            self._bound.clear()
             streams = list(self._streams.values())
             self._streams.clear()
             for stream in streams:

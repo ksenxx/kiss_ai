@@ -36,12 +36,14 @@ const TEST_DIR = __dirname;
 // the call eligible for the background compilers.
 const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 
-// Upper bound on one suite's wall-clock time.  The slowest suite
-// (remotePasswordBypass.test.js) takes about twenty seconds; this exists so
-// that any hang (in a suite, or in the runtime at exit) is reported as a
-// failure naming the suite instead of stalling `npm test` until someone
-// kills it.
-const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
+// Upper bound on one suite's wall-clock time, so that a hang (in a suite,
+// or in the runtime at exit) is reported as a failure naming the suite
+// instead of stalling `npm test` until someone kills it.  Measured with
+// every suite timed under a 32-wide pool on an 80-core box (2026-10):
+// the slowest, remotePasswordBypass.coverage.js, took 23 s and the next
+// four 9-16 s, so two minutes is five times the slowest suite's real time
+// and a hung suite costs the run two minutes instead of ten.
+const SUITE_TIMEOUT_MS = 2 * 60 * 1000;
 
 // Suites running at once: one per CPU, capped (each is a node + jsdom
 // process of a few hundred MB, and the *.coverage.js gates spawn a child

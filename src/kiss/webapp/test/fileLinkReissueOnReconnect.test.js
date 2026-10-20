@@ -31,20 +31,20 @@ const WORK_DIR = '/tmp/kiss-link-reissue';
 
 function makePage() {
   const page = harness.makePage();
-  send(page.win, {type: 'configData', config: {work_dir: WORK_DIR}, apiKeys: {}});
+  send(page.win, {
+    type: 'configData',
+    config: {work_dir: WORK_DIR},
+    apiKeys: {},
+  });
   page.win._testApi.endLaunch();
   return page;
 }
 
-// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
-// chat tabs any more), which retires nothing.
+// Put chat *tabId* on screen (the Chats-panel pick retires nothing) and
+// check it got there.
 function clickTab(win, tabId) {
+  harness.clickTab(win, tabId);
   const api = win._testApi;
-  assert.ok(
-    api.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  api.switchToTab(tabId);
   assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
 }
 

@@ -282,31 +282,7 @@ class Attachment:
             FileNotFoundError: If the file does not exist.
         """
         file_path = Path(path)
-        mime_type, _ = mimetypes.guess_type(str(file_path))
-        if mime_type is None:  # pragma: no cover – mimetypes knows all supported extensions
-            suffix = file_path.suffix.lower()
-            mime_map = {
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".png": "image/png",
-                ".gif": "image/gif",
-                ".webp": "image/webp",
-                ".heic": "image/heic",
-                ".heif": "image/heif",
-                ".hif": "image/heif",
-                ".pdf": "application/pdf",
-                ".mp3": "audio/mpeg",
-                ".wav": "audio/wav",
-                ".ogg": "audio/ogg",
-                ".webm": "video/webm",
-                ".flac": "audio/flac",
-                ".aac": "audio/aac",
-                ".m4a": "audio/mp4",
-                ".mp4": "video/mp4",
-                ".mpeg": "video/mpeg",
-                ".mov": "video/quicktime",
-            }
-            mime_type = mime_map.get(suffix, "")
+        mime_type = mimetypes.guess_type(str(file_path))[0] or ""
         heif = mime_type in HEIF_MIME_TYPES or file_path.suffix.lower() in HEIF_SUFFIXES
         if not heif and mime_type not in SUPPORTED_MIME_TYPES:
             raise ValueError(
@@ -1725,13 +1701,12 @@ class CLITextModel(Model):
     ) -> Iterator[None]:
         """Run one text-based tool turn with the tools prompt installed.
 
-        The skeleton both CLI adapters' ``generate_and_process_with_tools``
-        share: a *copy* of ``model_config`` whose ``system_instruction``
-        carries the tools prompt is installed, the
-        stream callbacks are wrapped by :class:`_ToolCallFilteredStream`
-        (which holds the assistant text back until the turn ends so the
-        raw ``tool_calls`` block is never rendered), and on every exit the
-        callbacks are restored first and the original config last.
+        A *copy* of ``model_config`` whose ``system_instruction`` carries
+        the tools prompt is installed, the stream callbacks are wrapped by
+        :class:`_ToolCallFilteredStream` (which streams the assistant text
+        with the raw ``tool_calls`` block held out of it), and on every
+        exit the callbacks are restored first and the original config
+        last.
 
         Args:
             function_map: Dictionary mapping function names to callables.
@@ -1747,6 +1722,55 @@ class CLITextModel(Model):
                 yield
         finally:
             self.model_config = original_config
+
+    def generate_and_process_with_tools(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], str, Any]:
+        """Generate one turn with text-based tool calling.
+
+        The tool descriptions are injected into the system prompt (the
+        CLI's own tools are switched off, so these are the only tools the
+        model can use), the turn runs through :meth:`generate`, and the
+        model's text is parsed for JSON ``tool_calls`` blocks, which are
+        returned to the framework for execution.  Thinking tokens and
+        text stream to the callbacks as they arrive, minus the raw
+        ``tool_calls`` JSON, so the block is never rendered in the chat
+        panel.  Adapters shape the turn through :meth:`_text_tools` and
+        :meth:`_tool_call_text`.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Ignored — text-based tool calling builds its own prompt.
+
+        Returns:
+            Tuple of ``(function_calls, content, response)``.
+        """
+        with self._tools_prompt_installed(self._text_tools(function_map)):
+            content, response = self.generate()
+        function_calls = _parse_text_based_tool_calls(self._tool_call_text(content))
+        if function_calls:
+            self._replace_last_assistant_with_tool_calls(content, function_calls)
+        return function_calls, content, response
+
+    def _text_tools(
+        self, function_map: dict[str, Callable[..., Any]]
+    ) -> dict[str, Callable[..., Any]]:
+        """Return the tools the text-based prompt of a turn should describe.
+
+        Args:
+            function_map: Every tool the framework offers for the turn.
+        """
+        return function_map
+
+    def _tool_call_text(self, content: str) -> str:
+        """Return the text of a finished turn that is parsed for ``tool_calls``.
+
+        Args:
+            content: The turn's assistant text.
+        """
+        return content
 
     def _emit_as_thinking(self, text: str) -> None:
         """Forward *text* to the token callback wrapped in a thinking block.
@@ -2453,6 +2477,116 @@ _FENCE_OPENER_RE = re.compile(r"`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*\Z")
 # brace once the next streaming chunk arrives.
 _FENCE_PREFIX_RE = re.compile(r"(?:`{1,2}|`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*)\Z")
 
+# What the next significant character of a JSON prefix may be.
+_KEY_OR_CLOSE, _KEY, _COLON, _VALUE, _VALUE_OR_CLOSE, _SCALAR, _NEXT = range(7)
+# Characters a number or a literal is made of: ``true``, ``false``,
+# ``null`` and the ``NaN``/``Infinity``/``-Infinity`` the decoder accepts.
+_SCALAR_CHARS = frozenset("0123456789+-.EIaefilnrstuyN")
+_CLOSER = {"{": "}", "[": "]"}
+# Nesting depth of the deepest envelope key: ``{"tool_calls": [{"name":
+# ..., "arguments": {``.  Keys at that depth or above are the envelope's
+# identifiers; keys below it are argument data and may hold anything.
+_ENVELOPE_DEPTH = 3
+
+
+class _JsonPrefix:
+    """Check, one character at a time, that text is still the prefix of a JSON value.
+
+    The stream filter holds text back only while it can still become a
+    ``tool_calls`` object; the moment a character rules that out the held
+    text is prose and must stream.  The check is structural (``{`` wants
+    a key or ``}``, a key wants ``:``, a value wants ``,`` or a closer)
+    and deliberately loose about scalars: any run of the characters
+    numbers and the three literals are made of passes, and the parser
+    that runs on the finished object judges those.
+
+    Strings are the one place the check is looser than JSON and the one
+    place it is stricter.  A value string may contain raw control
+    characters, because the models this filter serves emit literal
+    newlines inside long arguments and the scanner parses them with
+    ``strict=False``.  A key string of the envelope (nested no deeper
+    than :data:`_ENVELOPE_DEPTH`) may not: those keys are identifiers,
+    and a prose quote after a stray brace (``print("{")``) would
+    otherwise hold the rest of the turn inside an unclosed "key".  Keys
+    below the envelope are argument data, which the decoder accepts with
+    raw control characters, so they pass here too: a prefix released as
+    prose cannot be taken back once the object turns out to be a call.
+    """
+
+    def __init__(self) -> None:
+        self.open: list[str] = []
+        self._expect = _VALUE
+        self._in_string = False
+        self._in_key = False
+        self._escaped = False
+
+    def feed(self, char: str) -> bool:
+        """Consume *char*.
+
+        Args:
+            char: The next character of the text.
+
+        Returns:
+            False once the text so far cannot be the prefix of a JSON
+            value; the state is meaningless after that.  ``open`` is
+            empty again when the value has closed.
+        """
+        if self._in_string:
+            return self._feed_string_char(char)
+        if char in " \t\r\n":
+            if self._expect == _SCALAR:
+                self._expect = _NEXT
+            return True
+        if self._expect == _SCALAR:
+            if char in _SCALAR_CHARS:
+                return True
+            self._expect = _NEXT
+        if self._expect == _NEXT:
+            if char == "," and self.open:
+                self._expect = _KEY if self.open[-1] == "{" else _VALUE
+                return True
+            return self._close(char)
+        if self._expect in (_KEY, _KEY_OR_CLOSE):
+            if char == '"':
+                self._in_string = self._in_key = True
+                return True
+            return self._expect == _KEY_OR_CLOSE and self._close(char)
+        if self._expect == _COLON:
+            self._expect = _VALUE
+            return char == ":"
+        if char == '"':
+            self._in_string = True
+            self._in_key = False
+        elif char in _CLOSER:
+            self.open.append(char)
+            self._expect = _KEY_OR_CLOSE if char == "{" else _VALUE_OR_CLOSE
+        elif char in _SCALAR_CHARS:
+            self._expect = _SCALAR
+        else:
+            return self._expect == _VALUE_OR_CLOSE and self._close(char)
+        return True
+
+    def _feed_string_char(self, char: str) -> bool:
+        """Consume one character inside a string; see :meth:`feed`."""
+        if self._escaped:
+            self._escaped = False
+        elif char == "\\":
+            self._escaped = True
+        elif char == '"':
+            self._in_string = False
+            self._expect = _COLON if self._in_key else _NEXT
+        elif self._in_key and char < " " and len(self.open) <= _ENVELOPE_DEPTH:
+            return False
+        return True
+
+    def _close(self, char: str) -> bool:
+        """Close the innermost container if *char* is its closer."""
+        if not self.open or char != _CLOSER[self.open[-1]]:
+            return False
+        self.open.pop()
+        self._expect = _NEXT
+        return True
+
 
 class _ToolCallFilteredStream:
     """Stream a turn to the UI with its tool-call JSON held back.
@@ -2464,7 +2598,11 @@ class _ToolCallFilteredStream:
     turn, which keeps streaming text as it arrives — the panel must
     update incrementally, not in one dump when the turn ends — but
     buffers each top-level JSON object until it closes, then drops it if
-    it is a tool-call block and emits it otherwise.
+    it is a tool-call block and emits it otherwise.  The buffering lasts
+    only while the text can still become a JSON object (see
+    :class:`_JsonPrefix`): a brace in prose releases what it held the
+    moment the next character rules JSON out, so one unmatched ``{``
+    never parks the rest of the turn.
 
     A markdown code fence wrapping a suppressed tool call is suppressed
     with it: a fence opener immediately preceding a ``{`` is held back
@@ -2488,9 +2626,7 @@ class _ToolCallFilteredStream:
         self._thinking_callback = model.thinking_callback
         self._in_thinking = False
         self._pending = ""
-        self._depth = 0
-        self._in_string = False
-        self._escaped = False
+        self._json: _JsonPrefix | None = None
         self._held_prefix = ""
         self._fence_open = ""
         self._eat_close = False
@@ -2546,28 +2682,41 @@ class _ToolCallFilteredStream:
             self._feed(token)
 
     def _feed(self, text: str) -> None:
-        """Emit the plain text of *text*, buffering any JSON object in it."""
+        """Emit the plain text of *text*, buffering any JSON object in it.
+
+        A ``{`` opens a candidate that is held while :class:`_JsonPrefix`
+        still accepts it and released by :meth:`_release` when it closes
+        or when a character proves it prose; that character is then
+        rescanned as plain text.  Rescans and the closing-fence eater
+        continue in this same loop, so a chunk with thousands of false
+        candidates costs no recursion.
+        """
         if self._eat_close:
             text = self._eat_closing_fence(text)
-            if not text:
-                return
-        start = 0
-        for index, char in enumerate(text):
-            if self._depth == 0:
+        start = index = 0
+        while index < len(text):
+            char = text[index]
+            if self._json is None:
                 if char == "{":
                     self._begin_object(text[start:index])
                     start = index
-                    self._depth = 1
+                    self._json = _JsonPrefix()
+                    self._json.feed(char)
+            elif not self._json.feed(char):
+                self._pending += text[start:index]
+                self._release()
+                start = index
                 continue
-            self._track_json_char(char)
-            if self._depth == 0:
+            elif not self._json.open:
                 self._pending += text[start : index + 1]
-                self._release_pending()
-                if self._eat_close:
-                    self._feed(text[index + 1 :])
-                    return
+                self._release()
                 start = index + 1
-        if self._depth == 0:
+                if self._eat_close:
+                    text = self._eat_closing_fence(text[start:])
+                    start = index = 0
+                    continue
+            index += 1
+        if self._json is None:
             self._hold_tail(text[start:])
         else:
             self._pending += text[start:]
@@ -2640,30 +2789,21 @@ class _ToolCallFilteredStream:
                 return leftover
         return ""
 
-    def _track_json_char(self, char: str) -> None:
-        """Advance the brace/string state machine by one character."""
-        if self._escaped:
-            self._escaped = False
-        elif char == "\\":
-            self._escaped = True
-        elif self._in_string:
-            self._in_string = char != '"'
-        elif char == '"':
-            self._in_string = True
-        elif char == "{":
-            self._depth += 1
-        elif char == "}":
-            self._depth -= 1
+    def _release(self) -> None:
+        """Let go of the held candidate: drop a validated tool call, emit the rest.
 
-    def _release_pending(self) -> None:
-        """Emit the completed JSON object unless it is a tool call.
-
-        A suppressed tool call takes its held fence opener with it and
-        arms the closing-fence eater; anything else streams together with
-        the opener that was held for it.
+        Called when the object closes, when a character proves the held
+        text is not JSON, and at the end of the turn.  The held text is
+        dropped only when it parse-validates as a tool call; malformed
+        JSON and ordinary text that merely contains the substring
+        ``tool_calls`` are emitted, so no ordinary text is ever
+        swallowed.  A suppressed tool call takes its held fence opener
+        with it and arms the closing-fence eater; anything else streams
+        together with the opener that was held for it.
         """
         block, self._pending = self._pending, ""
         fence, self._fence_open = self._fence_open, ""
+        self._json = None
         if _parse_text_based_tool_calls(block):
             self._eat_close = bool(fence)
         else:
@@ -2672,24 +2812,18 @@ class _ToolCallFilteredStream:
     def _flush(self) -> None:
         """Release text the turn ended in the middle of.
 
-        A pending block is dropped only when it parse-validates as a tool
-        call — the early-stop path cuts the stream off exactly there.
-        Malformed JSON and ordinary text that merely contains the
-        substring ``tool_calls`` are emitted, so no ordinary text is ever
-        swallowed.  A partially consumed closing fence belongs to the
-        already-suppressed wrapper and is discarded with it.
+        A held possible fence opener is plain text once nothing follows
+        it; the pending candidate goes through :meth:`_release`, which
+        drops it only when it is a tool call — the early-stop path cuts
+        the stream off exactly there.  A partially consumed closing fence
+        belongs to the already-suppressed wrapper and is discarded with
+        it.
         """
         held, self._held_prefix = self._held_prefix, ""
-        fence, self._fence_open = self._fence_open, ""
-        block, self._pending = self._pending, ""
+        self._emit(held)
+        self._release()
         self._eat_close = False
         self._close_buf = ""
-        self._depth = 0
-        self._in_string = False
-        self._escaped = False
-        if block and _parse_text_based_tool_calls(block):
-            return
-        self._emit(held + fence + block)
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
@@ -2745,18 +2879,70 @@ CRITICAL RULES:
 """
 
 
+def _brace_matches(content: str) -> dict[int, tuple[int, bool]]:
+    """Pair every ``{`` in *content* with the ``}`` a scan started at it would find.
+
+    A scan that starts at a ``{`` is outside any JSON string, so for a
+    brace that a single left-to-right scan of the whole text sees *inside*
+    a string, the answer is what the opposite string parity sees from
+    there on.  Both parities are therefore tracked at once, each matching
+    the braces it sees outside its strings on its own stack.  A backslash
+    escapes the quote after it on both (JSON has that only inside
+    strings; giving prose the same rule keeps the two parities exact
+    complements).  Braces never affect the parity, so an escaped brace
+    still counts for the parity that sees it outside a string: a ``\\{``
+    in prose is a candidate like any other.
+
+    Args:
+        content: The text to scan.
+
+    Returns:
+        Mapping of the index of each matched ``{`` to ``(end, quoted)``:
+        the index just past its ``}`` and whether the whole-text scan
+        sees that ``{`` inside a string.  Two candidates with the same
+        ``quoted`` flag see each other's text with the same string parity.
+    """
+    matches: dict[int, tuple[int, bool]] = {}
+    stacks: tuple[list[int], list[int]] = ([], [])
+    in_string = False
+    escaped = False
+    for index, char in enumerate(content):
+        if char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char == '"':
+            if not escaped:
+                in_string = not in_string
+        elif char == "{":
+            stacks[in_string].append(index)
+        elif char == "}" and stacks[in_string]:
+            matches[stacks[in_string].pop()] = (index + 1, in_string)
+        escaped = False
+    return matches
+
+
 def _iter_balanced_json_objects(
     content: str,
 ) -> "list[tuple[int, int, Any]]":
     """Find every balanced ``{...}`` substring that parses as valid JSON.
 
-    Scans *content* character by character.  At every ``{`` that is not
-    inside a JSON string, walks forward tracking brace depth and string
-    state (with ``\\`` escape handling) until the matching ``}`` is found,
-    then attempts to parse the substring with :func:`json.loads`.  This
-    correctly handles nested objects, arrays, and brackets/braces embedded
-    inside JSON string values — cases the previous regex-based approach
-    silently dropped.
+    Every ``{`` is a candidate whose span runs to the ``}`` a scan started
+    at that brace pairs it with (see :func:`_brace_matches`), and the
+    candidates are tried in text order: one that parses is reported and
+    swallows the candidates inside it, one that does not is skipped, so a
+    stray ``{`` in prose, an unclosed quote or an object that is not JSON
+    never hides a later object.  Nested objects, arrays and braces inside
+    string values are handled by the pairing.
+
+    A candidate that fails to decode has a valid prefix up to the error
+    position: every object the decoder passed in that prefix is valid and
+    is reported when its turn comes, while a candidate that starts in the
+    prefix and reaches past the error is decoded along the same path and
+    fails at the same place, so it is skipped without a decode.  That
+    keeps deeply nested malformed text at one decode per failure instead
+    of one per nesting level.  The shortcut applies only to candidates
+    that see the failed one's text with the same string parity; one that
+    starts inside one of its strings is a different text and is tried.
 
     Args:
         content: The text to scan.
@@ -2765,49 +2951,28 @@ def _iter_balanced_json_objects(
         A list of ``(start, end_exclusive, parsed)`` tuples in left-to-right
         order, one per successfully parsed top-level balanced object.
     """
+    matches = _brace_matches(content)
     results: list[tuple[int, int, Any]] = []
-    i, n = 0, len(content)
-    while i < n:
-        if content[i] != "{":
-            i += 1
-            continue
-        depth = 0
-        j = i
-        in_str = False
-        esc = False
-        end = -1
-        while j < n:
-            ch = content[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = j + 1
-                    break
-            j += 1
-        if end == -1:
-            nxt = content.find("{", i + 1)
-            if nxt == -1:
-                break
-            i = nxt
+    skip_to = 0
+    failed_at = [0, 0]
+    for start in sorted(matches):
+        end, quoted = matches[start]
+        if start < skip_to or (start < failed_at[quoted] < end):
             continue
         try:
-            parsed = json.loads(content[i:end], strict=False)
-        except json.JSONDecodeError:
-            i += 1
+            parsed = json.loads(content[start:end], strict=False)
+        except json.JSONDecodeError as exc:
+            failed_at[quoted] = start + exc.pos
             continue
-        results.append((i, end, parsed))
-        i = end
+        except RecursionError:
+            # Nested deeper than the parser can follow (tens of thousands
+            # of levels).  The candidates inside are nearly as deep and
+            # each costs a walk to the recursion limit, so they are
+            # skipped with it.
+            skip_to = end
+            continue
+        results.append((start, end, parsed))
+        skip_to = end
     return results
 
 

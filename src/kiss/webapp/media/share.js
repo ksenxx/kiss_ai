@@ -18,7 +18,9 @@
   /**
    * Collect the visible text of *node* for a collapsed panel's
    * one-line preview, skipping the chrome elements the chat page's
-   * collectText (media/main.js) also skips.
+   * collectText (media/main.js) also skips, and a task panel's info
+   * rows (`.task-panel-info`, hidden while the panel is folded): a
+   * folded task panel previews its task text alone.
    *
    * @param {Node} node Panel content node.
    * @returns {string} The concatenated text.
@@ -31,7 +33,8 @@
         node.classList.contains('panel-stop-btn') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
-        node.classList.contains('panel-time')
+        node.classList.contains('panel-time') ||
+        node.classList.contains('task-panel-info')
       )
         return '';
     }

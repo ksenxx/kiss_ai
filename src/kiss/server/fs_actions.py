@@ -112,8 +112,8 @@ def fs_action(
 
 def _safe_name(name: str) -> str:
     """Validate a new-entry name: no empty segments, no ``..``."""
-    parts = [p for p in name.replace("\\", "/").split("/")]
-    if not parts or any(p in ("", ".", "..") for p in parts):
+    parts = name.replace("\\", "/").split("/")
+    if any(p in ("", ".", "..") for p in parts):
         raise OSError("invalid name")
     return "/".join(parts)
 
@@ -267,14 +267,6 @@ def _transfer(move: bool, src: Path, target: Path) -> None:
         shutil.copytree(src, target, symlinks=True)
     else:
         shutil.copy2(src, target, follow_symlinks=False)
-
-
-def _cut_bytes(text: str, limit: int) -> tuple[str, bool]:
-    """Cut *text* to *limit* UTF-8 bytes (never inside a character)."""
-    data = text.encode("utf-8", "surrogateescape")
-    if len(data) <= limit:
-        return text, False
-    return data[:limit].decode("utf-8", "ignore"), True
 
 
 class _CappedOutput:
@@ -489,10 +481,7 @@ def compare_files(a: str, b: str) -> dict[str, Any]:
     # --no-index exits 1 when the files differ, 0 when identical.
     if not proc.truncated and proc.returncode not in (0, 1):
         return {"error": proc.stderr.strip() or "git diff failed"}
-    text, truncated = _cut_bytes(
-        proc.stdout.decode("utf-8", "replace"), TEXT_MAX_BYTES,
-    )
-    truncated = truncated or proc.truncated
+    text = proc.stdout.decode("utf-8", "replace")
     if not text:
         text = f"{a} and {b} are identical\n"
-    return {"ok": True, "path": a, "dest": b, "text": text, "truncated": truncated}
+    return {"ok": True, "path": a, "dest": b, "text": text, "truncated": proc.truncated}

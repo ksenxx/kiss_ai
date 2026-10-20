@@ -68,6 +68,19 @@ without a click.  A second ``kiss-app`` while the window is open
 (``install.sh`` after an update) brings it to the front the same way
 the icon does (``open -a``, :func:`macos_activate_running`) instead
 of opening another window.
+
+Chromium on macOS keeps running after its last window closes, and a
+reopen sent to a browser without windows (a click on its icon, that
+``open -a``) opens the empty browser window again.  So the popup
+marks its WebSocket connection to the daemon (``/ws?appWindow=1``,
+:data:`APP_WINDOW_WS_QUERY`), the daemon counts those connections
+(:func:`app_window_event`) and quits the browser whose last one
+closed and that has no window left (:func:`quit_closed_app`): the next
+click starts the app afresh.  ``kiss-app`` asks the daemon whether the
+popup is connected (:data:`APP_WINDOW_API`, :func:`ask_app_window_open`)
+before it trusts a reopen, and hands its command line to a running
+browser without a window instead (Chromium's process singleton opens
+the ``--app`` page in the running instance, which opens a new popup).
 """
 
 from __future__ import annotations
@@ -81,18 +94,21 @@ import plistlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import IO
 from xml.parsers.expat import ExpatError
 
 from kiss.core.brand import BRAND
 from kiss.core.config import kiss_home
+from kiss.server.helpers import MEDIA_DIR
 
-MEDIA_DIR = Path(__file__).resolve().parent.parent / "webapp" / "media"
 ICON_FILE = MEDIA_DIR / "kiss-icon.png"
 PROFILE_DIR_NAME = "webapp-profile"
 LOOPBACK_URL = "http://127.0.0.1/"
@@ -627,6 +643,132 @@ def macos_bundle_in_use(bundle: Path) -> bool:
     return f"{bundle / 'Contents'}/" in listing.stdout
 
 
+def macos_bundle_pid(bundle: Path) -> int | None:
+    """Return the pid of the browser process started from *bundle*, or None.
+
+    The browser itself is the one executable under ``Contents/MacOS/``;
+    its helpers run from ``Contents/Frameworks/``.
+    """
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    for line in listing.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if command.startswith(f"{bundle / 'Contents' / 'MacOS'}/"):
+            return int(pid)
+    return None
+
+
+_WINDOWS_ON_SCREEN_JXA = """
+ObjC.import('CoreGraphics');
+function run(argv) {
+  var ref = $.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+    $.kCGNullWindowID);
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject(ref));
+  var count = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].kCGWindowOwnerPID === parseInt(argv[0], 10) && list[i].kCGWindowLayer === 0) {
+      count += 1;
+    }
+  }
+  return String(count);
+}
+"""
+
+
+def macos_windows_on_screen(pid: int) -> int | None:
+    """Return how many windows process *pid* has on screen, or None when it cannot be told.
+
+    The count comes from the window server (JXA over CoreGraphics),
+    which needs no accessibility permission.  A minimized window is off
+    screen and not counted; Chromium's hidden helper windows sit on
+    other layers.  None when ``osascript`` fails (no window server
+    session, say).
+    """
+    result = subprocess.run(
+        ["osascript", "-l", "JavaScript", "-e", _WINDOWS_ON_SCREEN_JXA, str(pid)],
+        capture_output=True,
+        text=True,
+    )
+    return int(result.stdout) if result.returncode == 0 and result.stdout.strip() else None
+
+
+APP_WINDOW_API = "/api/app-window"
+"""The daemon route that tells ``kiss-app`` whether the popup window is open."""
+
+APP_WINDOW_WS_QUERY = "appWindow=1"
+"""The query of the popup's WebSocket URL (``/ws?appWindow=1``), which marks it as the popup."""
+
+APP_WINDOW_QUIT_GRACE_SECS = 2.0
+"""How long after the popup's connection closed the daemon waits before quitting the browser."""
+
+_app_windows = 0
+"""How many WebSocket connections of the daemon come from the popup (0: no popup, or none yet)."""
+
+
+def app_window_state() -> dict[str, bool]:
+    """Return what the daemon serves at :data:`APP_WINDOW_API`: whether the popup is open."""
+    return {"open": _app_windows > 0}
+
+
+def app_window_event(event: str) -> bool:
+    """Count the popup's *event*, ``open`` or ``closing``; return whether it was one of them.
+
+    The events are the popup's WebSocket connections opening and
+    closing (the page closing, reloading, or reconnecting).  The
+    ``closing`` that leaves none arranges :func:`quit_closed_app` for
+    the brand bundle (:func:`macos_bundle_path`, as of now) after
+    :data:`APP_WINDOW_QUIT_GRACE_SECS`, by when a reload has connected
+    again.  Only macOS needs it: elsewhere Chromium quits by itself
+    when its last window closes.
+    """
+    global _app_windows
+    if event == "open":
+        _app_windows += 1
+    elif event == "closing":
+        _app_windows -= 1
+        if _app_windows == 0 and platform.system() == "Darwin":
+            timer = threading.Timer(
+                APP_WINDOW_QUIT_GRACE_SECS, quit_closed_app, args=(macos_bundle_path(),)
+            )
+            timer.start()
+    else:
+        return False
+    return True
+
+
+def quit_closed_app(bundle: Path) -> bool:
+    """Quit the browser running from *bundle* (the brand bundle) if its app window closed.
+
+    Nothing happens, and False is returned, when the popup is connected
+    (again: a reload), when no browser runs from the bundle, or when
+    the browser still has a window on screen (a page the popup moved
+    to) or the window server cannot be asked.  Otherwise the browser
+    gets SIGTERM, which Chromium answers with a regular quit, and True
+    is returned.
+    """
+    if _app_windows > 0:
+        return False
+    pid = macos_bundle_pid(bundle)
+    if pid is None or macos_windows_on_screen(pid) != 0:
+        return False
+    if _app_windows > 0:
+        # The popup connected while the processes and windows were listed.
+        return False
+    os.kill(pid, signal.SIGTERM)
+    return True
+
+
+def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
+    """Ask the daemon at *url* whether the app window is open; None when it does not answer."""
+    try:
+        api = urllib.parse.urljoin(url, APP_WINDOW_API)
+        with urllib.request.urlopen(api, timeout=timeout) as answer:
+            state = json.loads(answer.read())
+        return bool(state["open"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def clone_macos_browser(contents: Path, browser: Path, identifier: str) -> Path | None:
     """Copy *browser* and its bundle's ``Frameworks`` under *contents*; return the copy.
 
@@ -677,8 +819,8 @@ def write_macos_launcher(
     kiss_home: Path,
     browser: Path | None,
     in_use: bool | None = None,
-) -> Path:
-    """Write ``<apps_dir>/<Product Name>.app`` and return its path.
+) -> Path | None:
+    """Write ``<apps_dir>/<Product Name>.app``; return the bundle's copy of *browser*.
 
     The bundle's executable is a shell script that ``exec``s
     ``kiss-app --foreground`` for the state directory *kiss_home*,
@@ -702,6 +844,11 @@ def write_macos_launcher(
     is the launcher alone and the Dock shows the browser's icon.
     *in_use* is whether a window runs from the bundle when the caller
     already listed the processes (None: find out here).
+
+    Returns:
+        The clone's main executable, kept or just written; None when
+        the bundle is the launcher alone or a stale clone was left to
+        a window still running from it.
     """
     bundle = apps_dir / f"{brand['product_name']}.app"
     contents = bundle / "Contents"
@@ -718,7 +865,7 @@ def write_macos_launcher(
         # window still runs from the bundle.
         if macos_bundle_in_use(bundle) if in_use is None else in_use:
             print(f"{bundle} is in use; it is rewritten at the next launch.", file=sys.stderr)
-            return bundle
+            return None
         shutil.rmtree(bundle, ignore_errors=True)
         if source:
             clone = clone_macos_browser(contents, source, identifier)
@@ -747,7 +894,7 @@ def write_macos_launcher(
     launcher.chmod(0o755)
     # Launch Services caches bundle metadata by modification time.
     bundle.touch()
-    return bundle
+    return clone
 
 
 def install_launcher(
@@ -787,9 +934,9 @@ def install_launcher(
             subprocess.run([refresh, str(apps_dir)], check=False, capture_output=True)
         return entry
     if system == "Darwin":
-        return write_macos_launcher(
-            home / "Applications", brand, icon, exe, state_dir, browser, in_use
-        )
+        bundle = macos_bundle_path(home, brand)
+        write_macos_launcher(bundle.parent, brand, icon, exe, state_dir, browser, in_use)
+        return bundle
     return None
 
 
@@ -878,11 +1025,13 @@ def macos_launch_browser(
     clone = macos_bundle_browser(bundle, browser)
     if clone is None and macos_browser_bundle(browser) is not None:
         try:
-            install_launcher(home=home, system="Darwin", browser=browser, in_use=in_use)
+            clone = write_macos_launcher(
+                bundle.parent, BRAND, ICON_FILE, Path(sys.argv[0]).resolve(), kiss_home(),
+                browser, in_use,
+            )
         except OSError as exc:
             print(f"Could not write {bundle}: {exc}", file=sys.stderr)
             return browser
-        clone = macos_bundle_browser(bundle, browser)
     return clone or browser
 
 
@@ -979,6 +1128,11 @@ def main(argv: list[str] | None = None) -> int:
     # One process listing serves both the bundle rewrite and the
     # already-open check below.
     running = macos and macos_bundle_in_use(macos_bundle_path())
+    # A running browser whose window the daemon saw close gets the
+    # command line instead of a reopen, which would open an empty
+    # browser window (see the module doc); the daemon not answering
+    # (None) leaves the reopen, as before.
+    window_closed = running and ask_app_window_open(url) is False
     if macos:
         browser = macos_launch_browser(browser, in_use=running)
         url = app_window_url(url)
@@ -988,7 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_command:
         print(" ".join(command))
         return 0
-    if running and macos_activate_running(macos_bundle_path(), in_use=True):
+    if running and not window_closed and macos_activate_running(macos_bundle_path(), in_use=True):
         print(f"{BRAND['product_name']} is already open; its window was brought to the front.")
         return 0
     log = kiss_home() / "kiss-app.log"

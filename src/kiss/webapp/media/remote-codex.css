@@ -35,7 +35,6 @@ body.remote-chat {
   --yellow: var(--theme-charts-yellow, #cca700);
   --purple: var(--theme-charts-purple, #b180d7);
   --cyan: var(--theme-terminal-ansiCyan, #11a8cd);
-  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --error: var(--theme-errorForeground, #f85149);
   --warning: var(--theme-editorWarning-foreground, #cca700);
 
@@ -86,7 +85,6 @@ body.remote-chat {
   --panel-tint-solid: color-mix(in srgb, var(--fg) 4%, var(--bg));
   --panel-line: color-mix(in srgb, var(--fg) 10%, transparent);
   --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
-  --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
   --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
   --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
@@ -176,7 +174,6 @@ body.remote-chat #tab-list { gap: var(--space-1-5); }
 body.remote-chat #content-tab-bar .chat-tab,
 body.remote-chat #tab-bar .chat-tab {
   border: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
   border-radius: var(--radius-pill);
   padding: var(--space-1) var(--space-3);
   background: transparent;
@@ -705,6 +702,15 @@ body.remote-chat #meta-info-content {
   }
 
   body.remote-chat #meta-close { display: block; }
+
+  /* A phone or tablet (body.remote-mobile, set by main.js) swipes
+     between the chats, the chat, the file and the task info, so the
+     composer's two drawer buttons go.  A narrow mouse-only window
+     keeps them: it cannot swipe. */
+  body.remote-chat.remote-mobile #menu-btn,
+  body.remote-chat.remote-mobile #meta-drawer-btn {
+    display: none;
+  }
 }
 
 /* The panel's close button: the phone drawer's dismiss, and the
@@ -902,19 +908,20 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
      pane to press. */
   body.remote-chat.remote-desktop.content-pane-open #meta-close { display: block; }
 
-  /* The drawer tab: a small rounded handle on the window's right edge,
-     vertically centred, only while a content tab is open.  It fades in
-     as the panel slides out over it (and back out as the panel
-     returns) so that, panel open, nothing of it shows.  `visibility`
-     flips with the fade (delayed on the way out) so the invisible tab
-     is neither in the tab order nor in the accessibility tree. */
-  body.remote-chat.remote-desktop.content-pane-open #meta-drawer {
+  /* The two pane handles, one small rounded tab on a right edge,
+     vertically centred: the drawer tab (#meta-drawer) on the window's
+     edge while a content tab is open, and the unfold tab
+     (#content-pane-show) on the chat's edge, against the docked
+     task-info panel, once the pane was folded away by its hide button
+     (body.content-pane-folded, main.js: the chat alone fills #app with
+     the panel beside it, the rules above, no body.content-pane-open). */
+  body.remote-chat.remote-desktop.content-pane-open #meta-drawer,
+  body.remote-chat.remote-desktop.content-pane-folded #content-pane-show {
     display: flex;
     align-items: center;
     justify-content: center;
     position: fixed;
     top: 50%;
-    right: 0;
     width: 18px;
     height: 56px;
     margin: 0;
@@ -927,13 +934,22 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     color: var(--dim);
     font-size: var(--fs-md);
     cursor: pointer;
+    z-index: var(--z-docked);
+  }
+
+  /* The drawer tab fades in as the panel slides out over it (and back
+     out as the panel returns) so that, panel open, nothing of it
+     shows.  `visibility` flips with the fade (delayed on the way out)
+     so the invisible tab is neither in the tab order nor in the
+     accessibility tree. */
+  body.remote-chat.remote-desktop.content-pane-open #meta-drawer {
+    right: 0;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
     transition:
       opacity var(--dur-slow) var(--ease),
       visibility 0s linear var(--dur-slow);
-    z-index: var(--z-docked);
   }
 
   body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-drawer {
@@ -943,32 +959,9 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     transition: opacity var(--dur-slow) var(--ease);
   }
 
-  /* The pane folded away by its hide button (body.content-pane-folded,
-     main.js): the chat alone fills #app with the task-info panel docked
-     beside it (the rules above, no body.content-pane-open), and this
-     tab sits on the chat's right edge, against the docked panel, to
-     unfold the pane.  The same handle as #meta-drawer, moved in by the
-     panel's width. */
+  /* The unfold tab is moved in by the panel's width. */
   body.remote-chat.remote-desktop.content-pane-folded #content-pane-show {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: fixed;
-    top: 50%;
     right: var(--meta-w, var(--meta-panel-w));
-    width: 18px;
-    height: 56px;
-    margin: 0;
-    padding: 0;
-    transform: translateY(-50%);
-    border: 1px solid var(--border-soft);
-    border-right: none;
-    border-radius: var(--radius-md) 0 0 var(--radius-md);
-    background: var(--surface);
-    color: var(--dim);
-    font-size: var(--fs-md);
-    cursor: pointer;
-    z-index: var(--z-docked);
   }
 
   /* Both handles light up alike; this rule sits after the folded

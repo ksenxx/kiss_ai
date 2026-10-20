@@ -23,7 +23,11 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body
 
 _SEA_PATH = Path(orbestrouter_sea.__file__).resolve()
@@ -80,9 +84,8 @@ def test_orbestrouter_is_a_model_picker_sea_and_a_slash_command() -> None:
     assert sea_commands.model_seas()["orbestrouter"] == _SEA_PATH
     assert sea_commands.model_sea("orbestrouter") == _SEA_PATH
     assert sea_commands.get_command("orbestrouter") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/orbestrouter add a --json flag")
-    assert hit is not None
-    assert hit == ("add a --json flag", _SEA_PATH)
+    assert sea_commands.slash_command_task("/orbestrouter add a --json flag") == (
+        "add a --json flag", _SEA_PATH)
     assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.PRIMARY_MODEL}
     assert sea_commands.help_text_if_command("/orbestrouter help") == (
         OrbestrouterSea().description()
@@ -104,7 +107,7 @@ def test_agent_run_carries_the_openrouter_protocol_in_its_system_prompt(tmp_path
     parsed, agentic = run_sea(run, [finish_body("<p>hello</p>")], tmp_path, max_steps=2)
     assert parsed["success"] is True and "hello" in parsed["summary"]
     (request,) = agentic
-    names = {t["function"]["name"] for t in request["tools"]}
+    names = tool_names(request)
     assert {"run_parallel", "run_agent", "Read", "Edit", "finish"} <= names, names
     system = system_message(request)
     assert system.startswith("<identity>")

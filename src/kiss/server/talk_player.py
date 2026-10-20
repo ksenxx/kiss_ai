@@ -15,20 +15,17 @@ the clip on this machine's speakers
 
 * the base64 MP3 is decoded to a temp file and played with the
   machine's audio player (``afplay`` on macOS; ``mpg123`` / ``ffplay``
-  / ``mpv`` elsewhere);
-* when there is no clip, the clip is undecodable, or the player fails,
-  the text is spoken with the system TTS command (``say`` on macOS;
-  ``espeak`` / ``spd-say`` elsewhere);
+  / ``mpv`` elsewhere); an event without a clip is dropped (the
+  caller only hands over events that carry one);
 * utterances are deduped by ``talkId`` (bounded set, as in main.js)
   and serialised on one worker thread so back-to-back ``talk()`` calls
   never speak over each other (``enqueueTalkPlayback`` parity), and
   the agent loop never blocks on playback.
 
-Both external commands honour environment overrides —
-``KISS_SORCAR_PLAY_CMD`` (receives the audio file path as its last
-argument) and ``KISS_SORCAR_SAY_CMD`` (receives the utterance text as
-its last argument), each parsed with :func:`shlex.split`, so tests
-can substitute real scripted child processes.  The hung-playback
+The player command honours the ``KISS_SORCAR_PLAY_CMD`` environment
+override (receives the audio file path as its last argument, parsed
+with :func:`shlex.split`), so tests can substitute a real scripted
+child process.  The hung-playback
 timeout honours ``KISS_SORCAR_PLAY_TIMEOUT`` (seconds, default 600)
 for the same reason.  Because an override may be a wrapper script
 whose real player runs as a grandchild, each playback child is
@@ -60,7 +57,6 @@ from kiss.core.processes import kill_process_group, popen_process_group
 logger = logging.getLogger(__name__)
 
 _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
-_SAY_CMD_ENV = "KISS_SORCAR_SAY_CMD"
 _PLAY_TIMEOUT_ENV = "KISS_SORCAR_PLAY_TIMEOUT"
 _MAX_TALK_IDS = 500
 _PLAYBACK_TIMEOUT = 600.0
@@ -74,80 +70,35 @@ _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),
     ("mpv", "--no-video", "--really-quiet"),
 )
-_FALLBACK_SAY: tuple[tuple[str, ...], ...] = (
-    ("espeak-ng",),
-    ("espeak",),
-    ("spd-say", "--wait"),
-)
-
-
-def _resolve_command(
-    env_var: str,
-    darwin_argv: list[str],
-    fallbacks: tuple[tuple[str, ...], ...],
-) -> list[str] | None:
-    """Return the argv prefix for an external audio command, or ``None``.
-
-    Shared resolution policy for :func:`player_command` and
-    :func:`say_command`: an environment override in *env_var* (parsed
-    with :func:`shlex.split`, so quoted arguments survive) wins; a
-    malformed override logs a warning and disables the command.  With
-    no override, macOS uses *darwin_argv* directly and every other
-    platform picks the first entry of *fallbacks* whose executable is
-    found on ``PATH``.
-
-    Args:
-        env_var: Name of the override environment variable.
-        darwin_argv: The fixed argv prefix used on macOS.
-        fallbacks: Candidate argv prefixes scanned on other platforms.
-
-    Returns:
-        The resolved argv prefix, or ``None`` when no command exists.
-    """
-    override = os.environ.get(env_var, "").strip()
-    if override:
-        try:
-            parts = shlex.split(override)
-        except ValueError:
-            logger.warning("Malformed %s: %r", env_var, override)
-            return None
-        return parts or None
-    if sys.platform == "darwin":
-        return darwin_argv
-    for candidate in fallbacks:
-        if shutil.which(candidate[0]):
-            return list(candidate)
-    return None
 
 
 def player_command() -> list[str] | None:
     """Return the argv prefix used to play an audio file, or ``None``.
 
     Honours the ``KISS_SORCAR_PLAY_CMD`` environment variable (parsed
-    with :func:`shlex.split`, so quoted arguments survive); otherwise
-    picks the machine's audio player: ``afplay`` on macOS, else the
-    first of ``mpg123`` / ``ffplay`` / ``mpv`` found on ``PATH``.  The
-    audio file path is appended as the command's last argument.
+    with :func:`shlex.split`, so quoted arguments survive; a malformed
+    override logs a warning and disables playback); otherwise picks
+    the machine's audio player: ``afplay`` on macOS, else the first of
+    ``mpg123`` / ``ffplay`` / ``mpv`` found on ``PATH``.  The audio
+    file path is appended as the command's last argument.
 
     Returns:
         The player argv prefix, or ``None`` when no player exists.
     """
-    return _resolve_command(_PLAY_CMD_ENV, ["afplay"], _FALLBACK_PLAYERS)
-
-
-def say_command() -> list[str] | None:
-    """Return the argv prefix used to speak text aloud, or ``None``.
-
-    Honours the ``KISS_SORCAR_SAY_CMD`` environment variable (parsed
-    with :func:`shlex.split`); otherwise picks the machine's TTS
-    command: ``say`` on macOS, else the first of ``espeak-ng`` /
-    ``espeak`` / ``spd-say`` found on ``PATH``.  The utterance text is
-    appended as the command's last argument.
-
-    Returns:
-        The TTS argv prefix, or ``None`` when no TTS command exists.
-    """
-    return _resolve_command(_SAY_CMD_ENV, ["say"], _FALLBACK_SAY)
+    override = os.environ.get(_PLAY_CMD_ENV, "").strip()
+    if override:
+        try:
+            parts = shlex.split(override)
+        except ValueError:
+            logger.warning("Malformed %s: %r", _PLAY_CMD_ENV, override)
+            return None
+        return parts or None
+    if sys.platform == "darwin":
+        return ["afplay"]
+    for candidate in _FALLBACK_PLAYERS:
+        if shutil.which(candidate[0]):
+            return list(candidate)
+    return None
 
 
 def _playback_timeout() -> float:
@@ -263,14 +214,13 @@ class TalkPlayer:
     def play(self, event: dict[str, Any]) -> None:
         """Queue one ``talk`` *event* for playback (non-blocking).
 
-        Blank events (no clip and no text) and already-spoken
-        ``talkId`` values are dropped, matching the browser client.
+        Events without a clip and already-spoken ``talkId`` values
+        are dropped (the latter matching the browser client).
 
         Args:
             event: The broadcast ``talk`` event dictionary.
         """
-        text = str(event.get("text") or "").strip()
-        if not text and not event.get("audioB64"):
+        if not event.get("audioB64"):
             return
         if locked_call(self._lock, self._admit_locked, event.get("talkId")):
             self._queue.put(dict(event))
@@ -296,42 +246,29 @@ class TalkPlayer:
         while True:
             event = self._queue.get()
             try:
-                self._play_one(event)
+                self._play_clip(event)
             except Exception:
                 logger.exception("talk playback failed")
 
-    def _play_one(self, event: dict[str, Any]) -> None:
-        """Play one event: synthesized clip first, then TTS fallback."""
-        if self._play_clip(event):
-            return
-        text = str(event.get("text") or "").strip()
-        if not text:
-            return
-        say = say_command()
-        if say is None:
-            return
-        _run_playback([*say, text])
+    def _play_clip(self, event: dict[str, Any]) -> None:
+        """Play the event's ``audioB64`` clip with the machine's audio player.
 
-    def _play_clip(self, event: dict[str, Any]) -> bool:
-        """Play the event's ``audioB64`` clip; ``True`` when it played."""
-        audio_b64 = event.get("audioB64")
-        if not audio_b64:
-            return False
+        An undecodable or empty clip, or a machine without a player, is
+        skipped silently; the browser clients still play their copy.
+        """
         try:
-            audio = base64.b64decode(audio_b64, validate=True)
+            audio = base64.b64decode(event["audioB64"], validate=True)
         except (ValueError, TypeError):
-            return False
-        if not audio:
-            return False
+            return
         player = player_command()
-        if player is None:
-            return False
+        if not audio or player is None:
+            return
         suffix = ".mp3" if "mpeg" in str(event.get("audioMime") or "") else ".audio"
         fd, path = tempfile.mkstemp(prefix="sorcar-talk-", suffix=suffix)
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(audio)
-            return _run_playback([*player, path])
+            _run_playback([*player, path])
         finally:
             try:
                 os.unlink(path)

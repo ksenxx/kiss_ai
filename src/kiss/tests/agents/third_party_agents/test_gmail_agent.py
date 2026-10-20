@@ -229,8 +229,7 @@ class TestGmailTools:
         """Every Gmail tool returns {ok: false, error: ...} with invalid credentials."""
         composio, server = gmail_server
         backend = _make_error_backend(composio)
-        tools = backend.get_tool_methods()
-        fn = next(t for t in tools if t.__name__ == tool_name)
+        fn = next(t for t in backend.get_tool_methods() if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False
         assert "error" in result
@@ -244,7 +243,7 @@ class TestGmailAgent:
         agent = GmailAgent()
         assert agent._is_authenticated() is False
         assert agent._backend._service is None
-        check = next(t for t in agent._get_tools() if t.__name__ == "check_gmail_auth")
+        check = tools_by_name(agent)["check_gmail_auth"]
         result = check()
         assert "Not authenticated with Gmail" in result
         assert "authenticate_gmail()" in result
@@ -277,7 +276,7 @@ class TestGmailAgent:
         composio, _ = gmail_server
         account = connected_account_id(_SERVICE)
         agent = GmailAgent()
-        clear = next(t for t in agent._get_tools() if t.__name__ == "clear_gmail_auth")
+        clear = tools_by_name(agent)["clear_gmail_auth"]
         assert "cleared" in clear().lower()
         assert composio.deleted == [account]
         assert agent._is_authenticated() is False

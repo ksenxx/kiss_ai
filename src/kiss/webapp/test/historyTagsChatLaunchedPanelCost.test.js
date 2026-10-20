@@ -20,65 +20,31 @@
 
 'use strict';
 
-/* global require, __dirname, console, process, setImmediate */
+/* global require, console, process, setImmediate */
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  loadMainCss,
+  captureTimers,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const HOUR_MS = 3600 * 1000;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(style);
   // Every setTimeout the page arms, so a test can fire a long timer
   // (the 30 s "launched ... ago" sweep) without waiting for it.
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  win.setTimeout = function (cb, delay) {
-    timers.push({cb, delay});
-    return realSetTimeout.apply(win, arguments);
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  let timers;
+  const {win, posted} = makeChatPage({
+    beforeScripts(win) {
+      stubRaf(win);
+      loadMainCss(win);
+      timers = captureTimers(win);
+    },
+  });
   return {win, posted, timers};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function tabIdOf(wv) {
@@ -445,7 +411,7 @@ function testRefreshSweepRepaintsBothLabels() {
   labels.forEach(el => {
     el.dataset.launchTs = String(now - 7 * HOUR_MS);
   });
-  const sweeps = timers.filter(t => t.delay === 30000);
+  const sweeps = timers.filter(t => t.ms === 30000);
   assert.ok(sweeps.length >= 1, 'the sweep timer is armed');
   sweeps[sweeps.length - 1].cb();
   const after = Array.from(

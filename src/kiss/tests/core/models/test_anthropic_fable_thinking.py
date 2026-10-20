@@ -51,6 +51,7 @@ import pytest
 
 from kiss.core.models.anthropic_model import (
     AnthropicModel,
+    _claude_profile,
     _supports_extended_thinking,
     _uses_adaptive_thinking,
 )
@@ -94,11 +95,11 @@ class TestClaudeFable5ThinkingConfig:
 
     def test_supports_extended_thinking_helper_returns_true(self) -> None:
         """The adapter-side helper honours the JSON flag."""
-        assert _supports_extended_thinking("claude-fable-5") is True
+        assert _supports_extended_thinking(_claude_profile("claude-fable-5")) is True
 
     def test_uses_adaptive_thinking_helper_returns_true(self) -> None:
         """The adapter-side helper honours the JSON flag."""
-        assert _uses_adaptive_thinking("claude-fable-5") is True
+        assert _uses_adaptive_thinking(_claude_profile("claude-fable-5")) is True
 
     def test_build_kwargs_sets_thinking_adaptive_for_fable_5(self) -> None:
         """The Anthropic create call must carry ``thinking=adaptive``.
@@ -234,8 +235,8 @@ class TestNonThinkingModelsUnaffected:
         assert "interleaved-thinking" not in beta, beta
 
     def test_supports_extended_thinking_returns_false_for_claude_3(self) -> None:
-        assert _supports_extended_thinking("claude-3-5-sonnet-20241022") is False
-        assert _uses_adaptive_thinking("claude-3-5-sonnet-20241022") is False
+        assert _supports_extended_thinking(_claude_profile("claude-3-5-sonnet-20241022")) is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-3-5-sonnet-20241022")) is False
 
 
 class TestExtendedThinkingFlagCanForceOff:
@@ -253,7 +254,7 @@ class TestExtendedThinkingFlagCanForceOff:
         """Simulate a MODEL_INFO override that opts a prefix-matched model out."""
         info = MODEL_INFO["claude-opus-4-8"]
         monkeypatch.setattr(info, "extended_thinking", False)
-        assert _supports_extended_thinking("claude-opus-4-8") is False
+        assert _supports_extended_thinking(_claude_profile("claude-opus-4-8")) is False
         m = AnthropicModel("claude-opus-4-8", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs()

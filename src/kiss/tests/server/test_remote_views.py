@@ -19,9 +19,10 @@ fails on a stream the relay thread has not yet seen die
 remote browser failing to launch (a ``browserError`` without a tab),
 a frame that is not JSON, a ``browserState`` for a page never
 announced, the ``retired`` checks of the commands that follow an open
-(an open meeting a stream closed as idle just too late is covered), an
-SSH-registered machine (no password on the frames), and the daemon's
-own ``browserTabs`` answering a ``ready`` the stream never sends.
+(an open meeting a stream closed as idle just too late is covered), and
+an SSH-registered machine (no password on the frames).  The pages a
+chat tab's binding brings here (the stream's ``browserList``) are
+covered by :mod:`kiss.tests.server.test_remote_bound_tab_browser_pages`.
 """
 
 from __future__ import annotations
@@ -36,54 +37,16 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from types import CodeType, FrameType
 from typing import Any
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import web_stealth
 from kiss.server.remote_views import RemoteViews, RemoteViewStream, namespaced, split_tab_id
 from kiss.tests.remote_daemon import start_remote_daemon
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
-
-
-class _Pause:
-    """Hold the thread that enters *code* with locals *matching* until :meth:`release`.
-
-    A ``sys.settrace`` hook on every thread (``threading.settrace_all_threads``):
-    an instrumentation of the real code path, nothing is replaced.  It
-    widens the window between two steps of the daemon (a decision
-    recorded and the command sent, a snapshot copied and delivered) so
-    a second client's command lands inside it for sure.  ``paused`` is
-    set once the thread is held.
-    """
-
-    def __init__(self, code: CodeType, matching: Callable[[dict[str, Any]], bool]) -> None:
-        self._code = code
-        self._matching = matching
-        self.paused = threading.Event()
-        self._go = threading.Event()
-
-    def __enter__(self) -> _Pause:
-        threading.settrace_all_threads(self._trace)
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        threading.settrace_all_threads(None)  # type: ignore[arg-type]
-        self.release()
-
-    def release(self) -> None:
-        """Let the held thread go on."""
-        self._go.set()
-
-    def _trace(self, frame: FrameType, event: str, arg: Any) -> None:
-        if event != "call" or frame.f_code is not self._code or self.paused.is_set():
-            return None
-        if self._matching(dict(frame.f_locals)):
-            self.paused.set()
-            self._go.wait(60)
-        return None
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -335,7 +298,7 @@ class RemoteViewsTest(TwoClientHarness):
         a.close()
         self.wait_for(lambda: a.closed, what="page gone")
         c = self.open_client("c")
-        with _Pause(
+        with Pause(
             RemoteViewStream.send.__code__,
             lambda local: local["cmd"].get("type") == "terminalClose",
         ) as pause:
@@ -402,7 +365,7 @@ class RemoteViewsTest(TwoClientHarness):
             retired.append(local["stream"])
             return False
 
-        with _Pause(RemoteViews._forward.__code__, retire_under):
+        with Pause(RemoteViews._forward.__code__, retire_under):
             a.send({
                 "type": "terminalOpen", "tab_id": "term-retired", "cols": 80, "rows": 24,
                 "workDir": "", "machine": "box",
@@ -501,7 +464,7 @@ class RemoteViewsTest(TwoClientHarness):
         self.wait_event(b, "openBrowserTab", timeout=60, tab_id=tab_id)
         self._show(a, tab_id)
         self.wait_event(a, "browserFrame", timeout=60, tab_id=tab_id)
-        with _Pause(
+        with Pause(
             RemoteViewStream.send.__code__,
             lambda local: local["cmd"].get("type") == "browserViewport"
             and not local["cmd"].get("visible"),
@@ -520,7 +483,7 @@ class RemoteViewsTest(TwoClientHarness):
             what="frames for the new viewer after the stale hide",
         )
 
-        with _Pause(
+        with Pause(
             RemoteViewStream.send.__code__,
             lambda local: local["cmd"].get("type") == "browserOpen"
             and str(local["cmd"].get("url", "")).endswith("/pageA"),
@@ -563,7 +526,7 @@ class RemoteViewsTest(TwoClientHarness):
         tab_id = self._open_page(a, base + "/")
         self.wait_event(b, "openBrowserTab", timeout=60, tab_id=tab_id)
         c = self.open_client("c")
-        with _Pause(
+        with Pause(
             RemoteViews.deliver_to.__code__,
             lambda local: '"browserTabs"' in str(local.get("text", "")),
         ) as pause:

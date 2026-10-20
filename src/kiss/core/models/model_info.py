@@ -28,7 +28,7 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
-from kiss.core.utils import seed_file_atomically
+from kiss.core.utils import atomic_write_text, seed_file_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -326,8 +326,6 @@ def _write_my_models_file(raw: dict[str, Any]) -> None:
     a concurrent reader (catalog load, another settings panel) never
     observes a truncated file.
     """
-    from kiss.core.utils import atomic_write_text
-
     USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(USER_MY_MODELS_PATH, json.dumps(raw, indent=2) + "\n")
 
@@ -1853,7 +1851,7 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     return _scaled_prices(info, bedrock_price_factor(model_name))
 
 
-def _wants_responses_api(model_name: str, model_config: dict[str, Any] | None) -> bool:
+def _wants_responses_api(info: ModelInfo | None, model_config: dict[str, Any] | None) -> bool:
     """Decide whether the factory should build the v2 (Responses API) adapter.
 
     The caller's ``model_config["use_responses_api"]`` wins in either
@@ -1863,10 +1861,10 @@ def _wants_responses_api(model_name: str, model_config: dict[str, Any] | None) -
     live probe through ``/v1/responses`` (plain generation, plus a tool
     round-trip for function-calling models).  Generated ``-{level}`` thinking
     aliases carry the flag themselves (the alias entry mirrors its base), so
-    a plain catalog lookup suffices.
+    the catalog entry suffices.
 
     Args:
-        model_name: Model name after harbor-prefix stripping.
+        info: The model's catalog entry, or None for an unknown model.
         model_config: The caller-supplied model configuration, if any.
 
     Returns:
@@ -1876,7 +1874,6 @@ def _wants_responses_api(model_name: str, model_config: dict[str, Any] | None) -
         flag = model_config.get("use_responses_api")
         if flag is not None:
             return bool(flag)
-    info = _lookup_model_info(model_name)
     return info is not None and info.use_responses_api is True
 
 
@@ -2005,7 +2002,7 @@ def model(
             use_v2 = (
                 endpoint_provider is not None
                 and endpoint_provider is _match_openai_compatible_provider(model_name)
-                and _wants_responses_api(model_name, None)
+                and _wants_responses_api(info, None)
             )
         return _openai_compatible(
             model_name,
@@ -2026,7 +2023,7 @@ def model(
             model_config,
             token_callback,
             thinking_callback,
-            use_responses_api=_wants_responses_api(model_name, model_config),
+            use_responses_api=_wants_responses_api(info, model_config),
         )
     if model_name.startswith("gemini-"):
         cls = _load_model_class(
@@ -2108,7 +2105,6 @@ def _configured_providers() -> dict[str, bool]:
         "Claude Code CLI": shutil.which("claude") is not None,
         "Codex CLI": find_codex_executable() is not None,
         "Bedrock": bedrock_credentials_configured(),
-        "Unknown": False,
     }
     for provider in OPENAI_COMPATIBLE_PROVIDERS:
         configured[provider.label] = bool(getattr(keys, provider.api_key_name, ""))
@@ -2176,42 +2172,38 @@ def registered_bedrock_model(cheapest: bool) -> str | None:
     return min(names, key=_output_price) if cheapest else max(names, key=_output_price)
 
 
+_DEFAULT_PROVIDER_PRIORITY = (
+    "Anthropic",
+    "OpenAI",
+    "Gemini",
+    "OpenRouter",
+    "Together",
+    "Bedrock",
+    "Claude Code CLI",
+    "Codex CLI",
+)
+"""Provider labels in the order :func:`get_default_model` and
+:func:`get_fast_model` prefer them."""
+
+
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
     """Return the choice for the first provider with a configured credential.
 
-    Providers are checked in priority order: Anthropic → OpenAI → Gemini →
-    OpenRouter → Together → Bedrock → Claude Code CLI → Codex CLI.
+    Providers are checked in :data:`_DEFAULT_PROVIDER_PRIORITY` order
+    against :func:`_configured_providers`.
 
     Args:
-        choices: Mapping from ``config.DEFAULT_CONFIG`` API-key attribute
-            names (plus ``"bedrock"`` for Amazon Bedrock and ``"cc"`` /
-            ``"codex"`` for the subscription CLIs) to the model name to
-            return for that provider; an empty ``"bedrock"`` choice (no
-            Bedrock model registered) skips that provider.
+        choices: Mapping from provider label to the model name to return
+            for that provider; an empty choice (no ``bedrock/`` model
+            registered) skips the provider.
 
     Returns:
         The chosen model name, or ``"No model"`` when nothing is configured.
     """
-    import shutil
-
-    from kiss.core.models.codex_model import find_codex_executable
-
-    keys = config_module.DEFAULT_CONFIG
-    for key_name in (
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "GEMINI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "TOGETHER_API_KEY",
-    ):
-        if getattr(keys, key_name):
-            return choices[key_name]
-    if bedrock_credentials_configured() and choices["bedrock"]:
-        return choices["bedrock"]
-    if shutil.which("claude") is not None:
-        return choices["cc"]
-    if find_codex_executable() is not None:
-        return choices["codex"]
+    configured = _configured_providers()
+    for label in _DEFAULT_PROVIDER_PRIORITY:
+        if configured.get(label) and choices[label]:
+            return choices[label]
     return "No model"
 
 
@@ -2226,14 +2218,14 @@ def get_fast_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-sonnet-5-5",
-            "OPENAI_API_KEY": "gpt-6-luna",
-            "GEMINI_API_KEY": "gemini-3.5-flash-lite",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
-            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
-            "bedrock": registered_bedrock_model(cheapest=True) or "",
-            "cc": "cc/haiku",
-            "codex": "codex/default",
+            "Anthropic": "claude-sonnet-5-5",
+            "OpenAI": "gpt-6-luna",
+            "Gemini": "gemini-3.5-flash-lite",
+            "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
+            "Together": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "Bedrock": registered_bedrock_model(cheapest=True) or "",
+            "Claude Code CLI": "cc/haiku",
+            "Codex CLI": "codex/default",
         }
     )
 
@@ -2247,14 +2239,14 @@ def get_default_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-opus-5-5",
-            "OPENAI_API_KEY": "gpt-6.1-sol-medium",
-            "GEMINI_API_KEY": "gemini-3.8-flash",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5.5",
-            "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
-            "bedrock": registered_bedrock_model(cheapest=False) or "",
-            "cc": "cc/opus",
-            "codex": "codex/default",
+            "Anthropic": "claude-opus-5-5",
+            "OpenAI": "gpt-6.1-sol-medium",
+            "Gemini": "gemini-3.8-flash",
+            "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
+            "Together": "moonshotai/Kimi-K3",
+            "Bedrock": registered_bedrock_model(cheapest=False) or "",
+            "Claude Code CLI": "cc/opus",
+            "Codex CLI": "codex/default",
         }
     )
 
@@ -2339,6 +2331,8 @@ def calculate_cost(
     num_audio_output_tokens: int = 0,
     num_audio_cache_read_tokens: int = 0,
     num_image_output_tokens: int = 0,
+    *,
+    single_request: bool = True,
 ) -> float:
     """Calculates the cost in USD for the given token counts.
 
@@ -2369,6 +2363,13 @@ def calculate_cost(
             ``candidates_tokens_details`` IMAGE share), billed at the
             model's image output rate when registered, otherwise at the
             text output rate.
+        single_request: ``False`` when the counts are the sum over
+            several API requests (a CLI turn that ran its tools
+            natively).  The long-context tier is a per-request rule
+            (:func:`_long_context_uplift`); a sum cannot tell one
+            300K-token request from thirty 10K-token ones, so no tier is
+            applied to it and every token bills at the short-context
+            rates.
 
     Returns:
         float: Cost in USD.
@@ -2412,7 +2413,7 @@ def calculate_cost(
     )
     input_price = info.input_price_per_1M
     output_price = info.output_price_per_1M
-    uplift = _long_context_uplift(model_name)
+    uplift = _long_context_uplift(model_name) if single_request else None
     prompt_tokens = (
         total_tokens - num_output_tokens - num_audio_output_tokens - num_image_output_tokens
     )
@@ -2471,9 +2472,11 @@ def get_fallback_model(model_name: str) -> str | None:
         :func:`openrouter_twin`) if the OpenRouter key is configured;
         ``None`` when neither exists or the model is unknown.
     """
-    declared = declared_fallback(model_name)
-    if declared or _lookup_model_info(model_name) is None:
-        return declared
+    info = _lookup_model_info(model_name)
+    if info is None:
+        return None
+    if info.fallback:
+        return info.fallback
     if not getattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", ""):
         return None
     return openrouter_twin(model_name)

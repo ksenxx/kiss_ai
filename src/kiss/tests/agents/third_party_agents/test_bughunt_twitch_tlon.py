@@ -20,73 +20,49 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import cast
+from pathlib import Path
 
 import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
+    EyreHandler,
     RecordingServer,
     recording_server,
 )
 
 
-class _RecordingHandler(RecordingHandler):
-    """Handler that records requests and returns service-shaped JSON."""
-
-    def _record(self, body: bytes) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
-        )
+class _HelixAndEyreHandler(EyreHandler):
+    """Serves Twitch Helix endpoints alongside the Eyre ship."""
 
     def do_GET(self) -> None:  # noqa: N802
-        """Serve Helix GET and Eyre scry endpoints."""
-        self._record(b"")
+        self._record()
         if self.path.startswith("/users"):
             self._json(200, {"data": [{"id": "botid123", "login": "kissbot"}]})
         elif self.path.startswith("/channels"):
             self._json(200, {"data": [{"broadcaster_id": "123", "broadcaster_login": "streamer"}]})
         elif self.path.startswith("/search/channels"):
             self._json(200, {"data": [{"broadcaster_login": "streamer"}]})
-        elif self.path.startswith("/~/scry/channels/"):
-            self._json(200, {"channels": {}})
-        else:
-            self._json(404, {"error": "Not Found", "status": 404})
-
-    def do_PUT(self) -> None:  # noqa: N802
-        """Serve Eyre channel PUT (poke) endpoints."""
-        body = self._read_raw()
-        self._record(body)
-        if self.path.startswith("/~/channel"):
-            self.send_response(204)
-            self.end_headers()
-        else:
+        elif not self._eyre():
             self._json(404, {"error": "Not Found", "status": 404})
 
     def do_POST(self) -> None:  # noqa: N802
-        """Serve Helix POST and Eyre login/poke endpoints."""
-        body = self._read_raw()
-        self._record(body)
-        if self.path == "/~/login" or self.path.startswith("/~/channel"):
-            self.send_response(204)
-            self.end_headers()
-        elif self.path.startswith("/chat/messages"):
+        self._record()
+        if self.path.startswith("/chat/messages"):
             self._json(200, {"data": [{"message_id": "m1", "is_sent": True}]})
         elif self.path.startswith("/moderation/bans"):
             self._json(400, {"error": "Bad Request", "status": 400, "message": "missing field"})
-        else:
+        elif not self._eyre():
             self._json(404, {"error": "Not Found", "status": 404})
 
 
 @pytest.fixture()
 def server() -> Iterator[RecordingServer]:
     """A recording server emulating both Twitch Helix and Urbit Eyre."""
-    with recording_server(_RecordingHandler) as srv:
+    with recording_server(_HelixAndEyreHandler) as srv:
         yield srv
 
 
@@ -156,14 +132,15 @@ class TestTlonBackendBugs:
     """Tlon gall agent name/scry path corruption and ship_url persistence."""
 
     @pytest.fixture(autouse=True)
-    def _connected_backend(self, server: RecordingServer) -> Iterator[None]:
+    def _connected_backend(
+        self, server: RecordingServer, isolated_kiss_home: Path
+    ) -> Iterator[None]:
         self.server = server
         self.base = server.base_url
-        with config_backup(_tlon_config.path):
-            _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~zod"})
-            self.backend = TlonChannelBackend()
-            assert self.backend.connect() is True
-            yield
+        _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~zod"})
+        self.backend = TlonChannelBackend()
+        assert self.backend.connect() is True
+        yield
 
     def test_list_channels_scries_channels_agent(self) -> None:
         """Group channel listing must scry the 'channels' gall agent."""

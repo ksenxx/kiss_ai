@@ -57,188 +57,20 @@
 // exercised for real.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {send} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  makeVoicePage,
+  micBtn,
+  startPipeline,
+  feed,
+  lastProcessor,
+  fireWake,
+  flushWake,
+  fireTimer,
+} = require('./voice_page_helpers');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-const VOICE_CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: 'https://models.example.com/model.tar.gz',
-  ackAudioUrl: '/media/working-on-it.mp3',
-};
-
-/**
- * A fake vosk Model: KaldiRecognizer instances register themselves in
- * model.recognizers and deregister on remove(), mirroring the real
- * vosk.js Model (registerRecognizer / unregisterRecognizer).
- */
-function makeFakeModel(state) {
-  const model = {recognizers: new Map()};
-  let nextId = 1;
-  model.KaldiRecognizer = class FakeRecognizer {
-    constructor(sampleRate, grammar) {
-      this.id = 'rec-' + nextId++;
-      this.sampleRate = sampleRate;
-      this.grammar = grammar;
-      this.handlers = {};
-      this.removed = false;
-      model.recognizers.set(this.id, this);
-      state.recognizers.push(this);
-    }
-    setWords() {}
-    on(event, cb) {
-      this.handlers[event] = cb;
-    }
-    acceptWaveform() {}
-    retrieveFinalResult() {}
-    remove() {
-      this.removed = true;
-      model.recognizers.delete(this.id);
-    }
-  };
-  return model;
-}
-
-/**
- * Build a page running the real main.js + voice.js with a scriptable
- * microphone, clock, recognizer set, and audio processor nodes.
- */
-function makePage(opts) {
-  const options = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.Audio = function (src) {
-    return {src, play: () => Promise.resolve()};
-  };
-
-  // Controllable clock: triggerWake enforces a 2 s cooldown between wakes
-  // via Date.now(), so tests advance time instead of sleeping.
-  const clock = {now: 1000000};
-  win.Date.now = () => clock.now;
-
-  const state = {recognizers: [], processors: [], tracksStopped: 0};
-  const mic = {calls: []};
-  Object.defineProperty(win.navigator, 'mediaDevices', {
-    configurable: true,
-    value: {
-      getUserMedia: constraints => {
-        return new Promise((resolve, reject) => {
-          mic.calls.push({
-            constraints,
-            grant: () =>
-              resolve({
-                getTracks: () => [
-                  {
-                    stop: () => {
-                      state.tracksStopped++;
-                    },
-                  },
-                ],
-                getAudioTracks: () => [],
-              }),
-            refuse: message => {
-              const err = new Error(message || 'Permission denied');
-              err.name = 'NotAllowedError';
-              reject(err);
-            },
-          });
-        });
-      },
-      enumerateDevices: () => Promise.resolve([]),
-    },
-  });
-
-  const model = makeFakeModel(state);
-  win.Vosk = {createModel: () => Promise.resolve(model)};
-
-  win.AudioContext = class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      const node = {
-        connect: () => {},
-        disconnect: () => {},
-        onaudioprocess: null,
-      };
-      state.processors.push(node);
-      return node;
-    }
-  };
-
-  // The page's safety timers (the 45 s wake flash, the 60 s transcribing
-  // flash) are recorded so a test can fire one without waiting.
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (cb, ms) {
-    const id = realSetTimeout(cb, ms);
-    timers.push({id, cb, ms, cleared: false});
-    return id;
-  };
-  win.clearTimeout = function (id) {
-    for (const t of timers) if (t.id === id) t.cleared = true;
-    realClearTimeout(id);
-  };
-
-  win.__VOICE__ = Object.assign({}, VOICE_CFG);
-  win.localStorage.setItem('kissVoiceEnabled', '0');
-  if (options.debug) win.localStorage.setItem('kissVoiceDebug', '1');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return {win, posted, state, mic, clock, model, timers};
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
+const {test, report} = makeRunner();
 
 function twoTabs(win) {
   const api = win._testApi;
@@ -262,87 +94,8 @@ function clickTab(win, tabId) {
   assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
 }
 
-/** Fire the page's pending safety timer of `ms` milliseconds. */
-function fireTimer(page, ms) {
-  const live = page.timers.filter(t => !t.cleared && t.ms === ms);
-  assert.strictEqual(live.length, 1, `one live ${ms} ms timer is armed`);
-  page.win.clearTimeout(live[0].id);
-  live[0].cb();
-}
-
-function tick(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms || 20));
-}
-
-/** Turn the mic on and grant the pipeline its microphone. */
-async function startPipeline(page) {
-  micBtn(page.win).click();
-  await tick();
-  page.mic.calls[page.mic.calls.length - 1].grant(); // pipeline microphone
-  await tick();
-  assert.ok(
-    micBtn(page.win).classList.contains('voice-listening'),
-    `pipeline must be live: ${micBtn(page.win).className}`,
-  );
-}
-
-/** One onaudioprocess block: 4096 samples at 16 kHz = 256 ms. */
-function audioBlock(loud) {
-  const samples = new Float32Array(4096);
-  if (loud) samples.fill(0.5);
-  return {
-    inputBuffer: {
-      getChannelData: () => samples,
-      sampleRate: 16000,
-      numberOfChannels: 1,
-    },
-  };
-}
-
-function feed(proc, loud, blocks) {
-  for (let i = 0; i < blocks; i++) proc.onaudioprocess(audioBlock(loud));
-}
-
-/** Latest live recognizer / processor of the current pipeline. */
-function lastRecognizer(page) {
-  return page.state.recognizers[page.state.recognizers.length - 1];
-}
-
-function lastProcessor(page) {
-  return page.state.processors[page.state.processors.length - 1];
-}
-
-/** Fire the wake word through the pipeline's own result handler. */
-function fireWake(page) {
-  page.clock.now += 3000; // clear the 2 s wake cooldown
-  lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
-}
-
-/**
- * Clear the awaitingFlush latch fireWake armed: the real worker answers
- * retrieveFinalResult with one result message that voice.js swallows.
- */
-function flushWake(page) {
-  lastRecognizer(page).handlers.result({result: {text: ''}});
-}
-
 function submits(posted) {
   return posted.filter(m => m.type === 'submit');
-}
-
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
 }
 
 async function main() {
@@ -350,7 +103,7 @@ async function main() {
     'CAND-1: turning the mic off mid-capture retires the just-begun round, ' +
       'so the next transcript pairs with the round that spoke it',
     async () => {
-      const page = makePage();
+      const page = makeVoicePage();
       const {win, posted} = page;
       const {first, second} = twoTabs(win);
       clickTab(win, first); // tab A on screen
@@ -406,7 +159,7 @@ async function main() {
     'CAND-2: a wake that captures no audio retires ITS OWN round, not the ' +
       'oldest one still awaiting its transcript',
     async () => {
-      const page = makePage();
+      const page = makeVoicePage();
       const {win, posted} = page;
       const {first, second} = twoTabs(win);
       clickTab(win, first); // tab A on screen
@@ -459,7 +212,7 @@ async function main() {
     'CAND-2: a rounds reset mid-capture leaves the silent finish with ' +
       'nothing to retire and the accounting sound',
     async () => {
-      const page = makePage();
+      const page = makeVoicePage();
       const {win, posted} = page;
       const {first} = twoTabs(win);
       clickTab(win, first);
@@ -510,7 +263,7 @@ async function main() {
     'REV-1: a reply arriving after the transcribe window ran out is refused, ' +
       'never typed into the chat now on screen',
     async () => {
-      const page = makePage();
+      const page = makeVoicePage();
       const {win, posted} = page;
       const {first, second} = twoTabs(win);
       clickTab(win, first); // chat A on screen
@@ -558,7 +311,7 @@ async function main() {
     'REV-2: a reply lost with the connection, then a mic restart, never ' +
       'eats the next valid dictation',
     async () => {
-      const page = makePage();
+      const page = makeVoicePage();
       const {win, posted} = page;
       const {first, second} = twoTabs(win);
       clickTab(win, first); // chat A on screen
@@ -608,7 +361,7 @@ async function main() {
   );
 
   await test('CAND-3: stopping the pipeline removes the debug free recognizer too', async () => {
-    const page = makePage({debug: true});
+    const page = makeVoicePage({debug: true});
     const {win, state, model} = page;
 
     await startPipeline(page);
@@ -636,7 +389,7 @@ async function main() {
   });
 
   await test('CAND-3: repeated debug-mode pipeline restarts leave no recognizer behind', async () => {
-    const page = makePage({debug: true});
+    const page = makeVoicePage({debug: true});
     const {win, state, model} = page;
     await startPipeline(page);
 
@@ -661,8 +414,7 @@ async function main() {
     win.close();
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
+  report('conc2026_voice_rounds');
 }
 
 main().then(

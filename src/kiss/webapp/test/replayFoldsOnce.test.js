@@ -21,15 +21,12 @@
 //   * the page's `ready` names no `singleTabId`: it mirrors the whole
 //     registry.
 
-/* global require, __dirname, console, process */
+/* global require, console, process */
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const TS = 1767225600000;
 const STEPS = 150;
 // The pre-fix replay of STEPS steps took ~15 s here; the fixed one ~0.7 s.
@@ -37,49 +34,13 @@ const STEPS = 150;
 const REPLAY_BUDGET_MS = 5000;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: stubRaf,
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win._testApi.endLaunch();
   win._testApi.hideWelcome();
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 /**

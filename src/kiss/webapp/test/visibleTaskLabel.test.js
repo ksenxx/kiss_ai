@@ -14,50 +14,17 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeHarnessPage,
+  send,
+  clickTab,
+} = require('./simplify2_harness');
 
 const VIEWPORT = 500;
 const DEFAULT_HEIGHT = 400;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=visibletask-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  return makeHarnessPage({sourceUrl: 'visibletask-main.js'});
 }
 
 function heightOf(el) {
@@ -128,21 +95,6 @@ function wheel(win, el, deltaY) {
   );
 }
 
-// Bring a tab on screen the way the user does: a click on the group strip
-// when the tab is listed there, else the Chats-panel pick (chat tabs have
-// no row of their own any more).
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    'tab ' + tabId + ' must be open',
-  );
-  const el = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']',
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
-}
-
 /** The active tab's label: the task the reader is looking at. */
 function shownTask(win) {
   const active = win._testApi.getActiveTabId();
@@ -169,9 +121,7 @@ function metrics(win) {
 }
 
 function taskEvents(name) {
-  return [
-    {type: 'system_output', text: name + ' line one\n'},
-  ];
+  return [{type: 'system_output', text: name + ' line one\n'}];
 }
 
 // Builds a tab holding one main task, then splices in the neighbouring
@@ -994,9 +944,7 @@ function testAdjacentReplayLeavesTheLiveStepCountAlone() {
     direction: 'prev',
     task: 'Older task',
     task_id: '49',
-    events: [
-      {type: 'result', success: true, step_count: 77},
-    ],
+    events: [{type: 'result', success: true, step_count: 77}],
   });
   setHeight(taskEl(O, 'Older task'), 100);
   scrollTo(win, O, O.scrollHeight);

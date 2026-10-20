@@ -10,23 +10,11 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {installSpeech, assertNoSpeech} = require('./speech_helpers');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
 
 function flush() {
   return new Promise(resolve => setTimeout(resolve, 25));
@@ -108,8 +96,7 @@ async function main() {
     assert.deepStrictEqual(record.posts, [], 'nothing is posted for the ack');
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
+  report('voiceAckNoRoboticFallback');
 }
 
 main().catch(e => {

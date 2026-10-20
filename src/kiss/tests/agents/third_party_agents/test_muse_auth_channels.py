@@ -39,6 +39,7 @@ instead of mocked):
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import socket
@@ -79,6 +80,8 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     loopback_policy,
+    requires_muse_daemon,
+    set_policy,
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -92,6 +95,7 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     SlackOAuthState,
     sign_in,
 )
+from kiss.tests.server.pause import Pause
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
 _REAL_FIRECRAWL_KEY = "fc-real-secret-key"
@@ -310,10 +314,7 @@ def test_slack_vault_first_and_workspace_names(muse_env: Path, api_server: _ApiS
     assert not backend4.connect()  # 127.0.0.1 not allowed for slack-team2-...
     service = _muse_service("team2")
     assert vault_has_credentials(service)
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"][service] = {"extra_hosts": ["127.0.0.1"]}
-    policy_path.write_text(json.dumps(policy))
+    set_policy(service, extra_hosts=["127.0.0.1"])
     assert backend4.connect()
     assert api_server.header("Authorization") == f"Bearer {_REAL_SLACK_TOKEN}"
 
@@ -573,14 +574,24 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
         assert rogue.requests == []
 
 
-def _start_relic_daemon() -> tuple[threading.Thread, threading.Event]:
-    """Emulate a surviving pre-upgrade daemon on the real socket path.
+_RELIC_STATUS: dict[str, Any] = {"ok": True, "services": []}
 
-    It answers ``status`` without a protocol field (protocol 1) and
-    honors ``stop``, exactly like the previous daemon implementation.
+
+def _start_fake_daemon(
+    status: dict[str, Any], honors_stop: bool
+) -> tuple[threading.Thread, threading.Event]:
+    """Emulate a daemon on the real socket path.
+
+    It answers ``status`` with *status* and acknowledges ``stop``.  With
+    *honors_stop* the serve loop ends on ``stop`` like the real daemon
+    (a pre-upgrade relic answers ``status`` without a protocol field);
+    without it the listener lingers on the socket after the
+    acknowledgement, which is what a daemon that failed to exit looks
+    like to :func:`teardown_muse_env`.
 
     Returns:
-        The serving thread and the event set once ``stop`` arrived.
+        The serving thread and the event that ends its loop (set by the
+        listener itself on ``stop`` when *honors_stop*).
     """
     path = socket_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -591,32 +602,36 @@ def _start_relic_daemon() -> tuple[threading.Thread, threading.Event]:
     server.listen(4)
     stopped = threading.Event()
 
-    def serve_relic() -> None:
-        while not stopped.is_set():
-            try:
-                conn, _ = server.accept()
-            except OSError:
-                break
-            with conn:
+    def serve() -> None:
+        try:
+            while not stopped.is_set():
                 try:
-                    request = recv_frame(conn)
-                except Exception:
-                    continue
-                if request.get("op") == "stop":
-                    stopped.set()
-                    send_frame(conn, {"ok": True})
-                else:
-                    send_frame(conn, {"ok": True, "services": []})
-        # Unlink BEFORE close: connects to an unlinked-but-bound UDS fail
-        # immediately (what ensure_daemon polls for), and a late unlink can
-        # no longer delete the NEW daemon's socket bound at the same path
-        # after close() signalled "down".
-        path.unlink(missing_ok=True)
-        server.close()
+                    conn, _ = server.accept()
+                except OSError:
+                    break
+                with conn:
+                    try:
+                        request = recv_frame(conn)
+                    except Exception:
+                        continue
+                    is_stop = request.get("op") == "stop"
+                    if is_stop and honors_stop:
+                        stopped.set()
+                    # A client that hung up without reading the reply
+                    # (a stop with no wait) must not kill the listener.
+                    with contextlib.suppress(OSError):
+                        send_frame(conn, {"ok": True} if is_stop else status)
+        finally:
+            # Unlink BEFORE close: connects to an unlinked-but-bound UDS
+            # fail immediately (what ensure_daemon polls for), and a late
+            # unlink can no longer delete the NEW daemon's socket bound
+            # at the same path after close() signalled "down".
+            path.unlink(missing_ok=True)
+            server.close()
 
-    relic = threading.Thread(target=serve_relic, daemon=True)
-    relic.start()
-    return relic, stopped
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread, stopped
 
 
 def _stop_listener(thread: threading.Thread) -> None:
@@ -634,20 +649,70 @@ def _stop_listener(thread: threading.Thread) -> None:
         except OSError:
             pass
     thread.join(timeout=10.0)
+    assert not thread.is_alive(), "fake daemon listener did not exit"
 
 
 def _assert_relic_replaced(muse_client: Any) -> None:
     """Start a relic, let ensure_daemon replace it and check the new daemon answers."""
-    relic, stopped = _start_relic_daemon()
+    relic, stopped = _start_fake_daemon(_RELIC_STATUS, honors_stop=True)
     try:
         assert muse_client._daemon_protocol() == 1
         muse_client.ensure_daemon()
         relic.join(timeout=10.0)
-        assert stopped.is_set()
+        assert stopped.is_set() and not relic.is_alive()
         assert muse_client._checked({"op": "status"})["protocol"] == PROTOCOL_VERSION
     finally:
         stopped.set()
         _stop_listener(relic)
+
+
+@requires_muse_daemon
+def test_relic_listener_survives_a_client_that_hangs_up(isolated_kiss_home: Path) -> None:
+    """A ``stop`` whose sender closes before reading the reply still ends the relic cleanly.
+
+    ``send_frame`` to the gone peer raises ``BrokenPipeError``; the relic
+    used to die on it with its socket path still bound, so the next
+    ``ensure_daemon`` polled a dead listener for its whole deadline.
+    """
+    relic, stopped = _start_fake_daemon(_RELIC_STATUS, honors_stop=True)
+    try:
+        with Pause(send_frame.__code__, _sending_stop_ack) as pause:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(str(socket_path()))
+            send_frame(client, {"op": "stop"})
+            assert pause.paused.wait(10.0)
+            client.close()
+        relic.join(timeout=5.0)
+        assert stopped.is_set() and not relic.is_alive()
+        assert not socket_path().exists()
+    finally:
+        stopped.set()
+        _stop_listener(relic)
+
+
+def _sending_stop_ack(frame_locals: dict[str, Any]) -> bool:
+    """Match the relic's ``send_frame`` of the ``stop`` acknowledgement."""
+    return frame_locals.get("obj") == {"ok": True}
+
+
+@requires_muse_daemon
+def test_teardown_muse_env_fails_on_a_daemon_that_does_not_exit(isolated_kiss_home: Path) -> None:
+    """A daemon still listening after ``stop`` fails the test instead of leaking.
+
+    The fake daemon reports the current protocol (so ``stop_daemon`` talks
+    to it) and acknowledges ``stop`` without leaving the socket.
+    """
+    lingering, stopped = _start_fake_daemon(
+        {"ok": True, "protocol": PROTOCOL_VERSION}, honors_stop=False
+    )
+    try:
+        with pytest.raises(AssertionError, match="socket still present after 1.0s"):
+            teardown_muse_env(timeout=1.0)
+        assert lingering.is_alive() and socket_path().exists()
+    finally:
+        stopped.set()
+        _stop_listener(lingering)
+    teardown_muse_env()
 
 
 def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:

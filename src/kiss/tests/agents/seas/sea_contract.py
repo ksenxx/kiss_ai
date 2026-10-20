@@ -97,3 +97,13 @@ def assert_no_removed_getters(sea: ModuleType) -> None:
 def system_message(request: dict[str, Any]) -> str:
     """Return the system message text of one chat-completions *request*."""
     return str(next(m for m in request["messages"] if m["role"] == "system")["content"])
+
+
+def tool_names(request: dict[str, Any]) -> set[str]:
+    """Return the names of the tools offered in one chat-completions *request*."""
+    return {t["function"]["name"] for t in request["tools"]}
+
+
+def tool_results(request: dict[str, Any]) -> list[str]:
+    """Return the tool-result message texts of one chat-completions *request*, in order."""
+    return [str(m["content"]) for m in request["messages"] if m["role"] == "tool"]

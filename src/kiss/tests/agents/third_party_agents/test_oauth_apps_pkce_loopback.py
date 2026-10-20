@@ -298,24 +298,29 @@ def test_pkce_slack_style_ok_true_is_success(token_server: _TokenServer, service
     assert session.result == body
 
 
-def test_pkce_http_error_and_200_error_field(token_server: _TokenServer) -> None:
-    for reply, expected in [
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
         ((400, {"error": "invalid_grant"}), "code exchange refused (invalid_grant)"),
         ((200, {"error": "bad_verifier"}), "code exchange refused (bad_verifier)"),
         ((500, {}), "code exchange refused (HTTP 500)"),
-    ]:
-        name = f"pkce_{uuid.uuid4().hex[:8]}"
-        token_server.reply = reply
-        session = _start(name, token_server)
-        port = _port(session)
-        requests.get(
-            f"http://127.0.0.1:{port}/callback",
-            params={"code": "c", "state": _query(session)["state"]},
-            timeout=10,
-        )
-        finished, status = ConsentSession.finish(name, wait_seconds=15)
-        assert finished is None
-        assert status == expected
+    ],
+)
+def test_pkce_http_error_and_200_error_field(
+    token_server: _TokenServer, service: str, reply: tuple[int, dict[str, Any]], expected: str
+) -> None:
+    """A refused exchange reports the token endpoint's error, or the HTTP status without one."""
+    token_server.reply = reply
+    session = _start(service, token_server)
+    port = _port(session)
+    requests.get(
+        f"http://127.0.0.1:{port}/callback",
+        params={"code": "c", "state": _query(session)["state"]},
+        timeout=10,
+    )
+    finished, status = ConsentSession.finish(service, wait_seconds=15)
+    assert finished is None
+    assert status == expected
 
 
 def test_pkce_wrong_path_404_then_callback_completes(

@@ -266,13 +266,13 @@ class TestAnthropicBuildKwargs:
 
     def test_adaptive_thinking_date_stamped_ids(self) -> None:
         """Date-stamped official ids are release dates, not minor versions."""
-        from kiss.core.models.anthropic_model import _uses_adaptive_thinking
+        from kiss.core.models.anthropic_model import _claude_profile, _uses_adaptive_thinking
 
-        assert not _uses_adaptive_thinking("claude-opus-4-20250514")
-        assert not _uses_adaptive_thinking("claude-opus-4-1-20250805")
-        assert not _uses_adaptive_thinking("claude-opus-4-5")
-        assert _uses_adaptive_thinking("claude-opus-4-6")
-        assert _uses_adaptive_thinking("claude-opus-4-7")
+        assert not _uses_adaptive_thinking(_claude_profile("claude-opus-4-20250514"))
+        assert not _uses_adaptive_thinking(_claude_profile("claude-opus-4-1-20250805"))
+        assert not _uses_adaptive_thinking(_claude_profile("claude-opus-4-5"))
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-6"))
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-7"))
 
     def test_build_kwargs_custom_thinking_not_overridden(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel

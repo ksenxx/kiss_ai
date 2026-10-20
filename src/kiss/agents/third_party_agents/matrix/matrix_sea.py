@@ -390,13 +390,13 @@ def _raise_on_send_error(resp: Any, room_id: str) -> Any:
     """
     try:
         from nio import ErrorResponse
-    except ImportError:
+    except ImportError:  # pragma: no cover - nio is a dev dependency, so always importable in tests
         error_type: type | None = None
-    else:  # pragma: no cover - nio is not installed in the test environment
-        error_type = ErrorResponse
-    if error_type is not None:  # pragma: no cover - nio-installed path
-        is_error = isinstance(resp, error_type)
     else:
+        error_type = ErrorResponse
+    if error_type is not None:
+        is_error = isinstance(resp, error_type)
+    else:  # pragma: no cover - see above
         is_error = hasattr(resp, "message") and hasattr(resp, "status_code")
     if is_error:
         status = getattr(resp, "status_code", None) or "unknown"

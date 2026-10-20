@@ -16,6 +16,18 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {makeRunner} = require('./ui_antipattern_harness');
+const runner = makeRunner();
+const report = runner.report;
+
+// Every page a test opened is closed afterwards, pass or fail.
+function test(name, fn) {
+  try {
+    runner.test(name, fn);
+  } finally {
+    while (windows.length) windows.pop().close();
+  }
+}
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -67,21 +79,6 @@ function active(win) {
   return win.document.activeElement;
 }
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  not ok - ${name}`);
-  } finally {
-    while (windows.length) windows.pop().close();
-  }
-}
 
 test('items expose tabIndex / aria-disabled and the first enabled item is focused on open', () => {
   const win = makeDom();
@@ -264,8 +261,4 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
   ctl.dispose();
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-for (const f of failures) {
-  console.error(`\n${f.name}\n${f.err && f.err.stack}`);
-}
-if (failures.length) process.exit(1);
+report('ui_antipattern_content_menu_keyboard');

@@ -15,58 +15,21 @@
 // that IS running a task keeps its adopted id.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {typeAndEnter, submits} = require('./attachment_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  const posted = [];
-  const store = {state: undefined};
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => store.state,
-      setState: s => {
-        store.state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  const {win, posted, getState} = makeChatPage({beforeScripts: stubRaf});
   win._testApi.endLaunch();
-  return {win, posted, store};
+  return {win, posted, getState};
 }
 
 // The drafts the page would hand back after a reload: what the
 // `pagehide` handler persists (persistTabState).
-function persistedDrafts(win, store) {
+function persistedDrafts(win, getState) {
   win.dispatchEvent(new win.Event('pagehide'));
-  return (store.state && store.state.inputDrafts) || {};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  const state = getState();
+  return (state && state.inputDrafts) || {};
 }
 
 // The task the visible tab has claimed, as main.js reports it to voice.js.
@@ -77,7 +40,7 @@ function ownedTaskId(win) {
 const PROMPT = './src/kiss/agents/seas/review_paper/review_paper_sea.py';
 
 function testAckLiftsTheClaim() {
-  const {win, posted, store} = makePage();
+  const {win, posted, getState} = makePage();
   const tabId = win._testApi.getActiveTabId();
 
   typeAndEnter(win, PROMPT);
@@ -89,7 +52,7 @@ function testAckLiftsTheClaim() {
     'until the host answers, the tab claims the task it may have started',
   );
   assert.strictEqual(
-    persistedDrafts(win, store)[tabId],
+    persistedDrafts(win, getState)[tabId],
     PROMPT,
     'until the host answers, a reload would give the prompt back',
   );
@@ -115,7 +78,7 @@ function testAckLiftsTheClaim() {
 
   // The prompt is acknowledged: a reload gives back no unsent draft.
   assert.strictEqual(
-    persistedDrafts(win, store)[tabId],
+    persistedDrafts(win, getState)[tabId],
     undefined,
     'BUG: the opened path would come back as an unsent draft after a reload',
   );

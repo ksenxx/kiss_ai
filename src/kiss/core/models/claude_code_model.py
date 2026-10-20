@@ -34,9 +34,11 @@ The subprocess supervision both CLI-backed adapters share
 
 import json
 import logging
+import os
+import re
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
@@ -48,11 +50,14 @@ from kiss.core.models.model import (
     _iter_balanced_json_objects,
     _iter_jsonl,
     _iter_tool_calls_lists,
-    _parse_text_based_tool_calls,
     environ_without,
 )
 
 logger = logging.getLogger(__name__)
+
+# A dated snapshot id (``claude-sonnet-4-5-20250929``) prices as its
+# undated catalog entry.
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 
 
 def _find_claude_cli() -> str:
@@ -304,47 +309,29 @@ def _is_tool_calls_object(text: str) -> bool:
     return bool(_iter_tool_calls_lists(parsed))
 
 
-def _accumulate_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
-    """Add one completed message's usage counters into *total* in place.
+def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> None:
+    """Fold one ``usage`` dict into *target* in place.
 
-    Numeric fields are summed; the nested ``cache_creation`` dict is
-    merged field-by-field.  Non-numeric fields are ignored.
+    Numeric fields are summed when *add* is true and replaced otherwise;
+    the nested ``cache_creation`` dict is merged field by field the same
+    way; non-numeric fields are ignored and fields *usage* omits keep
+    their value.  A finished message is summed into the running total.
+    A ``message_delta`` snapshot replaces: its counters are *cumulative*
+    for the message (https://platform.claude.com/docs/en/build-with-claude/streaming
+    #event-types), so each supersedes the previous one while fields a
+    snapshot omits (older models report only ``output_tokens``) keep what
+    ``message_start`` reported.
 
     Args:
-        total: The running aggregate, updated in place.
-        usage: One finished assistant message's ``usage`` dict.
+        target: The running total or the open message's usage, updated in place.
+        usage: One ``usage`` dict from the stream.
+        add: Sum the counters instead of replacing them.
     """
     for key, value in usage.items():
         if isinstance(value, (int, float)):
-            total[key] = total.get(key, 0) + value
+            target[key] = target.get(key, 0) + value if add else value
         elif key == "cache_creation" and isinstance(value, dict):
-            sub = total.setdefault("cache_creation", {})
-            for sub_key, sub_value in value.items():
-                if isinstance(sub_value, (int, float)):
-                    sub[sub_key] = sub.get(sub_key, 0) + sub_value
-
-
-def _overwrite_usage(current: dict[str, Any], usage: dict[str, Any]) -> None:
-    """Apply one ``message_delta`` usage snapshot to the open message in place.
-
-    The counters in a ``message_delta`` event are *cumulative* for the
-    message (https://platform.claude.com/docs/en/build-with-claude/streaming
-    #event-types), so each snapshot replaces the previous one instead of
-    adding to it; fields a snapshot omits (older models report only
-    ``output_tokens``) keep the values ``message_start`` reported.
-
-    Args:
-        current: The open message's usage, updated in place.
-        usage: One ``message_delta`` event's ``usage`` dict.
-    """
-    for key, value in usage.items():
-        if isinstance(value, (int, float)):
-            current[key] = value
-        elif key == "cache_creation" and isinstance(value, dict):
-            sub = current.setdefault("cache_creation", {})
-            for sub_key, sub_value in value.items():
-                if isinstance(sub_value, (int, float)):
-                    sub[sub_key] = sub_value
+            _merge_usage(target.setdefault("cache_creation", {}), value, add)
 
 
 class ClaudeCodeModel(CLITextModel):
@@ -402,6 +389,14 @@ class ClaudeCodeModel(CLITextModel):
         # plus the cumulative usage of the message still streaming.
         self._partial_usage: dict[str, Any] = {}
         self._open_message_usage: dict[str, Any] = {}
+        # What prices the current turn (see extract_cost_from_response):
+        # whether an API key pays for it, decided when the CLI is launched
+        # (_cli_env); the API model id the CLI resolved ``--model`` to
+        # (``cc/opus`` is an alias) and the number of API requests it
+        # made, both read from the stream.
+        self._api_billed: bool = False
+        self._api_model: str = ""
+        self._request_count: int = 0
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``claude`` CLI argument list.
@@ -473,6 +468,8 @@ class ClaudeCodeModel(CLITextModel):
         self._stopped_for_tool_calls = False
         self._partial_usage = {}
         self._open_message_usage = {}
+        self._api_model = ""
+        self._request_count = 0
         stop_on_tool_calls = self._tool_bearing_turn
 
         with self._cli_turn(args, "Claude Code CLI") as proc:
@@ -498,8 +495,16 @@ class ClaudeCodeModel(CLITextModel):
         return content, result_json
 
     def _cli_env(self) -> dict[str, str] | None:
-        """The child environment: see :func:`claude_subscription_env`."""
-        return claude_subscription_env()
+        """The child environment: see :func:`claude_subscription_env`.
+
+        Called once per launch, so this is where the turn's billing is
+        decided for good: an inherited environment that holds an API
+        key variable makes the turn API spend, whatever the switch says
+        afterwards.
+        """
+        env = claude_subscription_env()
+        self._api_billed = env is None and any(os.environ.get(v) for v in _API_KEY_ENV_VARS)
+        return env
 
     @staticmethod
     def _with_auth_hint(error: KISSError, result_json: dict[str, Any]) -> KISSError:
@@ -536,7 +541,7 @@ class ClaudeCodeModel(CLITextModel):
         from its last cumulative snapshot exactly once.
         """
         if self._open_message_usage:
-            _accumulate_usage(self._partial_usage, self._open_message_usage)
+            _merge_usage(self._partial_usage, self._open_message_usage, add=True)
             self._open_message_usage = {}
 
     def take_partial_usage_response(self) -> Any:
@@ -561,7 +566,7 @@ class ClaudeCodeModel(CLITextModel):
             return None
         usage = self._partial_usage
         self._partial_usage = {}
-        return {"usage": usage}
+        return self._stamp_billing({"usage": usage})
 
     def _parse_stream_events(
         self,
@@ -615,6 +620,7 @@ class ClaudeCodeModel(CLITextModel):
         events = _iter_stream_json_events(lines)
         for event in events:
             event_type = event.get("type")
+            self._note_api_model(event)
 
             if event_type == "assistant":
                 msg = event.get("message", {})
@@ -689,13 +695,14 @@ class ClaudeCodeModel(CLITextModel):
                 # known now; output_tokens is a placeholder the cumulative
                 # message_delta snapshots replace.
                 self._close_open_message()
+                self._request_count += 1
                 usage = event.get("message", {}).get("usage")
                 if isinstance(usage, dict):
-                    _overwrite_usage(self._open_message_usage, usage)
+                    _merge_usage(self._open_message_usage, usage, add=False)
             elif event_type == "message_delta":
                 usage = event.get("usage")
                 if isinstance(usage, dict):
-                    _overwrite_usage(self._open_message_usage, usage)
+                    _merge_usage(self._open_message_usage, usage, add=False)
                 # A stop_reason marks the message's final snapshot, so the
                 # message is complete even if its message_stop never
                 # arrives (or the stream carries no message_start/stop).
@@ -723,47 +730,105 @@ class ClaudeCodeModel(CLITextModel):
             self._close_open_message()
             if self._partial_usage:
                 result_json = {"usage": self._partial_usage}
+        if result_json:
+            self._stamp_billing(result_json)
 
         self._last_thinking_content = thinking_content
         return content, result_json
 
-    def generate_and_process_with_tools(
-        self,
-        function_map: dict[str, Callable[..., Any]],
-        tools_schema: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generate with text-based tool calling via the Claude Code CLI.
+    def _stamp_billing(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Record on *response* what prices it, as of this turn.
 
-        Tool descriptions are injected into the system prompt.  The model's
-        text output is parsed for JSON ``tool_calls`` blocks, which are
-        returned to the framework for execution; the CLI's own tools are
-        switched off, so these are the only tools the model can use.
-
-        Thinking tokens stream to the callbacks as they arrive, but the
-        assistant text is held back and re-emitted once the turn ends,
-        stripped of the ``tool_calls`` JSON the framework parses out of
-        it — otherwise the raw block would be rendered in the chat panel
-        before every tool card.  :class:`CodexModel` filters its stream
-        the same way.
+        ``api_billed`` (an API key paid, decided at launch), ``model``
+        (the API model id the stream named, if any) and ``requests``
+        (the API requests the CLI made in the turn, counted from
+        ``message_start``; at least 1).  A later settings change or
+        turn cannot reprice a response that carries these.
 
         Args:
-            function_map: Dictionary mapping function names to callable functions.
-            tools_schema: Ignored (text-based tool calling builds its own prompt).
+            response: A response dict with the turn's ``usage``.
 
         Returns:
-            Tuple of ``(function_calls, content, response)``.
+            The same dict.
         """
-        with self._tools_prompt_installed(function_map):
-            content, response = self.generate()
+        response["api_billed"] = self._api_billed
+        if self._api_model:
+            response["model"] = self._api_model
+        response["requests"] = max(1, self._request_count)
+        return response
 
-        function_calls = _parse_text_based_tool_calls(
-            "\n".join([content, self._last_thinking_content])
-        )
+    def _note_api_model(self, event: dict[str, Any]) -> None:
+        """Remember the API model id a stream event names.
 
-        if function_calls:
-            self._replace_last_assistant_with_tool_calls(content, function_calls)
+        The CLI resolves ``--model opus`` to a concrete id and reports it
+        in the ``system``/``init`` event (``model``), in every
+        ``message_start`` and ``assistant`` event (``message.model``) and
+        in the terminal ``result``'s ``modelUsage`` map (keyed by id).
+        The last one seen wins; the turn's response is stamped with it.
 
-        return function_calls, content, response
+        Args:
+            event: One parsed ``stream-json`` event.
+        """
+        event_type = event.get("type")
+        model: Any = None
+        if event_type == "system":
+            model = event.get("model")
+        elif event_type in ("assistant", "message_start"):
+            model = (event.get("message") or {}).get("model")
+        elif event_type == "result":
+            model_usage = event.get("modelUsage")
+            if isinstance(model_usage, dict) and model_usage:
+                model = next(iter(model_usage))
+        if isinstance(model, str) and model:
+            self._api_model = model
+
+    def extract_cost_from_response(self, response: Any) -> float | None:
+        """Price the turn at the API model's rate when the API key pays.
+
+        A turn the Claude subscription paid for (the switch was on at
+        launch, or no API key was in the environment) keeps the ``cc/*``
+        catalog price of zero (``None`` here).  A turn an inherited
+        ``ANTHROPIC_API_KEY`` paid for is API spend at the resolved
+        model's list price, cache tiers included, so its usage is priced
+        through :func:`calculate_cost` under the API model id the stream
+        reported (falling back to the name after ``cc/``); the
+        per-request long-context tier applies only to a single-request
+        turn (see ``single_request``).  A model id the catalog does not
+        know (new snapshot) is billed at the CLI's own ``total_cost_usd``
+        estimate when the result carries one; otherwise
+        :func:`calculate_cost` raises.
+
+        Args:
+            response: The dict returned by :meth:`generate` or
+                :meth:`take_partial_usage_response`.
+
+        Returns:
+            The turn's USD cost, or ``None`` to bill the catalog entry.
+        """
+        from kiss.core.models.model_info import calculate_cost, is_known_model
+
+        if not isinstance(response, dict) or not response.get("api_billed"):
+            return None
+        counts = self.extract_input_output_token_counts_from_response(response)
+        model = response.get("model") or self._cli_model
+        if not is_known_model(model):
+            model = _DATE_SUFFIX_RE.sub("", model)
+        reported = response.get("total_cost_usd")
+        if not is_known_model(model) and isinstance(reported, int | float):
+            return float(reported)
+        return calculate_cost(model, *counts, single_request=response.get("requests", 1) <= 1)
+
+    def _tool_call_text(self, content: str) -> str:
+        """Parse the turn's thinking for ``tool_calls`` as well as its text.
+
+        A reasoning model sometimes emits the block inside its thinking
+        and then stops, so the thinking content of the turn just finished
+        is appended to the text that is scanned.
+
+        Args:
+            content: The turn's assistant text.
+        """
+        return "\n".join([content, self._last_thinking_content])
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

@@ -154,7 +154,8 @@ def test_remote_webapp_page_is_branded() -> None:
     assert f"Refresh the model catalog in ~/{HOME_DIR}/MODEL_INFO.json" in page
     assert not _PLACEHOLDER.search(page)
     # brand.css is part of the offline app shell the service worker precaches.
-    assert any(url.startswith("/media/brand.css?v=") for url in web_server._app_shell_urls())
+    shell = web_server._app_shell_urls(web_server._brand_css_asset_names())
+    assert any(url.startswith("/media/brand.css?v=") for url in shell)
 
 
 def test_share_page_inlines_brand_css_and_default_title() -> None:
@@ -174,8 +175,9 @@ def test_tips_and_brand_css_assets_are_branded() -> None:
     rendered = tips.read_tips()
     assert rendered and all("{{" not in tip for tip in rendered)
     assert any(PRODUCT_NAME in tip for tip in rendered)
-    shell = web_server._app_shell_urls()
-    for name in web_server._brand_css_asset_names():
+    names = web_server._brand_css_asset_names()
+    shell = web_server._app_shell_urls(names)
+    for name in names:
         assert f"/media/{name}" in shell
         assert (web_server.MEDIA_DIR / name).is_file()
 

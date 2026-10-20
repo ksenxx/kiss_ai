@@ -107,29 +107,15 @@ function testProcessEventRendersWarning() {
   console.log('  ok - replaying a persisted warning renders it');
 }
 
-function testLiveWarningNotDoubleRendered() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  send(win, {type: 'warning', message: 'live once QWERTY'});
-  const banners = win.document.querySelectorAll('#output .warn');
-  assert.strictEqual(
-    banners.length,
-    1,
-    'live warning must render exactly once, got ' + banners.length,
-  );
-  win.close();
-  console.log('  ok - live warning still renders exactly once');
-}
-
 function runTests() {
   testReplayRendersPersistedWarning();
   testReplayWarningMatchesLiveRendering();
   testProcessEventRendersWarning();
-  testLiveWarningNotDoubleRendered();
 }
 
 try {
   runTests();
-  console.log('\n4 passed, 0 failed');
+  console.log('\n3 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

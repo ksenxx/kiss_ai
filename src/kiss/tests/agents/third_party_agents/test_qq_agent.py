@@ -65,7 +65,10 @@ class _QQApiHandler(RecordingHandler):
     """Emulates the QQ open-platform token and message endpoints.
 
     Every request is recorded on the :class:`RecordingServer` as
-    ``{"path", "authorization", "body"}``; see :func:`_sent`.
+    ``{"path", "authorization", "body"}``; see :func:`_sent`.  Wrong
+    credentials are answered like the real API (an error body naming
+    what arrived) so the test body, not a handler-thread traceback,
+    reports the mismatch.
     """
 
     def do_POST(self) -> None:  # noqa: N802
@@ -75,10 +78,14 @@ class _QQApiHandler(RecordingHandler):
         server = cast(RecordingServer, self.server)
         server.requests.append({"path": self.path, "authorization": authorization, "body": body})
         if self.path == _TOKEN_PATH:
-            assert body == {"appId": "qq_app", "clientSecret": _SECRET}
+            if body != {"appId": "qq_app", "clientSecret": _SECRET}:
+                self._json(400, {"code": 100007, "message": f"bad credentials: {body}"})
+                return
             self._json(200, {"access_token": "QQTOKEN", "expires_in": "7200"})
             return
-        assert self.headers.get("Authorization") == "QQBot QQTOKEN"
+        if authorization != "QQBot QQTOKEN":
+            self._json(401, {"code": 11244, "message": f"bad token: {authorization!r}"})
+            return
         self._json(200, {"id": "msg1", "timestamp": 1712345678})
 
 
@@ -140,6 +147,22 @@ def test_auth_trio_persistence() -> None:
     assert agent._is_authenticated() is False
 
 
+def test_emulator_names_wrong_credentials() -> None:
+    """The emulated API answers bad credentials with an error that quotes them."""
+    with recording_server(_QQApiHandler) as api:
+        token = requests.post(api.base_url + _TOKEN_PATH, json={"appId": "other"}, timeout=10)
+        assert token.status_code == 400
+        assert "'appId': 'other'" in token.json()["message"]
+        sent = requests.post(
+            api.base_url + "/v2/groups/G1/messages",
+            json={},
+            headers={"Authorization": "QQBot stale"},
+            timeout=10,
+        )
+        assert sent.status_code == 401
+        assert "QQBot stale" in sent.json()["message"]
+
+
 def test_send_messages_with_cached_token() -> None:
     """Group and C2C sends use QQBot auth and share one cached token."""
     with recording_server(_QQApiHandler) as api:
@@ -148,6 +171,7 @@ def test_send_messages_with_cached_token() -> None:
         assert json.loads(backend.send_group_message("G1", "hi group"))["ok"] is True
         assert json.loads(backend.send_c2c_message("U1", "hi user"))["ok"] is True
         assert _token_hits(api) == 1
+        assert api.requests[0]["body"] == {"appId": "qq_app", "clientSecret": _SECRET}
         assert _sent(api) == [
             ("/v2/groups/G1/messages", "QQBot QQTOKEN", {"content": "hi group", "msg_type": 0}),
             ("/v2/users/U1/messages", "QQBot QQTOKEN", {"content": "hi user", "msg_type": 0}),

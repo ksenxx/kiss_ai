@@ -69,6 +69,7 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     loopback_policy,
+    set_policy,
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -706,10 +707,7 @@ def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: Record
     assert handle is not None
     # Notion's allowlist is api.notion.com; add the loopback host so the
     # emulated server is reachable for this test.
-    policy_file = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_file.read_text())
-    policy.setdefault("services", {})["notion"] = {"read": "allow", "extra_hosts": ["127.0.0.1"]}
-    policy_file.write_text(json.dumps(policy))
+    set_policy("notion", read="allow", extra_hosts=["127.0.0.1"])
     session = MuseBoundarySession("notion")
     port = api_server.server_address[1]
     resp = session.get(

@@ -65,6 +65,15 @@ def slow_host_bash(command: str, description: str) -> str:
     return host_bash(f"sleep 3; {command}", description, timeout_seconds=1)
 
 
+#: The Write/Edit scripts publish a file with ``mv -T`` and ``stat -c``
+#: of the GNU/busybox coreutils in the Linux containers they run in
+#: (Git bash on Windows has them too); BSD ``mv`` (macOS) rejects ``-T``,
+#: so a host bash there cannot run them.
+gnu_coreutils_only = unittest.skipIf(
+    sys.platform == "darwin", "the store scripts need GNU/busybox mv -T and stat -c"
+)
+
+
 @unittest.skipIf(sys.platform == "win32", "needs a POSIX shell")
 class TestDockerToolsWithoutDocker(unittest.TestCase):
     """F2 — the generated scripts, run by a real local bash."""
@@ -85,6 +94,7 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         self.assertIn("timed out", result)
         self.assertFalse(target.exists())
 
+    @gnu_coreutils_only
     def test_write_success_reports_success_and_writes_bytes(self) -> None:
         """The happy path really creates the file with the exact content."""
         target = self.dir / "sub" / "ok.txt"
@@ -100,6 +110,7 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         self.assertNotIn("Successfully wrote", result)
         self.assertIn("exit code:", result)
 
+    @gnu_coreutils_only
     def test_write_marker_is_not_echoed_to_the_model(self) -> None:
         """The success sentinel never leaks into the returned message."""
         target = self.dir / "clean.txt"
@@ -171,6 +182,7 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         )
         self.assertEqual(target.read_text(encoding="utf-8"), "aaa")
 
+    @gnu_coreutils_only
     def test_edit_still_replaces(self) -> None:
         """The happy path is unchanged by the new guard."""
         target = self.dir / "edit.txt"

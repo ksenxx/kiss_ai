@@ -22,10 +22,10 @@ import socket
 import threading
 import time
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.zalo.zalo_sea as zalo_sea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
@@ -35,7 +35,6 @@ from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
 from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
 
@@ -132,9 +131,9 @@ class TestIRCBugs:
     """IRC bugs (A)-(D) against a real local TCP server."""
 
     @pytest.fixture(autouse=True)
-    def _isolated(self):
+    def _isolated(self, isolated_kiss_home: Path):
         """Clean IRC config, a fake IRC server and a backend per test."""
-        with config_backup(_irc_config.path), closing(_FakeIRCServer()) as self.server:
+        with closing(_FakeIRCServer()) as self.server:
             self.backend = IRCChannelBackend()
             try:
                 yield
@@ -210,14 +209,10 @@ class TestIRCFreshDaemonTools:
     """
 
     @pytest.fixture(autouse=True)
-    def _isolated(self):
+    def _isolated(self, isolated_kiss_home: Path):
         """Clean IRC config and a fake IRC server per test."""
-        with config_backup(_irc_config.path):
-            self.server = _FakeIRCServer()
-            try:
-                yield
-            finally:
-                self.server.close()
+        with closing(_FakeIRCServer()) as self.server:
+            yield
 
     def test_tools_post_message_connects_on_demand(self) -> None:
         """``IrcSea().tools([])``' fresh backend lazily connects and really sends."""
@@ -264,22 +259,22 @@ class TestZaloBugs:
     """Zalo bugs (G) send errors swallowed and (I) poll ignores channel_id."""
 
     def setup_method(self) -> None:
-        self._saved_base = zalo_sea._API_BASE
         self._server: ThreadedHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.backend = ZaloChannelBackend()
         self.backend._access_token = "tok"
 
     def teardown_method(self) -> None:
-        zalo_sea._API_BASE = self._saved_base
         self._server, self._thread = stop_http_server(self._server, self._thread)
 
     def _start_server(self, body: bytes) -> None:
+        """Serve *body* to every POST and point the backend's API base at the server."""
         handler = type("Handler", (_JSONResponder,), {"body": body})
         self._server = ThreadedHTTPServer(("127.0.0.1", 0), handler)
         self._thread = start_serving(self._server)
         port = self._server.server_address[1]
-        zalo_sea._API_BASE = f"http://127.0.0.1:{port}/v2.0/oa"
+        self.backend = ZaloChannelBackend(api_base=f"http://127.0.0.1:{port}/v2.0/oa")
+        self.backend._access_token = "tok"
 
     def test_send_message_raises_on_api_error(self) -> None:
         """(G) send_message must raise when the Zalo API reports an error."""

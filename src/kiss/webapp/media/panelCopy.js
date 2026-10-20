@@ -300,15 +300,24 @@
     );
   }
 
-  function addCopyButton(panelEl) {
-    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
-    panelEl.classList.add('copyable');
-    const doc = panelEl.ownerDocument || document;
-    const btn = doc.createElement('button');
-    btn.type = 'button';
-    btn.className = 'panel-copy-btn';
-    btn.title = 'Copy panel text';
-    btn.setAttribute('aria-label', 'Copy panel text');
+  /**
+   * Make *btn* copy *text* on click and show the outcome on it for
+   * 1.5 s: a check mark (`copied`) or, when both the async clipboard
+   * and the execCommand fallback failed, a cross with a "Copy failed"
+   * title (`copy-failed`), so the failure is never silent.  The button
+   * gets the copy glyph now and back after the flash, with the title
+   * it had when wired.  The click neither bubbles nor acts as a
+   * default (a row's button must not open its row).  Every copy
+   * control of the page (panels, sidebar rows, id chips, the
+   * remote-URL bar) goes through here.
+   *
+   * @param {HTMLButtonElement} btn The button.
+   * @param {string|function(): string} text What the click copies, or
+   *     a function yielding it at click time.
+   */
+  function wireCopyButton(btn, text) {
+    const doc = btn.ownerDocument || document;
+    const idleTitle = btn.title;
     btn.innerHTML = PANEL_COPY_SVG;
     // The revert timer is tracked per button and restarted on every
     // copy: a bare setTimeout let a rapid second click's flash be cut
@@ -318,11 +327,14 @@
     // clipboard outcome reaches the button, so a slow first copy that
     // fails cannot overwrite the check mark of a faster second one.
     let copyGen = 0;
-    // Show the copy outcome on the button for 1.5 s: a check mark
-    // (`copied`) or, when both the async clipboard and the execCommand
-    // fallback failed, a cross with a "Copy failed" title (`copy-failed`)
-    // so the failure is never silent.
-    const flash = (ok, gen) => {
+    function revert() {
+      flashTimer = null;
+      btn.innerHTML = PANEL_COPY_SVG;
+      btn.classList.remove('copied', 'copy-failed');
+      if (idleTitle) btn.title = idleTitle;
+      else btn.removeAttribute('title');
+    }
+    function flash(ok, gen) {
       if (gen !== copyGen) return;
       btn.innerHTML = ok ? PANEL_CHECK_SVG : PANEL_FAIL_SVG;
       btn.classList.toggle('copied', ok);
@@ -331,20 +343,34 @@
         ? 'Copied'
         : 'Copy failed: select the text and copy it with the keyboard';
       if (flashTimer) clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        flashTimer = null;
-        btn.innerHTML = PANEL_COPY_SVG;
-        btn.classList.remove('copied', 'copy-failed');
-        btn.title = 'Copy panel text';
-      }, 1500);
-    };
+      flashTimer = setTimeout(revert, 1500);
+    }
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
       const gen = ++copyGen;
-      copyText(normalise(getRawText(panelEl)), doc).then(ok => flash(ok, gen));
+      const value = typeof text === 'function' ? text() : text;
+      copyText(String(value == null ? '' : value), doc).then(ok =>
+        flash(ok, gen),
+      );
     });
+  }
+
+  function addCopyButton(panelEl) {
+    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
+    panelEl.classList.add('copyable');
+    const doc = panelEl.ownerDocument || document;
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'panel-copy-btn';
+    btn.title = 'Copy panel text';
+    btn.setAttribute('aria-label', 'Copy panel text');
+    wireCopyButton(btn, panelText);
     panelEl.appendChild(btn);
+
+    function panelText() {
+      return normalise(getRawText(panelEl));
+    }
   }
 
   /**
@@ -512,6 +538,7 @@
   const api = {
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
+    wireCopyButton: wireCopyButton,
     addCopyButton: addCopyButton,
     addStopButton: addStopButton,
     fallbackCopyText: fallbackCopyText,

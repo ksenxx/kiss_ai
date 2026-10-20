@@ -8,7 +8,7 @@ BUG-19: discard() now acquires repo_lock — checkout serialized with
         merge/release from other tabs.
 BUG-20: merge() reports a checkout failure instead of silently failing.
 BUG-21: checkout_error() removed — checkout() returns (bool, stderr).
-BUG-22: _check_merge_conflict misses staged files — KNOWN LIMITATION.
+BUG-22: _conflict_of misses staged files — KNOWN LIMITATION.
 BUG-23: _try_setup_worktree now checks commit_staged return value and
         uses --no-verify for the baseline commit.
 BUG-24: _get_worktree_changed_files returns [] on git diff failure —

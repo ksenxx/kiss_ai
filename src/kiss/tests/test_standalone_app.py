@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -335,21 +336,37 @@ class _Hits(http.server.BaseHTTPRequestHandler):
     """A one-page site that records every request path.
 
     Like the daemon it serves the packaged ``media/appWindow.html`` and
-    ``media/appWindow.js`` (the macOS popup window and its bounds
-    keeper), and its page loads that script, so the window kiss-app
-    opens on macOS is the real popup.  The page also moves and
-    resizes a popup once to ``_MOVED_BOUNDS`` (a popup may move itself;
-    an app window may not), so a relaunch shows whether the bounds
-    were kept.
+    ``media/appWindow.js`` (the macOS popup window, its bounds keeper
+    and its open/closing reports), and its page loads that script, so
+    the window kiss-app opens on macOS is the real popup.  The page
+    also moves and resizes a popup once to ``_MOVED_BOUNDS`` (a popup
+    may move itself; an app window may not), so a relaunch shows
+    whether the bounds were kept, and closes itself once ``close`` is
+    set (it asks ``/close`` every 200 ms).  Like the daemon, the site
+    answers kiss-app's question whether the popup is open
+    (``/api/app-window``) with ``app_window_open``, which the test sets:
+    the daemon learns it from the popup's WebSocket connection, which
+    this page does not make.
     """
 
     paths: list[str] = []
+    app_window_open = False
+    close = False
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         self.paths.append(self.path)
-        media = Path(self.path.split("?")[0]).name
-        if self.path.startswith("/media/") and media in ("appWindow.html", "appWindow.js"):
+        path, _, _query = self.path.partition("?")
+        media = Path(path).name
+        ctype = "text/html"
+        if path.startswith("/media/") and media in ("appWindow.html", "appWindow.js"):
             body = (standalone_app.MEDIA_DIR / media).read_bytes()
+            ctype = "text/javascript" if media.endswith(".js") else ctype
+        elif path == standalone_app.APP_WINDOW_API:
+            body = json.dumps({"open": self.app_window_open}).encode()
+            ctype = "application/json"
+        elif path == "/close":
+            body = b"1" if _Hits.close else b"0"
+            ctype = "text/plain"
         else:
             body = (
                 b"<title>Standalone window test</title><h1>standalone ok</h1>"
@@ -358,10 +375,13 @@ class _Hits(http.server.BaseHTTPRequestHandler):
                 b"  localStorage.setItem('moved', '1');"
                 + f"  window.moveTo({_MOVED_BOUNDS[0]}, {_MOVED_BOUNDS[1]});"
                 f"  window.resizeTo({_MOVED_BOUNDS[2]}, {_MOVED_BOUNDS[3]});".encode()
-                + b"}</script>"
+                + b"}"
+                b"setInterval(function () {"
+                b"  fetch('/close').then(r => r.text())"
+                b"    .then(t => { if (t === '1') window.close(); });"
+                b"}, 200);</script>"
             )
         self.send_response(200)
-        ctype = "text/javascript" if media.endswith(".js") else "text/html"
         self.send_header("Content-Type", ctype)
         self.end_headers()
         self.wfile.write(body)
@@ -441,7 +461,9 @@ def test_real_browser_opens_the_page_in_app_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="checks the macOS brand bundle")
-def test_macos_real_browser_runs_from_the_brand_bundle(tmp_path: Path) -> None:
+def test_macos_real_browser_runs_from_the_brand_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """On macOS the real browser starts from the brand bundle's clone and loads the page.
 
     The clone is built under the child's temp HOME.  Its helpers (GPU,
@@ -449,15 +471,31 @@ def test_macos_real_browser_runs_from_the_brand_bundle(tmp_path: Path) -> None:
     them read the bundle they were started from: a clone made of
     symlinks dies at once with "GPU process isn't usable", so the page
     loading proves the copies and the re-signed executable work.
+
+    The window is the popup ``media/appWindow.html`` opens.  A reopen
+    (``open -a``, a second kiss-app) brings it to the front.  Once the
+    user closes it the browser lives on without a window: a second
+    kiss-app, told so by the site (as the daemon would, from the
+    popup's WebSocket connection), hands it the command line for a new
+    popup instead of a reopen (which would open an empty browser
+    window), and the daemon's check (:func:`standalone_app.quit_closed_app`,
+    armed by the popup's connection closing) quits the browser that
+    has no window left, so the next start is a fresh one, with the
+    popup's bounds kept.
     """
     browser = standalone_app.find_browser()
     if browser is None or standalone_app.macos_browser_bundle(browser) is None:
         pytest.skip("needs a Chromium-family browser in an application bundle")
     _Hits.paths = []
+    _Hits.app_window_open = True
+    _Hits.close = False
     httpd = http.server.HTTPServer(("127.0.0.1", 0), _Hits)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_port}/"
     env = _browser_env(tmp_path, browser)
+    # The daemon-side check looks for the brand bundle under HOME when it
+    # is armed: the child's.
+    monkeypatch.setenv("HOME", env["HOME"])
     profile = Path(env["KISS_HOME"]) / "webapp-profile"
     bundle = tmp_path / "home" / "Applications" / f"{BRAND['product_name']}.app"
     exe_copy = bundle / "Contents" / "MacOS" / browser.name
@@ -465,18 +503,16 @@ def test_macos_real_browser_runs_from_the_brand_bundle(tmp_path: Path) -> None:
         proc = _run(["--url", url], env)
         assert proc.returncode == 0, proc.stderr
         assert standalone_app.macos_bundle_browser(bundle, browser) == exe_copy
-        for _ in range(300):
-            if "/" in _Hits.paths:
-                break
-            time.sleep(0.1)
-        log = Path(env["KISS_HOME"]) / "kiss-app.log"
-        assert "/" in _Hits.paths, (_Hits.paths, log.read_text())
+        assert _wait_for(lambda: "/" in _Hits.paths), (
+            _Hits.paths, (Path(env["KISS_HOME"]) / "kiss-app.log").read_text(),
+        )
         # The window and its helpers run from the clone, not the browser's own bundle.
         assert standalone_app.macos_bundle_in_use(bundle)
         # The --app page was the popup opener, which closed itself: one
         # window, the popup, showing the page.
         assert _Hits.paths[0].startswith("/media/appWindow.html?url="), _Hits.paths
         pid = _macos_engine_pid(exe_copy, profile)
+        assert standalone_app.macos_bundle_pid(bundle) == pid
         assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
         # A click on the running app's icon (what `open -a` sends: a
         # reopen event) brings that window to the front and opens no
@@ -492,25 +528,60 @@ def test_macos_real_browser_runs_from_the_brand_bundle(tmp_path: Path) -> None:
         time.sleep(3)
         assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
         assert _Hits.paths.count("/") == 1, _Hits.paths
-        # The popup's bounds (moved once by the page) survive a relaunch:
-        # the browser forgets a popup's bounds, appWindow.js keeps them.
-        os.kill(pid, 15)
-        for _ in range(100):
-            if not standalone_app.macos_bundle_in_use(bundle):
-                break
-            time.sleep(0.1)
-        assert not standalone_app.macos_bundle_in_use(bundle)
+        # The daemon's check leaves a browser alone whose popup is
+        # connected, and one that still has a window on screen after
+        # the popup's connection closed (a reload).
+        assert standalone_app.app_window_event("open")
+        assert not standalone_app.quit_closed_app(bundle)
+        assert standalone_app.app_window_event("closing")
+        time.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 1)
+        assert standalone_app.macos_bundle_in_use(bundle)
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        # The user closes the window: the browser lives on without one.
+        # kiss-app, told by the site that the popup is gone, hands its
+        # command line to the running browser, which opens a new popup
+        # where the old one was, instead of sending a reopen.
+        _Hits.close = True
+        assert _macos_windows(pid, []) == []
+        assert standalone_app.macos_bundle_in_use(bundle)
+        _Hits.close = False
+        _Hits.app_window_open = False
         proc = _run(["--url", url], env)
         assert proc.returncode == 0, proc.stderr
-        for _ in range(300):
-            if _Hits.paths.count("/") == 2:
-                break
-            time.sleep(0.1)
+        assert "already open" not in proc.stdout
+        assert _wait_for(lambda: _Hits.paths.count("/") == 2), _Hits.paths
+        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        # Closed again, and this time the popup's connection closing
+        # reaches the daemon's check: the browser without a window quits.
+        _Hits.close = True
+        assert _macos_windows(pid, []) == []
+        assert standalone_app.app_window_event("open")
+        assert standalone_app.app_window_event("closing")
+        assert _wait_for(lambda: not standalone_app.macos_bundle_in_use(bundle))
+        assert standalone_app.macos_bundle_pid(bundle) is None
+        assert not standalone_app.quit_closed_app(bundle)
+        # The popup's bounds (moved once by the page) survive a relaunch:
+        # the browser forgets a popup's bounds, appWindow.js keeps them.
+        _Hits.close = False
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        assert _wait_for(lambda: _Hits.paths.count("/") == 3), _Hits.paths
         pid = _macos_engine_pid(exe_copy, profile)
         assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
     finally:
         subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False)
         httpd.shutdown()
+
+
+def _wait_for(condition: Callable[[], bool], timeout: float = 30) -> bool:
+    """Whether *condition* became true within *timeout* seconds (asked every 0.1 s)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if condition():
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
 
 
 def _macos_engine_pid(exe: Path, profile: Path) -> int:
@@ -1249,7 +1320,7 @@ def test_macos_stale_clone_in_use_is_left_alone(tmp_path: Path) -> None:
                 standalone_app.write_macos_launcher(
                     tmp_path / "Applications", BRAND, icon, exe, tmp_path / "state", browser
                 )
-                == bundle
+                is None
             )
             assert exe_copy.exists() and (bundle / "Contents" / "Frameworks").is_dir()
     finally:
@@ -1329,12 +1400,13 @@ def test_macos_bundle_without_a_browser_bundle_is_the_launcher_alone(tmp_path: P
     icon, exe = tmp_path / "icon.png", tmp_path / "kiss-app"
     icon.write_bytes(BRAND_ICON_PNG)
     has_tools = bool(shutil.which("sips") and shutil.which("iconutil"))
+    bundle = standalone_app.macos_bundle_path(tmp_path)
     for browser in (bare, None):
         # (write_macos_launcher directly: install_launcher would look
         # the host's browsers up in place of None)
-        bundle = standalone_app.write_macos_launcher(
+        assert standalone_app.write_macos_launcher(
             tmp_path / "Applications", BRAND, icon, exe, tmp_path / "state", browser
-        )
+        ) is None, "a plain bundle has no clone"
         assert not (bundle / "Contents" / "Frameworks").exists()
         assert [p.name for p in (bundle / "Contents" / "MacOS").iterdir()] == ["launcher"]
         info = _bundle_plist(bundle)
@@ -1348,9 +1420,9 @@ def test_macos_bundle_without_a_browser_bundle_is_the_launcher_alone(tmp_path: P
     # A bundle whose Info.plist cannot be read is treated like a bare binary.
     broken = _fake_browser_app(tmp_path / "broken")
     (tmp_path / "broken" / "Chromium.app" / "Contents" / "Info.plist").write_bytes(b"not a plist")
-    bundle = standalone_app.write_macos_launcher(
+    assert standalone_app.write_macos_launcher(
         tmp_path / "Applications", BRAND, icon, exe, tmp_path / "state", broken
-    )
+    ) is None
     assert not (bundle / "Contents" / "Frameworks").exists()
     assert standalone_app.macos_browser_bundle(broken) is not None
     assert standalone_app.macos_browser_bundle(bare) is None

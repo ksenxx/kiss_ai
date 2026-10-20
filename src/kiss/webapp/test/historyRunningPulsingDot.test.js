@@ -8,30 +8,18 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeSharedPage, send, MEDIA} = require('./simplify2_harness');
 const {inlineDesignTokens} = require('./designTokens');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  const {win, posted} = makeSharedPage({beforeScripts: freezeClockAndStyle});
+  return {win, posted};
+}
 
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
+/** Freeze the page's Date at FROZEN_NOW_MS and inline main.css. */
+function freezeClockAndStyle(win) {
   const RealDate = win.Date;
   const FakeDate = function (...args) {
     if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
@@ -43,34 +31,12 @@ function makePage() {
   FakeDate.UTC = RealDate.UTC;
   win.Date = FakeDate;
 
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
+  const cssText = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
   const styleEl = win.document.createElement('style');
   styleEl.textContent = cssText;
   win.document.head.appendChild(styleEl);
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 /** Let main.js's end-of-tick history refetch coalescing settle. */
@@ -140,7 +106,12 @@ function testDotRendersForRunningRow() {
   const SESSIONS = [
     makeRow({task_id: 1, title: 'finished task', is_running: false}),
     makeRow({task_id: 2, title: 'running task', is_running: true, endTs: 0}),
-    makeRow({task_id: 3, title: 'failed task', is_running: false, failed: true}),
+    makeRow({
+      task_id: 3,
+      title: 'failed task',
+      is_running: false,
+      failed: true,
+    }),
   ];
   send(win, {type: 'history', sessions: SESSIONS, offset: 0});
 
@@ -199,7 +170,9 @@ function testDotRendersForRunningRow() {
     'the running indicator must spin, not pulse',
   );
 
-  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
+  const cssText = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
   assert.ok(
     /@keyframes\s+status-spin\b/.test(cssText),
     'main.css must define @keyframes status-spin',
@@ -241,7 +214,8 @@ function testDotAppearsLiveOnStatusRunningTrue() {
     sent,
     'status running:true must trigger a getHistory refetch ' +
       'so the History panel can repaint with is_running:true; ' +
-      'posted=' + JSON.stringify(posted),
+      'posted=' +
+      JSON.stringify(posted),
   );
 
   const generation = sent.generation;
@@ -259,10 +233,7 @@ function testDotAppearsLiveOnStatusRunningTrue() {
   const row = rows['live task'];
   assert.ok(row, 'row must still render after the live refresh');
   const dot = dotOf(row);
-  assert.ok(
-    dot,
-    'spinner must appear on the row after status running:true',
-  );
+  assert.ok(dot, 'spinner must appear on the row after status running:true');
   assert.strictEqual(
     row.firstElementChild,
     dot,

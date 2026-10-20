@@ -32,7 +32,7 @@ No mocks/patches/fakes are used: the tests drive a real
 production ``WebPrinter`` broadcast contract) and the real config
 module with its ``CONFIG_DIR``/``CONFIG_PATH`` redirected to a fresh
 temp dir per test (the established pattern from
-``test_config_custom_headers.py``).
+``kiss.tests.agents.third_party_agents.test_100pct_branch_coverage``).
 """
 
 from __future__ import annotations

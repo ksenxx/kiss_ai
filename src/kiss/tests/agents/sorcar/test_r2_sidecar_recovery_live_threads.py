@@ -31,6 +31,12 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.pause import Pause
+
+
+def _on_sidecar_b(_locals: dict[str, object]) -> bool:
+    return threading.current_thread().name == "sidecar-b"
+
 
 _SLOW_COUNT = (
     "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 500000000) "
@@ -228,6 +234,133 @@ class TestRecoveryWithLiveThreads:
         assert tasks == {"seed", "B after recovery", "main after B reconnected"}
         if os.path.isdir("/proc/self/fd"):  # the dead mapping is really gone
             assert f"{th._DB_PATH}-shm (deleted)" not in _open_file_links(), _open_file_links()
+
+    def test_a_late_observer_of_the_dead_mapping_does_not_recover_twice(self) -> None:
+        """A thread that saw the dead mapping before another thread's recovery
+        finished must find nothing to do once it holds the lock.
+
+        B's ``_get_db()`` finds the dead ``-shm`` (the old identity is
+        still recorded) and queues for ``_init_tables_lock``; meanwhile
+        main recovers, reconnects and records the identity of the fresh
+        ``-shm``.  B's recovery used to take ``current_path in
+        _attached_shm`` as "still to do" and closed main's brand-new
+        handle, so the statement main was about to run on it (the
+        ``_get_db()`` / ``execute`` pair of every writer) failed with
+        ``ProgrammingError: Cannot operate on a closed database``.
+        Pinned with a settrace pause holding B at the recovery's entry.
+        """
+        th._add_task("seed")
+        ready = threading.Event()
+        go = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def run_b() -> None:
+            try:
+                th._get_db()
+                ready.set()
+                assert go.wait(timeout=30)
+                outcome["after"] = th._add_task("B after recovery")[0]
+            except BaseException as exc:  # noqa: BLE001 — recorded for the assertion
+                outcome["fatal"] = exc
+            finally:
+                th._close_thread_db()
+
+        b = threading.Thread(target=run_b, name="sidecar-b", daemon=True)
+        hold_b = Pause(th._recover_orphaned_sidecars.__code__, _on_sidecar_b)
+        with hold_b:
+            b.start()
+            assert ready.wait(timeout=30)
+            _unlink_sidecars(th._DB_PATH)
+            go.set()
+            assert hold_b.paused.wait(30), "B never observed the dead mapping"
+            db = th._get_db()  # main recovers, reconnects, records the fresh -shm
+            hold_b.release()
+            b.join(timeout=60)
+        assert not b.is_alive(), "thread B hung"
+        assert "fatal" not in outcome, repr(outcome.get("fatal"))
+        assert outcome["after"] is not None
+        assert db.execute("SELECT 1").fetchone()[0] == 1, "main's fresh handle was closed"
+        th._add_task("main after recovery")
+        tasks = {h["task"] for h in th._load_history()}
+        assert tasks == {"seed", "B after recovery", "main after recovery"}
+
+    def test_a_late_observer_still_recovers_a_mapping_a_busy_handle_kept_alive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only a *completed* recovery makes a queued observer stand down.
+
+        Main's recovery gives up on C's busy handle (the dead mapping and
+        its entry stay, the generation is bumped).  B, queued at the
+        recovery's entry since before that, must then retry the recovery
+        — and fail the same way while C is busy — rather than skip it and
+        open a connection that joins the dead mapping for good (a
+        generation check would have let it, and that connection's
+        writes corrupted the database).
+        """
+        monkeypatch.setattr(th, "_RECOVERY_IDLE_WAIT_S", 0.3)
+        th._add_task("seed")
+        stepping = threading.Event()
+        release_c = threading.Event()
+        ready = threading.Event()
+        go = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def hold_step() -> int:
+            """A SQL function that keeps C's statement busy until the test says so."""
+            stepping.set()
+            assert release_c.wait(timeout=30)
+            return 1
+
+        def run_c() -> None:
+            try:
+                db = th._get_db()
+                db.create_function("hold_step", 0, hold_step)
+                try:
+                    db.execute("SELECT hold_step()").fetchone()
+                except sqlite3.OperationalError as exc:
+                    outcome["c_error"] = exc
+            finally:
+                th._close_thread_db()
+
+        def run_b() -> None:
+            try:
+                th._get_db()
+                ready.set()
+                assert go.wait(timeout=30)
+                outcome["b_after"] = th._add_task("B after recovery")[0]
+            except BaseException as exc:  # noqa: BLE001 — recorded for the assertion
+                outcome["b_error"] = exc
+            finally:
+                th._close_thread_db()
+
+        c = threading.Thread(target=run_c, daemon=True)
+        b = threading.Thread(target=run_b, name="sidecar-b", daemon=True)
+        hold_b = Pause(th._recover_orphaned_sidecars.__code__, _on_sidecar_b)
+        with hold_b:
+            c.start()
+            assert stepping.wait(timeout=30)  # C is inside the step, holding its lock
+            b.start()
+            assert ready.wait(timeout=30)
+            _unlink_sidecars(th._DB_PATH)
+            go.set()
+            assert hold_b.paused.wait(30), "B never observed the dead mapping"
+            with pytest.raises(sqlite3.OperationalError, match="still busy"):
+                th._get_db()  # main's recovery gives up on C
+            hold_b.release()
+            b.join(timeout=60)
+        assert not b.is_alive(), "thread B hung"
+        assert "b_after" not in outcome, "B opened a connection onto the dead mapping"
+        assert "still busy" in str(outcome.get("b_error")), repr(outcome.get("b_error"))
+        release_c.set()
+        c.join(timeout=60)
+        assert not c.is_alive(), "thread C hung"
+        assert "interrupted" in str(outcome.get("c_error")), repr(outcome.get("c_error"))
+        th._get_db()  # C retired the last old handle: the recovery completes
+        th._add_task("main after recovery")
+        tasks = {h["task"] for h in th._load_history()}
+        assert tasks == {"seed", "main after recovery"}
+        assert th._get_db().execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
     def test_context_manager_and_scripts_run_under_the_lock(self) -> None:
         """``with conn:`` and ``executescript`` go through the locked wrappers."""

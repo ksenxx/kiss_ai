@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {loadMainCss, makePage, send} = require('./simplify2_harness');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
@@ -268,23 +264,18 @@ function testWorkspaceLineMergesMetadata() {
 }
 
 function testWorkspaceLineBreaksToOwnVisualLine() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const re = /\.running-item-workspace\s*\{([^}]*)\}/g;
-  let m;
-  let found = false;
-  while ((m = re.exec(css)) !== null) {
-    const body = m[1];
-    if (/flex-basis\s*:\s*100%/.test(body)) {
-      found = true;
-      break;
-    }
-  }
-  assert.ok(
-    found,
-    '.running-item-workspace rule in main.css must declare ' +
-      '"flex-basis: 100%" so the workspace+meta span renders on ' +
-      'its own line below the metrics row',
+  const {win} = makePage();
+  loadMainCss(win);
+  sendEmptyWorkDir(win);
+  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  const span = workspaceSpan(rowsByTitle(win)['meta row A — all flags on']);
+  assert.strictEqual(
+    win.getComputedStyle(span).flexBasis,
+    '100%',
+    'the workspace+meta span takes the whole row width, so it renders ' +
+      'on its own line below the metrics row',
   );
+  win.close();
   console.log('  ok - workspace+meta span has flex-basis: 100%');
 }
 

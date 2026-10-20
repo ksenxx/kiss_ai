@@ -80,14 +80,14 @@ class TestFirstStepErrorResult:
 
             def tracking_print(
                 content: Any, type: str = "text", **kwargs: Any,
-            ) -> str:
+            ) -> None:
                 if type == "result":
                     result_events.append({
                         "content": str(content),
                         "type": type,
                         **kwargs,
                     })
-                return original_print(content, type=type, **kwargs)
+                original_print(content, type=type, **kwargs)
 
             printer.print = tracking_print  # type: ignore[assignment]
 

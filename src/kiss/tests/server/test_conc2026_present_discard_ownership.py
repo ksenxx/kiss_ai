@@ -186,14 +186,14 @@ class TestPresentDiscardOwnership(unittest.TestCase):
 
         # Park thread A inside its presentation, right after the
         # unlocked changed-files probe — the production race window.
-        orig_probe = self.server._get_worktree_changed_files
+        orig_probe = self.server._list_pending
         a_thread_box: list[threading.Thread] = []
         a_parked = threading.Event()
         a_release = threading.Event()
         parked_once = threading.Event()
 
-        def parking_probe(t: str = "") -> list[str]:
-            result = orig_probe(t)
+        def parking_probe(wt_agent: Any) -> list[Any]:
+            result = orig_probe(wt_agent)
             if (
                 a_thread_box
                 and threading.current_thread() is a_thread_box[0]
@@ -204,7 +204,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 a_release.wait(timeout=60)
             return result
 
-        self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+        self.server._list_pending = (  # type: ignore[method-assign]
             parking_probe  # type: ignore[assignment]
         )
 
@@ -287,7 +287,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         finally:
             a_release.set()
             stub_release.set()
-            self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+            self.server._list_pending = (  # type: ignore[method-assign]
                 orig_probe
             )
 
@@ -308,14 +308,14 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         # Park thread B inside its presentation, right after the
         # changed-files probe, while it holds the is_merging claim
         # taken by _emit_pending_worktree.
-        orig_probe = self.server._get_worktree_changed_files
+        orig_probe = self.server._list_pending
         b_thread_box: list[threading.Thread] = []
         b_parked = threading.Event()
         b_release = threading.Event()
         parked_once = threading.Event()
 
-        def parking_probe(t: str = "") -> list[str]:
-            result = orig_probe(t)
+        def parking_probe(wt_agent: Any) -> list[Any]:
+            result = orig_probe(wt_agent)
             if (
                 b_thread_box
                 and threading.current_thread() is b_thread_box[0]
@@ -326,7 +326,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 b_release.wait(timeout=60)
             return result
 
-        self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+        self.server._list_pending = (  # type: ignore[method-assign]
             parking_probe  # type: ignore[assignment]
         )
 
@@ -377,7 +377,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
             self.assertEqual(b_error, [])
         finally:
             b_release.set()
-            self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+            self.server._list_pending = (  # type: ignore[method-assign]
                 orig_probe
             )
 
@@ -401,14 +401,14 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         tab_id = "tab-mc1-gone"
         wt_dir, branch = self._make_pending_empty_worktree(tab_id)
 
-        orig_probe = self.server._get_worktree_changed_files
+        orig_probe = self.server._list_pending
         a_thread_box: list[threading.Thread] = []
         a_parked = threading.Event()
         a_release = threading.Event()
         parked_once = threading.Event()
 
-        def parking_probe(t: str = "") -> list[str]:
-            result = orig_probe(t)
+        def parking_probe(wt_agent: Any) -> list[Any]:
+            result = orig_probe(wt_agent)
             if (
                 a_thread_box
                 and threading.current_thread() is a_thread_box[0]
@@ -419,7 +419,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 a_release.wait(timeout=60)
             return result
 
-        self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+        self.server._list_pending = (  # type: ignore[method-assign]
             parking_probe  # type: ignore[assignment]
         )
 
@@ -464,7 +464,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
             self.assertFalse(state.busy())
         finally:
             a_release.set()
-            self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+            self.server._list_pending = (  # type: ignore[method-assign]
                 orig_probe
             )
 
@@ -498,26 +498,28 @@ class TestPresentDiscardOwnership(unittest.TestCase):
 
         self._parent_class.run = late_writer
 
-        orig_probe = self.server._get_worktree_changed_files
+        orig_probe = self.server._list_pending
         presenter_box: list[threading.Thread] = []
         presenter_probed = threading.Event()
         allow_presenter = threading.Event()
         probed_once = threading.Event()
 
-        def parking_probe(t: str = "") -> list[str]:
-            result = orig_probe(t)
+        def parking_probe(wt_agent: Any) -> list[Any]:
+            result = orig_probe(wt_agent)
             if (
                 presenter_box
                 and threading.current_thread() is presenter_box[0]
                 and not probed_once.is_set()
             ):
                 probed_once.set()
-                assert result == [], "the first probe must be the empty one"
+                assert all(
+                    files == [] for _wt, files in result
+                ), "the first probe must be the empty one"
                 presenter_probed.set()
                 assert allow_presenter.wait(60)
             return result
 
-        self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+        self.server._list_pending = (  # type: ignore[method-assign]
             parking_probe  # type: ignore[assignment]
         )
 
@@ -602,7 +604,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         finally:
             allow_write.set()
             allow_presenter.set()
-            self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+            self.server._list_pending = (  # type: ignore[method-assign]
                 orig_probe
             )
 

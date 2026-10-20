@@ -173,7 +173,7 @@ def commands_table() -> str:
     rows = ["| Command | Script | Description |", "|---|---|---|"]
     for name, script in sorted(bundled_commands().items()):
         try:
-            text = sea_description(load_sea(script)) or ""
+            text = sea_description(load_sea(script))
         except Exception as exc:  # a broken bundled script is a lint finding, not a docs crash
             text = f"(broken: {exc})"
         first = re.split(r"(?<=[.!?])\s", text.strip().split("\n")[0], maxsplit=1)[0].replace(

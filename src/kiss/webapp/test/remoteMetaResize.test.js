@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, fakeMatchMedia} = require('./simplify2_harness');
 
 function makePage(opts) {
   const {
@@ -18,66 +14,26 @@ function makePage(opts) {
     storedWidth = null,
     storedSidebarWidth = null,
   } = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
   const captured = [];
   const released = [];
-  win.Element.prototype.setPointerCapture = function (id) {
-    captured.push(id);
-  };
-  win.Element.prototype.releasePointerCapture = function (id) {
-    released.push(id);
-  };
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: () => {},
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  if (storedWidth !== null) {
-    win.localStorage.setItem('kiss-meta-w', storedWidth);
-  }
-  if (storedSidebarWidth !== null) {
-    win.localStorage.setItem('kiss-sidebar-w', storedSidebarWidth);
-  }
-  const mql = {
-    matches: desktopMatches === true,
-    media: '(min-width: 900px)',
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    addListener: () => {},
-    removeListener: () => {},
-  };
-  win.matchMedia = function (query) {
-    if (query === '(min-width: 900px)') return mql;
-    return {
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  const {win} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts(win) {
+      win.Element.prototype.setPointerCapture = function (id) {
+        captured.push(id);
+      };
+      win.Element.prototype.releasePointerCapture = function (id) {
+        released.push(id);
+      };
+      if (storedWidth !== null) {
+        win.localStorage.setItem('kiss-meta-w', storedWidth);
+      }
+      if (storedSidebarWidth !== null) {
+        win.localStorage.setItem('kiss-sidebar-w', storedSidebarWidth);
+      }
+      fakeMatchMedia(win, desktopMatches === true);
+    },
+  });
   return {win, captured, released};
 }
 

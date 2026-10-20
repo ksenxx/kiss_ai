@@ -54,6 +54,7 @@ _MEDIA_DIR = (
 )
 _CSS = _MEDIA_DIR / "main.css"
 _API_JS = _MEDIA_DIR / "api.js"
+_PANEL_COPY_JS = _MEDIA_DIR / "panelCopy.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 
@@ -62,6 +63,7 @@ def _build_test_page() -> str:
     """Return a self-contained HTML page that loads the real CSS+JS."""
     css = _CSS.read_text(encoding="utf-8")
     api_js = _API_JS.read_text(encoding="utf-8")
+    panel_copy_js = _PANEL_COPY_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
     body_start = html.find("<body")
@@ -118,7 +120,6 @@ def _build_test_page() -> str:
       highlightAll: function () {{}},
     }};
     window.marked = {{ parse: function (s) {{ return s; }} }};
-    window.PanelCopy = {{ addCopyButton: function () {{}} }};
     window.__TRICKS__ = [];
     window.__post = function (ev) {{
       window.dispatchEvent(new MessageEvent('message', {{ data: ev }}));
@@ -129,6 +130,7 @@ def _build_test_page() -> str:
     }});
   </script>
   <script>{api_js}</script>
+  <script>{panel_copy_js}</script>
   <script>{js}</script>
 </body>
 </html>

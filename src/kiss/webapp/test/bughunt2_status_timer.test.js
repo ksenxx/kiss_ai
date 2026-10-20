@@ -6,10 +6,33 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sleep} = require('./simplify2_harness');
+const {makePage, send} = require('./simplify2_harness');
+
+// The page runs on a seeded clock and its 1 s header tick is recorded
+// instead of scheduled, so the elapsed label is exact and no wall-clock
+// stall between `send` and the assertion can move it.
+function makeClockedPage() {
+  const clock = {now: 1_700_000_000_000};
+  const ticks = [];
+  function seedClock(win) {
+    win.Date.now = () => clock.now;
+    const realSetInterval = win.setInterval;
+    win.setInterval = function (fn, ms, ...args) {
+      if (ms !== 1000) return realSetInterval(fn, ms, ...args);
+      ticks.push(fn);
+      return ticks.length;
+    };
+  }
+  const {win, posted} = makePage({beforeScripts: seedClock});
+  function advance(ms) {
+    clock.now += ms;
+    for (const tick of ticks) tick();
+  }
+  return {win, posted, clock, advance};
+}
 
 async function testForeignTabStatusMustNotClobberActiveTimer() {
-  const {win, posted} = makePage();
+  const {win, posted, clock, advance} = makeClockedPage();
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
@@ -19,12 +42,12 @@ async function testForeignTabStatusMustNotClobberActiveTimer() {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 5_000,
+    startTs: clock.now - 5_000,
   });
   const statusText = win.document.getElementById('status-text');
-  assert.match(
+  assert.strictEqual(
     statusText.textContent,
-    /^Running [4-7]s$/,
+    'Running 5s',
     'active tab timer must anchor to its own startTs',
   );
 
@@ -32,15 +55,15 @@ async function testForeignTabStatusMustNotClobberActiveTimer() {
     type: 'status',
     running: true,
     tabId: 'foreign-window-tab',
-    startTs: Date.now() - 3_600_000,
+    startTs: clock.now - 3_600_000,
   });
 
-  await sleep(1_300);
+  advance(1_000);
 
   const text = statusText.textContent;
-  assert.match(
+  assert.strictEqual(
     text,
-    /^Running [4-9]s$/,
+    'Running 6s',
     'BUG: a tab-stamped status event for a foreign/background tab ' +
       `clobbered the active tab's timer anchor (header now "${text}")`,
   );
@@ -51,7 +74,7 @@ async function testForeignTabStatusMustNotClobberActiveTimer() {
 }
 
 async function testBackgroundLocalTabStatusKeepsOwnT0() {
-  const {win, posted} = makePage();
+  const {win, posted, clock, advance} = makeClockedPage();
   const ready = posted.find(m => m.type === 'ready');
   const activeId = ready.tabId;
 
@@ -65,10 +88,10 @@ async function testBackgroundLocalTabStatusKeepsOwnT0() {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 5_000,
+    startTs: clock.now - 5_000,
   });
 
-  const bgStart = Date.now() - 1_800_000;
+  const bgStart = clock.now - 1_800_000;
   send(win, {
     type: 'status',
     running: true,
@@ -76,12 +99,12 @@ async function testBackgroundLocalTabStatusKeepsOwnT0() {
     startTs: bgStart,
   });
 
-  await sleep(1_300);
+  advance(1_000);
 
   const statusText = win.document.getElementById('status-text');
-  assert.match(
+  assert.strictEqual(
     statusText.textContent,
-    /^Running [4-9]s$/,
+    'Running 6s',
     'BUG: background-tab status clobbered the active timer ' +
       `(header now "${statusText.textContent}")`,
   );

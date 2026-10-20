@@ -6,77 +6,24 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  answerCheckPaths,
+} = require('./simplify2_harness');
+const {findLinks} = require('./file_link_helpers');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
+// Confirm every checkPaths existence query, like the server does for
+// files that exist: these tests exercise the linkifier itself
+// (clickFilePathExistsOnly.test.js covers the exists / does-not-exist
+// split against the real filesystem).
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      // Confirm every checkPaths existence query, like the server
-      // does for files that exist: these tests exercise the
-      // linkifier itself (clickFilePathExistsOnly.test.js covers the
-      // exists / does-not-exist split against the real filesystem).
-      postMessage: msg => {
-        posted.push(msg);
-        if (msg.type === 'checkPaths') {
-          const results = {};
-          for (const p of msg.paths) results[p] = true;
-          send(win, {
-            type: 'pathsExist',
-            results,
-            workDir: msg.workDir,
-            tabId: msg.tabId,
-          });
-        }
-      },
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  const {win, posted} = makeChatPage({beforeScripts: answerCheckPaths});
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function flushTextStream(win) {
   send(win, {type: 'text_end'});
-}
-
-function findLinks(win, p) {
-  return Array.from(
-    win.document.querySelectorAll('#output [data-path]'),
-  ).filter(el => el.dataset.path === p);
 }
 
 function clickFirstLink(win, p) {
@@ -154,11 +101,7 @@ function testFilePathWithLineSuffixLinkified() {
   const {win} = makePage();
   send(win, {type: 'prompt', text: 'crash at /tmp/foo.py:42 today'});
   const links = findLinks(win, '/tmp/foo.py:42');
-  assert.strictEqual(
-    links.length,
-    1,
-    'path with :42 suffix must be linkified',
-  );
+  assert.strictEqual(links.length, 1, 'path with :42 suffix must be linkified');
   win.close();
   console.log('  ok - path with :line suffix is linkified');
 }
@@ -188,11 +131,7 @@ function testFilePathInResultTextLinkified() {
     success: true,
   });
   const links = findLinks(win, '/var/log/y.log');
-  assert.strictEqual(
-    links.length,
-    1,
-    'path in result text must be linkified',
-  );
+  assert.strictEqual(links.length, 1, 'path in result text must be linkified');
   win.close();
   console.log('  ok - path in result text is linkified');
 }

@@ -9,63 +9,14 @@
 //   * a browser the daemon admits without a password (http://127.0.0.1,
 //     nothing stored) sends its frames bare: no password key at all.
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {sleep} = require('./simplify2_harness');
-const {waitForSocket} = require('./transport_page_helpers');
-
-const MEDIA = path.resolve(__dirname, '..', 'media');
-const shimJs = fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf-8');
-
-function buildDom(url) {
-  const html = `<!DOCTYPE html><html><head></head><body>
-    <div id="kiss-server-loading" role="status">
-      <div id="kiss-server-loading-msg">starting</div></div>
-    <div id="app" style="display:none;">
-      <div id="auth-modal" style="display:none;">
-        <input id="auth-modal-input" type="password">
-        <div id="auth-modal-error" role="alert"></div>
-        <button id="auth-modal-ok"></button>
-        <button id="auth-modal-cancel"></button>
-      </div>
-    </div></body></html>`;
-  return new JSDOM(html, {runScripts: 'outside-only', pretendToBeVisual: true, url});
-}
-
-function installFakeWebSocket(window, sockets) {
-  function FakeWebSocket(url) {
-    this.url = url;
-    this.readyState = 0;
-    this.sent = [];
-    sockets.push(this);
-  }
-  FakeWebSocket.CONNECTING = 0;
-  FakeWebSocket.OPEN = 1;
-  FakeWebSocket.CLOSING = 2;
-  FakeWebSocket.CLOSED = 3;
-  FakeWebSocket.prototype.send = function (data) {
-    this.sent.push(JSON.parse(data));
-  };
-  FakeWebSocket.prototype.close = function () {
-    this.readyState = 3;
-    if (this.onclose) this.onclose();
-  };
-  FakeWebSocket.prototype.fireOpen = function () {
-    this.readyState = 1;
-    this.onopen();
-  };
-  FakeWebSocket.prototype.fireMessage = function (msg) {
-    this.onmessage({data: JSON.stringify(msg)});
-  };
-  window.WebSocket = FakeWebSocket;
-}
-
-function evalShim(window) {
-  window.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
-  window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
-  window.document.dispatchEvent(new window.Event('DOMContentLoaded', {bubbles: true}));
-}
+const {
+  newAuthDom,
+  bootShim,
+  installFakeWebSocket,
+  frames,
+  waitForSocket,
+} = require('./transport_page_helpers');
 
 function ok(msg) {
   console.log('  ok -', msg);
@@ -83,10 +34,10 @@ async function run() {
     ['http://127.0.0.1:8787/', 'ws://127.0.0.1:8787/ws'],
     ['https://example.test/', 'wss://example.test/ws'],
   ]) {
-    const {window} = buildDom(url);
+    const {window} = newAuthDom(url);
     const sockets = [];
     installFakeWebSocket(window, sockets);
-    evalShim(window);
+    bootShim(window);
     try {
       assert.strictEqual(sockets[0].url, scheme);
       ok(`page ${url} opens ${scheme}`);
@@ -98,11 +49,11 @@ async function run() {
 
   // 2. Every post-auth frame carries the password, queued ones included.
   {
-    const {window} = buildDom('http://127.0.0.1:8787/');
+    const {window} = newAuthDom('http://127.0.0.1:8787/');
     window.localStorage.setItem('sorcar-remote-pwd', 'Secret20Chars0000000');
     const sockets = [];
     installFakeWebSocket(window, sockets);
-    evalShim(window);
+    bootShim(window);
     const transport = window.acquireTransport();
     transport.postMessage({type: 'ready'});
     transport.postMessage({});
@@ -111,7 +62,7 @@ async function run() {
     sock.fireMessage({type: 'auth_ok'});
     transport.postMessage({type: 'runTask', prompt: 'a "quoted" {thing}'});
     try {
-      assert.deepStrictEqual(sock.sent, [
+      assert.deepStrictEqual(frames(sock), [
         {type: 'auth', password: 'Secret20Chars0000000'},
         {password: 'Secret20Chars0000000', type: 'ready'},
         {password: 'Secret20Chars0000000'},
@@ -131,7 +82,7 @@ async function run() {
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       await waitForSocket(sockets, 2);
       sockets[1].fireOpen();
-      assert.deepStrictEqual(sockets[1].sent, [{type: 'auth', password: ''}]);
+      assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
       ok('post-auth auth_failed forgets the password; the reconnect probes with ""');
     } catch (err) {
       fail('rotated password handling', err);
@@ -152,7 +103,7 @@ async function run() {
     try {
       // After the auth frame: the unconfirmed batch of socket 1 (no
       // pong came back) is re-sent, then its ping, then the live ping.
-      assert.deepStrictEqual(sockets[1].sent.slice(1), [
+      assert.deepStrictEqual(frames(sockets[1]).slice(1), [
         {type: 'auth', password: 'NewPassword000000000'},
         {password: 'NewPassword000000000', type: 'ready'},
         {password: 'NewPassword000000000'},
@@ -169,10 +120,10 @@ async function run() {
   // 5. Admitted without a password (a loopback browser): frames go out
   //    bare, with no password key, and no dialog opens.
   {
-    const {window} = buildDom('http://127.0.0.1:8787/');
+    const {window} = newAuthDom('http://127.0.0.1:8787/');
     const sockets = [];
     installFakeWebSocket(window, sockets);
-    evalShim(window);
+    bootShim(window);
     const transport = window.acquireTransport();
     transport.postMessage({type: 'ready'});
     const sock = sockets[0];
@@ -180,7 +131,7 @@ async function run() {
     sock.fireMessage({type: 'auth_ok', local: false});
     transport.postMessage({type: 'getConfig'});
     try {
-      assert.deepStrictEqual(sock.sent, [
+      assert.deepStrictEqual(frames(sock), [
         {type: 'auth', password: ''},
         {type: 'ready'},
         {type: 'ping'},
@@ -197,7 +148,7 @@ async function run() {
     sock.fireMessage({type: 'remotePasswordChanged', password: 'Rotated0Password0001'});
     transport.postMessage({type: 'ping'});
     try {
-      assert.deepStrictEqual(sock.sent[sock.sent.length - 1], {type: 'ping'});
+      assert.deepStrictEqual(frames(sock).at(-1), {type: 'ping'});
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       ok('a page admitted without a password ignores remotePasswordChanged for its frames');
     } catch (err) {
@@ -212,11 +163,11 @@ async function run() {
   //    each frame against config.json, where the new one now is) and
   //    for the next page load.  A malformed event changes nothing.
   {
-    const {window} = buildDom('https://example.test/');
+    const {window} = newAuthDom('https://example.test/');
     window.localStorage.setItem('sorcar-remote-pwd', 'Secret20Chars0000000');
     const sockets = [];
     installFakeWebSocket(window, sockets);
-    evalShim(window);
+    bootShim(window);
     const received = []; // what the page sees, minus the shim's own daemonStatus
     window.addEventListener('message', (ev) => {
       if (ev.data && ev.data.type !== 'daemonStatus') received.push(ev.data);
@@ -236,7 +187,7 @@ async function run() {
     }
     transport.postMessage({type: 'ping'});
     try {
-      assert.deepStrictEqual(sock.sent, [
+      assert.deepStrictEqual(frames(sock), [
         {type: 'auth', password: 'Secret20Chars0000000'},
         {
           password: 'Secret20Chars0000000', type: 'saveConfig',
@@ -266,13 +217,13 @@ async function run() {
     sock.fireMessage({type: 'remotePasswordChanged', password: ''});
     transport.postMessage({type: 'ping'});
     try {
-      assert.deepStrictEqual(sock.sent[sock.sent.length - 1], {type: 'ping'});
+      assert.deepStrictEqual(frames(sock).at(-1), {type: 'ping'});
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       sock.fireMessage({type: 'error', code: 'auth_failed', text: 'Wrong password.'});
       sock.close();
       await waitForSocket(sockets, 2);
       sockets[1].fireOpen();
-      assert.deepStrictEqual(sockets[1].sent, [{type: 'auth', password: ''}]);
+      assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
       const refusal = 'Remote access is turned off: no remote password is set.';
       sockets[1].fireMessage({type: 'error', code: 'localhost_only', text: refusal});
       const overlay = window.document.getElementById('kiss-server-loading-msg');

@@ -484,7 +484,8 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     db.row_factory = sqlite3.Row
     counts = {"tags": 0, "sea": 0, "chats": 0}
     rows = db.execute(
-        "SELECT id, task, result, parent_task_id FROM task_history WHERE tags IS NULL OR tags = ''"
+        "SELECT id, task, result, parent_task_id, success FROM task_history "
+        "WHERE tags IS NULL OR tags = ''"
     ).fetchall()
     for start in range(0, len(rows), _BACKFILL_BATCH):
         with db:
@@ -492,7 +493,7 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
                 tags = classify_task_tags(
                     row["task"] or "",
                     is_subagent=bool(row["parent_task_id"]),
-                    failed=_is_failed_result(row["result"] or ""),
+                    failed=_is_failed_result(row["result"] or "", row["success"]),
                     has_secret=trajectory_has_secret(db, row["id"], row["task"], row["result"]),
                 )
                 db.execute(

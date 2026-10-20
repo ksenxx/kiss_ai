@@ -31,47 +31,7 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  newDom,
-  loadPageScripts,
-  readShimJs,
-  installFakeWebSocket,
-} = require('./transport_page_helpers');
-
-// ---------------------------------------------------------------------------
-// the webapp, running the real media/transport.js
-// ---------------------------------------------------------------------------
-
-function makeWebappClient() {
-  const win = newDom();
-  const sockets = [];
-  installFakeWebSocket(win, sockets);
-  win.eval(readShimJs());
-  assert.strictEqual(
-    typeof win.acquireTransport,
-    'function',
-    'media/transport.js must define acquireTransport()',
-  );
-  loadPageScripts(win);
-  const sock = sockets[0];
-  assert.ok(sock, 'the webapp shim must open a WebSocket');
-  sock.onopen();
-  const authFrame = JSON.parse(sock.sent[0]);
-  assert.strictEqual(
-    authFrame.type,
-    'auth',
-    'the shim must authenticate before sending commands',
-  );
-  sock.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  const posted = [];
-  const drain = () => {
-    while (posted.length < sock.sent.length) {
-      posted.push(JSON.parse(sock.sent[posted.length]));
-    }
-    return posted;
-  };
-  return {win, posted, drain, sock};
-}
+const {makeWebappClient} = require('./transport_page_helpers');
 
 // ---------------------------------------------------------------------------
 // scenario helpers

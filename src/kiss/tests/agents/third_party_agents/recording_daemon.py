@@ -13,15 +13,22 @@ authenticates and sends its ``run`` command over TLS; the command is
 recorded and answered with a scripted ``result`` event.
 
 A test reaches the stand-in either through ``KISS_SORCAR_LOCAL`` (the
-endpoint file a standalone client reads) or through
-:data:`kiss.agents.sorcar.cron_agent._daemon_endpoint_file` (the endpoint a
-channel launcher started by the daemon records), e.g.::
+endpoint file a standalone client reads) or through a module attribute
+such as :data:`kiss.agents.sorcar.cron_agent._daemon_endpoint_file` (the
+endpoint a channel launcher started by the daemon records) or
+:data:`kiss.agents.third_party_agents._kiss_web_launcher._ENDPOINT_FILE_OVERRIDE`.
+:func:`serve_recording_daemon` serves one for the attribute case::
+
+    with serve_recording_daemon(cron_agent, "_daemon_endpoint_file", text="ok") as daemon:
+        tool(task="hi")
+        assert daemon.run_commands[0]["workDir"] == ...
+
+For the env-var case::
 
     daemon = RecordingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     try:
         tool(task="hi")
-        assert daemon.run_commands[0]["workDir"] == ...
     finally:
         daemon.close()
 """
@@ -33,7 +40,10 @@ import json
 import shutil
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from websockets.asyncio.server import ServerConnection
@@ -151,3 +161,32 @@ class RecordingDaemon:
         if not self._thread.is_alive():
             self._loop.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+@contextmanager
+def serve_recording_daemon(
+    module: ModuleType, attribute: str, **kwargs: Any
+) -> Iterator[RecordingDaemon]:
+    """Serve a :class:`RecordingDaemon` and point ``module.attribute`` at its endpoint file.
+
+    The attribute (the endpoint-file override a dispatcher consults) is
+    restored and the daemon closed however the block exits, so a pytest
+    fixture is ``with serve_recording_daemon(...) as daemon: yield daemon``
+    and a ``unittest`` ``setUp`` is ``self.enterContext(serve_recording_daemon(...))``.
+
+    Args:
+        module: The module holding the endpoint-file attribute.
+        attribute: Name of that attribute (an ``str | None``).
+        **kwargs: Passed to :class:`RecordingDaemon` (``text``, ``cost``, ...).
+
+    Yields:
+        The running daemon stand-in.
+    """
+    daemon = RecordingDaemon(**kwargs)
+    saved = getattr(module, attribute)
+    setattr(module, attribute, str(daemon.endpoint_file))
+    try:
+        yield daemon
+    finally:
+        setattr(module, attribute, saved)
+        daemon.close()

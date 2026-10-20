@@ -131,14 +131,21 @@ def test_main_css_page_rows_are_neutral() -> None:
     """main.css's task panels are flat: transparent until hovered,
     theme foreground text, no per-chat colour bar in either view."""
     css = MAIN_CSS.read_text(encoding="utf-8")
+    # A task panel is a `sidebar-item running-item` row (main.js): the
+    # base rule paints it transparent in the theme foreground, and the
+    # .running-item rule must not restate or override either.
+    base = re.search(r"\n\.sidebar-item\s*\{([^}]*)\}", css)
+    assert base, ".sidebar-item rule missing from main.css"
+    assert "background: transparent" in base.group(1), base.group(1)
+    assert "color: var(--fg)" in base.group(1), base.group(1)
     m = re.search(r"\n\.running-item\s*\{([^}]*)\}", css)
     assert m, ".running-item rule missing from main.css"
     rule = m.group(1)
-    assert "background-color: transparent" in rule, (
+    assert "background" not in rule, (
         f".running-item must paint no background of its own; got: {rule!r}"
     )
-    assert "color: var(--fg)" in rule, (
-        f".running-item must use the theme foreground; got: {rule!r}"
+    assert not re.search(r"(?<![-\w])color:", rule), (
+        f".running-item must keep the theme foreground; got: {rule!r}"
     )
     assert "--task-color" not in css, "main.css reads no per-chat colour"
     assert "legacy-view" not in css, "the legacy flat list has no styling of its own"

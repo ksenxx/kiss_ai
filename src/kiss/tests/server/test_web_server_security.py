@@ -329,19 +329,23 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
 
     async def _try_auth(self, password: str) -> str:
         """Attempt auth, return the response 'type' or 'closed'."""
+        return await self._try_frame(json.dumps({"type": "auth", "password": password}))
+
+    async def _try_frame(self, raw: str) -> str:
+        """Send *raw* as the first frame, return the response 'type' or 'closed'."""
         try:
             async with connect(
                 f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
                 close_timeout=2, additional_headers=FORWARDED_VISITOR,
             ) as ws:
-                await ws.send(json.dumps({"type": "auth", "password": password}))
+                await ws.send(raw)
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    reply = await asyncio.wait_for(ws.recv(), timeout=3)
                 except TimeoutError:
                     return "timeout"
                 except Exception:
                     return "closed"
-                msg = json.loads(raw)
+                msg = json.loads(reply)
                 return str(msg.get("type", "?"))
         except Exception:
             return "closed"
@@ -371,6 +375,16 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
             resp, ("closed", "timeout", "auth_locked"),
             "after lockout the socket must be refused without prompting",
         )
+
+    async def test_a_first_frame_that_is_no_object_closes_without_a_failure(self) -> None:
+        """A JSON array or a non-JSON frame is no credential: the socket is closed.
+
+        Neither counts as a failed guess (there was none), so the
+        password prompt afterwards is still the ordinary one.
+        """
+        for raw in ("[]", "42", "not json"):
+            self.assertEqual(await self._try_frame(raw), "closed")
+        self.assertEqual(await self._try_auth("wrong-password"), "auth_required")
 
     async def test_correct_password_locked_out_too(self) -> None:
         """Even the correct password is refused while locked out (per-IP).

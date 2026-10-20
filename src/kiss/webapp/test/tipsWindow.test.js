@@ -11,21 +11,10 @@ const path = require('path');
 
 const projectRoot = path.resolve(__dirname, '..');
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  FAIL - ${name}: ${err && err.message}`);
-  }
-}
 
 const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 function loadTipsDom(cfg, {withMarked = true, withConfig = true} = {}) {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
@@ -590,19 +579,6 @@ asyncTest('copy shows Failed when execCommand throws', async () => {
 });
 
 (async () => {
-  for (const t of asyncTests) {
-    try {
-      await t.fn();
-      passed += 1;
-      console.log(`  ok - ${t.name}`);
-    } catch (err) {
-      failures.push({name: t.name, err});
-      console.log(`  FAIL - ${t.name}: ${err && err.message}`);
-    }
-  }
-  if (failures.length > 0) {
-    console.error(`\n${failures.length} test(s) failed, ${passed} passed`);
-    process.exit(1);
-  }
-  console.log(`\nAll ${passed} tipsWindow tests passed`);
+  for (const t of asyncTests) await test(t.name, t.fn);
+  report('tipsWindow');
 })();

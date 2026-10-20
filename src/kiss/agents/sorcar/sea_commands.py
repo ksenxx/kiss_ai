@@ -93,9 +93,10 @@ from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.sea_settings import (
     SEA_BASES,
     SeaError,
-    declared_bases,
     declares_hidden,
     execute_python_file,
+    is_stop,
+    parsed_sea,
     resolve_settings,
     safe_message,
     script_name,
@@ -621,13 +622,13 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[BaseSea]:
         ``None`` or the same file.
 
     Raises:
-        SeaError: When a file is broken (:func:`load_sea`) or has
-            malformed settings.
+        SeaError: When a file is broken (:func:`load_sea`).  Malformed
+            settings fail in :func:`evaluate_sea`, which every caller
+            runs next.
     """
     seas = [load_sea(sea_path)]
     if base is not None and base != sea_path:
         seas.insert(0, load_sea(base))
-    base_settings(seas)  # malformed settings fail at load time
     return seas
 
 
@@ -676,7 +677,7 @@ def sea_name(seas: list[BaseSea]) -> str:
 
 def _file_of(obj: Any) -> Path | None:
     """Return the source file of the module a class or function was defined in, if known."""
-    module = sys.modules.get(getattr(obj, "__module__", "") or "")
+    module = sys.modules.get(getattr(obj, "__module__", ""))
     file = getattr(module, "__file__", None)
     return Path(file) if file else None
 
@@ -717,10 +718,18 @@ def _label(method: Callable[..., Any]) -> str:
 
 
 def _call(method: Callable[..., Any], *args: Any) -> Any:
-    """Call a bound SEA method; whatever it raises becomes a :exc:`SeaError`."""
+    """Call a bound SEA method; whatever it raises becomes a :exc:`SeaError`.
+
+    Except a Stop (:func:`~kiss.agents.sorcar.sea_settings.is_stop`),
+    re-raised unchanged: the method did not fail, the task was stopped,
+    so nothing (the model picker's verdict cache included) records it
+    as broken.
+    """
     try:
         return method(*args)
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        if is_stop(exc):
+            raise
         logger.warning("%s raised", _label(method), exc_info=True)
         raise SeaError(f"{_label(method)} raised: {safe_message(exc)}") from exc
 
@@ -761,11 +770,12 @@ def inherited_settings(sea: BaseSea) -> dict[str, Any]:
     The values a key of :func:`own_settings` repeats when it equals one
     of these (the linter's ``redundant-key`` finding).
     """
+    methods = _chain([sea], "settings")
+    if "settings" in vars(type(sea)):
+        methods.pop()  # the chain ends with the SEA's own class
     settings: dict[str, Any] = {}
-    for cls in reversed(type(sea).__mro__[1:]):
-        if "settings" in vars(cls):
-            method = _bound(sea, cls, "settings")
-            settings = _check_dict(_label(method), _call(method, settings))
+    for method in methods:
+        settings = _check_dict(_label(method), _call(method, settings))
     return settings
 
 
@@ -1059,34 +1069,31 @@ def run_picked_hook(
 def _registers_as_model(sea_path: Path) -> bool:
     """Return whether the SEA at *sea_path* defines ``register_as_model()`` returning ``True``.
 
-    The verdict is cached per file stamp (mtime, size, inode), so both an
-    edit and an atomic replacement are re-read.  Only a script whose
-    source mentions ``register_as_model`` or derives its class from
-    something other than the plain bases (so it may inherit the
-    registration; :func:`~kiss.agents.sorcar.sea_settings.declared_bases`)
-    is imported: importing every registered SEA (channel agents with
-    heavy dependencies among them) on each picker refresh would be slow
-    for nothing.  A script that cannot be read, fails to import or whose
-    method raises is logged and treated as not registered, so one
-    broken SEA cannot break the model picker.
+    The verdict is cached per file stamp (the revision
+    :func:`~kiss.agents.sorcar.sea_settings.parsed_sea` read, so both
+    an edit and an atomic replacement are re-read).  Only a script
+    whose source mentions ``register_as_model`` or derives its class
+    from something other than the plain bases (so it may inherit the
+    registration) is imported: importing every registered SEA (channel
+    agents with heavy dependencies among them) on each picker refresh
+    would be slow for nothing.  A script that cannot be read, fails to
+    import or whose method raises is logged and treated as not
+    registered, so one broken SEA cannot break the model picker.
     """
-    try:
-        st = sea_path.stat()
-        stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
-        cached = locked_call(_lock, _model_sea_cache.get, sea_path)
-        if cached is not None and cached[0] == stamp:
-            return cached[1]
-        source = sea_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        logger.warning("SEA %s: cannot be read", sea_path, exc_info=True)
+    parsed = parsed_sea(sea_path)
+    if parsed.stamp is None:
+        logger.warning("SEA %s: cannot be read", sea_path)
         return False
+    cached = locked_call(_lock, _model_sea_cache.get, sea_path)
+    if cached is not None and cached[0] == parsed.stamp:
+        return cached[1]
     verdict = False
-    if "register_as_model" in source or declared_bases(sea_path).difference(SEA_BASES):
+    if parsed.mentions_register_as_model or parsed.bases.difference(SEA_BASES):
         try:
             verdict = _call(_method(load_sea(sea_path), "register_as_model")) is True
         except SeaError:
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
-    locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (stamp, verdict))
+    locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (parsed.stamp, verdict))
     return verdict
 
 

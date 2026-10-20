@@ -20,10 +20,10 @@ now an explicit unsupported stub.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from importlib.util import find_spec
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from nio import AsyncClient
 
 from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
@@ -80,8 +80,6 @@ class _SyncServer(RecordingServer):
 @pytest.fixture()
 def matrix_backend() -> Iterator[tuple[MatrixChannelBackend, _SyncServer]]:
     """A matrix backend whose real nio client talks to a local sync server."""
-    from nio import AsyncClient  # pyright: ignore[reportMissingImports]
-
     with recording_server(_SyncRecordingHandler, _SyncServer) as server:
         backend = MatrixChannelBackend()
         client = AsyncClient(server.base_url, "@bot:example.org")
@@ -97,15 +95,8 @@ def matrix_backend() -> Iterator[tuple[MatrixChannelBackend, _SyncServer]]:
             backend.disconnect()
 
 
-@pytest.mark.skipif(find_spec("nio") is None, reason="matrix-nio is optional")
 class TestMatrixSinceSelection:
-    """poll_messages must sync from the persisted cursor when present.
-
-    Skipif-guarded like the other optional-dependency channel tests
-    (``matrix-nio`` is an optional package); the client-less guard is
-    covered unconditionally by
-    ``test_poll_without_client_returns_cursor_unchanged`` below.
-    """
+    """poll_messages must sync from the persisted cursor when present."""
 
     def test_persisted_cursor_wins(
         self, matrix_backend: tuple[MatrixChannelBackend, _SyncServer]

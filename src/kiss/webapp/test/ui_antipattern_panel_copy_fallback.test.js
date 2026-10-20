@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {sleep, waitFor} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -58,19 +60,6 @@ function isCross(btn) {
   return btn.querySelectorAll('svg line').length === 2;
 }
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  not ok - ${name}`);
-  }
-}
 
 async function main() {
   await test('a rejected writeText falls back to execCommand and reports success', async () => {
@@ -152,9 +141,5 @@ async function main() {
 
 main().then(() => {
   windows.forEach(win => win.close());
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  for (const f of failures) {
-    console.error(`\n${f.name}\n${f.err && f.err.stack}`);
-  }
-  if (failures.length) process.exit(1);
+  report('ui_antipattern_panel_copy_fallback');
 });

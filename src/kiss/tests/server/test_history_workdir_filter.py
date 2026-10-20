@@ -48,7 +48,7 @@ def _ids(rows: list[th._HistoryEntry]) -> list[str]:
 
 
 class TestWorkDirFilterQueries:
-    """``_load_history`` / ``_search_history`` filter by work_dir in SQL."""
+    """``_load_history`` (with and without ``query``) filters by work_dir in SQL."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -82,16 +82,16 @@ class TestWorkDirFilterQueries:
         kiss_parser = _task("Fix the parser bug", "/home/u/kiss")
         _task("Fix the parser bug", "/home/u/other")
         kiss_paper = _task("Write the paper on parsers", "/home/u/kiss")
-        assert _ids(th._search_history("parser", work_dir="/home/u/kiss")) == [
+        assert _ids(th._load_history(query="parser", work_dir="/home/u/kiss")) == [
             kiss_paper,
             kiss_parser,
         ]
-        assert _ids(th._search_history("bug", work_dir="/home/u/kiss")) == [kiss_parser]
-        assert len(th._search_history("parser")) == 3
-        assert _ids(th._search_history("", tag="debugging", work_dir="/home/u/kiss")) == [
+        assert _ids(th._load_history(query="bug", work_dir="/home/u/kiss")) == [kiss_parser]
+        assert len(th._load_history(query="parser")) == 3
+        assert _ids(th._load_history(query="", tag="debugging", work_dir="/home/u/kiss")) == [
             kiss_parser,
         ]
-        assert th._search_history("paper", tag="paper", work_dir="/home/u/other") == []
+        assert th._load_history(query="paper", tag="paper", work_dir="/home/u/other") == []
 
 
 

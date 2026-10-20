@@ -254,7 +254,7 @@ def test_concurrent_close_during_teardown_is_deferred_not_duplicated(env: _Env) 
     release = threading.Event()
     calls = {"n": 0}
     calls_lock = threading.Lock()
-    original = agent._preserve_pending_worktree_for_review
+    original = agent._retire_previous_worktree
 
     def blocking_preserve() -> bool:
         with calls_lock:
@@ -265,7 +265,7 @@ def test_concurrent_close_during_teardown_is_deferred_not_duplicated(env: _Env) 
 
     # Real agent, real preserve — only its entry is gated so the second
     # close provably arrives while the first teardown is in flight.
-    agent._preserve_pending_worktree_for_review = blocking_preserve  # type: ignore[method-assign]
+    agent._retire_previous_worktree = blocking_preserve  # type: ignore[method-assign]
 
     lock = env.repo / ".git" / "kiss-preserve"
     lock.write_text("")

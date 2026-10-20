@@ -25,7 +25,7 @@ class TestI2FindChannelReturnsName:
 
         backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
         result = backend.find_channel("general")
-        assert result != "general" or result is None, (
+        assert result != "general", (
             f"find_channel('general') returned '{result}' — the name echoed "
             f"back as a channel ID. Should do actual channel lookup or return None."
         )

@@ -661,12 +661,17 @@ def _cache_entry_locked(key: str) -> dict[str, Any] | None:
 
 def _remember_locked(key: str, is_simple: bool) -> None:
     """Store the verdict under *key* and persist the cache (``_cache_lock`` held)."""
-    cache = _load_cache_locked()
     path = _cache_path()
-    for other_key, other in _read_cache_file(path).items():
-        mine = cache.get(other_key)
-        if mine is None or mine["ts"] < other["ts"]:
-            cache[other_key] = other
+    # A mirror loaded earlier may lag behind the file (another process
+    # wrote since): merge the file in.  One that _load_cache_locked
+    # reads just now is the file, so merging it would be a second read.
+    mirror_may_lag = _cache is not None and _cache_loaded_from == path
+    cache = _load_cache_locked()
+    if mirror_may_lag:
+        for other_key, other in _read_cache_file(path).items():
+            mine = cache.get(other_key)
+            if mine is None or mine["ts"] < other["ts"]:
+                cache[other_key] = other
     cache.pop(key, None)
     cache[key] = {"is_simple": is_simple, "ts": time.time()}
     while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:

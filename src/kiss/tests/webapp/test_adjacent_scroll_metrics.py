@@ -119,24 +119,26 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
 
     def test_update_visible_task_updates_metrics(self) -> None:
         """updateVisibleTask must update statusTokens, statusBudget, and
-        statusSteps from the visible adjacent container's dataset."""
-        m = re.search(
-            r"function updateVisibleTask\b[^{]*\{(.*?)^\s{2}\}",
-            self.src,
-            re.DOTALL | re.MULTILINE,
-        )
-        self.assertIsNotNone(m, "Could not find updateVisibleTask body")
-        assert m is not None
-        body = m.group(1)
+        statusSteps from the visible adjacent container's dataset, and
+        restore ``currentTaskMetrics`` when the reader is back on the
+        main task.  The restore lives in ``showLiveMetrics`` (the header
+        paints the tab's own metrics from the same place whether the
+        reader scrolled back or a live event arrived); follow that
+        delegation as ``_render_adjacent_replay_body`` does."""
+        body = self._function_body("updateVisibleTask")
         for attr in ("metricTokens", "metricBudget", "metricSteps"):
             self.assertIn(
                 f"dataset.{attr}",
                 body,
                 f"updateVisibleTask does not read dataset.{attr}",
             )
+        restore = body if "currentTaskMetrics" in body else "".join(
+            self._function_body(helper, required=False)
+            for helper in re.findall(r"\b(\w+)\s*\(", body)
+        )
         self.assertIn(
             "currentTaskMetrics",
-            body,
+            restore,
             "updateVisibleTask does not restore currentTaskMetrics",
         )
 

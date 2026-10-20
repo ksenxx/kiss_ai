@@ -15,69 +15,21 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.resolve(__dirname, '..', 'media');
-const shimJs = fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf-8');
-
-function installFakeWebSocket(window, sockets) {
-  function FakeWebSocket(url) {
-    this.url = url;
-    this.readyState = 0;
-    this.sent = [];
-    this.closed = false;
-    this.onopen = null;
-    this.onmessage = null;
-    this.onclose = null;
-    this.onerror = null;
-    sockets.push(this);
-  }
-  FakeWebSocket.CONNECTING = 0;
-  FakeWebSocket.OPEN = 1;
-  FakeWebSocket.CLOSING = 2;
-  FakeWebSocket.CLOSED = 3;
-  FakeWebSocket.prototype.send = function (data) {
-    this.sent.push(data);
-  };
-  // A half-open socket: close() never yields an onclose.
-  FakeWebSocket.prototype.close = function () {
-    this.closed = true;
-  };
-  FakeWebSocket.prototype.fireOpen = function () {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen();
-  };
-  FakeWebSocket.prototype.fireMessage = function (msg) {
-    this.onmessage({data: JSON.stringify(msg)});
-  };
-  window.WebSocket = FakeWebSocket;
-}
+const {
+  newAuthDom,
+  bootShim,
+  installFakeWebSocket,
+} = require('./transport_page_helpers');
 
 // A page with fake timers and a fake clock: `timers` collects every
 // setTimeout the shim arms, `clock.now` is what Date.now() returns.
 function page() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><head></head><body>' +
-      '<div id="kiss-server-loading" role="status">' +
-      '<div id="kiss-server-loading-msg"></div></div>' +
-      '<div id="app" style="display:none;">' +
-      '<div id="auth-modal" style="display:none;">' +
-      '<input id="auth-modal-input" type="password">' +
-      '<div id="auth-modal-error" role="alert"></div>' +
-      '<button id="auth-modal-ok"></button>' +
-      '<button id="auth-modal-cancel"></button></div>' +
-      '</div></body></html>',
-    {runScripts: 'outside-only', pretendToBeVisual: true,
-     url: 'https://example.test/'},
-  );
-  const {window} = dom;
+  const {window} = newAuthDom();
   const sockets = [];
   const timers = [];
   const statuses = [];
   const clock = {now: 1000000};
-  installFakeWebSocket(window, sockets);
+  installFakeWebSocket(window, sockets, {halfOpen: true});
   window.setTimeout = function (fn, ms) {
     timers.push({fn, ms});
     return timers.length;
@@ -87,11 +39,7 @@ function page() {
   window.addEventListener('message', ev => {
     if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
   });
-  window.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
-  window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
-  window.document.dispatchEvent(
-    new window.Event('DOMContentLoaded', {bubbles: true}),
-  );
+  bootShim(window);
   return {window, sockets, timers, statuses, clock};
 }
 
@@ -116,7 +64,8 @@ function main() {
     const s0 = sockets[0];
     s0.fireOpen();
     assert.strictEqual(
-      staleChecks(timers).length, 1,
+      staleChecks(timers).length,
+      1,
       'the half-open check is armed as soon as the socket opens',
     );
     clock.now += 15000;
@@ -130,7 +79,8 @@ function main() {
     assert.strictEqual(s0.onclose, null, 'its late events are neutralised');
     const last = statuses[statuses.length - 1];
     assert.deepStrictEqual(
-      [last.connected, last.reconnecting], [false, false],
+      [last.connected, last.reconnecting],
+      [false, false],
       'the app is told the daemon is not connected (pre-auth drop)',
     );
     const backoff = timers[timers.length - 1];
@@ -168,7 +118,8 @@ function main() {
     assert.strictEqual(sockets.length, 1, 'no reconnect while it is alive');
     s0.fireMessage({type: 'auth_ok'});
     assert.strictEqual(
-      staleChecks(timers).filter(t => !t.ran).length, 1,
+      staleChecks(timers).filter(t => !t.ran).length,
+      1,
       'auth_ok leaves exactly one pending stale check (no duplicate chain)',
     );
     console.log('  ok - a slow handshake kept alive by heartbeats is not cut');
@@ -189,14 +140,17 @@ function main() {
     runStaleChecks(timers);
     assert.ok(s0.closed, 'the silent socket behind the prompt is dropped');
     assert.strictEqual(
-      statuses.length, before,
+      statuses.length,
+      before,
       'no daemonStatus churn while the password prompt is up',
     );
     const backoff = timers[timers.length - 1];
     assert.notStrictEqual(backoff.ms, 15000, 'a reconnect is scheduled');
     backoff.fn();
     assert.strictEqual(sockets.length, 2, 'the prompt gets a fresh socket');
-    console.log('  ok - a silent socket behind the password prompt is replaced quietly');
+    console.log(
+      '  ok - a silent socket behind the password prompt is replaced quietly',
+    );
     window.close();
   }
   console.log('audit1016_transport_preauth_silence: all passed');

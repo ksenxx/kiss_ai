@@ -313,7 +313,7 @@ class MemoryTools:
         try:
             memory, memory_dir, page_name = self._locate(name)
             page = memory_dir.write(page_name, content, title=title, summary=summary)
-        except ValueError as e:
+        except (ValueError, TimeoutError) as e:
             return f"Error: {e}"
         size = len(page.raw.encode("utf-8"))
         embedded = len(embedding_text(page.raw).encode("utf-8"))
@@ -449,6 +449,6 @@ class MemoryTools:
             memory_dir.delete(page)
         except FileNotFoundError:
             return f"Error: no memory page named {name!r}."
-        except ValueError as e:
+        except (ValueError, TimeoutError) as e:
             return f"Error: {e}"
         return f"Deleted {name}."

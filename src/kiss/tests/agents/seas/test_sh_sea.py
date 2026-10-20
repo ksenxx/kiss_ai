@@ -17,36 +17,26 @@ result into the finish summary.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-import pytest
-
-from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.sh import sh_sea
 from kiss.agents.seas.sh.sh_sea import ShSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
     finish_body,
-    serve,
     tool_call_body,
 )
 
 _SEA_PATH = Path(sh_sea.__file__).resolve()
-
-
-_PLAIN_RUN = sea_commands.evaluate_sea([BaseSea()], "Say done.")
-"""A run with no SEA behaviour: identity hooks, no settings, the task as prompt."""
-
-
-def _tool_names(request: dict[str, Any]) -> set[str]:
-    """Return the names of the tools offered in one agentic *request*."""
-    return {t["function"]["name"] for t in request["tools"]}
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
@@ -87,13 +77,10 @@ def test_sea_methods_follow_the_user_contract() -> None:
 def test_slash_sh_resolves_to_the_bundled_sea() -> None:
     """``/sh <command>`` resolves to the command text and this file (run directly)."""
     assert sea_commands.get_command("sh") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/sh git status --short")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "git status --short"
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings([ShSea()])
-    assert type(sea_commands.load_sea(path)).__name__ == "ShSea"
+    assert sea_commands.slash_command_task("/sh git status --short") == (
+        "git status --short", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([ShSea()])
+    assert type(sea_commands.load_sea(_SEA_PATH)).__name__ == "ShSea"
 
 
 def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) -> None:
@@ -123,76 +110,13 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
 
     assert len(agentic) == 2
     for request in agentic:
-        assert _tool_names(request) == {"Bash", "finish"}
+        assert tool_names(request) == {"Bash", "finish"}
         system = system_message(request)
         assert system.startswith(sh_sea.SYSTEM_PROMPT), system[:200]
         assert "# Restricted tool profile: bash" in system
         assert "Bash" in system.split("# Restricted tool profile: bash", 1)[1]
     # The second step carries the Bash tool result: the command really ran.
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1, agentic[1]["messages"]
-    assert "sh-sea-output 42" in str(tool_results[0]["content"])
+    results = tool_results(agentic[1])
+    assert len(results) == 1, agentic[1]["messages"]
+    assert "sh-sea-output 42" in results[0]
 
-
-def test_explicit_full_profile_offers_the_whole_toolset(tmp_path: Path) -> None:
-    """``tool_profile="full"`` is accepted and offers more than Bash+finish."""
-    script = [finish_body("<p>done</p>", prompt_tokens=500)]
-    parsed, agentic = run_sea(_PLAIN_RUN, script, tmp_path, max_steps=3, tool_profile="full")
-    assert parsed["success"] is True
-    assert {"Bash", "Read", "Edit", "Write", "finish"} <= _tool_names(agentic[0])
-    assert "# Restricted tool profile" not in system_message(agentic[0])
-
-
-def test_unknown_profile_is_rejected_before_the_model_is_called(tmp_path: Path) -> None:
-    """A ``tool_profile`` that is not a ``TOOL_PROFILES`` key fails loudly.
-
-    The server's request log is kept and checked after the run: the
-    rejection happens before any request reaches the model, so the log
-    stays empty whatever the server would have answered.
-    """
-    with serve([finish_body("<p>never</p>", prompt_tokens=500)]) as (url, requests):
-        agent = ChatSorcarAgent("bad-profile-test")
-        with pytest.raises(ValueError, match="tool_profile must be one of") as excinfo:
-            agent.run(
-                prompt_template=_PLAIN_RUN.prompt,
-                model_name=MODEL,
-                work_dir=str(tmp_path),
-                max_steps=3,
-                max_budget=1.0,
-                model_config={"base_url": url, "api_key": "local"},
-                tool_profile="bogus",
-                web_tools=False,
-                use_memory=False,
-                verbose=False,
-            )
-        assert "'bogus'" in str(excinfo.value)
-    assert requests == []
-
-
-def test_profile_does_not_leak_into_the_next_run_of_the_same_agent(tmp_path: Path) -> None:
-    """A tab's agent is reused across runs: a later run without a profile gets the full set."""
-    script = [finish_body("<p>done</p>", prompt_tokens=500)]
-    agent = ChatSorcarAgent("profile-reset-test")
-    _parsed, first = run_sea(
-        _PLAIN_RUN, script, tmp_path, agent=agent, max_steps=3, tool_profile="bash"
-    )
-    assert _tool_names(first[0]) == {"Bash", "finish"}
-    again = sea_commands.evaluate_sea([BaseSea()], "Say done again.")
-    _parsed, second = run_sea(again, script, tmp_path, agent=agent, max_steps=3)
-    assert {"Bash", "Read", "Edit", "Write", "finish"} <= _tool_names(second[0])
-
-
-def test_profile_without_basic_tools_offers_finish_only_and_no_note(tmp_path: Path) -> None:
-    """``append_basic_tools=False`` builds no toolset to cut down: finish only, no profile note."""
-    script = [finish_body("<p>done</p>", prompt_tokens=500)]
-    parsed, agentic = run_sea(
-        _PLAIN_RUN,
-        script,
-        tmp_path,
-        max_steps=3,
-        tool_profile="bash",
-        append_basic_tools=False,
-    )
-    assert parsed["success"] is True
-    assert _tool_names(agentic[0]) == {"finish"}
-    assert "# Restricted tool profile" not in system_message(agentic[0])

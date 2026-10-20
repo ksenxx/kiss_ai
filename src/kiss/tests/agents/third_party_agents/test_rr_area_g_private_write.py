@@ -150,9 +150,12 @@ class TestSaveJsonConfig:
         ]
 
     def test_channel_config_facade(self, tmp_path: Path) -> None:
-        """The ChannelConfig facade round-trips through the atomic writer."""
+        """The ChannelConfig facade round-trips through the atomic writer and clears."""
         config = ChannelConfig(tmp_path / "chan", ("api_key",))
-        config.save({"api_key": "k1"})
-        assert config.load() == {"api_key": "k1"}
+        config.save({"api_key": "k1", "extra": "val"})
+        assert config.load() == {"api_key": "k1", "extra": "val"}
         if _IS_POSIX:  # pragma: no branch
             assert _mode(config.path) == 0o600
+        config.clear()
+        assert config.load() is None
+        assert not config.path.exists()

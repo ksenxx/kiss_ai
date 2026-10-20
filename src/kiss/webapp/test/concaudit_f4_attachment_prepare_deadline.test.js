@@ -29,68 +29,35 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeChatPage, sleep} = require('./simplify2_harness');
 const {paste, typeAndEnter, submits} = require('./attachment_helpers');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const SHORT_DEADLINE_MS = 300;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
   // A wedged decoder: every call parks for ever.
   let decodes = 0;
-  win.createImageBitmap = function () {
-    decodes += 1;
-    return new Promise(() => {});
-  };
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  const mainSrc = fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8');
-  const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
-  assert.ok(
-    mainSrc.includes(needle),
-    'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
-  );
-  win.eval(
-    mainSrc.replace(
-      needle,
-      `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
-    ) + '\n//# sourceURL=concaudit-f4-attach-deadline-main.js',
-  );
+  const {win, posted} = makeChatPage({
+    sourceUrl: 'concaudit-f4-attach-deadline-main.js',
+    beforeScripts(win) {
+      win.createImageBitmap = function () {
+        decodes += 1;
+        return new Promise(() => {});
+      };
+    },
+    mainSource(mainSrc) {
+      const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
+      assert.ok(
+        mainSrc.includes(needle),
+        'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
+      );
+      return mainSrc.replace(
+        needle,
+        `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
+      );
+    },
+  });
   return {win, posted, decodeCount: () => decodes};
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function chipText(win) {
@@ -106,14 +73,14 @@ async function main() {
     type: 'image/heic',
   });
   paste(win, heic);
-  await delay(30);
+  await sleep(30);
   assert.strictEqual(decodeCount(), 1, 'the HEIC reached the decoder');
   typeAndEnter(win, 'prompt with a photo that never decodes');
   assert.strictEqual(submits(posted).length, 0, 'the send is waiting');
 
   // 2. Well before the deadline nothing has changed: the chip is still
   //    pending and a second Enter is swallowed by the tab's latch.
-  await delay(SHORT_DEADLINE_MS / 3);
+  await sleep(SHORT_DEADLINE_MS / 3);
   typeAndEnter(win, 'prompt with a photo that never decodes');
   assert.strictEqual(submits(posted).length, 0, 'latched while pending');
   assert.match(chipText(win), /IMG_0001\.HEIC/, 'the pending chip shows');
@@ -122,7 +89,7 @@ async function main() {
   // 3. Past the deadline the stuck preparation is reported like a failed
   //    conversion.  The parked send is released but does NOT ship: a
   //    failed attachment still blocks the submit (policy unchanged).
-  await delay(SHORT_DEADLINE_MS);
+  await sleep(SHORT_DEADLINE_MS);
   assert.match(
     chipText(win),
     /IMG_0001\.HEIC: it could not be read within \d+s/,
@@ -139,7 +106,7 @@ async function main() {
   //    the latch swallowed this Enter too (recoverable only by removing
   //    the chip by hand).
   typeAndEnter(win, 'plain prompt after the timeout');
-  await delay(30);
+  await sleep(30);
   const sent = submits(posted);
   assert.strictEqual(sent.length, 1, 'the tab sends again after the timeout');
   assert.strictEqual(sent[0].prompt, 'plain prompt after the timeout');

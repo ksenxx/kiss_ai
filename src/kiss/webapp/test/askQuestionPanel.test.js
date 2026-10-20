@@ -12,55 +12,28 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  clickTab,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const pages = [];
 
+// The composer placeholder chat.html gets from {{INPUT_PLACEHOLDER}}; main.js
+// reads it from the element at load, so it is set before the scripts run.
+function placeholderAndRaf(win) {
+  win.document.getElementById('task-input').placeholder = 'Ask anything';
+  stubRaf(win);
+}
+
 function makePage(withMarked) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{INPUT_PLACEHOLDER\}\}/g, 'Ask anything');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted, getState} = makeChatPage({
+    beforeScripts: placeholderAndRaf,
+    extraScripts: withMarked ? ['marked.min.js', 'voice.js'] : ['voice.js'],
   });
-  const win = dom.window;
   pages.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: m => posted.push(m),
-      getState: () => state,
-      setState: s => {
-        state = s;
-        win._pageState = s;
-      },
-    };
-  };
-
-  if (withMarked) {
-    win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
@@ -68,23 +41,7 @@ function makePage(withMarked) {
   send(win, {type: 'clear', chat_id: 'chat-q', tabId: tab});
   send(win, {type: 'status', running: true, tabId: tab, startTs: Date.now()});
   send(win, {type: 'daemonStatus', connected: true});
-  return {win, posted, tab};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-// Bring a tab on screen the way the user does: a click on the group strip
-// when the tab is listed there (sub-agents, content tabs, the chat that
-// owns them), else the Chats-panel pick (chat tabs have no row of their
-// own any more).
-function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
+  return {win, posted, tab, getState};
 }
 
 function askQuestionCall(win, tab, question) {
@@ -562,14 +519,14 @@ test('the task ending gives the parked prompt back', () => {
 });
 
 test('the parked prompt and the answer in progress both survive a reload', () => {
-  const {win, tab} = makePage(true);
+  const {win, tab, getState} = makePage(true);
   win._testApi.endLaunch();
   const inp = win.document.getElementById('task-input');
   inp.value = 'parked prompt';
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
   inp.value = 'typed answer';
   win.dispatchEvent(new win.Event('pagehide'));
-  const state = win._pageState;
+  const state = getState();
   assert.strictEqual(
     JSON.stringify(state.inputDrafts),
     JSON.stringify({[tab]: 'parked prompt'}),

@@ -20,7 +20,6 @@
 'use strict';
 
 const assert = require('assert');
-const path = require('path');
 const {makePage, send} = require('./simplify2_harness');
 
 const WORK_DIR = '/tmp/kiss-owner-parity';

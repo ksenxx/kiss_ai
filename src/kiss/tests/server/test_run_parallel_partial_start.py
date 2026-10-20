@@ -63,3 +63,22 @@ def test_first_start_error_starts_nothing(tmp_path: Path, daemon: RecordingDaemo
     out = run_agents_parallel(str(tmp_path), ["   ", "second"], str(script), timeout="30")
     assert out == "Error: task must be a non-empty string."
     assert daemon.run_commands == []
+
+
+def test_unresolvable_agent_starts_nothing(tmp_path: Path, daemon: RecordingDaemon) -> None:
+    out = run_agents_parallel(str(tmp_path), ["first", "second"], "no-such-agent-xyz", timeout="30")
+    assert out.startswith("Error:"), out
+    assert daemon.run_commands == []
+
+
+def test_sea_is_loaded_once_for_every_task(tmp_path: Path, daemon: RecordingDaemon) -> None:
+    """The plan is the same for every task, so the SEA file is executed once per call."""
+    loads = tmp_path / "loads.txt"
+    script = tmp_path / "helper_sea.py"
+    script.write_text(
+        f"open({str(loads)!r}, 'a').write('load\\n')\n{SEA}", encoding="utf-8",
+    )
+    out = run_agents_parallel(str(tmp_path), ["a", "b", "c"], str(script), timeout="30")
+    assert len(yaml.safe_load(out)) == 3
+    assert sorted(call["prompt"] for call in daemon.run_commands) == ["a", "b", "c"]
+    assert loads.read_text(encoding="utf-8").count("load") == 1

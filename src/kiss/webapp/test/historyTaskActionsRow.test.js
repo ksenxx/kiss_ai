@@ -25,10 +25,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {inlineDesignTokens} = require('./designTokens');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, MEDIA} = require('./simplify2_harness');
 
 // The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
 // padding and no explicit min-width/min-height.  A history task panel
@@ -71,49 +69,19 @@ function assertCompactIcon(win, svg, what) {
   );
 }
 
+/** Append main.css and remote-codex.css, design tokens inlined, to *win*. */
+function loadRemoteCss(win) {
+  for (const name of ['main.css', 'remote-codex.css']) {
+    const style = win.document.createElement('style');
+    style.textContent = inlineDesignTokens(
+      fs.readFileSync(path.join(MEDIA, name), 'utf8'),
+    );
+    win.document.head.appendChild(style);
+  }
+}
+
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const style = win.document.createElement('style');
-  style.textContent = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
-  win.document.head.appendChild(style);
-  const remoteStyle = win.document.createElement('style');
-  remoteStyle.textContent = inlineDesignTokens(fs.readFileSync(
-    path.join(MEDIA, 'remote-codex.css'),
-    'utf8',
-  ));
-  win.document.head.appendChild(remoteStyle);
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
+  return makeChatPage({bodyClass: 'remote-chat', beforeScripts: loadRemoteCss});
 }
 
 function makeSession(overrides) {
@@ -288,14 +256,16 @@ function testActionsKeepCompactSize() {
     // Every declaration must match a plain compact sidebar button, so no
     // leftover of the enlargement (border-radius, justify-content, ...)
     // can distinguish a history panel's button from the others.
-    ['borderRadius', 'justifyContent', 'alignItems', 'display'].forEach(prop => {
-      assert.strictEqual(
-        btnStyle[prop],
-        compactStyle[prop],
-        `${label}: ${sel} must render exactly like a compact sidebar ` +
-          `button; ${prop} differs (${btnStyle[prop]} vs ${compactStyle[prop]})`,
-      );
-    });
+    ['borderRadius', 'justifyContent', 'alignItems', 'display'].forEach(
+      prop => {
+        assert.strictEqual(
+          btnStyle[prop],
+          compactStyle[prop],
+          `${label}: ${sel} must render exactly like a compact sidebar ` +
+            `button; ${prop} differs (${btnStyle[prop]} vs ${compactStyle[prop]})`,
+        );
+      },
+    );
 
     const svg = btn.querySelector('svg');
     assert.ok(svg, `${label}: ${sel} renders an icon`);

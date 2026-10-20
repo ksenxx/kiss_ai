@@ -10,46 +10,24 @@ concurrently running test that points it at a live local ephemeral-port HTTP
 server), so ``check_tlon_auth()`` returned ``{"ok": true, ...}`` instead of the
 unauthenticated message.
 
-Fixes verified here:
-1. ``ChannelConfig.path`` resolves lazily and honours ``$KISS_HOME``, so each
-   pytest process (conftest sets a fresh temp ``KISS_HOME``) has fully isolated
-   channel config state.
-2. ``test_new_channel_agents`` now resets module-level ``ChannelConfig``
-   objects (``_config``) before asserting unauthenticated state, so leftover
-   config within the same process is also cleared.
+Fix verified here: ``ChannelConfig.path`` resolves lazily and honours
+``$KISS_HOME``, so a test run under ``isolated_kiss_home`` (a fresh temp
+``KISS_HOME`` per test) has fully isolated channel config state and a
+leftover config from another test cannot be seen at all.
 
 No mocks or test doubles: a real in-process HTTP server plays the Urbit ship.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, _config
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, recording_server
-from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
-    _CHANNEL_AGENTS,
-)
-from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
-    test_check_auth_unauthenticated as _run_check_auth_unauthenticated,
-)
 
-_TLON_INFO = next(ch for ch in _CHANNEL_AGENTS if ch["agent_class"] == "TlonAgent")
-
-
-class _ShipHandler(RecordingHandler):
-    """Minimal Urbit-ship-shaped handler: accepts /~/login."""
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Accept any login POST with 204, like a real ship."""
-        self._read_raw()
-        self.send_response(204)
-        self.end_headers()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def test_channel_config_path_honours_kiss_home_lazily(
@@ -70,33 +48,14 @@ def test_channel_config_path_honours_kiss_home_lazily(
     assert _config.load() is None, "config must not leak across KISS_HOME dirs"
 
 
-def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None:
-    """The exact flaky scenario: leftover config pointing at a live local port.
-
-    A real local HTTP server (ephemeral port) plays the ship, and a leftover
-    config referencing it is saved before the auth-check test runs.  The
-    test must clear that state and still report unauthenticated.
-    """
-    with recording_server(_ShipHandler) as server:
-        with config_backup(_config.path):
-            _config.save({"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~zod"})
-
-            agent = TlonAgent()
-            tools = tools_by_name(agent)
-            assert json.loads(tools["check_tlon_auth"]())["ok"] is True
-
-            _run_check_auth_unauthenticated(_TLON_INFO)
-
-
 def test_clear_tlon_auth_resets_backend_and_config() -> None:
     """clear_tlon_auth removes the config file and in-memory ship state."""
-    with config_backup(_config.path):
-        _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
-        agent = TlonAgent()
-        assert agent._is_authenticated()
-        tools = tools_by_name(agent)
-        result = tools["clear_tlon_auth"]()
-        assert "cleared" in result.lower()
-        assert _config.load() is None
-        assert not agent._is_authenticated()
-        assert "not configured" in tools["check_tlon_auth"]().lower()
+    _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
+    agent = TlonAgent()
+    assert agent._is_authenticated()
+    tools = tools_by_name(agent)
+    result = tools["clear_tlon_auth"]()
+    assert "cleared" in result.lower()
+    assert _config.load() is None
+    assert not agent._is_authenticated()
+    assert "not configured" in tools["check_tlon_auth"]().lower()

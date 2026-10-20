@@ -22,6 +22,7 @@ from google.genai import types as gtypes
 
 from kiss.core.models.anthropic_model import (
     AnthropicModel,
+    _claude_profile,
     _openai_part_to_anthropic_block,
     _parse_data_url,
     _tool_calls_to_tool_use_blocks,
@@ -170,12 +171,12 @@ class TestAnthropicHelpers:
         ]
 
     def test_uses_adaptive_thinking_boundaries(self) -> None:
-        assert _uses_adaptive_thinking("claude-opus-4-6") is True
-        assert _uses_adaptive_thinking("claude-opus-4-7-20260101") is True
-        assert _uses_adaptive_thinking("claude-opus-4-5") is False
-        assert _uses_adaptive_thinking("claude-opus-4-1") is False
-        assert _uses_adaptive_thinking("claude-sonnet-4-6") is False
-        assert _uses_adaptive_thinking("claude-opus-4-x") is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-6")) is True
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-7-20260101")) is True
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-5")) is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-1")) is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-sonnet-4-6")) is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-4-x")) is False
 
 
 class TestAnthropicNormalization:
@@ -744,6 +745,8 @@ class TestCodexModel:
         assert content == "Hello"
         assert err is None
         assert result == {
+            "api_billed": False,
+            "requests": 1,
             "thread_id": "th_1",
             "usage": {"input_tokens": 3, "output_tokens": 4},
         }

@@ -21,6 +21,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.server import agent_state
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 def _attach_worktree_state(
@@ -163,7 +164,7 @@ class TestBug8Fix:
 
 
 class TestBug9Fix:
-    """After fix, _check_merge_conflict does NOT commit worktree changes."""
+    """After fix, _conflict_of does NOT commit worktree changes."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -176,7 +177,7 @@ class TestBug9Fix:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_check_conflict_does_not_commit(self) -> None:
-        """_check_merge_conflict must not create any commits."""
+        """_conflict_of must not create any commits."""
 
         server, events = _make_server(self.repo)
         agent = ChatSorcarAgent("Sorcar")
@@ -197,7 +198,7 @@ class TestBug9Fix:
         )
         assert r.stdout.strip() == "0", "No commits before check"
 
-        server._check_merge_conflict("0")
+        merge_conflict(server, "0")
 
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
@@ -205,7 +206,7 @@ class TestBug9Fix:
             capture_output=True, text=True,
         )
         assert r.stdout.strip() == "0", (
-            "BUG-9 FIX: _check_merge_conflict must not create commits"
+            "BUG-9 FIX: _conflict_of must not create commits"
         )
 
         agent.discard()
@@ -262,7 +263,7 @@ class TestBug9Fix:
         _git("merge", "--ff-only", "tmp-conflict", cwd=self.repo)
         _git("branch", "-d", "tmp-conflict", cwd=self.repo)
 
-        assert server._check_merge_conflict("0") is True
+        assert merge_conflict(server, "0") is True
 
         agent.discard()
 
@@ -290,6 +291,6 @@ class TestBug9Fix:
         _git("merge", "--ff-only", "tmp-noconflict", cwd=self.repo)
         _git("branch", "-d", "tmp-noconflict", cwd=self.repo)
 
-        assert server._check_merge_conflict("0") is False
+        assert merge_conflict(server, "0") is False
 
         agent.discard()

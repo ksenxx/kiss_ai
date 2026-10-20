@@ -97,8 +97,9 @@ with open(result_file, "w") as f:
 function makeScratchRunner() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conc1018-runall-'));
   const src = fs.readFileSync(RUNNER, 'utf8');
-  const needle = 'const SUITE_TIMEOUT_MS = 10 * 60 * 1000;';
-  assert.ok(src.includes(needle), 'run-all.js still declares the timeout');
+  // The cap's value is the runner's business; only the declaration matters.
+  const needle = /const SUITE_TIMEOUT_MS = [^;]+;/;
+  assert.ok(needle.test(src), 'run-all.js still declares the timeout');
   fs.writeFileSync(
     path.join(dir, 'run-all.js'),
     src.replace(needle, `const SUITE_TIMEOUT_MS = ${SHORT_TIMEOUT_MS};`),

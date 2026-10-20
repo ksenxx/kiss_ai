@@ -6,8 +6,8 @@
 'use strict';
 
 // Audit 2026-10-12 (webapp media): the interleavings of the terminal
-// and browser tab views that terminalTabView.test.js and
-// browserTabView.test.js leave untested.
+// tab view that terminalTabView.test.js leaves untested (the browser
+// tab view's are in browserTabView.test.js).
 //
 // terminalTab.js
 //   * dispose while xterm.js is still downloading: no Terminal is
@@ -19,12 +19,6 @@
 //   * a view hidden again before xterm.js arrived still opens its
 //     shell but does not steal focus.
 //
-// browserTab.js
-//   * show then hide before the layout tick: nothing is reported (the
-//     daemon never learns of a viewport it never had to stream to);
-//   * hide then dispose: the hide already reported visible:false, so
-//     dispose does not repeat it.
-//
 // xterm.js is not fetched from jsDelivr: the page gets a `fetch` that
 // answers from a script (resolve / reject per URL), and the bundle text
 // it returns defines Terminal / FitAddon on the page when evaluated,
@@ -34,6 +28,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {sleep} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -94,21 +89,17 @@ function bundleFor(url) {
 }
 
 /** A macrotask turn: every promise chain started so far has settled. */
-function settle() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 /** Let the pending fetches succeed and the load chain settle. */
 async function completeDownloads(page) {
   const batch = page.fetches.splice(0);
   for (const f of batch) f.resolve(bundleFor(f.url));
-  await settle();
+  await sleep(0);
 }
 
 async function failDownloads(page) {
   const batch = page.fetches.splice(0);
   for (const f of batch) f.reject(new TypeError('Failed to fetch'));
-  await settle();
+  await sleep(0);
 }
 
 function createTerminalView(page, sent) {
@@ -187,59 +178,10 @@ async function testHiddenBeforeXtermArrives() {
   assert.strictEqual(sent.length, 1, 'a re-show opens no second shell');
 }
 
-function makeBrowserView() {
-  const dom = new JSDOM('<!DOCTYPE html><body></body>', {
-    runScripts: 'outside-only',
-  });
-  const win = dom.window;
-  win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
-  const sent = [];
-  const view = win.BrowserTabView.create('tab-1', {
-    send: msg => sent.push(JSON.parse(JSON.stringify(msg))),
-  });
-  win.document.body.appendChild(view.el);
-  const screen = view.el.querySelector('.browser-screen');
-  Object.defineProperty(screen, 'clientWidth', {value: 640});
-  Object.defineProperty(screen, 'clientHeight', {value: 480});
-  return {view, sent};
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function testBrowserShowHideBeforeTick() {
-  const {view, sent} = makeBrowserView();
-  view.setVisible(true);
-  view.setVisible(false);
-  await sleep(10);
-  assert.deepStrictEqual(sent, [], 'a tab hidden before layout reports nothing');
-  view.dispose();
-  assert.deepStrictEqual(sent, [], 'and dispose has nothing to retract');
-}
-
-async function testBrowserHideThenDispose() {
-  const {view, sent} = makeBrowserView();
-  view.setVisible(true);
-  await sleep(10);
-  assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].visible, true);
-  view.setVisible(false);
-  assert.strictEqual(sent.length, 2);
-  assert.strictEqual(sent[1].visible, false);
-  view.dispose();
-  assert.strictEqual(sent.length, 2, 'hide already retracted the viewport');
-  view.setVisible(true);
-  await sleep(10);
-  assert.strictEqual(sent.length, 2, 'a disposed view never reports');
-}
-
 (async () => {
   await testDisposeWhileXtermLoads();
   await testFailedLoadThenRetry();
   await testHiddenBeforeXtermArrives();
-  await testBrowserShowHideBeforeTick();
-  await testBrowserHideThenDispose();
   console.log('audit1012_media_tab_views_lifecycle.test.js passed');
 })().catch(err => {
   console.error(err);

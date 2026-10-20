@@ -25,91 +25,44 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
 function makePage(opts) {
   opts = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    sourceUrl: 'streamtail-main.js',
+    beforeScripts(win) {
+      // Class-keyed fake geometry lets a test give scroll geometry to
+      // panels that are created *during* event handling (per-element
+      // fakeGeometry own properties still take precedence).
+      const geoByClass = {};
+      win._geoByClass = geoByClass;
+      Object.defineProperty(win.Element.prototype, 'scrollHeight', {
+        configurable: true,
+        get() {
+          for (const k in geoByClass)
+            if (this.classList && this.classList.contains(k))
+              return geoByClass[k].sh;
+          return 0;
+        },
+      });
+      Object.defineProperty(win.Element.prototype, 'clientHeight', {
+        configurable: true,
+        get() {
+          for (const k in geoByClass)
+            if (this.classList && this.classList.contains(k))
+              return geoByClass[k].ch;
+          return 0;
+        },
+      });
 
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  // jsdom has no layout engine: stub scrollIntoView (used by the tab
-  // bar) so main.js can initialize.
-  win.Element.prototype.scrollIntoView = function () {};
-
-  // Class-keyed fake geometry lets a test give scroll geometry to
-  // panels that are created *during* event handling (per-element
-  // fakeGeometry own properties still take precedence).
-  const geoByClass = {};
-  win._geoByClass = geoByClass;
-  Object.defineProperty(win.Element.prototype, 'scrollHeight', {
-    configurable: true,
-    get() {
-      for (const k in geoByClass)
-        if (this.classList && this.classList.contains(k))
-          return geoByClass[k].sh;
-      return 0;
+      // Environments (and many existing suites) where rAF runs the
+      // callback synchronously and returns 0: the flush handle stays 0,
+      // so every chunk must keep the original per-event tail.
+      if (opts.syncRaf) stubRaf(win);
     },
   });
-  Object.defineProperty(win.Element.prototype, 'clientHeight', {
-    configurable: true,
-    get() {
-      for (const k in geoByClass)
-        if (this.classList && this.classList.contains(k))
-          return geoByClass[k].ch;
-      return 0;
-    },
-  });
-
-  if (opts.syncRaf) {
-    // Environments (and many existing suites) where rAF runs the
-    // callback synchronously and returns 0: the flush handle stays 0,
-    // so every chunk must keep the original per-event tail.
-    win.requestAnimationFrame = function (cb) {
-      cb();
-      return 0;
-    };
-  }
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8') +
-      '\n//# sourceURL=streamtail-api.js',
-  );
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=streamtail-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function fakeGeometry(el, geo) {
@@ -172,9 +125,7 @@ async function testBashChunkDefersTailSweepReplaysIt() {
   send(win, {type: 'system_output', text: 'plain sys line\n'});
   assert.ok(
     O.querySelector('.ev.sys'),
-    'BUG (' +
-      label +
-      '): non-buffered system_output must render synchronously',
+    'BUG (' + label + '): non-buffered system_output must render synchronously',
   );
 
   // The stream keeps its newest two panels open, so the panel whose
@@ -233,9 +184,7 @@ async function testBashChunkDefersTailSweepReplaysIt() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): the chat is not at its bottom after the flush frame',
+    'BUG (' + label + '): the chat is not at its bottom after the flush frame',
   );
   win.close();
   console.log(
@@ -549,9 +498,9 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
     'BUG: a straggler sweep folded the newest panels after the task ended',
   );
   assert.ok(
-    panels[2].querySelector('.bash-panel-content').textContent.includes(
-      'late output',
-    ),
+    panels[2]
+      .querySelector('.bash-panel-content')
+      .textContent.includes('late output'),
     'buffered chunk text must still flush after the task ends',
   );
   win.close();
@@ -572,7 +521,12 @@ async function testSweepScrollsSiblingSubpanels() {
   fakeGeometry(O, {sh: 3000, ch: 500});
   startRunningTask(win, posted);
 
-  send(win, {type: 'tool_call', name: 'Bash', command: 'make', description: 'build'});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'make',
+    description: 'build',
+  });
   send(win, {type: 'system_output', text: 'line one\n'});
   const body = O.querySelector('.ev.tc > .tc-b');
   assert.ok(body, 'tool-call body subpanel missing');

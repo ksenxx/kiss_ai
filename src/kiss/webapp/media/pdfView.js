@@ -94,16 +94,17 @@
     // ignores the query).
     pdfjsAttempts++;
     const retry = pdfjsAttempts > 1 ? '?retry=' + pdfjsAttempts : '';
-    // The timer aborts the worker fetch; the import() cannot be
-    // aborted, so the timer's rejection wins the race against it.  The
-    // worker's blob: URL is made only once the race is won: an import
-    // that completes after the timeout must not allocate a URL nobody
-    // will use or revoke.
+    // Once the race is decided, a worker fetch still in flight is
+    // aborted: nobody waits for it after the timeout, a failed
+    // import() or a worker HTTP error (the retry starts its own).  The
+    // import() cannot be aborted, so the timer's rejection wins the
+    // race against it.  The worker's blob: URL is made only once the
+    // race is won: an import that completes after the timeout must not
+    // allocate a URL nobody will use or revoke.
     const ctl = new AbortController();
     let timer = 0;
     const timeout = new Promise((resolve, reject) => {
       timer = setTimeout(() => {
-        ctl.abort();
         reject(
           new Error(
             'pdf.js did not load within ' + LOAD_TIMEOUT_MS / 1000 + ' s',
@@ -121,7 +122,10 @@
       ),
     ]);
     return Promise.race([load, timeout])
-      .finally(() => clearTimeout(timer))
+      .finally(() => {
+        clearTimeout(timer);
+        ctl.abort();
+      })
       .then(([lib, workerBlob]) => ({
         lib,
         workerUrl: URL.createObjectURL(

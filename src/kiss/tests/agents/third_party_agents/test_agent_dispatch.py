@@ -54,7 +54,10 @@ from kiss.agents.sorcar.sea_settings import declares_channel
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.third_party_agents.recording_daemon import (
+    RecordingDaemon,
+    serve_recording_daemon,
+)
 
 # The standalone tool (no calling-task work directory): relative agent
 # paths resolve against the process working directory and path-mode
@@ -81,19 +84,15 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
-def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+def daemon() -> Iterator[RecordingDaemon]:
     """A daemon stand-in every dispatch in the test reaches.
 
     The dispatcher hands ``cron_agent._daemon_endpoint_file`` to
     ``daemon_client.run`` as its explicit endpoint file, which takes
     precedence over the unreachable ``KISS_SORCAR_LOCAL`` set above.
     """
-    stand_in = RecordingDaemon()
-    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(stand_in.endpoint_file))
-    try:
+    with serve_recording_daemon(cron_agent, "_daemon_endpoint_file") as stand_in:
         yield stand_in
-    finally:
-        stand_in.close()
 
 
 def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
@@ -355,22 +354,8 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     )
     # Extra tools come only from the SEA's ``tools()``:
     # the tool has no tools-path arguments, and the old per-option
-    # keyword arguments (and the ``model_name`` alias) are gone.
-    import inspect
-
-    params = inspect.signature(run_agent).parameters
-    assert list(params) == [
-        "task",
-        "agent",
-        "model",
-        "tool_profile",
-        "max_budget",
-        "timeout",
-        "options",
-        "wait",
-        "machine",
-        "description",
-    ]
+    # keyword arguments (and the ``model_name`` alias) are gone
+    # (``test_tool_schema_requires_only_task`` pins the parameter list).
     for kwarg in ("tools", "use_memory", "chat_id", "add_to_prompt", "model_name", "workspace"):
         with pytest.raises(TypeError):
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
@@ -570,10 +555,9 @@ def test_docstring_and_error_mention_cron() -> None:
     # "cron" is not a third-party channel — it must never appear in
     # the channel list, only via its dedicated dispatch branch.
     assert "cron" not in available_channels()
-    # A mistyped agent name gets a hint about the built-in cron agent.
-    out = run_agent("say hi", "no_such_channel")
-    assert out.startswith("Error: unknown agent")
-    assert "cron" in out
+    # A mistyped agent name gets a hint about the built-in cron agent
+    # (``test_unknown_agent_error`` pins the error prefix).
+    assert "cron" in run_agent("say hi", "no_such_channel")
 
 
 def test_path_mode_missing_file_error(tmp_path: Path) -> None:

@@ -193,10 +193,9 @@ class _OffsetPrinter(Printer):
         self.steps_offset = 0
         self.calls: list[dict[str, Any]] = []
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Record the call; offset/emit tests assert on the kwargs."""
         self.calls.append(dict(kwargs))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Unused by these paths."""

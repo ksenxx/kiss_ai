@@ -76,16 +76,7 @@ _CALENDARS = {
 class _CalendarRequestHandler(RecordingHandler):
     """Emulates the Google Calendar v3 REST API and records requests."""
 
-    def _read_body(self) -> dict[str, Any] | None:
-        raw = self._read_raw()
-        if not raw:
-            return None
-        try:
-            return cast(dict[str, Any], json.loads(raw.decode("utf-8")))
-        except ValueError:
-            return None
-
-    def _record(self, body: dict[str, Any] | None) -> None:
+    def _record(self, body: Any) -> None:
         cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
@@ -356,20 +347,25 @@ def test_path_unsafe_ids_rejected_before_any_request(backend) -> None:
     assert server.requests == []
 
 
+def _call_every_tool(b: GoogleCalendarChannelBackend) -> list[str]:
+    """Invoke every backend tool once with valid arguments; return the results."""
+    return [
+        b.gcal_list_calendars(),
+        b.gcal_list_events(),
+        b.gcal_get_event("ev1"),
+        b.gcal_create_event("x", "2025-06-05", "2025-06-06"),
+        b.gcal_update_event("ev1", summary="x"),
+        b.gcal_delete_event("ev1"),
+        b.gcal_quick_add("hi"),
+    ]
+
+
 def test_wrong_token_returns_ok_false(backend, composio) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
     b, _ = backend
     composio.token = "wrong-token"
-    for call in (
-        b.gcal_list_calendars,
-        b.gcal_list_events,
-        lambda: b.gcal_get_event("ev1"),
-        lambda: b.gcal_create_event("x", "2025-06-05", "2025-06-06"),
-        lambda: b.gcal_update_event("ev1", summary="x"),
-        lambda: b.gcal_delete_event("ev1"),
-        lambda: b.gcal_quick_add("hi"),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert "401" in result["error"]
 
@@ -392,15 +388,7 @@ def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> Non
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
     b._base_url = f"http://127.0.0.1:{refusing_port}"
-    for call in (
-        b.gcal_list_calendars,
-        b.gcal_list_events,
-        lambda: b.gcal_get_event("ev1"),
-        lambda: b.gcal_create_event("x", "2025-06-05", "2025-06-06"),
-        lambda: b.gcal_update_event("ev1", summary="x"),
-        lambda: b.gcal_delete_event("ev1"),
-        lambda: b.gcal_quick_add("hi"),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert result["error"]

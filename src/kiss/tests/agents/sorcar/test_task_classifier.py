@@ -996,8 +996,10 @@ def test_non_simple_verdict_keeps_full_prompt(
     agent = SorcarAgent("clf-full-prompt")
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(is_simple=False)
+    # The full prompt tells the model to report success only for a checked
+    # task, so the instruction names the success value it must pass.
     result = _run_minimal_sorcar(
-        agent, "Call the finish tool with the word DONE.",
+        agent, "Call the finish tool with success=true and the summary DONE.",
     )
     assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(SYSTEM_PROMPT)

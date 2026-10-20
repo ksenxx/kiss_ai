@@ -108,6 +108,7 @@ from kiss.agents.sorcar.sea_commands import (
     load_sea,
     model_sea,
     own_settings,
+    sea_script_in,
 )
 from kiss.agents.sorcar.sea_docs import GENERATED_FILES, REPO_ROOT
 from kiss.agents.sorcar.sea_settings import (
@@ -116,7 +117,7 @@ from kiss.agents.sorcar.sea_settings import (
     SEA_BASES,
     SeaError,
     declares_hidden,
-    settings_functions,
+    settings_dicts,
 )
 
 REMOVED_GETTERS = (
@@ -195,6 +196,39 @@ def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path
     return sorted(scripts)
 
 
+def lint_targets(
+    paths: Iterable[Path] | None, registered: bool,
+) -> tuple[list[Path], dict[Path, str]]:
+    """Return the scripts ``sea lint`` checks for *paths*, and the ``script -> /command`` map.
+
+    Args:
+        paths: Scripts (or SEA folders) to check; ``None`` means
+            :func:`default_targets`.
+        registered: With ``paths=None``, also the user's registered
+            scripts.
+    """
+    commands = registered_commands()
+    if paths is None:
+        return default_targets(registered, commands), commands
+    return [_script_of(Path(p)) for p in paths], commands
+
+
+def lint_scripts(
+    scripts: Iterable[Path], commands: Mapping[Path, str], prose: bool,
+) -> list[Finding]:
+    """Lint *scripts* (each as the ``/command`` *commands* maps it to), then the prose when *prose*.
+
+    Returns:
+        The findings, in path order.
+    """
+    findings: list[Finding] = []
+    for script in scripts:
+        findings.extend(lint_sea(script, commands.get(script)))
+    if prose:
+        findings.extend(lint_prose())
+    return findings
+
+
 def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> list[Finding]:
     """Lint *paths*, or the default targets (then also the prose of :data:`PROSE_FILES`).
 
@@ -207,17 +241,8 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
     Returns:
         The findings, in path order.
     """
-    commands = registered_commands()
-    if paths is None:
-        scripts = default_targets(registered, commands)
-    else:
-        scripts = [_script_of(Path(p)) for p in paths]
-    findings: list[Finding] = []
-    for script in scripts:
-        findings.extend(lint_sea(script, commands.get(script)))
-    if paths is None:
-        findings.extend(lint_prose())
-    return findings
+    scripts, commands = lint_targets(paths, registered)
+    return lint_scripts(scripts, commands, prose=paths is None)
 
 
 PROSE_FILES = (
@@ -316,9 +341,12 @@ def lint_prose(root: Path | None = None) -> list[Finding]:
 
 
 def _script_of(path: Path) -> Path:
-    """Return the ``*_sea.py`` of a SEA folder, or *path* itself."""
+    """Return the script of a folder (``xxx/xxx_sea.py``, else its first ``*_sea.py``) or *path*."""
     path = path.expanduser().resolve()
     if path.is_dir():
+        script = sea_script_in(path)
+        if script.is_file():
+            return script
         candidates = sorted(path.glob("*_sea.py"))
         if candidates:
             return candidates[0]
@@ -540,7 +568,7 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     which name keys too.
     """
     keys: list[ast.Constant] = []
-    for sub in _settings_dicts(tree):
+    for sub in settings_dicts(tree):
         for key, value in zip(sub.keys, sub.values, strict=True):
             if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
                 continue
@@ -552,29 +580,6 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
                     if isinstance(e, ast.Constant) and isinstance(e.value, str)
                 )
     return keys
-
-
-def _settings_dicts(tree: ast.Module) -> list[ast.Dict]:
-    """Return the dict literals of the SEA's ``settings`` method that hold settings keys.
-
-    Every dict literal in the function except dicts anywhere inside
-    the *value* of another dict's key (``model_config``'s contents,
-    however deep, are not settings).
-    """
-    dicts: list[ast.Dict] = []
-    for node in settings_functions(tree):
-        nested = {
-            id(inner)
-            for sub in ast.walk(node)
-            if isinstance(sub, ast.Dict)
-            for value in sub.values
-            for inner in ast.walk(value)
-            if isinstance(inner, ast.Dict)
-        }
-        dicts.extend(
-            sub for sub in ast.walk(node) if isinstance(sub, ast.Dict) and id(sub) not in nested
-        )
-    return dicts
 
 
 def _own_returns(node: ast.AST) -> list[ast.Return]:
@@ -634,7 +639,7 @@ def _removed_entries(tree: ast.Module) -> list[_RemovedEntry]:
     be read here, so the entry is left for a hand migration.
     """
     entries: list[_RemovedEntry] = []
-    for sub in _settings_dicts(tree):
+    for sub in settings_dicts(tree):
         for index, (key, value) in enumerate(zip(sub.keys, sub.values, strict=True)):
             if not isinstance(key, ast.Constant):
                 continue
@@ -695,7 +700,7 @@ def _removed_lock_names(tree: ast.Module) -> dict[ast.List, set[int]]:
     name a removed key."""
     removed = set(_DROPPED_KEYS) | set(_BASE_CLASS_OF)
     found: dict[ast.List, set[int]] = {}
-    for sub in _settings_dicts(tree):
+    for sub in settings_dicts(tree):
         for key, value in zip(sub.keys, sub.values, strict=True):
             if not (isinstance(key, ast.Constant) and key.value == "locked"):
                 continue
@@ -843,7 +848,7 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     # An entry asking for a base class is dropped only once the class
     # derives from it; a script whose SEA class the rewrite cannot find
     # keeps the entry (and its ``base-class`` finding) for a hand migration.
-    for sub in _settings_dicts(tree):
+    for sub in settings_dicts(tree):
         indexes = {
             entry.index for entry in entries if entry.dict is sub and (found or not entry.base)
         }
@@ -928,15 +933,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace) -> int:
     """Execute ``sea lint`` with parsed *args* (:func:`add_arguments`); return the exit code."""
     paths = [Path(p) for p in args.paths] or None
+    scripts, commands = lint_targets(paths, args.registered)
     if args.fix:
-        if paths:
-            targets = [_script_of(p) for p in paths]
-        else:
-            targets = default_targets(args.registered, registered_commands())
-        for script in targets:
+        for script in scripts:
             for line in fix_sea(script):
                 print(f"fixed {line}")
-    findings = lint_all(paths, args.registered)
+    findings = lint_scripts(scripts, commands, prose=paths is None)
     for finding in findings:
         print(finding)
     print(f"sea lint: {len(findings)} finding(s)")

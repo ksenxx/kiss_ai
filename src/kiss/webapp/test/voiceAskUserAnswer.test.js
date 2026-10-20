@@ -9,6 +9,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -33,20 +35,6 @@ function answering(win) {
   return win.document.body.classList.contains('ask-answering');
 }
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
 
 test('a pending question puts the composer into answer mode', () => {
   const {win} = makePage();
@@ -173,5 +161,5 @@ test('answering by voice clears the pending question for the tab', () => {
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 1);
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length > 0 ? 1 : 0);
+report('voiceAskUserAnswer');
+process.exit(0);

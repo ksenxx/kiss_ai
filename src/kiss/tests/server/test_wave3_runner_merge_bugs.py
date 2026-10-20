@@ -15,10 +15,10 @@ B3  ``_cmd_save_config`` propagated ``work_dir`` to ``self.work_dir`` /
     saves with different folders could leave the live server pointed at
     a folder that does not match the persisted config.
 
-D4  ``JsonPrinter._handle_message`` (message-object path) emitted
-    ``tool_result`` events WITHOUT ``tool_name`` and bypassed the
-    finish-suppression / streamed-dedup treatment of the primary
-    ``print(type="tool_result")`` path.
+D4  ``print(type="tool_result")`` must stamp ``tool_name`` and the
+    Read ``path`` / ``start_line`` on every ``tool_result`` event.  (The
+    message-object route this finding originally compared it with was
+    dead code and has been removed, V5-2.)
 
 No mocks/patches/fakes: real :class:`JsonPrinter` /
 :class:`AgentServer` / :class:`ChatSorcarAgent` /
@@ -202,9 +202,14 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
             "model": models[0],
         })
         assert int(agent.total_tokens_used or 0) == 100
+        warm_row = _fetch_metrics(warm_prompt)
+        # A row some other writer inserted for the same text: a run
+        # that failed before allocating its own row must not adopt it.
         _add_task(probe_prompt)
+        foreign_row = _fetch_metrics(probe_prompt)
         tab.agent = agent
         tab.fail_next_prompt_write = True
+        printer.events.clear()
 
         server._run_task({
             "tabId": tab_id,
@@ -213,16 +218,25 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
             "model": models[0],
         })
 
-        row = _fetch_metrics(probe_prompt)
-        assert row is not None
-        result, tokens, cost, steps = row
-        assert "simulated pre-subtask failure" in (result or "")
-        assert tokens == 0, (
+        # The failure before the first ``agent.run`` has no row:
+        # nothing is persisted, neither on the previous run's row nor
+        # on a row that merely shares the prompt text ...
+        assert _fetch_metrics(warm_prompt) == warm_row
+        assert _fetch_metrics(probe_prompt) == foreign_row
+        # ... and the failure ``result`` shown on the tab carries the
+        # failed run's own (zero) usage, not the reused agent's
+        # cumulative lifetime counters.
+        results = [e for e in printer.events if e.get("type") == "result"]
+        assert len(results) == 1, printer.event_types()
+        failure = results[0]
+        assert "simulated pre-subtask failure" in failure["text"]
+        assert failure["tabId"] == tab_id
+        assert failure["total_tokens"] == 0, (
             "pre-loop failure inherited the reused agent's cumulative "
-            f"lifetime tokens (got {tokens})"
+            f"lifetime tokens (got {failure['total_tokens']})"
         )
-        assert cost == pytest.approx(0.0)
-        assert steps == 0
+        assert failure["cost_usd"] == pytest.approx(0.0)
+        assert failure["step_count"] == 0
     finally:
         _pop_states("w3f3-b2-task")
 
@@ -362,156 +376,19 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
         server._cmd_save_config({"config": {"work_dir": original_work_dir}})
 
 
+def test_d4_tool_result_event_carries_tool_name_and_read_location() -> None:
+    printer = _RecordingPrinter()
 
-class _ToolResultBlock:
-    """Real content block shaped like a third-party agent's tool result."""
+    printer.print(
+        "file body", type="tool_result", tool_name="Read",
+        tool_input={"file_path": "src/x.py", "start_line": 3},
+    )
 
-    def __init__(
-        self, content: str, *, is_error: bool = False,
-        tool_name: str | None = None,
-    ) -> None:
-        self.content = content
-        self.is_error = is_error
-        if tool_name is not None:
-            self.tool_name = tool_name
-
-
-class _TextBlock:
-    """Content block WITHOUT is_error/content-pair (must be skipped)."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _ContentMessage:
-    """Real message object carrying ``.content`` blocks."""
-
-    def __init__(self, content: list[Any]) -> None:
-        self.content = content
-
-
-class _ResultMessage:
-    """Real message object carrying a ``.result`` payload."""
-
-    def __init__(self, result: str) -> None:
-        self.result = result
-
-
-class TestMessageObjectToolResults:
-    def test_tool_name_stamped_from_block(self) -> None:
-        printer = _RecordingPrinter()
-        msg = _ContentMessage([
-            _ToolResultBlock("bash output", tool_name="Bash"),
-        ])
-
-        printer.print(msg, type="message")
-
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert len(results) == 1
-        assert results[0].get("tool_name") == "Bash", (
-            "message-object tool_result lost its tool_name — downstream "
-            "consumers key panel labels / highlighting on it"
-        )
-        assert results[0]["content"] == "bash output"
-        assert results[0]["is_error"] is False
-
-    def test_tool_name_falls_back_to_kwargs(self) -> None:
-        printer = _RecordingPrinter()
-        msg = _ContentMessage([_ToolResultBlock("read output")])
-
-        printer.print(msg, type="message", tool_name="Read")
-
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert len(results) == 1
-        assert results[0].get("tool_name") == "Read"
-
-    def test_finish_result_suppressed_like_primary_path(self) -> None:
-        printer = _RecordingPrinter()
-        msg = _ContentMessage([
-            _ToolResultBlock("final summary", tool_name="finish"),
-        ])
-
-        printer.print(msg, type="message")
-
-        assert all(
-            e.get("type") != "tool_result" for e in printer.events
-        ), (
-            "finish tool_result must be suppressed — the agentic loop "
-            "renders it as a dedicated result panel right after"
-        )
-
-    def test_streamed_bash_output_deduplicated(self) -> None:
-        printer = _RecordingPrinter()
-        printer._thread_local.task_id = "w3f3-d4-task"
-        printer.print("live streamed chunk", type="bash_stream")
-        msg = _ContentMessage([
-            _ToolResultBlock("live streamed chunk", tool_name="Bash"),
-        ])
-
-        printer.print(msg, type="message")
-
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert len(results) == 1
-        assert results[0]["content"] == "", (
-            "already-streamed output must not be duplicated into the "
-            "tool_result event"
-        )
-        printer.print(
-            _ContentMessage([_ToolResultBlock("fresh", tool_name="Bash")]),
-            type="message",
-        )
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert results[-1]["content"] == "fresh"
-
-    def test_error_flag_and_mixed_blocks(self) -> None:
-        printer = _RecordingPrinter()
-        msg = _ContentMessage([
-            _TextBlock("not a tool result"),
-            _ToolResultBlock("boom", is_error=True, tool_name="Edit"),
-        ])
-
-        printer.print(msg, type="message")
-
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert len(results) == 1
-        assert results[0]["is_error"] is True
-        assert results[0]["tool_name"] == "Edit"
-
-    def test_result_message_path_unchanged(self) -> None:
-        printer = _RecordingPrinter()
-
-        printer.print(
-            _ResultMessage("all done"), type="message",
-            total_tokens_used=5, budget_used=0.5,
-        )
-
-        results = [e for e in printer.events if e.get("type") == "result"]
-        assert len(results) == 1
-        assert results[0]["text"] == "all done"
-
-    def test_primary_tool_result_path_unchanged(self) -> None:
-        printer = _RecordingPrinter()
-
-        printer.print(
-            "file body", type="tool_result", tool_name="Read",
-            tool_input={"file_path": "src/x.py", "start_line": 3},
-        )
-
-        results = [
-            e for e in printer.events if e.get("type") == "tool_result"
-        ]
-        assert len(results) == 1
-        assert results[0]["tool_name"] == "Read"
-        assert results[0]["path"] == "src/x.py"
-        assert results[0]["start_line"] == 3
-        assert results[0]["content"] == "file body"
+    results = [
+        e for e in printer.events if e.get("type") == "tool_result"
+    ]
+    assert len(results) == 1
+    assert results[0]["tool_name"] == "Read"
+    assert results[0]["path"] == "src/x.py"
+    assert results[0]["start_line"] == 3
+    assert results[0]["content"] == "file body"
