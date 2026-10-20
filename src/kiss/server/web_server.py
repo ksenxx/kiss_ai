@@ -83,6 +83,7 @@ import uuid
 from asyncio import sslproto
 from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import Future as ConcurrentFuture
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -103,7 +104,7 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _queue_chat_event,
 )
-from kiss.core import tls_certs
+from kiss.core import tls_certs, user_config
 from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
 from kiss.core.browser_handoff import in_docker, set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
@@ -123,14 +124,16 @@ from kiss.core.utils import (
     read_bytes_waiting_for_writer,
     replace_waiting_for_readers,
 )
-from kiss.server import agent_state
+from kiss.server import agent_state, standalone_app
 from kiss.server import sorcar as sorcar_api
 from kiss.server.commands import broadcast_to_conn, sea_commands_event
+from kiss.server.helpers import MEDIA_DIR
 from kiss.server.install_problems import NOTICE_ID as INSTALL_PROBLEMS_NOTICE_ID
 from kiss.server.install_problems import install_problems_notice
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
+    task_metrics_from_session,
     with_synthesized_events,
 )
 from kiss.server.server import AgentServer
@@ -161,7 +164,6 @@ logger = logging.getLogger(__name__)
 # ``JsonPrinter.replay_snapshot`` whose JSON is supplied later.
 Payload = str | ConcurrentFuture[str]
 
-MEDIA_DIR = Path(__file__).resolve().parent.parent / "webapp" / "media"
 
 VOICE_MODEL_URL = (
     "https://ccoreilly.github.io/vosk-browser/models/"
@@ -363,7 +365,14 @@ _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
 
 _PYPI_FETCH_TIMEOUT = 5.0
 
-_WS_PING_TIMEOUT = 10
+_WS_PING_TIMEOUT = 10.0
+
+# Threads of the event loop's default executor.  Every backend command
+# (``_run_cmd``), file read, ``pgrep``, Playwright call and blocking
+# socket probe of this module runs on it, so the library default of
+# ``min(32, cpus + 4)`` (8 on a 4-core box) let a handful of slow
+# commands hold up every connection's next frame.
+_EXECUTOR_WORKERS = 64
 
 _WS_HEARTBEAT_FRAME = json.dumps({"type": "heartbeat"})
 """Proof-of-life frame the watchdog sends every WSS client after each
@@ -534,6 +543,7 @@ def _share_subagent_entries(
                     "task_id": sub_id,
                     "parent_task_id": parent_id,
                     "events": with_synthesized_events(events, row),
+                    "metrics": task_metrics_from_session(row),
                 }
                 if max_bytes is not None:
                     used += len(json.dumps(entry).encode("utf-8"))
@@ -647,6 +657,11 @@ def _rate_limit_backoff_seconds() -> int:
     """
     jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
     return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
+
+
+def _default_executor() -> ThreadPoolExecutor:
+    """Return the executor a server installs as its loop's default."""
+    return ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS, thread_name_prefix="kiss-web")
 
 
 def _bound_loopback(*ws_servers: Any) -> tuple[str, int]:
@@ -844,12 +859,6 @@ def _settle(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
-def _consume_handshake_result(handshake: asyncio.Future[None]) -> None:
-    """Read a failed TLS handshake's exception (it is logged by the TLS layer)."""
-    if not handshake.cancelled():
-        handshake.exception()
-
-
 class _HeadAwareServerConnection(ServerConnection):
     """``ServerConnection`` that speaks TLS or plain HTTP as the peer does.
 
@@ -866,6 +875,12 @@ class _HeadAwareServerConnection(ServerConnection):
     (``websockets`` accepts only GET and would otherwise mark the
     origin unhealthy): a first request line starting with ``HEAD ``
     gets a 200 and the connection is closed.
+
+    A connection ``websockets`` has not been given yet (sniffing, or in
+    its TLS handshake) is not in the server's ``connections``, so
+    ``Server.close()`` would leave it open: *sniffing* collects the raw
+    transports of those connections, and
+    :meth:`RemoteAccessServer._close_ws_listeners` closes them.
     """
 
     def __init__(
@@ -873,10 +888,13 @@ class _HeadAwareServerConnection(ServerConnection):
         protocol: Any,
         server: Any,
         ssl_context: ssl.SSLContext | None = None,
+        sniffing: set[Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(protocol, server, **kwargs)
         self._ssl_context = ssl_context
+        self._sniffing = sniffing if sniffing is not None else set()
+        self._raw_transport: Any = None
         self._sniff_task: asyncio.Task[None] | None = None
         # Whether ``websockets`` has been given the transport (plain
         # right after the sniff; TLS once the handshake is done).
@@ -894,10 +912,13 @@ class _HeadAwareServerConnection(ServerConnection):
         if self._ssl_context is None or self._attached:
             self._attach(transport)
             return
+        self._raw_transport = transport
+        self._sniffing.add(transport)
         transport.pause_reading()
         self._sniff_task = asyncio.get_running_loop().create_task(self._sniff(transport))
 
     def _attach(self, transport: Any) -> None:
+        self._sniffing.discard(self._raw_transport)
         self._attached = True
         super().connection_made(transport)
 
@@ -931,7 +952,7 @@ class _HeadAwareServerConnection(ServerConnection):
             self._attached = True
             loop = asyncio.get_running_loop()
             handshake: asyncio.Future[None] = loop.create_future()
-            handshake.add_done_callback(_consume_handshake_result)
+            handshake.add_done_callback(self._handshake_done)
             tls = sslproto.SSLProtocol(
                 loop, self, self._ssl_context, handshake, server_side=True,
             )
@@ -947,8 +968,20 @@ class _HeadAwareServerConnection(ServerConnection):
         transport.write(_PLAIN_HTTP_REFUSAL)
         transport.close()
 
+    def _handshake_done(self, handshake: asyncio.Future[None]) -> None:
+        """Read a failed TLS handshake's exception (it is logged by the TLS layer).
+
+        The TLS layer reports a connection lost during the handshake
+        here only (never through :meth:`connection_lost`), so the raw
+        transport leaves the sniffing set here too.
+        """
+        self._sniffing.discard(self._raw_transport)
+        if not handshake.cancelled():
+            handshake.exception()
+
     def connection_lost(self, exc: Exception | None) -> None:
         """Stop a pending sniff; hand the loss to ``websockets`` once it knows the transport."""
+        self._sniffing.discard(self._raw_transport)
         if self._sniff_task is not None and not self._sniff_task.done():
             self._sniff_task.cancel()
         if hasattr(self, "transport"):
@@ -2760,10 +2793,6 @@ class FifoSendLock:
         self._locked = False
         self._waiters: collections.deque[asyncio.Future[None]] = collections.deque()
 
-    def locked(self) -> bool:
-        """Return True while some task holds the lock."""
-        return self._locked
-
     async def acquire(self) -> bool:
         """Wait in FIFO order until the lock is owned by the caller."""
         if not self._locked:
@@ -3412,10 +3441,10 @@ class WebPrinter(JsonPrinter):
         """Return the per-endpoint lock serialising outbound sends.
 
         Every code path that writes to *endpoint* — the broadcast
-        fan-out in :meth:`_schedule_send` and the direct replies in
-        :meth:`RemoteAccessServer._endpoint_send` — must acquire this
-        lock so payloads reach the wire in send-start order even when
-        an earlier ``send()`` is suspended on write backpressure.
+        fan-out in :meth:`_schedule_send` and the direct replies
+        (:meth:`_locked_send`) — must acquire this lock so payloads
+        reach the wire in send-start order even when an earlier
+        ``send()`` is suspended on write backpressure.
 
         Args:
             endpoint: The client connection the payload targets.
@@ -4409,7 +4438,7 @@ def _build_manifest() -> str:
 _MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
 
 
-def _app_shell_urls() -> list[str]:
+def _app_shell_urls(brand_assets: list[str]) -> list[str]:
     """Return the URLs the service worker precaches: the app shell.
 
     The shell is the page itself (``/``) plus every cache-busted
@@ -4422,9 +4451,17 @@ def _app_shell_urls() -> list[str]:
     is stable while the assets on disk are unchanged and changes
     exactly when an asset's bytes change — even under a daemon that
     keeps running across an in-place upgrade.
+
+    Args:
+        brand_assets: The media files ``brand.css`` references
+            (:func:`_brand_css_asset_names`); a skin's
+            ``url("kiss-icon.png")`` resolves next to the stylesheet,
+            so the browser requests the plain ``/media/<name>`` (no
+            ``?v=``) and those files are precached under exactly that
+            URL.
     """
     urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
-    return ["/", *urls, *_brand_css_asset_urls()]
+    return ["/", *urls, *(f"/media/{name}" for name in brand_assets)]
 
 
 _CSS_URL_RE = re.compile(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", re.IGNORECASE)
@@ -4434,10 +4471,8 @@ _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 def _brand_css_asset_names() -> list[str]:
     """Return the media files ``brand.css`` references through relative ``url()``.
 
-    A skin's ``url("kiss-icon.png")`` resolves next to the stylesheet, so
-    the browser requests the plain ``/media/<name>`` (no ``?v=``); those
-    files are precached under exactly that URL.  Comments are ignored and
-    names that do not exist in the media directory are skipped.
+    Comments are ignored and names that do not exist in the media
+    directory are skipped.
     """
     try:
         css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
@@ -4445,11 +4480,6 @@ def _brand_css_asset_names() -> list[str]:
         return []
     names = sorted(set(_CSS_URL_RE.findall(_CSS_COMMENT_RE.sub("", css))))
     return [name for name in names if (MEDIA_DIR / name).is_file()]
-
-
-def _brand_css_asset_urls() -> list[str]:
-    """Return the plain ``/media/<name>`` URLs of the assets ``brand.css`` references."""
-    return [f"/media/{name}" for name in _brand_css_asset_names()]
 
 
 def _build_service_worker() -> str:
@@ -4466,11 +4496,12 @@ def _build_service_worker() -> str:
     Returns:
         The complete service-worker script.
     """
-    urls = _app_shell_urls()
-    # The brand.css assets are listed without ``?v=`` (see
-    # _brand_css_asset_urls), so fold their content hashes into the
-    # version separately: a swapped logo must still roll the worker.
-    version_input = urls + [_media_url(name) for name in _brand_css_asset_names()]
+    brand_assets = _brand_css_asset_names()
+    urls = _app_shell_urls(brand_assets)
+    # The brand.css assets are listed without ``?v=``, so fold their
+    # content hashes into the version separately: a swapped logo must
+    # still roll the worker.
+    version_input = urls + [_media_url(name) for name in brand_assets]
     shell = {
         "version": hashlib.sha256("\n".join(version_input).encode("utf-8")).hexdigest()[:16],
         "urls": urls,
@@ -4938,6 +4969,15 @@ class RemoteAccessServer:
         # Second WSS listener bound to 127.0.0.1:<port> beside the
         # wildcard one; see :meth:`_bind_loopback_alias`.
         self._ws_loopback_server: Any = None
+        # Raw transports of connections still sniffing their first byte
+        # or in their TLS handshake (``_HeadAwareServerConnection``);
+        # closed with the listeners.
+        self._sniffing: set[Any] = set()
+        # ``(stamp, remote_password)`` of config.json: the password and
+        # the file's stat stamp it was read under, published as ONE
+        # tuple so the two can never come from different reads; see
+        # :meth:`_stored_remote_password`.
+        self._remote_password_cache: tuple[tuple[int, int, int] | None, str] = (None, "")
         # Where same-machine clients learn this daemon's URL and the
         # per-start secret that marks them as local (see
         # :mod:`kiss.agents.sorcar.local_endpoint`).  Written once the WSS
@@ -4986,10 +5026,15 @@ class RemoteAccessServer:
         # "Update when idle": ``_update_when_idle_task`` polls the agent
         # registry and runs the installer once no task is in flight.  It
         # stays tracked (for shutdown) until it finishes; ``_armed`` is
-        # True only while it is still waiting for idle, i.e. while a
-        # Cancel can still call it off.
+        # the generation of the poller still waiting for idle (0 once
+        # it launched or was cancelled), i.e. non-zero while a Cancel
+        # can still call it off.  Every arm takes a fresh generation so
+        # a poller's idle check that was parked on the registry lock
+        # across a Cancel and a re-arm (which now belongs to a NEW
+        # poller) cannot pass for the new one.
         self._update_when_idle_task: asyncio.Task[None] | None = None
-        self._update_when_idle_armed = False
+        self._update_when_idle_armed = 0
+        self._update_when_idle_gen = 0
         self._update_models_log_path: Path = (
             kiss_home() / "update_models.log"
         )
@@ -5038,9 +5083,11 @@ class RemoteAccessServer:
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
-        if not self._peer_is_loopback(connection) and not self._peer_client_ca(connection):
-            cfg = await asyncio.to_thread(load_config)
-            if not str(cfg.get("remote_password", "") or ""):
+        if (
+            not self._peer_is_loopback(connection)
+            and not await self._peer_client_ca(connection)
+        ):
+            if not self._stored_remote_password():
                 addr = getattr(connection, "remote_address", None)
                 logger.warning(
                     "Refusing non-localhost request from %s: "
@@ -5098,6 +5145,14 @@ class RemoteAccessServer:
             return await asyncio.to_thread(_trajectory_jobs_response)
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return await asyncio.to_thread(_trajectory_job_response, path)
+        if path == standalone_app.APP_WINDOW_API:
+            # kiss-app asks whether the standalone app's popup window
+            # (macOS) is connected.
+            return _http_response(
+                200,
+                "application/json; charset=utf-8",
+                json.dumps(standalone_app.app_window_state()).encode(),
+            )
         if path == "/ca.crt":
             # The auto-generated local CA certificate (public data, no
             # key) so a phone on the LAN can install and trust it and
@@ -5155,7 +5210,7 @@ class RemoteAccessServer:
             f"No route matches {path[:200]!r}.",
         )
 
-    def _peer_client_ca(self, connection: Any) -> str:
+    async def _peer_client_ca(self, connection: Any) -> str:
         """Return the enrolled CA that issued *connection*'s client certificate, or ''.
 
         A non-empty name means the peer is another daemon's machine
@@ -5166,6 +5221,10 @@ class RemoteAccessServer:
         peer is admitted like a loopback client with the local token,
         whatever the ``remote_password``.  Empty when the peer sent no
         certificate (every browser) or the transport is not TLS.
+
+        The check reads the enrolled CA files and verifies a signature:
+        it runs in a thread, so a peer's handshake or request holds up
+        none of the other connections' frames.
 
         Args:
             connection: A WebSocket server connection (its ``transport``
@@ -5179,7 +5238,9 @@ class RemoteAccessServer:
             der = ssl_object.getpeercert(binary_form=True)
         except ValueError:  # the handshake is not complete
             return ""
-        return tls_certs.enrolled_client_ca(der, _trusted_clients_dir()) if der else ""
+        if not der:
+            return ""
+        return await asyncio.to_thread(tls_certs.enrolled_client_ca, der, _trusted_clients_dir())
 
     def _peer_is_loopback(self, connection: Any) -> bool:
         """Return True when *connection*'s raw TCP peer is loopback.
@@ -5336,10 +5397,7 @@ class RemoteAccessServer:
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
         """Run a backend command in the thread-pool executor."""
-        assert self._loop is not None
-        await self._loop.run_in_executor(
-            None, self._agent_server._handle_command, cmd,
-        )
+        await asyncio.to_thread(self._agent_server._handle_command, cmd)
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
@@ -5370,6 +5428,13 @@ class RemoteAccessServer:
         # replies to its own requests (see ``WebPrinter.add_client``).
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
         self._printer.bind_conn(conn_state["conn_id"], websocket)
+        # The standalone app's popup window (kiss-app on macOS) marks
+        # its connection; the daemon quits a browser whose popup closed.
+        # (``request`` is None only before the handshake, done by now.)
+        ws_path = websocket.request.path if websocket.request is not None else ""
+        app_window = urlsplit(ws_path).query == standalone_app.APP_WINDOW_WS_QUERY
+        if app_window:
+            standalone_app.app_window_event("open")
         try:
             async for message in websocket:
                 try:
@@ -5426,20 +5491,57 @@ class RemoteAccessServer:
             self._server_api.remote_views.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
+            if app_window:
+                standalone_app.app_window_event("closing")
 
-    @staticmethod
+    def _stored_remote_password(self) -> str:
+        """Return the ``remote_password`` of ``config.json`` as of now.
+
+        Costs one ``stat`` per call: the file is parsed again only when
+        its stamp ``(st_ino, st_mtime_ns, st_size)`` differs from the
+        one the cached value was read under.  The inode is part of the
+        stamp because file times are jiffy-grained on Linux (two
+        same-length writes a few milliseconds apart share
+        ``st_mtime_ns`` more often than not), and ``save_config``
+        publishes every write by ``os.replace`` of a temporary file
+        created while the previous file still holds its inode, so the
+        inode differs on every write.  A missing or unreadable file
+        reads as an empty password (remote access off), as
+        ``load_config`` reports it.
+
+        Called from the event loop and from executor threads
+        (:meth:`_lan_urls`) without a lock: the cache is a single
+        tuple of the stamp and the password read under it, replaced
+        in one assignment, so a refresh that finishes after a newer
+        one can only publish an OLDER coherent pair, which the next
+        call's ``stat`` sees as stale and reads again.  Publishing the
+        two separately let an old password end up under the current
+        stamp, where no later ``stat`` could tell it from a fresh read.
+        """
+        try:
+            st = os.stat(user_config.CONFIG_PATH)
+            stamp: tuple[int, int, int] | None = (st.st_ino, st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        cached_stamp, password = self._remote_password_cache
+        if stamp != cached_stamp:
+            password = str(load_config().get("remote_password", "") or "")
+            self._remote_password_cache = (stamp, password)
+        return password
+
     async def _frame_password_accepted(
-        cmd: dict[str, Any], kind: sorcar_api.AuthKind, conn_state: dict[str, Any],
+        self, cmd: dict[str, Any], kind: sorcar_api.AuthKind, conn_state: dict[str, Any],
     ) -> bool:
         """Strip the ``password`` of a frame and, for a ``"remote"`` client, check it.
 
         The ``password`` key is removed from *cmd* whatever *kind* is,
         so no handler ever sees it.  Only a password-authenticated
         (``"remote"``) client is policed: the stored password is
-        re-read from ``config.json`` for every frame, so the one in
-        force is always the one ``install.sh`` set last.  Local-token
-        clients, machine links and loopback browsers (``"local"`` and
-        ``"loopback"``) are always accepted.
+        checked against ``config.json`` for every frame
+        (:meth:`_stored_remote_password`, a ``stat`` unless the file
+        changed), so the one in force is always the one ``install.sh``
+        set last.  Local-token clients, machine links and loopback
+        browsers (``"local"`` and ``"loopback"``) are always accepted.
 
         A client that changes the password itself (Settings > Remote
         password, a ``saveConfig`` frame carrying a different
@@ -5466,7 +5568,7 @@ class RemoteAccessServer:
             return True
         if not isinstance(client_pw, str):
             client_pw = ""
-        stored = (await asyncio.to_thread(load_config)).get("remote_password", "")
+        stored = self._stored_remote_password()
         if not stored:
             conn_state.pop("rotated_from", None)
             return False
@@ -5539,16 +5641,6 @@ class RemoteAccessServer:
                 events.append(notice)
         return events
 
-    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
-        """Broadcast *event*, stamped with *conn_id* when non-empty.
-
-        A non-empty ``conn_id`` makes :meth:`WebPrinter.broadcast`
-        deliver the event ONLY to the requesting connection (the
-        browser tab whose user triggered the command), so siblings do
-        not pop a banner; ``""`` broadcasts to all.
-        """
-        broadcast_to_conn(self._printer, event, conn_id)
-
     async def _handle_server_reset(self, conn_id: str = "") -> None:
         """Restart the ``kiss-web`` daemon at the user's request.
 
@@ -5572,7 +5664,7 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        self._broadcast_to_conn({
+        broadcast_to_conn(self._printer, {
             "type": "notification",
             "id": "server-reset-restarting",
             "severity": "info",
@@ -5745,7 +5837,7 @@ class RemoteAccessServer:
             # Single-flight guard (F4-13): two windows clicking
             # "Update" concurrently must not launch two installers
             # that fetch/reset/overwrite the same tree in parallel.
-            self._broadcast_to_conn({
+            broadcast_to_conn(self._printer, {
                 "type": "notice",
                 "text": (
                     f"A {PRODUCT_NAME} update is already running… "
@@ -5768,7 +5860,7 @@ class RemoteAccessServer:
         spawned = None
         started = 0.0
         try:
-            if await self._cancel_update_when_idle():
+            if self._cancel_update_when_idle():
                 await self._broadcast_update_available()
             # When the clone (or its install.sh) is missing —
             # ~/.kiss/kiss_ai was deleted — fall back to the public
@@ -5779,7 +5871,7 @@ class RemoteAccessServer:
             script = await loop.run_in_executor(
                 None, _find_install_script, self._install_root,
             )
-            self._broadcast_to_conn({
+            broadcast_to_conn(self._printer, {
                 "type": "notice",
                 "text": (
                     f"An update of {PRODUCT_NAME} is getting installed… "
@@ -5822,7 +5914,7 @@ class RemoteAccessServer:
         with agent_state.STATE_LOCK:
             self._agent_server._update_installing = up
 
-    def _arm_update_barrier_if_idle(self) -> bool:
+    def _arm_update_barrier_if_idle(self, gen: int) -> bool:
         """Raise the run-admission barrier when no task is in flight.
 
         The idle verdict (:func:`_snapshot_active_tabs`) and the arming
@@ -5831,20 +5923,28 @@ class RemoteAccessServer:
         ``run`` submitted between the poller's "no active tasks"
         observation and the installer spawn is either counted as
         active (and defers the update) or refused by the barrier.
-        The armed flag is read in the same section — and
+        The armed generation is read in the same section — and
         :meth:`_cancel_update_when_idle` clears it under the same lock
         — so a Cancel that lands while this thread waits for the lock
         is seen here and nothing is armed for an update nobody will
         run (the cancelled poller has already lowered the barrier and
-        no exit watcher would ever lower it again).  The flag is also
+        no exit watcher would ever lower it again).  Comparing *gen*
+        rather than testing "armed" also covers a Cancel followed by a
+        re-arm during that wait: the armed generation is then the new
+        poller's and this (cancelled) poller's check must not consume
+        it, or the new poller would never see idle and the barrier
+        would stay up with no installer behind it.  The generation is
         CONSUMED in this section: from here on the launch belongs to
-        the poller, and a Cancel that gets the lock after it finds the
-        flag down and stands down.  Clearing the flag later, on the
+        the poller, and a Cancel that gets the lock after it finds
+        nothing armed and stands down.  Clearing it later, on the
         poller's next loop step, let such a Cancel cancel a poller
         already inside :meth:`_handle_run_update`; landing at the spawn
         ``await`` that left a started installer with the barrier
         lowered and no exit watcher (conc1018 I2-F1).
         Blocks on the lock: call it off the event loop.
+
+        Args:
+            gen: The calling poller's generation.
 
         Returns:
             ``True`` when the barrier was raised (idle), ``False`` when
@@ -5852,9 +5952,9 @@ class RemoteAccessServer:
             update was cancelled meanwhile.
         """
         with agent_state.STATE_LOCK:
-            if not self._update_when_idle_armed or _snapshot_active_tabs():
+            if self._update_when_idle_armed != gen or _snapshot_active_tabs():
                 return False
-            self._update_when_idle_armed = False
+            self._update_when_idle_armed = 0
             self._agent_server._update_installing = True
             return True
 
@@ -6000,7 +6100,7 @@ class RemoteAccessServer:
                 )
                 return proc, log_offset
         except OSError as exc:
-            self._broadcast_to_conn({
+            broadcast_to_conn(self._printer, {
                 "type": "error",
                 "text": f"Failed to start {what}: {exc}",
             }, conn_id)
@@ -6051,11 +6151,13 @@ class RemoteAccessServer:
             self._set_update_barrier(False)
         notice = await asyncio.to_thread(install_problems_notice, since=started - 1.0)
         if notice is not None:
-            self._broadcast_to_conn(notice, "")
+            broadcast_to_conn(self._printer, notice, "")
             return
         if proc.returncode == 0:
-            self._broadcast_to_conn(
-                {"type": "notification", "id": INSTALL_PROBLEMS_NOTICE_ID, "close": True}, "",
+            broadcast_to_conn(
+                self._printer,
+                {"type": "notification", "id": INSTALL_PROBLEMS_NOTICE_ID, "close": True},
+                "",
             )
             return
         output = await asyncio.to_thread(
@@ -6066,7 +6168,7 @@ class RemoteAccessServer:
             if "another KISS update is already running" in line:
                 text = f"{PRODUCT_NAME} update: {line.strip()}"
                 break
-        self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
+        broadcast_to_conn(self._printer, {"type": "error", "text": text}, conn_id)
 
     async def _handle_update_models(self, conn_id: str = "") -> None:
         """Refresh ``$KISS_HOME/MODEL_INFO.json`` via ``update_models.py``.
@@ -6099,7 +6201,7 @@ class RemoteAccessServer:
         loop = self._loop
         assert loop is not None
         if _proc_live(self._update_models_starting, self._update_models_proc):
-            self._broadcast_to_conn({
+            broadcast_to_conn(self._printer, {
                 "type": "notice",
                 "text": (
                     "A model catalog update is already running… "
@@ -6108,7 +6210,7 @@ class RemoteAccessServer:
             }, conn_id)
             return
         self._update_models_starting = True
-        self._broadcast_to_conn({
+        broadcast_to_conn(self._printer, {
             "type": "notice",
             "text": (
                 f"Updating the model catalog {self._update_models_argv[-1]}… "
@@ -6172,7 +6274,7 @@ class RemoteAccessServer:
         """
         await _wait_exit(proc)
         if proc.returncode == 0:
-            self._broadcast_to_conn({
+            broadcast_to_conn(self._printer, {
                 "type": "notice",
                 "text": (
                     "Model catalog update complete "
@@ -6182,7 +6284,7 @@ class RemoteAccessServer:
                 ),
             }, conn_id)
             return
-        self._broadcast_to_conn({
+        broadcast_to_conn(self._printer, {
             "type": "error",
             "text": (
                 f"Model catalog update failed (exit {proc.returncode}), "
@@ -6301,7 +6403,7 @@ class RemoteAccessServer:
                 speaker = await self._loop.run_in_executor(
                     None, self._identify_voice_speaker, speaker_pcm,
                 )
-        await self._endpoint_send(
+        await self._printer._locked_send(
             endpoint,
             json.dumps(
                 {
@@ -6406,7 +6508,7 @@ class RemoteAccessServer:
         page.  The path is resolved by :meth:`_resolve_tab_file` (``~``
         expansion, the command's ``workDir``, then the tab's pending
         worktree) and the content is sent directly to the requesting
-        *endpoint* via :meth:`_endpoint_send` — never broadcast — as a
+        *endpoint* via :meth:`_reply_direct` — never broadcast — as a
         single ``fileContent`` JSON object::
 
             {"type": "fileContent", "path": <resolved abs path>,
@@ -6742,10 +6844,17 @@ class RemoteAccessServer:
             {"type": "share_tasks", "tabId": <echo>, "chatId": <echo>,
              "tasks": [{"task": <str>, "task_id": <str>,
                         "events": [<event>, ...],
+                        "metrics": {"tokens", "cost", "steps",
+                                    "start_ts", "end_ts"} | None,
                         "subagents": [{"task": <str>, "task_id": <str>,
                                        "parent_task_id": <str>,
-                                       "events": [...]}, ...]}, ...],
+                                       "events": [...],
+                                       "metrics": ...}, ...]}, ...],
              "truncated": <bool>}
+
+        ``metrics`` (:func:`~kiss.server.json_printer.task_metrics_from_session`)
+        feeds the Tokens / Cost / Steps / Time rows of the saved page's
+        per-task info block.
 
         Each task's ``subagents`` list carries the transcripts of
         every sub-agent the task fanned out (recursively, parents
@@ -6822,6 +6931,10 @@ class RemoteAccessServer:
                         cast("list[dict[str, Any]]", row.get("events") or []),
                         row,
                     ),
+                    # The row's tokens / cost / steps / start and end
+                    # times: the Tokens, Cost, Steps and Time rows of
+                    # the saved page's task info (taskPanelInfoHTML).
+                    "metrics": task_metrics_from_session(row),
                 }
                 budget -= len(json.dumps(entry).encode("utf-8"))
                 if budget < 0:
@@ -6917,7 +7030,7 @@ class RemoteAccessServer:
         not surface an error.
         """
         try:
-            await self._endpoint_send(endpoint, json.dumps(reply))
+            await self._printer._locked_send(endpoint, json.dumps(reply))
         except Exception:
             logger.debug("%s: failed to write reply", what, exc_info=True)
 
@@ -7446,7 +7559,7 @@ class RemoteAccessServer:
 
         The response is a single JSON object sent directly to the
         requesting *endpoint* — a :class:`ServerConnection`, via
-        :meth:`_endpoint_send` — i.e. not broadcast to other clients.
+        :meth:`_reply_direct` — i.e. not broadcast to other clients.
         It has the shape::
 
             {"type": "activeTasksResponse",
@@ -7500,7 +7613,7 @@ class RemoteAccessServer:
         """
         if self.host == "localhost" or sorcar_api.is_loopback_ip(self.host):
             return []
-        if not str(load_config().get("remote_password", "") or ""):
+        if not self._stored_remote_password():
             return []
         if not self._ips_probed:
             return []
@@ -7630,7 +7743,7 @@ class RemoteAccessServer:
         """
         msg = await asyncio.to_thread(self._remote_url_message, url)
         if gen == self._url_publish_gen:
-            self._broadcast_to_conn(msg, conn_id)
+            broadcast_to_conn(self._printer, msg, conn_id)
 
     async def _broadcast_update_available(self, conn_id: str = "") -> None:
         """Send the cached PyPI ``update_available`` state.
@@ -7648,20 +7761,20 @@ class RemoteAccessServer:
         snoozed = available and await asyncio.to_thread(
             _is_update_snoozed, latest,
         )
-        self._broadcast_to_conn({
+        broadcast_to_conn(self._printer, {
             "type": "update_available",
             "available": available,
             "latest": latest,
             "current": current,
             "snoozed": snoozed,
-            "pendingIdle": self._update_when_idle_armed,
+            "pendingIdle": self._update_when_idle_armed != 0,
         }, conn_id)
 
     def _update_in_progress(self) -> bool:
         """Return whether an installer is being spawned or still running."""
         return _proc_live(self._update_starting, self._update_proc)
 
-    async def _cancel_update_when_idle(self) -> bool:
+    def _cancel_update_when_idle(self) -> bool:
         """Disarm an "Update when idle" still waiting for idle.
 
         Returns:
@@ -7669,36 +7782,25 @@ class RemoteAccessServer:
             idle and is launching the installer is left alone: the
             update is under way and the single-flight guard in
             :meth:`_handle_run_update` covers any concurrent request.
-            The flag is cleared under :data:`agent_state.STATE_LOCK`
-            so an idle check already started in the executor
-            (:meth:`_arm_update_barrier_if_idle`) cannot raise the
-            barrier after this cancel lowered it.  That acquisition
-            waits behind task threads holding the lock, so it runs in
-            the executor like the idle check itself and never stalls
-            the event loop; only ``Task.cancel`` runs on the loop.
+            The armed generation is cleared under
+            :data:`agent_state.STATE_LOCK` — the lock the idle check
+            (:meth:`_arm_update_barrier_if_idle`) takes — so a check
+            already parked on the lock cannot raise the barrier after
+            this cancel.  Task threads hold that lock for the few
+            milliseconds of a run admission or a refusal broadcast; the
+            loop waits those out here as :meth:`_set_update_barrier`
+            does.
         """
-        if not self._update_when_idle_armed:
-            return False
-        if not await asyncio.to_thread(self._disarm_update_when_idle):
-            # The poller armed the barrier and cleared the flag during
-            # the wait: it is launching the installer, leave it alone.
+        with agent_state.STATE_LOCK:
+            was_armed = self._update_when_idle_armed != 0
+            self._update_when_idle_armed = 0
+        if not was_armed:
             return False
         task = self._update_when_idle_task
         if task is not None:
             task.cancel()
             self._update_when_idle_task = None
         return True
-
-    def _disarm_update_when_idle(self) -> bool:
-        """Executor thread: clear the armed flag under the state lock.
-
-        Returns:
-            Whether the flag was set (this call disarmed the update).
-        """
-        with agent_state.STATE_LOCK:  # executor thread: no Stop injection
-            was_armed = self._update_when_idle_armed
-            self._update_when_idle_armed = False
-            return was_armed
 
     async def _handle_update_when_idle(self, cancel: bool = False) -> None:
         """Arm (or cancel) an update that runs once no task is running.
@@ -7714,7 +7816,7 @@ class RemoteAccessServer:
                 arming one.
         """
         if cancel:
-            await self._cancel_update_when_idle()
+            self._cancel_update_when_idle()
         elif (
             self._update_when_idle_task is None
             and not self._update_in_progress()
@@ -7722,13 +7824,14 @@ class RemoteAccessServer:
             # No poller at all — neither armed nor still finishing its
             # handoff after a fast installer exit — so a second one
             # cannot overwrite (and orphan) a live task.
-            self._update_when_idle_armed = True
+            self._update_when_idle_gen += 1
+            self._update_when_idle_armed = self._update_when_idle_gen
             self._update_when_idle_task = asyncio.create_task(
-                self._run_update_when_idle(),
+                self._run_update_when_idle(self._update_when_idle_gen),
             )
         await self._broadcast_update_available()
 
-    async def _run_update_when_idle(self) -> None:
+    async def _run_update_when_idle(self, gen: int) -> None:
         """Wait until no task is in flight, then launch the installer.
 
         Polls :meth:`_arm_update_barrier_if_idle` (off-thread: it takes
@@ -7744,9 +7847,13 @@ class RemoteAccessServer:
         to one connection.  The task stays tracked on
         :attr:`_update_when_idle_task` until it returns so
         :meth:`stop_async` can cancel it mid-handoff too.
+
+        Args:
+            gen: This poller's generation (:attr:`_update_when_idle_armed`
+                while it is the armed one).
         """
         try:
-            while not await asyncio.to_thread(self._arm_update_barrier_if_idle):
+            while not await asyncio.to_thread(self._arm_update_barrier_if_idle, gen):
                 await asyncio.sleep(_IDLE_UPDATE_POLL_S)
             await self._handle_run_update("")
             await self._broadcast_update_available()
@@ -7864,27 +7971,6 @@ class RemoteAccessServer:
             await self._broadcast_remote_url(url or "")
         await self._broadcast_update_available(conn_id)
 
-    async def _endpoint_send(
-        self, endpoint: ServerConnection, data: str,
-    ) -> None:
-        """Send ``data`` to one client connection.
-
-        Delegates to the printer's :meth:`WebPrinter._locked_send`
-        (C-R1) rather than duplicating it: that path acquires the
-        per-endpoint send lock — so a direct reply cannot overtake a
-        broadcast event already in flight to the same client
-        (``Connection.send`` waits out write backpressure BEFORE
-        queuing the frame) — and routes through
-        :meth:`WebPrinter._timed_send`, whose failure handler removes
-        a dead peer from the active sets so subsequent broadcasts skip
-        it.
-
-        Args:
-            endpoint: The connection to send to.
-            data: The JSON payload (already encoded with ``json.dumps``).
-        """
-        await self._printer._locked_send(endpoint, data)
-
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
         """Sanitize the ``restoredTabs`` field of a ``ready`` command.
@@ -7994,13 +8080,13 @@ class RemoteAccessServer:
         # and on none once it closes: the snapshot lets this
         # (re)connecting client add the live ones and drop any it kept
         # from before a disconnect or a daemon restart.
-        self._broadcast_to_conn(self._agent_server.browser_tabs.snapshot_event(), conn_id)
+        broadcast_to_conn(self._printer, self._agent_server.browser_tabs.snapshot_event(), conn_id)
         await self._send_welcome_info(conn_id)
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
         # these events (the page also embeds them at load).
         for bootstrap in await asyncio.to_thread(self._bootstrap_events):
-            self._broadcast_to_conn(bootstrap, conn_id)
+            broadcast_to_conn(self._printer, bootstrap, conn_id)
         await self._reply_direct(
             websocket, {"type": "focusInput", "tabId": tab_id}, "ready focusInput",
         )
@@ -8781,9 +8867,18 @@ class RemoteAccessServer:
         :meth:`WebPrinter._timed_send` happened to abort the peer —
         forever on an idle daemon.  The ping frame gets the tolerance
         every frame gets (:attr:`WebPrinter._send_timeout`), the pong
-        and the heartbeat :data:`_WS_PING_TIMEOUT`.  Any failure
-        aborts the transport, which ends the connection's handler;
-        ``close()`` would wait for the same drain.
+        :data:`_WS_PING_TIMEOUT`.  Any failure aborts the transport,
+        which ends the connection's handler; ``close()`` would wait for
+        the same drain.
+
+        The heartbeat is queued like any other frame
+        (:meth:`WebPrinter._schedule_send`): it takes its place in the
+        connection's send FIFO behind the frames already in flight and
+        :meth:`WebPrinter._timed_send` drops the peer if its own send
+        stalls.  Waiting for it here under :data:`_WS_PING_TIMEOUT`
+        used to abort a live client that had just answered the ping
+        whenever a large replay (one frame may be tens of megabytes)
+        was still draining ahead of it.
 
         The heartbeat frame goes only to a socket the printer has
         registered (:meth:`WebPrinter.add_client`, which runs after
@@ -8800,10 +8895,7 @@ class RemoteAccessServer:
             )
             await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
             if ws in self._printer._pending_sends:
-                await asyncio.wait_for(
-                    self._endpoint_send(ws, _WS_HEARTBEAT_FRAME),
-                    timeout=_WS_PING_TIMEOUT,
-                )
+                self._printer._schedule_send(ws, _WS_HEARTBEAT_FRAME)
         except Exception:
             transport = getattr(ws, "transport", None)
             if transport is not None:
@@ -9051,15 +9143,12 @@ class RemoteAccessServer:
                 self._url_file, tunnel_url,
             )
 
-    def _watchdog_check_ip_change(
-        self, current_ips: frozenset[str] | None = None,
-    ) -> bool:
+    def _watchdog_check_ip_change(self, current_ips: frozenset[str]) -> bool:
         """Detect a debounced local-IP change and initiate a restart.
 
         Args:
-            current_ips: Pre-fetched :func:`_get_local_ips` result
-                (the watchdog fetches it off-thread, M10); when
-                ``None``, fetched synchronously here.
+            current_ips: The :func:`_get_local_ips` result, fetched
+                off-thread by the watchdog (the probe opens sockets).
 
         Compares the current :func:`_get_local_ips` result against the
         established baseline in :attr:`_last_ips`, requiring
@@ -9072,8 +9161,6 @@ class RemoteAccessServer:
             been closed and the watchdog loop must exit); False
             otherwise.
         """
-        if current_ips is None:
-            current_ips = _get_local_ips()
         if not current_ips:
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
@@ -9122,7 +9209,10 @@ class RemoteAccessServer:
         ``close()`` only; callers that must wait for the sockets to be
         released (:meth:`stop_async`) await ``wait_closed()`` themselves.
         The wildcard server object is kept so its pending
-        ``serve_forever()`` observes the close.
+        ``serve_forever()`` observes the close.  Connections still
+        sniffing their first byte or in their TLS handshake are not the
+        library's yet (``_HeadAwareServerConnection``): their raw
+        transports are closed here.
 
         Args:
             remove_endpoint_file: Also withdraw the local endpoint file
@@ -9134,6 +9224,8 @@ class RemoteAccessServer:
             self._ws_server.close()
         if self._ws_loopback_server is not None:
             self._ws_loopback_server.close()
+        for transport in list(self._sniffing):
+            transport.close()
         if remove_endpoint_file:
             # Nothing can connect any more: the endpoint file must not
             # keep advertising this daemon (a rebind publishes a fresh
@@ -9349,6 +9441,7 @@ class RemoteAccessServer:
         """
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
+        self._loop.set_default_executor(_default_executor())
         # No database write may run here: the legacy side-channel stamp
         # and the orphan sweep live on AgentServer's background thread
         # so a locked history.db never delays binding the listeners.
@@ -9406,6 +9499,14 @@ class RemoteAccessServer:
         not answer within :data:`_WS_PING_TIMEOUT`
         (:meth:`_ping_one_ws`), then sends the ``heartbeat`` frame
         ``media/transport.js`` watches.
+
+        The receive queue is unbounded (``max_queue=None``): a
+        connection's frames are handled one at a time
+        (:meth:`_ws_handler`), so with the library's default of 16
+        queued frames a client sending more while a slow command runs
+        would get its transport paused, which also holds back its pong
+        and makes the watchdog abort a live connection.  Memory stays
+        bounded by ``max_size`` per frame and the peer's send rate.
         """
         bind = asyncio.ensure_future(serve(
             self._ws_handler,
@@ -9416,13 +9517,16 @@ class RemoteAccessServer:
             ping_interval=None,
             ping_timeout=None,
             max_size=_MAX_LINE_BYTES,
+            max_queue=None,
             # Each connection sniffs its first byte and speaks TLS or
             # plain HTTP accordingly (``_HeadAwareServerConnection``),
             # so the listener itself is created without ``ssl``.
             create_connection=cast(
                 "type[ServerConnection]",
                 functools.partial(
-                    _HeadAwareServerConnection, ssl_context=self._ssl_context,
+                    _HeadAwareServerConnection,
+                    ssl_context=self._ssl_context,
+                    sniffing=self._sniffing,
                 ),
             ),
         ))
@@ -10326,6 +10430,7 @@ class RemoteAccessServer:
                 return
             self._loop = asyncio.get_running_loop()
             self._printer._loop = self._loop
+            self._loop.set_default_executor(_default_executor())
             if self._ssl_context is None:
                 self._ssl_context = await asyncio.to_thread(
                     _create_ssl_context, self._ssl_certfile, self._ssl_keyfile, [],
@@ -10382,7 +10487,7 @@ class RemoteAccessServer:
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
             idle_poller = self._update_when_idle_task
-            await self._cancel_update_when_idle()
+            self._cancel_update_when_idle()
             await _cancel_task(idle_poller)
             self._update_when_idle_task = None
             await _cancel_task(self._update_models_watch_task)

@@ -4,9 +4,9 @@
 # add your name here
 """Tests that custom HTTP headers can be configured via the settings panel.
 
-Core-only tests (depending only on ``kiss.core``) moved here from
-``kiss.tests.agents.third_party_agents.test_config_custom_headers``;
-the non-core tests remain there.
+Core-only tests (depending only on ``kiss.core``) moved here from the
+channel tests; the non-core cases live in
+``kiss.tests.agents.third_party_agents.test_100pct_branch_coverage``.
 """
 
 from __future__ import annotations

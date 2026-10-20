@@ -19,7 +19,6 @@
 'use strict';
 
 const assert = require('assert');
-const path = require('path');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
 
 const pages = [];

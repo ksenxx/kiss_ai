@@ -96,18 +96,17 @@ class TestPingPong:
         """The PONG arrives on the original connection; no reconnect happens."""
         backend = _connected_backend(server)
         try:
-            conn = server.accept()
-            _read_lines(conn, "USER ")
-            conn.sendall(b"PING :tok-123\r\n")
-            lines = _read_lines(conn, "PONG")
-            assert lines[-1] == "PONG :tok-123"
-            # No second connection was opened to answer the PING.
-            server.sock.settimeout(0.3)
-            with pytest.raises(TimeoutError):
-                server.accept()
-            reader = backend._reader_thread
-            assert reader is not None and reader.is_alive()
-            conn.close()
+            with server.accept() as conn:
+                _read_lines(conn, "USER ")
+                conn.sendall(b"PING :tok-123\r\n")
+                lines = _read_lines(conn, "PONG")
+                assert lines[-1] == "PONG :tok-123"
+                # No second connection was opened to answer the PING.
+                server.sock.settimeout(0.3)
+                with pytest.raises(TimeoutError):
+                    server.accept()
+                reader = backend._reader_thread
+                assert reader is not None and reader.is_alive()
         finally:
             backend.disconnect()
 
@@ -115,16 +114,15 @@ class TestPingPong:
         """The reader keeps parsing PRIVMSG lines after answering a PING."""
         backend = _connected_backend(server)
         try:
-            conn = server.accept()
-            _read_lines(conn, "USER ")
-            conn.sendall(b"PING :alive\r\n")
-            _read_lines(conn, "PONG")
-            conn.sendall(b":alice!u@h PRIVMSG #chan :hello bot\r\n")
-            assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
-            messages, _ = backend.poll_messages("#chan", "")
-            assert [m["text"] for m in messages] == ["hello bot"]
-            assert messages[0]["user"] == "alice"
-            conn.close()
+            with server.accept() as conn:
+                _read_lines(conn, "USER ")
+                conn.sendall(b"PING :alive\r\n")
+                _read_lines(conn, "PONG")
+                conn.sendall(b":alice!u@h PRIVMSG #chan :hello bot\r\n")
+                assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
+                messages, _ = backend.poll_messages("#chan", "")
+                assert [m["text"] for m in messages] == ["hello bot"]
+                assert messages[0]["user"] == "alice"
         finally:
             backend.disconnect()
 
@@ -136,24 +134,22 @@ class TestReconnect:
         """After connect() twice, only the new reader consumes the new socket."""
         backend = _connected_backend(server)
         try:
-            conn1 = server.accept()
-            _read_lines(conn1, "USER ")
-            reader1 = backend._reader_thread
-            assert reader1 is not None
+            with server.accept() as conn1:
+                _read_lines(conn1, "USER ")
+                reader1 = backend._reader_thread
+                assert reader1 is not None
 
-            assert backend.connect() is True
-            conn2 = server.accept()
-            _read_lines(conn2, "USER ")
-            reader2 = backend._reader_thread
-            assert reader2 is not None and reader2 is not reader1
-            assert wait_until(lambda: not reader1.is_alive(), timeout=6.0)
+                assert backend.connect() is True
+                with server.accept() as conn2:
+                    _read_lines(conn2, "USER ")
+                    reader2 = backend._reader_thread
+                    assert reader2 is not None and reader2 is not reader1
+                    assert wait_until(lambda: not reader1.is_alive(), timeout=6.0)
 
-            conn2.sendall(b":carol!u@h PRIVMSG #chan :after reconnect\r\n")
-            assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
-            messages, _ = backend.poll_messages("", "")
-            assert [m["text"] for m in messages] == ["after reconnect"]
-            conn1.close()
-            conn2.close()
+                    conn2.sendall(b":carol!u@h PRIVMSG #chan :after reconnect\r\n")
+                    assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
+                    messages, _ = backend.poll_messages("", "")
+                    assert [m["text"] for m in messages] == ["after reconnect"]
         finally:
             backend.disconnect()
 
@@ -191,13 +187,12 @@ class TestDisconnectGuard:
         """A normal disconnect still joins and clears the reader thread."""
         backend = _connected_backend(server)
         try:
-            conn = server.accept()
-            _read_lines(conn, "USER ")
-            reader = backend._reader_thread
-            assert reader is not None
-            backend.disconnect()
-            assert backend._reader_thread is None
-            assert not reader.is_alive()
-            conn.close()
+            with server.accept() as conn:
+                _read_lines(conn, "USER ")
+                reader = backend._reader_thread
+                assert reader is not None
+                backend.disconnect()
+                assert backend._reader_thread is None
+                assert not reader.is_alive()
         finally:
             backend.disconnect()

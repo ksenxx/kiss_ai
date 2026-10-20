@@ -38,8 +38,15 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  stubRaf,
+  sleep,
+  MEDIA,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+const {test, report} = makeRunner();
 
 const FALLBACK_CFG = {
   voskSrc: '/media/vosk.js',
@@ -57,47 +64,39 @@ class FakeRecognizer {
   remove() {}
 }
 
+/** A loaded model with the surface the pipeline uses. */
+function fakeModel() {
+  return {KaldiRecognizer: FakeRecognizer, terminate() {}};
+}
+
 /**
  * A browser-mode page whose window.Vosk.createModel returns promises the
  * test settles (or never settles) by hand, counting every call.
  */
 function makePage(opts) {
   const options = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const mic = {calls: []};
+  const vosk = {createModelCalls: 0, settlers: []};
+  const bootWorkers = [];
+  const {win, posted} = makeChatPage({
+    beforeScripts: win =>
+      installVoiceStubs(win, options, mic, vosk, bootWorkers),
+    extraScripts: ['voice.js'],
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
+  // voice.js only reads window.Vosk lazily (loadVosk at mic click), so
+  // the real bundle may follow it.
+  if (options.realVosk) {
+    win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
+  }
+  return {win, posted, mic, vosk, bootWorkers};
+}
 
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
+function installVoiceStubs(win, options, mic, vosk, bootWorkers) {
+  stubRaf(win);
   win.Audio = function (src) {
     return {src, play: () => Promise.resolve()};
   };
 
-  const mic = {calls: []};
   Object.defineProperty(win.navigator, 'mediaDevices', {
     configurable: true,
     value: {
@@ -116,8 +115,6 @@ function makePage(opts) {
     },
   });
 
-  const vosk = {createModelCalls: 0, settlers: []};
-  const bootWorkers = [];
   if (options.realVosk) {
     // Integrated mode: the REAL vendored vosk.js is loaded below and
     // window.Vosk comes from it.  jsdom has no Web Workers, so this
@@ -187,28 +184,12 @@ function makePage(opts) {
     }
   };
 
-  win.__VOICE__ = Object.assign(
-    {},
-    FALLBACK_CFG,
-    options.cfg || {},
-  );
+  win.__VOICE__ = Object.assign({}, FALLBACK_CFG, options.cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  if (options.realVosk) {
-    win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return {win, posted, mic, vosk, bootWorkers};
 }
 
 function micBtn(win) {
   return win.document.getElementById('voice-btn');
-}
-
-function tick(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms || 20));
 }
 
 // ---------------------------------------------------------------------
@@ -279,21 +260,6 @@ function workerReclaimed(worker) {
   );
 }
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
-
 async function main() {
   await test(
     'CAND-4: a model load that never settles times out into the error ' +
@@ -302,14 +268,14 @@ async function main() {
       const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
       const {win, vosk} = page;
       micBtn(win).click(); // browser mode: pipeline starts directly
-      await tick();
+      await sleep(20);
       assert.strictEqual(vosk.createModelCalls, 1);
       assert.ok(
         micBtn(win).classList.contains('voice-loading'),
         `must be loading while the model loads: ${micBtn(win).className}`,
       );
       // The worker never posts 'load': createModel never settles.
-      await tick(150);
+      await sleep(150);
       const btn = micBtn(win);
       assert.ok(
         btn.classList.contains('voice-error'),
@@ -325,56 +291,91 @@ async function main() {
   );
 
   await test(
-    'CAND-4: after the timeout, busy is cleared so re-enabling actually ' +
-      'retries the model load',
+    'CAND-4: after the timeout, busy is cleared so re-enabling is honoured; ' +
+      'it waits for the download already in flight instead of starting a ' +
+      'second one',
     async () => {
       const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-      const {win, vosk} = page;
+      const {win, mic, vosk} = page;
       micBtn(win).click();
-      await tick(150); // load timed out; the error turned the mic off
+      await sleep(150); // load timed out; the error turned the mic off
       assert.ok(micBtn(win).classList.contains('voice-error'));
       micBtn(win).click(); // the user tries again
-      await tick();
+      await sleep(20);
       assert.strictEqual(
         vosk.createModelCalls,
-        2,
-        're-enabling must start a fresh model load, not defer to a busy ' +
-          'flag the wedged load never cleared',
+        1,
+        'a model download that is still running is shared by the retry, ' +
+          'not duplicated',
       );
       assert.ok(
         micBtn(win).classList.contains('voice-loading'),
         `the retry must be visibly loading: ${micBtn(win).className}`,
       );
+      // The slow download completes: the retry goes on to the microphone.
+      vosk.settlers[0].resolve(fakeModel());
+      await sleep(20);
+      assert.strictEqual(
+        mic.calls.length,
+        1,
+        'the retry must open the microphone once the shared load arrives',
+      );
       win.close();
     },
   );
 
-  await test('CAND-4: a model that arrives after its timeout is terminated, not used', async () => {
-    const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-    const {win, mic, vosk} = page;
-    micBtn(win).click();
-    await tick(150); // timed out
-    assert.ok(micBtn(win).classList.contains('voice-error'));
-    let terminated = 0;
-    vosk.settlers[0].resolve({
-      KaldiRecognizer: FakeRecognizer,
-      terminate: () => {
-        terminated++;
-      },
-    });
-    await tick();
-    assert.strictEqual(terminated, 1, "the late model's worker must be freed");
-    assert.strictEqual(
-      mic.calls.length,
-      0,
-      'a timed-out attempt must never go on to open the microphone',
-    );
-    assert.ok(
-      micBtn(win).classList.contains('voice-error'),
-      `the late arrival must not repaint the UI: ${micBtn(win).className}`,
-    );
-    win.close();
-  });
+  await test(
+    'CAND-4: a model that arrives after its timeout is kept for the next ' +
+      'enable, which uses it without another download',
+    async () => {
+      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
+      const {win, mic, vosk} = page;
+      micBtn(win).click();
+      await sleep(150); // timed out
+      assert.ok(micBtn(win).classList.contains('voice-error'));
+      vosk.settlers[0].resolve(fakeModel());
+      await sleep(20);
+      assert.strictEqual(
+        mic.calls.length,
+        0,
+        'a timed-out attempt must never go on to open the microphone',
+      );
+      assert.ok(
+        micBtn(win).classList.contains('voice-error'),
+        `the late arrival must not repaint the UI: ${micBtn(win).className}`,
+      );
+      micBtn(win).click();
+      await sleep(20);
+      assert.strictEqual(vosk.createModelCalls, 1, 'no second download');
+      assert.strictEqual(mic.calls.length, 1, 'the kept model is used');
+      win.close();
+    },
+  );
+
+  await test(
+    'CAND-4: a shared load that fails after the timeout is forgotten, so ' +
+      'the next enable starts a fresh one',
+    async () => {
+      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
+      const {win, vosk} = page;
+      micBtn(win).click();
+      await sleep(150); // timed out
+      vosk.settlers[0].reject(new Error('model download failed'));
+      await sleep(20);
+      assert.ok(
+        micBtn(win).classList.contains('voice-error'),
+        `the late failure must not repaint the UI: ${micBtn(win).className}`,
+      );
+      micBtn(win).click();
+      await sleep(20);
+      assert.strictEqual(
+        vosk.createModelCalls,
+        2,
+        'a failed download is not reused; the retry downloads again',
+      );
+      win.close();
+    },
+  );
 
   await test(
     'CAND-4: a load failure reported before the timeout still paints the ' +
@@ -383,9 +384,9 @@ async function main() {
       const page = makePage({cfg: {modelLoadTimeoutMs: 5000}});
       const {win, vosk} = page;
       micBtn(win).click();
-      await tick();
+      await sleep(20);
       vosk.settlers[0].reject(new Error('model download failed'));
-      await tick();
+      await sleep(20);
       const btn = micBtn(win);
       assert.ok(
         btn.classList.contains('voice-error'),
@@ -396,7 +397,7 @@ async function main() {
         `the failure reason must be shown: ${btn.getAttribute('data-tooltip')}`,
       );
       micBtn(win).click();
-      await tick();
+      await sleep(20);
       assert.strictEqual(vosk.createModelCalls, 2, 'retry must be possible');
       win.close();
     },
@@ -409,9 +410,9 @@ async function main() {
       const page = makePage({cfg: {modelLoadTimeoutMs: 5000}});
       const {win, vosk} = page;
       micBtn(win).click();
-      await tick();
+      await sleep(20);
       vosk.settlers[0].reject(undefined);
-      await tick();
+      await sleep(20);
       const btn = micBtn(win);
       assert.ok(
         btn.classList.contains('voice-error'),
@@ -426,26 +427,6 @@ async function main() {
       win.close();
     },
   );
-
-  await test('CAND-4: a late model whose terminate() throws is still contained', async () => {
-    const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-    const {win, vosk} = page;
-    micBtn(win).click();
-    await tick(150); // timed out
-    vosk.settlers[0].resolve({
-      KaldiRecognizer: FakeRecognizer,
-      terminate: () => {
-        throw new Error('worker already gone');
-      },
-    });
-    await tick();
-    assert.ok(
-      micBtn(win).classList.contains('voice-error'),
-      `the error state must survive the throwing cleanup: ` +
-        micBtn(win).className,
-    );
-    win.close();
-  });
 
   await test('CAND-5: a model that fails to load terminates its spawned worker', async () => {
     const {win, workers} = makeVoskWindow();
@@ -463,7 +444,7 @@ async function main() {
     );
     // The worker booted, but the model failed to load (bad modelUrl).
     worker.emit({event: 'load', result: false});
-    await tick();
+    await sleep(20);
     assert.strictEqual(rejected, 1, 'createModel must reject');
     assert.ok(
       workerReclaimed(worker),
@@ -483,7 +464,7 @@ async function main() {
       });
       assert.strictEqual(workers.length, attempt + 1);
       workers[attempt].emit({event: 'load', result: false});
-      await tick();
+      await sleep(20);
       assert.strictEqual(rejected, 1, `attempt ${attempt} must reject`);
     }
     const leaked = workers.filter(w => !workerReclaimed(w));
@@ -516,7 +497,7 @@ async function main() {
       // process the protocol {action:'terminate'} message either, so
       // only the real Worker.terminate() can reclaim it.
       worker.emitError({message: 'worker boot failed'});
-      await tick();
+      await sleep(20);
       assert.ok(rejection, 'createModel must reject on a Worker boot error');
       assert.ok(
         String(rejection.message).includes('worker boot failed'),
@@ -538,7 +519,7 @@ async function main() {
         resolvedLate = true;
       }).catch(() => {});
       worker.emit({event: 'load', result: true});
-      await tick();
+      await sleep(20);
       assert.ok(!resolvedLate, 'a late load cannot resurrect the rejection');
       win.close();
     },
@@ -554,7 +535,7 @@ async function main() {
       });
       assert.strictEqual(workers.length, attempt + 1);
       workers[attempt].emitError({message: 'boot failed'});
-      await tick();
+      await sleep(20);
       assert.strictEqual(rejected, 1, `attempt ${attempt} must reject`);
     }
     const leaked = workers.filter(w => !w.terminated);
@@ -576,10 +557,10 @@ async function main() {
         model = m;
       });
       workers[0].emit({event: 'load', result: true});
-      await tick();
+      await sleep(20);
       assert.ok(model, 'createModel must resolve');
       workers[0].emitError({message: 'late runtime error'});
-      await tick();
+      await sleep(20);
       assert.ok(
         !workers[0].terminated,
         'a runtime error after load must not terminate the live worker',
@@ -600,7 +581,7 @@ async function main() {
         model = m;
       });
       workers[0].emit({event: 'load', result: true});
-      await tick();
+      await sleep(20);
       assert.ok(model, 'createModel must resolve with the model');
       assert.ok(model.ready, 'the resolved model must be ready');
       assert.ok(
@@ -622,7 +603,7 @@ async function main() {
       });
       const {win, bootWorkers} = page;
       micBtn(win).click();
-      await tick(150);
+      await sleep(150);
       assert.strictEqual(
         bootWorkers.length,
         1,
@@ -639,7 +620,7 @@ async function main() {
       );
       // Retry: a fresh Worker is created and reclaimed in turn.
       micBtn(win).click();
-      await tick(150);
+      await sleep(150);
       assert.strictEqual(
         bootWorkers.length,
         2,
@@ -655,8 +636,7 @@ async function main() {
     },
   );
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
+  report('conc2026_vosk_model_lifecycle');
 }
 
 main().then(

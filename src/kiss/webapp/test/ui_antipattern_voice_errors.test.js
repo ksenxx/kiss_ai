@@ -13,47 +13,30 @@
 // later successful start closes that toast again.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-const {waitFor} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  stubRaf,
+  waitFor,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const runner = makeRunner();
+const report = runner.report;
 
-const MEDIA = path.join(__dirname, '..', 'media');
+// Every page a test opened is closed afterwards, pass or fail.
+async function test(name, fn) {
+  try {
+    await runner.test(name, fn);
+  } finally {
+    while (windows.length) windows.pop().close();
+  }
+}
 
 // Every page a test builds; closed after the test so no voice or toast
 // timer keeps node alive.
 const windows = [];
 
-function makePage(opts) {
-  const options = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
+function installVoiceStubs(win, options) {
+  stubRaf(win);
   win.Audio = function (src) {
     return {src, play: () => Promise.resolve()};
   };
@@ -67,12 +50,16 @@ function makePage(opts) {
   win.AudioContext = FakeAudioContext;
   win.__VOICE__ = Object.assign({}, options.voiceCfg);
   win.localStorage.setItem('kissVoiceEnabled', '0');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  windows.push(win);
-  return {win, posted};
+}
+
+function makePage(opts) {
+  const options = opts || {};
+  const page = makeChatPage({
+    beforeScripts: win => installVoiceStubs(win, options),
+    extraScripts: ['voice.js'],
+  });
+  windows.push(page.win);
+  return page;
 }
 
 const BROWSER_CFG = {
@@ -166,22 +153,6 @@ function toast(win) {
  */
 function waitForToast(win) {
   return waitFor(() => toast(win), 'no voice error toast appeared');
-}
-
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  ok - ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  not ok - ${name}`);
-  } finally {
-    while (windows.length) windows.pop().close();
-  }
 }
 
 async function main() {
@@ -316,9 +287,5 @@ async function main() {
 }
 
 main().then(() => {
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  for (const f of failures) {
-    console.error(`\n${f.name}\n${f.error && f.error.stack}`);
-  }
-  if (failures.length) process.exit(1);
+  report('ui_antipattern_voice_errors');
 });

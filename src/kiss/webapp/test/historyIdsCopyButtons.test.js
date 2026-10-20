@@ -6,63 +6,54 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeHarnessPage,
+  send,
+  loadMainCss,
+} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
   const clipboardWrites = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: text => {
-        clipboardWrites.push(String(text));
-        return Promise.resolve();
-      },
+  // Every timer the page arms is recorded (and still runs) so a test can
+  // play the clock forward by hand instead of sleeping through it.
+  const timeouts = [];
+  const {win, posted} = makeHarnessPage({
+    beforeScripts(win) {
+      Object.defineProperty(win.navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: text => {
+            clipboardWrites.push(String(text));
+            return Promise.resolve();
+          },
+        },
+      });
+      const realSetTimeout = win.setTimeout.bind(win);
+      const realClearTimeout = win.clearTimeout.bind(win);
+      win.setTimeout = function (fn, ms, ...args) {
+        const timer = {
+          fn,
+          ms,
+          id: realSetTimeout(fn, ms, ...args),
+          cleared: false,
+        };
+        timeouts.push(timer);
+        return timer.id;
+      };
+      win.clearTimeout = function (id) {
+        for (const t of timeouts) if (t.id === id) t.cleared = true;
+        realClearTimeout(id);
+      };
     },
   });
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted, clipboardWrites};
+  return {win, posted, clipboardWrites, timeouts};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+/** Let the clock reach *timer*'s due time: it runs unless it was cleared. */
+function fireTimeout(win, timer) {
+  if (timer.cleared) return;
+  win.clearTimeout(timer.id);
+  timer.fn();
 }
 
 const WS = '/Users/koushik/work/repo';
@@ -459,31 +450,38 @@ async function testRejectedClipboardFallsBackToExecCommand() {
 async function testRepeatedClicksRestartFlashTimer() {
   const ctx = makePage();
   const rows = loadHistory(ctx);
-  const {win} = ctx;
+  const {win, timeouts} = ctx;
 
   const a = rows['copy row A — chat + task + parent'];
   const chatBtn = a.querySelector('.ids-copy-chat');
   assert.ok(chatBtn, 'row A chat copy button must exist');
 
+  let armed = timeouts.length;
   click(win, chatBtn);
   await new Promise(r => setTimeout(r, 0));
   assert.ok(
     chatBtn.classList.contains('copied'),
     'first click must flash the "copied" feedback',
   );
+  const firstFlash = timeouts.slice(armed).filter(t => t.ms === 1500);
+  assert.strictEqual(firstFlash.length, 1, 'the first click arms one revert');
 
-  await new Promise(r => setTimeout(r, 1200));
+  // A second click 1.2 s later, then the clock reaches the first
+  // click's 1.5 s mark and, later, the second click's.
+  armed = timeouts.length;
   click(win, chatBtn);
   await new Promise(r => setTimeout(r, 0));
+  const secondFlash = timeouts.slice(armed).filter(t => t.ms === 1500);
+  assert.strictEqual(secondFlash.length, 1, 'the second click arms one revert');
 
-  await new Promise(r => setTimeout(r, 500));
+  fireTimeout(win, firstFlash[0]);
   assert.ok(
     chatBtn.classList.contains('copied'),
     "the first click's stale timer must not end the second " +
       'click\'s "copied" feedback early',
   );
 
-  await new Promise(r => setTimeout(r, 1200));
+  fireTimeout(win, secondFlash[0]);
   assert.ok(
     !chatBtn.classList.contains('copied'),
     'the "copied" feedback must still revert after the second timer',
@@ -494,21 +492,28 @@ async function testRepeatedClicksRestartFlashTimer() {
 }
 
 function testCopyButtonCss() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const re = /\.ids-copy-btn\s*\{([^}]*)\}/;
-  const m = re.exec(css);
-  assert.ok(m, 'main.css must define a .ids-copy-btn rule');
-  const body = m[1];
-  assert.match(
-    body,
-    /cursor\s*:\s*pointer/,
-    '.ids-copy-btn must use cursor: pointer',
+  const ctx = makePage();
+  loadMainCss(ctx.win);
+  const rows = loadHistory(ctx);
+  const btn =
+    rows['copy row A — chat + task + parent'].querySelector('.ids-copy-btn');
+  const style = ctx.win.getComputedStyle(btn);
+  assert.strictEqual(
+    style.cursor,
+    'pointer',
+    'an ids copy button is clickable',
   );
-  assert.match(
-    body,
-    /background\s*:\s*none/,
-    '.ids-copy-btn must have no background (icon-only button)',
+  assert.strictEqual(
+    style.backgroundImage,
+    'none',
+    'an ids copy button has no background (icon-only button)',
   );
+  assert.strictEqual(
+    style.backgroundColor,
+    'rgba(0, 0, 0, 0)',
+    'an ids copy button has no background colour (icon-only button)',
+  );
+  ctx.win.close();
   console.log('  ok - main.css styles the ids copy buttons');
 }
 

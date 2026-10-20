@@ -11,11 +11,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const harness = require('./simplify2_harness');
 
 // Every window built by makePage, so that main.js's timers (the
 // elapsed-time ticker, the daemon-status spinner, the completions-load
@@ -32,53 +28,17 @@ const openWindows = [];
  */
 function makePage(opts) {
   const {desktop = false} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const page = harness.makePage({
+    bodyClass: 'remote-chat',
+    beforeScripts(win) {
+      openWindows.push(win);
+      if (desktop) {
+        harness.stubRaf(win);
+        harness.fakeMatchMedia(win, true);
+      }
+    },
   });
-  const win = dom.window;
-  openWindows.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  if (desktop) {
-    win.requestAnimationFrame = cb => {
-      cb();
-      return 0;
-    };
-    win.cancelAnimationFrame = () => {};
-    win.matchMedia = query => ({
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    });
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
+  return {win: page.win, posted: page.posted};
 }
 
 /** Close every window makePage built. */
@@ -86,15 +46,7 @@ function closeWindows() {
   while (openWindows.length) openWindows.pop().close();
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function byId(win, id) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  return node;
-}
+const {send, byId} = harness;
 
 function msgs(posted, type) {
   return posted.filter(m => m && m.type === type);

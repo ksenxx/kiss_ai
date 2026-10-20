@@ -15,13 +15,20 @@ typed by hand.
 
 When machines are registered (``/machine add``), the same ``/sync``
 then runs on each of them, one after the other, as a sub-task
-(``run_agent(agent="sync", machine=<name>)``) on the checkout at the
-same path there, and finally syncs this checkout once more so it gets
-what the machines pushed.  The sub-task's message ends in
-:data:`THIS_MACHINE_ONLY`, which keeps it from fanning out again to
-the machines registered there; ``/sync this machine only`` is the
-user's way of asking for the local sync alone.  The methods follow the
-SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
+(``run_agent(agent="sync", machine=<name>)``) on that machine's
+checkout of the same repository, and finally syncs this checkout once
+more so it gets what the machines pushed.  The sub-task names the
+repository by its remote URL (``origin/main of https://... this
+machine only``), never by this machine's path: the checkout lives
+wherever the machine keeps it (its daemon's working directory, or
+another directory it has opened; see
+:func:`kiss.agents.seas.sync.git_sync.locate_checkout`), and a path of
+this machine forced on it used to fail the sub-task before it started
+(``Permission denied: '/Users'`` on a Linux box).  The sub-task's
+message ends in :data:`THIS_MACHINE_ONLY`, which keeps it from fanning
+out again to the machines registered there; ``/sync this machine
+only`` is the user's way of asking for the local sync alone.  The
+methods follow the SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -62,26 +69,33 @@ You are the git sync agent. You update the checkout in the work dir from a remot
 branch and push the result, here and on the registered machines the message lists.
 Nothing else.
 
-1. Call `git_sync` once with `repo` = the work dir named below and `ref` = the
-   `<remote>/<branch>` the message names (default `origin/main`). It fetches, merges,
-   pushes and returns a report. Never run `git fetch`, `git merge`, `git pull` or
-   `git push` yourself.
+1. Call `git_sync` once with `repo` = the work dir named below, `ref` = the
+   `<remote>/<branch>` the message names (default `origin/main`) and `url` = the
+   repository URL the message names after that ref with the word "of" (as in
+   "origin/main of https://github.com/me/kiss.git"; leave `url` empty when the message
+   names none). It fetches, merges, pushes and returns a report whose first lines name
+   the checkout it synced and the remote's URL. Never run `git fetch`, `git merge`,
+   `git pull` or `git push` yourself.
 2. If the report says the merge stopped on conflicts: read each conflicted file,
    resolve every `<<<<<<< ... ======= ... >>>>>>>` block keeping the intent of both
    sides, remove the markers, `git add` the files, `git commit --no-edit`, then call
-   `git_sync` again to push. Never run `git merge --abort`, `git reset`,
-   `git checkout --`, `git restore`, `git stash` or `git push --force`.
+   `git_sync` again to push. Do this in the checkout the report names (when it is not
+   the work dir, the files are under it and git runs there: `git -C <checkout> ...`).
+   Never run `git merge --abort`, `git reset`, `git checkout --`, `git restore`,
+   `git stash` or `git push --force`.
 3. If the report says anything else failed (not a checkout, detached HEAD, a refused
    push), stop and report it. Do not work around it.
 4. If the message lists registered machines, sync each of them in the order given,
-   one at a time: call `run_agent(agent="sync", task="<ref> {THIS_MACHINE_ONLY}",
-   machine="<name>", max_budget="{MAX_BUDGET_USD:g}", options='{{"work_dir": "<the work
-   dir named below>"}}')` and wait for its result before the next machine (never
-   `run_parallel`, never `wait="false"`). The checkout is at the same path on every
-   machine; the budget is one checkout's share, whatever the machine has registered. A machine
-   that cannot be reached or whose sync fails is reported, not retried; go on to the
-   next one. When the last machine is done, call `git_sync` once more here so this
-   checkout gets what the machines pushed.
+   one at a time: call `run_agent(agent="sync", task="<ref> of <the remote's URL from
+   the git_sync report> {THIS_MACHINE_ONLY}", machine="<name>",
+   max_budget="{MAX_BUDGET_USD:g}")` and wait for its result before the next machine
+   (never `run_parallel`, never `wait="false"`). Pass no `options` and no `work_dir`:
+   the machine keeps its checkout of that repository wherever it likes (a path of this
+   machine means nothing there), and the sub-task finds it from the URL. The budget is
+   one checkout's share, whatever the machine has registered. A machine that cannot be
+   reached or whose sync fails is reported, with the reason its result gives, not
+   retried; go on to the next one. When the last machine is done, call `git_sync` once
+   more here so this checkout gets what the machines pushed.
 5. Call `finish` with a short HTML summary: branch, what was merged (fast-forward,
    merge commit or nothing), what was pushed, any warning, and one line per machine
    saying what its sync did or why it failed.
@@ -89,19 +103,24 @@ Nothing else.
 """The whole base system prompt of the sync agent (replaces ``SYSTEM.md``)."""
 
 
-def git_sync(repo: str, ref: str = DEFAULT_REF) -> str:
+def git_sync(repo: str, ref: str = DEFAULT_REF, url: str = "") -> str:
     """Fetch *ref*, merge it into the current branch of the checkout at *repo* and push.
 
     Args:
         repo: Absolute path of the git checkout (the run's work dir).
         ref: The remote branch to merge, as ``<remote>/<branch>``.
+        url: The URL of the repository to sync, when the message names
+            one (``origin/main of <url>``). When *repo* is not a clone of
+            it, the clone this machine's daemon has worked in is synced
+            instead and the report says so; empty skips the check.
 
     Returns:
-        A report of what was fetched, merged and pushed, or of the step
-        that failed (conflicts are left in progress for you to resolve).
+        A report of the checkout and remote URL synced, what was fetched,
+        merged and pushed, or of the step that failed (conflicts are left
+        in progress for you to resolve).
     """
     try:
-        return sync(repo, ref)
+        return sync(repo, ref, url)
     except GitSyncError as exc:
         return str(exc)
 
@@ -125,7 +144,8 @@ class SyncSea(WorkerSea):
             "Fetches origin/main, merges it into the current branch of the tab's working "
             "directory and pushes, resolving merge conflicts when they stop the merge, then "
             "does the same on every registered machine (`/machine list`), one at a time, on "
-            "the checkout at the same path there, and syncs here once more; use `/sync` in "
+            "that machine's checkout of the same repository (found by its remote URL), and "
+            "syncs here once more; use `/sync` in "
             "the chat (`/sync <remote>/<branch>` to merge another remote branch, `/sync this "
             'machine only` to skip the machines) or run_agent(agent="sync", task="origin/main").'
         )

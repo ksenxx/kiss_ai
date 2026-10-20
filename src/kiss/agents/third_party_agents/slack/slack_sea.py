@@ -782,7 +782,7 @@ class SlackChannelBackend(ToolMethodBackend):
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
             raw_channels: list[dict[str, Any]] = resp.get("channels", [])
-            third_party_agents = [
+            channels = [
                 {
                     "id": ch["id"],
                     "name": ch.get("name", ""),
@@ -792,7 +792,7 @@ class SlackChannelBackend(ToolMethodBackend):
                 }
                 for ch in raw_channels
             ]
-            result: dict[str, Any] = {"ok": True, "third_party_agents": third_party_agents}
+            result: dict[str, Any] = {"ok": True, "channels": channels}
             next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
             if next_cursor:  # pragma: no branch
                 result["next_cursor"] = next_cursor

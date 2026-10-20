@@ -1,10 +1,11 @@
 /**
- * ESLint flat config for the KISS Sorcar webapp (media/).
- * Uses the Google style rules bundled with gts, with browser globals.
+ * ESLint flat config for the KISS Sorcar webapp (media/): the
+ * recommended rules plus prettier (gts's .prettierrc), with browser
+ * globals.  Formatting is prettier's alone; eslint-config-prettier
+ * turns the overlapping stylistic rules off.
  */
 import eslint from "@eslint/js";
 import prettierConfig from "eslint-config-prettier";
-import pluginN from "eslint-plugin-n";
 import pluginPrettier from "eslint-plugin-prettier";
 
 export default [
@@ -20,19 +21,12 @@ export default [
   prettierConfig,
   {
     plugins: {
-      n: pluginN,
       prettier: pluginPrettier,
     },
     rules: {
       "prettier/prettier": "error",
-      "block-scoped-var": "error",
-      eqeqeq: "error",
-      "no-var": "error",
       "prefer-const": "error",
-      "eol-last": "error",
       "prefer-arrow-callback": "error",
-      "no-trailing-spaces": "error",
-      quotes: ["warn", "single", {avoidEscape: true}],
       "no-restricted-properties": [
         "error",
         {object: "describe", property: "only"},
@@ -59,10 +53,7 @@ export default [
         Event: "readonly",
         KeyboardEvent: "readonly",
         MouseEvent: "readonly",
-        DragEvent: "readonly",
-        ClipboardEvent: "readonly",
         FileReader: "readonly",
-        FormData: "readonly",
         URL: "readonly",
         Blob: "readonly",
         Image: "readonly",

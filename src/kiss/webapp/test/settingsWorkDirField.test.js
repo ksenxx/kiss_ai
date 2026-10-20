@@ -24,69 +24,31 @@
 'use strict';
 
 const assert = require('assert');
-const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  lastMsg,
+  openSettings,
+  closeSettings,
+  typeInto,
+} = require('./settings_helpers');
+const {makePage: makeSharedPage, send} = require('./simplify2_harness');
 
 // The served web page carries body.remote-chat (web_server.py injects the
 // class).  `stalePin` seeds the sessionStorage key an older WS shim used
 // to write, to prove main.js no longer reads it.
 function makePage(opts) {
   const {stalePin = ''} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makeSharedPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: win => {
+      if (stalePin) {
+        win.sessionStorage.setItem('sorcar-work-dir', stalePin);
+      }
+    },
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  if (stalePin) {
-    win.sessionStorage.setItem('sorcar-work-dir', stalePin);
-  }
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
 // Typing for real: set the value and fire the event the browser fires.
-function typeInto(win, id, value) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
-
 function assertNoDirectoryFields(win) {
   assert.strictEqual(
     win.document.getElementById('cfg-work-dir'),

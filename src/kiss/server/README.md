@@ -739,8 +739,11 @@ own frames have told its task id, since the remote announces every
 sub-agent run to every client) under the caller's tab, so every
 surface here opens the nested sub-agent tab,
 streams its transcript (a forwarded `resumeSession`) and closes it on
-the relayed `subagentDone` (a link lost meanwhile ends those tabs
-with a `subagentDone` of its own, so none spins for good); a surface
+the relayed `subagentDone` (a link lost meanwhile, or the caller's
+tab leaving the stream on a `newChat`, a re-bind or a resume into it,
+ends those tabs with a `subagentDone` of this daemon's, so none spins
+for good; one a client bound to a stream of its own meanwhile is
+left to it); a surface
 connecting while it runs gets
 the same `new_tab` from `RemoteTabs.replay_to`.  The result's `ran:`
 line ends with `machine=<name>`; an unregistered name or host is
@@ -750,8 +753,10 @@ The Terminal and Browser buttons of a chat bound to a machine open
 the shell, or the page, on that machine (`server.remote_views`): the
 webapp stamps `terminalOpen`/`browserOpen` with `machine`, and
 `RemoteViews` keeps one authenticated stream per machine in use
-(opened on the first such command, closed once it carries no terminal
-or page), forwarding the terminal and browser commands without
+(opened on the first such command or when a chat tab is bound to the
+machine, `RemoteViews.bind` from `RemoteTabs._announce`; closed once
+it carries no terminal or page and no tab is bound there), forwarding
+the terminal and browser commands without
 `connId`/`machine` and relaying the machine's `terminal*` and browser
 events back stamped `machine`.  A terminal's events go to the
 connection that opened it (a dropped connection's shell is hung up
@@ -760,10 +765,23 @@ tab id is namespaced `browser__N@machine`, so a tab-addressed browser
 command finds its machine from the id, its frames go to the local
 connections whose last `browserViewport` for the tab was visible, and
 its `openBrowserTab` goes to every client (the focused reply to a
-`browserOpen` to its requester alone).  `replay_to` tells a connecting
-client the known remote pages in one `browserTabs {remote: true, tabs}`
-snapshot, each tab stamped `machine`; a lost stream ends its terminals with a `terminalError`
-naming the machine and closes its pages everywhere.
+`browserOpen` to its requester alone; a focused one nobody asked for
+is the machine's agent calling for the user, `show_browser`, and
+every surface here switches to it as the machine's own would).  A
+stream that opens sends `browserList`, answered with the machine's
+`browserTabs` snapshot (or an `error` by an older daemon): the pages
+open there before the stream are shown here unfocused.  `replay_to`
+tells a connecting client the known remote pages in one
+`browserTabs {remote: true, tabs}` snapshot, each tab stamped
+`machine`; a lost stream ends its terminals with a `terminalError`
+naming the machine and closes its pages everywhere, and is opened
+again after `REOPEN_DELAY` while a tab is still bound to the machine.
+`RemoteViews.bind` only records the binding (under `RemoteTabs`'
+registry lock, in the registry's order; `_announce` and the `ready`
+replay drop a binding the registry has moved past); `RemoteTabs`
+then opens the stream (`open_for`, before the run is forwarded, so
+the page its agent opens finds the stream subscribed) or releases the
+previous one (`release`); `close_all` fences every later registration.
 
 `run_parallel(tasks, ..., agent=...)` is N `run_agent` calls
 (`agent_dispatch.run_agents_parallel`): one `start_run_agent` per
@@ -1821,8 +1839,23 @@ class TaskResult:
   and `forwarded`, a machine's `error` frame coming back as the reply's
   `error`, and a `saveConfig` that changes a password-registered
   machine's remote password to another non-empty one re-registers the
-  machine with it (an emptied password is not adopted);
-  a daemon's
+  machine with it (an emptied password is not adopted); the sidebar's
+  Schedule, Apps, Spend and Recommendations subpanels show the machine
+  too, their commands (`getCronJobs`, `cronAction`, `getAppsStatus`,
+  `getSpendReport`, `getRecommendations` --
+  `sidebar_panels.MACHINE_PANEL_REPLIES`) forwarded the same way on a
+  link lane of their own (`machines.link_for(machine, "panels")`, so
+  the up-to-45-second app probe holds up no submit, settings or
+  Explorer request), an unreachable or refusing machine answering with
+  an empty reply of the expected type plus the `error`, while the
+  Machines subpanel is this daemon's registry and is never forwarded;
+  the "..." menu's Git Commit (`autocommitAction` stamped `machine`,
+  `sidebar_panels.machine_autocommit`) commits the machine's folder:
+  its daemon stages, writes the message and commits there and sends the
+  link its own copy of the tab's `autocommit_done` (`replyTo`), which
+  this daemon re-broadcasts to its clients as the toast and the event
+  that re-arms the button, on a `commit` lane with a 900 s wait
+  (`MACHINE_COMMIT_TIMEOUT`); a daemon's
   link is never a local client of the machine, whatever token it
   presents, so the machine answers these as it would a browser), the chat header's machine drop-down
   offers it (a machine registered by its address is shown by the host
@@ -1867,9 +1900,16 @@ class TaskResult:
   `/sync <remote>/<branch>` merges another remote branch; when machines
   are registered the `prompt()` also lists them and the agent then
   syncs each one in turn through `run_agent(agent="sync",
-  machine=<name>, task="<ref> this machine only", max_budget="2",
-  options={"work_dir": <the same path>})`, waiting for each before the next, and calls
-  `git_sync` here once more; the words "this machine only" in a task
+  machine=<name>, task="<ref> of <the remote's URL> this machine only",
+  max_budget="2")`, with no `work_dir` option, waiting for each before
+  the next, and calls `git_sync` here once more; the sub-task runs in
+  the machine's own folder and its `git_sync(repo, ref, url)` syncs
+  that folder when it is a clone of the URL, else the clone among the
+  directories the machine's daemon has opened (`config.json`'s
+  `work_dir` and `recent_work_dirs`), since the checkout lives
+  wherever that machine keeps it (forcing this machine's path on it
+  used to fail with `Permission denied: '/Users'` on a Linux box);
+  the words "this machine only" in a task
   (what the sub-task sent to a machine says, or `/sync this machine
   only` typed by the user) keep that run on its own checkout, so the
   machines registered there are not synced in turn; the budget is

@@ -187,7 +187,7 @@ class ConsolePrinter(Printer):
         if text:
             self._mid_line = not text.endswith("\n")
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Render content to the console using Rich formatting.
 
         The whole render is serialized on ``_lock`` so that an event made
@@ -198,24 +198,21 @@ class ConsolePrinter(Printer):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "tool_call",
-                "tool_result", "result", "message").
+                "tool_result", "result").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
-
-        Returns:
-            str: Always the empty string.
         """
         with self._lock:
-            return self._render(content, type, **kwargs)
+            self._render(content, type, **kwargs)
 
-    def _render(self, content: Any, type: str, **kwargs: Any) -> str:
+    def _render(self, content: Any, type: str, **kwargs: Any) -> None:
         """Render one event; the caller must hold ``_lock``."""
         if type == "text":
             if not str(content).strip():
-                return ""
+                return
             self._flush_newline()
             self._console.print(content, **kwargs)
-            return ""
+            return
         if type == "system_prompt":
             self._flush_newline()
             self._console.print(
@@ -226,7 +223,7 @@ class ConsolePrinter(Printer):
                     padding=(1, 2),
                 )
             )
-            return ""
+            return
         if type == "prompt":
             self._flush_newline()
             self._console.print(
@@ -237,10 +234,7 @@ class ConsolePrinter(Printer):
                     padding=(1, 2),
                 )
             )
-            return ""
-        if type == "message":
-            self._handle_message(content, **kwargs)
-            return ""
+            return
         if type == "bash_stream":
             if not self._bash_streamed:
                 self._flush_newline()
@@ -249,14 +243,14 @@ class ConsolePrinter(Printer):
             self._file.flush()
             self._mid_line = not str(content).endswith("\n")
             self._bash_streamed = True
-            return ""
+            return
         if type == "tool_call":
             self._flush_newline()
             if self._bash_streamed:
                 self._console.rule(style="green")
                 self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
-            return ""
+            return
         if type == "tool_result":
             is_error = bool(kwargs.get("is_error", False))
             tool_name = kwargs.get("tool_name", "")
@@ -269,13 +263,13 @@ class ConsolePrinter(Printer):
                     tool_name=tool_name,
                     tool_input=tool_input,
                 )
-            return ""
+            return
         if type == "usage_info":
             text = str(content)
             if text.strip():
                 self._flush_newline()
                 self._console.print(text, style="dim", highlight=False)
-            return ""
+            return
         if type == "notification":
             severity = str(kwargs.get("severity", "info")).lower()
             border, label = _NOTIFICATION_STYLES.get(severity, _NOTIFICATION_STYLES["info"])
@@ -293,7 +287,7 @@ class ConsolePrinter(Printer):
                     padding=(0, 1),
                 )
             )
-            return ""
+            return
         if type == "result":
             cost = self._apply_budget_offset(kwargs.get("cost", "N/A"))
             total_tokens = kwargs.get("total_tokens", 0) + self.tokens_offset
@@ -302,11 +296,9 @@ class ConsolePrinter(Printer):
                 content,
                 f"tokens={total_tokens:,}  cost={cost}  steps={step_count:,}",
             )
-            return ""
-        return ""
 
     def _print_result_panel(self, raw: Any, subtitle: str) -> None:
-        """Render the green "Result" panel shared by result and message events."""
+        """Render the green "Result" panel of a ``result`` event."""
         self._flush_newline()
         body = self._format_result_content(str(raw)) if raw else "(no result)"
         self._console.print(
@@ -463,27 +455,3 @@ class ConsolePrinter(Printer):
             else:
                 self._console.rule(style=style)
         self._bash_streamed = False
-
-    def _handle_message(self, message: Any, **kwargs: Any) -> None:
-        if hasattr(message, "subtype") and hasattr(message, "data"):
-            if message.subtype == "tool_output":
-                text = message.data.get("content", "")
-                if text:
-                    self._file.write(text)
-                    self._file.flush()
-                    self._mid_line = not text.endswith("\n")
-        elif hasattr(message, "result"):
-            budget_used = kwargs.get("budget_used", 0.0)
-            total_tokens_used = kwargs.get("total_tokens_used", 0) + self.tokens_offset
-            cost_str = self._apply_budget_offset(f"${budget_used:.4f}" if budget_used else "N/A")
-            self._print_result_panel(
-                message.result, f"tokens={total_tokens_used:,}  cost={cost_str}"
-            )
-        elif hasattr(message, "content"):
-            for block in message.content:
-                if hasattr(block, "is_error") and hasattr(block, "content"):
-                    content = (
-                        block.content if isinstance(block.content, str) else str(block.content)
-                    )
-                    self._flush_newline()
-                    self._print_tool_result(content, is_error=bool(block.is_error))

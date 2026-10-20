@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS
-from kiss.agents.sorcar import sea_commands, sea_lint, sea_settings
+from kiss.agents.sorcar import sea_apply, sea_commands, sea_lint, sea_settings
 from kiss.agents.sorcar.sea_settings import SeaError, execute_python_file, wire_field
 from kiss.core.config import kiss_home
 
@@ -137,13 +137,15 @@ def test_concurrent_executions_of_one_file_keep_the_good_module(tmp_path: Path) 
 
 
 def test_execute_python_file_rejects_non_paths_and_non_py_files(tmp_path: Path) -> None:
-    """The loader's diagnostics name the SEA field and the offending path."""
+    """The wire screen (``load_layers``) and the loader name the SEA field and the bad path."""
     with pytest.raises(SeaError, match="SEA field must be a path string, got int"):
-        execute_python_file(7)
+        sea_apply.load_layers({"seaPath": 7})
     text = tmp_path / "notes.txt"
     text.write_text("x", encoding="utf-8")
     with pytest.raises(SeaError, match=r"is not an existing Python \(\.py\) file"):
         execute_python_file(str(text))
+    with pytest.raises(SeaError, match=r"is not an existing Python \(\.py\) file"):
+        execute_python_file(text)
     with pytest.raises(SeaError, match="failed to import: ZeroDivisionError"):
         boom = tmp_path / "boom_sea.py"
         boom.write_text("1 / 0\n", encoding="utf-8")
@@ -243,11 +245,10 @@ def test_check_report_and_lint_run_settings_and_tools_once_per_evaluation(
     """``sea_check`` and ``lint_sea`` read the check's result instead of re-running the SEA.
 
     ``check_sea`` evaluates the SEA the way a run does: ``settings()``
-    once when the layers load (malformed settings fail at load time)
-    and once when the run command is applied, ``tools()`` once for the
-    tools hook.  The report and the linter add nothing to that (the
-    linter's ``own_settings`` is one more ``settings()`` of the script
-    alone).
+    once when the run command is applied (loading the layers folds
+    nothing), ``tools()`` once for the tools hook.  The report and the
+    linter add nothing to that (the linter's ``own_settings`` is one
+    more ``settings()`` of the script alone).
     """
     log = tmp_path / "calls.log"
     sea = _write_sea(tmp_path / "seas", "count", _COUNTING_SEA.format(log=str(log)))
@@ -256,18 +257,18 @@ def test_check_report_and_lint_run_settings_and_tools_once_per_evaluation(
     assert check.seas[-1].path == sea and check.cmd["prompt"] == sea_commands.CHECK_SAMPLE_TASK
     assert check.description == "counts how often its methods run"
     assert check.settings["use_memory"] is False and check.tools == []
-    assert _counts(log) == {"settings": 2, "tools": 1}
+    assert _counts(log) == {"settings": 1, "tools": 1}
 
     log.unlink()
     report = sea_commands.sea_check("count", sea)
     assert "settings: " in report and "tools added: none" in report
     assert "methods defined: tools" in report
-    assert _counts(log) == {"settings": 2, "tools": 1}
+    assert _counts(log) == {"settings": 1, "tools": 1}
 
     log.unlink()
     findings = sea_lint.lint_sea(sea)
     assert [f.code for f in findings] == []
-    assert _counts(log) == {"settings": 3, "tools": 1}
+    assert _counts(log) == {"settings": 2, "tools": 1}
 
 
 _FLIPPING_HIDDEN = """\
@@ -309,8 +310,8 @@ def test_parse_cache_sees_an_edit_in_every_reader(tmp_path: Path) -> None:
     # A broken revision is memoised too: the watcher must not re-read
     # it on every poll (the entry carries the revision's stamp).
     broken_stat = sea.stat()
-    assert sea_settings._PARSE_CACHE[sea] == (
-        (broken_stat.st_mtime_ns, broken_stat.st_size, broken_stat.st_ino), set(), {},
+    assert sea_settings._PARSE_CACHE[sea] == sea_settings.ParsedSea(
+        (broken_stat.st_mtime_ns, broken_stat.st_size, broken_stat.st_ino), set(), {}, False,
     )
     assert sea_settings.declares_hidden(tmp_path / "missing_sea.py") is False
     assert (tmp_path / "missing_sea.py") not in sea_settings._PARSE_CACHE
@@ -369,11 +370,15 @@ def test_precedence_example_names_the_sh_lock() -> None:
     assert "tool_profile" in text
 
 
-def test_wire_field_keeps_its_aliases_and_camel_case() -> None:
-    """The three legacy aliases and the camelCase rule are unchanged."""
-    assert wire_field("add_to_prompt") == "appendToPrompt"
-    assert wire_field("add_to_system_prompt") == "appendToSystemPrompt"
+def test_wire_field_keeps_its_alias_and_camel_case() -> None:
+    """The one legacy alias (a live settings key) and the camelCase rule are unchanged.
+
+    The prompt suffixes are no settings (``REMOVED_SETTINGS``), so the
+    alias table does not spell them: ``daemon_client`` does.
+    """
     assert wire_field("auto_classify") == "classifyTasks"
+    assert not {"add_to_prompt", "add_to_system_prompt"} & set(sea_settings.SETTING_TYPES)
+    assert {"add_to_prompt", "add_to_system_prompt"} <= set(sea_settings.REMOVED_SETTINGS)
     assert wire_field("use_web_tools") == "useWebTools"
     assert wire_field("model") == "model"
     assert WORKER_DEFAULTS["use_memory"] is False

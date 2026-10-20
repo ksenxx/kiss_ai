@@ -23,9 +23,11 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 const {
   send,
   sleep,
@@ -36,92 +38,43 @@ const {
   showSection,
   ofType,
   all,
+  makeRunner,
 } = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
   const copied = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    value: {
-      writeText: text => {
-        copied.push(text);
-        return Promise.resolve();
+  function beforeScripts(win) {
+    stubRaf(win);
+    fakeMatchMedia(win, true);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      value: {
+        writeText: text => {
+          copied.push(text);
+          return Promise.resolve();
+        },
       },
-    },
-    configurable: true,
+      configurable: true,
+    });
+    // Native dialogs are gone from main.js; any call is a regression.
+    win.prompt = () => {
+      throw new Error('window.prompt must not be called');
+    };
+    win.confirm = () => {
+      throw new Error('window.confirm must not be called');
+    };
+  }
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts,
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
+    sourceUrl: 'sidebar-fixes-main.js',
   });
-  // Native dialogs are gone from main.js; any call is a regression.
-  win.prompt = () => {
-    throw new Error('window.prompt must not be called');
-  };
-  win.confirm = () => {
-    throw new Error('window.confirm must not be called');
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=sidebar-fixes-main.js',
-  );
   return {win, posted, copied};
 }
 
@@ -353,7 +306,11 @@ async function main() {
     // Typed, never listed: Select lists it first...
     input.value = '/definitely/missing';
     click(win, picker.querySelector('.folder-picker-select'));
-    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0, 'not adopted yet');
+    assert.strictEqual(
+      ofType(posted, 'setWorkDir').length,
+      0,
+      'not adopted yet',
+    );
     list = ofType(posted, 'listDir');
     req = list[list.length - 1];
     assert.strictEqual(req.path, '/definitely/missing');
@@ -419,11 +376,14 @@ async function main() {
     assert.strictEqual(input.value, '/data/proj/child');
     click(win, picker.querySelector('.folder-picker-select'));
     assert.ok(picker.hidden);
-    assert.strictEqual(ofType(posted, 'setWorkDir')[1].workDir, '/data/proj/child');
+    assert.strictEqual(
+      ofType(posted, 'setWorkDir')[1].workDir,
+      '/data/proj/child',
+    );
     assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
   });
 
-  await test('Folder picker: the global working directory is browsed, not the chat\'s task folder, and a pick re-roots', async () => {
+  await test("Folder picker: the global working directory is browsed, not the chat's task folder, and a pick re-roots", async () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     // The active chat replays a task that ran in a sub-folder.  There
@@ -453,7 +413,7 @@ async function main() {
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
     list = ofType(posted, 'listDir');
-    let req = list[list.length - 1];
+    const req = list[list.length - 1];
     assert.strictEqual(req.path, WD, 'the picker opens at the global folder');
     send(win, {
       type: 'dirListing',
@@ -778,7 +738,7 @@ async function main() {
     ]);
     const dirRow = explorerRow(win, WD + '/dir');
     click(win, dirRow);
-    let list = ofType(posted, 'listDir');
+    const list = ofType(posted, 'listDir');
     send(win, {
       type: 'dirListing',
       token: list[list.length - 1].token,
@@ -864,8 +824,7 @@ async function main() {
     );
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
+  report('sidebarMenuFixes');
   process.exit(0);
 }
 

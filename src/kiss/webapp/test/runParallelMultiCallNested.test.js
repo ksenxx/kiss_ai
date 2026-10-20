@@ -11,16 +11,11 @@ const {
   subagentTabEls,
   togglePanel,
   clickClose,
+  openSubTabIds,
 } = require('./subagent_tab_helpers');
 
 function runParallelPanels(win) {
   return Array.from(win.document.querySelectorAll('#output .tc-run-parallel'));
-}
-
-function openSubTabIds(win) {
-  return subagentTabEls(win)
-    .map(el => el.dataset.tabId)
-    .sort();
 }
 
 function switchToTabEl(win, tabId) {
@@ -128,7 +123,7 @@ function testThreeSequentialRunParallelCallsOpenTabs() {
 
     send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
     assert.deepStrictEqual(
-      openSubTabIds(win),
+      openSubTabIds(win).sort(),
       [subTabIds[1]],
       'subagentDone for ' +
         taskIds[0] +
@@ -217,7 +212,7 @@ function testPerPanelExpandCollapseIndependence() {
       'expanding panel #1 must resume its own sub-agent ' + taskId,
     );
   }
-  const call1TabIds = openSubTabIds(win);
+  const call1TabIds = openSubTabIds(win).sort();
 
   before = posted.length;
   togglePanel(win, panels[2]);
@@ -246,7 +241,7 @@ function testPerPanelExpandCollapseIndependence() {
 
   togglePanel(win, panels[2]);
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     call1TabIds,
     'BUG: collapsing panel #3 must close ONLY the tabs spawned by ' +
       "run_parallel call #3 — call #1's tabs must stay open",
@@ -328,14 +323,14 @@ function testThreeLevelNestedRunParallel() {
 
   send(win, {type: 'subagentDone', tab_id: l3[0]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1, ...l2, l3[1], l3[2]].sort(),
     "finishing l3-a must close ONLY l3-a's tab",
   );
   send(win, {type: 'subagentDone', tab_id: l3[1]});
   send(win, {type: 'subagentDone', tab_id: l3[2]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1, ...l2].sort(),
     'all level-3 tabs closed, levels 1–2 untouched',
   );
@@ -344,14 +339,14 @@ function testThreeLevelNestedRunParallel() {
   send(win, {type: 'result', tabId: l2[0], summary: 'done', success: true});
   send(win, {type: 'subagentDone', tab_id: l2[0]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1, l2[1], l2[2]].sort(),
     "finishing l2-a must close ONLY l2-a's tab",
   );
   send(win, {type: 'subagentDone', tab_id: l2[1]});
   send(win, {type: 'subagentDone', tab_id: l2[2]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1].sort(),
     'all level-2 tabs closed, level 1 untouched',
   );
@@ -360,7 +355,7 @@ function testThreeLevelNestedRunParallel() {
   send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
   send(win, {type: 'subagentDone', tab_id: l1[0]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [l1[1], l1[2]].sort(),
     "finishing l1-a must close ONLY l1-a's tab",
   );
@@ -401,14 +396,18 @@ function testNestedPanelCollapseExpand() {
     'clicking the nested header collapses the nested panel',
   );
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     running,
     'collapsing the nested panel must keep every running descendant visible',
   );
 
   const before = posted.length;
   togglePanel(win, nestedPanel);
-  assert.deepStrictEqual(openSubTabIds(win), running, 'expansion retains the same tabs');
+  assert.deepStrictEqual(
+    openSubTabIds(win).sort(),
+    running,
+    'expansion retains the same tabs',
+  );
   assert.ok(
     !posted.slice(before).some(m => m.type === 'resumeSession'),
     'expansion must not resubscribe tabs that remained open',
@@ -420,11 +419,17 @@ function testNestedPanelCollapseExpand() {
   togglePanel(win, rootPanel);
   assert.ok(rootPanel.classList.contains('collapsed'), 'root collapsed');
   assert.deepStrictEqual(
-    openSubTabIds(win), running,
+    openSubTabIds(win).sort(),
+    running,
     'collapsing the root must preserve its running children and descendants',
   );
-  for (const id of [...l2, ...l1]) send(win, {type: 'subagentDone', tab_id: id});
-  assert.strictEqual(subagentTabEls(win).length, 0, 'completion closes every child');
+  for (const id of [...l2, ...l1])
+    send(win, {type: 'subagentDone', tab_id: id});
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'completion closes every child',
+  );
   win.close();
   console.log('  ok - nested collapse preserves running tabs until completion');
 }
@@ -442,14 +447,14 @@ function testSubagentMakesMultipleRunParallelCalls() {
   send(win, {type: 'thinking_delta', tabId: l1[0], text: 'next call'});
   send(win, {type: 'thinking_end', tabId: l1[0]});
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1].sort(),
     'nested call #1 fan-out fully closed after both subagentDone',
   );
 
   const c2 = runParallelCall(win, posted, l1[0], ['n2-a', 'n2-b'], 'N2 ');
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1, ...c2].sort(),
     "the sub-agent's SECOND run_parallel call must open one tab per " +
       'sub-agent, exactly like the first call',
@@ -463,7 +468,7 @@ function testSubagentMakesMultipleRunParallelCalls() {
   send(win, {type: 'thinking_end', tabId: l1[0]});
   const c3 = runParallelCall(win, posted, l1[0], ['n3-a', 'n3-b'], 'N3 ');
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [...l1, ...c3].sort(),
     "the sub-agent's THIRD run_parallel call must open one tab per " +
       'sub-agent',
@@ -578,7 +583,7 @@ function testSpawnUnderFragmentlessParentStillOpensTab() {
     taskIndex: 0,
   });
   assert.deepStrictEqual(
-    openSubTabIds(win),
+    openSubTabIds(win).sort(),
     [l1[0], resume.tabId].sort(),
     'the grandchild tab must be open next to its parent sub-agent tab',
   );
@@ -598,7 +603,8 @@ function testMultiPanelParentReplayAdoptsPerCall() {
   }
   assert.strictEqual(subagentTabEls(win).length, 3, 'three live fan-outs');
   // Child terminal statuses precede a completed parent's history replay.
-  for (const id of groups.flat()) send(win, {type: 'status', tabId: id, running: false});
+  for (const id of groups.flat())
+    send(win, {type: 'status', tabId: id, running: false});
 
   const rpEv = k => ({
     type: 'tool_call',
@@ -940,11 +946,15 @@ function testFinishedAncestorKeepsLiveDescendants() {
   const [c] = runParallelCall(win, posted, b, ['c'], 'C ');
 
   send(win, {type: 'subagentDone', tab_id: a});
-  assert.deepStrictEqual(openSubTabIds(win), [b, c].sort(), 'A closed, B and C kept');
+  assert.deepStrictEqual(
+    openSubTabIds(win).sort(),
+    [b, c].sort(),
+    'A closed, B and C kept',
+  );
 
   // B finished: closes alone; C (never reparented) stays open.
   send(win, {type: 'subagentDone', tab_id: b});
-  assert.deepStrictEqual(openSubTabIds(win), [c], 'only C remains');
+  assert.deepStrictEqual(openSubTabIds(win).sort(), [c], 'only C remains');
   send(win, {type: 'subagentDone', tab_id: c});
   assert.strictEqual(subagentTabEls(win).length, 0, 'all closed');
   win.close();
@@ -967,7 +977,7 @@ function testLateSpawnUnderFinishedParentOpensUnderAncestor() {
     .find(m => m.type === 'resumeSession' && m.taskId === 'helper');
   assert.ok(resume, 'the late helper must still get a tab');
   assert.strictEqual(resume.tabId, a + '__sub_helper', 'stable daemon id kept');
-  assert.deepStrictEqual(openSubTabIds(win), [resume.tabId]);
+  assert.deepStrictEqual(openSubTabIds(win).sort(), [resume.tabId]);
 
   send(win, {
     type: 'openSubagentTab',
@@ -977,10 +987,18 @@ function testLateSpawnUnderFinishedParentOpensUnderAncestor() {
     task_id: 'old',
     isDone: true,
   });
-  assert.deepStrictEqual(openSubTabIds(win), [resume.tabId], 'history needs its parent');
+  assert.deepStrictEqual(
+    openSubTabIds(win).sort(),
+    [resume.tabId],
+    'history needs its parent',
+  );
 
   send(win, {type: 'subagentDone', tab_id: resume.tabId});
-  assert.strictEqual(subagentTabEls(win).length, 0, 'helper closed on completion');
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'helper closed on completion',
+  );
   win.close();
   console.log('  ok - late spawn under finished parent opens under ancestor');
 }
@@ -994,9 +1012,16 @@ function testUserCloseOfRunningSubagentTab() {
   const [x, y] = runParallelCall(win, posted, rootId, ['x', 'y'], 'S ');
   const closes = posted.filter(m => m.type === 'closeTab').length;
   clickClose(win, x);
-  assert.deepStrictEqual(openSubTabIds(win), [y], 'running tab closes by hand');
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'closeTab').slice(closes).map(m => m.tabId),
+    openSubTabIds(win).sort(),
+    [y],
+    'running tab closes by hand',
+  );
+  assert.deepStrictEqual(
+    posted
+      .filter(m => m.type === 'closeTab')
+      .slice(closes)
+      .map(m => m.tabId),
     [x],
     'the hand close is echoed to the daemon',
   );

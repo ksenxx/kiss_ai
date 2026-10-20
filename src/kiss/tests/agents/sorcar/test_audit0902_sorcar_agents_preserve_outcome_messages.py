@@ -7,7 +7,7 @@
 ``ChatSorcarAgent._commit_and_clean_worktree`` reports WHY a
 worktree was preserved (``PRESERVED_SUBAGENT_ACTIVE``,
 ``PRESERVED_RESCUE_FAILED``, ``PRESERVED_COMMIT_FAILED``).
-``_preserve_pending_worktree_for_review`` turns each outcome into a
+``_retire_previous_worktree`` turns each outcome into a
 matching user warning, but ``merge()`` collapsed the outcome to a bool
 and returned "auto-commit ... failed (a pre-commit hook may have
 rejected the commit)" for every preserved outcome.
@@ -93,7 +93,7 @@ def test_preserve_warning_names_failed_rescue_not_hook(
     wt = agent._wt
     assert wt is not None
     _make_rescue_fail(env, agent)
-    assert agent._preserve_pending_worktree_for_review() is True
+    assert agent._retire_previous_worktree() is True
     assert wt.wt_dir.exists(), "worktree deleted with the only copy of out/"
     assert agent._last_preserve_outcome is (
         _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED
@@ -125,7 +125,7 @@ def test_preserve_hook_wording_is_kept(
     assert wt is not None
     hook = _install_rejecting_pre_commit_hook(env.repo)
     try:
-        assert agent._preserve_pending_worktree_for_review() is True
+        assert agent._retire_previous_worktree() is True
     finally:
         hook.unlink()
     assert wt.wt_dir.exists(), "worktree deleted with the only copy of the work"

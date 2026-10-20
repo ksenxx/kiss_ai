@@ -36,12 +36,16 @@ from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.server import sidebar_panels
 from kiss.tests.agents.seas.conftest import persist_task, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
 )
-from kiss.tests.agents.sorcar.test_history_date_range import _set_timestamp
 
 _SEA_PATH = Path(sea.__file__).resolve()
 
@@ -82,16 +86,15 @@ def _persist(
     *result* is ``None`` for a task still running (no outcome recorded);
     an empty string is a finished run with an empty summary.
     """
-    task_id = persist_task(
+    return persist_task(
         task,
         result=result,
         success=success,
+        timestamp=time.time() - age_seconds,
         model="test-model",
         work_dir=work_dir,
         **(extra or {}),
     )
-    _set_timestamp(task_id, time.time() - age_seconds)
-    return task_id
 
 
 def _tool_names(tools: list[Any]) -> list[str]:
@@ -140,11 +143,9 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
 def test_slash_recommendations_resolves_to_the_bundled_sea() -> None:
     """``/recommendations now`` resolves to this SEA, which the chat and cron run directly."""
     assert sea_commands.get_command("recommendations") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/recommendations now")
-    assert hit is not None
-    task_text, path = hit
-    assert (task_text, path) == ("now", _SEA_PATH)
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings([RecommendationsSea()])
+    assert sea_commands.slash_command_task("/recommendations now") == ("now", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings(
+        [RecommendationsSea()])
     assert sea_commands.help_text_if_command("/recommendations help") == (
         RecommendationsSea().description()
     )
@@ -329,10 +330,9 @@ def test_memory_read_tools_follow_the_memory_toggle(monkeypatch: pytest.MonkeyPa
     assert "memory_write" not in _tool_names(RecommendationsSea().tools([]))
 
 
-def test_save_and_load_recommendations() -> None:
+def test_save_and_load_recommendations(recommendations_path: Path) -> None:
     """Exactly ten non-empty sentences are stored atomically; anything else is refused."""
-    path = sea.recommendations_file()
-    path.unlink(missing_ok=True)
+    path = recommendations_path
     assert sea.load_recommendations() == {"generatedAt": 0.0, "tasks": []}
     assert sidebar_panels.recommendations_report() == {"generatedAt": 0, "tasks": []}
     # The model may hand the tool anything: a bare string or non-string
@@ -371,12 +371,12 @@ def test_save_and_load_recommendations() -> None:
     assert sea.load_recommendations() == {"generatedAt": 0.0, "tasks": []}
     path.write_text(json.dumps({"generatedAt": "soon", "tasks": ["x", "", 3]}))
     assert sea.load_recommendations() == {"generatedAt": 0.0, "tasks": ["x", "3"]}
-    path.unlink()
 
 
 def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
     tmp_path: Path,
     empty_history: None,
+    recommendations_path: Path,
 ) -> None:
     """With the SEA's configuration the model gets its six tools and finish.
 
@@ -385,7 +385,6 @@ def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
     system prompt, the real history and probe answer in the tool-result
     messages, and the file the sidebar reads.
     """
-    sea.recommendations_file().unlink(missing_ok=True)
     _persist("Fix the parser", 3 * 3600, result="Fixed parser.py", success=True)
     summary = "<ul>" + "".join(f"<li>{t}</li>" for t in TEN) + "</ul>"
     script = [
@@ -405,17 +404,9 @@ def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
 
     assert len(agentic) == 4
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
-        assert names == {"finish", *TOOL_NAMES}, names
-        system = system_message(request)
-        assert system.startswith(sea.SYSTEM_PROMPT)
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1
-    assert str(tool_results[0]["content"]).startswith(
-        "- 3h ago | /home/me/proj | ok | Fix the parser -> Fixed parser.py"
-    )
-    probed = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
-    assert str(probed[-1]["content"]).startswith("No third-party app is connected.")
-    saved = [m for m in agentic[3]["messages"] if m["role"] == "tool"]
-    assert str(saved[-1]["content"]).startswith("Saved 10 recommendations.")
-    sea.recommendations_file().unlink(missing_ok=True)
+        assert tool_names(request) == {"finish", *TOOL_NAMES}
+        assert system_message(request).startswith(sea.SYSTEM_PROMPT)
+    (listed,) = tool_results(agentic[1])
+    assert listed.startswith("- 3h ago | /home/me/proj | ok | Fix the parser -> Fixed parser.py")
+    assert tool_results(agentic[2])[-1].startswith("No third-party app is connected.")
+    assert tool_results(agentic[3])[-1].startswith("Saved 10 recommendations.")

@@ -957,6 +957,7 @@ def test_bedrock_id_the_catalog_lists_only_on_openrouter_is_priced_by_that_entry
 ) -> None:
     """Opus 4.1 has no ``claude-*`` entry; its Bedrock id resolves to the OpenRouter twin."""
     from kiss.core.models.anthropic_model import (
+        _claude_profile,
         _supports_extended_thinking,
         _uses_adaptive_thinking,
     )
@@ -986,8 +987,8 @@ def test_bedrock_id_the_catalog_lists_only_on_openrouter_is_priced_by_that_entry
     assert isinstance(adapter, AnthropicModel)
     assert adapter._api_model_name == "anthropic.claude-opus-4-1-20250805-v1:0"
     assert adapter._catalog_model_name == "claude-opus-4-1-20250805"
-    assert _supports_extended_thinking(adapter._catalog_model_name)
-    assert not _uses_adaptive_thinking(adapter._catalog_model_name)
+    assert _supports_extended_thinking(_claude_profile(adapter._catalog_model_name))
+    assert not _uses_adaptive_thinking(_claude_profile(adapter._catalog_model_name))
 
 
 def test_persisted_bedrock_entry_bills_like_its_claude_entry_after_restart(

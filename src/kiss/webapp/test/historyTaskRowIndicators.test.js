@@ -8,68 +8,33 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {inlineDesignTokens} = require('./designTokens');
+const {makePage: makeHarnessPage, send, MEDIA} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  return makeHarnessPage({
+    beforeScripts(win) {
+      const RealDate = win.Date;
+      const FakeDate = function (...args) {
+        if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
+        return new RealDate(...args);
+      };
+      FakeDate.prototype = RealDate.prototype;
+      FakeDate.now = () => FROZEN_NOW_MS;
+      FakeDate.parse = RealDate.parse;
+      FakeDate.UTC = RealDate.UTC;
+      win.Date = FakeDate;
 
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+      const cssText = inlineDesignTokens(
+        fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+      );
+      const styleEl = win.document.createElement('style');
+      styleEl.textContent = cssText;
+      win.document.head.appendChild(styleEl);
+    },
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const RealDate = win.Date;
-  const FakeDate = function (...args) {
-    if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
-    return new RealDate(...args);
-  };
-  FakeDate.prototype = RealDate.prototype;
-  FakeDate.now = () => FROZEN_NOW_MS;
-  FakeDate.parse = RealDate.parse;
-  FakeDate.UTC = RealDate.UTC;
-  win.Date = FakeDate;
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = cssText;
-  win.document.head.appendChild(styleEl);
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function makeRow(overrides) {
@@ -274,9 +239,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
   });
 
   const transitionedRow = byTitle['running task'];
-  const completedDot = transitionedRow.querySelector(
-    '.sidebar-item-completed',
-  );
+  const completedDot = transitionedRow.querySelector('.sidebar-item-completed');
   assert.ok(
     completedDot,
     'a row whose running→completed transition the session ' +
@@ -437,7 +400,9 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
 }
 
 function testCompletedDotKeyframesNotShared() {
-  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
+  const cssText = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
   assert.ok(
     /\.sidebar-item-completed\s*\{/.test(cssText),
     'main.css must define .sidebar-item-completed for the green ' +

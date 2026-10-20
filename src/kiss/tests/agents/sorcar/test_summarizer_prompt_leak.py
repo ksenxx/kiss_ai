@@ -56,20 +56,16 @@ class EventCollectorPrinter(Printer):
         self.events: list[tuple[str, str]] = []
         self._lock = threading.Lock()
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Record the (type, content) pair of every print call.
 
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "tool_call").
             **kwargs: Additional type-specific options (ignored).
-
-        Returns:
-            str: Always the empty string.
         """
         with self._lock:
             self.events.append((type, str(content)))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Ignore streamed tokens.

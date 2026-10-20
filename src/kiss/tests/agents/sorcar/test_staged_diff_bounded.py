@@ -19,21 +19,27 @@ uses a real ``diff.external`` helper that hangs.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar.git_worktree import (
+    _PIPE_GIVE_UP_SECONDS,
     COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
     GitWorktreeOps,
     _git_stdout_head,
 )
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
+from kiss.core.processes import IS_WINDOWS
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -183,6 +189,75 @@ def test_stdout_head_watchdog_kills_a_hung_git_and_reports_truncation(
     assert any("timed out after 0.5s" in r.getMessage() for r in caplog.records), [
         r.getMessage() for r in caplog.records
     ]
+
+
+_SPEWING_CHILD = """
+import os, sys, time
+os.setsid()
+with open(sys.argv[1], "w") as f:
+    f.write(str(os.getpid()))
+while True:
+    sys.stdout.write("x" * 100 + "\\n")
+    sys.stdout.flush()
+    time.sleep(0.2)
+"""
+
+
+def _read_head_in_thread(
+    args: tuple[str, ...], cwd: Path, max_bytes: int, timeout: float,
+) -> tuple[threading.Thread, list[tuple[str, bool]]]:
+    """Start ``_git_stdout_head`` on a daemon thread; its result lands in the list."""
+    results: list[tuple[str, bool]] = []
+
+    def run() -> None:
+        results.append(_git_stdout_head(*args, cwd=cwd, max_bytes=max_bytes, timeout=timeout))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, results
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="a Job Object kills every descendant on Windows")
+def test_stdout_head_gives_up_on_an_escaped_child_that_keeps_writing(
+    repo: Path, tmp_path: Path,
+) -> None:
+    """A descendant git left in its own session that keeps the pipe busy
+    cannot hold the reader past the grace after the watchdog: the give-up
+    deadline is absolute, not reset by every chunk."""
+    spew = tmp_path / "spew.py"
+    spew.write_text(_SPEWING_CHILD, encoding="utf-8")
+    pid_file = tmp_path / "spew.pid"
+    alias = f'alias.spew=!"{sys.executable}" "{spew}" "{pid_file}"'
+    started = time.monotonic()
+    thread, results = _read_head_in_thread(
+        ("-c", alias, "spew"), repo, max_bytes=1_000_000, timeout=1.0,
+    )
+    limit = 1.0 + _PIPE_GIVE_UP_SECONDS + 3.0
+    thread.join(limit)
+    try:
+        assert not thread.is_alive(), f"still reading the pipe after {limit}s"
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    elapsed = time.monotonic() - started
+    assert 1.0 + _PIPE_GIVE_UP_SECONDS <= elapsed < limit
+    text, truncated = results[0]
+    assert truncated is True
+    assert text.startswith("x" * 100)
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX descriptor limit")
+def test_stdout_head_reads_a_pipe_above_the_select_limit(repo: Path) -> None:
+    """A daemon with more than ``FD_SETSIZE`` descriptors open still reads git's stdout."""
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+        assert max(held) >= 1024
+        text, truncated = _git_stdout_head("--version", cwd=repo, max_bytes=1000)
+    finally:
+        for fd in held:
+            os.close(fd)
+    assert text.startswith("git version")
+    assert truncated is False
 
 
 def test_has_staged_changes_reports_git_failures(

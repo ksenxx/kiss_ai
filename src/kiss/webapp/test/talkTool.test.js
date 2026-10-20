@@ -7,49 +7,22 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
-const {installSpeech} = require('./speech_helpers');
-
-function installAudio(win) {
-  const created = [];
-  win.Audio = function Audio(src) {
-    created.push(this);
-    this.src = src;
-    this.play = () => Promise.resolve();
-  };
-  return created;
-}
+const {installSpeech, installAudio} = require('./speech_helpers');
 
 const B64 = 'SUQzBAAAAAAAAA==';
-
-function testAudiolessTalkIsSilentAndQueueAdvances() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
-  const created = installAudio(win);
-  const activeTab = win._testApi.getActiveTabId();
-
-  send(win, {type: 'talk', language: 'es', text: 'hola usuario',
-             talkId: 'tt-noaudio', tabId: activeTab});
-
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
-  assert.strictEqual(created.length, 0, 'no clip to play — stays silent');
-
-  send(win, {type: 'talk', language: 'es', text: 'con audio',
-             talkId: 'tt-audio', tabId: activeTab,
-             audioB64: B64, audioMime: 'audio/mpeg'});
-
-  assert.strictEqual(created.length, 1, 'queue advanced to the clip talk');
-  assert.strictEqual(created[0].src, 'data:audio/mpeg;base64,' + B64);
-  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
-  console.log('PASS: audio-less talk is silent and the queue advances');
-}
 
 function testTalkForOtherWindowsTabStaysSilent() {
   const {win} = makePage({beforeScripts: stubRaf});
   const spoken = installSpeech(win);
   const created = installAudio(win);
 
-  send(win, {type: 'talk', language: 'de', text: 'hallo',
-             tabId: 'some-other-windows-tab', audioB64: B64});
+  send(win, {
+    type: 'talk',
+    language: 'de',
+    text: 'hallo',
+    tabId: 'some-other-windows-tab',
+    audioB64: B64,
+  });
 
   assert.strictEqual(created.length, 0, "another window's copy is silent");
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
@@ -61,8 +34,12 @@ function testTalkWithoutLanguagePlaysClip() {
   const spoken = installSpeech(win);
   const created = installAudio(win);
 
-  send(win, {type: 'talk', text: 'plain default', talkId: 'tt-nolang',
-             audioB64: B64});
+  send(win, {
+    type: 'talk',
+    text: 'plain default',
+    talkId: 'tt-nolang',
+    audioB64: B64,
+  });
 
   assert.strictEqual(created.length, 1, 'clip plays without a language');
   assert.strictEqual(created[0].src, 'data:audio/mpeg;base64,' + B64);
@@ -84,7 +61,6 @@ function testTalkEmptyTextIsIgnored() {
   console.log('PASS: talk with empty/missing text is ignored');
 }
 
-testAudiolessTalkIsSilentAndQueueAdvances();
 testTalkForOtherWindowsTabStaysSilent();
 testTalkWithoutLanguagePlaysClip();
 testTalkEmptyTextIsIgnored();

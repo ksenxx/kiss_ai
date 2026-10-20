@@ -33,12 +33,12 @@ class FifoSendLockTests(unittest.TestCase):
                     await asyncio.sleep(0)
 
             await lock.acquire()
-            self.assertTrue(lock.locked())
+            self.assertTrue(lock._locked)
             tasks = [asyncio.create_task(contender(i)) for i in range(50)]
             await asyncio.sleep(0)  # every contender is now queued
             lock.release()
             await asyncio.gather(*tasks)
-            self.assertFalse(lock.locked())
+            self.assertFalse(lock._locked)
             return order
 
         self.assertEqual(asyncio.run(scenario()), list(range(50)))
@@ -67,7 +67,7 @@ class FifoSendLockTests(unittest.TestCase):
             await survivor
             self.assertTrue(queued.cancelled())
             self.assertTrue(handed.cancelled())
-            self.assertFalse(lock.locked())
+            self.assertFalse(lock._locked)
             return log
 
         self.assertEqual(asyncio.run(scenario()), ["survivor"])
@@ -116,8 +116,8 @@ class FifoSendLockTests(unittest.TestCase):
             lock = printer.send_lock(endpoint)
             self.assertIs(lock, printer.send_lock(endpoint))
             async with lock:
-                self.assertTrue(lock.locked())
-            self.assertFalse(lock.locked())
+                self.assertTrue(lock._locked)
+            self.assertFalse(lock._locked)
 
         asyncio.run(scenario())
 

@@ -11,14 +11,11 @@
 'use strict';
 
 const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const harness = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 // UI_ANTIPATTERN_MAIN_JS points the harness at another main.js (an older
 // revision, say) to show that a regression test fails without its fix.
-const MAIN_JS =
-  process.env.UI_ANTIPATTERN_MAIN_JS || path.join(MEDIA, 'main.js');
+const MAIN_JS = process.env.UI_ANTIPATTERN_MAIN_JS;
 const WD = '/ws/repo';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -31,104 +28,34 @@ const SHA_B = 'b'.repeat(40);
  */
 function makePage(opts) {
   const wide = !(opts && opts.narrow);
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: wide && query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  Object.defineProperty(win.navigator, 'clipboard', {
-    value: {writeText: () => Promise.resolve()},
-    configurable: true,
-  });
-  // The page ships its own dialogs; a native prompt/confirm would block
-  // the whole page.  Any call is a defect.
-  win.prompt = function () {
-    throw new Error('window.prompt must not be called');
-  };
-  win.confirm = function () {
-    throw new Error('window.confirm must not be called');
-  };
-  const created = [];
-  win.monaco = {
-    editor: {
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        let value = String(opts.value === undefined ? '' : opts.value);
-        let version = 1;
-        const listeners = [];
-        const model = {
-          getAlternativeVersionId: () => version,
-          getValue: () => value,
-          getLineCount: () => value.split('\n').length,
-        };
-        const editor = {
-          getModel: () => model,
-          onDidChangeModelContent: cb => listeners.push(cb),
-          setPosition: () => {},
-          revealLineInCenter: () => {},
-          getDomNode: () => holder,
-          dispose: () => {},
-          layout: () => {},
-          focus: () => {},
-          _type: text => {
-            value = String(text);
-            version += 1;
-            listeners.slice().forEach(cb => cb());
-          },
-        };
-        created.push({holder, editor, value: opts.value, opts});
-        return editor;
-      },
+  let created;
+  const {win, posted} = harness.makePage({
+    bodyClass: 'remote-chat',
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
+    sourceUrl: 'ui-antipattern-main.js',
+    mainSource: src => (MAIN_JS ? fs.readFileSync(MAIN_JS, 'utf8') : src),
+    beforeScripts(w) {
+      harness.stubRaf(w);
+      harness.fakeMatchMedia(w, wide);
+      Object.defineProperty(w.navigator, 'clipboard', {
+        value: {writeText: () => Promise.resolve()},
+        configurable: true,
+      });
+      // The page ships its own dialogs; a native prompt/confirm would block
+      // the whole page.  Any call is a defect.
+      w.prompt = function () {
+        throw new Error('window.prompt must not be called');
+      };
+      w.confirm = function () {
+        throw new Error('window.confirm must not be called');
+      };
+      created = harness.stubMonaco(w);
     },
-  };
-  for (const file of [
-    'marked.min.js',
-    'panelCopy.js',
-    'api.js',
-    'contentContextMenu.js',
-    'treeContextMenu.js',
-  ]) {
-    win.eval(fs.readFileSync(path.join(MEDIA, file), 'utf8'));
-  }
-  win.eval(
-    fs.readFileSync(MAIN_JS, 'utf8') + '\n//# sourceURL=ui-antipattern-main.js',
-  );
+  });
   return {win, posted, created};
 }
 
@@ -338,20 +265,43 @@ function contentTabStrips(win) {
   return win.document.querySelectorAll('.chat-tab.content-tab');
 }
 
-/** Minimal test runner: `test(name, fn)` collects, `report(title)` exits 1 on failures. */
+/**
+ * Minimal test runner: `test(name, fn)` runs and records one test,
+ * `report(title)` prints the totals and exits 1 on any failure.
+ *
+ * A synchronous `fn` is recorded before `test` returns, so a suite that
+ * calls `test(...)` back to back and then `report(...)` without awaiting
+ * counts every test.  An async `fn` returns a promise the suite must
+ * await before `report`.
+ */
 function makeRunner() {
   let passed = 0;
   const failures = [];
-  async function test(name, fn) {
+  function pass(name) {
+    passed++;
+    console.log(`  \u2713 ${name}`);
+  }
+  function fail(name, e) {
+    failures.push({name, error: e});
+    console.log(`  \u2717 ${name}`);
+    console.log(`      ${e.stack || e.message}`);
+  }
+  function test(name, fn) {
+    let result;
     try {
-      await fn();
-      passed++;
-      console.log(`  \u2713 ${name}`);
+      result = fn();
     } catch (e) {
-      failures.push({name, error: e});
-      console.log(`  \u2717 ${name}`);
-      console.log(`      ${e.stack || e.message}`);
+      fail(name, e);
+      return undefined;
     }
+    if (result && typeof result.then === 'function') {
+      return result.then(
+        () => pass(name),
+        e => fail(name, e),
+      );
+    }
+    pass(name);
+    return undefined;
   }
   function report(title) {
     console.log(`\n${title}: ${passed} passed, ${failures.length} failed`);

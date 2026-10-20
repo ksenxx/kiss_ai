@@ -255,11 +255,7 @@
     return /Mac|iPhone|iPad/i.test(plat);
   }
 
-  /**
-   * Build the ordered menu model for a right-click on *target* in *doc*.
-   *
-   * Exported so tests can assert the model without touching the DOM.
-   */
+  /** Build the ordered menu model for a right-click on *target* in *doc*. */
   function buildMenuModel(doc, target) {
     const mod = isMac(doc) ? '\u2318' : 'Ctrl+';
     const editable = editableTarget(target);
@@ -662,9 +658,6 @@
     '})();';
 
   const api = {
-    buildMenuModel: buildMenuModel,
-    selectAll: selectAll,
-    copyText: copyText,
     installContentContextMenu: installContentContextMenu,
     contentContextMenuBootstrapHtml: contentContextMenuBootstrapHtml,
   };

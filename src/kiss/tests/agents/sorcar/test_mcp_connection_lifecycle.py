@@ -38,6 +38,7 @@ from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
     MCPServerConfig,
+    _child_errlog,
     _connection_key,
 )
 from kiss.core.processes import pid_alive
@@ -487,5 +488,65 @@ def test_spawn_survives_a_closed_stderr(
         conn = manager.connect(_config(server_script, pid_file))
         assert conn.session is not None, conn.error
         assert _alive(_wait_for_pid_file(pid_file))
+    finally:
+        stdin_stream.close()
+
+
+def _settled_fd_count(timeout: float = 5) -> int:
+    """This process's open descriptor count once it has stopped changing."""
+    last, stable_since = -1, time.monotonic()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        count = len(os.listdir("/proc/self/fd"))
+        if count != last:
+            last, stable_since = count, time.monotonic()
+        elif time.monotonic() - stable_since > 0.5:
+            break
+        time.sleep(0.05)
+    return last
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts fds through /proc")
+def test_respawns_with_a_closed_stderr_do_not_leak_descriptors(
+    manager: MCPManager,
+    server_script: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stderr fallback is one stream per process, not one per spawn.
+
+    With ``sys.stderr`` closed every spawn used to ``dup`` the real
+    stderr into a new file object that nothing ever closed; every
+    reconnect of the daemon (idle eviction, a crashed server) then cost
+    one descriptor for good.  Real children are crashed and respawned
+    through ``call_tool``; the descriptor count must come back to where
+    it was after the first spawn.
+    """
+    stdin_stream = open(os.devnull, encoding="utf-8")
+    dead = (tmp_path / "dead_errlog.txt").open("w", encoding="utf-8")
+    dead.close()
+    monkeypatch.setattr(sys, "stdin", stdin_stream)
+    monkeypatch.setattr(sys, "stderr", dead)
+    try:
+        assert _child_errlog() is _child_errlog()
+        pid_file = tmp_path / "respawn-pid"
+        config = _config(server_script, pid_file)
+        key = _connection_key(config)
+        conn = manager.connect(config)
+        assert conn.session is not None, conn.error
+        assert manager.call_tool(key, "add", {"a": 1, "b": 2}) == "3"
+        baseline = _settled_fd_count()
+        for _ in range(4):
+            conn = manager._connections[key]  # a reconnect replaces the record
+            pid = _wait_for_pid_file(pid_file)
+            pid_file.unlink()
+            os.kill(pid, 9)
+            assert _wait_until_dead(pid)
+            deadline = time.time() + 20
+            while time.time() < deadline and conn.session is not None:
+                time.sleep(0.05)
+            assert conn.session is None, "connection did not notice the dead server"
+            assert manager.call_tool(key, "add", {"a": 2, "b": 3}) == "5"
+        assert _settled_fd_count() <= baseline
     finally:
         stdin_stream.close()

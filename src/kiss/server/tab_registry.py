@@ -465,9 +465,8 @@ class TabRegistry:
 
     def _retire_unregistered_and_observe_locked(self, tab_id: str) -> int:
         """Under ``_lock``: the body of :meth:`retire_unregistered_and_observe`."""
-        if tab_id and self._find_locked(tab_id) is None:
-            self._generations.pop(tab_id, None)
-        return self._generation_counter
+        self._retire_unregistered_locked(tab_id)
+        return self._clock_locked()
 
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",

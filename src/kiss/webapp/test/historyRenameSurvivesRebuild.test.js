@@ -1,0 +1,183 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+'use strict';
+
+// A chat rename box open in the Chats panel must survive a history
+// refresh that changes the rows (a `tasks_updated` broadcast lands
+// whenever ANY task on the daemon persists a result).  The rebuild is
+// parked, as it is under a held mouse button, until the rename ends;
+// the rename's Enter then saves the text and the parked page lands.
+// Runs with: node test/historyRenameSurvivesRebuild.test.js
+
+const assert = require('assert');
+const {makePage: buildPage, send} = require('./simplify2_harness');
+
+function makePage() {
+  const {win, posted} = buildPage({bodyClass: 'remote-chat'});
+  win.document.getElementById('sidebar').classList.add('open');
+  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
+  return {win, posted};
+}
+
+function makeRow(overrides) {
+  return Object.assign(
+    {
+      id: 'chat-' + overrides.task_id,
+      task_id: overrides.task_id,
+      title: 'task ' + overrides.task_id,
+      timestamp: 1_700_000_000,
+      preview: 'task ' + overrides.task_id,
+      has_events: true,
+      failed: false,
+      is_running: false,
+      awaiting_answer: false,
+      tokens: 1,
+      cost: 0,
+      steps: 1,
+      is_favorite: false,
+      work_dir: '',
+      startTs: 1_700_000_000_000,
+      endTs: 0,
+    },
+    overrides,
+  );
+}
+
+/** Reply to the latest getHistory request (or the first load). */
+function sendHistory(win, posted, sessions) {
+  const req = posted.filter(m => m && m.type === 'getHistory').pop();
+  send(win, {
+    type: 'history',
+    offset: 0,
+    generation: req ? req.generation : undefined,
+    sessions,
+  });
+}
+
+function group(win, chatId) {
+  return win.document.querySelector(
+    '#history-list .history-chat-group[data-chat-id="' + chatId + '"]',
+  );
+}
+
+function title(win, chatId) {
+  const g = group(win, chatId);
+  assert.ok(g, 'chat panel for ' + chatId);
+  return g
+    .querySelector(':scope > .history-chat-header')
+    .querySelector(':scope > .history-chat-title');
+}
+
+function byType(posted, type) {
+  return posted.filter(m => m && m.type === type);
+}
+
+function key(win, el, k) {
+  el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
+}
+
+const tick = () => new Promise(r => setTimeout(r, 5));
+
+async function testRenameBoxSurvivesChangedRows() {
+  const {win, posted} = makePage();
+  sendHistory(win, posted, [
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
+  ]);
+  win.document.querySelector('#history-list .history-chat-rename').click();
+  const input = title(win, 'A').querySelector('input');
+  assert.ok(input, 'setup: the pencil opened the rename box');
+  input.value = 'Login fix';
+
+  // Another task finished elsewhere: the daemon broadcasts, the client
+  // refetches, the reply carries a new row.
+  send(win, {type: 'tasks_updated'});
+  sendHistory(win, posted, [
+    makeRow({id: 'B', task_id: 2, chat_summary: 'Other chat'}),
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
+  ]);
+  await tick();
+  assert.strictEqual(
+    title(win, 'A').querySelector('input'),
+    input,
+    'the rename box must survive the refresh',
+  );
+  assert.strictEqual(input.value, 'Login fix', 'the typed text is kept');
+  assert.strictEqual(group(win, 'B'), null, 'the new row waits');
+
+  key(win, input, 'Enter');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(byType(posted, 'setChatSummary'))),
+    [{type: 'setChatSummary', chatId: 'A', summary: 'Login fix'}],
+  );
+  await tick();
+  assert.ok(group(win, 'B'), 'the parked page lands once the rename ends');
+  assert.strictEqual(title(win, 'A').textContent, 'Login fix');
+  assert.strictEqual(
+    title(win, 'A').querySelector('input'),
+    null,
+    'no rename box after Enter',
+  );
+  win.close();
+  console.log('  ok - the rename box survives a refresh with changed rows');
+}
+
+/** A cancelled rename (Escape) lands the parked page as a save does. */
+async function testEscapeLandsTheParkedPage() {
+  const {win, posted} = makePage();
+  sendHistory(win, posted, [
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
+  ]);
+  win.document.querySelector('#history-list .history-chat-rename').click();
+  const input = title(win, 'A').querySelector('input');
+  send(win, {type: 'tasks_updated'});
+  sendHistory(win, posted, [
+    makeRow({id: 'B', task_id: 2, chat_summary: 'Other chat'}),
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
+  ]);
+  await tick();
+  assert.strictEqual(group(win, 'B'), null, 'setup: the page is parked');
+  key(win, input, 'Escape');
+  await tick();
+  assert.strictEqual(byType(posted, 'setChatSummary').length, 0);
+  assert.ok(group(win, 'B'), 'Escape lands the parked page');
+  assert.strictEqual(title(win, 'A').textContent, 'Fix the login bug');
+  win.close();
+  console.log('  ok - Escape lands the parked page');
+}
+
+/**
+ * The identical-page fast path never rebuilt, so the box always lived
+ * through it; a refresh returning the same rows keeps the box too.
+ */
+async function testSameRowsKeepTheBox() {
+  const {win, posted} = makePage();
+  const rows = [makeRow({id: 'A', task_id: 1, chat_summary: 'Fix it'})];
+  sendHistory(win, posted, rows);
+  win.document.querySelector('#history-list .history-chat-rename').click();
+  const input = title(win, 'A').querySelector('input');
+  send(win, {type: 'tasks_updated'});
+  sendHistory(
+    win,
+    posted,
+    rows.map(r => Object.assign({}, r)),
+  );
+  await tick();
+  assert.strictEqual(title(win, 'A').querySelector('input'), input);
+  win.close();
+  console.log('  ok - a refresh with the same rows keeps the box');
+}
+
+async function main() {
+  await testRenameBoxSurvivesChangedRows();
+  await testEscapeLandsTheParkedPage();
+  await testSameRowsKeepTheBox();
+  console.log('historyRenameSurvivesRebuild: all passed');
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

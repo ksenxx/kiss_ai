@@ -4,7 +4,7 @@
 # add your name here
 """Tests for worktree bugs 1–5 fixes.
 
-BUG 1: _check_merge_conflict false positives with baseline
+BUG 1: _conflict_of false positives with baseline
 BUG 2: copy_dirty_state doesn't delete old file on rename
 BUG 3: stash pop failure silently loses user's dirty edits
 BUG 4 (obsolete): covered _parse_diff_hunks/_prepare_merge_view of the
@@ -220,7 +220,7 @@ class TestBug3StashPopWarning:
 
 
 class TestBug1ConflictDetectionBaseline:
-    """_check_merge_conflict should NOT false-positive with baseline."""
+    """_conflict_of should NOT false-positive with baseline."""
 
     def test_no_false_positive_with_dirty_state_baseline(self) -> None:
         """Dirty state in baseline shouldn't trigger false conflict.

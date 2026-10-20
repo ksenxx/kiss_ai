@@ -124,11 +124,7 @@ class _FirecrawlRequestHandler(RecordingHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        raw = self._read_raw()
-        try:
-            body: dict[str, Any] | None = json.loads(raw.decode("utf-8")) if raw else {}
-        except ValueError:
-            body = None
+        body = self._read_body()
         self._record(body)
         if not self._authorized():
             self._reply(401, json.dumps({"error": "Unauthorized: Invalid token"}))

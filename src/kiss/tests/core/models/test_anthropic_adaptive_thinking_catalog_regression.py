@@ -37,6 +37,7 @@ import pytest
 
 from kiss.core.models.anthropic_model import (
     AnthropicModel,
+    _claude_profile,
     _supports_extended_thinking,
     _uses_adaptive_thinking,
 )
@@ -79,7 +80,7 @@ def _adaptive_thinking_models() -> list[str]:
     return [
         name
         for name in _direct_anthropic_catalog_models()
-        if _uses_adaptive_thinking(name)
+        if _uses_adaptive_thinking(_claude_profile(name))
     ]
 
 
@@ -142,7 +143,7 @@ class TestAdaptiveThinkingCatalogRequestShape:
         set, prefix not in the allowlist) would silently send NO
         ``thinking`` param at all.
         """
-        assert _supports_extended_thinking(name), (
+        assert _supports_extended_thinking(_claude_profile(name)), (
             f"{name} uses adaptive thinking but _supports_extended_thinking() "
             "is False — the request would carry no thinking param at all. "
             "Set extended_thinking=true alongside adaptive_thinking=true in "
@@ -179,7 +180,7 @@ def test_non_thinking_models_still_force_tool_use() -> None:
     non_thinking = [
         n
         for n in _direct_anthropic_catalog_models()
-        if not _supports_extended_thinking(n)
+        if not _supports_extended_thinking(_claude_profile(n))
     ]
     non_thinking.append("claude-3-5-sonnet-20241022")
     for name in non_thinking:

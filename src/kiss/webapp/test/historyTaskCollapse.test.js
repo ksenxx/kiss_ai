@@ -18,6 +18,8 @@ const fs = require('fs');
 const path = require('path');
 const {makePage, send} = require('./simplify2_harness.js');
 
+const MEDIA = path.join(__dirname, '..', 'media');
+
 function makeSession() {
   return {
     id: 'chat-1',
@@ -214,41 +216,62 @@ function testRowWithoutTaskIdStillCollapsible() {
   console.log('PASS rows without task_id are collapsible too');
 }
 
+/** Append a media/ stylesheet to *win*'s document. */
+function loadCss(win, name) {
+  const styleEl = win.document.createElement('style');
+  styleEl.textContent = fs.readFileSync(path.join(MEDIA, name), 'utf8');
+  win.document.head.appendChild(styleEl);
+}
+
 function testCssHidesMetadataWhenCollapsed() {
-  const css = fs.readFileSync(
-    path.join(__dirname, '..', 'media', 'main.css'),
-    'utf8',
+  const {win} = makePage();
+  loadCss(win, 'main.css');
+  loadCss(win, 'remote-codex.css');
+  win.document.body.classList.add('remote-chat');
+  loadHistory(win, [makeSession()]);
+  const row = historyRow(win);
+  const info = row.querySelector('.running-item-info');
+  const text = row.querySelector('.sidebar-item-text');
+  const toggle = row.querySelector('.sidebar-item-collapse');
+  assert.ok(row.classList.contains('collapsed'), 'row starts collapsed');
+  assert.strictEqual(
+    win.getComputedStyle(info).display,
+    'none',
+    'a collapsed panel hides its metadata',
   );
-  assert.ok(
-    /\.running-item\.collapsed\s*>\s*\.running-item-info\s*\{\s*display:\s*none;\s*\}/.test(
-      css,
-    ),
-    'main.css must hide .running-item-info of collapsed panels',
+  assert.strictEqual(
+    win.getComputedStyle(text).getPropertyValue('-webkit-line-clamp'),
+    '3',
+    'a collapsed panel clamps the task text to 3 lines',
   );
-  const textRule = css.slice(
-    css.indexOf('.running-item > .sidebar-item-text'),
+  toggle.click();
+  assert.notStrictEqual(
+    win.getComputedStyle(info).display,
+    'none',
+    'an expanded panel shows its metadata',
   );
-  assert.ok(
-    /-webkit-line-clamp:\s*3;/.test(textRule.slice(0, 400)) &&
-      /[^-]line-clamp:\s*3;/.test(textRule.slice(0, 400)),
-    'collapsed panels must clamp the task text to 3 lines',
+  const toggleStyle = win.getComputedStyle(toggle);
+  const copyStyle = win.getComputedStyle(
+    row.querySelector('.sidebar-item-copy'),
   );
-  assert.ok(
-    css.indexOf('.sidebar-item-collapse,') >= 0,
-    'main.css must style the collapse toggle like the other row buttons',
+  for (const prop of ['cursor', 'border-radius', 'background-image']) {
+    assert.strictEqual(
+      toggleStyle.getPropertyValue(prop),
+      copyStyle.getPropertyValue(prop),
+      `the collapse toggle's ${prop} matches the other row buttons'`,
+    );
+  }
+  assert.strictEqual(
+    toggleStyle.color,
+    'var(--fg)',
+    'the webapp theme paints the collapse toggle in the foreground colour',
   );
-  const remote = fs.readFileSync(
-    path.join(__dirname, '..', 'media', 'remote-codex.css'),
-    'utf8',
+  assert.strictEqual(
+    row.querySelector('.sidebar-item-delete'),
+    null,
+    'a history row has no delete button',
   );
-  assert.ok(
-    remote.indexOf('.running-item .sidebar-item-collapse') >= 0,
-    'remote-codex.css must theme the collapse toggle for the webapp',
-  );
-  assert.ok(
-    remote.indexOf('.running-item .sidebar-item-delete') < 0,
-    'remote-codex.css must not theme a history delete button anymore',
-  );
+  win.close();
   console.log('PASS css hides collapsed metadata in the webapp');
 }
 

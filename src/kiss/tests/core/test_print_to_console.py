@@ -4,9 +4,8 @@
 # add your name here
 """Tests for ConsolePrinter.
 
-Tests verify correctness and accuracy of all terminal printing logic.
-Uses real objects with duck-typed attributes (SimpleNamespace) as
-message inputs.
+Tests verify correctness and accuracy of all terminal printing logic
+with real objects.
 """
 
 import io
@@ -21,30 +20,10 @@ def _make() -> tuple[ConsolePrinter, io.StringIO]:
     return ConsolePrinter(file=buf), buf
 
 
-class TestPrintMessageSystem(unittest.TestCase):
-    def test_other_subtype_ignored(self):
+class TestPrintUnknownType(unittest.TestCase):
+    def test_unknown_type_prints_nothing(self):
         p, buf = _make()
-        msg = SimpleNamespace(subtype="other", data={"content": "should not appear"})
-        p.print(msg, type="message")
-        assert buf.getvalue() == ""
-
-
-class TestPrintMessageUser(unittest.TestCase):
-    def test_blocks_without_is_error_skipped(self):
-        p, buf = _make()
-        block = SimpleNamespace(text="just text")
-        msg = SimpleNamespace(content=[block])
-        p.print(msg, type="message")
-        out = buf.getvalue()
-        assert "OK" not in out
-        assert "FAILED" not in out
-
-
-class TestPrintMessageDispatch(unittest.TestCase):
-    def test_unknown_message_type_no_crash(self):
-        p, buf = _make()
-        msg = SimpleNamespace(unknown_attr="value")
-        p.print(msg, type="message")
+        p.print(SimpleNamespace(unknown_attr="value"), type="no_such_type")
         assert buf.getvalue() == ""
 
 

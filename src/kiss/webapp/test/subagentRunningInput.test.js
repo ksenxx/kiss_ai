@@ -6,19 +6,17 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {subagentTabEls} = require('./subagent_tab_helpers');
+const harness = require('./simplify2_harness');
+const {bootParallelRun, subagentTabEls} = require('./subagent_tab_helpers');
+
+const {makePage, send} = harness;
 
 function activeTabEl(win) {
   return win.document.querySelector('#tab-list .chat-tab.active');
 }
 
 function clickTab(win, tabId) {
-  const el = Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab'),
-  ).find(e => e.dataset.tabId === tabId);
-  assert.ok(el, 'tab ' + tabId + ' must be in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  harness.clickTab(win, tabId);
   assert.strictEqual(
     activeTabEl(win).dataset.tabId,
     tabId,
@@ -32,61 +30,8 @@ function inputVisible(win) {
   return c.style.display !== 'none';
 }
 
-function bootParallelRun(n) {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(taskNames)},
-  });
-
-  const subTabIds = [];
-  for (let i = 0; i < n; i++) {
-    const taskId = 'sub-task-' + (i + 1);
-    const before = posted.length;
-    send(win, {
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-    });
-  }
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    n,
-    'each spawned sub-agent must get its own tab',
-  );
-  return {win, posted, parentId, subTabIds};
-}
-
 function testRunningSubagentTabShowsInput() {
-  const {win, subTabIds} = bootParallelRun(2);
+  const {win, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, subTabIds[0]);
 
@@ -108,7 +53,7 @@ function testRunningSubagentTabShowsInput() {
 }
 
 function testOpenSubagentTabActiveRespectsRunningState() {
-  const {win, parentId, subTabIds} = bootParallelRun(1);
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   clickTab(win, subTabIds[0]);
   send(win, {
@@ -144,7 +89,7 @@ function testOpenSubagentTabActiveRespectsRunningState() {
 }
 
 function testTabSwitchTogglesInputByRunningState() {
-  const {win, parentId, subTabIds} = bootParallelRun(2);
+  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   send(win, {
     type: 'openSubagentTab',
@@ -180,7 +125,7 @@ function testTabSwitchTogglesInputByRunningState() {
 }
 
 function testSubagentDoneRemovesInput() {
-  const {win, subTabIds} = bootParallelRun(2);
+  const {win, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, subTabIds[0]);
   assert.ok(inputVisible(win), 'input must be visible while running');
@@ -202,7 +147,7 @@ function testSubagentDoneRemovesInput() {
 }
 
 function testSendInjectsPromptWithSubagentTabId() {
-  const {win, posted, subTabIds} = bootParallelRun(2);
+  const {win, posted, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, subTabIds[1]);
   assert.ok(inputVisible(win), 'input must be visible while running');
@@ -243,7 +188,7 @@ function testSendInjectsPromptWithSubagentTabId() {
 }
 
 function testStopPostsStopWithSubagentTabId() {
-  const {win, posted, subTabIds} = bootParallelRun(2);
+  const {win, posted, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, subTabIds[0]);
   const before = posted.length;
@@ -264,7 +209,7 @@ function testStopPostsStopWithSubagentTabId() {
 }
 
 function testStatusNotRunningRemovesInputOnActiveSubTab() {
-  const {win, subTabIds} = bootParallelRun(2);
+  const {win, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, subTabIds[0]);
   assert.ok(inputVisible(win), 'input must be visible while running');

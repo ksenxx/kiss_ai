@@ -77,15 +77,23 @@ def ensure_password(rotate: bool = False) -> str:
     at once because the daemon reads ``config.json`` on every check.
     The write also purges the hash-only key of an earlier release
     (``save_config`` drops ``RETIRED_KEYS``).
+
+    Storing a first password is a ``setdefault_config``: the "none
+    stored" check and the write share one config-lock section, so two
+    overlapping runs (two ``install.sh`` runs, the daemon's first start
+    beside a manual ``python -m kiss.core.remote_password``) both end
+    up returning the one password that was stored.
     """
-    from kiss.core.user_config import save_config
+    from kiss.core.user_config import save_config, setdefault_config
 
     stored = stored_password()
     if stored and not rotate:
         return stored
     password = generate_password()
-    save_config({"remote_password": password})
-    return password
+    if rotate:
+        save_config({"remote_password": password})
+        return password
+    return str(setdefault_config({"remote_password": password})["remote_password"])
 
 
 if __name__ == "__main__":

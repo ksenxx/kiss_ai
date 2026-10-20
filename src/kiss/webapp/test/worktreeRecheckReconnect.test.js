@@ -22,6 +22,7 @@ const path = require('path');
 // `checkPaths` explicitly so it can swallow the one a disconnect would
 // swallow.
 const {makePage, send} = require('./simplify2_harness');
+const {findLinks, findMissing} = require('./file_link_helpers');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtreconnect-'));
 
@@ -47,18 +48,6 @@ function replyOnRealFs(win, msg) {
     workDir: msg.workDir,
     tabId: msg.tabId,
   });
-}
-
-function findLinks(win, p) {
-  return Array.from(
-    win.document.querySelectorAll('#output [data-path]'),
-  ).filter(el => el.dataset.path === p);
-}
-
-function findMissing(win, p) {
-  return Array.from(
-    win.document.querySelectorAll('#output [data-path-missing]'),
-  ).filter(el => el.getAttribute('data-path-missing') === p);
 }
 
 function testReconnectReissuesPostWorktreeRecheck() {

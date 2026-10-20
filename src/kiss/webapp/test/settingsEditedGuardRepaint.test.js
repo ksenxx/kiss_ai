@@ -23,14 +23,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
-
-function typeInto(win, id, value) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
+const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 function valueOf(win, id) {
   return win.document.getElementById(id).value;

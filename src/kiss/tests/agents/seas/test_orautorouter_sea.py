@@ -26,7 +26,12 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.tests.agents.seas.conftest import registered, run_sea, runnable_candidates
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _SEA_PATH = Path(orautorouter_sea.__file__).resolve()
@@ -66,11 +71,9 @@ def test_orautorouter_is_a_model_picker_sea_and_a_slash_command() -> None:
     assert sea_commands.model_seas()["orautorouter"] == _SEA_PATH
     assert sea_commands.model_sea("orautorouter") == _SEA_PATH
     assert sea_commands.get_command("orautorouter") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/orautorouter add a --json flag")
-    assert hit is not None
-    task_text, path = hit
-    assert (task_text, path) == ("add a --json flag", _SEA_PATH)
-    assert sea_commands.sea_settings(path) == OrautorouterSea().settings({})
+    assert sea_commands.slash_command_task("/orautorouter add a --json flag") == (
+        "add a --json flag", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == OrautorouterSea().settings({})
     assert sea_commands.help_text_if_command("/orautorouter help") == (
         OrautorouterSea().description()
     )
@@ -168,13 +171,13 @@ def test_agent_run_offers_the_openrouter_tools_and_logs_to_the_shared_ledger(
     assert parsed["success"] is True and model in parsed["summary"]
     assert len(agentic) == 3
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert _TOOL_NAMES | {"run_agent", "run_parallel", "set_model", "Bash"} <= names, names
         system = system_message(request)
         assert orautorouter_sea.SYSTEM_PROMPT in system
         assert "## Model routing protocol (autorouter)" not in system
-    pick_result = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    pick_text = str(pick_result[0]["content"]).split("\n\nSteps:")[0]
+    pick_result = tool_results(agentic[1])
+    pick_text = pick_result[0].split("\n\nSteps:")[0]
     if runnable:
         assert json.loads(pick_text)["model"] == model
         assert model.startswith(orautorouter_sea.VENDOR_PREFIX)

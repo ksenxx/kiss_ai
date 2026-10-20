@@ -15,18 +15,16 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import unittest
-from typing import cast
-from urllib.parse import parse_qs, urlparse
+
+import pytest
 
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
+    PhoneApiHandler,
     RecordingServer,
     recording_server,
 )
@@ -108,43 +106,26 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
             _build_send_message_script("+14155238886", "hi", service='x" & quit')
 
 
-class _PhoneApiHandler(RecordingHandler):
-    """Real HTTP handler emulating the phone companion REST app.
-
-    Each ``/api/sms/messages`` query string is recorded into the owning
-    :class:`RecordingServer`'s ``requests``.
-    """
-
-    def do_GET(self) -> None:  # noqa: N802
-        """Serve /api/device/info and /api/sms/messages with canned JSON."""
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/device/info":
-            body = json.dumps({"device_name": "testphone"})
-        elif parsed.path == "/api/sms/messages":
-            cast(RecordingServer, self.server).requests.append(
-                parse_qs(parsed.query, keep_blank_values=True)
-            )
-            body = json.dumps(
-                {
-                    "messages": [
-                        {"timestamp": 111, "from": "+15550001", "body": "hi", "id": "1"},
-                        {"timestamp": 222, "from": "+15550001", "body": "there", "id": "2"},
-                    ]
-                }
-            )
-        else:
-            body = json.dumps({})
-        data = body.encode()
-        self._reply(200, data)
+class _PhoneHandler(PhoneApiHandler):
+    messages = [
+        {"timestamp": 111, "from": "+15550001", "body": "hi", "id": "1"},
+        {"timestamp": 222, "from": "+15550001", "body": "there", "id": "2"},
+    ]
 
 
+def _since_cursors(server: RecordingServer) -> list[str]:
+    """The ``since`` query value of every ``/api/sms/messages`` poll, in order."""
+    polls = [r for r in server.requests if r["path"] == "/api/sms/messages"]
+    return [r["query"].get("since", [""])[0] for r in polls]
+
+
+@pytest.mark.usefixtures("isolated_kiss_home")
 class TestPhoneControlPollCursor(unittest.TestCase):
     """poll_messages must advance and reuse its stored cursor across calls."""
 
     def setUp(self) -> None:
         """Start a real local HTTP server and point the phone config at it."""
-        self._server = self.enterContext(recording_server(_PhoneApiHandler))
-        self.enterContext(config_backup(_phone_config.path))
+        self._server = self.enterContext(recording_server(_PhoneHandler))
         port = self._server.server_address[1]
         _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
 
@@ -160,13 +141,13 @@ class TestPhoneControlPollCursor(unittest.TestCase):
         messages, new_oldest = backend.poll_messages("+15550001", "")
         self.assertEqual(len(messages), 2)
         self.assertEqual(new_oldest, "222")
-        self.assertEqual(self._server.requests[0].get("since", [""])[0], "")
+        self.assertEqual(_since_cursors(self._server), [""])
 
         messages2, _ = backend.poll_messages("+15550001", "")
         self.assertEqual(len(messages2), 2)
         self.assertEqual(
-            self._server.requests[1].get("since", [""])[0],
-            "222",
+            _since_cursors(self._server),
+            ["", "222"],
             "second poll with oldest='' must fall back to the stored _last_msg_id cursor",
         )
 

@@ -22,70 +22,38 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  captureTimers,
+  loadMainCss,
+  MEDIA,
+} = require('./simplify2_harness');
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
 /**
- * Build a chat page under jsdom.  When *timeouts* is given, every
- * `setTimeout` the page arms is also recorded there as `{fn, ms}` so a
- * test can fire a long timer on demand instead of waiting for it.
+ * Build a chat page under jsdom.  When *captureTimeouts* is set, every
+ * `setTimeout` the page arms is also returned in `timeouts` as `{cb, ms}`
+ * so a test can fire a long timer on demand instead of waiting for it.
  */
-function makePage(timeouts) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+function makePage(captureTimeouts) {
+  let timeouts;
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts(win) {
+      loadMainCss(win);
+      const remoteStyle = win.document.createElement('style');
+      remoteStyle.textContent = fs.readFileSync(
+        path.join(MEDIA, 'remote-codex.css'),
+        'utf8',
+      );
+      win.document.head.appendChild(remoteStyle);
+      if (captureTimeouts) timeouts = captureTimers(win);
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(style);
-  const remoteStyle = win.document.createElement('style');
-  remoteStyle.textContent = fs.readFileSync(
-    path.join(MEDIA, 'remote-codex.css'),
-    'utf8',
-  );
-  win.document.head.appendChild(remoteStyle);
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  if (timeouts) {
-    const realSetTimeout = win.setTimeout.bind(win);
-    win.setTimeout = function (fn, ms, ...args) {
-      timeouts.push({fn, ms});
-      return realSetTimeout(fn, ms, ...args);
-    };
-  }
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
+  return {win, posted, timeouts};
 }
 
 function makeSession(overrides) {
@@ -240,7 +208,9 @@ function testTimestampSources() {
     makeSession({id: 'chat-f', task_id: 'task-f', startTs: 0, timestamp: 1e20}),
   ]);
   const rows = ['a', 'b', 'c', 'd', 'e', 'f'].map(id =>
-    win.document.querySelector('[data-chat-id="chat-' + id + '"] .sidebar-item'),
+    win.document.querySelector(
+      '[data-chat-id="chat-' + id + '"] .sidebar-item',
+    ),
   );
   assert.strictEqual(
     rows[0].querySelector('.sidebar-item-launched').textContent,
@@ -298,8 +268,7 @@ function testFutureClockSkew() {
 // ---------------------------------------------------------------------------
 
 function testPeriodicRefresh() {
-  const timeouts = [];
-  const {win} = makePage(timeouts);
+  const {win, timeouts} = makePage(true);
   const now = Date.now();
   loadHistory(win, [
     makeSession({startTs: now - 45 * 1000}), // "just now" at render time
@@ -316,7 +285,7 @@ function testPeriodicRefresh() {
   // launch instant, then fire the armed sweep on demand instead of
   // waiting 30 s of wall-clock time for it.
   ago.dataset.launchTs = String(now - 120 * 1000);
-  sweeps[0].fn();
+  sweeps[0].cb();
   assert.strictEqual(
     ago.textContent,
     '2 minutes ago',

@@ -736,10 +736,9 @@ class _RecordingPrinter(Printer):
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Record the call; the merged-result kwargs are asserted on."""
         self.calls.append((type, dict(kwargs)))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Unused by the merged-result emit path."""

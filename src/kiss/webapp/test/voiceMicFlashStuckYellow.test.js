@@ -19,23 +19,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
 
 class FakeRecognizer {
   constructor() {
@@ -275,10 +263,7 @@ async function main() {
     assert.ok(!btn.classList.contains('voice-transcribing'));
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length > 0) {
-    process.exit(1);
-  }
+  report('voiceMicFlashStuckYellow');
 }
 
 main().catch(e => {

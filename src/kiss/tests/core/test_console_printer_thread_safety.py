@@ -347,18 +347,12 @@ def test_usage_offsets_survive_a_reset_within_the_same_thread() -> None:
     assert "steps=11" in text
 
 
-def test_message_result_panel_uses_this_threads_token_offset() -> None:
-    """The Claude-SDK message path reads the same per-thread snapshot."""
+def test_result_panel_uses_this_threads_token_offset_after_a_sibling_wrote() -> None:
+    """A result printed after a sibling thread set its own offsets keeps this thread's."""
     buf = io.StringIO()
     printer = ConsolePrinter(file=buf)
     ready = threading.Event()
     rendered = threading.Event()
-
-    class _ResultMessage:
-        """A real Claude-SDK-shaped result message (duck-typed by the printer)."""
-
-        def __init__(self, result: str) -> None:
-            self.result = result
 
     def early_agent() -> None:
         printer.tokens_offset = 100
@@ -366,10 +360,7 @@ def test_message_result_panel_uses_this_threads_token_offset() -> None:
         ready.set()
         assert rendered.wait(timeout=30)
         printer.print(
-            _ResultMessage("early message"),
-            type="message",
-            budget_used=0.1,
-            total_tokens_used=10,
+            "early result", type="result", total_tokens=10, cost="$0.1000", step_count=1
         )
 
     def late_agent() -> None:

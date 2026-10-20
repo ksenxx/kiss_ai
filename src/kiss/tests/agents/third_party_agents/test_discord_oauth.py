@@ -63,9 +63,6 @@ class _DiscordHandler(RecordingHandler):
 
     server: _DiscordServer  # type: ignore[assignment]
 
-    def _read(self) -> bytes:
-        return self._read_raw()
-
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         auth = self.headers.get("Authorization", "")
         self.server.auth_headers.append(auth)
@@ -88,10 +85,10 @@ class _DiscordHandler(RecordingHandler):
     def do_POST(self) -> None:  # noqa: N802 - http.server naming
         url = urlsplit(self.path)
         if url.path == "/api/oauth2/token":
-            self.server.token_forms.append(dict(parse_qsl(self._read().decode())))
+            self.server.token_forms.append(dict(parse_qsl(self._read_raw().decode())))
             self._json(200, self.server.token_answer)
         elif url.path == _HOOK_PATH:
-            self.server.webhook_posts.append((url.query, json.loads(self._read())))
+            self.server.webhook_posts.append((url.query, json.loads(self._read_raw())))
             self._json(200, {"id": "m-1", "channel_id": "555"})
         else:
             self._json(404, {"message": "Unknown"})

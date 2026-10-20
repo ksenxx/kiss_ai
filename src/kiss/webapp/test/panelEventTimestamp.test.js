@@ -8,9 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  MEDIA,
+} = require('./simplify2_harness');
 
 let passed = 0;
 const failures = [];
@@ -28,67 +31,27 @@ async function test(name, fn) {
 }
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-
-  const posted = [];
   let clipboardText = null;
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: text => {
-        clipboardText = String(text);
-        return Promise.resolve();
-      },
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    sourceUrl: {
+      'panelCopy.js': 'panelts-panelCopy.js',
+      'main.js': 'panelts-main.js',
+    },
+    beforeScripts(win) {
+      stubRaf(win);
+      Object.defineProperty(win.navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: text => {
+            clipboardText = String(text);
+            return Promise.resolve();
+          },
+        },
+      });
     },
   });
-
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8') +
-      '\n//# sourceURL=panelts-panelCopy.js',
-  );
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=panelts-main.js',
-  );
-
   return {win, posted, getClipboard: () => clipboardText};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function tabIdOf(wv) {
@@ -581,7 +544,10 @@ async function run() {
       ts: now,
     });
     const tc = output.querySelector('.ev.tc');
-    assert.ok(tc.classList.contains('collapsed'), 'the live panel starts folded');
+    assert.ok(
+      tc.classList.contains('collapsed'),
+      'the live panel starts folded',
+    );
     const label = tc.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;

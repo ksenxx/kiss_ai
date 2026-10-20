@@ -24,8 +24,14 @@ function testWarningEventIsRendered() {
       'dropped by the page — the user never learns their ' +
       'uncommitted changes are stuck in the stash',
   );
+  const banners = output.querySelectorAll('.warn');
+  assert.strictEqual(
+    banners.length,
+    1,
+    'an active-tab warning renders exactly once, got ' + banners.length,
+  );
   win.close();
-  console.log('  ok - warning event renders in the transcript');
+  console.log('  ok - warning event renders once in the transcript');
 }
 
 function testWarningEscapesHtml() {

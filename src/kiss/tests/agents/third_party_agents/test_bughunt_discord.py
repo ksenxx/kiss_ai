@@ -20,13 +20,13 @@ the actual HTTP traffic the backend produces:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend, _config
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -106,15 +106,14 @@ class TestDiscordBackendBugs:
     backend: DiscordChannelBackend
 
     @pytest.fixture(autouse=True)
-    def _fresh_backend(self, discord_server: RecordingServer):
+    def _fresh_backend(self, discord_server: RecordingServer, isolated_kiss_home: Path):
         """Clear the recorded requests and build a backend aimed at the server."""
         self.server = discord_server
         self.server.requests.clear()
-        with config_backup(_config.path):
-            _config.save({"bot_token": "test-token"})
-            self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
-            self.backend._token = "test-token"
-            yield
+        _config.save({"bot_token": "test-token"})
+        self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
+        self.backend._token = "test-token"
+        yield
 
     def _paths(self) -> list[str]:
         return [r["path"] for r in self.server.requests]

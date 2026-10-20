@@ -17,27 +17,14 @@
 // Runs with: node test/audit1016b_bash_relink.test.js
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
+// A queued requestAnimationFrame the test flushes by hand (win.flushRaf).
+function queueRaf(win) {
   const rafs = [];
   win.requestAnimationFrame = function (cb) {
     rafs.push(cb);
@@ -49,35 +36,18 @@ function makePage() {
   win.flushRaf = () => {
     rafs.splice(0).forEach(cb => cb && cb());
   };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  for (const f of ['marked.min.js', 'panelCopy.js', 'api.js', 'main.js']) {
-    win.eval(fs.readFileSync(path.join(MEDIA, f), 'utf8'));
-  }
-  return {win, posted};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+function makePage() {
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['marked.min.js'],
+    beforeScripts(win) {
+      queueRaf(win);
+      fakeMatchMedia(win, true);
+    },
+  });
+  return {win, posted};
 }
 
 function checks(posted) {

@@ -99,6 +99,14 @@ class TestRemoteClientInteraction(LocalDaemonTestCase):
         return finish_response(STUB_SUMMARY)
 
     def _close_viewer(self) -> None:
+        """Close the viewer's connection and surface any failure of its reader task.
+
+        The reader ends with the closed connection; an exception it died
+        of earlier (a malformed frame, the loop gone) would otherwise be
+        lost in the dropped future and the test would pass with an
+        inbox that stopped filling.
+        """
+
         async def _close() -> None:
             if self._viewer_writer is not None:
                 self._viewer_writer.close()
@@ -106,6 +114,8 @@ class TestRemoteClientInteraction(LocalDaemonTestCase):
                     await self._viewer_writer.wait_closed()
 
         self.run_on_loop(_close(), timeout=30)
+        if self._reader_task is not None:
+            self._reader_task.result(timeout=30)
 
     def _open_viewer(self) -> list[dict[str, Any]]:
         """Open a remote client's local connection and drain its inbox.

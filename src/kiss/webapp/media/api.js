@@ -41,6 +41,7 @@
     'deleteTrick',
     'editTrick',
     'setWorkDir',
+    'setMachine',
     'getFiles',
     'recordFileUsage',
     'openFile',

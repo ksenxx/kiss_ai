@@ -2,11 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Helper utilities for Sorcar agent backends (autocomplete, model info)."""
+"""Helper utilities for Sorcar agent backends (autocomplete, model info, media dir)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from kiss.core.models.model_info import _OPENAI_PREFIXES
+
+# The web app's static files (``kiss/webapp/media``), served by the web
+# server and read by the standalone launcher for the app icon.
+MEDIA_DIR = Path(__file__).resolve().parent.parent / "webapp" / "media"
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:

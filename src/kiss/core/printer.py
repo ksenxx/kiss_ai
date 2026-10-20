@@ -132,17 +132,14 @@ def extract_extras(tool_input: dict) -> dict[str, str]:
 
 class Printer(ABC):
     @abstractmethod
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Render content to the output destination.
 
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "tool_call",
-                "tool_result", "result", "message").
+                "tool_result", "result").
             **kwargs: Additional type-specific options (e.g. tool_input, is_error).
-
-        Returns:
-            str: Any extracted text (e.g. streamed text deltas), or empty string.
         """
 
     @abstractmethod

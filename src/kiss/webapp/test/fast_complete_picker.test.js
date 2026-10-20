@@ -6,7 +6,16 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makePage, send, stubRaf, waitFor} = require('./simplify2_harness');
+
+const openWindows = [];
+
+/** A chat page with synchronous animation frames, closed after its test. */
+function openPage() {
+  const page = makePage({beforeScripts: stubRaf});
+  openWindows.push(page.win);
+  return page;
+}
 
 function setInput(win, text) {
   const inp = win.document.getElementById('task-input');
@@ -48,7 +57,7 @@ const COMPLETIONS = [
 ];
 
 function testCompletionsRendersPicker() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -68,7 +77,7 @@ function testCompletionsRendersPicker() {
 }
 
 function testCompletionsHasSectionsAndIcons() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -89,7 +98,7 @@ function testCompletionsHasSectionsAndIcons() {
 }
 
 function testCompletionsRendersFooter() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -103,7 +112,7 @@ function testCompletionsRendersFooter() {
 }
 
 function testCompletionsStaleQueryDropped() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix the new bug');
   send(win, {
     type: 'completions',
@@ -118,7 +127,7 @@ function testCompletionsStaleQueryDropped() {
 }
 
 function testCompletionsSuppressedDuringAtMention() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'open @util');
   send(win, {
     type: 'completions',
@@ -133,7 +142,7 @@ function testCompletionsSuppressedDuringAtMention() {
 }
 
 function testCompletionsSuppressedWhenCursorNotAtEnd() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix the bug now');
   inp.setSelectionRange(3, 3);
   send(win, {
@@ -149,7 +158,7 @@ function testCompletionsSuppressedWhenCursorNotAtEnd() {
 }
 
 function testClickAcceptsCompletion() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -171,7 +180,7 @@ function testClickAcceptsCompletion() {
 }
 
 function testArrowDownMovesSelection() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -192,7 +201,7 @@ function testArrowDownMovesSelection() {
 }
 
 function testTabAcceptsCompletion() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -214,7 +223,7 @@ function testTabAcceptsCompletion() {
 }
 
 function testEnterDoesNotAcceptCompletion() {
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const {win, posted} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -259,7 +268,7 @@ function testEnterDoesNotAcceptCompletion() {
 }
 
 function testEnterAcceptsFileMention() {
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const {win, posted} = openPage();
   const inp = setInput(win, 'open @util');
   send(win, {
     type: 'files',
@@ -289,7 +298,7 @@ function testEnterAcceptsFileMention() {
 }
 
 function testEscapeDismissesPicker() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -307,7 +316,7 @@ function testEscapeDismissesPicker() {
 }
 
 function testEmptyCompletionsHidesPicker() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -328,7 +337,7 @@ function testEmptyCompletionsHidesPicker() {
 }
 
 function testGhostStillWorks() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {type: 'ghost', suggestion: ' the bug', query: 'fix'});
   const overlay = win.document.getElementById('ghost-overlay').textContent;
@@ -345,29 +354,23 @@ function testGhostStillWorks() {
   assert.strictEqual(inp.value, 'fix the bug ');
 }
 
-function testTypingRequestsCompletions() {
-  const {win, posted} = makePage({beforeScripts: stubRaf});
+async function testTypingRequestsCompletions() {
+  const {win, posted} = openPage();
   const inp = win.document.getElementById('task-input');
   inp.value = 'f';
   inp.setSelectionRange(1, 1);
   inp.dispatchEvent(new win.Event('input', {bubbles: true}));
   typeChar(win, 'i');
   typeChar(win, 'x');
-  const sentinel = Date.now() + 600;
-  while (Date.now() < sentinel) {
-  }
-  return new Promise(resolve => {
-    win.setTimeout(() => {
-      const cmd = posted.find(p => p && p.type === 'complete');
-      assert.ok(cmd, 'typing must dispatch a ``complete`` command');
-      assert.strictEqual(cmd.query, 'fix');
-      resolve();
-    }, 500);
-  });
+  const cmd = await waitFor(
+    () => posted.find(p => p && p.type === 'complete'),
+    'typing must dispatch a ``complete`` command',
+  );
+  assert.strictEqual(cmd.query, 'fix');
 }
 
 function testCompletionsForEmptyInputDoesNotShow() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, '');
   send(win, {
     type: 'completions',
@@ -382,7 +385,7 @@ function testCompletionsForEmptyInputDoesNotShow() {
 }
 
 function testPickerSurvivesMouseDown() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -396,7 +399,7 @@ function testPickerSurvivesMouseDown() {
 }
 
 function testCompletionsConnIdTolerated() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -408,7 +411,7 @@ function testCompletionsConnIdTolerated() {
 }
 
 function testCompletionsBackCompatNoQuery() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {type: 'completions', completions: COMPLETIONS});
   assert.strictEqual(
@@ -419,7 +422,7 @@ function testCompletionsBackCompatNoQuery() {
 }
 
 function testCompletionsMissingFieldHandled() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {type: 'completions', query: 'fix'});
   assert.strictEqual(
@@ -430,7 +433,7 @@ function testCompletionsMissingFieldHandled() {
 }
 
 function testCompletionsIconsPerType() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -457,7 +460,7 @@ function testCompletionsIconsPerType() {
 }
 
 function testAcceptCompletionPreservesTrailingSpace() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -473,7 +476,7 @@ function testAcceptCompletionPreservesTrailingSpace() {
 }
 
 function testCompletionsFooterContents() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -487,7 +490,7 @@ function testCompletionsFooterContents() {
 }
 
 function testCompletionsHighlightsPrefix() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -500,7 +503,7 @@ function testCompletionsHighlightsPrefix() {
 }
 
 function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   setInput(win, 'open @util');
   send(win, {
     type: 'files',
@@ -532,7 +535,7 @@ function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
 }
 
 function testIdentifierAcceptPreservesExistingText() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'please fix the bug in parse_arg');
   send(win, {
     type: 'completions',
@@ -553,7 +556,7 @@ function testIdentifierAcceptPreservesExistingText() {
 }
 
 function testTrickAcceptPreservesEarlierSentences() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'Fix the crash. Then rep');
   send(win, {
     type: 'completions',
@@ -575,7 +578,7 @@ function testTrickAcceptPreservesEarlierSentences() {
 }
 
 function testIdentifierClickAcceptPreservesExistingText() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'rename self.old_na');
   send(win, {
     type: 'completions',
@@ -591,7 +594,7 @@ function testIdentifierClickAcceptPreservesExistingText() {
 }
 
 function testTabInPickerPreventsDefault() {
-  const {win} = makePage({beforeScripts: stubRaf});
+  const {win} = openPage();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
@@ -643,13 +646,14 @@ async function main() {
   let failed = 0;
   for (const t of tests) {
     try {
-      const r = t();
-      if (r && typeof r.then === 'function') await r;
+      await t();
       console.log('PASS', t.name);
     } catch (err) {
       failed += 1;
       console.error('FAIL', t.name);
       console.error(err && err.stack ? err.stack : err);
+    } finally {
+      while (openWindows.length) openWindows.pop().close();
     }
   }
   if (failed) {

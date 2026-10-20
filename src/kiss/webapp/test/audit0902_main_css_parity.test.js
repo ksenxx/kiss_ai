@@ -19,18 +19,20 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {inlineDesignTokens} = require('./designTokens');
+const {newDom, MEDIA} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
+// No page script runs: only main.css (its design tokens inlined, as
+// jsdom resolves no var()) is applied to the real chat.html markup.
 function makeDom() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const css = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
-  html = html.replace('</head>', '<style>' + css + '</style></head>');
-  return new JSDOM(html, {pretendToBeVisual: true, url: 'https://localhost/'});
+  const win = newDom('outside-only');
+  const css = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
+  const styleEl = win.document.createElement('style');
+  styleEl.textContent = css;
+  win.document.head.appendChild(styleEl);
+  return win;
 }
 
 function styleOf(win, el, props) {
@@ -63,11 +65,7 @@ function assertSiblingsAgree(win, ids, props, label) {
   }
 }
 
-const OVERLAYS = [
-  'sidebar-overlay',
-  'settings-overlay',
-  'tricks-overlay',
-];
+const OVERLAYS = ['sidebar-overlay', 'settings-overlay', 'tricks-overlay'];
 const CLOSE_BTNS = [
   'sidebar-close',
   'settings-panel-close',
@@ -75,8 +73,7 @@ const CLOSE_BTNS = [
 ];
 
 function testOverlaysAgree() {
-  const dom = makeDom();
-  const win = dom.window;
+  const win = makeDom();
   const props = [
     'position',
     'inset',
@@ -108,8 +105,7 @@ function testOverlaysAgree() {
 }
 
 function testCloseButtonsAgree() {
-  const dom = makeDom();
-  const win = dom.window;
+  const win = makeDom();
   const props = [
     'position',
     'top',

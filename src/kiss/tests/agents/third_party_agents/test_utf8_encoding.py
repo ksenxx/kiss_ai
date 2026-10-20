@@ -24,7 +24,6 @@ from kiss.tests.core.test_utf8_encoding import _run_in_c_locale
 
 
 class TestUtf8Encoding:
-
     def test_task_file_loads_in_c_locale(self, tmp_path: Path) -> None:
         task_file = tmp_path / "task.md"
         task_file.write_bytes(NON_ASCII.encode("utf-8"))

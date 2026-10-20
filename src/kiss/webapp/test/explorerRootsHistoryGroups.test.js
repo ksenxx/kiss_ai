@@ -23,11 +23,15 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  byId,
+  sleep,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
 let passed = 0;
 const failures = [];
@@ -45,90 +49,41 @@ async function test(name, fn) {
 }
 
 function makePage(beforeMain) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
   const copied = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    value: {
-      writeText: text => {
-        copied.push(text);
-        return Promise.resolve();
-      },
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: win => {
+      stubRaf(win);
+      fakeMatchMedia(win, true);
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          writeText: text => {
+            copied.push(text);
+            return Promise.resolve();
+          },
+        },
+        configurable: true,
+      });
+      // Native dialogs are gone from main.js; any call is a regression.
+      win.prompt = () => {
+        throw new Error('window.prompt must not be called');
+      };
+      win.confirm = () => {
+        throw new Error('window.confirm must not be called');
+      };
+      if (beforeMain) beforeMain(win);
     },
-    configurable: true,
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
   });
-  // Native dialogs are gone from main.js; any call is a regression.
-  win.prompt = () => {
-    throw new Error('window.prompt must not be called');
-  };
-  win.confirm = () => {
-    throw new Error('window.confirm must not be called');
-  };
-  if (beforeMain) beforeMain(win);
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=explorer-roots-main.js',
-  );
   return {win, posted, copied};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 const WD = '/ws/repo';
 const OTHER = '/data/other';
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
 
 function rightClick(win, el) {
   el.dispatchEvent(
@@ -148,10 +103,6 @@ function key(win, el, name, extra) {
       Object.assign({key: name, bubbles: true, cancelable: true}, extra || {}),
     ),
   );
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
 }
 
 /**
@@ -3181,7 +3132,12 @@ async function main() {
     // The chat header's drop-down still lists every folder.
     click(win, picker.querySelector('.folder-picker-cancel'));
     const listed = Array.from(byId(win, 'chat-workdir').options, o => o.value);
-    assert.deepStrictEqual(listed.slice(0, 4), [WD, '/data/newer', OTHER, '/data/old']);
+    assert.deepStrictEqual(listed.slice(0, 4), [
+      WD,
+      '/data/newer',
+      OTHER,
+      '/data/old',
+    ]);
     assert.strictEqual(listed.length, 5, 'plus "Choose ..."');
     win.close();
   });

@@ -14,19 +14,20 @@
 //    queue, an audible one plays unmuted, and the queue moves on when the
 //    clip ends.
 
-/* global require, console, process, setTimeout */
+/* global require, console, process */
 
 'use strict';
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {sleep} = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted} = harness.makePage({beforeScripts: harness.stubRaf});
   return {win, sent: posted};
 }
 
-const {send} = harness;
+const {send, clickTab} = harness;
 
 // Every open tab, in tab order (copied into this realm's Array so
 // deepStrictEqual compares values, not realms' prototypes).
@@ -34,25 +35,9 @@ function tabIds(win) {
   return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
-// A tab on the group strip (#tab-list: the chat on screen, its
-// sub-agents and every content tab) is clicked there; a background chat
-// is picked the way the Chats panel does it.
-function clickTab(win, tabId) {
-  assert.ok(tabIds(win).includes(tabId), `tab ${tabId} must be open`);
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
-}
-
 // One event-loop turn: lets the theme MutationObserver callbacks a class
 // change queued run while the document still exists, so win.close() tears
 // down a quiet window.
-function tick() {
-  return new Promise(r => setTimeout(r, 0));
-}
-
 async function testRegistryRemovalKeepsContentTabs() {
   const {win, sent} = makePage();
   const T1 = 'tab-one';
@@ -127,7 +112,7 @@ async function testRegistryRemovalKeepsContentTabs() {
   // The file tab is still usable: switching to it shows its view.
   clickTab(win, fileTabId);
   assert.notStrictEqual(fileView.style.display, 'none');
-  await tick();
+  await sleep(0);
   win.close();
 }
 
@@ -156,16 +141,16 @@ async function testTalkPlaysUnmutedAndSkipsMuted() {
   assert.strictEqual(players.length, 0, 'a muted talk creates no player');
   send(win, {type: 'talk', text: 'one', audioB64: 'QUJD', talkId: 'a'});
   send(win, {type: 'talk', text: 'two', audioB64: 'QUJD', talkId: 'b'});
-  await tick();
+  await sleep(0);
   assert.strictEqual(players.length, 1, 'one clip plays at a time');
   assert.strictEqual(players[0].playCalls, 1);
   assert.ok(!players[0].muted, 'an audible clip is never muted');
   players[0].fire('ended');
-  await tick();
+  await sleep(0);
   assert.strictEqual(players.length, 2, 'the queue moved on to the next clip');
   assert.ok(!players[1].muted);
   players[1].fire('ended');
-  await tick();
+  await sleep(0);
   win.close();
 }
 

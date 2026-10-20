@@ -12,7 +12,7 @@ collapsed the change into a single entry for the NEW path.  The OLD
 path — which merging the worktree branch will DELETE from the user's
 main tree — was silently missing from ``changedFiles`` (the list shown
 to the user on the ``worktree_done`` prompt) and from the file-overlap
-sets used by ``_check_merge_conflict``, which could therefore miss a
+sets used by ``_conflict_of``, which could therefore miss a
 conflict with dirty main-tree edits to the old path.
 
 No mocks, patches, fakes, or test doubles. Real git repository, real
@@ -30,6 +30,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -116,7 +117,7 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
         )
 
         self.assertTrue(
-            self.server._check_merge_conflict(self.tab_id),
+            merge_conflict(self.server, self.tab_id),
             "conflict check missed the overlap between the worktree "
             "rename (deletes old.txt) and the user's dirty edit of "
             "old.txt on the main tree",

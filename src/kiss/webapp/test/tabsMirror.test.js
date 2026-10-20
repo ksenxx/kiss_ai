@@ -12,11 +12,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: buildPage, send} = require('./simplify2_harness');
 
 // Windows opened by the running test, closed by the runner once the test
 // returns: a `daemonStatus connected:true` arms main.js's SCM badge poll
@@ -24,48 +20,9 @@ const MEDIA = path.join(__dirname, '..', 'media');
 const openWindows = [];
 
 function makePage(initialState) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  openWindows.push(win);
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state = initialState;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {
-    win,
-    posted,
-    getState: () => state,
-  };
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  const page = buildPage({initialState});
+  openWindows.push(page.win);
+  return page;
 }
 
 // Every open tab in tab order.  No row renders the chat tabs any more
@@ -186,7 +143,7 @@ function testSnapshotRestoresSavedSelection() {
   assert.strictEqual(
     activeTabId(win),
     't2',
-    'this client\'s own saved selection is restored from the snapshot',
+    "this client's own saved selection is restored from the snapshot",
   );
 }
 
@@ -202,10 +159,7 @@ function testSnapshotFollowsTitlesOrderAndRemovals() {
   });
   send(win, {
     type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t3', 'three renamed'),
-      snapshotEntry('t1', 'one'),
-    ],
+    tabs: [snapshotEntry('t3', 'three renamed'), snapshotEntry('t1', 'one')],
   });
   assert.deepStrictEqual(tabBarIds(win), ['t3', 't1']);
   assert.deepStrictEqual(tabBarTitles(win), ['three renamed', 'one']);
@@ -341,8 +295,12 @@ function testPerTabComposerAndModelSurviveReconcile() {
     ],
     selected: 'model-a',
   });
-  send(win, {type: 'modelPick', model: 'model-b', source: 'restore',
-             tabId: 't2'});
+  send(win, {
+    type: 'modelPick',
+    model: 'model-b',
+    source: 'restore',
+    tabId: 't2',
+  });
   const inp = win.document.getElementById('task-input');
   // Type a draft into the ACTIVE tab's composer.
   const active = activeTabId(win);

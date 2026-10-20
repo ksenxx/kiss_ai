@@ -106,9 +106,8 @@ class _CollectingPrinter:
     def broadcast(self, event: dict[str, object]) -> None:
         self.events.append(event)
 
-    def print(self, content: object, type: str = "text", **kwargs: object) -> str:
+    def print(self, content: object, type: str = "text", **kwargs: object) -> None:
         self.printed.append((content, {"type": type, **kwargs}))
-        return ""
 
 
 class _BrokenBroadcastPrinter:

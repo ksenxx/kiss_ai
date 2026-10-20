@@ -238,10 +238,10 @@ def _call_after_barrier(start: threading.Barrier, errors: list[BaseException]) -
 
     Args:
         start: Barrier that releases all callers together.
-        errors: Collects any exception a caller raises.
+        errors: Collects any exception a caller raises, a broken barrier included.
     """
-    start.wait(timeout=_DEADLINE_S)
     try:
+        start.wait(timeout=_DEADLINE_S)
         ensure_daemon()
     except BaseException as e:  # reported by the test's assertion
         errors.append(e)

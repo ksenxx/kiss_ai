@@ -17,8 +17,35 @@ from pathlib import Path
 
 import pytest
 
-from kiss.tests.agents.seas.conftest import git
+from kiss.tests.agents.seas.conftest import git, seed_repo
 from kiss.tests.conftest import posix_only
+
+
+@posix_only("the blocking hook is a shell script")
+def test_seed_repo_ignores_global_hooks_and_signing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seeded repository is built with the helper's hermetic git, so a global
+    ``core.hooksPath`` whose pre-commit hook waits for ever, a ``commit.gpgsign`` and an
+    ``init.defaultBranch`` never reach it; each call keeps the helper's 60 s cap."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexec sleep 3600\n", encoding="utf-8")
+    hook.chmod(0o755)
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(
+        f"[core]\n\thooksPath = {hooks}\n[init]\n\tdefaultBranch = trunk\n"
+        "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /bin/false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    repo = tmp_path / "repo"
+    seed_repo(repo)
+    assert git(repo, "branch", "--show-current") == "main"
+    assert git(repo, "log", "--format=%s %ae") == "seed test@example.com"
+    assert (repo / "seed.txt").read_text(encoding="utf-8") == "seed\n"
+    assert git(repo, "config", "--get", "commit.gpgsign") == "false"
 
 
 def test_global_git_config_does_not_reach_the_test_repositories(

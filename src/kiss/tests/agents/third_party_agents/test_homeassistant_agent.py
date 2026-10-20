@@ -19,8 +19,8 @@ import json
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -33,7 +33,6 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -48,22 +47,9 @@ _HISTORY = [[{"entity_id": "light.kitchen", "state": "on"}]]
 class _HARequestHandler(RecordingHandler):
     """Emulates the Home Assistant REST API and records requests."""
 
-    def _authorized(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _record(self, body: dict[str, Any] | None) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "body": body,
-            }
-        )
-
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._record(None)
-        if not self._authorized():
+        self.record_request(None, raw_path=self.path)
+        if not self.bearer_ok(_TOKEN):
             self._reply(401, json.dumps({"message": "Unauthorized"}))
             return
         path = urlparse(self.path).path
@@ -87,8 +73,8 @@ class _HARequestHandler(RecordingHandler):
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except ValueError:
             body = None
-        self._record(body)
-        if not self._authorized():
+        self.record_request(body, raw_path=self.path)
+        if not self.bearer_ok(_TOKEN):
             self._reply(401, json.dumps({"message": "Unauthorized"}))
             return
         path = urlparse(self.path).path
@@ -292,10 +278,10 @@ def test_ha_get_history(backend) -> None:
     result = json.loads(b.ha_get_history("light.kitchen", hours=2))
     assert result["ok"] is True
     assert result["result"] == _HISTORY
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path.startswith("/api/history/period/")
-    assert parse_qs(parsed.query)["filter_entity_id"] == ["light.kitchen"]
-    iso_start = parsed.path.removeprefix("/api/history/period/")
+    req = server.requests[-1]
+    assert req["path"].startswith("/api/history/period/")
+    assert req["query"]["filter_entity_id"] == ["light.kitchen"]
+    iso_start = req["path"].removeprefix("/api/history/period/")
     start = datetime.fromisoformat(iso_start.replace("Z", "+00:00"))
     expected = before - timedelta(hours=2)
     assert abs((start - expected).total_seconds()) < 60
@@ -363,9 +349,9 @@ def test_history_filter_entity_id_is_url_encoded(backend) -> None:
     b, server = backend
     result = json.loads(b.ha_get_history("light.a b", hours=1))
     assert result["ok"] is True
-    parsed = urlparse(server.requests[-1]["path"])
-    assert "filter_entity_id=light.a%20b" in parsed.query
-    assert parse_qs(parsed.query)["filter_entity_id"] == ["light.a b"]
+    req = server.requests[-1]
+    assert "filter_entity_id=light.a%20b" in req["raw_path"]
+    assert req["query"]["filter_entity_id"] == ["light.a b"]
 
 
 def test_send_message_creates_persistent_notification(backend) -> None:

@@ -739,7 +739,7 @@ def test_cli_import_devices(
     )
 
 
-def test_scrub_helpers_tolerate_malformed_configs(muse_env: Path) -> None:
+def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> None:
     """The metadata readers and scrubbers never crash on odd files."""
     from kiss.agents.third_party_agents.discord.discord_sea import (
         _scrub_config_token as discord_scrub,

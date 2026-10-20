@@ -139,6 +139,30 @@ class TestCronJobsReport(_StoreTestCase):
         self.assertEqual(sidebar_panels.cron_jobs_report(), [])
 
 
+class TestResolveIp(unittest.TestCase):
+    """The machine row's host lookup runs on its own thread and is waited for at most
+    ``DNS_TIMEOUT_SECONDS``.
+
+    A resolver that drops packets (the case the bound exists for) needs
+    a black-holed name server, which only a network namespace provides;
+    the lookups here answer at once, so the bound itself is not timed.
+    Both outcomes of the lookup thread are covered: an answer, and none
+    (an unresolvable name), which leaves the host name in place.
+    """
+
+    def test_literal_and_resolvable_hosts(self) -> None:
+        self.assertEqual(sidebar_panels._resolve_ip("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(sidebar_panels._resolve_ip("localhost"), "127.0.0.1")
+
+    def test_unresolvable_host_is_returned_as_is(self) -> None:
+        name = "no-such-host.invalid"
+        started = time.monotonic()
+        self.assertEqual(sidebar_panels._resolve_ip(name), name)
+        self.assertLess(
+            time.monotonic() - started, sidebar_panels.DNS_TIMEOUT_SECONDS + 1.0,
+        )
+
+
 def _noon(days_ago: int) -> tuple[str, float]:
     """The local calendar day *days_ago* days back: its key and its noon."""
     day = datetime.date.today() - datetime.timedelta(days=days_ago)

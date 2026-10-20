@@ -69,10 +69,11 @@ import sys
 import threading
 import types
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, channel_work_dir
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, BaseSea, ChannelSea, WorkerSea
 from kiss.agents.sorcar._concurrency import locked_call
 from kiss.core.stop_signal import stop_requested
 from kiss.core.tool_interrupt import ToolCallInterrupted
@@ -280,17 +281,26 @@ BASE_CLASS_DOCS: dict[str, str] = {
 def base_class_defaults() -> dict[str, dict[str, Any]]:
     """Return the settings each base class lays under a subclass's own keys.
 
-    What ``sea docs`` renders next to :data:`BASE_CLASS_DOCS`:
-    :class:`~kiss.agents.seas.base.base_sea.BaseSea` lays nothing,
-    :class:`~kiss.agents.seas.base.base_sea.WorkerSea` the
-    :data:`WORKER_DEFAULTS`, :class:`~kiss.agents.seas.base.base_sea.ChannelSea`
-    those plus the scratch ``work_dir``.
+    What ``sea docs`` renders next to :data:`BASE_CLASS_DOCS`, computed
+    by running each class's own ``settings`` methods over ``{}`` (base
+    first, as a run folds them), so the table always says what the
+    classes do: :class:`~kiss.agents.seas.base.base_sea.BaseSea` lays
+    nothing, :class:`~kiss.agents.seas.base.base_sea.WorkerSea` the
+    :data:`WORKER_DEFAULTS`,
+    :class:`~kiss.agents.seas.base.base_sea.ChannelSea` those plus the
+    scratch ``work_dir``.
     """
-    return {
-        "BaseSea": {},
-        "WorkerSea": dict(WORKER_DEFAULTS),
-        "ChannelSea": {**WORKER_DEFAULTS, "work_dir": channel_work_dir()},
-    }
+    return {cls.__name__: _laid_by(cls) for cls in (BaseSea, WorkerSea, ChannelSea)}
+
+
+def _laid_by(cls: type[BaseSea]) -> dict[str, Any]:
+    """Return what *cls* and its bases write in ``settings`` over ``{}``, base first."""
+    sea = cls()
+    settings: dict[str, Any] = {}
+    for base in reversed(cls.__mro__):
+        if "settings" in vars(base):
+            settings = vars(base)["settings"](sea, settings)
+    return settings
 
 
 CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
@@ -341,13 +351,13 @@ def wire_field(key: str) -> str:
     """Return the ``run`` command wire field of the ``run()`` keyword *key*.
 
     The wire vocabulary is the keyword vocabulary in camelCase
-    (``use_web_tools`` -> ``useWebTools``), with three aliases kept from
-    the wire protocol's earlier vocabulary: ``add_to_prompt`` ->
-    ``appendToPrompt``, ``add_to_system_prompt`` ->
-    ``appendToSystemPrompt`` and ``auto_classify`` -> ``classifyTasks``.
-    This table is the only place the wire spelling exists on the
-    client side: settings keys, ``options`` keys and ``run()`` keywords
-    all use the snake_case name.
+    (``use_web_tools`` -> ``useWebTools``), with one alias kept from
+    the wire protocol's earlier vocabulary: ``auto_classify`` ->
+    ``classifyTasks``.  This table is the only place the wire spelling
+    of a settings key exists on the client side: settings keys,
+    ``options`` keys and ``run()`` keywords all use the snake_case
+    name.  (The prompt suffixes, which are no settings, are spelled
+    ``appendToPrompt`` / ``appendToSystemPrompt`` by ``daemon_client``.)
     """
     if key in _WIRE_ALIASES:
         return _WIRE_ALIASES[key]
@@ -355,11 +365,7 @@ def wire_field(key: str) -> str:
     return first + "".join(part.capitalize() for part in rest)
 
 
-_WIRE_ALIASES = {
-    "add_to_prompt": "appendToPrompt",
-    "add_to_system_prompt": "appendToSystemPrompt",
-    "auto_classify": "classifyTasks",
-}
+_WIRE_ALIASES = {"auto_classify": "classifyTasks"}
 """The settings keys whose wire field is not their camelCase spelling (:func:`wire_field`)."""
 
 
@@ -511,7 +517,7 @@ def _release(module_name: str, me: threading.Thread, depth: int) -> None:
         _EXECUTING.notify_all()
 
 
-def execute_python_file(raw_path: Any) -> dict[str, Any]:
+def execute_python_file(path: str | Path) -> dict[str, Any]:
     """Execute a caller-supplied Python file and return its namespace.
 
     The one loader of SEAs (the daemon's ``seaPath``, the
@@ -539,16 +545,17 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
     load across threads is reported as a :class:`SeaError`.
 
     Args:
-        raw_path: The path of the file — expected to be an absolute path
-            string, but treated as untrusted.
+        path: The path of the file, expected to be absolute.  The wire
+            value a ``run`` command carries is screened by
+            ``sea_apply.load_layers`` before it becomes a path.
 
     Returns:
         The executed module's namespace dict.
 
     Raises:
-        SeaError: *raw_path* is not a string, is not the path of an
-            existing ``.py`` file, or names a module that raises at
-            import time (``BaseException`` included: a file raising
+        SeaError: *path* is not the path of an existing ``.py`` file,
+            or names a module that raises at import time
+            (``BaseException`` included: a file raising
             ``KeyboardInterrupt`` or ``SystemExit`` at import time is a
             broken file, not a cancelled task; the original raise stays
             reachable as ``__cause__``).  A Stop that lands inside the
@@ -556,13 +563,8 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
             ``ToolCallInterrupted``, and a ``KeyboardInterrupt`` while
             the calling thread's stop event is set.
     """
-    # Type-check FIRST: comparing or repr-ing an untrusted non-string
-    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
-    # so nothing touches *raw_path* beyond isinstance until it is known
-    # to be a plain string.
-    if not isinstance(raw_path, str):
-        raise SeaError(f"SEA field must be a path string, got {type(raw_path).__name__}")
-    path = Path(raw_path)
+    path = Path(path)
+    raw_path = str(path)
     try:
         is_py_file = path.suffix == ".py" and path.is_file()
     except (OSError, ValueError):
@@ -570,9 +572,9 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
         is_py_file = False
     if not is_py_file:
         raise SeaError(f"SEA {raw_path!r} is not an existing Python (.py) file")
-    module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:12]}"
+    module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(raw_path.encode()).hexdigest()[:12]}"
     module = types.ModuleType(module_name)
-    module.__file__ = str(path)
+    module.__file__ = raw_path
     with _executing(module_name, raw_path):
         # A failed re-execution must not unregister the module of an
         # earlier, successful execution of the same file whose classes
@@ -589,13 +591,24 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
                 sys.modules.pop(module_name, None)
             else:
                 sys.modules[module_name] = previous
-            if isinstance(exc, ToolCallInterrupted) or (
-                isinstance(exc, KeyboardInterrupt) and stop_requested()
-            ):
+            if is_stop(exc):
                 raise  # a Stop (per-tool or the task's) landed inside the import
             logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
             raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
     return module.__dict__
+
+
+def is_stop(exc: BaseException) -> bool:
+    """Return whether *exc*, raised by untrusted SEA code, is a Stop and not the code's failure.
+
+    The per-tool Stop's ``ToolCallInterrupted``, or a
+    ``KeyboardInterrupt`` while the calling thread's stop event is set
+    (the task's Stop).  A caller re-raises such an exception unchanged
+    instead of reporting the SEA broken.
+    """
+    return isinstance(exc, ToolCallInterrupted) or (
+        isinstance(exc, KeyboardInterrupt) and stop_requested()
+    )
 
 
 def anchored_work_dir(work_dir: str, base_dir: str) -> str:
@@ -664,52 +677,80 @@ def declared_bases(path: Path) -> set[str]:
     under its last attribute; a computed base (``sea_class('picker')``)
     under its source text.  Empty for an unreadable or unparsable file.
     """
-    return _parsed(path)[0]
+    return parsed_sea(path).bases
 
 
 def declared_literal(path: Path, key: str) -> Any:
     """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
 
     Parsed from the source, never executed (see :func:`declares_hidden`);
-    only a constant value under a string-literal key in a dict inside
-    the file's own ``settings`` method counts.
+    only a constant value under a string-literal key in a settings dict
+    of the file's own ``settings`` method counts (:func:`settings_dicts`:
+    ``model_config``'s contents are not settings).
     """
-    return _parsed(path)[1].get(key)
+    return parsed_sea(path).literals.get(key)
 
 
-_PARSE_CACHE: dict[Path, tuple[tuple[int, int, int], set[str], dict[str, Any]]] = {}
-"""``path -> ((mtime_ns, size, inode), {base class name}, {settings key: literal})``.
+@dataclass(frozen=True)
+class ParsedSea:
+    """What :func:`parsed_sea` reads from a SEA's source without executing it.
 
-The memo of :func:`_parsed`: one parse per file revision, so a registry
-refresh costs one ``stat`` per SEA.
-"""
+    Attributes:
+        stamp: The file revision ``(mtime_ns, size, inode)`` the rest
+            was read from; ``None`` when the file cannot be read (the
+            rest is then empty).
+        bases: The last name of every base of every class the file
+            defines (:func:`declared_bases`).
+        literals: ``{settings key: literal value}`` of the settings
+            dicts in the file's ``settings`` method
+            (:func:`declared_literal`).
+        mentions_register_as_model: Whether the source text contains
+            ``register_as_model`` (a superset of defining the method:
+            what decides whether the model picker imports the file).
+    """
+
+    stamp: tuple[int, int, int] | None
+    bases: set[str]
+    literals: dict[str, Any]
+    mentions_register_as_model: bool
 
 
-def _parsed(path: Path) -> tuple[set[str], dict[str, Any]]:
-    """Return ``(base class names, settings literals)`` of *path*, parsed once per revision.
+_UNREADABLE = ParsedSea(None, set(), {}, False)
+
+_PARSE_CACHE: dict[Path, ParsedSea] = {}
+"""The memo of :func:`parsed_sea`: one parse per file revision, so a registry refresh costs
+one ``stat`` per SEA."""
+
+
+def parsed_sea(path: Path) -> ParsedSea:
+    """Return what the source of the SEA at *path* declares, parsed once per revision.
 
     The revision is the file's mtime, size and inode, so an atomic
     replacement that keeps the mtime and size is still re-read.  A
-    revision that does not parse is memoised as empty, so the registry
-    watcher does not re-read a broken SEA on every poll.
+    revision that does not parse is memoised with empty ``bases`` and
+    ``literals``, so the registry watcher does not re-read a broken SEA
+    on every poll.
     """
     try:
         stat = path.stat()
         stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
     except OSError:
-        return set(), {}
+        return _UNREADABLE
     cached = _PARSE_CACHE.get(path)
-    if cached is None or cached[0] != stamp:
+    if cached is None or cached.stamp != stamp:
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return set(), {}
+            return _UNREADABLE
+        mentions = "register_as_model" in source
+        try:
+            tree = ast.parse(source)
         except (SyntaxError, ValueError):
-            cached = (stamp, set(), {})
+            cached = ParsedSea(stamp, set(), {}, mentions)
         else:
-            cached = (stamp, _class_bases(tree), _settings_literals(tree))
+            cached = ParsedSea(stamp, _class_bases(tree), _settings_literals(tree), mentions)
         _PARSE_CACHE[path] = cached
-    return cached[1], cached[2]
+    return cached
 
 
 def _class_bases(tree: ast.Module) -> set[str]:
@@ -733,14 +774,12 @@ def _class_bases(tree: ast.Module) -> set[str]:
 
 
 def _settings_literals(tree: ast.Module) -> dict[str, Any]:
-    """Return the constant ``"key": value`` entries of the dicts in the ``settings()`` of *tree*."""
+    """Return the constant ``"key": value`` entries of the settings dicts of *tree*."""
     literals: dict[str, Any] = {}
-    for node in settings_functions(tree):
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Dict):
-                for key, value in zip(sub.keys, sub.values, strict=True):
-                    if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
-                        literals[str(key.value)] = value.value
+    for sub in settings_dicts(tree):
+        for key, value in zip(sub.keys, sub.values, strict=True):
+            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+                literals[str(key.value)] = value.value
     return literals
 
 
@@ -750,6 +789,31 @@ def settings_functions(tree: ast.Module) -> list[ast.FunctionDef]:
         node for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "settings"
     ]
+
+
+def settings_dicts(tree: ast.Module) -> list[ast.Dict]:
+    """Return the dict literals of the ``settings`` methods of *tree* that hold settings keys.
+
+    Every dict literal in the function except dicts anywhere inside
+    the *value* of another dict's key (``model_config``'s contents,
+    however deep, are not settings).  The one rule for reading settings
+    from the source: the registry's ``hidden`` check and the linter
+    use it alike.
+    """
+    dicts: list[ast.Dict] = []
+    for node in settings_functions(tree):
+        nested = {
+            id(inner)
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Dict)
+            for value in sub.values
+            for inner in ast.walk(value)
+            if isinstance(inner, ast.Dict)
+        }
+        dicts.extend(
+            sub for sub in ast.walk(node) if isinstance(sub, ast.Dict) and id(sub) not in nested
+        )
+    return dicts
 
 
 def resolve_settings(declared: Mapping[str, Any], channel: bool = False) -> dict[str, Any]:

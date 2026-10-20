@@ -14,9 +14,9 @@ const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 let passed = 0;
 const failures = [];
 
-function test(name, fn) {
+async function test(name, fn) {
   try {
-    fn();
+    await fn();
     passed++;
     console.log(`  \u2713 ${name}`);
   } catch (e) {
@@ -70,13 +70,13 @@ function flushMicrotasks() {
 }
 
 async function run() {
-  test('exports getRawText + addCopyButton on window.PanelCopy', () => {
+  await test('exports getRawText + addCopyButton on window.PanelCopy', () => {
     const {PanelCopy} = makeWindow();
     assert.strictEqual(typeof PanelCopy.getRawText, 'function');
     assert.strictEqual(typeof PanelCopy.addCopyButton, 'function');
   });
 
-  test('getRawText honours data-raw-text override', () => {
+  await test('getRawText honours data-raw-text override', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     panel.innerHTML =
@@ -88,7 +88,7 @@ async function run() {
     );
   });
 
-  test('getRawText skips copy-btn / collapse-preview chrome', () => {
+  await test('getRawText skips copy-btn / collapse-preview chrome', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     panel.innerHTML =
@@ -98,7 +98,7 @@ async function run() {
     assert.strictEqual(PanelCopy.getRawText(panel), 'real content');
   });
 
-  test('getRawText recurses through children when no override is set', () => {
+  await test('getRawText recurses through children when no override is set', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     const a = document.createElement('div');
@@ -110,7 +110,7 @@ async function run() {
     assert.strictEqual(PanelCopy.getRawText(panel), 'alpha\nbeta');
   });
 
-  test('getRawText prefers nested data-raw-text over child markup', () => {
+  await test('getRawText prefers nested data-raw-text over child markup', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     const header = document.createElement('div');
@@ -126,7 +126,7 @@ async function run() {
     );
   });
 
-  test('addCopyButton attaches a single button (idempotent)', () => {
+  await test('addCopyButton attaches a single button (idempotent)', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     document.body.appendChild(panel);
@@ -137,7 +137,7 @@ async function run() {
     assert.ok(panel.classList.contains('copyable'));
   });
 
-  test(
+  await test(
     'clicking copy on a Result panel copies the raw markdown',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
@@ -161,7 +161,7 @@ async function run() {
     },
   );
 
-  test(
+  await test(
     'clicking copy on a Prompt panel copies the raw markdown',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
@@ -182,7 +182,7 @@ async function run() {
     },
   );
 
-  test(
+  await test(
     'clicking copy on a bash output panel preserves whitespace',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
@@ -203,7 +203,7 @@ async function run() {
     },
   );
 
-  test(
+  await test(
     'clicking copy on a Thoughts container with a nested text block ' +
       'returns the raw markdown of that text block',
     async () => {
@@ -230,7 +230,7 @@ async function run() {
     },
   );
 
-  test(
+  await test(
     'clicking copy on a Result panel WITHOUT a data-raw-text ' +
       'override falls back to a textContent walk',
     async () => {
@@ -252,7 +252,7 @@ async function run() {
     },
   );
 
-  test('click handler does not collapse / propagate to ancestors', () => {
+  await test('click handler does not collapse / propagate to ancestors', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     panel.dataset.rawText = 'x';

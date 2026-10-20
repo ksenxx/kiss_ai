@@ -19,48 +19,31 @@
 // track whose `ended` the test fires (audit1016_voice_mic_track_ended).
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeSharedPage,
+  send,
+  sleep,
+  stubRaf,
+} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const clock = {now: 1000000};
+  const state = {recognizers: [], processors: [], tracks: []};
+  const timers = [];
+  const {win, posted} = makeSharedPage({
+    beforeScripts: win => stubVoice(win, clock, state, timers),
+    extraScripts: ['voice.js'],
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
+  return {win, posted, state, clock, timers};
+}
+
+function stubVoice(win, clock, state, timers) {
+  stubRaf(win);
   win.Audio = function (src) {
     return {src, play: () => Promise.resolve()};
   };
-  const clock = {now: 1000000};
   win.Date.now = () => clock.now;
 
-  const state = {recognizers: [], processors: [], tracks: []};
   Object.defineProperty(win.navigator, 'mediaDevices', {
     configurable: true,
     value: {
@@ -115,14 +98,17 @@ function makePage() {
       return {connect: () => {}, disconnect: () => {}};
     }
     createScriptProcessor() {
-      const node = {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
+      const node = {
+        connect: () => {},
+        disconnect: () => {},
+        onaudioprocess: null,
+      };
       state.processors.push(node);
       return node;
     }
   };
   // The page's safety timers (the 45 s wake flash, the 60 s transcribing
   // flash) are recorded so the test can fire one without waiting.
-  const timers = [];
   const realSetTimeout = win.setTimeout;
   const realClearTimeout = win.clearTimeout;
   win.setTimeout = function (cb, ms) {
@@ -140,23 +126,20 @@ function makePage() {
     ackAudioUrl: '/media/working-on-it.mp3',
   };
   win.localStorage.setItem('kissVoiceEnabled', '0');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return {win, posted, state, clock, timers};
 }
 
 const micBtn = win => win.document.getElementById('voice-btn');
-const send = (win, data) => win.dispatchEvent(new win.MessageEvent('message', {data}));
-const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 const last = list => list[list.length - 1];
-const liveTimers = (page, ms) => page.timers.filter(t => !t.cleared && t.ms === ms);
+const liveTimers = (page, ms) =>
+  page.timers.filter(t => !t.cleared && t.ms === ms);
 
 async function startPipeline(page) {
   micBtn(page.win).click();
-  await tick();
-  assert.ok(micBtn(page.win).classList.contains('voice-listening'), 'pipeline is live');
+  await sleep(20);
+  assert.ok(
+    micBtn(page.win).classList.contains('voice-listening'),
+    'pipeline is live',
+  );
 }
 
 /** One onaudioprocess block: 4096 samples at 16 kHz = 256 ms. */
@@ -164,7 +147,11 @@ function feed(proc, loud, blocks) {
   const samples = new Float32Array(4096);
   if (loud) samples.fill(0.5);
   const block = {
-    inputBuffer: {getChannelData: () => samples, sampleRate: 16000, numberOfChannels: 1},
+    inputBuffer: {
+      getChannelData: () => samples,
+      sampleRate: 16000,
+      numberOfChannels: 1,
+    },
   };
   for (let i = 0; i < blocks; i++) proc.onaudioprocess(block);
 }
@@ -188,38 +175,59 @@ async function main() {
 
   await startPipeline(page);
   speakRound(page); // round A: audio posted, transcript pending
-  assert.strictEqual(posted.filter(m => m.type === 'voiceTranscribe').length, 1);
-  assert.strictEqual(liveTimers(page, 60000).length, 1, 'the 60 s transcribing timer is armed');
+  assert.strictEqual(
+    posted.filter(m => m.type === 'voiceTranscribe').length,
+    1,
+  );
+  assert.strictEqual(
+    liveTimers(page, 60000).length,
+    1,
+    'the 60 s transcribing timer is armed',
+  );
 
   // The microphone goes away while round A transcribes.
   state.tracks[0].end();
-  await tick();
-  assert.ok(micBtn(win).classList.contains('voice-error'), 'the trigger is off with the reason');
+  await sleep(20);
+  assert.ok(
+    micBtn(win).classList.contains('voice-error'),
+    'the trigger is off with the reason',
+  );
   assert.ok(
     micBtn(win).classList.contains('voice-transcribing'),
-    'the round still awaiting its transcript keeps the transcribing flash: ' + micBtn(win).className,
+    'the round still awaiting its transcript keeps the transcribing flash: ' +
+      micBtn(win).className,
   );
   const live = liveTimers(page, 60000);
   assert.strictEqual(
-    live.length, 1,
+    live.length,
+    1,
     'REGRESSION: the mic loss must keep (or re-arm) the 60 s timer that retires the round ' +
-      'if its transcript never comes, got ' + live.length,
+      'if its transcript never comes, got ' +
+      live.length,
   );
 
   // Round A's reply never comes: the timer retires it.
   win.clearTimeout(live[0].id);
   live[0].cb();
-  assert.ok(!micBtn(win).classList.contains('voice-transcribing'), 'the flash is gone');
+  assert.ok(
+    !micBtn(win).classList.contains('voice-transcribing'),
+    'the flash is gone',
+  );
 
   // The mic comes back; the user dictates in chat B.
   api.switchToTab(second);
   await startPipeline(page);
   speakRound(page); // round B
-  assert.strictEqual(posted.filter(m => m.type === 'voiceTranscribe').length, 2);
+  assert.strictEqual(
+    posted.filter(m => m.type === 'voiceTranscribe').length,
+    2,
+  );
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'words spoken in chat B QB1'});
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'submit').map(m => ({onB: m.tabId === second, prompt: m.prompt})),
+    posted
+      .filter(m => m.type === 'submit')
+      .map(m => ({onB: m.tabId === second, prompt: m.prompt})),
     [{onB: true, prompt: 'words spoken in chat B QB1'}],
     "round B's words must reach chat B, not the chat of the round the mic loss stranded: " +
       JSON.stringify(posted),

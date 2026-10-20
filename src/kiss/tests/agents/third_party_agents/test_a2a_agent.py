@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.a2a.a2a_sea import (
     _config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
 _AUTH_TRIO = {"check_a2a_auth", "authenticate_a2a", "clear_a2a_auth"}
@@ -59,11 +60,6 @@ def _tool_names(tools: list) -> set[str]:
     return {t.__name__ for t in tools}
 
 
-def _auth_tool(agent: A2AAgent, name: str):
-    """Return the named auth tool closure from an agent."""
-    return next(t for t in agent._get_auth_tools() if t.__name__ == name)
-
-
 def _configured_backend(token: str = "") -> tuple[A2AChannelBackend, int]:
     """Authenticate on an ephemeral port; return the connected backend and port.
 
@@ -78,7 +74,7 @@ def _configured_backend(token: str = "") -> tuple[A2AChannelBackend, int]:
     url fails them.
     """
     agent = A2AAgent()
-    result = _auth_tool(agent, "authenticate_a2a")(bind_host="127.0.0.1", port="0", token=token)
+    result = auth_tools(agent)["authenticate_a2a"](bind_host="127.0.0.1", port="0", token=token)
     assert json.loads(result)["ok"] is True
     backend = a2a_mod._make_backend()
     assert backend.connect() is True
@@ -138,9 +134,9 @@ def test_agent_instantiation_unauthenticated() -> None:
 def test_authenticate_persists_check_and_clear() -> None:
     """The auth trio persists, reports, and clears config on disk."""
     agent = A2AAgent()
-    assert "Not configured" in _auth_tool(agent, "check_a2a_auth")()
+    assert "Not configured" in auth_tools(agent)["check_a2a_auth"]()
 
-    result = _auth_tool(agent, "authenticate_a2a")(
+    result = auth_tools(agent)["authenticate_a2a"](
         bind_host="127.0.0.1", port="18099", token="tok", agent_name="Test Peer"
     )
     assert json.loads(result)["ok"] is True
@@ -156,7 +152,7 @@ def test_authenticate_persists_check_and_clear() -> None:
         "agent_name": "Test Peer",
     }
 
-    status = json.loads(_auth_tool(agent, "check_a2a_auth")())
+    status = json.loads(auth_tools(agent)["check_a2a_auth"]())
     assert status["ok"] is True
     assert status["port"] == "18099"
     assert status["token_set"] is True
@@ -167,7 +163,7 @@ def test_authenticate_persists_check_and_clear() -> None:
     assert _AUTH_TRIO <= tools
     assert _BACKEND_TOOLS <= tools
 
-    assert "cleared" in _auth_tool(agent, "clear_a2a_auth")()
+    assert "cleared" in auth_tools(agent)["clear_a2a_auth"]()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
 
@@ -175,8 +171,8 @@ def test_authenticate_persists_check_and_clear() -> None:
 def test_authenticate_rejects_bad_input() -> None:
     """Empty host/port and non-integer ports are rejected."""
     agent = A2AAgent()
-    assert "cannot be empty" in _auth_tool(agent, "authenticate_a2a")(bind_host="", port="1")
-    assert "must be an integer" in _auth_tool(agent, "authenticate_a2a")(port="http")
+    assert "cannot be empty" in auth_tools(agent)["authenticate_a2a"](bind_host="", port="1")
+    assert "must be an integer" in auth_tools(agent)["authenticate_a2a"](port="http")
     assert not _config.path.exists()
 
 
@@ -454,7 +450,7 @@ def test_invalid_envelope_params_and_message_are_rejected() -> None:
 
 
 def test_bad_content_length_is_handled_and_server_stays_up() -> None:
-    """Negative, non-numeric, missing, and oversized Content-Length."""
+    """Negative, non-numeric, missing, oversized and 5000-digit Content-Length."""
     backend, port = _configured_backend()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -463,6 +459,8 @@ def test_bad_content_length_is_handled_and_server_stays_up() -> None:
         assert raw_post_status(port, "Content-Length: \u00b2\r\n") == 400
         assert raw_post_status(port, "Content-Type: application/json\r\n") == 400
         assert raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
+        # 5000 digits: 400 instead of an int() crash.
+        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n") == 400
         # The server survives all of the above.
         good = _rpc(base, "message/send", _send_params("after bad lengths", "ctx-len"))
         assert good.json()["result"]["status"] == {"state": "submitted"}
@@ -473,7 +471,7 @@ def test_bad_content_length_is_handled_and_server_stays_up() -> None:
 def test_non_loopback_bind_requires_token() -> None:
     """A non-loopback bind_host with an empty token is rejected everywhere."""
     agent = A2AAgent()
-    auth = _auth_tool(agent, "authenticate_a2a")
+    auth = auth_tools(agent)["authenticate_a2a"]
     for host in ("0.0.0.0", "192.168.1.5", "example.com"):
         assert "without a token" in auth(bind_host=host, port="18099", token="")
     assert not _config.path.exists()
@@ -508,18 +506,6 @@ def test_connect_fails_without_config_or_bad_port() -> None:
         assert "bind failed" in second.connection_info
     finally:
         first.disconnect()
-
-
-def test_overlong_content_length_rejected_400() -> None:
-    """A 5000-digit Content-Length gets 400 instead of an int() crash."""
-    backend, port = _configured_backend()
-    base = f"http://127.0.0.1:{port}"
-    try:
-        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n") == 400
-        good = _rpc(base, "message/send", _send_params("after overlong length", "ctx-len2"))
-        assert good.json()["result"]["status"] == {"state": "submitted"}
-    finally:
-        backend.disconnect()
 
 
 def test_invalid_jsonrpc_id_types_rejected_32600() -> None:

@@ -61,6 +61,8 @@ logger = logging.getLogger(__name__)
 
 APPS_STATUS_TTL_SECONDS = 30.0
 MACHINES_STATUS_TTL_SECONDS = 60.0
+# Longest a machine row waits for its host name to resolve (:func:`_resolve_ip`).
+DNS_TIMEOUT_SECONDS = 2.0
 # Seconds ``codex login --device-auth`` may take to print its code
 # (:func:`kiss.core.models.codex_model.codex_device_login`'s default
 # *timeout*): a forwarded ``startCodexLogin`` is waited for that long.
@@ -114,12 +116,14 @@ def cron_jobs_report() -> list[dict[str, Any]]:
             "lastRunAt": _epoch_ms(job.get("last_run_at")),
             "lastStatus": str(job.get("last_status") or ""),
             "workDir": str(job.get("work_dir") or ""),
-            "_next": float(job.get("next_run_at") or 0) or float("inf"),
         })
-    rows.sort(key=lambda row: (not row["enabled"], row["_next"], row["name"]))
-    for row in rows:
-        del row["_next"]
+    rows.sort(key=_cron_row_order)
     return rows
+
+
+def _cron_row_order(row: dict[str, Any]) -> tuple[bool, float, str]:
+    """Sort key of :func:`cron_jobs_report`: enabled first, soonest next run first, then by name."""
+    return (not row["enabled"], row["nextRunAt"] or float("inf"), row["name"])
 
 
 def _add_spend(bucket: dict[str, Any], row: dict[str, Any]) -> None:
@@ -213,11 +217,31 @@ _machines_checked_at = 0.0
 
 
 def _resolve_ip(host: str) -> str:
-    """Return the IPv4 address *host* resolves to, or *host* itself when it does not."""
+    """Return the IPv4 address *host* resolves to, or *host* itself when it does not.
+
+    ``gethostbyname`` has no timeout of its own: a resolver that drops
+    packets holds it for libc's retry schedule (tens of seconds), and
+    :func:`_machine_row` runs under ``_machines_lock``, so every
+    Machines subpanel would wait on that one name.  The lookup runs on
+    a daemon thread this call waits for at most
+    :data:`DNS_TIMEOUT_SECONDS`; one that overruns is abandoned and the
+    host name shown instead.
+    """
+    found: list[str] = []
+    thread = threading.Thread(
+        target=_lookup_ip, args=(host, found), name="machine-dns", daemon=True,
+    )
+    thread.start()
+    thread.join(DNS_TIMEOUT_SECONDS)
+    return found[0] if found else host
+
+
+def _lookup_ip(host: str, found: list[str]) -> None:
+    """Append the IPv4 address of *host* to *found*; leave it empty when the lookup fails."""
     try:
-        return socket.gethostbyname(host)
+        found.append(socket.gethostbyname(host))
     except OSError:
-        return host
+        pass
 
 
 def _machine_row(machine: machines.Machine) -> tuple[machines.Machine, dict[str, Any]]:

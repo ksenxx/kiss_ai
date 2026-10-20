@@ -169,7 +169,7 @@ class TestCorruptNumericColumnsDoNotCrashHistory(_TempDbTestBase):
     dynamic typing happily stores TEXT like ``'abc'`` in the REAL
     ``cost`` (or INTEGER ``tokens``) column, and the resulting
     ``ValueError`` propagated out of ``_load_history`` /
-    ``_search_history`` / ``_load_chat_events_by_task_id`` — one
+    ``_load_history`` / ``_load_chat_events_by_task_id`` — one
     corrupt row blanked the entire history sidebar and made every
     session unloadable.
     """

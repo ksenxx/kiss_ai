@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const harness = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function makePage(preSetup) {
   return harness.makePage({beforeScripts: preSetup});
@@ -400,24 +396,36 @@ function testLocalStorageUnavailableFallsBackToCollapsed() {
 }
 
 function testFiltersPanelCss() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-
-  const toggleRule = /\.history-filters-toggle\s*\{([^}]*)\}/.exec(css);
-  assert.ok(toggleRule, 'main.css must declare .history-filters-toggle');
-  assert.ok(
-    /cursor\s*:\s*pointer/.test(toggleRule[1]),
+  const {win} = makePage();
+  harness.loadMainCss(win);
+  const doc = win.document;
+  const toggle = doc.getElementById('history-filters-toggle');
+  const chevron = toggle.querySelector('.history-filters-chevron');
+  const body = doc.getElementById('history-filters-body');
+  assert.strictEqual(
+    win.getComputedStyle(toggle).cursor,
+    'pointer',
     'the toggle must look interactive (cursor: pointer)',
   );
-
-  assert.ok(
-    /\.history-filters-toggle\.expanded\s+\.history-filters-chevron/.test(css),
-    'main.css must rotate the chevron in the expanded state',
+  assert.strictEqual(
+    win.getComputedStyle(body).display,
+    'none',
+    'the collapsed body is not displayed',
   );
-  assert.ok(
-    /\.history-filters-body\[hidden\]\s*\{[^}]*display\s*:\s*none/.test(css),
-    'main.css must force display:none on the hidden body',
+  const collapsedChevron = win.getComputedStyle(chevron).transform;
+  clickToggle(win);
+  assert.ok(toggle.classList.contains('expanded'));
+  assert.notStrictEqual(
+    win.getComputedStyle(chevron).transform,
+    collapsedChevron,
+    'the chevron turns in the expanded state',
   );
-
+  assert.notStrictEqual(
+    win.getComputedStyle(body).display,
+    'none',
+    'the expanded body is displayed',
+  );
+  win.close();
   console.log('  ok - Filters panel CSS: pointer toggle, chevron, hidden');
 }
 

@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {loadMainCss, makePage} = require('./simplify2_harness');
 
 function assertGroupedTrio(win, which) {
   const doc = win.document;
@@ -92,39 +88,27 @@ function testFromAndToGroupsAreAtomic() {
 }
 
 function testDateGroupCssPreventsInternalWrap() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const re = /\.history-filter-date-group\s*\{([^}]*)\}/g;
-  let m;
-  let body = null;
-  while ((m = re.exec(css)) !== null) {
-    body = m[1];
-    break;
-  }
+  const {win} = makePage();
+  loadMainCss(win);
+  const group = win.document.querySelector(
+    'label[for="hf-from"]',
+  ).parentElement;
   assert.ok(
-    body !== null,
-    'main.css must declare a ".history-filter-date-group" rule so ' +
-      'the From/To trios stay on a single line',
+    group.classList.contains('history-filter-date-group'),
+    'the From trio sits in a .history-filter-date-group',
   );
-
-  const hasFlexNowrap = /flex-wrap\s*:\s*nowrap/.test(body);
-  const hasWhitespaceNowrap = /white-space\s*:\s*nowrap/.test(body);
+  const style = win.getComputedStyle(group);
   assert.ok(
-    hasFlexNowrap || hasWhitespaceNowrap,
-    '.history-filter-date-group must declare "flex-wrap: nowrap" ' +
-      'or "white-space: nowrap" so its label/input/button never ' +
-      `split across lines; got body: ${body.trim()}`,
+    style.flexWrap === 'nowrap' || style.whiteSpace === 'nowrap',
+    'the date group never splits its label/input/button across lines; ' +
+      `got flex-wrap=${style.flexWrap} white-space=${style.whiteSpace}`,
   );
-
-  const hasInlineDisplay =
-    /display\s*:\s*inline-flex/.test(body) ||
-    /display\s*:\s*inline-block/.test(body);
   assert.ok(
-    hasInlineDisplay,
-    '.history-filter-date-group must use an inline display ' +
-      '("inline-flex" or "inline-block") so it behaves as a ' +
-      `single flex item of .history-filter-bar; got body: ${body.trim()}`,
+    style.display === 'inline-flex' || style.display === 'inline-block',
+    'the date group behaves as a single flex item of .history-filter-bar; ' +
+      `got display=${style.display}`,
   );
-
+  win.close();
   console.log(
     '  ok - .history-filter-date-group CSS keeps label/input/button ' +
       'on the same line',

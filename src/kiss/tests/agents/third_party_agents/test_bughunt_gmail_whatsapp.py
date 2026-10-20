@@ -102,8 +102,8 @@ class TestWhatsAppSendMessage:
             port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             backend.send_message("+14155238886", "hello")
-            assert server.requests == [
-                {"path": "/api/send", "json": {"recipient": "14155238886", "message": "hello"}}
+            assert [(r["method"], r["path"], r["json"]) for r in server.requests] == [
+                ("POST", "/api/send", {"recipient": "14155238886", "message": "hello"})
             ]
 
 

@@ -11,7 +11,9 @@
 // closes.  The "Classify tasks before running" and "Use Jev" boxes were
 // removed from the Settings UI: the form must neither show nor save
 // ``classify_tasks`` / ``classify_with_decisions`` (the daemon keeps
-// its stored values).
+// its stored values).  The memory directory (config key ``memory_dir``)
+// has no settings field either: the panel never shows it and
+// ``saveConfig`` never carries it.
 
 'use strict';
 
@@ -39,8 +41,14 @@ function testClassifyTogglesAreGone() {
     null,
     'the Settings UI must not show "Use Jev (decisions model)"',
   );
+  assert.strictEqual(
+    win.document.getElementById('cfg-memory-dir'),
+    null,
+    'the memory directory is not a settings field: memory_dir stays a ' +
+      'config.json key without a box in the panel',
+  );
   win.close();
-  console.log('  ok - the classify toggles are not in the Settings UI');
+  console.log('  ok - the classify toggles and memory dir are not in the Settings UI');
 }
 
 function testTogglesInitializedFalseFromConfigData() {
@@ -175,6 +183,7 @@ function testToggleStatePersistedOnSettingsClose() {
     config: {
       use_web_browser: true,
       use_memory: true,
+      memory_dir: '~/notes/memories',
       classify_tasks: true,
       classify_with_decisions: true,
     },
@@ -215,6 +224,12 @@ function testToggleStatePersistedOnSettingsClose() {
     false,
     'saveConfig must persist use_memory from #cfg-use-memory',
   );
+  assert.strictEqual(
+    'memory_dir' in save.config,
+    false,
+    'a full-form save must not carry memory_dir: the daemon merges the ' +
+      'payload, and a blank invented here would wipe the stored directory',
+  );
 
   // Round-trip: the server echoes the saved config back; a fresh
   // populate must land on the persisted (unchecked) state.
@@ -222,7 +237,7 @@ function testToggleStatePersistedOnSettingsClose() {
   mem.checked = true;
   send(win, {
     type: 'configData',
-    config: {use_web_browser: false, use_memory: false},
+    config: {use_web_browser: false, use_memory: false, memory_dir: '~/notes/memories'},
     apiKeys: {},
   });
   assert.strictEqual(web.checked, false, 'echoed configData must re-apply');
@@ -307,6 +322,40 @@ function testMemoryToggleFlushedAloneWithoutConfigData() {
   console.log('  ok - the memory edit alone is flushed before configData');
 }
 
+function testPartialSaveWhenPanelClosedBeforeConfigData() {
+  const {win, posted} = makePage();
+
+  // No configData ever arrived (configFormPopulated is false).  The
+  // user edits ONLY the budget and closes the panel: the partial
+  // payload must carry just that field -- sending the untouched
+  // checkboxes too would flush chat.html's hardcoded checked state over
+  // whatever values are stored on the server.
+  const budget = win.document.getElementById('cfg-max-budget');
+  budget.value = '77';
+  budget.dispatchEvent(new win.Event('input', {bubbles: true}));
+
+  win.document
+    .getElementById('settings-panel-close')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+
+  const save = lastMsg(posted, 'saveConfig');
+  assert.ok(save, 'closing the settings panel must post saveConfig');
+  assert.strictEqual(
+    save.config.max_budget,
+    77,
+    'the edited max_budget must be saved even before any configData',
+  );
+  assert.deepStrictEqual(
+    Object.keys(save.config),
+    ['max_budget'],
+    'an untouched checkbox must be omitted from a partial save (the ' +
+      'daemon merges the payload; an invented value would clobber the ' +
+      'stored toggle) and memory_dir is never part of the payload',
+  );
+  win.close();
+  console.log('  ok - a panel closed before configData saves only edits');
+}
+
 function main() {
   testClassifyTogglesAreGone();
   testTogglesInitializedFalseFromConfigData();
@@ -316,6 +365,7 @@ function main() {
   testToggleStatePersistedOnSettingsClose();
   testMemoryToggleEditSurvivesPollAndFlushesAlone();
   testMemoryToggleFlushedAloneWithoutConfigData();
+  testPartialSaveWhenPanelClosedBeforeConfigData();
   console.log('configToggleInit.test.js: all tests passed');
 }
 
