@@ -32,8 +32,49 @@ function makePage(sourceUrl) {
       });
     };
   }
-  const {win, posted} = harness.makePage({beforeScripts: parkDecoder, sourceUrl});
+  const {win, posted} = harness.makePage({
+    beforeScripts: parkDecoder,
+    sourceUrl,
+  });
   return {win, posted, decodes};
+}
+
+/**
+ * Build a chat page whose decoder is wedged (every `createImageBitmap`
+ * call parks for ever) and whose attachment-prepare deadline is lowered
+ * from the production 60 s to `deadlineMs`, so only the deadline can
+ * settle an image slot.  main.js is loaded with that ONE constant
+ * replaced; the substitution is asserted so a rename fails loudly.
+ *
+ * @param {number} deadlineMs The ATTACH_PREPARE_TIMEOUT_MS to run with.
+ * @param {string} sourceUrl Name for the eval'd main.js (a `*.coverage.js`
+ *   gate keys on it).
+ * @returns {{win: object, posted: Array<object>, decodeCount: Function}}
+ *   The page, the messages it posted and a counter of decodes asked for.
+ */
+function makeWedgedDecoderPage(deadlineMs, sourceUrl) {
+  let decodes = 0;
+  const {win, posted} = harness.makePage({
+    sourceUrl,
+    beforeScripts(w) {
+      w.createImageBitmap = function () {
+        decodes += 1;
+        return new Promise(() => {});
+      };
+    },
+    mainSource(mainSrc) {
+      const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
+      assert.ok(
+        mainSrc.includes(needle),
+        'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
+      );
+      return mainSrc.replace(
+        needle,
+        `const ATTACH_PREPARE_TIMEOUT_MS = ${deadlineMs};`,
+      );
+    },
+  });
+  return {win, posted, decodeCount: () => decodes};
 }
 
 /**
@@ -117,4 +158,12 @@ async function failDecode(decodes, first, reason) {
   await settle();
 }
 
-module.exports = {makePage, paste, typeAndEnter, submits, settle, failDecode};
+module.exports = {
+  makePage,
+  makeWedgedDecoderPage,
+  paste,
+  typeAndEnter,
+  submits,
+  settle,
+  failDecode,
+};

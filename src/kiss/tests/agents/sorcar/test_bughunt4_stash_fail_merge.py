@@ -4,12 +4,12 @@
 # add your name here
 """BUGHUNT-4: a failed ``git stash push`` must abort the merge.
 
-``GitWorktreeOps.stash_if_dirty`` returns ``False`` both when the main
-tree is clean AND when ``git stash push`` itself fails (e.g. an
-untracked file the process cannot read makes git error out with
-``Cannot save the untracked files``).  ``_do_merge`` treated the two
-cases identically and proceeded to ``git merge --squash`` on a still
-dirty main tree, which:
+``GitWorktreeOps.stash_if_dirty`` used to return ``False`` both when
+the main tree is clean AND when ``git stash push`` itself fails (e.g.
+an untracked file the process cannot read makes git error out with
+``Cannot save the untracked files``); it now returns ``None`` for the
+failure.  ``_do_merge`` treated the two cases identically and
+proceeded to ``git merge --squash`` on a still dirty main tree, which:
 
 1. silently committed the USER's staged changes into the agent's
    squash-merge commit (``git commit`` commits the whole index), and
@@ -103,6 +103,7 @@ class TestStashFailureAbortsMerge:
 
             unreadable = _dirty_main_with_unstashable_state(repo)
             try:
+                assert GitWorktreeOps.stash_if_dirty(repo) is None
                 msg = agent.merge()
 
                 assert GitWorktreeOps.head_sha(repo) == head_before, (

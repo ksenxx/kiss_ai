@@ -25,6 +25,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {clickTab} = harness;
 
 const {send} = harness;
 const WORK_DIR = '/tmp/kiss-link-reissue';
@@ -38,14 +39,6 @@ function makePage() {
   });
   page.win._testApi.endLaunch();
   return page;
-}
-
-// Put chat *tabId* on screen (the Chats-panel pick retires nothing) and
-// check it got there.
-function clickTab(win, tabId) {
-  harness.clickTab(win, tabId);
-  const api = win._testApi;
-  assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
 }
 
 function sendToolResult(win, tabId, content, workDir) {

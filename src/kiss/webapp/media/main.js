@@ -418,6 +418,39 @@
     return t.innerHTML;
   }
 
+  /**
+   * Whether this page is the standalone app's window (kiss-app): the
+   * popup media/appWindow.html names on macOS, or a Chromium
+   * `--app` window elsewhere, which reports the standalone display
+   * mode.  Only a daemon on this machine (the app's loopback URL)
+   * counts: a PWA of a remote daemon could not open a browser here.
+   */
+  function inAppWindow() {
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(location.hostname)) {
+      return false;
+    }
+    if (window.name === 'kiss-app-window') return true;
+    try {
+      return window.matchMedia('(display-mode: standalone)').matches;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /**
+   * Open a web link the chat shows outside this page: the user's
+   * default browser from the app window (the daemon opens it and
+   * answers openExternalResult; `opened: false` falls back to a new
+   * window), a new tab from a browser.
+   */
+  function openWebLink(url) {
+    if (inAppWindow()) {
+      api.openExternal({url: url});
+      return;
+    }
+    window.open(url, '_blank', 'noopener');
+  }
+
   const RESULT_HTML_TAG_RE = new RegExp(
     '</?(?:p|div|h[1-6]|ul|ol|li|br|hr|table|thead|tbody|tr|td|th|' +
       'pre|code|span|b|i|u|strong|em|a|img|blockquote|section|article|' +
@@ -1473,12 +1506,7 @@
     tab.inputValue = inp.value;
     tab.t0 = t0;
     tab.endTs = endTs;
-    tab.streamState = state;
-    tab.streamLlmPanel = llmPanel;
-    tab.streamLlmPanelState = llmPanelState;
-    tab.streamLastToolName = lastToolName;
-    tab.streamPendingPanel = pendingPanel;
-    tab.streamStepCount = stepCount;
+    saveStreamCtxTo(tab, liveStreamCtx());
     if (worktreeBar && worktreeBar.parentNode) {
       tab.worktreeBarEl = worktreeBar;
       worktreeBar.parentNode.removeChild(worktreeBar);
@@ -1639,12 +1667,7 @@
     autosizeComposer();
     t0 = tab.t0 || null;
     endTs = tab.endTs || 0;
-    state = tab.streamState || mkS();
-    llmPanel = tab.streamLlmPanel || null;
-    llmPanelState = tab.streamLlmPanelState || mkS();
-    lastToolName = tab.streamLastToolName || '';
-    pendingPanel = tab.streamPendingPanel || false;
-    stepCount = tab.streamStepCount || 0;
+    saveLiveStreamCtx(loadStreamCtxFrom(tab, {}));
     if (worktreeBar && worktreeBar.parentNode)
       worktreeBar.parentNode.removeChild(worktreeBar);
     worktreeBar = null;
@@ -1973,6 +1996,195 @@
     }
     els.forEach(t => t.setAttribute('tabindex', t === target ? '0' : '-1'));
     target.focus();
+  }
+
+  // ---- Sign-in window -----------------------------------------------
+  //
+  // The daemon sends `signin` after `ready` while the brand's sign-in
+  // hook ($KISS_HOME/signin, kiss/server/signin.py) says the user is
+  // not logged in: a modal with one button per provider.  A click
+  // sends `signinLogin`; the daemon answers `signinUrl` with the page
+  // to sign in on, which loads in the tab this window opened at the
+  // click (a tab opened later, when the URL arrives, is what popup
+  // blockers stop), then `signinDone` reaches every window (the modal
+  // closes everywhere) or `signinError` this one.  The paste row is
+  // for a browser on another machine than the daemon: the provider's
+  // redirect to the daemon's loopback port cannot land there, so the
+  // user pastes the address of that dead-end page (or the code the
+  // sign-in showed) and `signinPaste` hands it to the hook.
+  const signinModal = document.getElementById('signin-modal');
+  const signinButtons = document.getElementById('signin-modal-buttons');
+  const signinNote = document.getElementById('signin-modal-note');
+  const signinPasteRow = document.getElementById('signin-modal-paste');
+  const signinPasteInput = document.getElementById('signin-modal-paste-input');
+  // The tab the last provider click opened, and whether the sign-in
+  // page has been loaded into it (its location is then another origin's
+  // and may not be read; a tab still blank is closed when it is no
+  // longer needed).  The provider of that click: a `signinUrl` of an
+  // earlier, replaced click is ignored.
+  let signinTab = null;
+  let signinTabNavigated = false;
+  let signinProvider = '';
+
+  /**
+   * Show the sign-in window for a `signin` event.  The daemon sends one
+   * on every `ready`, so a websocket reconnect while the window is up or
+   * a sign-in is running (the hook still says "not logged in") must not
+   * rebuild it: that would drop the "open it again" link and the paste
+   * row of the running sign-in and take the focus from the composer.
+   * @param {{title: string, providers: Array<{id: string, label: string}>}} ev
+   */
+  function showSigninWindow(ev) {
+    if (!signinModal || signinWindowOpen() || signinProvider) return;
+    document.getElementById('signin-modal-title').textContent =
+      ev.title || 'Sign in';
+    signinButtons.replaceChildren();
+    (ev.providers || []).forEach(p => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'auth-modal-btn auth-modal-ok';
+      btn.dataset.provider = p.id;
+      btn.textContent = p.label;
+      btn.addEventListener('click', () => startSignin(p.id));
+      signinButtons.appendChild(btn);
+    });
+    setSigninNote('', false);
+    signinPasteRow.style.display = 'none';
+    signinModal.style.display = 'flex';
+    const first = signinButtons.querySelector('button');
+    if (first) first.focus();
+  }
+
+  /** Whether the sign-in window is on screen. */
+  function signinWindowOpen() {
+    return !!signinModal && signinModal.style.display !== 'none';
+  }
+
+  /**
+   * Hide the sign-in window and drop the blank tab a click may have left.
+   * @param {boolean} cancel Whether to end the daemon's running sign-in.
+   */
+  function hideSigninWindow(cancel) {
+    if (!signinModal) return;
+    signinModal.style.display = 'none';
+    signinProvider = '';
+    if (cancel) api.send({type: 'signinCancel'});
+    dropSigninTab();
+  }
+
+  /** Close the tab a click opened if it still shows nothing. */
+  function dropSigninTab() {
+    if (signinTab && !signinTab.closed && !signinTabNavigated) {
+      signinTab.close();
+    }
+    signinTab = null;
+    signinTabNavigated = false;
+  }
+
+  /**
+   * Write the window's status line.
+   * @param {string|Node} text The line (a string, or a node with links).
+   * @param {boolean} isError Whether to paint it as an error.
+   */
+  function setSigninNote(text, isError) {
+    signinNote.replaceChildren(text);
+    signinNote.classList.toggle('signin-modal-error', isError);
+  }
+
+  /**
+   * A provider button was clicked: open the tab the sign-in page will
+   * load in and ask the daemon for that page.
+   * @param {string} provider The provider id.
+   */
+  function startSignin(provider) {
+    dropSigninTab();
+    try {
+      signinTab = window.open('about:blank', '_blank') || null;
+    } catch (_e) {
+      signinTab = null;
+    }
+    signinProvider = String(provider);
+    setSigninNote('Starting the sign-in\u2026', false);
+    signinPasteRow.style.display = 'none';
+    api.send({type: 'signinLogin', provider: signinProvider});
+  }
+
+  /**
+   * The daemon named the sign-in page (`signinUrl`): load it in the tab
+   * the click opened, and offer a link to it in case that tab is gone.
+   * @param {{provider: string, url: string}} ev
+   */
+  function signinPageArrived(ev) {
+    if (!signinWindowOpen() || ev.provider !== signinProvider) return;
+    const note = document.createDocumentFragment();
+    if (signinTab && !signinTab.closed) {
+      signinTab.location.href = ev.url;
+      signinTabNavigated = true;
+      note.append('Sign in on the page that just opened (');
+    } else {
+      note.append('Sign in on the page this link opens (');
+    }
+    const link = document.createElement('a');
+    link.href = ev.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'open it again';
+    note.append(link, '). This window closes once you are signed in.');
+    setSigninNote(note, false);
+    signinPasteInput.value = '';
+    signinPasteRow.style.display = '';
+  }
+
+  /**
+   * The sign-in finished (`signinDone`, every window): close the window.
+   * @param {{email?: string}} ev
+   */
+  function signinFinished(ev) {
+    if (!signinWindowOpen()) return;
+    hideSigninWindow(false);
+    if (ev.email) {
+      updateNotification({
+        id: 'signin',
+        severity: 'info',
+        message: 'Signed in as ' + ev.email,
+      });
+    }
+  }
+
+  /**
+   * The sign-in failed (`signinError`): say why, keep the buttons.
+   * @param {{error: string}} ev
+   */
+  function signinFailed(ev) {
+    if (!signinWindowOpen()) return;
+    signinProvider = '';
+    dropSigninTab();
+    setSigninNote('Sign-in failed: ' + (ev.error || 'unknown error'), true);
+  }
+
+  /** Hand the pasted redirect address or code to the daemon's sign-in. */
+  function sendSigninPaste() {
+    const text = signinPasteInput.value.trim();
+    if (!text) return;
+    setSigninNote('Finishing the sign-in\u2026', false);
+    api.send({type: 'signinPaste', text});
+  }
+
+  if (signinModal) {
+    document
+      .getElementById('signin-modal-later')
+      .addEventListener('click', () => {
+        hideSigninWindow(true);
+      });
+    document
+      .getElementById('signin-modal-paste-btn')
+      .addEventListener('click', sendSigninPaste);
+    signinPasteInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendSigninPaste();
+      }
+    });
   }
 
   // ---- Tab groups ---------------------------------------------------
@@ -2407,6 +2619,26 @@
   // fromServer marks a close applied FROM a daemon broadcast (e.g.
   // `closeSubagentTab`): it must not be echoed back as a `closeTab`
   // command, or two clients would bounce the close between each other.
+  /**
+   * Add to *ids* every tab whose `parentTabId` chain leads to a tab in
+   * *ids* (the sub-agent descendants a close takes along).
+   * @param {Set<string>} ids Tab ids; grown in place.
+   * @returns {Set<string>} The same set.
+   */
+  function addDescendantTabs(ids) {
+    let grew = ids.size > 0;
+    while (grew) {
+      grew = false;
+      for (const t of tabs) {
+        if (t.parentTabId && ids.has(t.parentTabId) && !ids.has(t.id)) {
+          ids.add(t.id);
+          grew = true;
+        }
+      }
+    }
+    return ids;
+  }
+
   function closeTab(tabId, agentInitiated, fromServer) {
     const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
@@ -2416,17 +2648,7 @@
       closeContentTab(tabId, false, fromServer);
       return;
     }
-    const toClose = new Set([tabId]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const t of tabs) {
-        if (t.parentTabId && toClose.has(t.parentTabId) && !toClose.has(t.id)) {
-          toClose.add(t.id);
-          grew = true;
-        }
-      }
-    }
+    const toClose = addDescendantTabs(new Set([tabId]));
     // A running sub-agent's tab stays open unless the USER closes it (a
     // user's close takes every descendant along, running ones
     // included, and the daemon mirrors each to every surface).  A close
@@ -5748,20 +5970,7 @@
         removedIds.add(t.id);
       }
     });
-    let grew = removedIds.size > 0;
-    while (grew) {
-      grew = false;
-      tabs.forEach(t => {
-        if (
-          t.parentTabId &&
-          removedIds.has(t.parentTabId) &&
-          !removedIds.has(t.id)
-        ) {
-          removedIds.add(t.id);
-          grew = true;
-        }
-      });
-    }
+    addDescendantTabs(removedIds);
     tabs.forEach(t => {
       if (inSnapshot.has(t.id) || removedIds.has(t.id)) return;
       next.push(t);
@@ -6522,9 +6731,7 @@
   function taskUpdateBodyHTML(text) {
     if (/^\s*</.test(text)) return kissSanitize(text);
     if (typeof marked !== 'undefined') return kissSanitize(marked.parse(text));
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return esc(text);
   }
 
   /** Format an epoch-ms timestamp as a short local clock time. */
@@ -10108,10 +10315,15 @@
   /**
    * Reload Source Control now (a manual refresh, a git action done):
    * the request goes out at once and supersedes any pending debounced
-   * one (its token would be stale anyway).
+   * one (its token would be stale anyway).  A view folded or hidden
+   * meanwhile is marked dirty instead and reloads when it shows.
    */
   function reloadSourceControlNow() {
     cancelScmRefreshTimer();
+    if (!workspaceViewShown(scmSection)) {
+      scmDirty = true;
+      return;
+    }
     scmDirty = false;
     requestSourceControl(sidebarWorkDir(), sidebarMachine());
   }
@@ -10147,7 +10359,7 @@
     if (!wd) return;
     const token = String(scmGeneration);
     api.gitStatus(
-      onMachine({workDir: wd, tabId: activeTabId, token: token}, machine),
+      onMachine({workDir: wd, tabId: scmTabId(), token: token}, machine),
     );
     api.gitLog(
       onMachine(
@@ -10179,6 +10391,7 @@
       status.error,
       status.changes,
       status.worktrees,
+      status.taskWorktree,
     ]);
   }
 
@@ -10231,10 +10444,20 @@
     }
     api.gitStatus(
       onMachine(
-        {workDir: wd, tabId: activeTabId, token: String(scmGeneration)},
+        {workDir: wd, tabId: scmTabId(), token: String(scmGeneration)},
         machine,
       ),
     );
+  }
+
+  /**
+   * The tab a gitStatus request is for: the chat whose workspace the
+   * side views browse (a content tab's owner), so the daemon answers
+   * with the worktree that chat's task runs in (`taskWorktree`).
+   */
+  function scmTabId() {
+    const tab = sidebarOwnerTab();
+    return tab ? tab.id : activeTabId;
   }
 
   /** Start the badge poll, once: on the daemon's first reply. */
@@ -10251,9 +10474,9 @@
     container.appendChild(empty);
   }
 
-  /** The VS Code decoration letter for a status code. */
+  /** The VS Code decoration letter for a status code (its first char). */
   function scmStatusLetter(status) {
-    return status === '!' ? '!' : String(status || '').slice(0, 1);
+    return String(status || '').slice(0, 1);
   }
 
   /**
@@ -10344,12 +10567,13 @@
       return;
     }
     const worktrees = scmWorktrees(scmStatus);
-    let total = 0;
-    worktrees.forEach(wt => {
-      total += Array.isArray(wt.changes) ? wt.changes.length : 0;
-    });
+    const counted = scmBadgeWorktree(scmStatus, worktrees);
+    const total = Array.isArray(counted.changes) ? counted.changes.length : 0;
     setScmChangesCount(total);
-    if (!total && worktrees.length <= 1) {
+    const anyChange = worktrees.some(
+      wt => Array.isArray(wt.changes) && wt.changes.length > 0,
+    );
+    if (!anyChange && worktrees.length <= 1) {
       sidebarEmpty(scmChangesList, 'No changes');
       return;
     }
@@ -10453,6 +10677,38 @@
       ];
     }
     return rows.filter(wt => wt.current).concat(rows.filter(wt => !wt.current));
+  }
+
+  /**
+   * The worktree the SOURCE CONTROL badge counts: the one the tab's
+   * task runs in (the reply's `taskWorktree`, recorded by the daemon
+   * from the task's worktree_created), else the current worktree --
+   * the folder the next task runs in.  Never the other worktrees of
+   * the repository: their changes belong to other tasks.
+   */
+  function scmBadgeWorktree(status, worktrees) {
+    const task = String(status.taskWorktree || '').replace(/[/\\]+$/, '');
+    if (task) {
+      // The task's folder may sit below the worktree root (a task run in
+      // a sub-folder of the repository): the deepest worktree whose path
+      // contains it wins.
+      let own = null;
+      let ownLen = 0;
+      for (const wt of worktrees) {
+        const path = String(wt.path || '').replace(/[/\\]+$/, '');
+        if (!path) continue;
+        const inside =
+          task === path ||
+          task.startsWith(path + '/') ||
+          task.startsWith(path + '\\');
+        if (inside && path.length > ownLen) {
+          own = wt;
+          ownLen = path.length;
+        }
+      }
+      if (own) return own;
+    }
+    return worktrees.find(wt => wt.current) || worktrees[0];
   }
 
   /**
@@ -11288,7 +11544,8 @@
         ? {paths: left, cut: true, machine: explorerClipboard.machine}
         : null;
     }
-    refreshExplorer(true);
+    // Both views (may) have changed; one out of sight reloads when shown.
+    explorerDirty = true;
     scmDirty = true;
     refreshSidebarDataViews(false);
     // The folder that received the entry opens so the result is seen
@@ -12620,8 +12877,8 @@
   function applyPickedWorkDir(dir, machine) {
     workDirCheckSeq++;
     workDirCheckPath = '';
+    closeFolderPicker();
     if (machine) {
-      closeFolderPicker();
       api.setWorkDir({workDir: dir, machine: machine});
       return;
     }
@@ -12634,11 +12891,11 @@
    * Explorer, SCM view, history filter and the chat header's drop-down
    * follow it, and every tab's next task runs in it (a running task
    * keeps the folder it started in).  Used for this client's own pick
-   * (applyPickedWorkDir) and for the daemon's
-   * workDirChanged broadcast of a pick made on another surface.
+   * (applyPickedWorkDir) and for the daemon's workDirChanged broadcast
+   * of a pick made on another surface, which leaves a folder picker
+   * this surface has open alone (it only repaints its recent list).
    */
   function adoptWorkDir(dir) {
-    closeFolderPicker();
     configWorkDir = dir;
     explorerRoot = '';
     scmWorkDir = '';
@@ -12646,12 +12903,12 @@
     // The daemon records every adopted directory at the front of
     // recent_work_dirs (record_recent_work_dir: one row per directory,
     // the list capped); mirror that here so the chat header's
-    // drop-down and the CHATS WORKDIR filter list it right away,
-    // before the next configData or history reply (the folder picker
-    // was just closed; it reads the list when it opens again).
+    // drop-down, the CHATS WORKDIR filter and an open folder picker
+    // list it right away, before the next configData or history reply.
     recentWorkDirs = [{path: dir, ts: Date.now() / 1000}]
       .concat(recentWorkDirs.filter(r => !samePath(r.path, dir)))
       .slice(0, MAX_RECENT_WORK_DIRS);
+    renderPickerRecentFolders();
     renderChatWorkDir();
     refreshHistoryWorkDirOptions(chatWorkDirList(''));
     // The task-info panel's Workdir item falls back to the global
@@ -13838,8 +14095,12 @@
   // resolve to the later tab, because the backend hands out its running
   // tasks oldest first and they are opened in that order.
   function switchToLatestRunningTab() {
+    // The news counts whether or not the switch is still allowed: a tap
+    // that pre-empted it has ended this launch, and a later restart must
+    // not begin another.  News before the backend is live (no launch
+    // yet) is not recorded, so it cannot spend the launch it precedes.
+    if (launchStartedAt) launchNewsSeen = true;
     if (!launchSwitchAllowed()) return;
-    launchNewsSeen = true;
     let best = null;
     let bestTs = -1;
     for (let i = 0; i < tabs.length; i++) {
@@ -15076,12 +15337,7 @@
       // A neighbouring task's replayed transcript owns no tab of this
       // conversation, so its fan-out panels are left untouched.
       if (p.closest('.adjacent-task')) continue;
-      if (!p.classList.contains('collapsed')) {
-        p.classList.add('collapsed');
-        p.classList.remove('user-pinned');
-        collapsePreview(p);
-      }
-      syncRunParallelPanel(p);
+      rpCollapsePanel(p);
     }
   }
 
@@ -17144,6 +17400,35 @@
     };
   }
 
+  /**
+   * Store the renderer state of *ctx* on *tab*, where a background
+   * tab's stream resumes from it (loadStreamCtxFrom) and a tab switch
+   * finds it (restoreTab).
+   */
+  function saveStreamCtxTo(tab, ctx) {
+    tab.streamState = ctx.state;
+    tab.streamLlmPanel = ctx.llmPanel;
+    tab.streamLlmPanelState = ctx.llmPanelState;
+    tab.streamLastToolName = ctx.lastToolName;
+    tab.streamPendingPanel = ctx.pendingPanel;
+    tab.streamStepCount = ctx.stepCount;
+  }
+
+  /**
+   * Load the renderer state stored on *tab* into *ctx* (fresh state
+   * for a field never stored).
+   * @returns {object} *ctx*.
+   */
+  function loadStreamCtxFrom(tab, ctx) {
+    ctx.state = tab.streamState || mkS();
+    ctx.llmPanel = tab.streamLlmPanel || null;
+    ctx.llmPanelState = tab.streamLlmPanelState || mkS();
+    ctx.lastToolName = tab.streamLastToolName || '';
+    ctx.pendingPanel = tab.streamPendingPanel || false;
+    ctx.stepCount = tab.streamStepCount || 0;
+    return ctx;
+  }
+
   function streamCountStep(ctx) {
     ctx.stepCount += 1;
     if (ctx.onStep) ctx.onStep(ctx.stepCount);
@@ -17298,6 +17583,7 @@
   }
 
   function saveLiveStreamCtx(ctx) {
+    state = ctx.state;
     lastToolName = ctx.lastToolName;
     llmPanel = ctx.llmPanel;
     llmPanelState = ctx.llmPanelState;
@@ -17449,9 +17735,7 @@
     streamEnd(ctx, ev, target);
     saveLiveStreamCtx(ctx);
     if (t === 'result' || t === 'usage_info') {
-      currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
-      currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
-      currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
+      Object.assign(currentTaskMetrics, readStatusRow());
     }
     autoScrollLatestEventPanel(autoScrollPanel);
     applyChevronState(currentTaskName);
@@ -17577,6 +17861,15 @@
     if (statusBudget) statusBudget.textContent = budgetText || '';
     if (statusSteps) statusSteps.textContent = stepsText || '';
   }
+
+  /** The status row's three numbers, in the shape of currentTaskMetrics. */
+  function readStatusRow() {
+    return {
+      tokens: statusTokens ? statusTokens.textContent : '',
+      budget: statusBudget ? statusBudget.textContent : '',
+      steps: statusSteps ? statusSteps.textContent : '',
+    };
+  }
   // visibletask-coverage:end
 
   function processOutputEventForBgTab(ev, tab) {
@@ -17585,13 +17878,7 @@
     if (!tab.outputFragment)
       tab.outputFragment = document.createDocumentFragment();
 
-    const ctx = mkStreamCtx(tab.outputFragment, tab.id);
-    ctx.state = tab.streamState || mkS();
-    ctx.lastToolName = tab.streamLastToolName || '';
-    ctx.llmPanel = tab.streamLlmPanel || null;
-    ctx.llmPanelState = tab.streamLlmPanelState || mkS();
-    ctx.pendingPanel = tab.streamPendingPanel || false;
-    ctx.stepCount = tab.streamStepCount || 0;
+    const ctx = loadStreamCtxFrom(tab, mkStreamCtx(tab.outputFragment, tab.id));
     ctx.onStep = count => {
       tab.statusStepsText = 'Steps: ' + count;
     };
@@ -17629,12 +17916,7 @@
       tab.statusStepsText = 'Steps: ' + ev.step_count;
     }
 
-    tab.streamState = ctx.state;
-    tab.streamLlmPanel = ctx.llmPanel;
-    tab.streamLlmPanelState = ctx.llmPanelState;
-    tab.streamLastToolName = ctx.lastToolName;
-    tab.streamPendingPanel = ctx.pendingPanel;
-    tab.streamStepCount = ctx.stepCount;
+    saveStreamCtxTo(tab, ctx);
     tab.welcomeVisible = false;
   }
 
@@ -17831,9 +18113,11 @@
    */
   function showLiveMetrics() {
     if (!O.querySelector('.adjacent-task[data-task]')) return;
-    if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
-    if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
-    if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
+    paintStatusRow(
+      currentTaskMetrics.tokens,
+      currentTaskMetrics.budget,
+      currentTaskMetrics.steps,
+    );
   }
 
   function updateVisibleTask() {
@@ -17851,12 +18135,11 @@
     );
     // taskinfo-coverage:end
     if (container) {
-      if (statusTokens)
-        statusTokens.textContent = container.dataset.metricTokens || '';
-      if (statusBudget)
-        statusBudget.textContent = container.dataset.metricBudget || '';
-      if (statusSteps)
-        statusSteps.textContent = container.dataset.metricSteps || '';
+      paintStatusRow(
+        container.dataset.metricTokens,
+        container.dataset.metricBudget,
+        container.dataset.metricSteps,
+      );
     } else showLiveMetrics();
   }
   // visibletask-coverage:end
@@ -18046,8 +18329,10 @@
     // terminal's shell, an editor, the browser screen): a connect-time
     // or host focus request is a convenience, not a reason to pull the
     // caret out of it.  Reachable on the desktop remote page only,
-    // where the composer sits beside the content pane.
-    if (contentViewHasFocus()) return;
+    // where the composer sits beside the content pane.  The sign-in
+    // window covers the composer: even a forced request leaves the
+    // keyboard on its buttons.
+    if (contentViewHasFocus() || signinWindowOpen()) return;
     if (!force && composerFocusWouldSteal()) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
@@ -18099,10 +18384,10 @@
     return false;
   }
 
-  /** Whether a sheet (settings / promptlets) or the server-reset
-   *  confirm is open over the page. */
+  /** Whether a sheet (settings / promptlets), the sign-in window or the
+   *  server-reset confirm is open over the page. */
   function sheetOrModalOpen() {
-    if (openSheets.length) return true;
+    if (openSheets.length || signinWindowOpen()) return true;
     return Boolean(
       serverResetConfirmModal &&
       serverResetConfirmModal.classList.contains('open'),
@@ -18700,6 +18985,10 @@
           releaseSidebarFormSaves();
           abandonExplorerListings();
           setAutocommitInFlight(false);
+          // The share reply goes to this very connection; a dropped
+          // one never comes, so the latch would hold Share shut for
+          // its whole failsafe.
+          setShareInFlight(false);
           tabs.forEach(t => {
             // A "Reload from disk" whose reply was swallowed is dead
             // too; left armed, the next plain open of the file would
@@ -18876,7 +19165,10 @@
         // persisted tasks, so a reply for a tab that is no longer
         // highlighted would serialize the WRONG screen: it is dropped,
         // and that tab's share button can simply be clicked again.
-        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) {
+          setShareInFlight(false);
+          break;
+        }
         if (ev.error) {
           notifyShareFailed(ev.error);
           flashShareBtn(false);
@@ -19179,6 +19471,19 @@
         // same forwarded-error rule as claudeCodeStatus.
         if (loginReplyShown(ev, typeof ev.useSubscription !== 'boolean'))
           renderCodexStatus(ev);
+        break;
+      case 'signin':
+        // The brand's sign-in hook says the user is not logged in.
+        showSigninWindow(ev);
+        break;
+      case 'signinUrl':
+        signinPageArrived(ev);
+        break;
+      case 'signinDone':
+        signinFinished(ev);
+        break;
+      case 'signinError':
+        signinFailed(ev);
         break;
       case 'codexLogin':
         // The device-code prompt of a "Sign in with ChatGPT" click (or
@@ -19513,12 +19818,7 @@
             setOwnTaskPanel(clearTab.outputFragment, clearTab.taskText);
             clearTab.welcomeVisible = false;
           }
-          clearTab.streamState = null;
-          clearTab.streamLlmPanel = null;
-          clearTab.streamLlmPanelState = null;
-          clearTab.streamLastToolName = '';
-          clearTab.streamPendingPanel = false;
-          clearTab.streamStepCount = 0;
+          saveStreamCtxTo(clearTab, mkStreamCtx(null, clearTab.id));
         }
         renderTabBar();
         break;
@@ -19600,6 +19900,12 @@
       case 'tasks_updated':
         refreshHistory();
         api.getInputHistory();
+        break;
+
+      case 'openExternalResult':
+        // The daemon could not start a browser (headless): a new
+        // window of this one is still better than nothing.
+        if (!ev.opened && ev.url) window.open(ev.url, '_blank', 'noopener');
         break;
 
       case 'replay_deferred': {
@@ -19752,12 +20058,7 @@
           // old state points into the discarded fragment, and a live
           // event routed through it would render into detached panels
           // and vanish.
-          teTab.streamState = bgCtx.state;
-          teTab.streamLlmPanel = bgCtx.llmPanel;
-          teTab.streamLlmPanelState = bgCtx.llmPanelState;
-          teTab.streamLastToolName = bgCtx.lastToolName;
-          teTab.streamPendingPanel = bgCtx.pendingPanel;
-          teTab.streamStepCount = bgCtx.stepCount;
+          saveStreamCtxTo(teTab, bgCtx);
           // The replay's collapse pass can close the tab that was on
           // screen and put THIS tab there in its place (a finished
           // fan-out takes its sub-agent tabs with it). restoreTab ran
@@ -19765,10 +20066,7 @@
           // it loaded points into the discarded old transcript; the
           // next live event would render into detached panels. Hand the
           // replay's tail state to the live stream too.
-          if (activeTabId === teTabId) {
-            state = bgCtx.state;
-            saveLiveStreamCtx(bgCtx);
-          }
+          if (activeTabId === teTabId) saveLiveStreamCtx(bgCtx);
           if (bgCtx.stepCount > 0)
             teTab.statusStepsText = 'Steps: ' + bgCtx.stepCount;
           // Same as the visible-tab replay below: the replayed
@@ -20431,22 +20729,6 @@
     }
   }
 
-  // faildot-coverage:start
-  /**
-   * Record that *tabId*'s task ended, and whether the end was a failure.
-   *
-   * `failed` is the TERMINAL event's own verdict (task_error, stopped,
-   * interrupted).  A plain `task_done` carries none -- the daemon puts
-   * `success` on the preceding `result` event, which streamEnd already
-   * recorded on the tab -- so a false here means "no verdict", never
-   * "succeeded", and must not clear the result's failure.  The flag
-   * starts each task afresh: `clear` resets it when a task starts and
-   * `task_events` when a tab replays another task.
-   *
-   * @param {string|undefined} tabId The tab whose task ended;
-   *     undefined means the visible tab.
-   * @param {boolean} failed True when the terminal event is a failure.
-   */
   /**
    * End a task in its tab, whichever way it ended.
    *
@@ -20478,6 +20760,22 @@
     openReadyReportTabs(ev.tabId);
   }
 
+  // faildot-coverage:start
+  /**
+   * Record that *tabId*'s task ended, and whether the end was a failure.
+   *
+   * `failed` is the TERMINAL event's own verdict (task_error, stopped,
+   * interrupted).  A plain `task_done` carries none -- the daemon puts
+   * `success` on the preceding `result` event, which streamEnd already
+   * recorded on the tab -- so a false here means "no verdict", never
+   * "succeeded", and must not clear the result's failure.  The flag
+   * starts each task afresh: `clear` resets it when a task starts and
+   * `task_events` when a tab replays another task.
+   *
+   * @param {string|undefined} tabId The tab whose task ended;
+   *     undefined means the visible tab.
+   * @param {boolean} failed True when the terminal event is a failure.
+   */
   function markTabDone(tabId, failed) {
     const tid = tabId !== undefined ? tabId : activeTabId;
     const tab = getTab(tid);
@@ -21073,11 +21371,27 @@
    *
    * @param {boolean} ok Whether the daemon saved the shared page.
    */
+  // One export at a time: a click while the daemon has not answered the
+  // last one (`share_tasks`, then `share_done`) would serialize and write
+  // the same page twice.  `shareInFlight` holds a failsafe timer so a
+  // reply that never comes cannot wedge the button; every end of an
+  // export reaches flashShareBtn, which clears it.
+  let shareInFlight = null;
+  function setShareInFlight(pending) {
+    if (shareInFlight) clearTimeout(shareInFlight);
+    shareInFlight = pending
+      ? setTimeout(() => {
+          shareInFlight = null;
+        }, 120000)
+      : null;
+  }
+
   // One tracked timer: a bare setTimeout let an earlier flash's stale
   // timer end a later flash early, and adding the new class without
   // removing the old one could leave ok and err stacked.
   let shareFlashTimer = null;
   function flashShareBtn(ok) {
+    setShareInFlight(false);
     if (!shareBtn) return;
     const cls = ok ? 'share-ok' : 'share-err';
     if (shareFlashTimer) clearTimeout(shareFlashTimer);
@@ -21507,7 +21821,6 @@
     // stream's state, so a still-running task's next live event fills
     // and closes the replayed panels instead of rendering orphans
     // beside them.
-    state = rCtx.state;
     saveLiveStreamCtx(rCtx);
     if (rCtx.stepCount > 0) updateStepCount(rCtx.stepCount);
     if (keepScroll) {
@@ -21520,9 +21833,7 @@
       // chat lands at the end of its latest event panel.
       autoScrollLatestEventPanel(O.lastElementChild);
     }
-    currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
-    currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
-    currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
+    Object.assign(currentTaskMetrics, readStatusRow());
     applyChevronState(currentTaskName);
   }
 
@@ -22071,6 +22382,8 @@
     });
     if (shareBtn) {
       shareBtn.addEventListener('click', () => {
+        if (shareInFlight) return;
+        setShareInFlight(true);
         // A content tab shares the chat that produced it — never the
         // file view's own id, whose transcript is empty. The export
         // splices the LIVE screen into the chat's persisted tasks, so
@@ -23144,6 +23457,21 @@
       }
     });
 
+    // A web link of the chat (a markdown link of a result, a URL in
+    // a tool's output, ...) never navigates this page: in the
+    // standalone app window it opens in the user's default browser
+    // (the daemon runs on this machine and opens it), everywhere else
+    // in a new browser tab.
+    document.addEventListener('click', e => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const a = e.target.closest('a[href]');
+      if (!a || a.hasAttribute('download')) return;
+      const url = a.href;
+      if (!/^https?:\/\//i.test(url)) return;
+      e.preventDefault();
+      openWebLink(url);
+    });
+
     inp.addEventListener('paste', e => {
       const items = (e.clipboardData || {}).items;
       if (!items) return;
@@ -23642,11 +23970,11 @@
     // as a prompt later). Emptying the composer through the input event
     // settles its height, ghost text, history index and clear button;
     // the parked prompt then comes back the same way (retireAskForTab).
-    const askTab = getTab(activeTabId);
-    if (askTab && !askTab.isContentTab && askTab.askPendingQuestion !== null) {
-      setComposerTextOf(askTab, '');
+    const tab = getTab(activeTabId);
+    if (tab && !tab.isContentTab && tab.askPendingQuestion !== null) {
+      setComposerTextOf(tab, '');
       clearGhost();
-      submitAskForTab(askTab, prompt);
+      submitAskForTab(tab, prompt);
       updateInputDisabled();
       return;
     }
@@ -23659,14 +23987,13 @@
       // attachlatch-coverage:start
       // Only the first waiting caller of THIS tab may proceed, or a burst
       // of Enters would submit the same prompt several times.
-      const waitTab = getTab(activeTabId);
-      if (waitTab.awaitingAttachments) return;
-      waitTab.awaitingAttachments = true;
+      if (tab.awaitingAttachments) return;
+      tab.awaitingAttachments = true;
       let ready = false;
       try {
         ready = await attachmentsReady();
       } finally {
-        waitTab.awaitingAttachments = false;
+        tab.awaitingAttachments = false;
       }
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
@@ -23677,9 +24004,9 @@
       // more, and the parked text comes back once the question is answered.
       if (
         !ready ||
-        activeTabId !== waitTab.id ||
+        activeTabId !== tab.id ||
         !daemonConnected ||
-        waitTab.askPendingQuestion !== null
+        tab.askPendingQuestion !== null
       )
         return;
       // attachlatch-coverage:end
@@ -23688,32 +24015,28 @@
       if (!prompt) return;
     }
 
-    // A message added to a running task is text only (appendUserMessage
-    // carries no attachments), so a photo attached meanwhile cannot ride
-    // along.  Refuse and say why rather than send the text and drop the
-    // photo silently: the composer keeps both.
-    if (isRunning && attachments.length) {
-      showNotification({
-        id: 'append-attachments',
-        severity: 'warning',
-        message:
-          'A message added to a running task is text only: remove the ' +
-          'attachment to send it now, or wait for the task to finish.',
-      });
-      return;
-    }
-
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
     const curTab = getTab(activeTabId);
+    const wireAttachments = attachments
+      .filter(a => a.data)
+      .map(a => {
+        return {name: a.name, mimeType: a.type, data: a.data};
+      });
 
+    // A message added to a running task carries its files too: the
+    // daemon shows them to the running agent with the text.
     if (isRunning) {
       if (curTab) {
         curTab.unackedPrompt = prompt;
-        curTab.unackedAttachments = [];
+        curTab.unackedAttachments = attachments;
       }
-      api.appendUserMessage({prompt: prompt, tabId: activeTabId});
+      api.appendUserMessage({
+        prompt: prompt,
+        tabId: activeTabId,
+        attachments: wireAttachments,
+      });
       resetComposerAfterSend();
       return;
     }
@@ -23727,11 +24050,7 @@
       // drop-down); '' is this machine.  Sent: the daemon's binding
       // is the pick from here on.
       machine: tabMachine(activeTabId),
-      attachments: attachments
-        .filter(a => a.data)
-        .map(a => {
-          return {name: a.name, mimeType: a.type, data: a.data};
-        }),
+      attachments: wireAttachments,
       isParallel: true,
     };
     // Only a KNOWN toggle state becomes a per-run override; otherwise
@@ -24124,8 +24443,32 @@
     confirmWrap.style.display = '';
   }
 
+  /** The inverse of showSidebarDeleteConfirm; the keyboard goes back to the icon. */
+  function hideSidebarDeleteConfirm(delBtn, confirmWrap) {
+    confirmWrap.style.display = 'none';
+    delBtn.style.display = '';
+    if (delBtn.isConnected) delBtn.focus();
+  }
+
+  /**
+   * A row's Delete button with its inline Delete / Cancel confirmation.
+   *
+   * The confirm click disables its own button and leaves the box in
+   * place until the daemon's refetch re-renders the row: the second
+   * click of a double click then lands on a disabled Delete, so it
+   * neither posts the delete twice nor (had the box been folded away)
+   * opens the row under it.  A refused delete (the daemon's notice)
+   * leaves the box up with Delete spent; Cancel folds it, and the
+   * trash icon asks afresh.  The confirmation box swallows clicks (a
+   * row that opens on click must not open from the gap between its
+   * two buttons) and its buttons never submit a form.
+   *
+   * @param {{ariaLabel: string, onConfirm: function(): void}} opts
+   * @returns {{delBtn: HTMLButtonElement, confirmWrap: HTMLElement}}
+   */
   function makeSidebarDeleteConfirm(opts) {
     const delBtn = document.createElement('button');
+    delBtn.type = 'button';
     delBtn.className = 'sidebar-item-delete';
     delBtn.dataset.tooltip = 'Delete';
     delBtn.setAttribute('aria-label', opts.ariaLabel);
@@ -24134,10 +24477,12 @@
     confirmWrap.className = 'sidebar-item-confirm';
     confirmWrap.style.display = 'none';
     const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
     confirmBtn.className = 'sidebar-confirm-yes';
     confirmBtn.dataset.tooltip = 'Confirm delete';
     confirmBtn.textContent = 'Delete';
     const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
     cancelBtn.className = 'sidebar-confirm-no';
     cancelBtn.dataset.tooltip = 'Cancel';
     cancelBtn.textContent = 'Cancel';
@@ -24145,21 +24490,23 @@
     confirmWrap.appendChild(confirmBtn);
     confirmWrap.appendChild(cancelBtn);
     confirmWrap.addEventListener('keydown', onInlineConfirmKey);
+    confirmWrap.addEventListener('click', e => e.stopPropagation());
     delBtn.addEventListener('click', e => {
       e.stopPropagation();
+      confirmBtn.disabled = false;
       showSidebarDeleteConfirm(delBtn, confirmWrap);
       // The safe choice holds focus, so Enter keeps and Escape cancels.
       cancelBtn.focus();
     });
-    confirmBtn.addEventListener('click', e => {
-      e.stopPropagation();
+    confirmBtn.addEventListener('click', () => {
+      // A browser never clicks a disabled button; a synthetic event can.
+      if (confirmBtn.disabled) return;
+      confirmBtn.disabled = true;
+      cancelBtn.focus();
       opts.onConfirm();
     });
-    cancelBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      confirmWrap.style.display = 'none';
-      delBtn.style.display = '';
-      if (delBtn.isConnected) delBtn.focus();
+    cancelBtn.addEventListener('click', () => {
+      hideSidebarDeleteConfirm(delBtn, confirmWrap);
     });
     return {delBtn: delBtn, confirmWrap: confirmWrap};
   }
@@ -24955,6 +25302,16 @@
     const remote = group._kissLastLocalSession ? null : group._kissLastSession;
     const pencil = actions.querySelector(':scope > .history-chat-rename');
     if (pencil) pencil.style.display = remote ? 'none' : '';
+    // The delete button too: the chat's rows live in the remote
+    // machine's history.db, which a deleteChat here cannot reach.
+    const del = actions.querySelector(':scope > .sidebar-item-delete');
+    if (del) {
+      del.style.display = remote ? 'none' : '';
+      if (remote) {
+        const confirm = actions.querySelector(':scope > .sidebar-item-confirm');
+        if (confirm) confirm.style.display = 'none';
+      }
+    }
     if (
       chip &&
       (!remote || chip.textContent !== machineLabel(sessionMachine(remote)))
@@ -25163,6 +25520,15 @@
           () => startHistoryGroupRename(group, chatId),
         ),
       );
+      // Delete the chat (every task of it) from history.db.  The group
+      // goes with the daemon's `tasks_updated` refetch; a delete refused
+      // with a notice (one of its tasks runs) leaves it on screen.
+      const del = makeSidebarDeleteConfirm({
+        ariaLabel: 'Delete chat',
+        onConfirm: () => api.deleteChat({chatId: chatId, tabId: activeTabId}),
+      });
+      actions.appendChild(del.delBtn);
+      actions.appendChild(del.confirmWrap);
     }
     // After the chevron: when the chat's latest task was launched
     // (filled by updateHistoryGroupLaunched).
@@ -25913,6 +26279,21 @@
       if (s.task_id) {
         const copyBtn = makeSidebarCopyButton(s.preview || itemText);
         actions.appendChild(copyBtn);
+      }
+      // Delete the task from history.db (its sub-tasks go with it).
+      // A running task keeps its row (the daemon refuses anyway), and
+      // a remote task's row lives on its own machine.  The row is not
+      // removed here: the daemon's `tasks_updated` after the delete
+      // refetches the history, and a refused delete (a sub-task still
+      // running) leaves the row where it is.
+      if (s.task_id && !s.is_running && !div.dataset.machine) {
+        const del = makeSidebarDeleteConfirm({
+          ariaLabel: 'Delete task',
+          onConfirm: () =>
+            api.deleteTask({taskId: s.task_id, tabId: activeTabId}),
+        });
+        actions.appendChild(del.delBtn);
+        actions.appendChild(del.confirmWrap);
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
@@ -27359,7 +27740,6 @@
           ariaLabel: 'Delete promptlet',
           onConfirm: () => deleteTrick(index),
         });
-        del.delBtn.type = 'button';
         del.delBtn.dataset.tooltip = 'Delete promptlet';
         div.appendChild(del.delBtn);
         div.appendChild(del.confirmWrap);
@@ -27849,7 +28229,6 @@
         api.deleteMyModel(settingsCommand({name: model.name}));
       },
     });
-    del.delBtn.type = 'button';
     del.delBtn.classList.add('custom-model-btn', 'custom-model-delete-btn');
     row.appendChild(del.delBtn);
     row.appendChild(del.confirmWrap);

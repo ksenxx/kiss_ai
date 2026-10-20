@@ -478,7 +478,7 @@ class TestWorktreeCommitBroadcasts:
         original = sa._generate_commit_message
         calls: list[tuple[Path, str | None]] = []
 
-        def spy(commit_dir: Path, user_prompt: str | None) -> str:
+        def spy(commit_dir: Path, user_prompt: str | None, **_: object) -> str:
             calls.append((commit_dir, user_prompt))
             return original(commit_dir, user_prompt)
 

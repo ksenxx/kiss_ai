@@ -103,7 +103,7 @@ GEPA(
 
 - `agent_wrapper`: Function `(prompt_template, arguments) -> (result, trajectory)`
 - `initial_prompt_template`: Initial prompt to optimize
-- `evaluation_fn`: Function `result -> {metric: score}` (higher is better)
+- `evaluation_fn`: Function `result -> {metric: score}` (higher is better). When `None`, a built-in scorer returns `{"success": 1.0}` if the substring `"success"` occurs anywhere in the lower-cased result (so `"unsuccessful"` also scores 1.0), else `{"success": 0.0}`
 - `max_generations`: Evolutionary generations (default: 10)
 - `population_size`: Candidates per generation (default: 8)
 - `pareto_size`: Max Pareto frontier size (default: 4)
@@ -132,6 +132,15 @@ optimize(
 
 - `train_examples`: Training examples (split into dev/val)
 - `dev_minibatch_size`: Dev examples per evaluation (default: all)
+
+Returns the best `PromptCandidate`, chosen from the Pareto frontier (or all candidates if the frontier is empty) by number of instance wins, then by total validation score.
+
+### `GEPA.get_pareto_frontier` / `GEPA.get_best_prompt`
+
+```python
+get_pareto_frontier() -> list[PromptCandidate]   # copy of the current frontier
+get_best_prompt() -> str                          # prompt template of the best candidate
+```
 
 ### `GEPAPhase`
 

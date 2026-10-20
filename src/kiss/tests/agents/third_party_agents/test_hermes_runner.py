@@ -588,35 +588,42 @@ class TestPairingAdminCli:
         save_channel_state(state_path, state)
         return state_path
 
-    def _run_main(self, argv: list[str]) -> None:
-        original = sys.argv
-        sys.argv = argv
-        try:
-            telegram_main()
-        finally:
-            sys.argv = original
+    def _run_main(self, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+        monkeypatch.setattr(sys, "argv", argv)
+        telegram_main()
 
-    def test_approve_moves_user_to_approved(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_approve_moves_user_to_approved(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--approve CODE approves the matching pending user."""
         state_path = self._seed_state("pair-approve", {"bob": {"code": "abcd1234", "ts": 1.0}})
-        self._run_main(["kiss-telegram", "--channel", "pair-approve", "--approve", "abcd1234"])
+        self._run_main(
+            monkeypatch, ["kiss-telegram", "--channel", "pair-approve", "--approve", "abcd1234"]
+        )
         assert "Approved user: bob" in capsys.readouterr().out
         state = load_channel_state(state_path)
         assert state["approved_users"] == ["bob"]
         assert state["pending_pairing"] == {}
 
-    def test_approve_unknown_code_exits_nonzero(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_approve_unknown_code_exits_nonzero(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--approve with an unknown code prints an error and exits 1."""
         self._seed_state("pair-unknown", {"bob": {"code": "abcd1234", "ts": 1.0}})
         with pytest.raises(SystemExit) as exc_info:
-            self._run_main(["kiss-telegram", "--channel", "pair-unknown", "--approve", "ffff0000"])
+            self._run_main(
+                monkeypatch,
+                ["kiss-telegram", "--channel", "pair-unknown", "--approve", "ffff0000"],
+            )
         assert exc_info.value.code == 1
         assert "no pending pairing request" in capsys.readouterr().out
 
-    def test_approve_requires_channel(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_approve_requires_channel(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--approve without --channel exits nonzero with an error."""
         with pytest.raises(SystemExit) as exc_info:
-            self._run_main(["kiss-telegram", "--approve", "abcd1234"])
+            self._run_main(monkeypatch, ["kiss-telegram", "--approve", "abcd1234"])
         assert exc_info.value.code == 1
         assert "require --channel" in capsys.readouterr().out
 
@@ -661,7 +668,9 @@ class TestPairingAdminCli:
         assert final["failures"] == 1
         assert "Approved user: bob" in capsys.readouterr().out
 
-    def test_list_pending_prints_pairs(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_list_pending_prints_pairs(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--list-pending prints user_id:code pairs and exits cleanly."""
         self._seed_state(
             "pair-list",
@@ -670,7 +679,7 @@ class TestPairingAdminCli:
                 "carol": {"code": "beef5678", "ts": 2.0},
             },
         )
-        self._run_main(["kiss-telegram", "--channel", "pair-list", "--list-pending"])
+        self._run_main(monkeypatch, ["kiss-telegram", "--channel", "pair-list", "--list-pending"])
         out = capsys.readouterr().out
         assert "bob:abcd1234" in out
         assert "carol:beef5678" in out

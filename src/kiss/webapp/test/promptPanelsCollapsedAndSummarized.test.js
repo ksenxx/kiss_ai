@@ -13,7 +13,13 @@
 // task panel.  A later summary stops at the earlier one, as before.
 
 const assert = require('assert');
-const {makePage: buildPage, loadMainCss, send} = require('./simplify2_harness');
+const {
+  makePage: buildPage,
+  loadMainCss,
+  send,
+  readyTabId,
+  output,
+} = require('./simplify2_harness');
 
 function makePage() {
   // Markdown rendering, so a prompt can show a picture.
@@ -23,23 +29,13 @@ function makePage() {
   return win;
 }
 
-function readyTabId(win) {
-  const ready = win.__posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
-  return ready.tabId;
-}
-
-function output(win) {
-  return win.document.getElementById('output');
-}
-
 /** Start a running task on the ready tab; sends no prompt events. */
 function startTask(win, task) {
   send(win, {
     type: 'task_events',
     events: [],
     task,
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});
@@ -379,7 +375,7 @@ function testReplayOfRunningTaskFoldsPromptsUnderSummary() {
     type: 'task_events',
     events,
     task: 'replayed',
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-replay',
   });
   send(win, {type: 'status', running: true});

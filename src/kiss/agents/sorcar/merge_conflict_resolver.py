@@ -204,7 +204,9 @@ def resolve_merge_conflict(
     repo = wt.repo_root
     before = GitWorktreeOps.status_porcelain(repo)
     head_before = GitWorktreeOps.head_sha(repo) or ""
-    conflicted = GitWorktreeOps.begin_conflicted_merge(repo, wt.branch, wt.baseline_commit)
+    conflicted = GitWorktreeOps.begin_conflicted_merge(
+        repo, wt.branch, wt.baseline_commit, before,
+    )
     if conflicted is None:
         return MergeResult.CONFLICT
     try:

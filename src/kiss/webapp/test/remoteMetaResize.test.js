@@ -6,63 +6,19 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, fakeMatchMedia} = require('./simplify2_harness');
-
-function makePage(opts) {
-  const {
-    desktopMatches = true,
-    storedWidth = null,
-    storedSidebarWidth = null,
-  } = opts || {};
-  const captured = [];
-  const released = [];
-  const {win} = makeChatPage({
-    bodyClass: 'remote-chat',
-    beforeScripts(win) {
-      win.Element.prototype.setPointerCapture = function (id) {
-        captured.push(id);
-      };
-      win.Element.prototype.releasePointerCapture = function (id) {
-        released.push(id);
-      };
-      if (storedWidth !== null) {
-        win.localStorage.setItem('kiss-meta-w', storedWidth);
-      }
-      if (storedSidebarWidth !== null) {
-        win.localStorage.setItem('kiss-sidebar-w', storedSidebarWidth);
-      }
-      fakeMatchMedia(win, desktopMatches === true);
-    },
-  });
-  return {win, captured, released};
-}
+const {
+  makeResizePage: makePage,
+  panelW,
+  pointer,
+  drag,
+} = require('./panel_resize_helpers');
 
 function metaW(win) {
-  return win.document.documentElement.style.getPropertyValue('--meta-w');
+  return panelW(win, '--meta-w');
 }
 
 function sidebarW(win) {
-  return win.document.documentElement.style.getPropertyValue('--sidebar-w');
-}
-
-function pointer(win, el, type, props) {
-  const ev = new win.MouseEvent(type, {
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    ...props,
-  });
-  if (props && props.pointerId !== undefined) {
-    Object.defineProperty(ev, 'pointerId', {value: props.pointerId});
-  }
-  el.dispatchEvent(ev);
-  return ev;
-}
-
-function drag(win, resizer, x0, x1) {
-  pointer(win, resizer, 'pointerdown', {clientX: x0, pointerId: 1});
-  pointer(win, resizer, 'pointermove', {clientX: x1, pointerId: 1});
-  pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
+  return panelW(win, '--sidebar-w');
 }
 
 // The task-info panel's handle rides its LEFT edge, so a pointer at
@@ -226,7 +182,7 @@ function testWidthPersistsAndRestores() {
   first.win.close();
   const second = makePage({
     desktopMatches: true,
-    storedWidth: '430',
+    stored: {'kiss-meta-w': '430'},
   });
   assert.strictEqual(
     metaW(second.win),
@@ -246,7 +202,7 @@ function testWidthPersistsAndRestores() {
 function testPersistedGarbageSanitized() {
   const garbage = makePage({
     desktopMatches: true,
-    storedWidth: 'abc',
+    stored: {'kiss-meta-w': 'abc'},
   });
   assert.strictEqual(
     metaW(garbage.win),
@@ -256,7 +212,7 @@ function testPersistedGarbageSanitized() {
   garbage.win.close();
   const huge = makePage({
     desktopMatches: true,
-    storedWidth: '9999',
+    stored: {'kiss-meta-w': '9999'},
   });
   assert.strictEqual(
     metaW(huge.win),
@@ -266,7 +222,7 @@ function testPersistedGarbageSanitized() {
   huge.win.close();
   const tiny = makePage({
     desktopMatches: true,
-    storedWidth: '4',
+    stored: {'kiss-meta-w': '4'},
   });
   assert.strictEqual(
     metaW(tiny.win),
@@ -284,8 +240,7 @@ function testBothPersistedWidthsKeepTheChatUsable() {
   // keeps --chat-min-w.
   const {win} = makePage({
     desktopMatches: true,
-    storedWidth: '900',
-    storedSidebarWidth: '900',
+    stored: {'kiss-meta-w': '900', 'kiss-sidebar-w': '900'},
   });
   const sb = parseInt(sidebarW(win), 10);
   const mt = parseInt(metaW(win), 10);
@@ -415,7 +370,7 @@ function testUntouchedPanelStaysFluid() {
 function testWidePreferenceSurvivesNarrowWindow() {
   const {win} = makePage({
     desktopMatches: true,
-    storedWidth: '600',
+    stored: {'kiss-meta-w': '600'},
   });
   assert.strictEqual(
     metaW(win),

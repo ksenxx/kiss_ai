@@ -85,14 +85,55 @@ def _drag(cdp, start: tuple[float, float], end: tuple[float, float],
     cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
 
 
+# mobileSwipe.js ignores a finger that was down longer than this (a
+# press-and-drag).
+_SWIPE_MAX_MS = 1500
+
+# Records, next to the detector's own listeners, how long the page saw
+# the last finger down: the detector's clock, not the test's.
+_FINGER_CLOCK_JS = """() => {
+  if (window.__fingerDownMs !== undefined) return;
+  window.__fingerDownMs = 0;
+  let at = 0;
+  const opts = {capture: true, passive: true};
+  document.addEventListener('touchstart', () => { at = Date.now(); }, opts);
+  document.addEventListener('touchend', () => {
+    window.__fingerDownMs = Date.now() - at;
+  }, opts);
+}"""
+
+
+def _quick_drag(cdp, start: tuple[float, float], end: tuple[float, float],
+                steps: int = 6) -> None:
+    """:func:`_drag`, again when the page saw the finger down longer
+    than the detector allows: every touch event is a CDP round trip,
+    and on a loaded machine the whole finger can take longer than a
+    swipe may, which the detector rightly ignores.
+
+    The clock here and the detector's are read apart by at most a
+    millisecond, so only a finger down longer than the limit by more
+    than that is surely ignored and dragged again (a drag the detector
+    took is never repeated: that would swipe twice)."""
+    cdp.send("Runtime.evaluate", {"expression": f"({_FINGER_CLOCK_JS})()"})
+    down = 0
+    for _ in range(5):
+        _drag(cdp, start, end, steps)
+        down = cdp.send("Runtime.evaluate",
+                        {"expression": "window.__fingerDownMs",
+                         "returnByValue": True})["result"]["value"]
+        if down <= _SWIPE_MAX_MS + 1:
+            return
+    raise AssertionError(f"the finger took {down} ms, never a swipe's time")
+
+
 def _swipe_left(cdp, y: float = _Y) -> None:
     """The finger moves right to left: the next screen."""
-    _drag(cdp, (_RIGHT_X, y), (_LEFT_X, y))
+    _quick_drag(cdp, (_RIGHT_X, y), (_LEFT_X, y))
 
 
 def _swipe_right(cdp, y: float = _Y) -> None:
     """The finger moves left to right: the previous screen."""
-    _drag(cdp, (_LEFT_X, y), (_RIGHT_X, y))
+    _quick_drag(cdp, (_LEFT_X, y), (_RIGHT_X, y))
 
 
 def _wait_screen(page, screen: str) -> None:
@@ -427,7 +468,7 @@ def test_a_sideways_scroll_is_not_a_swipe(browser, harness):
             "() => { const b = document.getElementById('swipe-probe-scroller');"
             " b.scrollLeft = b.scrollWidth; }"
         )
-        _drag(cdp, (box["x"] + 250, y), (box["x"] + 20, y), steps=12)
+        _quick_drag(cdp, (box["x"] + 250, y), (box["x"] + 20, y), steps=12)
         _wait_screen(page, "info")
         _swipe_right(cdp)
         _wait_screen(page, "chat")
@@ -468,7 +509,7 @@ def test_a_sideways_scroll_is_not_a_swipe(browser, harness):
         # ...and with the editor at its end the same drag moves nothing:
         # it is a swipe.  Few steps: Monaco spends ~100ms on every
         # synthetic touchmove, and a swipe must finish within 1.5s.
-        _drag(cdp, (before + 300, y), (before + 60, y), steps=4)
+        _quick_drag(cdp, (before + 300, y), (before + 60, y), steps=4)
         _wait_screen(page, "info")
     finally:
         context.close()

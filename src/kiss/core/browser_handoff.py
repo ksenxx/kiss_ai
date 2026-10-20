@@ -117,12 +117,15 @@ def _allowed(url: str) -> bool:
         return False
 
 
-def _claim(url: str, surface: str) -> str | None:
+def _claim(url: str, surface: str, once: bool = True) -> str | None:
     """Record that *url* is being opened on *surface*, unless it is open already.
 
     Args:
         url: The page.
         surface: :data:`BROWSER_TAB` or :data:`DEFAULT_BROWSER`.
+        once: ``False`` replaces a settled claim (the page was opened
+            and is to be opened again); a launch still in flight is
+            shared either way.
 
     Returns:
         Where *url* was opened within the last :data:`_REOPEN_AFTER`
@@ -133,20 +136,26 @@ def _claim(url: str, surface: str) -> str | None:
         the page itself.  So concurrent callers never open a second
         copy, nor report a page that never appeared.
     """
-    return locked_call(_lock, _claim_locked, url, surface, time.monotonic() + _SETTLE_TIMEOUT)
+    deadline = time.monotonic() + _SETTLE_TIMEOUT
+    return locked_call(_lock, _claim_locked, url, surface, once, deadline)
 
 
-def _claim_locked(url: str, surface: str, deadline: float) -> str | None:
+def _claim_locked(url: str, surface: str, once: bool, deadline: float) -> str | None:
     """The body of :func:`_claim`; the caller holds ``_lock``."""
     while True:
         now = time.monotonic()
         opening = _recent.get(url)
-        if opening is None or now - opening.opened_at >= _REOPEN_AFTER:
+        if (
+            opening is None
+            or now - opening.opened_at >= _REOPEN_AFTER
+            or (opening.settled and not once)
+        ):
             _recent[url] = _Opening(now, surface)
             return None
         if opening.settled or now >= deadline:
             return opening.surface
         _lock.wait(deadline - now)
+        once = True  # joined the launch in flight: share its outcome, do not repeat it
 
 
 @locked(_lock)
@@ -298,7 +307,7 @@ def _launch(command: list[str]) -> bool:
         return True
 
 
-def open_in_default_browser(url: str) -> bool:
+def open_in_default_browser(url: str, *, once: bool = True) -> bool:
     """Try to open *url* in the user's default browser on this machine.
 
     Never raises: a malformed URL or ``$BROWSER`` simply counts as not
@@ -307,6 +316,12 @@ def open_in_default_browser(url: str) -> bool:
     Args:
         url: An ``http(s)://`` sign-in page or a ``file://`` page this
             program wrote.  Any other scheme is refused.
+        once: Open a page opened in the last two minutes again only
+            when ``False``.  The default suits a credential check that
+            runs several times while the user signs in (one tab per
+            attempt); a link the user clicks is opened every time,
+            except that a launch of the same page already in flight is
+            shared rather than doubled.
 
     Returns:
         ``True`` when the page is (or was very recently) opened in a
@@ -318,7 +333,7 @@ def open_in_default_browser(url: str) -> bool:
     """
     if not _allowed(url) or is_headless_environment():
         return False
-    if _claim(url, DEFAULT_BROWSER) is not None:
+    if _claim(url, DEFAULT_BROWSER, once) is not None:
         return True
     opened = False
     windows_shell = sys.platform == "win32" and not os.environ.get("BROWSER", "").strip()

@@ -26,12 +26,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.seas.sync import sync_sea
-from kiss.tests.agents.seas.conftest import (
-    HERMETIC_GIT_WITH_IDENTITY,
-    commit,
-    git,
-    remote_and_clones,
-)
+from kiss.tests.agents.seas.conftest import commit, git, hermetic_git_env, remote_and_clones
 from kiss.tests.agents.seas.sea_contract import tool_names, tool_results
 from kiss.tests.server.test_run_agent_machine import TwoDaemonsCase, _DelegatingModel, _finish
 
@@ -59,13 +54,18 @@ class TestSyncOnMachines(TwoDaemonsCase):
         # unittest skips the tear-down when the set-up fails.
         env = pytest.MonkeyPatch()
         self.addCleanup(env.undo)
-        for key, value in HERMETIC_GIT_WITH_IDENTITY.items():
-            env.setenv(key, value)
+        hermetic_git_env(env)
         await super().asyncSetUp()
         # The box has a machine of its own: the sub-task must not sync it.
-        (self.remote.home / "machines.json").write_text(json.dumps({"machines": [
-            {"name": "back", "url": "https://127.0.0.1:1", "password": "", "ssh": ""},
-        ]}))
+        (self.remote.home / "machines.json").write_text(
+            json.dumps(
+                {
+                    "machines": [
+                        {"name": "back", "url": "https://127.0.0.1:1", "password": "", "ssh": ""},
+                    ]
+                }
+            )
+        )
 
     def _clones(self) -> tuple[Path, Path, str, str]:
         """A bare origin with ``main``, clones ``mine``/``theirs``/``colleague``.
@@ -74,7 +74,8 @@ class TestSyncOnMachines(TwoDaemonsCase):
         the box's own unpushed commit.
         """
         mine, theirs, colleague = remote_and_clones(
-            Path(self.tmpdir), "mine", "theirs", "colleague")
+            Path(self.tmpdir), "mine", "theirs", "colleague"
+        )
         pushed = commit(colleague, "colleague", {"a.txt": "a\n"})
         git(colleague, "push", "-q", "origin", "main")
         own = commit(theirs, "box", {"b.txt": "b\n"})
@@ -111,7 +112,7 @@ class TestSyncOnMachines(TwoDaemonsCase):
             _call("run_agent", agent="sync", task=box_task, machine="box", max_budget="2"),
             # The box's agent: its work dir, the ref and the URL from its message.
             _call("git_sync", repo=box_work_dir, ref="origin/main", url=origin_url),
-            _finish("<p>box: merged origin/main into main and pushed.</p>", pause=1.0),
+            _finish("<p>box: merged origin/main into main and pushed.</p>"),
             _call("git_sync", repo=str(mine), ref="origin/main"),
             _finish("<p>main fast-forwarded twice; box merged and pushed.</p>"),
         ]
@@ -136,7 +137,8 @@ class TestSyncOnMachines(TwoDaemonsCase):
         first = requests[0]
         self.assertTrue(first["messages"][0]["content"].startswith(sync_sea.SYSTEM_PROMPT))
         self.assertEqual(
-            _user_text(first), f"{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box.",
+            _user_text(first),
+            f"{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box.",
         )
         names = tool_names(first)
         self.assertLessEqual({"git_sync", "run_agent", "Bash", "Edit", "finish"}, names)
@@ -157,24 +159,26 @@ class TestSyncOnMachines(TwoDaemonsCase):
         # The box's report: the checkout found from the URL, the merge, and
         # one checkout's share, not the $4 the box's own registry would give it.
         box_report = tool_results(requests[3])[0]
-        self.assertTrue(box_report.startswith(
-            f"{box_work_dir} is not a git checkout with a remote 'origin'; syncing the "
-            f"checkout of that repository at {theirs} instead.\n"
-            f"Checkout {theirs.resolve().as_posix()}, branch main, syncing with origin/main "
-            f"(origin = {origin_url})."
-        ), box_report)
+        self.assertTrue(
+            box_report.startswith(
+                f"{box_work_dir} is not a git checkout with a remote 'origin'; syncing the "
+                f"checkout of that repository at {theirs} instead.\n"
+                f"Checkout {theirs.resolve().as_posix()}, branch main, syncing with origin/main "
+                f"(origin = {origin_url})."
+            ),
+            box_report,
+        )
         self.assertIn(f"Merged origin/main: now at {head[:12]}", box_report)
         self.assertIn("Budget: $0.0000/$2.00", box_report)
-        transcript = next(
-            m for m in seen if m["type"] == "task_events" and m.get("tabId") == child
-        )
+        transcript = next(m for m in seen if m["type"] == "task_events" and m.get("tabId") == child)
         settings = next(e for e in transcript["events"] if e["type"] == "task_settings")
         self.assertEqual(settings["settings"]["sea"], "sync")
         self.assertEqual(settings["settings"]["tool_profile"], "shell+edit+agents")
         # No work dir was forced on the box: the sub-task ran in its daemon's,
         # the one its system prompt named and the scripted git_sync call used.
         self.assertEqual(
-            os.path.realpath(settings["settings"]["work_dir"]), os.path.realpath(box_work_dir),
+            os.path.realpath(settings["settings"]["work_dir"]),
+            os.path.realpath(box_work_dir),
         )
         self.assertIn(settings["settings"]["work_dir"], box["messages"][0]["content"])
         self.assertIn(sync_sea.THIS_MACHINE_ONLY, transcript["task"])

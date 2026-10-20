@@ -8,7 +8,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, output} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -32,10 +32,6 @@ function sendToolPanels(win, n, offset) {
     send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
     send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
   }
-}
-
-function output(win) {
-  return win.document.getElementById('output');
 }
 
 function summaryPanels(win) {
@@ -132,7 +128,9 @@ function testNestsAllPanelsBackToPromptInOrder() {
   assert.strictEqual(after.length, 1, 'top level must be: the summary panel');
   assert.strictEqual(after[0], p, 'summary panel is the only child');
   win.close();
-  console.log('  ok - ALL panels, the prompt included, nest; Thoughts included, order kept');
+  console.log(
+    '  ok - ALL panels, the prompt included, nest; Thoughts included, order kept',
+  );
 }
 
 function testAdjacentTaskIsBoundarySystemPromptIsNot() {
@@ -156,7 +154,9 @@ function testAdjacentTaskIsBoundarySystemPromptIsNot() {
   assert.strictEqual(adj.parentElement, O, 'the adjacent task stays put');
   assert.strictEqual(adj.nextElementSibling, p, 'right before the summary');
   win.close();
-  console.log('  ok - .adjacent-task is a boundary; .system-prompt folds under the summary');
+  console.log(
+    '  ok - .adjacent-task is a boundary; .system-prompt folds under the summary',
+  );
 }
 
 function testWelcomeBlockNeverAdopted() {
@@ -292,14 +292,28 @@ function testSecondSummaryStopsAtEarlierSummaryBoundary() {
   const {win} = makePage();
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 8);
-  send(win, {type: 'tool_call', name: 'summary', description: 'first. ' + DESC});
-  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {
+    type: 'tool_call',
+    name: 'summary',
+    description: 'first. ' + DESC,
+  });
+  send(win, {
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
   sendToolPanels(win, 2, 100);
-  send(win, {type: 'tool_call', name: 'summary', description: 'second. ' + DESC});
+  send(win, {
+    type: 'tool_call',
+    name: 'summary',
+    description: 'second. ' + DESC,
+  });
   const panels = summaryPanels(win);
   assert.strictEqual(panels.length, 2, 'both summary panels exist');
-  const second = panels.filter(
-    x => x.querySelector(':scope > .tc-summary-desc').textContent.startsWith('second'),
+  const second = panels.filter(x =>
+    x
+      .querySelector(':scope > .tc-summary-desc')
+      .textContent.startsWith('second'),
   )[0];
   const first = panels.filter(x => x !== second)[0];
   const nested = Array.from(
@@ -337,7 +351,11 @@ function testSummaryImmediatelyAfterSummaryNestsNothing() {
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 3);
   send(win, {type: 'tool_call', name: 'summary', description: 'first'});
-  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
   send(win, {type: 'tool_call', name: 'summary', description: 'second'});
   const panels = summaryPanels(win);
   assert.strictEqual(panels.length, 2);
@@ -357,7 +375,11 @@ function testManyPanelsBetweenSummariesAllNest() {
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 2);
   send(win, {type: 'tool_call', name: 'summary', description: 'first'});
-  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
   sendToolPanels(win, 9, 200);
   send(win, {type: 'tool_call', name: 'summary', description: 'second'});
   const panels = summaryPanels(win);
@@ -381,7 +403,11 @@ function testToolResultLandsInsideCollapsedSummaryPanel() {
   const {win} = makePage();
   sendToolPanels(win, 2);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
-  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
   const p = summaryPanels(win)[0];
   assert.ok(
     p.querySelector('.bash-panel'),
@@ -514,7 +540,9 @@ function openTrajectory(win) {
   assert.ok(traj.classList.contains('collapsed'), 'collapsed at first');
   traj
     .querySelector(':scope > .trajectory-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
+    .dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    );
   assert.ok(!traj.classList.contains('collapsed'), 'the header click opens it');
   return traj;
 }

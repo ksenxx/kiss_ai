@@ -565,14 +565,19 @@ class FileTokenStorage:
     def clear(self) -> bool:
         """Delete the stored token file for this server.
 
+        Taken under the same inter-process lock as :meth:`put`, so a
+        concurrent read-modify-write (a token refresh in this or another
+        kiss process) cannot land its stale copy on top of the deletion.
+
         Returns:
             ``True`` when a file was deleted, ``False`` when absent.
         """
-        try:
-            self.path.unlink()
-            return True
-        except FileNotFoundError:
-            return False
+        with exclusive_file_lock(self._lock_path):
+            try:
+                self.path.unlink()
+                return True
+            except FileNotFoundError:
+                return False
 
 
 _LOGIN_HINT = (
@@ -924,8 +929,9 @@ class MCPManager:
         """Wait until *conn* is ready or *deadline* (``time.monotonic()``) passes.
 
         A connection that misses the deadline is dropped from the pool
-        and its task told to stop; one stuck mid-handshake is reaped by
-        :meth:`_reap_straggler`.  A shut-down manager's already-failed
+        and its task told to stop (unless its handshake landed in the
+        meantime; see :meth:`_orphan_timed_out`); one stuck
+        mid-handshake is reaped by :meth:`_reap_straggler`.  A shut-down manager's already-failed
         record (``task is None``) never started, so there is nothing to
         wait for.  The global ``_shut_down`` flag is no evidence about
         *conn*: a shutdown that began after ``_connection_for`` returned
@@ -934,8 +940,9 @@ class MCPManager:
         """
         if conn.task is None:
             return
-        if not _wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
-            locked_call(self._lock, self._orphan_timed_out, key, conn)
+        if _wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
+            return
+        if locked_call(self._lock, self._orphan_timed_out, key, conn):
             self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn)
 
@@ -962,13 +969,22 @@ class MCPManager:
         )
         return conn
 
-    def _orphan_timed_out(self, key: str, conn: _Connection) -> None:
-        """Drop the timed-out *conn* from the pool; its unfinished task is an orphan (locked)."""
+    def _orphan_timed_out(self, key: str, conn: _Connection) -> bool:
+        """Drop the timed-out *conn* from the pool; its unfinished task is an orphan (locked).
+
+        A connection whose handshake finished between the deadline and
+        this lock acquisition is healthy and possibly already leased by
+        another task, so it is kept: returns ``False`` for it, ``True``
+        once *conn* has been orphaned.
+        """
+        if conn.ready.is_set() and conn.error == "":
+            return False
         if self._connections.get(key) is conn:
             del self._connections[key]
         conn.error = conn.error or "connection timed out"
         if conn.task is not None and not conn.task.done():
             self._orphans.append(conn)
+        return True
 
     def _evict_surplus(self, keep: set[str]) -> None:
         """Tear down connections that are idle or beyond the pool cap.

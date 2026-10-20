@@ -81,7 +81,7 @@ def _agent_in_worktree(
 def no_llm_commit_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         wta_mod, "_generate_commit_message",
-        lambda commit_dir, user_prompt, task_result=None: "test: work",
+        lambda commit_dir, user_prompt, task_result=None, bill_to=None: "test: work",
     )
 
 

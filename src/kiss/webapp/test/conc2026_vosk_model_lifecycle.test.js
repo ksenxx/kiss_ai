@@ -45,6 +45,7 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {micBtn} = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
 
@@ -186,10 +187,6 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers) {
 
   win.__VOICE__ = Object.assign({}, FALLBACK_CFG, options.cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
 }
 
 // ---------------------------------------------------------------------

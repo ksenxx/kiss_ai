@@ -4,19 +4,19 @@
 # add your name here
 """Pending-warning races in ``ChatSorcarAgent`` (F2 findings 1 and 4).
 
-Finding 1 — ``add_warning`` must combine with the pending merge warning
+Finding 1 — ``add_warning`` must combine with the pending warning
 under ONE hold of ``_warning_lock``.  The old inline code in
 ``task_runner._release_worktree_without_merging`` read the slot under
-the lock, released it, and wrote ``reason + old`` back through
-``_set_warnings``.  A ``_flush_warnings`` landing in the gap took and
+the lock, released it, and wrote ``reason + old`` back through a
+locked setter.  A ``_flush_warnings`` landing in the gap took and
 broadcast ``old``; the write then put it back, so ``old`` reached the
-user twice.  A ``_set_warnings(B)`` landing in the gap was overwritten.
+user twice.  A write landing in the gap was overwritten.
 
 Finding 4 — ``_flush_warnings`` clears the slot, then broadcasts outside
 the lock.  When the broadcast raised, it restored the taken warning
 only if the slot was still empty, so a warning set concurrently while
 the broadcast was failing made the taken one vanish: neither delivered
-nor retained.  Both the stash and the merge slot had the defect.
+nor retained.
 
 These tests use real threads.  The finding-4 tests force the exact
 interleaving with a printer that blocks inside ``broadcast`` until the
@@ -77,11 +77,11 @@ def test_add_warning_prepend_under_concurrent_flush_delivers_old_once() -> None:
         t.start()
     try:
         for i in range(300):
-            # ``_set_warnings`` replaces the slot, so only store the
-            # round's "old" warning once the previous round was flushed.
+            # Store the round's "old" warning only once the previous
+            # round was flushed, so each broadcast holds one round.
             while agent._merge_conflict_warning is not None:
                 pass
-            agent._set_warnings(merge=f"OLD-{i}")
+            agent.add_warning(f"OLD-{i}")
             agent.add_warning(f"REASON-{i}", prepend=True)
     finally:
         stop.set()
@@ -104,7 +104,7 @@ def test_add_warning_prepend_under_concurrent_flush_delivers_old_once() -> None:
 
 
 def test_add_warning_never_loses_a_concurrent_set() -> None:
-    """A ``_set_warnings`` racing ``add_warning`` is never overwritten."""
+    """A prepend racing an append is never overwritten."""
     agent = ChatSorcarAgent("f2-add-warning-vs-set")
     printer = _RecordingPrinter()
     n = 500
@@ -138,7 +138,7 @@ def test_add_warning_on_empty_slot_sets_text() -> None:
     agent = ChatSorcarAgent("f2-add-warning-empty")
     agent.add_warning("A")
     assert agent._merge_conflict_warning == "A"
-    agent._set_warnings(merge="")
+    agent._merge_conflict_warning = None
     agent.add_warning("B", prepend=True)
     assert agent._merge_conflict_warning == "B"
     agent.add_warning("C")
@@ -146,52 +146,41 @@ def test_add_warning_on_empty_slot_sets_text() -> None:
 
 
 def _flush_fails_while_slot_is_rewritten(
-    agent: ChatSorcarAgent, slot: str, taken: str, concurrent: str,
+    agent: ChatSorcarAgent, taken: str, concurrent: str,
 ) -> None:
-    """Run a failing flush of *taken* while *concurrent* lands in *slot*."""
-    agent._set_warnings(**{slot: taken})
+    """Run a failing flush of *taken* while *concurrent* lands in the slot."""
+    agent.add_warning(taken)
     printer = _BlockingBrokenPrinter()
     flusher = threading.Thread(target=agent._flush_warnings, args=(printer,))
     flusher.start()
     try:
         assert printer.entered.wait(30)
         # The flush has taken *taken* and is stuck in the broadcast.
-        agent._set_warnings(**{slot: concurrent})
+        agent.add_warning(concurrent)
     finally:
         printer.release.set()
         flusher.join(timeout=30)
         assert not flusher.is_alive()
 
 
-def test_failed_merge_broadcast_keeps_both_old_and_concurrent_warning() -> None:
-    """Finding 4, merge slot: the taken warning is prepended, not dropped."""
+def test_failed_broadcast_keeps_both_old_and_concurrent_warning() -> None:
+    """Finding 4: the taken warning is prepended, not dropped."""
     agent = ChatSorcarAgent("f2-flush-restore-merge")
-    _flush_fails_while_slot_is_rewritten(agent, "merge", "OLD-MERGE", "NEW-MERGE")
+    _flush_fails_while_slot_is_rewritten(agent, "OLD-MERGE", "NEW-MERGE")
     assert agent._merge_conflict_warning == "OLD-MERGE\nNEW-MERGE"
     good = _RecordingPrinter()
     agent._flush_warnings(good)
     assert good.messages == ["OLD-MERGE\nNEW-MERGE"]
 
 
-def test_failed_stash_broadcast_keeps_both_old_and_concurrent_warning() -> None:
-    """Finding 4, stash slot: the taken warning is prepended, not dropped."""
-    agent = ChatSorcarAgent("f2-flush-restore-stash")
-    _flush_fails_while_slot_is_rewritten(agent, "stash", "OLD-STASH", "NEW-STASH")
-    assert agent._stash_pop_warning == "OLD-STASH\nNEW-STASH"
-    good = _RecordingPrinter()
-    agent._flush_warnings(good)
-    assert good.messages == ["OLD-STASH\nNEW-STASH"]
-
-
 def test_failed_broadcast_with_empty_slot_restores_plain_warning() -> None:
     """Without a concurrent write, the failed warning is put back as is."""
     agent = ChatSorcarAgent("f2-flush-restore-plain")
-    agent._set_warnings(stash="S", merge="M")
+    agent.add_warning("M")
 
     class _Broken:
         def broadcast(self, event: dict[str, Any]) -> None:
             raise RuntimeError("printer is broken")
 
     agent._flush_warnings(_Broken())
-    assert agent._stash_pop_warning == "S"
     assert agent._merge_conflict_warning == "M"

@@ -5,7 +5,7 @@
 """Audit 14: Integration tests for bugs/redundancies found in audit round 14.
 
 BUG-64: ``ChatSorcarAgent.run()`` silently drops
-    ``_stash_pop_warning`` and ``_merge_conflict_warning`` when the
+    the pending ``_merge_conflict_warning`` when the
     call falls back to direct (non-worktree) execution — the warnings
     are only broadcast on the success path.  The fallback points
     (the ``use_worktree=False`` kwarg of the time is gone with the
@@ -143,7 +143,7 @@ class TestBug64WarningsDroppedOnFallback:
         """Fallback B: ``discover_repo`` returns None — warning
         must still be broadcast."""
         agent = ChatSorcarAgent("t")
-        agent._stash_pop_warning = "Stash pop failed — run git stash pop."
+        agent.add_warning("Stash pop failed — run git stash pop.")
         printer = _RecordingPrinter()
 
         agent.run(
@@ -159,7 +159,7 @@ class TestBug64WarningsDroppedOnFallback:
             "BUG-64: warning not broadcast on not-a-repo fallback.  "
             f"Events were: {printer.events}"
         )
-        assert agent._stash_pop_warning is None
+        assert agent._merge_conflict_warning is None
 
     def test_warning_flushed_on_detached_head(self, tmp_path: Path) -> None:
         """Fallback C: ``_try_setup_worktree`` returns None
@@ -201,7 +201,7 @@ class TestBug64WarningsDroppedOnFallback:
         working identically."""
         repo = _make_repo(tmp_path / "repo")
         agent = ChatSorcarAgent("t")
-        agent._stash_pop_warning = "success-path warning"
+        agent.add_warning("success-path warning")
         printer = _RecordingPrinter()
         try:
             agent.run(

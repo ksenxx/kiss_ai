@@ -226,19 +226,22 @@ class TalkPlayer:
             self._queue.put(dict(event))
 
     def _admit_locked(self, talk_id: Any) -> bool:
-        """Record *talk_id* and make sure the worker runs; ``False`` when already spoken."""
-        if talk_id:
-            if talk_id in self._spoken_ids:
-                return False
-            self._spoken_ids[talk_id] = None
-            if len(self._spoken_ids) > _MAX_TALK_IDS:
-                for stale in list(self._spoken_ids)[: _MAX_TALK_IDS // 2]:
-                    del self._spoken_ids[stale]
+        """Make sure the worker runs and record *talk_id*; ``False`` when already spoken."""
+        if talk_id and talk_id in self._spoken_ids:
+            return False
+        # The worker before the record: a start that fails (thread
+        # exhaustion) raises out of ``play`` with nothing remembered,
+        # so the talk re-sent once the pressure is over still plays.
         if self._worker is None or not self._worker.is_alive():
             self._worker = threading.Thread(
                 target=self._drain, name="sorcar-talk-player", daemon=True
             )
             self._worker.start()
+        if talk_id:
+            self._spoken_ids[talk_id] = None
+            if len(self._spoken_ids) > _MAX_TALK_IDS:
+                for stale in list(self._spoken_ids)[: _MAX_TALK_IDS // 2]:
+                    del self._spoken_ids[stale]
         return True
 
     def _drain(self) -> None:

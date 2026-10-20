@@ -19,6 +19,7 @@ const {
   waitFor,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {micBtn} = require('./voice_page_helpers');
 const runner = makeRunner();
 const report = runner.report;
 
@@ -134,10 +135,6 @@ function flakyMediaDevices(messages) {
     },
     enumerateDevices: () => Promise.resolve([]),
   };
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
 }
 
 function toast(win) {

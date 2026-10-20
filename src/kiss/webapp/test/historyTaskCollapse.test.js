@@ -266,11 +266,15 @@ function testCssHidesMetadataWhenCollapsed() {
     'var(--fg)',
     'the webapp theme paints the collapse toggle in the foreground colour',
   );
-  assert.strictEqual(
-    row.querySelector('.sidebar-item-delete'),
-    null,
-    'a history row has no delete button',
-  );
+  const del = row.querySelector('.sidebar-item-actions > .sidebar-item-delete');
+  assert.ok(del, 'a finished history row has a delete button in its action strip');
+  for (const prop of ['cursor', 'border-radius', 'background-image']) {
+    assert.strictEqual(
+      win.getComputedStyle(del).getPropertyValue(prop),
+      copyStyle.getPropertyValue(prop),
+      `the delete button's ${prop} matches the other row buttons'`,
+    );
+  }
   win.close();
   console.log('PASS css hides collapsed metadata in the webapp');
 }

@@ -15,7 +15,7 @@
 // editor is closed when the list changes under it.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, click} = require('./simplify2_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -28,13 +28,14 @@ function texts(doc) {
   });
 }
 
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
-}
-
 function key(win, el, keyName, init) {
   el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: keyName, bubbles: true, cancelable: true, ...init}),
+    new win.KeyboardEvent('keydown', {
+      key: keyName,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    }),
   );
 }
 
@@ -78,19 +79,25 @@ function runPanel() {
   const copyBtn = first.querySelector('.sidebar-item-copy');
   const delBtn = first.querySelector('.sidebar-item-delete');
   assert.ok(
-    copyBtn.compareDocumentPosition(editBtn) & win.Node.DOCUMENT_POSITION_FOLLOWING,
+    copyBtn.compareDocumentPosition(editBtn) &
+      win.Node.DOCUMENT_POSITION_FOLLOWING,
     'the pencil sits right of the copy button',
   );
   assert.ok(
-    editBtn.compareDocumentPosition(delBtn) & win.Node.DOCUMENT_POSITION_FOLLOWING,
+    editBtn.compareDocumentPosition(delBtn) &
+      win.Node.DOCUMENT_POSITION_FOLLOWING,
     'the pencil sits left of (next to) the delete button',
   );
 
   // --- pressing the pencil turns the row into an in-place editor
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  assert.strictEqual(composer.value, '', 'the pencil does not inject the promptlet');
+  assert.strictEqual(
+    composer.value,
+    '',
+    'the pencil does not inject the promptlet',
+  );
   assert.ok(panel.classList.contains('open'), 'the panel stays open');
-  let row = rows(doc)[1];
+  const row = rows(doc)[1];
   assert.ok(row.classList.contains('editing'));
   let ta = editor(doc, row);
   assert.ok(ta, 'the row holds a textarea');
@@ -99,8 +106,14 @@ function runPanel() {
   assert.strictEqual(ta.getAttribute('aria-label'), 'Edit promptlet');
   assert.strictEqual(doc.activeElement, ta, 'the textarea takes focus');
   assert.strictEqual(ta.selectionStart, 'Mine two'.length, 'caret at the end');
-  assert.strictEqual(row.querySelector('.tricks-edit-save').textContent, 'Save');
-  assert.strictEqual(row.querySelector('.tricks-edit-cancel').textContent, 'Cancel');
+  assert.strictEqual(
+    row.querySelector('.tricks-edit-save').textContent,
+    'Save',
+  );
+  assert.strictEqual(
+    row.querySelector('.tricks-edit-cancel').textContent,
+    'Cancel',
+  );
   assert.strictEqual(row.querySelectorAll('.sidebar-item-text').length, 0);
   assert.strictEqual(row.querySelectorAll('.sidebar-item-copy').length, 0);
   assert.strictEqual(row.querySelectorAll('.sidebar-item-edit').length, 0);
@@ -110,7 +123,12 @@ function runPanel() {
     1,
     'the other rows are untouched',
   );
-  assert.deepStrictEqual(texts(doc), ['Mine one', 'Mine two', 'Bundled alpha', 'Bundled beta']);
+  assert.deepStrictEqual(texts(doc), [
+    'Mine one',
+    'Mine two',
+    'Bundled alpha',
+    'Bundled beta',
+  ]);
 
   // --- clicking inside the editor does not inject the promptlet
   click(win, ta);
@@ -137,8 +155,16 @@ function runPanel() {
     'Bundled alpha',
     'Bundled beta',
   ]);
-  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0, 'editor closed');
-  assert.strictEqual(win.__MY_TRICKS_COUNT__, 2, 'an edit keeps the user count');
+  assert.strictEqual(
+    list.querySelectorAll('.tricks-edit-input').length,
+    0,
+    'editor closed',
+  );
+  assert.strictEqual(
+    win.__MY_TRICKS_COUNT__,
+    2,
+    'an edit keeps the user count',
+  );
   assert.deepStrictEqual(
     rows(doc).map(r => r.querySelectorAll('.sidebar-item-edit').length),
     [1, 1, 0, 0],
@@ -185,7 +211,10 @@ function runPanel() {
     cancelable: true,
   });
   ta.dispatchEvent(shiftEnter);
-  assert.ok(!shiftEnter.defaultPrevented, 'Shift+Enter is left to the textarea');
+  assert.ok(
+    !shiftEnter.defaultPrevented,
+    'Shift+Enter is left to the textarea',
+  );
   assert.strictEqual(editsPosted(posted).length, 2, 'nothing posted');
   assert.ok(rows(doc)[0].classList.contains('editing'), 'still editing');
   input(win, ta, 'Line one\nLine two');
@@ -221,7 +250,11 @@ function runPanel() {
   ta = editor(doc, rows(doc)[1]);
   input(win, ta, '  Mine two, edited\n');
   click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
-  assert.strictEqual(editsPosted(posted).length, 3, 'unchanged text posts nothing');
+  assert.strictEqual(
+    editsPosted(posted).length,
+    3,
+    'unchanged text posts nothing',
+  );
   assert.strictEqual(texts(doc)[1], 'Mine two, edited');
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
 
@@ -242,15 +275,39 @@ function runPanel() {
   input(win, ta, 'My unsaved draft');
   search.focus();
   input(win, search, 'line');
-  assert.deepStrictEqual(texts(doc), ['My unsaved draft'], 'filtered on the stored text');
-  assert.strictEqual(editor(doc, rows(doc)[0]), ta, 'the same editor element is re-attached');
-  assert.strictEqual(ta.value, 'My unsaved draft', 'the draft survives the repaint');
-  assert.strictEqual(doc.activeElement, search, 'focus stays in the search box');
+  assert.deepStrictEqual(
+    texts(doc),
+    ['My unsaved draft'],
+    'filtered on the stored text',
+  );
+  assert.strictEqual(
+    editor(doc, rows(doc)[0]),
+    ta,
+    'the same editor element is re-attached',
+  );
+  assert.strictEqual(
+    ta.value,
+    'My unsaved draft',
+    'the draft survives the repaint',
+  );
+  assert.strictEqual(
+    doc.activeElement,
+    search,
+    'focus stays in the search box',
+  );
   assert.strictEqual(editsPosted(posted).length, 3, 'nothing posted');
   input(win, search, 'bundled');
-  assert.deepStrictEqual(texts(doc), ['Bundled alpha', 'Bundled beta'], 'editor row filtered out');
+  assert.deepStrictEqual(
+    texts(doc),
+    ['Bundled alpha', 'Bundled beta'],
+    'editor row filtered out',
+  );
   input(win, search, '');
-  assert.strictEqual(editor(doc, rows(doc)[0]), ta, 'the editor comes back with its draft');
+  assert.strictEqual(
+    editor(doc, rows(doc)[0]),
+    ta,
+    'the editor comes back with its draft',
+  );
   assert.strictEqual(ta.value, 'My unsaved draft');
   key(win, ta, 'Escape');
   assert.strictEqual(texts(doc)[0], 'Line one\nLine two');
@@ -267,11 +324,18 @@ function runPanel() {
       ...init,
     });
     ta.dispatchEvent(composingEnter);
-    assert.ok(!composingEnter.defaultPrevented, 'composition Enter is not swallowed');
+    assert.ok(
+      !composingEnter.defaultPrevented,
+      'composition Enter is not swallowed',
+    );
     key(win, ta, 'Escape', init);
     assert.ok(rows(doc)[0].classList.contains('editing'), 'still editing');
   }
-  assert.strictEqual(editsPosted(posted).length, 3, 'composition keys post nothing');
+  assert.strictEqual(
+    editsPosted(posted).length,
+    3,
+    'composition keys post nothing',
+  );
   key(win, ta, 'Enter');
   assert.deepStrictEqual(editsPosted(posted)[3], {
     type: 'editTrick',
@@ -280,10 +344,18 @@ function runPanel() {
   });
   send(win, {
     type: 'tricksData',
-    tricks: ['Line one\nLine two', 'Mine two, edited', 'Bundled alpha', 'Bundled beta'],
+    tricks: [
+      'Line one\nLine two',
+      'Mine two, edited',
+      'Bundled alpha',
+      'Bundled beta',
+    ],
     userCount: 2,
   });
-  posted.splice(posted.findIndex(m => m.type === 'editTrick' && m.newText === '変換中'), 1);
+  posted.splice(
+    posted.findIndex(m => m.type === 'editTrick' && m.newText === '変換中'),
+    1,
+  );
   assert.strictEqual(editsPosted(posted).length, 3);
 
   // --- opening a second editor closes the first (one at a time)
@@ -305,7 +377,11 @@ function runPanel() {
     text: 'Mine two, edited',
     newText: 'Line one\nLine two',
   });
-  assert.strictEqual(texts(doc)[1], 'Line one\nLine two', 'shown optimistically');
+  assert.strictEqual(
+    texts(doc)[1],
+    'Line one\nLine two',
+    'shown optimistically',
+  );
   send(win, {
     type: 'error',
     text: 'That promptlet is already in ~/.kiss/MY_INJECTION.md',
@@ -313,7 +389,12 @@ function runPanel() {
   });
   send(win, {
     type: 'tricksData',
-    tricks: ['Line one\nLine two', 'Mine two, edited', 'Bundled alpha', 'Bundled beta'],
+    tricks: [
+      'Line one\nLine two',
+      'Mine two, edited',
+      'Bundled alpha',
+      'Bundled beta',
+    ],
     userCount: 2,
     connId: 'c1',
   });
@@ -338,7 +419,11 @@ function runPanel() {
     userCount: 1,
   });
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
-  assert.deepStrictEqual(texts(doc), ['Mine two, edited', 'Bundled alpha', 'Bundled beta']);
+  assert.deepStrictEqual(texts(doc), [
+    'Mine two, edited',
+    'Bundled alpha',
+    'Bundled beta',
+  ]);
   assert.deepStrictEqual(
     rows(doc).map(r => r.querySelectorAll('.sidebar-item-edit').length),
     [1, 0, 0],
@@ -357,7 +442,10 @@ function runPanel() {
   click(win, rows(doc)[0].querySelector('.sidebar-confirm-yes'));
   assert.deepStrictEqual(texts(doc), ['Mine B', 'Bundled alpha']);
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
-  assert.strictEqual(rows(doc)[0].querySelectorAll('.sidebar-item-edit').length, 1);
+  assert.strictEqual(
+    rows(doc)[0].querySelectorAll('.sidebar-item-edit').length,
+    1,
+  );
   assert.strictEqual(editsPosted(posted).length, 4, 'closing posts no edit');
 
   // --- a filtered list edits the right promptlet (index into the full list)

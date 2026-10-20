@@ -8,7 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  sendEmptyWorkDir,
+  rowsByTitle,
+} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -125,26 +130,6 @@ const SESSIONS_FIXTURE = [
   },
 ];
 
-function rowsByTitle(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
-}
-
 function idsSpan(row) {
   return row.querySelector('.running-item-ids');
 }
@@ -228,7 +213,9 @@ function testIdsLineRendersAllCombinations() {
   );
 
   win.close();
-  console.log('  ok - .running-item-ids renders the right text in every combination');
+  console.log(
+    '  ok - .running-item-ids renders the right text in every combination',
+  );
 }
 
 function testIdsLineOrderingAndContainer() {
@@ -243,7 +230,10 @@ function testIdsLineOrderingAndContainer() {
   assert.ok(a, 'row A must render');
   assert.ok(b, 'row B must render');
 
-  for (const [label, row] of [['A', a], ['B', b]]) {
+  for (const [label, row] of [
+    ['A', a],
+    ['B', b],
+  ]) {
     const info = infoBlock(row);
     assert.ok(
       info,
@@ -334,7 +324,9 @@ function testIdsLineLayoutEliminatesGap() {
       'chat/task/parent ids line',
   );
 
-  console.log('  ok - CSS eliminates the gap between metrics and workspace lines');
+  console.log(
+    '  ok - CSS eliminates the gap between metrics and workspace lines',
+  );
 }
 
 function main() {

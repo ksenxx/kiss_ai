@@ -549,23 +549,6 @@ class _AutocompleteMixin:
         """
         return work_dir or self.work_dir
 
-    def _files_request_map(self) -> dict[str, object]:
-        """Return the per-connection latest file-picker request map.
-
-        Maps a connection id to a unique token identifying its most
-        recent ``getFiles`` request.  Entries are SHORT-LIVED: each is
-        removed as soon as the request it names has been answered (see
-        :meth:`_get_files` and :meth:`_emit_indexed_files`), so the map
-        never accumulates departed connections and needs no teardown
-        wiring.  Created lazily on first use (the daemon's ``__init__``
-        predates this guard).  Callers must hold ``_state_lock``.
-        """
-        reqs = getattr(self, "_files_latest_request", None)
-        if reqs is None:
-            reqs = {}
-            self._files_latest_request = reqs
-        return reqs
-
     def _refresh_files_after_task(self, work_dir: str = "") -> None:
         """Rescan the ``@``-mention index covering *work_dir* after a task.
 
@@ -660,7 +643,7 @@ class _AutocompleteMixin:
         the populated reply.
 
         Replies are guarded by a per-connection request token
-        (:meth:`_files_request_map`): a newer ``getFiles`` from the
+        (``_files_latest_request``): a newer ``getFiles`` from the
         same connection (a later keystroke, or the same prefix typed in
         a tab rooted elsewhere) supersedes this one, so a slow build's
         reply is dropped instead of overwriting the newer picker
@@ -671,8 +654,7 @@ class _AutocompleteMixin:
         wd = self._resolve_work_dir(work_dir)
         token: object = object()
         with self._state_lock:
-            reqs = self._files_request_map()
-            reqs[conn_id] = token
+            self._files_latest_request[conn_id] = token
         picker = self._file_index.picker_for(wd)
         if picker is None:
             # The placeholder must be emitted BEFORE the build is
@@ -733,7 +715,7 @@ class _AutocompleteMixin:
             picker = self._file_index.picker_for(work_dir)
             if picker is None:
                 with self._state_lock:
-                    superseded = self._files_request_map().get(conn_id) is not token
+                    superseded = self._files_latest_request.get(conn_id) is not token
                 if not superseded and not self._file_index.ensure(
                     work_dir,
                     functools.partial(
@@ -745,7 +727,7 @@ class _AutocompleteMixin:
                 return
             ranked = picker.search(prefix, _load_file_usage())
             with self._state_lock:
-                reqs = self._files_request_map()
+                reqs = self._files_latest_request
                 if reqs.get(conn_id) is not token:
                     return
                 self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
@@ -760,6 +742,6 @@ class _AutocompleteMixin:
     def _release_files_token(self, conn_id: str, token: object) -> None:
         """Forget *token* if it is still *conn_id*'s latest ``getFiles`` request."""
         with self._state_lock:
-            reqs = self._files_request_map()
+            reqs = self._files_latest_request
             if reqs.get(conn_id) is token:
                 del reqs[conn_id]

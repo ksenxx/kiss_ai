@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const harness = require('./simplify2_harness');
+const {readyTabId, output} = harness;
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -35,16 +36,6 @@ function makePage() {
 }
 
 const send = harness.send;
-
-function readyTabId(win) {
-  const ready = win.__posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
-  return ready.tabId;
-}
-
-function output(win) {
-  return win.document.getElementById('output');
-}
 
 function topLevel(win) {
   return Array.from(output(win).children).filter(
@@ -69,7 +60,12 @@ function sendStep(win, i) {
     command: 'echo ' + i,
     description: 'echo step ' + i,
   });
-  send(win, {type: 'tool_result', name: 'Bash', output: String(i), success: true});
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    output: String(i),
+    success: true,
+  });
 }
 
 function startTask(win, task) {
@@ -77,7 +73,7 @@ function startTask(win, task) {
     type: 'task_events',
     events: [],
     task,
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});
@@ -88,9 +84,18 @@ function assertThoughtsVisible(win, where) {
   const panels = thoughtsPanels(win);
   assert.ok(panels.length > 0, where + ': the transcript has Thoughts panels');
   for (const p of panels) {
-    assert.ok(!p.classList.contains('collapsed'), where + ': a Thoughts panel is not collapsed');
-    assert.ok(!p.classList.contains('chv-hidden'), where + ': a Thoughts panel is not hidden');
-    assert.ok(!p.closest('.summary-sub'), where + ': a Thoughts panel is not adopted by a summary');
+    assert.ok(
+      !p.classList.contains('collapsed'),
+      where + ': a Thoughts panel is not collapsed',
+    );
+    assert.ok(
+      !p.classList.contains('chv-hidden'),
+      where + ': a Thoughts panel is not hidden',
+    );
+    assert.ok(
+      !p.closest('.summary-sub'),
+      where + ': a Thoughts panel is not adopted by a summary',
+    );
     assert.strictEqual(
       win.getComputedStyle(p).display !== 'none',
       true,
@@ -130,16 +135,30 @@ function testSummaryFoldsThoughtsToo() {
   const summary = output(win).querySelector('.tc-summary');
   assert.ok(summary.classList.contains('collapsed'), 'the summary panel folds');
   const adopted = Array.from(summary.querySelector('.summary-sub').children);
-  const adoptedThoughts = adopted.filter(el => el.classList.contains('llm-panel'));
-  assert.strictEqual(adoptedThoughts.length, 3, 'the summary adopts the three Thoughts panels');
+  const adoptedThoughts = adopted.filter(el =>
+    el.classList.contains('llm-panel'),
+  );
+  assert.strictEqual(
+    adoptedThoughts.length,
+    3,
+    'the summary adopts the three Thoughts panels',
+  );
   assert.strictEqual(
     adopted.filter(el => el.classList.contains('tc-bash')).length,
     3,
-    'the summary adopts the tool panels: ' + adopted.map(e => e.className).join(','),
+    'the summary adopts the tool panels: ' +
+      adopted.map(e => e.className).join(','),
   );
   const top = topLevel(win);
-  assert.strictEqual(top[top.length - 2], summary, 'the summary precedes the preserved message');
-  assert.ok(top[top.length - 1].classList.contains('user-msg'), 'the preserved message follows the summary');
+  assert.strictEqual(
+    top[top.length - 2],
+    summary,
+    'the summary precedes the preserved message',
+  );
+  assert.ok(
+    top[top.length - 1].classList.contains('user-msg'),
+    'the preserved message follows the summary',
+  );
   assert.strictEqual(
     top.filter(p => p.classList.contains('llm-panel')).length,
     0,
@@ -150,7 +169,9 @@ function testSummaryFoldsThoughtsToo() {
     'the steering Message panel stays top-level, after the summary',
   );
   win.close();
-  console.log('  ok - a summary tool call folds the Thoughts panels of its steps');
+  console.log(
+    '  ok - a summary tool call folds the Thoughts panels of its steps',
+  );
 }
 
 function testThoughtsNeverCollapsedOnReplayOrDigest() {
@@ -165,22 +186,29 @@ function testThoughtsNeverCollapsedOnReplayOrDigest() {
       name: 'Read',
       path: '/tmp/file' + i + '.txt',
     });
-    events.push({type: 'tool_result', name: 'Read', output: 'x', success: true});
+    events.push({
+      type: 'tool_result',
+      name: 'Read',
+      output: 'x',
+      success: true,
+    });
   }
   events.push({type: 'result', text: 'done', success: true});
   send(win, {
     type: 'task_events',
     events,
     task: 'replayed',
-    tabId: readyTabId(win),
+    tabId: readyTabId(win.__posted),
     chat_id: 'chat-replayed',
   });
   send(win, {type: 'status', running: false});
   send(win, {type: 'usage_info', text: 'Steps: 3/10'});
   assertThoughtsVisible(win, 'replay');
   const reads = Array.from(output(win).querySelectorAll('.tc-path'));
-  assert.ok(reads.length === 3 && reads.every(p => p.classList.contains('collapsed')),
-    'the replay folds the Read panels');
+  assert.ok(
+    reads.length === 3 && reads.every(p => p.classList.contains('collapsed')),
+    'the replay folds the Read panels',
+  );
   win.close();
   console.log('  ok - a replayed finished task keeps its Thoughts panels open');
 }
@@ -192,8 +220,15 @@ function testThoughtsFoldOnlyByClick() {
   const p = thoughtsPanels(win)[0];
   const hdr = p.querySelector('.collapse-header');
   hdr.click();
-  assert.ok(p.classList.contains('collapsed'), 'the header click folds the Thoughts panel');
-  assert.ok(/thought number 1|words of step 1/.test(hdr.querySelector('.collapse-preview').textContent));
+  assert.ok(
+    p.classList.contains('collapsed'),
+    'the header click folds the Thoughts panel',
+  );
+  assert.ok(
+    /thought number 1|words of step 1/.test(
+      hdr.querySelector('.collapse-preview').textContent,
+    ),
+  );
   hdr.click();
   assert.ok(!p.classList.contains('collapsed'), 'a second click unfolds it');
   win.close();
@@ -232,15 +267,24 @@ function testBashCollapsedHeaderIsDescription() {
   // A tool call's panel starts folded; a header click unfolds it.
   assert.ok(panel.classList.contains('collapsed'), 'folded at birth');
   panel.querySelector('.tc-h').click();
-  assert.ok(!panel.classList.contains('collapsed'), 'a header click unfolds it');
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'a header click unfolds it',
+  );
   const expanded = headerText(panel.querySelector('.tc-h'));
   assert.strictEqual(expanded, 'Bash', 'expanded: the header is the tool name');
   assert.ok(
-    /description:\s*List the temp dir/.test(panel.querySelector('.tc-b').textContent),
+    /description:\s*List the temp dir/.test(
+      panel.querySelector('.tc-b').textContent,
+    ),
     'expanded: the body still labels the description',
   );
   const txt = collapsedHeaderText(panel);
-  assert.strictEqual(txt, 'Bash List the temp dir', 'collapsed: "Bash <description>"');
+  assert.strictEqual(
+    txt,
+    'Bash List the temp dir',
+    'collapsed: "Bash <description>"',
+  );
   assert.ok(!/description/.test(txt), 'no "description:" label in the header');
   assert.ok(!/ls -la/.test(txt), 'the command is not in the header');
   win.close();
@@ -253,7 +297,11 @@ function testBashWithoutDescriptionPreviewsBody() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'uptime'});
   const panel = output(win).querySelector('.tc-bash');
   const txt = collapsedHeaderText(panel);
-  assert.strictEqual(txt, 'Bash uptime', 'without a description the body is the preview');
+  assert.strictEqual(
+    txt,
+    'Bash uptime',
+    'without a description the body is the preview',
+  );
   win.close();
   console.log('  ok - a Bash panel without description previews its command');
 }
@@ -280,7 +328,10 @@ function testReadWriteCollapsedHeaderIsPath() {
   assert.strictEqual(panels.length, 3);
   const [read, write, edit] = panels;
   assert.strictEqual(collapsedHeaderText(read), 'Read /home/u/proj/src/app.py');
-  assert.strictEqual(collapsedHeaderText(write), 'Write /home/u/proj/src/new.py');
+  assert.strictEqual(
+    collapsedHeaderText(write),
+    'Write /home/u/proj/src/new.py',
+  );
   for (const p of [read, write]) {
     const txt = p.querySelector('.collapse-header').textContent;
     assert.ok(!/path:/i.test(txt), 'no "path:" label in the header: ' + txt);
@@ -288,7 +339,10 @@ function testReadWriteCollapsedHeaderIsPath() {
       /path:/.test(p.querySelector('.tc-b').textContent),
       'the expanded body still labels the path',
     );
-    assert.ok(p.querySelector('.tc-arg-path .tp'), 'the path stays a clickable .tp');
+    assert.ok(
+      p.querySelector('.tc-arg-path .tp'),
+      'the path stays a clickable .tp',
+    );
   }
   // Other tools keep the whole-body preview.
   const editTxt = collapsedHeaderText(edit);
@@ -300,19 +354,44 @@ function testReadWriteCollapsedHeaderIsPath() {
 function testSharePagePreviewMatches() {
   const win = makePage();
   startTask(win, 'Share preview');
-  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', description: 'list files'});
-  send(win, {type: 'tool_call', name: 'Write', path: '/tmp/w.txt', content: 'x'});
-  send(win, {type: 'tool_call', name: 'Edit', path: '/tmp/e.txt', old_string: 'a', new_string: 'b'});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'ls',
+    description: 'list files',
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'Write',
+    path: '/tmp/w.txt',
+    content: 'x',
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'Edit',
+    path: '/tmp/e.txt',
+    old_string: 'a',
+    new_string: 'b',
+  });
   // A shared page is the serialized transcript, re-driven by share.js.
-  const html = '<!doctype html><html><body><div id="output">' +
-    output(win).innerHTML + '</div></body></html>';
+  const html =
+    '<!doctype html><html><body><div id="output">' +
+    output(win).innerHTML +
+    '</div></body></html>';
   win.close();
-  const dom = new JSDOM(html, {runScripts: 'dangerously', url: 'https://localhost/'});
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: 'https://localhost/',
+  });
   const sw = dom.window;
   sw.eval(fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8'));
   const panels = Array.from(sw.document.querySelectorAll('.tc'));
   assert.strictEqual(panels.length, 3);
-  const expect = ['Bash list files', 'Write /tmp/w.txt', 'Edit path: /tmp/e.txt - a + b'];
+  const expect = [
+    'Bash list files',
+    'Write /tmp/w.txt',
+    'Edit path: /tmp/e.txt - a + b',
+  ];
   panels.forEach((p, i) => {
     const hdr = p.querySelector('.collapse-header');
     // Open a panel the live sweep had folded, then fold it again so the
@@ -334,9 +413,23 @@ function testHeadersAreMixedCase() {
   send(win, {type: 'system_prompt', text: 'You are a test.'});
   send(win, {type: 'ask_answer', question: 'q?', answer: 'a.'});
   sendStep(win, 1);
-  send(win, {type: 'tool_call', name: 'Bash', command: 'false', description: 'fail'});
-  send(win, {type: 'tool_result', name: 'Bash', content: 'boom', is_error: true});
-  send(win, {type: 'tool_call', name: 'ask_user_question', extras: {question: 'why?'}});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'false',
+    description: 'fail',
+  });
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    content: 'boom',
+    is_error: true,
+  });
+  send(win, {
+    type: 'tool_call',
+    name: 'ask_user_question',
+    extras: {question: 'why?'},
+  });
   const sels = [
     '.tc-h',
     '.llm-panel-hdr',
@@ -350,15 +443,28 @@ function testHeadersAreMixedCase() {
     const els = output(win).querySelectorAll(sel);
     assert.ok(els.length > 0, sel + ' rendered');
     for (const el of els) {
-      const tt = win.getComputedStyle(el).getPropertyValue('text-transform').trim();
-      assert.ok(tt === '' || tt === 'none', sel + ' is not transformed: ' + JSON.stringify(tt));
+      const tt = win
+        .getComputedStyle(el)
+        .getPropertyValue('text-transform')
+        .trim();
+      assert.ok(
+        tt === '' || tt === 'none',
+        sel + ' is not transformed: ' + JSON.stringify(tt),
+      );
     }
   }
   const names = Array.from(output(win).querySelectorAll('.tc-h')).map(h =>
     h.firstChild.textContent.trim(),
   );
-  assert.deepStrictEqual(names, ['Bash', 'Bash', 'Question'], 'tool names keep their own case');
-  assert.strictEqual(output(win).querySelector('.llm-panel-hdr').firstChild.textContent, 'Thinking');
+  assert.deepStrictEqual(
+    names,
+    ['Bash', 'Bash', 'Question'],
+    'tool names keep their own case',
+  );
+  assert.strictEqual(
+    output(win).querySelector('.llm-panel-hdr').firstChild.textContent,
+    'Thinking',
+  );
   win.close();
   console.log('  ok - collapsible panel headers are mixed case');
 }

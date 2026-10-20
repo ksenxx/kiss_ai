@@ -477,6 +477,54 @@ class TestGitStatus:
         )
         assert groups == ["changes", "staged"]
 
+    def test_reply_names_the_tabs_task_worktree(self, harness) -> None:
+        """``taskWorktree`` is the worktree the tab's task runs in, ``""`` otherwise.
+
+        The page's SOURCE CONTROL badge counts that worktree's changes
+        alone.  The daemon learns the directory from the task's
+        ``worktree_created`` event addressed to the tab and forgets it
+        when the branch is merged (``worktree_result``).
+        """
+        reply = _request(
+            harness, {"type": "gitStatus", "tabId": "t-wt"}, "gitStatus",
+        )
+        assert reply["taskWorktree"] == ""
+        reply = _request(harness, {"type": "gitStatus"}, "gitStatus")
+        assert reply["taskWorktree"] == ""
+
+        wt_dir = str(harness.work_dir / ".kiss-worktrees" / "kiss_wt-1")
+        printer = harness.server._printer
+        printer._track_worktree_event(
+            {
+                "type": "worktree_created",
+                "worktreeDir": wt_dir,
+                "worktreeWorkDir": wt_dir,
+                "branch": "kiss/wt-1",
+                "tabId": "t-wt",
+            },
+            "t-wt",
+        )
+        try:
+            reply = _request(
+                harness, {"type": "gitStatus", "tabId": "t-wt"}, "gitStatus",
+            )
+            assert reply["taskWorktree"] == wt_dir
+            assert reply["branch"] == "main"
+            # Another tab's request is not told about this tab's worktree.
+            other = _request(
+                harness, {"type": "gitStatus", "tabId": "t-other"}, "gitStatus",
+            )
+            assert other["taskWorktree"] == ""
+        finally:
+            printer._track_worktree_event(
+                {"type": "worktree_result", "success": True, "tabId": "t-wt"},
+                "t-wt",
+            )
+        reply = _request(
+            harness, {"type": "gitStatus", "tabId": "t-wt"}, "gitStatus",
+        )
+        assert reply["taskWorktree"] == "", "a merged worktree is forgotten"
+
 
 class TestGitLog:
     """``gitLog`` over a real wss:// connection against a real repo."""

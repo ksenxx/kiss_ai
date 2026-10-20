@@ -43,6 +43,7 @@ const {
   byId,
   fakeMatchMedia,
   MEDIA,
+  ofType,
 } = require('./simplify2_harness');
 
 /**
@@ -77,10 +78,6 @@ function makePage(opts) {
 
 function press(win, el) {
   el.dispatchEvent(new win.Event('pointerdown', {bubbles: true}));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 function hasClass(win, cls) {

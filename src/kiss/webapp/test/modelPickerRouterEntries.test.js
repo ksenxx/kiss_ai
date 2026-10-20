@@ -60,20 +60,7 @@ function openPicker(win) {
   }));
 }
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 test('the router rows show their cost_label, priced rows show prices', () => {
   const {win} = makePage();
@@ -127,5 +114,5 @@ test('picking autorouter posts selectModel like any other row', () => {
   win.close();
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length > 0 ? 1 : 0);
+report('modelPickerRouterEntries');
+process.exit(0);

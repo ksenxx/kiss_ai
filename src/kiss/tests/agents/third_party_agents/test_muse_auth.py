@@ -68,12 +68,13 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     vault_has_credentials,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    MuseApiHandler,
+    bearer_of,
     loopback_policy,
     set_policy,
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
     RecordingServer,
     recording_server,
     serve_recording,
@@ -103,21 +104,11 @@ def _google_info(token: str) -> dict[str, str]:
     }
 
 
-class _ApiHandler(RecordingHandler):
-    """Emulated REST API recording every request's method/path/auth."""
-
-    server: Any
+class _ApiHandler(MuseApiHandler):
+    """Emulated REST API recording every request's method/path/headers."""
 
     def _serve(self) -> None:
-        body = self._read_raw()
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "auth": self.headers.get("Authorization", ""),
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
+        self.record_full_request()
         self._json(200, {"ok": True, "path": self.path})
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _serve  # noqa: N815
@@ -184,9 +175,9 @@ def test_surrogate_swap_read_allowed(muse_env: Path, api_server: RecordingServer
     assert result["ok"] is True
     assert api_server.requests, "the emulated API saw no traffic"
     seen = api_server.requests[-1]
-    assert seen["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
+    assert bearer_of(seen) == f"Bearer {_REAL_DRIVE_TOKEN}"
     # The surrogate never crossed the network boundary.
-    assert all("muse-sgt." not in r["auth"] for r in api_server.requests)
+    assert all("muse-sgt." not in bearer_of(r) for r in api_server.requests)
     # No plaintext token.json exists anywhere under KISS_HOME's agent dirs.
     legacy = muse_env / "third_party_agents" / "google_drive" / "token.json"
     assert not legacy.exists()
@@ -300,7 +291,7 @@ def test_github_bearer_service(muse_env: Path, api_server: RecordingServer) -> N
 
     result = json.loads(backend.gh_get_me())
     assert result["ok"] is True
-    assert api_server.requests[-1]["auth"] == f"Bearer {_REAL_GITHUB_TOKEN}"
+    assert bearer_of(api_server.requests[-1]) == f"Bearer {_REAL_GITHUB_TOKEN}"
 
     # connect() scrubbed the token-only legacy config automatically;
     # the vault alone still connects.
@@ -584,7 +575,7 @@ def test_boundary_hardening(muse_env: Path, api_server: RecordingServer) -> None
         10,
     )
     assert reply["ok"] is True and reply["status"] == 200
-    assert api_server.requests[-1]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
+    assert bearer_of(api_server.requests[-1]) == f"Bearer {_REAL_DRIVE_TOKEN}"
 
     # Reconstructed responses stream their body via iter_content.
     resp = session.get(f"http://127.0.0.1:{port}/drive/v3/files", headers=auth)
@@ -720,26 +711,19 @@ def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: Record
     )
     assert resp.status_code == 200
     seen = api_server.requests[-1]
-    assert seen["auth"] == "Bearer ntn_real_secret"
+    assert bearer_of(seen) == "Bearer ntn_real_secret"
     # The custom headers reached the emulated API (recorded via the
     # handler, which stores all headers it receives).
 
 
-class _RedirectHandler(RecordingHandler):
+class _RedirectHandler(MuseApiHandler):
     """Emulated API that 302-redirects /start to a final location."""
 
-    server: Any
-
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Serve a redirect or a final body, recording the auth header."""
-        self.server.requests.append(
-            {"path": self.path, "auth": self.headers.get("Authorization", "")}
-        )
+        """Serve a redirect or a final body, recording the request."""
+        self.record_full_request()
         if self.path == "/start":
-            self.send_response(302)
-            self.send_header("Location", self.server.redirect_to)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.redirect(302, self.server.redirect_to)
             return
         self._json(200, {"ok": True, "final": True})
 
@@ -768,7 +752,7 @@ def test_boundary_follows_same_host_redirect_with_token(muse_env: Path) -> None:
         assert json.loads(resp.content)["final"] is True
         # Both hops saw the real token (same allowlisted host).
         assert [r["path"] for r in server.requests] == ["/start", "/final"]
-        assert all(r["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}" for r in server.requests)
+        assert all(bearer_of(r) == f"Bearer {_REAL_DRIVE_TOKEN}" for r in server.requests)
 
 
 def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
@@ -790,5 +774,5 @@ def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
         assert resp.status_code == 200
         # The upstream (allowlisted) host saw the real token; the
         # cross-host (localhost, not allowlisted) target did NOT.
-        assert upstream.requests[0]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
-        assert downstream.requests[-1]["auth"] == ""
+        assert bearer_of(upstream.requests[0]) == f"Bearer {_REAL_DRIVE_TOKEN}"
+        assert bearer_of(downstream.requests[-1]) == ""

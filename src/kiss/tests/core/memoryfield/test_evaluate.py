@@ -26,7 +26,6 @@ from kiss.core.memoryfield.evaluate import (
     family_rank_of,
     format_results_table,
     hand_probes,
-    html_to_text,
     llm_probes,
     load_past_tasks,
     main,
@@ -91,15 +90,6 @@ def make_db(path: Path, extra_rows: list[tuple[Any, ...]] | None = None) -> Path
     return path
 
 
-def test_html_to_text() -> None:
-    text = html_to_text(
-        "<h3>Title</h3><p>One <em>two</em>   \n</p><ul><li>a</li><li>b</li></ul>plain"
-    )
-    assert text == "Title\n\nOne two\n\na\n\nb\n\nplain"
-    assert html_to_text("no tags") == "no tags"
-    assert html_to_text("") == ""
-
-
 def test_load_past_tasks_filters_failed_and_child_rows(tmp_path: Path) -> None:
     long_result = "<p>" + "x" * 400 + "</p>"
     db = make_db(
@@ -149,7 +139,7 @@ def test_task_page_body_and_truncation() -> None:
         task_id="abc", timestamp=1_757_700_000.0, task="do X", result="<p>done <b>well</b></p>"
     )
     body = task_page_body(task)
-    assert body.startswith("# Task (2025-09-12)\n\ndo X\n\n# Result\n\ndone well\n")
+    assert body.startswith("# Task (2025-09-12)\n\ndo X\n\n# Result\n\ndone **well**\n")
     huge = PastTask(task_id="abc", timestamp=0.0, task="t", result="é" * 20_000)
     truncated = task_page_body(huge)
     assert truncated.endswith("[truncated]\n")

@@ -78,6 +78,7 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     _token_path,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    MuseApiHandler,
     auth_tools,
     loopback_policy,
     requires_muse_daemon,
@@ -85,7 +86,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     teardown_muse_env,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -104,33 +104,19 @@ _REAL_BRAVE_KEY = "brave-real-secret-key"
 _GZIP_PATH = "/api/admin.analytics.getFile"
 
 
-class _ApiHandler(RecordingHandler):
+class _ApiHandler(MuseApiHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
-    server: Any
-
     def _serve(self) -> None:
-        body = self._read_raw()
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "headers": {k: v for k, v in self.headers.items()},
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
-        auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
+        body = self.record_full_request()
         if self.path == "/api/oauth.v2.access":
             answer = self.server.oauth.answer(body.decode())
             self._json(200, answer, "application/json; charset=utf-8")
             return
         if self.path == "/upload/file" and self.server.upload_redirect_to:
-            self.send_response(307)
-            self.send_header("Location", self.server.upload_redirect_to)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.redirect(307, self.server.upload_redirect_to)
             return
-        if auth.endswith("-invalid"):
+        if self.authorization().endswith("-invalid"):
             payload = json.dumps({"ok": False, "error": "invalid_auth"}).encode()
             content_type = "application/json; charset=utf-8"
         elif self.path == _GZIP_PATH:
@@ -676,12 +662,15 @@ def test_relic_listener_survives_a_client_that_hangs_up(isolated_kiss_home: Path
     """
     relic, stopped = _start_fake_daemon(_RELIC_STATUS, honors_stop=True)
     try:
-        with Pause(send_frame.__code__, _sending_stop_ack) as pause:
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # The client closes (inner ``with``) while the relic is still paused
+        # before its acknowledgement, so the ack hits a dead peer.
+        with (
+            Pause(send_frame.__code__, _sending_stop_ack) as pause,
+            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client,
+        ):
             client.connect(str(socket_path()))
             send_frame(client, {"op": "stop"})
             assert pause.paused.wait(10.0)
-            client.close()
         relic.join(timeout=5.0)
         assert stopped.is_set() and not relic.is_alive()
         assert not socket_path().exists()

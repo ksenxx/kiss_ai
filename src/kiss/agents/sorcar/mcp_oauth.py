@@ -253,6 +253,10 @@ class MCPLoginSession:
 
         Returns:
             The session; check ``auth_url``, ``done`` and ``error``.
+
+        Raises:
+            ToolCallInterrupted: When the calling tool call was stopped
+                while waiting (checked between slices, as in :meth:`wait`).
         """
         storage = FileTokenStorage(cfg.name)
         if not seed_preregistered_client(storage, cfg.name):
@@ -262,6 +266,7 @@ class MCPLoginSession:
         while time.monotonic() < deadline and not session._finished.is_set():
             if session._url_ready.wait(timeout=0.1):
                 break
+            tool_interrupt.raise_if_interrupted()
         return session
 
     @classmethod

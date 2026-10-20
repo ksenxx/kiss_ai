@@ -210,7 +210,9 @@ function loadMainCss(win) {
 
 /** Dispatch a bubbling click on `el` in `win`. */
 function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const ev = new win.MouseEvent('click', {bubbles: true, cancelable: true});
+  el.dispatchEvent(ev);
+  return ev;
 }
 
 /**
@@ -228,6 +230,11 @@ function clickTab(win, tabId) {
   );
   if (el) click(win, el);
   else win._testApi.switchToTab(tabId);
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    tabId,
+    `tab ${tabId} is on screen`,
+  );
 }
 
 /** The element with `id`, asserting it exists. */
@@ -455,11 +462,54 @@ async function waitFor(predicate, message, timeoutMs = 3000) {
   throw new Error(message || 'waitFor timed out');
 }
 
+/** The messages of `type` the page posted. */
+function ofType(posted, type) {
+  return posted.filter(m => m && m.type === type);
+}
+
+/** The tabId main.js posted in its `ready` message. */
+function readyTabId(posted) {
+  const ready = posted.find(m => m.type === 'ready');
+  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
+  return ready.tabId;
+}
+
+/** Send the configData of a chat with no working directory. */
+function sendEmptyWorkDir(win) {
+  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
+}
+
+/** The transcript element. */
+function output(win) {
+  return win.document.getElementById('output');
+}
+
+/** The history-list rows keyed by their title text. */
+function rowsByTitle(win) {
+  const list = win.document.getElementById('history-list');
+  const map = {};
+  list.querySelectorAll('.sidebar-item').forEach(r => {
+    const t = r.querySelector('.sidebar-item-text');
+    if (t) map[t.textContent] = r;
+  });
+  return map;
+}
+
+/** Whether the page is answering an ask_user_question. */
+function answering(win) {
+  return win.document.body.classList.contains('ask-answering');
+}
+
+/** Pick `value` in the chat's machine drop-down. */
+function pickMachine(win, value) {
+  const select = byId(win, 'chat-machine');
+  select.value = value;
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
+}
+
 module.exports = {
   MEDIA,
-  chatHtml,
   newDom,
-  installRecordingTransport,
   makePage,
   makePreloadedPage,
   loadMainCss,
@@ -475,4 +525,11 @@ module.exports = {
   fakeMatchMedia,
   fakeIntervals,
   waitFor,
+  ofType,
+  readyTabId,
+  sendEmptyWorkDir,
+  output,
+  rowsByTitle,
+  answering,
+  pickMachine,
 };

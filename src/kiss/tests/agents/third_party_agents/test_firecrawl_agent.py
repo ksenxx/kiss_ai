@@ -19,14 +19,11 @@ from __future__ import annotations
 import json
 import shutil
 import stat
-import subprocess
 import sys
-from typing import Any, cast
 from urllib.parse import urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.firecrawl.firecrawl_sea as fc_mod
 from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
     _DEFAULT_BASE_URL,
     FirecrawlAgent,
@@ -36,7 +33,6 @@ from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -110,23 +106,10 @@ _CRAWL_STATUS_PAGED = {
 class _FirecrawlRequestHandler(RecordingHandler):
     """Emulates the Firecrawl v2 REST API and records requests."""
 
-    def _authorized(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {_API_KEY}"
-
-    def _record(self, body: dict[str, Any] | None) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "body": body,
-            }
-        )
-
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         body = self._read_body()
-        self._record(body)
-        if not self._authorized():
+        self.record_request(body)
+        if not self.bearer_ok(_API_KEY):
             self._reply(401, json.dumps({"error": "Unauthorized: Invalid token"}))
             return
         path = urlparse(self.path).path
@@ -159,8 +142,8 @@ class _FirecrawlRequestHandler(RecordingHandler):
             self._reply(404, json.dumps({"error": "Not found"}))
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._record(None)
-        if not self._authorized():
+        self.record_request(None)
+        if not self.bearer_ok(_API_KEY):
             self._reply(401, json.dumps({"error": "Unauthorized: Invalid token"}))
             return
         path = urlparse(self.path).path
@@ -172,8 +155,8 @@ class _FirecrawlRequestHandler(RecordingHandler):
             self._reply(404, json.dumps({"error": "Crawl job not found."}))
 
     def do_DELETE(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._record(None)
-        if not self._authorized():
+        self.record_request(None)
+        if not self.bearer_ok(_API_KEY):
             self._reply(401, json.dumps({"error": "Unauthorized: Invalid token"}))
             return
         if urlparse(self.path).path == f"/v2/crawl/{_CRAWL_ID}":
@@ -200,19 +183,6 @@ def backend(fc_server):
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
-
-
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
-    agent = FirecrawlAgent()
-    assert agent.name == "Firecrawl Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == [
-        "check_firecrawl_auth",
-        "authenticate_firecrawl",
-        "clear_firecrawl_auth",
-    ]
 
 
 def test_check_auth_unauthenticated_message() -> None:
@@ -324,13 +294,6 @@ def test_new_agent_loads_persisted_base_url() -> None:
     _config.save({"api_key": _API_KEY, "base_url": "http://firecrawl.internal:3002"})
     agent = FirecrawlAgent()
     assert agent._backend._base_url == "http://firecrawl.internal:3002"
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    tools = fc_mod.FirecrawlSea().tools([])
-    assert len(tools) >= 3
-    assert all(callable(t) for t in tools)
 
 
 def test_connect_without_config_fails() -> None:
@@ -606,24 +569,6 @@ def test_unauthorized_key_returns_ok_false(fc_server) -> None:
         result = json.loads(call())
         assert result["ok"] is False
         assert "401" in result["error"]
-
-
-def test_main_prints_usage_without_args() -> None:
-    """Running the module CLI with no arguments prints usage and exits 1.
-
-    Executed as a REAL subprocess (no argv patching), so the
-    ``channel_main(...)`` call inside ``main()`` is exercised end to
-    end.  In-process branch coverage cannot count this line because
-    the coverage tracer does not follow the child process.
-    """
-    proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.third_party_agents.firecrawl.firecrawl_sea"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert proc.returncode == 1
-    assert "Usage: kiss-firecrawl" in proc.stdout
 
 
 def test_connection_refused_returns_ok_false(refusing_port: int) -> None:

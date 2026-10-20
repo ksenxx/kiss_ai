@@ -295,7 +295,6 @@ module.exports = {
   audioBlock,
   feed,
   lastProcessor,
-  lastRecognizer,
   fireWake,
   flushWake,
   wake,

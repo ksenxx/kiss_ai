@@ -412,12 +412,19 @@ def _current_leaf(cert_path: Path, key_path: Path, ca_cert_path: Path) -> x509.C
     return cert
 
 
-def _ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:
+def ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:
     """Return the CA pair's paths in *tls_dir*, generating the CA when unusable.
 
     A regenerated CA must be trusted again by every browser and machine
     that trusted the old one, so replacing an existing (expiring or
-    unusable) CA is logged as a warning.  The caller holds the TLS lock.
+    unusable) CA is logged as a warning.  The caller holds the TLS lock
+    (or, for a throwaway directory of its own, needs none).
+
+    Args:
+        tls_dir: The directory holding ``ca.pem`` / ``ca-key.pem``.
+
+    Returns:
+        The CA certificate's and private key's paths, in that order.
     """
     ca_cert_path, ca_key_path = tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
     if not _ca_pair_is_usable(ca_cert_path, ca_key_path):
@@ -447,7 +454,7 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
     Returns:
         ``(cert_path, key_path)`` of the client certificate to present.
     """
-    ca_cert_path, ca_key_path = _ensure_local_ca(tls_dir)
+    ca_cert_path, ca_key_path = ensure_local_ca(tls_dir)
     cert_path, key_path = tls_dir / CLIENT_CERT_FILE, tls_dir / CLIENT_KEY_FILE
     if _current_leaf(cert_path, key_path, ca_cert_path) is None:
         logger.info("Issuing the machine-link client certificate in %s", tls_dir)
@@ -534,7 +541,7 @@ def ensure_local_tls_pair(
     Returns:
         ``(cert_path, key_path)`` of the server certificate to load.
     """
-    ca_cert_path, ca_key_path = _ensure_local_ca(tls_dir)
+    ca_cert_path, ca_key_path = ensure_local_ca(tls_dir)
     cert_path = tls_dir / SERVER_CERT_FILE
     key_path = tls_dir / SERVER_KEY_FILE
     lan_ips = list(lan_ips)

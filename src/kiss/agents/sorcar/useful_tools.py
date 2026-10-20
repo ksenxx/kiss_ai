@@ -679,6 +679,22 @@ CommandRunner = Callable[[str, threading.Event], tuple[int | None, str, float]]
 NOT_STARTED = "Not started: the task was stopped."
 
 
+def _stop_requested(stop_event: threading.Event | None) -> bool:
+    """Return whether *stop_event* fired or the calling thread's tool call was interrupted.
+
+    The waits of the host and docker Bash tools poll this in 0.2 s
+    slices so a task Stop and a tool-panel Stop end a command promptly
+    instead of after its whole timeout.
+
+    Args:
+        stop_event: The task's stop event, or ``None`` when there is none.
+    """
+    interrupt = tool_interrupt.current_tool_interrupt_event()
+    return (stop_event is not None and stop_event.is_set()) or (
+        interrupt is not None and interrupt.is_set()
+    )
+
+
 def run_commands_pool(
     commands: list[str],
     run_one: CommandRunner,
@@ -713,13 +729,11 @@ def run_commands_pool(
         ToolCallInterrupted: When the tool panel's Stop was pressed.
     """
     cancel = threading.Event()
-    interrupt = tool_interrupt.current_tool_interrupt_event()
-    watched = [e for e in (stop_event, interrupt) if e is not None]
     pool = ThreadPoolExecutor(max_workers=max_workers or len(commands))
     try:
         futures = [pool.submit(run_one, command, cancel) for command in commands]
         while not all(f.done() for f in futures):
-            if any(e.is_set() for e in watched):
+            if _stop_requested(stop_event):
                 cancel.set()
                 for f in futures:
                     f.cancel()
@@ -1135,14 +1149,9 @@ class UsefulTools:
         after the loop, exactly like a foreground :meth:`Bash`.
         """
         deadline = time.monotonic() + timeout_seconds
-        interrupt = tool_interrupt.current_tool_interrupt_event()
         while job.process.poll() is None:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if self.stop_event is not None and self.stop_event.is_set():
-                break
-            if interrupt is not None and interrupt.is_set():
+            if remaining <= 0 or _stop_requested(self.stop_event):
                 break
             time.sleep(min(remaining, 0.2))
         tool_interrupt.raise_if_interrupted()
@@ -1566,10 +1575,9 @@ class UsefulTools:
         out_queue: "queue.Queue[str | None]",
         chunks: list[str],
         deadline: float,
-        stop: threading.Event | None = None,
-        interrupt: threading.Event | None = None,
+        until_stop: bool = False,
     ) -> bool:
-        """Consume streamed lines from *out_queue* until EOF, *deadline*, *stop* or *interrupt*.
+        """Consume streamed lines from *out_queue* until EOF, *deadline* or (opted in) a Stop.
 
         Runs on the thread that called :meth:`Bash` so that
         ``stream_callback`` executes with the caller's thread-local
@@ -1584,13 +1592,14 @@ class UsefulTools:
             out_queue: Queue fed by the reader thread; ``None`` marks EOF.
             chunks: Accumulator that received lines are appended to.
             deadline: ``time.monotonic()`` timestamp to stop waiting at.
-            stop: When given, the wait also ends once it is set.
-                ``_stop_monitor`` alone cannot end the wait when the
-                shell has already exited but a background child still
-                holds the stdout pipe (no group to kill), so without
-                this a stop would block for the whole *deadline*.
-            interrupt: The running tool call's interrupt event (the
-                tool panel's Stop button), ending the wait the same way.
+            until_stop: When true, the wait also ends once the task's
+                stop event or the tool panel's Stop fired (see
+                :func:`_stop_requested`).  ``_stop_monitor`` alone
+                cannot end the wait when the shell has already exited
+                but a background child still holds the stdout pipe (no
+                group to kill), so without this a stop would block for
+                the whole *deadline*.  The drain after a kill leaves it
+                off: its short deadline is the bound there.
 
         The queue is polled in 0.2 s slices rather than one long C-level
         wait, so the loop keeps returning to Python: that is where an
@@ -1604,11 +1613,7 @@ class UsefulTools:
         """
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            if stop is not None and stop.is_set():
-                return False
-            if interrupt is not None and interrupt.is_set():
+            if remaining <= 0 or (until_stop and _stop_requested(self.stop_event)):
                 return False
             remaining = min(remaining, 0.2)
             try:
@@ -1686,13 +1691,7 @@ class UsefulTools:
             reader.start()
             interrupt = tool_interrupt.current_tool_interrupt_event()
             deadline = time.monotonic() + timeout_seconds
-            eof = self._consume_stream(
-                out_queue,
-                chunks,
-                deadline,
-                stop=self.stop_event,
-                interrupt=interrupt,
-            )
+            eof = self._consume_stream(out_queue, chunks, deadline, until_stop=True)
             if not eof:
                 # A stop is not a timeout: the shell is killed (the
                 # monitor may already have done so) and its exit code

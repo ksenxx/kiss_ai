@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makePage, send, stubRaf, answering} = require('./simplify2_harness');
 
 // The Chats-panel pick: chat tabs have no row of their own any more, so a
 // chat is shown through the test API; a sub-agent or content tab still on
@@ -18,11 +18,6 @@ function clickTab(win, tabId) {
   if (tabEl) tabEl.click();
   else win._testApi.switchToTab(tabId);
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
-}
-
-// The composer is in answer mode while the tab on screen has a question.
-function answering(win) {
-  return win.document.body.classList.contains('ask-answering');
 }
 
 // The Question panel of the tab on screen while it is awaiting an answer.

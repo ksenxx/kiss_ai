@@ -39,12 +39,15 @@ Every KISS Sorcar surface feeds the same local kiss-web daemon, so the **same
 plain-language prompts work everywhere**:
 
 1. **Web / mobile app.** Open the chat page and type your prompt in the chat box
-   (`@` mentions attach files; the model picker and budget field sit next to the
-   input).  The same page is served over a cloudflared tunnel — copy the URL and
+   (`@` mentions attach files; the model picker sits next to the input, and the
+   per-task budget is the Settings panel's "Max budget per task").  The same page is
+   served over a cloudflared tunnel — copy the URL and
    password from the Settings panel and open it on any phone, tablet, or browser.
-2. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Abracadabra,
-   tell the eng Slack channel that the deploy is done."* You can also steer a running
-   task by voice; Sorcar replies aloud in the language you spoke.
+2. **Voice.** Switch on the mic button (the voice trigger: the page then listens
+   locally for the wake word, and the setting survives reloads) and speak, prefixed
+   with the wake word: *"Abracadabra, tell the eng Slack channel that the deploy is
+   done."* You can also steer a running task by voice; Sorcar replies aloud in the
+   language you spoke.
 3. **Your existing messaging apps.** Once a channel gateway is running (see
    [Always-on gateways](#always-on-gateways) below), any message you send to the bot
    in Telegram, Slack, Discord, email, WhatsApp, ... *is* a prompt: it becomes a
@@ -155,10 +158,12 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   task text itself is not modified (the `kiss-<channel>` CLI launcher no longer appends
   `channel_system_prompt` to the prompt either).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
-  `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
-  below) migrate out of those files into the `~/.kiss/muse_auth/vault` credential
-  vault on first use; non-secret settings and inbound-verification secrets (LINE's
-  `channel_secret`) stay in the service directory. The Google Workspace agents keep no
+  `~/.kiss`; a white-label build uses the `home_dir` of its `brand.json` instead, so a
+  Seamless Loop install keeps all of this under `~/.s10s/`, and every `~/.kiss` path
+  in this document moves with it). On Linux, outbound API secrets for the 18
+  Muse-covered services (see below) migrate out of those files into the
+  `~/.kiss/muse_auth/vault` credential vault on first use; non-secret settings and
+  inbound-verification secrets (LINE's `channel_secret`) stay in the service directory. The Google Workspace agents keep no
   Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
   a not-yet-configured agent can walk you through authentication *in chat* — you never
   have to hand-edit `config.json` first.
@@ -456,7 +461,13 @@ is instead dispatched directly to the daemon through a background side channel t
 not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
 while it works (the tab closes when it finishes and does not reappear on reload), and the
-reply lands in that task's transcript. No configuration or credentials are involved.
+reply lands in that task's transcript as a persisted "Answer" panel that quotes the
+question. Files attached to the `/ask` message travel with the question to the
+answering run (the side channel passes them as the `attachments` of its
+`daemon_client.run` call), and the answering session's spend is charged to the task you
+asked about. The task-info panel's periodic progress update
+(`src/kiss/server/task_update.py`) is the same agent answering a fixed question.
+No configuration or credentials are involved.
 
 > /ask Which files has this task modified so far, and why did the last test run fail?
 
@@ -566,7 +577,7 @@ polite request.
 
 **5. Speak it.** Press the mic button on any chat surface:
 
-> Sorcar, send "dinner at 7" to my family Telegram chat.
+> Abracadabra, send "dinner at 7" to my family Telegram chat.
 
 ### Cross-service pipelines
 
@@ -796,8 +807,9 @@ Concurrent dispatches with different workspaces are serialized so one account's
 credentials never leak into the other's session.
 
 **23. Cheap model for chatter, big model on demand.** Gateway ticks use the
-per-channel defaults from example 20; for a task that matters, pick the model and
-budget in the chat surface's model picker and budget field — or say so in the prompt:
+per-channel defaults from example 20; for a task that matters, pick the model in the
+chat surface's model picker and the budget in its Settings panel — or say so in the
+prompt:
 
 > Using claude-fable-5 with a $2 budget, analyze the last 200 messages in #incidents
 > and post a post-mortem outline back to #incidents.

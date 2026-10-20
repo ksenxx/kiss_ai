@@ -117,8 +117,10 @@ def _make_repo(root: Path, name: str = "ledger") -> Path:
 
 
 def _forget(slug: str) -> None:
-    """Drop the memory of repository *slug*: it is keyed by name, so earlier tests share it."""
+    """Drop the memory and the URL-spec checkout of repository *slug*: both are keyed by
+    name in the session home, so earlier tests (and earlier runs) share them."""
     shutil.rmtree(kiss_home() / "memories" / slug, ignore_errors=True)
+    shutil.rmtree(kiss_home() / "knowledge" / "checkouts" / slug, ignore_errors=True)
 
 
 @pytest.fixture
@@ -151,20 +153,29 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     # per-repository indexing sub-agents.  ``system_prompt`` is a hook
     # the daemon applies (checked below through ``apply_sea``), not a
     # settings key.
-    assert sea_commands.base_settings([agent]) == resolve_settings(
-        {**WORKER_DEFAULTS, **agent.settings({})}
-    ) == {
-        "tool_profile": "full",
-        "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
-    }
+    assert (
+        sea_commands.base_settings([agent])
+        == resolve_settings({**WORKER_DEFAULTS, **agent.settings({})})
+        == {
+            "tool_profile": "full",
+            "auto_classify": False,
+            "use_web_tools": False,
+            "use_memory": False,
+        }
+    )
     assert_no_removed_getters(sea)
     names = [tool.__name__ for tool in agent.tools([])]
     assert names == [
-        "index_repo", "knowledge_status", "knowledge_search", "knowledge_read",
-        "list_knowledge_pages", "read_knowledge_page", "search_knowledge_pages",
-        "write_knowledge_page", "delete_knowledge_page", "schedule_daily_update",
+        "index_repo",
+        "knowledge_status",
+        "knowledge_search",
+        "knowledge_read",
+        "list_knowledge_pages",
+        "read_knowledge_page",
+        "search_knowledge_pages",
+        "write_knowledge_page",
+        "delete_knowledge_page",
+        "schedule_daily_update",
     ]
     assert [tool.__name__ for tool in agent.tools([print])] == ["print", *names]
     # ``system_prompt`` REPLACES the assembled prompt with the filled template.
@@ -200,7 +211,9 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     """``/git_extract_knowledge <repo>`` resolves to the repo text and this SEA."""
     assert sea_commands.get_command("git_extract_knowledge") == _SEA_PATH
     assert sea_commands.slash_command_task("/git_extract_knowledge /tmp/repo") == (
-        "/tmp/repo", _SEA_PATH)
+        "/tmp/repo",
+        _SEA_PATH,
+    )
     assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings(
         [GitExtractKnowledgeSea()]
     )
@@ -402,7 +415,9 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     assert ctrl is not None and "subject with \x1f byte" in ctrl.text and "CTRLFACT" in ctrl.text
     assert ctrl.title.endswith("subject with \x1f byte")
     for path, fact in (
-        ("space name.txt", "SPACEFACT"), ("café.txt", "UNICODEFACT"), ("tab\tname.txt", "TABFACT"),
+        ("space name.txt", "SPACEFACT"),
+        ("café.txt", "UNICODEFACT"),
+        ("tab\tname.txt", "TABFACT"),
     ):
         change = store.get(f"change:{root}:{path}")
         assert change is not None and f"+{fact}" in change.text, path
@@ -542,7 +557,8 @@ def test_unshallowing_keeps_the_head_commit_of_a_file_the_boundary_changed(
 
 
 def test_lookups_beyond_the_budget_are_drained_by_the_next_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Touched files past MAX_LAST_TOUCH_LOOKUPS wait in ``pending_touch`` for the next runs."""
     _forget("budget")
@@ -667,17 +683,30 @@ def test_search_tokenizes_queries_filters_kinds_and_paths(repo: Path) -> None:
     # History ranks below the current state: a change block and a chunk block
     # with the same text tie on BM25, and the chunk wins, even over a change
     # whose BM25 score is better (a title match) but not 1/0.6 = 1.7x better.
-    store.upsert([
-        Block(
-            "change", "change:deadbeef:src/x.py", "x.py in deadbeef", "quorum quorum",
-            "src/x.py", "deadbeef",
-        ),
-        Block("chunk", "chunk:src/x.py:1", "src/x.py lines 1-2", "quorum quorum", "src/x.py", ""),
-        Block(
-            "change", "change:cafebabe:src/y.py", "quorum quorum in y.py",
-            "quorum quorum quorum", "src/y.py", "cafebabe",
-        ),
-    ], "2026-01-01T00:00:00Z")
+    store.upsert(
+        [
+            Block(
+                "change",
+                "change:deadbeef:src/x.py",
+                "x.py in deadbeef",
+                "quorum quorum",
+                "src/x.py",
+                "deadbeef",
+            ),
+            Block(
+                "chunk", "chunk:src/x.py:1", "src/x.py lines 1-2", "quorum quorum", "src/x.py", ""
+            ),
+            Block(
+                "change",
+                "change:cafebabe:src/y.py",
+                "quorum quorum in y.py",
+                "quorum quorum quorum",
+                "src/y.py",
+                "cafebabe",
+            ),
+        ],
+        "2026-01-01T00:00:00Z",
+    )
     ranked = [h.block.key for h in store.search("quorum", k=3)]
     assert ranked == ["chunk:src/x.py:1", "change:cafebabe:src/y.py", "change:deadbeef:src/x.py"]
     only_changes = [h.block.key for h in store.search("quorum", k=3, kinds=["change"])]
@@ -697,15 +726,18 @@ def test_search_tokenizes_queries_filters_kinds_and_paths(repo: Path) -> None:
 
 
 def test_pages_are_written_to_the_domain_memory_and_mirrored(
-    repo: Path, monkeypatch: pytest.MonkeyPatch,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Curated pages land where every Sorcar run in the repo finds them, plus note blocks."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # offline hashed embeddings
     sea.index_repo(str(repo))
     result = sea.write_knowledge_page(
-        str(repo), "domain-glossary",
+        str(repo),
+        "domain-glossary",
         "# Glossary\n\n- **Ledger**: holds accounts (src/pkg/bank.py:11).",
-        title="Domain glossary", summary="Terms of the ledger domain.",
+        title="Domain glossary",
+        summary="Terms of the ledger domain.",
     )
     assert result.startswith("Wrote ledger/domain-glossary.md")
     page = MemoryDir(_memory_dir(repo)).read("domain-glossary")
@@ -798,14 +830,20 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         # A job in the format of an older version of this SEA (host-local
         # schedule, no model or budget in the directive) is recognised and
         # removed too, while the up-to-date job stays.
-        old = yaml.safe_load(cron_job(
-            "create", name=name, schedule="0 11 * * *", max_budget="5", timeout="300",
-            prompt=(
-                "Call the run_agent tool IMMEDIATELY, as your very first action, with "
-                f"these arguments and no others:\n  agent   = {str(_SEA_PATH)!r}\n"
-                f"  task    = {f'update {repo}'!r}\n  timeout = '14400'\nDo not explore."
-            ),
-        ))
+        old = yaml.safe_load(
+            cron_job(
+                "create",
+                name=name,
+                schedule="0 11 * * *",
+                max_budget="5",
+                timeout="300",
+                prompt=(
+                    "Call the run_agent tool IMMEDIATELY, as your very first action, with "
+                    f"these arguments and no others:\n  agent   = {str(_SEA_PATH)!r}\n"
+                    f"  task    = {f'update {repo}'!r}\n  timeout = '14400'\nDo not explore."
+                ),
+            )
+        )
         assert [job for job in load_jobs() if job["id"] == old["created"]["id"]]
         again = sea.schedule_daily_update(str(repo))
         assert again.startswith(
@@ -821,11 +859,17 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         # Same prompt, schedule, model and budget but a short timeout: outdated too.
         current = [job for job in load_jobs() if job["id"] == job_id][0]
         cron_job("remove", job_id=job_id)
-        short = yaml.safe_load(cron_job(
-            "create", name=name, schedule=current["schedule"], prompt=current["prompt"],
-            model_name=current["model_name"], max_budget=str(current["max_budget"]),
-            timeout="300",
-        ))
+        short = yaml.safe_load(
+            cron_job(
+                "create",
+                name=name,
+                schedule=current["schedule"],
+                prompt=current["prompt"],
+                model_name=current["model_name"],
+                max_budget=str(current["max_budget"]),
+                timeout="300",
+            )
+        )
         assert "created" in short, short
         renewed = sea.schedule_daily_update(str(repo))
         assert renewed.startswith(f"Removed outdated job(s) {short['created']['id']}.\ncreated:")
@@ -841,8 +885,12 @@ def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
 
     def cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-m", sea.MODULE, *args], capture_output=True, text=True, env=env,
-            cwd=cwd, timeout=600,
+            [sys.executable, "-m", sea.MODULE, *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=cwd,
+            timeout=600,
         )
 
     out = cli("index", "ledger", cwd=tmp_path)  # relative to the shell's directory
@@ -856,8 +904,15 @@ def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
     body = tmp_path / "page.md"
     body.write_text("# Module src/pkg\n\n`bank.py` holds the Ledger (src/pkg/bank.py:11).\n")
     out = cli(
-        "write-page", str(repo), "module-src-pkg", "--title", "Module src/pkg",
-        "--summary", "The ledger package.", "--file", str(body),
+        "write-page",
+        str(repo),
+        "module-src-pkg",
+        "--title",
+        "Module src/pkg",
+        "--summary",
+        "The ledger package.",
+        "--file",
+        str(body),
     )
     assert out.returncode == 0 and out.stdout.startswith("Wrote ledger/module-src-pkg.md")
     assert "module-src-pkg" in cli("pages", str(repo)).stdout
@@ -876,14 +931,20 @@ def test_lookup_page_commands_run_for_paths_with_spaces(tmp_path: Path) -> None:
     page = MemoryDir(_memory_dir(repo)).read(sea.LOOKUP_PAGE).body
     command = next(line.strip() for line in page.splitlines() if " status " in line)
     out = subprocess.run(
-        shlex.split(command), capture_output=True, text=True, cwd=tmp_path,
-        env={**os.environ, "KISS_HOME": str(kiss_home())}, timeout=600,
+        shlex.split(command),
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "KISS_HOME": str(kiss_home())},
+        timeout=600,
     )
     assert out.returncode == 0 and f"repository: {repo}" in out.stdout, out.stderr
 
 
 def test_cli_in_process_covers_every_subcommand(
-    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """``main`` maps each sub-command to its tool and exits 1 on an error message."""
     assert sea.main(["index", str(repo)]) == 0
@@ -923,7 +984,9 @@ def test_segments_are_linear_and_cap_giant_diffs() -> None:
 
 
 def test_git_failures_and_odd_inputs_are_reported(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every git failure surfaces as ``KnowledgeError``; odd stream inputs are handled."""
     with pytest.raises(index.KnowledgeError, match="exit 128"):
@@ -937,10 +1000,19 @@ def test_git_failures_and_odd_inputs_are_reported(
         index._parse_header("garbage")
     assert list(index.read_blobs(repo, ["0" * 40])) == []  # a missing blob is skipped
     # An empty commit has neither numstat nor patch: one commit block, no change blocks.
-    header = "\x1f".join([
-        "a" * 40, "", "Bob", "bob@x", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
-        "1767225600", "", "empty\n",
-    ])
+    header = "\x1f".join(
+        [
+            "a" * 40,
+            "",
+            "Bob",
+            "bob@x",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "1767225600",
+            "",
+            "empty\n",
+        ]
+    )
     empty = index._parse_header(header)
     index._parse_diff(empty, "\n")
     assert empty.numstat == [] and empty.patches == {} and empty.subject == "empty"
@@ -961,7 +1033,13 @@ def test_submodule_gitlinks_are_not_files(tmp_path: Path) -> None:
     outer = _make_repo(tmp_path, "outer")
     inner = _make_repo(tmp_path, "inner")
     git(
-        outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner),
+        outer,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(inner),
         "vendor/inner",
     )
     git(outer, "commit", "-q", "-m", "add submodule")
@@ -973,7 +1051,8 @@ def test_symbols_are_found_across_language_families() -> None:
     """The definition-line patterns cover the common languages."""
     cases = {
         "Python": (
-            "async def fetch(x):\nclass Node:\n", [(1, "def", "fetch"), (2, "class", "Node")],
+            "async def fetch(x):\nclass Node:\n",
+            [(1, "def", "fetch"), (2, "class", "Node")],
         ),
         "TypeScript": (
             "export default class App {}\nexport const run = async (x: number) => x;\n"
@@ -985,7 +1064,8 @@ def test_symbols_are_found_across_language_families() -> None:
             [(1, "func", "Start"), (2, "struct", "Config")],
         ),
         "Rust": (
-            "pub async fn serve() {}\nimpl Server {\n", [(1, "fn", "serve"), (2, "impl", "Server")],
+            "pub async fn serve() {}\nimpl Server {\n",
+            [(1, "fn", "serve"), (2, "impl", "Server")],
         ),
         "Java": (
             "public final class Main {\n    public static void main(String[] a) {\n",
@@ -1000,7 +1080,8 @@ def test_symbols_are_found_across_language_families() -> None:
             [(1, "function", "parse_args"), (4, "struct", "node")],
         ),
         "Ruby": (
-            "module Bank\n  def deposit!(x)\n", [(1, "module", "Bank"), (2, "def", "deposit!")],
+            "module Bank\n  def deposit!(x)\n",
+            [(1, "module", "Bank"), (2, "def", "deposit!")],
         ),
         "PHP": (
             "final class Account {\n    public function balance() {}\n",
@@ -1015,7 +1096,8 @@ def test_symbols_are_found_across_language_families() -> None:
             [(1, "function", "tick"), (2, "function", "M.start")],
         ),
         "Markdown": (
-            "# Title\ntext\n## Part ##\n", [(1, "heading", "Title"), (3, "heading", "Part")],
+            "# Title\ntext\n## Part ##\n",
+            [(1, "heading", "Title"), (3, "heading", "Part")],
         ),
         "JSON": ('{"def": 1}\n', []),
     }
@@ -1031,7 +1113,12 @@ def test_chunks_hold_the_whole_file_and_oversized_files_keep_metadata() -> None:
     lines = ["short"] * 100 + ["y" * 13_000] + ["tail"]
     spans = index.chunk_spans(lines)
     assert spans == [
-        (0, 80, 0), (80, 100, 0), (100, 101, 1), (100, 101, 2), (100, 101, 3), (101, 102, 0),
+        (0, 80, 0),
+        (80, 100, 0),
+        (100, 101, 1),
+        (100, 101, 2),
+        (100, 101, 3),
+        (101, 102, 0),
     ]
     dense = ["z" * 500] * 30  # 30 lines but 15,000 characters: split by characters
     assert index.chunk_spans(dense) == [(0, 11, 0), (11, 22, 0), (22, 30, 0)]
@@ -1039,13 +1126,21 @@ def test_chunks_hold_the_whole_file_and_oversized_files_keep_metadata() -> None:
     blocks = index.file_blocks("big.txt", "sha", "\n".join(lines).encode(), ("abc", "2026-01-01"))
     keys = [block.key for block in blocks]
     assert keys == [  # the file block comes last: it marks the file as fully indexed
-        "chunk:big.txt:1", "chunk:big.txt:81", "chunk:big.txt:101:p1", "chunk:big.txt:101:p2",
-        "chunk:big.txt:101:p3", "chunk:big.txt:102", "file:big.txt",
+        "chunk:big.txt:1",
+        "chunk:big.txt:81",
+        "chunk:big.txt:101:p1",
+        "chunk:big.txt:101:p2",
+        "chunk:big.txt:101:p3",
+        "chunk:big.txt:102",
+        "file:big.txt",
     ]
     assert "".join(b.text.split("\n", 1)[1] for b in blocks[2:5]) == "y" * 13_000
     assert "last commit: abc (2026-01-01)" in blocks[-1].text
     oversized = index.file_blocks(
-        "huge.csv", "sha", b"a,b\n" * (index.MAX_CONTENT_BYTES // 4 + 1), None,
+        "huge.csv",
+        "sha",
+        b"a,b\n" * (index.MAX_CONTENT_BYTES // 4 + 1),
+        None,
     )
     assert len(oversized) == 1 and "not indexed (too large: " in oversized[0].text
 
@@ -1057,12 +1152,18 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
         tool_call_body("index_repo", {"repo": str(repo)}, prompt_tokens=500),
         tool_call_body(
             "write_knowledge_page",
-            {"repo": str(repo), "name": "overview", "content": page, "title": "Overview",
-             "summary": "What the ledger is."},
+            {
+                "repo": str(repo),
+                "name": "overview",
+                "content": page,
+                "title": "Overview",
+                "summary": "What the ledger is.",
+            },
             prompt_tokens=600,
         ),
         tool_call_body(
-            "knowledge_search", {"repo": str(repo), "query": "ledger", "kinds": "note"},
+            "knowledge_search",
+            {"repo": str(repo), "query": "ledger", "kinds": "note"},
             prompt_tokens=700,
         ),
         finish_body("<h3>Memory built</h3>", prompt_tokens=800),
@@ -1088,11 +1189,26 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
 def test_report_lists_are_capped() -> None:
     """Long change lists are cut with a count of the rest."""
     report = index.IndexReport(
-        repo="r", slug="s", memory_dir="m", store_path="p", mode="full", head="h" * 40,
-        previous_head="", seconds=1.0, counts={"file": 3}, files_total=3, files_indexed=3,
-        files_removed=0, changed_paths=[f"f{i}" for i in range(5)], commits_indexed=0,
-        commits_removed=0, new_commits=[], languages={"Python": 3}, top_dirs=[(".", 3)],
-        authors=["A (1 commits)"], tags=[],
+        repo="r",
+        slug="s",
+        memory_dir="m",
+        store_path="p",
+        mode="full",
+        head="h" * 40,
+        previous_head="",
+        seconds=1.0,
+        counts={"file": 3},
+        files_total=3,
+        files_indexed=3,
+        files_removed=0,
+        changed_paths=[f"f{i}" for i in range(5)],
+        commits_indexed=0,
+        commits_removed=0,
+        new_commits=[],
+        languages={"Python": 3},
+        top_dirs=[(".", 3)],
+        authors=["A (1 commits)"],
+        tags=[],
     )
     text = index.format_report(report, list_limit=2)
     assert "changed files:\n  f0\n  f1\n  … 3 more" in text and "new commits" not in text
@@ -1230,8 +1346,15 @@ def test_blocks_are_written_children_first() -> None:
     assert [b.kind for b in blocks[:-1]] and blocks[-1].kind == "file"
     assert all(b.kind != "file" for b in blocks[:-1])
     commit = index.Commit(
-        "c" * 40, "", "A", "a@x", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", 0,
-        "", "subject",
+        "c" * 40,
+        "",
+        "A",
+        "a@x",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:00+00:00",
+        0,
+        "",
+        "subject",
     )
     commit.numstat.append(("1", "0", "a.py"))
     commit.patches["a.py"] = "diff --git a/a.py b/a.py\n+++ b/a.py\n+x\n"

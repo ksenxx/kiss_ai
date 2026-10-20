@@ -43,6 +43,8 @@ const {
   send,
   stubRaf,
   fakeMatchMedia,
+  ofType,
+  sendEmptyWorkDir,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -62,17 +64,9 @@ function makePage() {
   return {win, posted, scrolled};
 }
 
-function byType(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
 function lastMessage(posted, type) {
-  const msgs = byType(posted, type);
+  const msgs = ofType(posted, type);
   return msgs.length ? msgs[msgs.length - 1] : null;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
 }
 
 /** A booted page with the Chats drawer open (which asks for history). */
@@ -482,7 +476,7 @@ function testFilteredRowWaitsForTheFilter() {
 function testPagePaintsFromOwnTabs() {
   const {win, posted, scrolled} = makePage();
   sendEmptyWorkDir(win);
-  const mine = byType(posted, 'ready')[0].tabId;
+  const mine = ofType(posted, 'ready')[0].tabId;
   send(win, {
     type: 'tabs_state',
     tabs: [
@@ -522,7 +516,7 @@ function testPagePaintsFromOwnTabs() {
   assert.ok(collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
 
   assert.strictEqual(
-    byType(posted, 'activeTask').length,
+    ofType(posted, 'activeTask').length,
     0,
     'the page never posts activeTask (its postMessage is the daemon)',
   );

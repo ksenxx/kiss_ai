@@ -21,16 +21,11 @@ const {
   makePage: makeChatPage,
   send,
   loadMainCss: injectCss,
+  readyTabId,
 } = require('./simplify2_harness');
 
 function makePage() {
   return makeChatPage({sourceUrl: 'trajectory-main.js'});
-}
-
-function readyTabId(posted) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 /** Whether *el* and every ancestor up to #output is displayed. */

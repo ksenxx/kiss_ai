@@ -223,16 +223,30 @@ class TerminalService:
         """
         tab_id, conn_id = opening.tab_id, opening.conn_id
         with self._spawn_lock:
-            with self._lock:
-                if opening.cancelled:
-                    return None
-                if tab_id in self._sessions:
-                    # The shell is up (an earlier open of the tab): a
-                    # live connection re-attaches; a dropped one has
-                    # nothing to claim.
-                    if not opening.detached:
-                        self._reattach_locked(tab_id, conn_id, cols, rows)
-                    return None
+            # A ``terminalOpen`` right behind the ``terminalClose`` of
+            # the same tab (a page reloading as a grace hang-up fires)
+            # finds the hung-up shell still registered, on its way out.
+            # It must not re-attach to it (its exit would be reported
+            # under the new page) but wait for its reap and start a
+            # fresh one; the hang-up kills the shell after
+            # ``_HANGUP_TIMEOUT``, so the wait is bounded.  The decision
+            # and the re-attach are one step under the lock.
+            deadline = time.monotonic() + _HANGUP_TIMEOUT + 2.0
+            while True:
+                with self._lock:
+                    if opening.cancelled:
+                        return None
+                    session = self._sessions.get(tab_id)
+                    if session is None:
+                        break
+                    if not session.hung_up or time.monotonic() >= deadline:
+                        # The shell is up (an earlier open of the tab): a
+                        # live connection re-attaches; a dropped one has
+                        # nothing to claim.
+                        if not opening.detached:
+                            self._reattach_locked(tab_id, conn_id, cols, rows)
+                        return None
+                time.sleep(0.01)
             try:
                 session = self._spawn(tab_id, conn_id, work_dir, cols, rows)
             except Exception as exc:  # noqa: BLE001 — reported to the tab
@@ -435,8 +449,15 @@ class TerminalService:
             return
         session.hung_up = True
         self._cancel_grace(session)
+        # The shell's group is its own pid once the child's ``setsid``
+        # has run; ``pty.fork`` returns to us before that, and until
+        # then the child is still in the daemon's group, which a
+        # ``killpg`` would hang up as well.
         try:
-            os.killpg(os.getpgid(session.pid), signal.SIGHUP)
+            if os.getpgid(session.pid) == session.pid:
+                os.killpg(session.pid, signal.SIGHUP)
+            else:
+                os.kill(session.pid, signal.SIGHUP)
         except OSError:
             pass
         timer = threading.Timer(_HANGUP_TIMEOUT, self._kill_if_alive, [session])

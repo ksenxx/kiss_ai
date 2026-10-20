@@ -568,6 +568,11 @@ class AgentServer(
         ) = None
         self._complete_worker: threading.Thread | None = None
         self._file_index = FileIndexRegistry()
+        # Connection id -> token of its latest ``getFiles`` request.
+        # Entries are short-lived: each is removed once the request it
+        # names has been answered or abandoned (autocomplete.py), so
+        # the map only ever holds connections with a build in flight.
+        self._files_latest_request: dict[str, object] = {}
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
 
@@ -684,7 +689,7 @@ class AgentServer(
             # scan that answers it, but a scan that failed (A-C1) or
             # is still in flight when the window closes would leave
             # the departed connection's entry behind forever.
-            self._files_request_map().pop(conn_id, None)
+            self._files_latest_request.pop(conn_id, None)
 
     def _broadcast_tabs_state(self) -> None:
         """Send the full tab registry snapshot to EVERY connected client.
@@ -992,10 +997,7 @@ class AgentServer(
             pick = self._model_pick
         persisted = _load_last_model()
         with self._state_lock:
-            if (
-                persisted and (valid is None or persisted in valid)
-                and self._model_pick == pick
-            ):
+            if persisted and (valid is None or persisted in valid) and self._model_pick == pick:
                 self._default_model = persisted
 
     def _printer_cleanup_tab(self, tab_id: str, keep_task_id: str = "") -> None:
@@ -1456,7 +1458,7 @@ class AgentServer(
         # the reopened state ``frontend_closed`` / tore down the
         # re-subscribed viewer.  A publication landing between the
         # ``close_tab`` above and this clock read can stamp a
-        # generation at or below the reading; ``_tab_reopened_since``
+        # generation at or below the reading; ``reopened_since``
         # closes that gap by also treating registry PRESENCE as a
         # reopen (presence after an absent-close is always a later
         # republication).  A tab that was never published (sub-agent
@@ -1466,36 +1468,6 @@ class AgentServer(
             tab_id,
             removal_token=removal_token or self.tab_registry.clock(),
         )
-
-    def _tab_reopened_since(self, tab_id: str, token: int) -> bool:
-        """True when *tab_id* was legitimately reopened after *token*.
-
-        The stand-down predicate of the close/displacement cleanup
-        tails.  A reopen is visible in either of two ways:
-
-        * a publication stamped a generation newer than *token*
-          (:meth:`TabRegistry.republished_since`) — covers a removal
-          token and a clock observation alike; or
-        * the tab is PRESENT in the registry.  For a real removal
-          token this is implied by the first clause (the removal
-          deleted the row, so presence requires a later publication).
-          For a token-0 duplicate close it closes the observation gap:
-          a reopen publishing between the close's ``close_tab`` (which
-          found the tab absent) and its ``clock()`` read stamps a
-          generation at or below the observation, yet its row proves
-          the reopen happened after the close's registry step.
-
-        Both observations are drawn in ONE registry-locked section
-        (:meth:`TabRegistry.reopened_since`): two separate calls left
-        a seam where a rowless publication landing between them was
-        invisible to both — the stale generation read and a still-false
-        row presence (gpt-5.6-sol round-6 review, finding 1).
-
-        Args:
-            tab_id: The frontend tab identifier being cleaned up.
-            token: The cleanup's removal token or clock observation.
-        """
-        return self.tab_registry.reopened_since(tab_id, token)
 
     def _commit_replay_publication(
         self,
@@ -1706,10 +1678,15 @@ class AgentServer(
             teardown tail for the claimed *state*; ``(False, None)``
             when the drop stood down or the tab is busy.
         """
-        if removal_token is not None and self._tab_reopened_since(tab_id, removal_token):
+        if removal_token is not None and self.tab_registry.reopened_since(
+            tab_id,
+            removal_token,
+        ):
             # A later publication reopened the tab between the
-            # registry removal and this cleanup; it owns the state
-            # now (its own rebind runs under this same lock).
+            # registry removal and this cleanup (a newer generation,
+            # or — for a token-0 duplicate close — a registry row
+            # published after the close found the tab absent); it owns
+            # the state now (its own rebind runs under this same lock).
             return False, None
         state = agent_state.find_by_tab(tab_id)
         is_subagent_tab = (state is not None and state.is_subagent) or "__sub_" in tab_id
@@ -1782,7 +1759,7 @@ class AgentServer(
         return True, state
 
     def _remember_closed_subagent_tab(self, tab_id: str) -> None:
-        """Record that the user closed the running sub-agent tab *tab_id*.
+        """Under ``_state_lock``: record that the user closed the running sub-agent tab *tab_id*.
 
         :meth:`_open_persisted_subagent_tabs` then leaves the tab closed
         on a replay (a surface connecting mid-run) until the sub-agent
@@ -1796,13 +1773,13 @@ class AgentServer(
             tab_id: The shared sub-agent tab identifier
                 (``{parent_tab_id}__sub_{task_id}``).
         """
-        locked_call(self._state_lock, self._remember_closed_subagent_tab_locked, tab_id)
-
-    def _remember_closed_subagent_tab_locked(self, tab_id: str) -> None:
-        """Under ``_state_lock``: the body of :meth:`_remember_closed_subagent_tab`."""
         self._closed_subagent_tabs.add(tab_id)
         self._closed_subagent_tabs.difference_update(
-            {t for t in self._closed_subagent_tabs if _subagent_is_done(t.rsplit("__sub_", 1)[-1])}
+            {
+                t
+                for t in self._closed_subagent_tabs
+                if _no_live_state_locked(t.rsplit("__sub_", 1)[-1])
+            }
         )
 
     def _broadcast_subagent_close(self, tab_id: str) -> None:
@@ -2178,6 +2155,7 @@ class AgentServer(
         tab_id: str = "",
         task_id: str | None = None,
         conn_id: str = "",
+        replay_id: str = "",
     ) -> None:
         """Replay recorded chat events for a previous chat session.
 
@@ -2209,11 +2187,20 @@ class AgentServer(
                 have no other way to learn its new transcript.  The tab
                 binding (``tabs_state``) and status events are always
                 broadcast.
+            replay_id: When non-empty, echoed as ``replayId`` on every
+                frame of the answer (the transcript, the status or
+                ``subagentDone`` standing in for it, the sub-agent
+                announcements and transcripts that follow), so a
+                daemon that forwarded the resume for one of its
+                clients (:mod:`kiss.server.remote_tabs`) can tell the
+                answer from the tab's other frames.
         """
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
         replay_scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
+        if replay_id:
+            replay_scope["replayId"] = replay_id
         with self._state_lock:
             if task_id:
                 self._tab_opened_task_ids[tab_id] = str(task_id)
@@ -2455,6 +2442,7 @@ class AgentServer(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
                 conn_id=conn_id,
+                replay_id=replay_id,
                 live_only=subagent_info is not None,
                 transcripts=not conn_id,
             )
@@ -2652,6 +2640,7 @@ class AgentServer(
         parent_task_id: str,
         parent_tab_id: str,
         conn_id: str = "",
+        replay_id: str = "",
         live_only: bool = False,
         ancestors: frozenset[str] = frozenset(),
         transcripts: bool = True,
@@ -2690,6 +2679,8 @@ class AgentServer(
                 would also re-open a sub-tab a user closed by hand.
                 A reattached still-running sub-agent's live events
                 keep fanning out to every viewer as before.
+            replay_id: Echoed as ``replayId`` on every frame, as
+                :meth:`_replay_session` does for the parent's.
             live_only: Omit completed descendants when walking through a
                 finished ancestor; their live children must still be reachable.
             ancestors: Task ids already on the replay path.  A child that
@@ -2704,6 +2695,8 @@ class AgentServer(
                 fetch) does this; a history click still replays all.
         """
         scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
+        if replay_id:
+            scope["replayId"] = replay_id
         ancestors = ancestors | {parent_task_id}
         sub_rows = _load_subagent_rows_by_parent_task_id(
             parent_task_id,
@@ -2751,6 +2744,7 @@ class AgentServer(
                     parent_task_id=str(sub_task_id),
                     parent_tab_id=sub_tab_id,
                     conn_id=conn_id,
+                    replay_id=replay_id,
                     live_only=True,
                     ancestors=ancestors,
                     transcripts=transcripts,
@@ -2842,6 +2836,7 @@ class AgentServer(
                 parent_task_id=str(sub_task_id),
                 parent_tab_id=sub_tab_id,
                 conn_id=conn_id,
+                replay_id=replay_id,
                 live_only=is_done,
                 ancestors=ancestors,
                 transcripts=transcripts,

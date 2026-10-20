@@ -332,6 +332,11 @@ class ToolBridge:
         reading its request line; it is not in ``running`` yet, so the
         refusal, set under the same lock the registration takes, is
         what keeps it from running a tool after the block.
+
+        The refusal and the wait both run in a ``finally``: a Stop
+        injected while the listener is shutting down must still
+        interrupt and await the calls already executing, or a long tool
+        would keep working on its daemon thread after the run returned.
         """
         try:
             if _spawned(self._thread):
@@ -340,7 +345,7 @@ class ToolBridge:
         finally:
             self._server.server_close()
             locked_call(self._server.state_lock, self._server.refuse_new_calls)
-        self._wait_for_calls()
+            self._wait_for_calls()
 
     def _wait_for_calls(self) -> None:
         """Wait for the calls still executing; a Stop interrupts them and bounds the wait.

@@ -44,6 +44,8 @@ const {
   byId,
   stubRaf,
   fakeMatchMedia,
+  captureTimers,
+  ofType,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -133,10 +135,6 @@ function openText(win, path, content, version, line) {
     version,
     line,
   });
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 /** Press Enter in a form input: sidebarInlineForm submits the form. */
@@ -663,12 +661,14 @@ async function main() {
     const checkSvg = probe.innerHTML;
     assert.strictEqual(btn.innerHTML, copySvg);
     assert.strictEqual(btn.getAttribute('aria-label'), 'Copy URL to clipboard');
+    const timers = captureTimers(win);
     click(win, btn);
     await sleep(0);
     assert.deepStrictEqual(copied, ['https://words.trycloudflare.com']);
     assert.strictEqual(btn.innerHTML, checkSvg);
     assert.ok(btn.classList.contains('copied'));
-    await sleep(1600);
+    // The 1500 ms revert timer is fired instead of waited for.
+    timers.find(t => t.ms === 1500).cb();
     assert.strictEqual(btn.innerHTML, copySvg);
     assert.ok(!btn.classList.contains('copied'));
     win.close();

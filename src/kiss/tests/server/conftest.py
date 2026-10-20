@@ -169,6 +169,38 @@ def clear_tab_states(tab_id: str) -> None:
             agent_state.unregister(state.task_id, state)
 
 
+class EntryGate:
+    """Hold a thread at the entry of one real function until released.
+
+    A race test needs a thread parked INSIDE a real code path (not a
+    sleep that hopes the other thread gets there in time).  Installed
+    as a profile hook, the gate sets ``reached`` when a thread enters
+    the function whose ``__code__`` it watches and blocks that thread
+    until ``release`` is set.  Nothing is replaced: the function then
+    runs as it is.  :meth:`start` installs the gate with
+    ``threading.setprofile``, so every thread started afterwards
+    carries it (the handler's thread and any worker it spawns); call
+    ``threading.setprofile(None)`` in teardown.
+    """
+
+    def __init__(self, code: Any) -> None:
+        self.code = code
+        self.reached = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is self.code:
+            self.reached.set()
+            self.release.wait(30)
+
+    def start(self, target: Any, *args: Any) -> threading.Thread:
+        """Install the gate and run ``target(*args)`` on a daemon thread."""
+        threading.setprofile(self)
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        thread.start()
+        return thread
+
+
 def make_capturing_server() -> tuple[AgentServer, list[dict[str, Any]]]:
     """Create a ``AgentServer`` whose broadcasts are appended to the returned list."""
     from kiss.server.server import AgentServer

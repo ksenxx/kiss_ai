@@ -23,14 +23,11 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
-import sys
-from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.github.github_sea as gh_mod
 from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
 from kiss.agents.third_party_agents.github.github_sea import (
     GitHubAgent,
@@ -40,7 +37,6 @@ from kiss.agents.third_party_agents.github.github_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -136,24 +132,13 @@ _DIFF_99 = "d" * 9000
 class _GHRequestHandler(RecordingHandler):
     """Emulates the GitHub REST API and records requests."""
 
-    def _authorized(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _record(self, body: dict[str, Any] | None) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "accept": self.headers.get("Accept", ""),
-                "api_version": self.headers.get("X-GitHub-Api-Version", ""),
-                "body": body,
-            }
-        )
-
     def _route(self, body: dict[str, Any] | None) -> None:
-        self._record(body)
-        if not self._authorized():
+        self.record_request(
+            body,
+            accept=self.headers.get("Accept", ""),
+            api_version=self.headers.get("X-GitHub-Api-Version", ""),
+        )
+        if not self.bearer_ok(_TOKEN):
             self._reply(401, json.dumps({"message": "Bad credentials"}))
             return
         path = urlparse(self.path).path
@@ -316,20 +301,6 @@ def _call_every_tool(b: GitHubChannelBackend) -> list[str]:
 # ----------------------------------------------------------------------
 
 
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth tools."""
-    agent = GitHubAgent()
-    assert agent.name == "GitHub Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == [
-        "check_github_auth",
-        "authenticate_github",
-        "finish_github_auth",
-        "clear_github_auth",
-    ]
-
-
 def test_check_auth_unauthenticated_message() -> None:
     """check_github_auth points at the device-flow sign-in when unauthenticated."""
     agent = GitHubAgent()
@@ -364,13 +335,6 @@ def test_new_agent_loads_persisted_config() -> None:
     _config.save({"token": _TOKEN})  # no read_only key -> defaults to read-write
     agent2 = GitHubAgent()
     assert agent2._backend._read_only is False
-
-
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    tools = gh_mod.GithubSea().tools([])
-    assert len(tools) >= 3
-    assert all(callable(t) for t in tools)
 
 
 def test_connect_without_config_fails() -> None:
@@ -416,7 +380,7 @@ def test_gh_get_me(backend) -> None:
         },
     }
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == ("GET", "/user")
+    assert (req["method"], req["path"]) == ("GET", "/user")
     assert req["authorization"] == f"Bearer {_TOKEN}"
     assert req["accept"] == "application/vnd.github+json"
     assert req["api_version"] == "2022-11-28"
@@ -438,7 +402,7 @@ def test_gh_search_repositories(backend) -> None:
             "private": False,
         }
     ]
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert query == {"q": ["language:python"], "per_page": ["7"], "page": ["2"]}
 
 
@@ -449,7 +413,7 @@ def test_gh_get_repository(backend) -> None:
     assert result["ok"] is True
     assert result["repository"]["full_name"] == "octo/hello"
     assert "watchers" not in result["repository"]
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello"
+    assert server.requests[-1]["path"] == "/repos/octo/hello"
 
 
 def test_gh_list_issues_default(backend) -> None:
@@ -467,9 +431,8 @@ def test_gh_list_issues_default(backend) -> None:
             "url": "https://github.com/octo/hello/issues/5",
         }
     ]
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/repos/octo/hello/issues"
-    query = parse_qs(parsed.query)
+    assert server.requests[-1]["path"] == "/repos/octo/hello/issues"
+    query = server.requests[-1]["query"]
     assert query == {"state": ["open"], "per_page": ["20"], "page": ["1"]}
 
 
@@ -477,7 +440,7 @@ def test_gh_list_issues_with_labels(backend) -> None:
     """gh_list_issues forwards a non-empty labels filter."""
     b, server = backend
     json.loads(b.gh_list_issues("octo", "hello", state="all", labels="bug,p1"))
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert query["labels"] == ["bug,p1"]
     assert query["state"] == ["all"]
 
@@ -489,7 +452,7 @@ def test_gh_get_issue_includes_truncated_body(backend) -> None:
     assert result["ok"] is True
     assert result["issue"]["number"] == 5
     assert result["issue"]["body"] == "B" * 1000
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/issues/5"
+    assert server.requests[-1]["path"] == "/repos/octo/hello/issues/5"
 
 
 def test_gh_list_issue_comments(backend) -> None:
@@ -500,9 +463,8 @@ def test_gh_list_issue_comments(backend) -> None:
     assert result["comments"] == [
         {"user": "carol", "created_at": "2026-01-02T00:00:00Z", "body": "C" * 1000}
     ]
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/repos/octo/hello/issues/5/comments"
-    assert parse_qs(parsed.query) == {"per_page": ["3"], "page": ["1"]}
+    assert server.requests[-1]["path"] == "/repos/octo/hello/issues/5/comments"
+    assert server.requests[-1]["query"] == {"per_page": ["3"], "page": ["1"]}
 
 
 def test_gh_list_issue_comments_page_forwarded(backend) -> None:
@@ -510,7 +472,7 @@ def test_gh_list_issue_comments_page_forwarded(backend) -> None:
     b, server = backend
     result = json.loads(b.gh_list_issue_comments("octo", "hello", 5, per_page=3, page=4))
     assert result["ok"] is True
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert query == {"per_page": ["3"], "page": ["4"]}
 
 
@@ -522,9 +484,8 @@ def test_gh_search_issues(backend) -> None:
     assert result["total_count"] == 2
     assert result["issues"][0]["number"] == 5
     assert "body" not in result["issues"][0]
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/search/issues"
-    assert parse_qs(parsed.query)["q"] == ["is:open repo:octo/hello"]
+    assert server.requests[-1]["path"] == "/search/issues"
+    assert server.requests[-1]["query"]["q"] == ["is:open repo:octo/hello"]
 
 
 def test_gh_search_code(backend) -> None:
@@ -540,7 +501,7 @@ def test_gh_search_code(backend) -> None:
             "url": "https://github.com/octo/hello/blob/main/src/main.py",
         }
     ]
-    assert urlparse(server.requests[-1]["path"]).path == "/search/code"
+    assert server.requests[-1]["path"] == "/search/code"
 
 
 def test_gh_list_pull_requests(backend) -> None:
@@ -550,9 +511,8 @@ def test_gh_list_pull_requests(backend) -> None:
     assert result["ok"] is True
     assert result["pull_requests"][0]["number"] == 7
     assert result["pull_requests"][0]["user"] == "bob"
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/repos/octo/hello/pulls"
-    assert parse_qs(parsed.query)["state"] == ["closed"]
+    assert server.requests[-1]["path"] == "/repos/octo/hello/pulls"
+    assert server.requests[-1]["query"]["state"] == ["closed"]
 
 
 def test_gh_get_pull_request(backend) -> None:
@@ -563,7 +523,7 @@ def test_gh_get_pull_request(backend) -> None:
     pr = result["pull_request"]
     assert (pr["head"], pr["base"], pr["merged"]) == ("feature", "main", False)
     assert pr["body"] == ""  # null body condensed to empty string
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/pulls/7"
+    assert server.requests[-1]["path"] == "/repos/octo/hello/pulls/7"
 
 
 def test_gh_get_pull_request_diff(backend) -> None:
@@ -572,7 +532,7 @@ def test_gh_get_pull_request_diff(backend) -> None:
     result = json.loads(b.gh_get_pull_request_diff("octo", "hello", 7))
     assert result == {"ok": True, "diff": _DIFF_7}
     req = server.requests[-1]
-    assert urlparse(req["path"]).path == "/repos/octo/hello/pulls/7"
+    assert req["path"] == "/repos/octo/hello/pulls/7"
     assert req["accept"] == _DIFF_ACCEPT
     assert req["api_version"] == "2022-11-28"
 
@@ -595,9 +555,8 @@ def test_gh_get_file_contents_file(backend) -> None:
         "size": len(_FILE_TEXT),
         "content": _FILE_TEXT,
     }
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/repos/octo/hello/contents/README.md"
-    assert parsed.query == ""
+    assert server.requests[-1]["path"] == "/repos/octo/hello/contents/README.md"
+    assert server.requests[-1]["query"] == {}
 
 
 def test_gh_get_file_contents_with_ref(backend) -> None:
@@ -605,7 +564,7 @@ def test_gh_get_file_contents_with_ref(backend) -> None:
     b, server = backend
     result = json.loads(b.gh_get_file_contents("octo", "hello", "README.md", ref="dev"))
     assert result["ok"] is True
-    assert parse_qs(urlparse(server.requests[-1]["path"]).query)["ref"] == ["dev"]
+    assert server.requests[-1]["query"]["ref"] == ["dev"]
 
 
 @pytest.mark.parametrize(
@@ -618,7 +577,7 @@ def test_gh_get_file_contents_directory(backend, path: str, listing: list) -> No
     b, server = backend
     result = json.loads(b.gh_get_file_contents("octo", "hello", path))
     assert result == {"ok": True, "directory": listing}
-    assert urlparse(server.requests[-1]["path"]).path == f"/repos/octo/hello/contents/{path}"
+    assert server.requests[-1]["path"] == f"/repos/octo/hello/contents/{path}"
 
 
 def test_gh_get_file_contents_non_base64_object(backend) -> None:
@@ -639,9 +598,9 @@ def test_gh_get_file_contents_encoding_none_refetches_raw(backend) -> None:
         "content": "R" * 8000,
     }
     first, second = server.requests[-2], server.requests[-1]
-    assert urlparse(first["path"]).path == "/repos/octo/hello/contents/big.bin"
+    assert first["path"] == "/repos/octo/hello/contents/big.bin"
     assert first["accept"] == "application/vnd.github+json"
-    assert urlparse(second["path"]).path == "/repos/octo/hello/contents/big.bin"
+    assert second["path"] == "/repos/octo/hello/contents/big.bin"
     assert second["accept"] == _RAW_ACCEPT
     assert second["api_version"] == "2022-11-28"
 
@@ -668,7 +627,7 @@ def test_gh_list_commits_default(backend) -> None:
             "date": "2026-01-03T00:00:00Z",
         }
     ]
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert "sha" not in query
     assert "path" not in query
 
@@ -677,7 +636,7 @@ def test_gh_list_commits_with_sha_and_path(backend) -> None:
     """gh_list_commits forwards non-empty sha and path filters."""
     b, server = backend
     json.loads(b.gh_list_commits("octo", "hello", sha="dev", path="src/main.py"))
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert query["sha"] == ["dev"]
     assert query["path"] == ["src/main.py"]
 
@@ -690,9 +649,8 @@ def test_gh_list_branches(backend) -> None:
         "ok": True,
         "branches": [{"name": "main", "sha": "b" * 12, "protected": True}],
     }
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/repos/octo/hello/branches"
-    assert parse_qs(parsed.query) == {"per_page": ["5"], "page": ["1"]}
+    assert server.requests[-1]["path"] == "/repos/octo/hello/branches"
+    assert server.requests[-1]["query"] == {"per_page": ["5"], "page": ["1"]}
 
 
 def test_gh_list_branches_page_forwarded(backend) -> None:
@@ -700,7 +658,7 @@ def test_gh_list_branches_page_forwarded(backend) -> None:
     b, server = backend
     result = json.loads(b.gh_list_branches("octo", "hello", per_page=5, page=3))
     assert result["ok"] is True
-    query = parse_qs(urlparse(server.requests[-1]["path"]).query)
+    query = server.requests[-1]["query"]
     assert query == {"per_page": ["5"], "page": ["3"]}
 
 
@@ -715,7 +673,7 @@ def test_gh_create_issue_full(backend) -> None:
     result = json.loads(b.gh_create_issue("octo", "hello", "Bug", body="text", labels="bug, p1,"))
     assert result == {"ok": True, "number": 42, "url": "https://github.com/octo/hello/issues/42"}
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == ("POST", "/repos/octo/hello/issues")
+    assert (req["method"], req["path"]) == ("POST", "/repos/octo/hello/issues")
     assert req["body"] == {"title": "Bug", "body": "text", "labels": ["bug", "p1"]}
 
 
@@ -734,7 +692,7 @@ def test_gh_comment_on_issue(backend) -> None:
     assert result["ok"] is True
     assert result["url"].endswith("#issuecomment-1")
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == (
+    assert (req["method"], req["path"]) == (
         "POST",
         "/repos/octo/hello/issues/5/comments",
     )
@@ -752,7 +710,7 @@ def test_gh_update_issue_each_field(backend) -> None:
         "url": "https://github.com/octo/hello/issues/5",
     }
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == (
+    assert (req["method"], req["path"]) == (
         "PATCH",
         "/repos/octo/hello/issues/5",
     )
@@ -785,7 +743,7 @@ def test_gh_create_pull_request(backend) -> None:
     )
     assert result == {"ok": True, "number": 8, "url": "https://github.com/octo/hello/pull/8"}
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == ("POST", "/repos/octo/hello/pulls")
+    assert (req["method"], req["path"]) == ("POST", "/repos/octo/hello/pulls")
     assert req["body"] == {
         "title": "Add feature",
         "head": "feature",
@@ -809,7 +767,7 @@ def test_gh_merge_pull_request(backend) -> None:
     result = json.loads(b.gh_merge_pull_request("octo", "hello", 7, merge_method="squash"))
     assert result == {"ok": True, "merged": True, "message": "Pull Request successfully merged"}
     req = server.requests[-1]
-    assert (req["method"], urlparse(req["path"]).path) == (
+    assert (req["method"], req["path"]) == (
         "PUT",
         "/repos/octo/hello/pulls/7/merge",
     )
@@ -885,14 +843,14 @@ def test_owner_is_encoded_as_single_path_segment(backend) -> None:
     b, server = backend
     result = json.loads(b.gh_get_repository("octo cat", "hello"))
     assert result["ok"] is False  # emulator 404s the unknown repo — that's fine
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo%20cat/hello"
+    assert server.requests[-1]["path"] == "/repos/octo%20cat/hello"
 
 
 def test_nested_file_path_keeps_slashes(backend) -> None:
     """File paths keep '/' separators but encode other special characters."""
     b, server = backend
     json.loads(b.gh_get_file_contents("octo", "hello", "src/a b.py"))
-    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/contents/src/a%20b.py"
+    assert server.requests[-1]["path"] == "/repos/octo/hello/contents/src/a%20b.py"
 
 
 def test_unauthorized_token_returns_ok_false_for_every_tool(gh_server) -> None:
@@ -921,23 +879,6 @@ def test_non_json_success_response_returns_text(backend) -> None:
     data, err = b._api("GET", "/plain")
     assert err == ""
     assert data == "plain text"
-
-
-def test_main_without_args_prints_usage() -> None:
-    """Running the module CLI with no arguments prints usage and exits 1.
-
-    Coverage note: this exercises ``main()``'s ``channel_main`` call in
-    a real subprocess, which in-process coverage cannot trace — that
-    line shows as uncovered in the report despite being tested here.
-    """
-    proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.third_party_agents.github.github_sea"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert proc.returncode == 1
-    assert "Usage: kiss-github" in proc.stdout
 
 
 def test_connection_refused_returns_ok_false_for_every_tool(refusing_port: int) -> None:

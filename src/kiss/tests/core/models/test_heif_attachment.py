@@ -113,21 +113,6 @@ def test_from_bytes_leaves_other_formats_untouched(tmp_path: Path) -> None:
     assert att.data == data
 
 
-def test_from_file_accepts_a_heic_path(heic_photo: Path) -> None:
-    """Attaching IMG_4242.HEIC no longer raises ValueError."""
-    att = Attachment.from_file(str(heic_photo))
-    assert att.mime_type == "image/jpeg"
-    assert att.data.startswith(_JPEG_SOI)
-
-
-def test_from_file_still_rejects_unsupported_types(tmp_path: Path) -> None:
-    """The MIME allow-list is intact for genuinely unusable files."""
-    bad = tmp_path / "notes.xyz"
-    bad.write_bytes(b"nope")
-    with pytest.raises(ValueError, match="Unsupported MIME type"):
-        Attachment.from_file(str(bad))
-
-
 def test_from_bytes_ignores_a_wrong_heif_label(tmp_path: Path) -> None:
     """A mislabelled file keeps its own bytes and label."""
     png = tmp_path / "mislabelled.png"

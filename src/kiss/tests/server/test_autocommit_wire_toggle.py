@@ -23,7 +23,7 @@ Do-nothing bar).  Two things are pinned here:
   squash-merges it.
 
 * **K2-2** — the "your work now lives only on ``kiss/wt-*``" warning the
-  retire records with ``agent._set_warnings(merge=...)`` must reach the
+  retire records with ``agent.add_warning(...)`` must reach the
   tab: ``ChatSorcarAgent.run`` flushes it before ``super().run()``,
   i.e. before the run's ``task_history`` id exists, so the
   ``{"type": "warning"}`` event has to be stamped with the tab id by

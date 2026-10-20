@@ -254,9 +254,9 @@ every table number comes from a macro or a script. Nothing spills into the margi
 
 File paths, page count, gate counts before and after, the citations verified with their
 source URLs, each reviewer finding and what you did with it, and any claim you could not
-verify. Report total spend: the `Budget:` figure after a tool result covers only your
-own steps; add the cost each `run_parallel` or `run_agent` result reports, and use the
-total when the task caps the reviewer's share.
+verify. Report total spend: the `Budget:` figure after a tool result already includes
+the cost of every finished `run_parallel` or `run_agent` child, so do not add it again;
+when the task caps the reviewer's share, sum the costs the reviewers' results report.
 
 ## Working rules
 

@@ -466,3 +466,88 @@ def test_codex_api_key_turn_on_the_cli_default_model_warns_once_and_stays_free(
     warnings = [r for r in caplog.records if "no price for 'default'" in r.getMessage()]
     assert len(warnings) == 1
     assert model.extract_cost_from_response("not a dict") is None
+
+
+# --- Cost audit 2026-10-20 ----------------------------------------------
+
+
+def test_cc_api_key_turn_with_a_helper_model_bills_the_cli_estimate(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``modelUsage`` naming two models (Haiku helper first) bills at the
+    CLI's per-model ``total_cost_usd``, not the whole turn at Haiku's rate."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    model_usage = {
+        "claude-haiku-4-5": {"inputTokens": 50, "costUSD": 0.0001},
+        "claude-opus-4-5": {"inputTokens": 1000, "costUSD": 0.0899},
+    }
+    turn = _claude_turn(init_model="claude-opus-4-5", model_usage=model_usage, total_cost_usd=0.09)
+    fake_claude.write_text(json.dumps(turn))
+    agent = _run_agent("cc/opus", tmp_path)
+    assert agent.budget_used == pytest.approx(0.09)
+
+
+def test_cc_helper_model_does_not_replace_the_stream_model(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a CLI estimate a two-model turn prices at the stream's main
+    model, never at whichever model ``modelUsage`` lists first."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    model_usage = {
+        "claude-haiku-4-5": {"inputTokens": 50},
+        "claude-opus-4-5": {"inputTokens": 1000},
+    }
+    turn = _claude_turn(init_model="claude-opus-4-5", model_usage=model_usage)
+    fake_claude.write_text(json.dumps(turn))
+    agent = _run_agent("cc/opus", tmp_path)
+    assert agent.budget_used == pytest.approx(calculate_cost("claude-opus-4-5", *_CLAUDE_COUNTS))
+
+
+def _save_codex_login(tmp_path: Path, auth: dict[str, Any]) -> None:
+    """Write the ``auth.json`` ``codex login`` leaves under ``CODEX_HOME``."""
+    home = tmp_path / "codex-home"
+    home.mkdir(exist_ok=True)
+    (home / "auth.json").write_text(json.dumps(auth))
+
+
+def _without_key_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Switch off with no API key in the environment or the settings."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(DEFAULT_CONFIG, "OPENAI_API_KEY", "")
+
+
+def test_codex_switch_off_with_a_saved_api_key_login_is_billed(
+    fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No key variable, but ``codex login --with-api-key`` saved one: the CLI
+    bills that key per token, so the turn is API spend."""
+    _without_key_variables(monkeypatch)
+    _save_codex_login(tmp_path, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-saved"})
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    agent = _run_agent("codex/gpt-5.5", tmp_path)
+    assert agent.budget_used == pytest.approx(calculate_cost("gpt-5.5", *_CODEX_COUNTS))
+
+
+def test_codex_saved_api_key_login_behind_an_access_token_is_free(
+    fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``CODEX_ACCESS_TOKEN`` in the child environment is read before the
+    saved key, so the subscription pays."""
+    _without_key_variables(monkeypatch)
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "tok")
+    _save_codex_login(tmp_path, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-saved"})
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    assert _run_agent("codex/gpt-5.5", tmp_path).budget_used == 0.0
+
+
+def test_codex_switch_off_with_a_chatgpt_login_is_free(
+    fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ChatGPT sign-in saved by ``codex login`` bills the plan."""
+    _without_key_variables(monkeypatch)
+    _save_codex_login(tmp_path, {"auth_mode": "chatgpt", "tokens": {"id_token": "x"}})
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    assert _run_agent("codex/gpt-5.5", tmp_path).budget_used == 0.0

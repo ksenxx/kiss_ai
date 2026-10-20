@@ -29,43 +29,25 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, sleep} = require('./simplify2_harness');
-const {paste, typeAndEnter, submits} = require('./attachment_helpers');
+const {sleep} = require('./simplify2_harness');
+const {
+  makeWedgedDecoderPage,
+  paste,
+  typeAndEnter,
+  submits,
+} = require('./attachment_helpers');
 
 const SHORT_DEADLINE_MS = 300;
-
-function makePage() {
-  // A wedged decoder: every call parks for ever.
-  let decodes = 0;
-  const {win, posted} = makeChatPage({
-    sourceUrl: 'concaudit-f4-attach-deadline-main.js',
-    beforeScripts(win) {
-      win.createImageBitmap = function () {
-        decodes += 1;
-        return new Promise(() => {});
-      };
-    },
-    mainSource(mainSrc) {
-      const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
-      assert.ok(
-        mainSrc.includes(needle),
-        'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
-      );
-      return mainSrc.replace(
-        needle,
-        `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
-      );
-    },
-  });
-  return {win, posted, decodeCount: () => decodes};
-}
 
 function chipText(win) {
   return win.document.getElementById('file-chips').textContent;
 }
 
 async function main() {
-  const {win, posted, decodeCount} = makePage();
+  const {win, posted, decodeCount} = makeWedgedDecoderPage(
+    SHORT_DEADLINE_MS,
+    'concaudit-f4-attach-deadline-main.js',
+  );
   win._testApi.endLaunch();
 
   // 1. A camera HEIC whose decode never settles; Enter parks the send.

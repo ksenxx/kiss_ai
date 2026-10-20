@@ -17,6 +17,7 @@ const {
   send,
   stubRaf,
   clickTab,
+  answering,
 } = require('./simplify2_harness');
 
 const pages = [];
@@ -60,10 +61,6 @@ function pressEnter(win) {
   inp.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
   );
-}
-
-function answering(win) {
-  return win.document.body.classList.contains('ask-answering');
 }
 
 let passed = 0;

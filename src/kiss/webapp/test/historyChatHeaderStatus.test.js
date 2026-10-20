@@ -13,7 +13,13 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage: makeChatPage, send, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  MEDIA,
+  ofType,
+  sendEmptyWorkDir,
+} = require('./simplify2_harness');
 const {inlineDesignTokens} = require('./designTokens');
 
 function makePage() {
@@ -36,10 +42,6 @@ function tick() {
 
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
 }
 
 function makeRow(overrides) {
@@ -208,7 +210,7 @@ function testHeaderShowsLastTaskIcon() {
     before,
     'the icon never folds the panel',
   );
-  const resumes = byType(posted, 'resumeSession');
+  const resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the icon opens the chat');
   assert.strictEqual(resumes[0].id, 'A');
   win.close();
@@ -401,10 +403,6 @@ function hasTab(win, tabId) {
   return win._testApi.openTabs().some(t => t.id === tabId);
 }
 
-function byType(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
 /** The chat panel's "Show details" chevron. */
 function chevron(win, chatId) {
   const btn = header(win, chatId).querySelector(
@@ -481,14 +479,14 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     'the chevron opens no tab',
   );
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     0,
     'and resumes nothing',
   );
   chev.click();
   assert.ok(a.classList.contains('collapsed'), 'folded again');
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     0,
     'no resume on fold',
   );
@@ -509,7 +507,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
-  let resumes = byType(posted, 'resumeSession');
+  let resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the chat is resumed once');
   assert.strictEqual(resumes[0].id, 'A', 'at chat A');
   assert.strictEqual(resumes[0].taskId, 2, 'at its last task');
@@ -569,7 +567,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     'the idle fresh chat left behind is retired',
   );
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     0,
     'chat A is already on screen',
   );
@@ -601,7 +599,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     c.classList.contains('collapsed'),
     'the icon leaves the panel folded',
   );
-  resumes = byType(posted, 'resumeSession');
+  resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'and opens the running chat');
   assert.strictEqual(resumes[0].id, 'C');
   assert.strictEqual(resumes[0].taskId, 9);
@@ -634,7 +632,7 @@ function testEventlessLastTaskResumesByChatId() {
   assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for chat E');
-  const resumes = byType(posted, 'resumeSession');
+  const resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(
     resumes.length,
     1,
@@ -665,7 +663,7 @@ function testEventlessLastTaskResumesByChatId() {
     'no second tab for chat E',
   );
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     0,
     'no second resume',
   );
@@ -697,7 +695,7 @@ function testEventlessLastTaskResumesByChatId() {
     'only the read-only tab',
   );
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     0,
     'nothing to resume',
   );
@@ -762,7 +760,7 @@ function testPencilEditsTheChatSummary() {
   keyIn(win, input, 'Escape');
   assert.strictEqual(headerTitle(win, 'A').querySelector('input'), null);
   assert.strictEqual(headerTitle(win, 'A').textContent, 'Fix the login bug');
-  assert.strictEqual(byType(posted, 'setChatSummary').length, 0);
+  assert.strictEqual(ofType(posted, 'setChatSummary').length, 0);
 
   // Double-clicking the title edits too; Enter saves.
   headerTitle(win, 'A').dispatchEvent(
@@ -773,7 +771,7 @@ function testPencilEditsTheChatSummary() {
   input.value = '  Login fix, round two  ';
   keyIn(win, input, 'Enter');
   assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(byType(posted, 'setChatSummary'))),
+    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
     [{type: 'setChatSummary', chatId: 'A', summary: 'Login fix, round two'}],
   );
   assert.strictEqual(headerTitle(win, 'A').textContent, 'Login fix, round two');
@@ -805,13 +803,13 @@ function testPencilEditsTheChatSummary() {
   pencilNow().dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   input = headerTitle(win, 'A').querySelector('input');
   keyIn(win, input, 'Enter');
-  assert.strictEqual(byType(posted, 'setChatSummary').length, 1);
+  assert.strictEqual(ofType(posted, 'setChatSummary').length, 1);
   // Leaving the box (blur) saves like Enter does.
   pencilNow().dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   input = headerTitle(win, 'A').querySelector('input');
   input.value = 'Blurred title';
   input.dispatchEvent(new win.Event('blur'));
-  assert.strictEqual(byType(posted, 'setChatSummary').length, 2);
+  assert.strictEqual(ofType(posted, 'setChatSummary').length, 2);
   assert.strictEqual(headerTitle(win, 'A').textContent, 'Blurred title');
   win.close();
   console.log('  ok - the pencil edits the chat summary');

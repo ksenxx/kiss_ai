@@ -31,6 +31,7 @@ const {
   send,
   stubRaf,
   MEDIA,
+  readyTabId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -41,12 +42,6 @@ function makePage() {
     beforeScripts: stubRaf,
     sourceUrl: 'sharesub-main.js',
   });
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function click(el) {
@@ -65,7 +60,7 @@ function click(el) {
  */
 function runFanoutTask(wv, chatId, taskId, taskDescs) {
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const now = Date.now();
   send(win, {type: 'clear', chat_id: chatId, tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
@@ -586,7 +581,7 @@ async function run() {
 
   await test('a page without sub-agents never shows a tab strip', () => {
     const wv = makePage();
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     const now = Date.now();
     send(wv.win, {type: 'clear', chat_id: 'chat-plain', tabId: TAB});
     send(wv.win, {type: 'status', running: true, tabId: TAB, startTs: now});

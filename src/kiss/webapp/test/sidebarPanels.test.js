@@ -496,6 +496,13 @@ async function main() {
     del.click();
     confirm.querySelector('.sidebar-confirm-yes').click();
     eq(posted, [{type: 'cronAction', action: 'remove', jobId: 'a'}]);
+    // Answering Delete spends the button but keeps the question in
+    // place until the reply rebuilds the row: a double click can
+    // neither post the removal twice nor land on the row under it.
+    assert.strictEqual(confirm.style.display, '');
+    assert.ok(confirm.querySelector('.sidebar-confirm-yes').disabled);
+    confirm.querySelector('.sidebar-confirm-yes').click();
+    eq(posted, [{type: 'cronAction', action: 'remove', jobId: 'a'}]);
     // The reply to an action carries an error when the daemon refused
     // it: shown on the status line, cleared by the next clean reply.
     send(win, {
@@ -509,6 +516,50 @@ async function main() {
     send(win, {type: 'cronJobs', jobs: [job({id: 'a'})]});
     assert.strictEqual(status.textContent, '');
     assert.ok(!status.classList.contains('is-error'));
+    // The refused removal's reply rebuilt the row: the daemon has
+    // answered, so the question comes back with a live Delete.
+    const row = el(win, 'meta-schedule-list').querySelector(
+      '.sidebar-panel-row',
+    );
+    assert.notStrictEqual(row, rows[0], 'the reply rebuilt the row');
+    assert.strictEqual(
+      row.querySelector('.sidebar-item-confirm').style.display,
+      '',
+    );
+    assert.ok(!row.querySelector('.sidebar-confirm-yes').disabled);
+    // Cancel folds it; the trash icon is back.
+    row.querySelector('.sidebar-confirm-no').click();
+    assert.strictEqual(
+      row.querySelector('.sidebar-item-confirm').style.display,
+      'none',
+    );
+    assert.strictEqual(
+      row.querySelector('.sidebar-item-delete').style.display,
+      '',
+    );
+    // A question still open when a poll reply rebuilds the list is asked
+    // again in the new row, with the keyboard where it was.
+    button(row, 'Delete the job').click();
+    row.querySelector('.sidebar-confirm-yes').focus();
+    send(win, {type: 'cronJobs', jobs: [job({id: 'a'})]});
+    const rebuilt = el(win, 'meta-schedule-list').querySelector(
+      '.sidebar-panel-row',
+    );
+    assert.notStrictEqual(rebuilt, row, 'the reply rebuilt the row');
+    assert.strictEqual(
+      rebuilt.querySelector('.sidebar-item-confirm').style.display,
+      '',
+    );
+    assert.strictEqual(
+      win.document.activeElement,
+      rebuilt.querySelector('.sidebar-confirm-yes'),
+    );
+    // A row gone from the reply has nothing to restore.
+    send(win, {type: 'cronJobs', jobs: []});
+    assert.strictEqual(
+      el(win, 'meta-schedule-list').querySelector('.sidebar-item-confirm'),
+      null,
+    );
   });
 
   await test('Schedule rows: the edit button opens an in-place editor that saves or cancels', () => {

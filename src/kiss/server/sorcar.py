@@ -125,6 +125,7 @@ from kiss.server import sidebar_panels
 from kiss.server.commands import broadcast_to_conn
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
+from kiss.server.signin import SigninLogin
 from kiss.server.tips import TIPS_OPT_OUT_MARKER
 from kiss.server.vscode_retired import NOTICE_ID as VSCODE_RETIRED_NOTICE_ID
 from kiss.server.vscode_retired import dismiss_vscode_retired_notice
@@ -270,6 +271,9 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("setChatSummary", required=("chatId", "summary")),
+    ApiCommand("deleteTask", required=("taskId",)),
+    ApiCommand("deleteChat", required=("chatId",)),
+    ApiCommand("openExternal", required=("url",)),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),
     ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
@@ -350,6 +354,9 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("tipsOptOut", handler="tips_opt_out"),
     ApiCommand("dismissNotice", required=("id",), handler="dismiss_notice"),
+    ApiCommand("signinLogin", required=("provider",), handler="signin_login"),
+    ApiCommand("signinPaste", required=("text",), handler="signin_paste"),
+    ApiCommand("signinCancel", handler="signin_cancel"),
 )
 """Every command the daemon accepts, keyed by wire name.
 
@@ -761,6 +768,8 @@ class ServerApi:
         # The latest dictation per connection (see ``voice_transcribe``):
         # the connection's next one is answered after it.
         self._pending_voice: dict[str, asyncio.Task[None]] = {}
+        # The brand's running ``signin login`` (see ``signin_login``).
+        self.signin = SigninLogin()
         # Set by ``cancel_background_replies``: from then on no reply
         # is spawned (a frame can still arrive while the cancelled
         # tasks are awaited, before the listeners close).
@@ -1072,8 +1081,11 @@ class ServerApi:
         loop open for a slow machine's answer, end here.  A command
         dispatched from here on (one received while the cancelled
         tasks are awaited) spawns no reply, so none outlives this.
+        The brand's running sign-in hook, a child process, is ended
+        too: it must not finish a login after the daemon is gone.
         """
         self._closing = True
+        self.signin.cancel()
         tasks = list(self._background_replies)
         for task in tasks:
             task.cancel()
@@ -2310,6 +2322,58 @@ class ServerApi:
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
             "",
         )
+
+    def _signin_reply(self, conn_id: str) -> Callable[[dict[str, Any], bool], None]:
+        """A :data:`kiss.server.signin.Reply` for the window of *conn_id*."""
+        printer = self._backend._printer
+
+        def reply(event: dict[str, Any], everyone: bool) -> None:
+            broadcast_to_conn(printer, event, "" if everyone else conn_id)
+
+        return reply
+
+    async def signin_login(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Service a click on a provider button of the sign-in window.
+
+        Starts the brand's ``$KISS_HOME/signin login <provider>``
+        (:class:`kiss.server.signin.SigninLogin`); the window gets
+        ``signinUrl`` as soon as the hook prints the page to open, every
+        window ``signinDone`` when the sign-in succeeds, the clicking
+        window ``signinError`` when it fails.
+
+        Args:
+            cmd: The ``signinLogin`` command with the ``provider`` id.
+            ctx: The transport context of the current call; supplies
+                the ``conn_id`` the URL and errors are stamped with.
+        """
+        reply = self._signin_reply(ctx.conn_state["conn_id"])
+        await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply)
+
+    async def signin_paste(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Forward a pasted redirect URL or code to the running sign-in hook.
+
+        For a browser on another machine, whose redirect to the hook's
+        loopback port cannot land.  Without a running login the window
+        gets a ``signinError`` saying to start over.
+
+        Args:
+            cmd: The ``signinPaste`` command with the pasted ``text``.
+            ctx: The transport context of the current call.
+        """
+        if not await asyncio.to_thread(self.signin.paste, str(cmd["text"])):
+            error = "No sign-in is in progress: click a button to start one."
+            self._signin_reply(ctx.conn_state["conn_id"])(
+                {"type": "signinError", "error": error}, False
+            )
+
+    async def signin_cancel(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """End the running sign-in hook: the window was closed with "Not now".
+
+        Args:
+            cmd: The ``signinCancel`` command (unused).
+            ctx: The transport context of the current call (unused).
+        """
+        await asyncio.to_thread(self.signin.cancel)
 
     async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Arm (or cancel) an update that runs once no task is running.

@@ -22,8 +22,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
+    _chat_task_tree,
+    _delete_chat,
+    _delete_task,
     _load_slash_command_usage,
     _record_file_usage,
     _record_model_usage,
@@ -31,6 +35,7 @@ from kiss.agents.sorcar.persistence import (
     _save_last_model,
     _set_chat_summary,
     _set_task_favorite,
+    _task_tree,
 )
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
@@ -41,6 +46,8 @@ from kiss.agents.sorcar.sea_commands import (
 )
 from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 from kiss.core.brand import HOME_DIR
+from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.models.model import Attachment
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -50,6 +57,7 @@ from kiss.server.task_runner import (
     _result_event,
     contains_task_tags,
     parse_task_tags,
+    pending_attachments,
 )
 
 if TYPE_CHECKING:
@@ -234,6 +242,31 @@ def broadcast_to_conn(
     printer.broadcast(event)
 
 
+def _any_running(task_ids: list[str], chat_id: str = "") -> bool:
+    """Whether a live agent state runs one of *task_ids* (or a task of *chat_id*).
+
+    A sub-task that has not allocated its ``task_history`` row yet is
+    known only by its parent (``state.parent_task_id``): it counts when
+    its parent is among *task_ids*.
+
+    Args:
+        task_ids: The persisted task ids a delete would remove.
+        chat_id: A chat whose running tasks count too (a run that has
+            no ``task_history`` row yet is known by its chat alone).
+    """
+    wanted = set(task_ids)
+    for state in agent_state.snapshot():
+        if not state.running():
+            continue
+        if (
+            state.task_id in wanted
+            or (state.parent_task_id or "") in wanted
+            or (chat_id and state.chat_id == chat_id)
+        ):
+            return True
+    return False
+
+
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
@@ -315,6 +348,7 @@ class _CommandsMixin:
             tab_id: str = "",
             task_id: str | None = None,
             conn_id: str = "",
+            replay_id: str = "",
         ) -> None: ...
         def _defer_replay(
             self,
@@ -510,6 +544,11 @@ class _CommandsMixin:
         chat_id = ""
         prompt = cmd.get("prompt", "")
         typed = isinstance(prompt, str) and bool(prompt.strip())
+        # Nothing is decoded here: a running owner takes the files as
+        # lazily decoded ``PendingAttachment``s (so queueing them under
+        # the lock costs nothing), and a fresh run's worker decodes its
+        # own from the command, after the run is registered.
+        attachments = pending_attachments(cmd.get("attachments", []))
         with self._state_lock:
             prev = agent_state.find_by_tab(tab_id)
             # A plain message typed into a tab that only VIEWS a task
@@ -543,7 +582,7 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if typed:
-                    queued = self._queue_prompt_on_owner(prev, prompt, tab_id)
+                    queued = self._queue_prompt_on_owner(prev, prompt, tab_id, attachments)
                     if queued is None:
                         # Queued after the agent loop ended: no drain
                         # will consume it, so ``_run_task``'s cleanup
@@ -553,7 +592,7 @@ class _CommandsMixin:
                     remember, inject_task = queued
                     inject_prompt = prompt
             elif asked is not None:
-                queued = self._queue_prompt_on_owner(asked, prompt, tab_id)
+                queued = self._queue_prompt_on_owner(asked, prompt, tab_id, attachments)
                 if queued is None:
                     return
                 remember, inject_task = queued
@@ -935,6 +974,83 @@ class _CommandsMixin:
         _set_chat_summary(chat_id, summary.strip() if isinstance(summary, str) else "")
         self.printer.broadcast({"type": "tasks_updated"})
 
+    def _cmd_open_external(self, cmd: dict[str, Any]) -> None:
+        """Open an ``http(s)`` link of the chat in the user's default browser.
+
+        The standalone app window (``kiss-app``, a Chromium ``--app``
+        window) has no browser UI, so the page sends the links it
+        shows here instead of following them in the window.  The
+        opener can wait a few seconds for a launcher that fails at
+        once, so it runs off the command thread; the page gets an
+        ``openExternalResult`` either way and falls back to its own
+        ``window.open`` when nothing opened (a headless daemon).
+        """
+        url = _opt_str(cmd.get("url"))
+        conn_id = str(cmd.get("connId", "") or "")
+        if not url or not url.lower().startswith(("http://", "https://")):
+            return
+
+        def _open() -> None:
+            opened = open_in_default_browser(url, once=False)
+            self._broadcast_to_conn(
+                {"type": "openExternalResult", "url": url, "opened": opened},
+                conn_id,
+            )
+
+        threading.Thread(target=_open, name="open-external", daemon=True).start()
+
+    def _refuse_delete_while_running(self, cmd: dict[str, Any], what: str) -> None:
+        """Tell the requesting page that *what* cannot be deleted while its task runs."""
+        self._broadcast_to_conn(
+            {
+                "type": "notice",
+                "text": f"Cannot delete {what}: its task is still running. Stop it first.",
+                "tabId": str(cmd.get("tabId", "") or ""),
+            },
+            cmd.get("connId", ""),
+        )
+
+    def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
+        """Delete one task (and its sub-tasks) from history.db at the CHATS panel's request.
+
+        A live task is never deleted — nor a finished task whose
+        sub-task (deleted with it) still runs: the worker still appends
+        events to the row, and the page shows a notice instead.  Every
+        page is nudged to refresh its history once the rows are gone.
+        """
+        task_id = _opt_str(cmd.get("taskId"))
+        if not task_id:
+            return
+        # The liveness check and the delete form one critical section
+        # under ``_state_lock``: ``_cmd_run`` registers a new task's
+        # state under the same lock, so a run that starts after the
+        # check cannot lose its freshly inserted row.
+        with self._state_lock:
+            if _any_running(_task_tree(task_id)):
+                self._refuse_delete_while_running(cmd, "the task")
+                return
+            _race_delay()  # test hook: widens the check-to-delete window
+            _delete_task(task_id)
+        self.printer.broadcast({"type": "tasks_updated"})
+
+    def _cmd_delete_chat(self, cmd: dict[str, Any]) -> None:
+        """Delete a chat — all its tasks, their events and its title — from history.db.
+
+        Refused with a notice while any task the delete would remove
+        (a task of the chat, or a sub-task of one) is running.
+        """
+        chat_id = _opt_str(cmd.get("chatId"))
+        if not chat_id:
+            return
+        # Same critical section as ``_cmd_delete_task``.
+        with self._state_lock:
+            if _any_running(_chat_task_tree(chat_id), chat_id):
+                self._refuse_delete_while_running(cmd, "the chat")
+                return
+            _race_delay()  # test hook: widens the check-to-delete window
+            _delete_chat(chat_id)
+        self.printer.broadcast({"type": "tasks_updated"})
+
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
 
@@ -1051,7 +1167,11 @@ class _CommandsMixin:
         self.printer.broadcast_transient({"type": "askUserDone"}, owner.task_id, ans_tab)
 
     def _route_prompt_to_owner(
-        self, owner: AgentState, prompt: str, tab_id: str,
+        self,
+        owner: AgentState,
+        prompt: str,
+        tab_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> bool:
         """Queue a mid-run user *prompt* on the right list of *owner*.
 
@@ -1095,10 +1215,19 @@ class _CommandsMixin:
 
         MUST be called while holding :data:`agent_state.STATE_LOCK`.
 
+        Files attached to the message (*attachments*) follow the text:
+        a steering message's go to ``pending_user_attachments`` for the
+        live agent, a ``<task>`` follow-up's to
+        ``queued_followup_files`` (one entry per block, so each queued
+        task runs with the message's files), and an answer to a
+        pending question carries none (the composer never attaches
+        files to an answer).
+
         Args:
             owner: The running-task state that accepted the prompt.
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
+            attachments: The message's decoded attachments, if any.
 
         Returns:
             ``True`` when the text was queued as a prompt (steering
@@ -1113,7 +1242,9 @@ class _CommandsMixin:
             and not owner.followup_queue_closed
             and contains_task_tags(prompt)
         ):
-            owner.queued_followup_tasks.extend(parse_task_tags(prompt))
+            blocks = parse_task_tags(prompt)
+            owner.queued_followup_tasks.extend(blocks)
+            owner.queued_followup_files.extend(list(attachments or []) for _ in blocks)
             return True
         if owner.pending_ask_question and owner.user_answer_queue is not None:
             self._deliver_user_answer(
@@ -1121,10 +1252,15 @@ class _CommandsMixin:
             )
             return False
         owner.pending_user_messages.append(prompt)
+        owner.pending_user_attachments.extend(attachments or [])
         return True
 
     def _queue_prompt_on_owner(
-        self, owner: AgentState, prompt: str, tab_id: str,
+        self,
+        owner: AgentState,
+        prompt: str,
+        tab_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> tuple[bool, str] | None:
         """Route *prompt* to *owner* and resolve how to echo it.
 
@@ -1149,6 +1285,7 @@ class _CommandsMixin:
             owner: The running-task state that accepted the prompt.
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
+            attachments: The message's decoded attachments, if any.
 
         Returns:
             ``(remember, owner_task)`` — the *remember* flag of
@@ -1156,7 +1293,7 @@ class _CommandsMixin:
             echo with (``""`` when unknown) — or ``None`` when no echo
             must be emitted.
         """
-        remember = self._route_prompt_to_owner(owner, prompt, tab_id)
+        remember = self._route_prompt_to_owner(owner, prompt, tab_id, attachments)
         if _reruns_after_teardown(owner):
             return None
         owner_task = _persisted_task_id(owner.agent)
@@ -1306,6 +1443,7 @@ class _CommandsMixin:
         owner_agent: Any,
         chat_id: str,
         question: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """Fire a background ``ask_sea`` dispatch for a live ``/ask`` query.
 
@@ -1360,6 +1498,8 @@ class _CommandsMixin:
                 history.
             question: The user's question, already stripped of the
                 ``/ask`` prefix and surrounding whitespace.
+            attachments: The files sent with the question, in the
+                ``submit`` wire shape; the answering run gets them.
         """
         from kiss.agents.seas.ask import ask_sea
         from kiss.agents.sorcar import daemon_client
@@ -1371,6 +1511,7 @@ class _CommandsMixin:
         # chat command, but the side channel is this answerer's.
         sea_path = Path(ask_sea.__file__)
         endpoint_file = _daemon_endpoint_file()
+        wire_attachments = [a for a in attachments or [] if isinstance(a, dict)]
         epoch_getter = getattr(owner_agent, "_usage_epoch", None)
         epoch = epoch_getter() if callable(epoch_getter) else None
 
@@ -1387,6 +1528,7 @@ class _CommandsMixin:
                     endpoint_file=endpoint_file,
                     timeout=_ASK_TIMEOUT_SECONDS,
                     stop_on_timeout=True,
+                    attachments=wire_attachments,
                 )
                 spent = result
                 text, success = result.text, result.success
@@ -1532,6 +1674,10 @@ class _CommandsMixin:
         prompt = cmd.get("prompt", "")
         if not isinstance(prompt, str) or not prompt.strip():
             return
+        # Lazily decoded (see ``PendingAttachment``): the owner is
+        # chosen and the message queued in ONE locked step, so a task
+        # finishing meanwhile cannot strand the follow-up.
+        attachments = pending_attachments(cmd.get("attachments", []))
         # ``running()`` (not a raw ``is_alive()``) so a follow-up typed
         # while ``_cmd_run`` has installed but not yet started the
         # worker thread is queued instead of silently dropped.
@@ -1583,7 +1729,7 @@ class _CommandsMixin:
             if question is not None and owner_task:
                 ask_question = question
             else:
-                queued = self._queue_prompt_on_owner(owner, prompt, tab_id)
+                queued = self._queue_prompt_on_owner(owner, prompt, tab_id, attachments)
                 if queued is None:
                     # The agent loop is over: nothing drains the queue
                     # any more and ``_run_task``'s cleanup re-submits
@@ -1617,12 +1763,14 @@ class _CommandsMixin:
                         success=help_ok,
                     )
                     return
+            raw_attachments = cmd.get("attachments")
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,
                 owner_agent=owner.agent,
                 chat_id=owner_chat_id,
                 question=ask_question,
+                attachments=raw_attachments if isinstance(raw_attachments, list) else None,
             )
             return
         self._echo_injected_prompt(tab_id, prompt, owner_task, remember)
@@ -1644,6 +1792,12 @@ class _CommandsMixin:
         ``_handle_ready``) sends no transcript at all: the connection
         gets the tab's state and a ``replay_deferred`` offer instead
         (:meth:`_defer_replay`).
+
+        ``replayId`` is set by a daemon forwarding the resume for one
+        of its clients (:mod:`kiss.server.remote_tabs`): every frame
+        of the answer echoes it, and a ``replayDone`` to the asking
+        connection ends the answer, so that daemon can tell the frames
+        of this replay from the tab's other frames.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
@@ -1656,12 +1810,18 @@ class _CommandsMixin:
         if cmd.get("deferred") and conn_id:
             self._defer_replay(chat_id, cmd.get("tabId", ""), task_id, conn_id)
             return
+        replay_id = str(cmd.get("replayId") or "")
         self._replay_session(
             chat_id,
             cmd.get("tabId", ""),
             task_id=task_id,
             conn_id=conn_id,
+            replay_id=replay_id,
         )
+        if replay_id:
+            self._broadcast_to_conn(
+                {"type": "replayDone", "replayId": replay_id}, str(cmd.get("connId") or ""),
+            )
 
     def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
         """Register a client-opened tab in the shared tab registry.
@@ -2445,6 +2605,9 @@ class _CommandsMixin:
         "getHistory": _cmd_get_history,
         "setFavorite": _cmd_set_favorite,
         "setChatSummary": _cmd_set_chat_summary,
+        "deleteTask": _cmd_delete_task,
+        "deleteChat": _cmd_delete_chat,
+        "openExternal": _cmd_open_external,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
         "userAnswer": _cmd_user_answer,

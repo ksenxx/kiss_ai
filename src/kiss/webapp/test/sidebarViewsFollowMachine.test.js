@@ -34,7 +34,14 @@ const {
   stubRaf,
   stubMonaco,
   fakeMatchMedia,
+  pickMachine,
 } = require('./simplify2_harness');
+const {
+  all,
+  showSection,
+  menuItem,
+  rightClick,
+} = require('./ui_antipattern_harness');
 
 const openWindows = [];
 
@@ -76,28 +83,12 @@ function msgs(posted, type) {
   return posted.filter(m => m && m.type === type);
 }
 
-function all(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
-}
-
 function rootRows(win) {
   return all(win, '#explorer-tree > .explorer-row.is-root');
 }
 
 function rootPaths(win) {
   return rootRows(win).map(r => r.dataset.explorerPath);
-}
-
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function pickMachine(win, value) {
-  const select = byId(win, 'chat-machine');
-  select.value = value;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 /** Answer the last listDir for *p* (stamped *machine*, '' for none). */
@@ -181,23 +172,6 @@ function boot() {
 function goToBox(win) {
   pickMachine(win, 'gpu-box');
   send(win, BOX_DIRS);
-}
-
-function rightClick(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
-}
-
-function menuItem(win, label) {
-  return all(win, '#sidebar-context-menu .tree-ctx-item').find(
-    el => el.querySelector('.tree-ctx-label').textContent === label,
-  );
 }
 
 function rowFor(win, p) {

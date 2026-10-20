@@ -1181,14 +1181,11 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         self.addCleanup(_refresh_config)
         for name in _PROVIDER_KEYS:
             self.addCleanup(_restore_env, name, os.environ.pop(name, None))
-        orig_argv = sys.argv
+        self.addCleanup(setattr, sys, "argv", sys.argv)
         sys.argv = ["kiss-slack", *argv]
 
         def launch() -> str:
-            try:
-                channel_main(SlackAgent, "kiss-slack", channel_name="Slack")
-            finally:
-                sys.argv = orig_argv
+            channel_main(SlackAgent, "kiss-slack", channel_name="Slack")
             return "returned"
 
         return launch

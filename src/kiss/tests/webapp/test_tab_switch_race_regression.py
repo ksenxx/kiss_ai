@@ -1030,8 +1030,12 @@ class TestPerTabT0(unittest.TestCase):
         focus_steal_src = _extract_function(self.js, "composerFocusWouldSteal")
         is_text_entry_src = _extract_function(self.js, "isTextEntry")
         sheet_open_src = _extract_function(self.js, "sheetOrModalOpen")
+        # sheetOrModalOpen also counts the sign-in window; the page has
+        # none here (signinModal is null).
+        signin_open_src = _extract_function(self.js, "signinWindowOpen")
         result = _run_node(_make_test_script(
             r"""
+            var signinModal = null;
             var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
             var activeTabId = 1;
             var t0 = 111;
@@ -1065,6 +1069,7 @@ class TestPerTabT0(unittest.TestCase):
             """
             + set_tab_running_src
             + is_text_entry_src
+            + signin_open_src
             + sheet_open_src
             + focus_steal_src
             + set_ready_src

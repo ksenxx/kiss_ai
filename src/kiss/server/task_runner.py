@@ -84,6 +84,7 @@ from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 
 logger = logging.getLogger(__name__)
 
+
 def inject_keyboard_interrupt(tid: int) -> int:
     """Raise ``KeyboardInterrupt`` asynchronously in thread *tid*.
 
@@ -268,15 +269,20 @@ def _claim_merge(state: AgentState) -> tuple[bool, threading.Thread | None]:
 
 
 def _set_merge_claim(
-    state: AgentState, merging: bool, thread: threading.Thread | None,
+    state: AgentState,
+    merging: bool,
+    thread: threading.Thread | None,
 ) -> None:
     """Under ``STATE_LOCK``: restore the merge claim :func:`_claim_merge` returned."""
     state.is_merging = merging
     state.merge_thread = thread
 
 
-def _drain_queued_followups(state: AgentState, close_if_empty: bool) -> list[str]:
-    """Under ``STATE_LOCK``: take the queued ``<task>`` follow-ups of *state*.
+def _drain_queued_followups(
+    state: AgentState,
+    close_if_empty: bool,
+) -> tuple[list[str], list[list[Attachment]]]:
+    """Under ``STATE_LOCK``: take the queued ``<task>`` follow-ups of *state* and their files.
 
     With *close_if_empty* (the last drain of the subtask loop) an empty
     queue is closed in the same critical section, so a ``<task>``
@@ -286,9 +292,14 @@ def _drain_queued_followups(state: AgentState, close_if_empty: bool) -> list[str
     """
     queued = list(state.queued_followup_tasks)
     state.queued_followup_tasks.clear()
+    files = list(state.queued_followup_files)
+    state.queued_followup_files.clear()
+    # Index-aligned by construction (``_route_prompt_to_owner``); a
+    # queue written by an older path without files gets none.
+    files.extend([] for _ in range(len(queued) - len(files)))
     if not queued and close_if_empty:
         state.followup_queue_closed = True
-    return queued
+    return queued, files[: len(queued)]
 
 
 def _end_agent_loop(state: AgentState) -> None:
@@ -584,18 +595,91 @@ def decode_attachments(raw: object) -> list[Attachment] | None:
             type(raw).__name__,
         )
         return None
-    if not raw:
+    out = [a for a in map(decode_attachment, raw) if a is not None]
+    return out or None
+
+
+def decode_attachment(att: object) -> Attachment | None:
+    """Decode one wire entry of an ``attachments`` list.
+
+    Args:
+        att: The entry, normally a dict with base64 ``data`` and
+            ``mimeType``.
+
+    Returns:
+        The attachment, or ``None`` for a malformed entry (logged).
+    """
+    try:
+        if not isinstance(att, dict):
+            raise TypeError(type(att).__name__)
+        data = base64.b64decode(att.get("data", ""))
+        mime = att.get("mimeType", "application/octet-stream")
+    except Exception:
+        logger.warning("Skipping malformed attachment", exc_info=True)
         return None
-    out: list[Attachment] = []
-    for att in raw:
-        try:
-            data = base64.b64decode(att.get("data", ""))
-            mime = att.get("mimeType", "application/octet-stream")
-        except Exception:
-            logger.warning("Skipping malformed attachment", exc_info=True)
-            continue
-        out.append(Attachment.from_bytes(data, mime))
-    return out
+    return Attachment.from_bytes(data, mime)
+
+
+class PendingAttachment(Attachment):
+    """A file queued on a running task, decoded by the thread that uses it.
+
+    ``_cmd_run`` and ``_cmd_append_user_message`` queue a message on the
+    task that owns its tab under ``STATE_LOCK``: choosing the owner and
+    queueing must be one step, or a Stop or a finishing task slips
+    between them.  Decoding cannot happen there (a HEIC transcode takes
+    hundreds of milliseconds and the lock serializes every task
+    thread), so the wire entry is kept as it came and decoded on the
+    first read of ``data`` or ``mime_type``: by the agent thread's
+    pre-step drain, the follow-up subtask, or the leftover re-dispatch,
+    all off the lock.  ``pending_attachments`` drops entries of the
+    wrong shape up front; one whose base64 still fails decodes to an
+    empty attachment rather than failing that later reader.
+    """
+
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in ("data", "mime_type"):
+            raise AttributeError(name)
+        att = decode_attachment(self._raw) or Attachment(b"", "application/octet-stream")
+        self.data, self.mime_type = att.data, att.mime_type
+        return getattr(self, name)
+
+
+def pending_attachments(raw: object) -> list[Attachment] | None:
+    """Wrap a submit command's ``attachments`` for a running task's queue.
+
+    Nothing is decoded (see :class:`PendingAttachment`), so the caller
+    may hold ``STATE_LOCK``.
+
+    Args:
+        raw: The command's ``attachments`` value, normally a list of dicts.
+
+    Returns:
+        The pending attachments, or ``None`` when there are none to send.
+    """
+    if not isinstance(raw, list):
+        logger.warning(
+            "Ignoring malformed attachments field of type %s",
+            type(raw).__name__,
+        )
+        return None
+    out: list[Attachment] = [
+        PendingAttachment(att) for att in raw if _well_formed_attachment(att)
+    ]
+    if len(out) < len(raw):
+        logger.warning("Skipping %d malformed attachment(s)", len(raw) - len(out))
+    return out or None
+
+
+def _well_formed_attachment(att: object) -> bool:
+    """True when *att* has the shape ``decode_attachment`` can decode (an O(1) check)."""
+    return (
+        isinstance(att, dict)
+        and isinstance(att.get("data", ""), (str, bytes))
+        and isinstance(att.get("mimeType", ""), str)
+    )
 
 
 def parse_task_tags(text: str) -> list[str]:
@@ -764,8 +848,12 @@ def _result_event(text: str, *, success: bool, agent: object = None) -> dict[str
 
 
 def _save_subtask_extra(
-    state: AgentState, task_id: str | None, model: str, work_dir: str,
-    start_ms: int, end_ms: int,
+    state: AgentState,
+    task_id: str | None,
+    model: str,
+    work_dir: str,
+    start_ms: int,
+    end_ms: int,
 ) -> None:
     """Under ``TASK_USAGE_LOCK``: save a finished row's ``extra`` payload from the agent's
     metrics."""
@@ -779,7 +867,7 @@ def _save_subtask_extra(
             work_dir=work_dir,
             version=__version__,
             tokens=tokens,
-            cost=round(cost, 6),
+            cost=cost,
             steps=steps,
             is_parallel=state.use_parallel,
             start_ms=start_ms,
@@ -911,7 +999,10 @@ class _TaskRunnerMixin:
         # model and ``_run_task`` falls back to the daemon default.
         if not cmd.get("model"):
             remembered = locked_call(
-                self._state_lock, self._tab_models.get, cmd.get("tabId", ""), "",
+                self._state_lock,
+                self._tab_models.get,
+                cmd.get("tabId", ""),
+                "",
             )
             if remembered:
                 cmd["model"] = remembered
@@ -959,7 +1050,8 @@ class _TaskRunnerMixin:
             # to PICKED_HOOK_TIMEOUT_SECONDS to land before the task
             # starts.  The already-executed namespace is reused.
             run_picked_hook(
-                picked[0], str(cmd.get("workDir") or self.work_dir),
+                picked[0],
+                str(cmd.get("workDir") or self.work_dir),
                 sea=next(sea for sea in layers if sea.path == picked[1]),
             )
         return overridden
@@ -1044,8 +1136,11 @@ class _TaskRunnerMixin:
                     override_chat_id = str(cmd["chatId"])
                     state.chat_id = override_chat_id
                     locked_call(
-                        self._state_lock, operator.setitem,
-                        self._tab_chat_views, tab_id, override_chat_id,
+                        self._state_lock,
+                        operator.setitem,
+                        self._tab_chat_views,
+                        tab_id,
+                        override_chat_id,
                     )
                 # The dispatch handler already PINNED the tab's registry
                 # entry (chat, title, work dir) from the client-sent
@@ -1053,10 +1148,7 @@ class _TaskRunnerMixin:
                 self._registry_update_tab(
                     tab_id,
                     chat_id=override_chat_id,
-                    title=(
-                        cmd["prompt"] if "prompt" in overridden_fields
-                        else None
-                    ),
+                    title=(cmd["prompt"] if "prompt" in overridden_fields else None),
                     work_dir=(
                         # A script's ``work_dir`` is never empty either:
                         # the override is the directory the run uses.
@@ -1075,16 +1167,20 @@ class _TaskRunnerMixin:
                     # follow-up submitted during this setup window was
                     # echoed since, so the run's own prompt is echoed
                     # again first.
-                    self.printer.broadcast({
-                        "type": "setTaskText",
-                        "text": str(cmd.get("prompt", "") or ""),
-                        "tabId": tab_id,
-                    })
-                    self.printer.broadcast({
-                        "type": "clear",
-                        "chat_id": override_chat_id,
-                        "tabId": tab_id,
-                    })
+                    self.printer.broadcast(
+                        {
+                            "type": "setTaskText",
+                            "text": str(cmd.get("prompt", "") or ""),
+                            "tabId": tab_id,
+                        }
+                    )
+                    self.printer.broadcast(
+                        {
+                            "type": "clear",
+                            "chat_id": override_chat_id,
+                            "tabId": tab_id,
+                        }
+                    )
                     # That ``clear`` wipes the transcript again, so the
                     # run's notice (dropped attachments) must follow it.
                     self._broadcast_run_notice(cmd, tab_id)
@@ -1108,8 +1204,7 @@ class _TaskRunnerMixin:
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
             if state is not None and (
-                isinstance(exc, KeyboardInterrupt)
-                or _stop_interrupt_wrapped(exc, state)
+                isinstance(exc, KeyboardInterrupt) or _stop_interrupt_wrapped(exc, state)
             ):
                 # A cancellation that landed before ``_run_task_inner``'s
                 # own handlers (setup, or the inner prologue) — as the
@@ -1124,7 +1219,9 @@ class _TaskRunnerMixin:
                 # also labels a shutdown as a shutdown.
                 setup_fail_text, _ = self._cancel_outcome(state)
                 logger.info(
-                    "%s during setup: tab_id=%s", setup_fail_text, tab_id,
+                    "%s during setup: tab_id=%s",
+                    setup_fail_text,
+                    tab_id,
                 )
             else:
                 logger.warning(
@@ -1174,7 +1271,8 @@ class _TaskRunnerMixin:
                     logger.warning(
                         "Early-failure cleanup timer for task %s could "
                         "not be started; dropping the recording now",
-                        state.task_id, exc_info=True,
+                        state.task_id,
+                        exc_info=True,
                     )
                     self.printer.cleanup_task(state.task_id)
             # Recording the result (the launcher's copy) and choosing
@@ -1183,8 +1281,11 @@ class _TaskRunnerMixin:
             # holds the result and supersedes the live copy, or lacks
             # it and is followed by it — never both.
             locked_call(
-                self.printer.delivery_lock, self._broadcast_setup_result,
-                setup_result, state, tab_id,
+                self.printer.delivery_lock,
+                self._broadcast_setup_result,
+                setup_result,
+                state,
+                tab_id,
             )
         finally:
             # The channel workspace ``_apply_sea`` entered on this
@@ -1208,10 +1309,24 @@ class _TaskRunnerMixin:
             # merge, while ``task_thread`` was still installed): no
             # agent drains them any more, so they are re-submitted
             # below as the tab's next run instead of being dropped.
-            leftover, redispatch, task_id_for_end = locked_call(
-                self._state_lock, self._release_run_state,
-                state, cmd, tab_id, client_task_id,
+            leftover, leftover_files, redispatch, task_id_for_end = locked_call(
+                self._state_lock,
+                self._release_run_state,
+                state,
+                cmd,
+                tab_id,
+                client_task_id,
             )
+            # A run_agent child's completion signal goes out only now,
+            # with the thread slot released: a parent replay that read
+            # the state as live before this point re-checks it after
+            # subscribing the tab and sends the signal itself
+            # (``_open_persisted_subagent_tabs``); one that reads it
+            # from here on announces the tab as done (C3-F1).
+            subagent_done = cmd.pop("_subagent_done", None)
+            if subagent_done is not None:
+                last_row_id, model, parent_tab_id = subagent_done
+                self._broadcast_dispatch_subagent_done(last_row_id, tab_id, model, parent_tab_id)
             self._broadcast_status_end_to_viewers(
                 task_id_for_end,
                 tab_id,
@@ -1231,10 +1346,13 @@ class _TaskRunnerMixin:
             self.printer._thread_local.stop_event = None
             self._dispose_if_closed(tab_id)
             if redispatch:
-                self._redispatch_leftover_prompts(submitted_cmd, leftover)
+                self._redispatch_leftover_prompts(submitted_cmd, leftover, leftover_files)
 
     def _redispatch_leftover_prompts(
-        self, cmd: dict[str, Any], leftover: list[str],
+        self,
+        cmd: dict[str, Any],
+        leftover: list[str],
+        files: list[Attachment],
     ) -> None:
         """Re-submit prompts left in ``pending_user_messages`` as the tab's next run.
 
@@ -1249,17 +1367,22 @@ class _TaskRunnerMixin:
         token (``taskId``) belongs to the submission that has just
         ended, and the routing key (``_state_key``) to the state that
         has just been torn down.  Multiple leftovers become one
-        prompt, joined by blank lines, in the order they were typed.
+        prompt, joined by blank lines, in the order they were typed;
+        the files attached to them are the follow-up's attachments
+        (not the finished run's).
 
         Args:
             cmd: The finished run's ``run`` command as submitted
                 (``_run_task``'s pre-SEA snapshot).
             leftover: The undrained prompts, oldest first.
+            files: The attachments of those prompts.
         """
-        followup = {
-            k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")
-        }
+        followup = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")}
         followup["prompt"] = "\n\n".join(leftover)
+        followup["attachments"] = [
+            {"mimeType": att.mime_type, "data": base64.b64encode(att.data).decode("ascii")}
+            for att in files
+        ]
         try:
             self._cmd_run(followup)
         except BaseException:
@@ -1271,7 +1394,7 @@ class _TaskRunnerMixin:
         cmd: dict[str, Any],
         tab_id: str,
         client_task_id: str,
-    ) -> tuple[list[str], bool, str | None]:
+    ) -> tuple[list[str], list[Attachment], bool, str | None]:
         """Under ``_state_lock``: free *state*'s run slot and end the tab's status.
 
         Clears the thread, stop and answer handles and every per-run
@@ -1290,18 +1413,20 @@ class _TaskRunnerMixin:
                 status event when known.
 
         Returns:
-            ``(leftover, redispatch, task_id)``: the prompts typed into
+            ``(leftover, files, redispatch, task_id)``: the prompts typed into
             the tab after the agent's last step (no agent drains them
-            any more), whether they should be re-submitted as the
+            any more) and their attachments, whether they should be re-submitted as the
             tab's next run (mirrors ``commands._reruns_after_teardown``
             plus the stop verdict only known here), and the state's
             task id for the viewers' status fan-out.
         """
         leftover: list[str] = []
+        leftover_files: list[Attachment] = []
         redispatch = False
         task_id_for_end: str | None = None
         if state is not None:
             leftover = list(state.pending_user_messages)
+            leftover_files = list(state.pending_user_attachments)
             redispatch = bool(leftover) and not (
                 _stop_requested(state)
                 or state.frontend_closed
@@ -1312,18 +1437,27 @@ class _TaskRunnerMixin:
             state.stop_event = None
             state.user_answer_queue = None
             state.pending_user_messages.clear()
+            state.pending_user_attachments.clear()
             state.unattributed_prompt_echoes.clear()
             # Queued ``<task>`` follow-ups that were never drained (the
             # run failed, was stopped, or the message landed after the
             # last drain point) must not leak into a later run on the
             # same tab.
             state.queued_followup_tasks.clear()
+            state.queued_followup_files.clear()
+            # Not redundant with ``_run_task_inner``'s mandatory
+            # finally: ``_activate_run`` raises the flag before that
+            # try block starts, and a failure in between (early prompt
+            # broadcast, task classification, worktree inheritance)
+            # reaches only this clear.
             state.is_task_active = False
             state.interrupted_by_shutdown = False
             state.stop_acknowledged = False
             task_id_for_end = state.task_id
             if state.agent is not None and not getattr(
-                state.agent, "_wt_pending", False,
+                state.agent,
+                "_wt_pending",
+                False,
             ):
                 state.agent = None
         status_end: dict[str, Any] = {
@@ -1335,7 +1469,7 @@ class _TaskRunnerMixin:
             status_end["taskId"] = client_task_id
         self.printer.broadcast(status_end)
         self._restore_user_model_pick(tab_id)
-        return leftover, redispatch, task_id_for_end
+        return leftover, leftover_files, redispatch, task_id_for_end
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
         """Put the user's own model back in *tab_id*'s picker.
@@ -1358,9 +1492,7 @@ class _TaskRunnerMixin:
 
     def _user_model_for_tab(self, tab_id: str) -> str:
         """Under ``_state_lock``: *tab_id*'s own pick, else the last saved or default model."""
-        return self._tab_models.get(tab_id, "") or (
-            _load_last_model() or self._default_model
-        )
+        return self._tab_models.get(tab_id, "") or (_load_last_model() or self._default_model)
 
     def _broadcast_status_end_to_viewers(
         self,
@@ -1400,12 +1532,18 @@ class _TaskRunnerMixin:
             if viewer_tab_id == launcher_tab_id:
                 continue
             locked_call(
-                self._state_lock, self._end_viewer_status,
-                viewer_tab_id, task_key, client_task_id,
+                self._state_lock,
+                self._end_viewer_status,
+                viewer_tab_id,
+                task_key,
+                client_task_id,
             )
 
     def _end_viewer_status(
-        self, viewer_tab_id: str, task_key: str, client_task_id: str,
+        self,
+        viewer_tab_id: str,
+        task_key: str,
+        client_task_id: str,
     ) -> None:
         """Under ``_state_lock``: send *viewer_tab_id* its ``running=False`` for *task_key*.
 
@@ -1422,11 +1560,7 @@ class _TaskRunnerMixin:
         ``running=False`` and its composer would re-enable mid-run.
         """
         viewer_state = agent_state.find_by_tab(viewer_tab_id)
-        if (
-            viewer_state is not None
-            and viewer_state.busy()
-            and viewer_state.task_id != task_key
-        ):
+        if viewer_state is not None and viewer_state.busy() and viewer_state.task_id != task_key:
             return
         payload: dict[str, Any] = {
             "type": "status",
@@ -1453,7 +1587,10 @@ class _TaskRunnerMixin:
         ``resumeSession`` after the child's ``new_tab`` broadcast, or
         still opening it under the derived ``{parent}__sub_{task}`` id —
         stops its running indicator and gets the user's model pick
-        back.  Best-effort UI signalling: never raises.
+        back.  Best-effort UI signalling: never raises.  Sent from
+        ``_run_task`` after ``_release_run_state`` for the last row
+        (the state no longer reports the child as running), and from
+        ``_run_task_inner`` for each intermediate row.
 
         Args:
             task_id: The child's ``task_history`` row id, whose
@@ -1470,7 +1607,11 @@ class _TaskRunnerMixin:
         """
         try:
             _notify_subagent_done(
-                self.printer, task_id, tab_id, model or "", parent_tab_id,
+                self.printer,
+                task_id,
+                tab_id,
+                model or "",
+                parent_tab_id,
             )
         except Exception:
             logger.debug("subagentDone broadcast failed", exc_info=True)
@@ -1517,9 +1658,7 @@ class _TaskRunnerMixin:
         from kiss.core.base import SYSTEM_PROMPT
 
         system_text = (
-            system_prompt_override
-            if system_prompt_override.strip()
-            else SYSTEM_PROMPT
+            system_prompt_override if system_prompt_override.strip() else SYSTEM_PROMPT
         ) + append_to_system_prompt
         if active_file:
             system_text += f"\n\n- The path of the file open in the editor is {active_file}"
@@ -1560,7 +1699,10 @@ class _TaskRunnerMixin:
         return locked_call(self._state_lock, self._resolve_run_state_locked, cmd, key)
 
     def _activate_run(
-        self, state: AgentState, cmd: dict[str, Any], tab_id: str,
+        self,
+        state: AgentState,
+        cmd: dict[str, Any],
+        tab_id: str,
     ) -> tuple[bool, threading.Event | None]:
         """Under ``_state_lock``: mark *state*'s task active unless a merge is in progress.
 
@@ -1594,6 +1736,12 @@ class _TaskRunnerMixin:
                 existing.stop_event = threading.Event()
             if existing.user_answer_queue is None:
                 existing.user_answer_queue = queue.Queue(maxsize=1)
+            if existing.task_thread is None:
+                # An idle state is keyed by its previous run; give this
+                # run a fresh key like ``_cmd_run`` does, so a previous
+                # run's early-failure ``Timer(cleanup_task)`` can never
+                # name this one (C3-F2).
+                agent_state.rekey(existing, key or uuid.uuid4().hex)
             existing.task_thread = threading.current_thread()
             # A reused idle state carries the PREVIOUS run's
             # closed follow-up queue; left set, every later
@@ -1601,6 +1749,7 @@ class _TaskRunnerMixin:
             # steered instead of queued.  Re-open it (and drop any
             # stale leftovers) for the new run.
             existing.queued_followup_tasks.clear()
+            existing.queued_followup_files.clear()
             existing.followup_queue_closed = False
             cmd["_state_key"] = existing.task_id
             return existing
@@ -1681,21 +1830,18 @@ class _TaskRunnerMixin:
         # prompt for the agent and its sub-agents; anything else
         # (absent, None, non-string, blank) runs as usual.
         _raw_system_prompt = cmd.get("systemPrompt")
-        system_prompt_override = (
-            _raw_system_prompt if isinstance(_raw_system_prompt, str) else ""
-        )
+        system_prompt_override = _raw_system_prompt if isinstance(_raw_system_prompt, str) else ""
         # Caller-supplied append-only suffixes (wire fields
         # ``appendToSystemPrompt`` / ``appendToPrompt``).  Untrusted
         # input: anything but a string (absent, None, wrong type)
         # appends nothing.
         _raw_append_sys = cmd.get("appendToSystemPrompt")
-        append_to_system_prompt = (
-            _raw_append_sys if isinstance(_raw_append_sys, str) else ""
-        )
+        append_to_system_prompt = _raw_append_sys if isinstance(_raw_append_sys, str) else ""
         _raw_append_prompt = cmd.get("appendToPrompt")
-        append_to_prompt = (
-            _raw_append_prompt if isinstance(_raw_append_prompt, str) else ""
-        )
+        append_to_prompt = _raw_append_prompt if isinstance(_raw_append_prompt, str) else ""
+        # Decoded here, on the worker, after ``_cmd_run`` registered
+        # the run: a Stop sent during a slow HEIC transcode must find
+        # the run.
         attachments = decode_attachments(cmd.get("attachments", []))
         start_ms = int(cmd.get("_start_ms") or 0)
 
@@ -1717,10 +1863,7 @@ class _TaskRunnerMixin:
         # reports ``is_subagent``.  Set unconditionally: a reused
         # agent must not carry a previous run's parentage.
         _raw_parent_task_id = cmd.get("parentTaskId")
-        parent_task_id = (
-            _raw_parent_task_id.strip()
-            if isinstance(_raw_parent_task_id, str) else ""
-        )
+        parent_task_id = _raw_parent_task_id.strip() if isinstance(_raw_parent_task_id, str) else ""
         # An SEA run (``seaPath``, e.g. the SEA an
         # ``/xxx text`` relay dispatches) or another agent's sub-task
         # (``parentTaskId``) is not a user typing into a chat box: a
@@ -1733,9 +1876,7 @@ class _TaskRunnerMixin:
             _raw_sea_path.strip() if isinstance(_raw_sea_path, str) else "",
         )
         # Recorded in the row's ``sea`` column (see ChatSorcarAgent.sea_name).
-        agent.sea_name = (
-            Path(str(_raw_sea_path).strip()).stem if _sea_run else ""
-        )
+        agent.sea_name = Path(str(_raw_sea_path).strip()).stem if _sea_run else ""
         # Recorded in the row's ``is_cron`` column (the CHATS list's Cron
         # chip); ``cronJob`` was settled from the submitted command in
         # ``_run_task``.  Set unconditionally: a reused agent must not
@@ -1743,9 +1884,7 @@ class _TaskRunnerMixin:
         agent.is_cron_job = bool(cmd.get("cronJob"))
         _open_bare_path = not _sea_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
-        parent_tab_id = (
-            _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
-        )
+        parent_tab_id = _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
         agent._subagent_info = (
             {
                 "parent_task_id": parent_task_id,
@@ -1824,9 +1963,7 @@ class _TaskRunnerMixin:
         # to the default provider fails or stalls there.
         _vcfg = load_config()
         _raw_model_config = cmd.get("modelConfig")
-        _agent_model_config = (
-            _raw_model_config if isinstance(_raw_model_config, dict) else None
-        )
+        _agent_model_config = _raw_model_config if isinstance(_raw_model_config, dict) else None
         _model_config = custom_model_config(model) or build_model_config(_vcfg)
         # A run whose effective configuration names an endpoint never
         # needs a vendor key: ``model_info.model`` builds the
@@ -1842,25 +1979,35 @@ class _TaskRunnerMixin:
         )
         available = get_available_models()
         if not _endpoint_run and (not available or (model and model not in available)):
-            self.printer.broadcast({
-                **_result_event(
-                    "No model available.  Set at least one API key in the environment.",
-                    success=False,
-                ),
-                "tabId": tab_id,
-            })
+            self.printer.broadcast(
+                {
+                    **_result_event(
+                        "No model available.  Set at least one API key in the environment.",
+                        success=False,
+                    ),
+                    "tabId": tab_id,
+                }
+            )
             return
 
         activated, stop_event = locked_call(
-            self._state_lock, self._activate_run, state, cmd, tab_id,
+            self._state_lock,
+            self._activate_run,
+            state,
+            cmd,
+            tab_id,
         )
         if not activated:
             return
         self.printer._thread_local.stop_event = stop_event
 
         self._broadcast_early_prompts(
-            display_prompt, active_file, tab_id, system_prompt_override,
-            append_to_system_prompt, append_to_prompt,
+            display_prompt,
+            active_file,
+            tab_id,
+            system_prompt_override,
+            append_to_system_prompt,
+            append_to_prompt,
         )
 
         # Pre-run task classification (kiss.agents.sorcar.task_classifier),
@@ -1875,9 +2022,7 @@ class _TaskRunnerMixin:
         # "Classify tasks before running" setting decides, exactly
         # like ``useWebTools`` falls back to "Use web tools".
         _raw_classify = cmd.get("classifyTasks")
-        _classify_enabled = (
-            _raw_classify if isinstance(_raw_classify, bool) else None
-        )
+        _classify_enabled = _raw_classify if isinstance(_raw_classify, bool) else None
         _classify_task_text = prompt + append_to_prompt
         if classification_enabled(_classify_enabled):
             # The classifier is a blocking model round trip (seconds);
@@ -1888,9 +2033,7 @@ class _TaskRunnerMixin:
             model_name=model,
             task=_classify_task_text,
             model_config=(
-                _agent_model_config
-                if _agent_model_config is not None
-                else _model_config
+                _agent_model_config if _agent_model_config is not None else _model_config
             ),
             enabled=_classify_enabled,
         )
@@ -1908,7 +2051,7 @@ class _TaskRunnerMixin:
             # is honoured right after.
             prior_claim = locked_call(self._state_lock, _claim_merge, state)
             try:
-                agent._retire_previous_worktree()
+                agent._retire_after_task_saved()
             finally:
                 locked_call(self._state_lock, _set_merge_claim, state, *prior_claim)
             if stop_event is not None and stop_event.is_set():
@@ -1919,13 +2062,19 @@ class _TaskRunnerMixin:
         self.printer.broadcast_launch_phase("", tab_id=tab_id)
 
         opened_task_id = locked_call(
-            self._state_lock, self._tab_opened_task_ids.pop, tab_id, "",
+            self._state_lock,
+            self._tab_opened_task_ids.pop,
+            tab_id,
+            "",
         )
         if opened_task_id:
             agent.resume_from_task_id(opened_task_id)
 
         logger.info(
-            "Task started: tab_id=%s model=%s prompt=%r", tab_id, model, prompt[:200],
+            "Task started: tab_id=%s model=%s prompt=%r",
+            tab_id,
+            model,
+            prompt[:200],
         )
         result_summary = "Agent Failed Abruptly"
         # The agent's own ``finish(suggested_next_task=...)`` proposal;
@@ -1953,6 +2102,9 @@ class _TaskRunnerMixin:
                 # agent run, ``state.last_user_prompt``, and the
                 # per-subtask persistence all consistent.
                 subtasks = [t + append_to_prompt for t in subtasks]
+            # The files each subtask runs with: the submission's for
+            # its own ``<task>`` blocks, a queued follow-up's own.
+            subtask_files: list[list[Attachment] | None] = [attachments] * len(subtasks)
             # ``load_config()`` fills every key from ``DEFAULTS``, so a
             # literal fallback here would be unreachable code that can
             # only drift away from the one authoritative default.
@@ -2020,9 +2172,7 @@ class _TaskRunnerMixin:
             # assembles its system prompt and builds its toolset.  The
             # ``none`` tool profile strips the run to ``finish`` plus
             # what ``tools()`` returns.
-            _system_prompt_hook: Callable[[str], str] | None = _staged_hook(
-                cmd, "systemPromptHook"
-            )
+            _system_prompt_hook: Callable[[str], str] | None = _staged_hook(cmd, "systemPromptHook")
             _tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = (
                 _staged_hook(cmd, "toolsHook")
             )
@@ -2079,7 +2229,7 @@ class _TaskRunnerMixin:
                         work_dir=work_dir,
                         printer=self.printer,
                         current_editor_file=active_file,
-                        attachments=attachments,
+                        attachments=subtask_files[subtask_index],
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=state.use_parallel,
                         max_budget=(_agent_budget if _agent_budget is not None else _cfg_budget),
@@ -2219,9 +2369,7 @@ class _TaskRunnerMixin:
                     # ``None`` keeps the teardown below off it, as for
                     # an agent that has never published a row.
                     row_after_run = getattr(agent, "last_task_id", "") or None
-                    task_history_id = (
-                        row_after_run if row_after_run != row_before_run else None
-                    )
+                    task_history_id = row_after_run if row_after_run != row_before_run else None
                     state.last_result_summary = result_summary
                 if subtask_failed:
                     # A failure aborts the queued follow-ups, so no
@@ -2230,7 +2378,11 @@ class _TaskRunnerMixin:
                     # instead of being silently cleared by the
                     # end-of-run cleanup.
                     locked_call(
-                        self._state_lock, setattr, state, "followup_queue_closed", True,
+                        self._state_lock,
+                        setattr,
+                        state,
+                        "followup_queue_closed",
+                        True,
                     )
                     already_broadcast = bool(
                         getattr(subtask_exc, "terminal_result_broadcast", False)
@@ -2250,18 +2402,19 @@ class _TaskRunnerMixin:
                 # intermediate one, so its row is persisted below and
                 # the queued tasks then run one-by-one exactly like
                 # the subtasks of a multi-``<task>`` submission.
-                queued_followups = locked_call(
-                    self._state_lock, _drain_queued_followups,
-                    state, subtask_index >= len(subtasks) - 1,
+                queued_followups, queued_files = locked_call(
+                    self._state_lock,
+                    _drain_queued_followups,
+                    state,
+                    subtask_index >= len(subtasks) - 1,
                 )
                 if queued_followups:
+                    subtask_files.extend(files or None for files in queued_files)
                     if append_to_prompt:
                         # Same executed-prompt suffix contract as the
                         # pre-loop application to the submitted
                         # subtasks.
-                        queued_followups = [
-                            t + append_to_prompt for t in queued_followups
-                        ]
+                        queued_followups = [t + append_to_prompt for t in queued_followups]
                     subtasks.extend(queued_followups)
                 if subtask_index < len(subtasks) - 1:
                     if task_history_id is not None and parent_task_id:
@@ -2272,7 +2425,10 @@ class _TaskRunnerMixin:
                         # the end-of-run signal below covers only
                         # the LAST row.
                         self._broadcast_dispatch_subagent_done(
-                            task_history_id, "", model, parent_tab_id,
+                            task_history_id,
+                            "",
+                            model,
+                            parent_tab_id,
                         )
                     self._persist_subtask_row(
                         state,
@@ -2291,7 +2447,8 @@ class _TaskRunnerMixin:
                 # as an ``SeaError`` wrapping the interrupt — a
                 # cancellation, not a task error.
                 if isinstance(
-                    _outer_exc, KeyboardInterrupt,
+                    _outer_exc,
+                    KeyboardInterrupt,
                 ) or _stop_interrupt_wrapped(_outer_exc, state):
                     result_summary, _cancel_event = self._cancel_outcome(state)
                     task_end_event = task_end_event or _cancel_event
@@ -2303,7 +2460,8 @@ class _TaskRunnerMixin:
                         "text": f"{_exc_name}: {_outer_exc}",
                     }
             elif isinstance(
-                _outer_exc, KeyboardInterrupt,
+                _outer_exc,
+                KeyboardInterrupt,
             ) or _stop_interrupt_wrapped(_outer_exc, state):
                 # A stop/shutdown interrupt landing in the
                 # between-subtask bookkeeping — after ``agent.run``
@@ -2330,11 +2488,10 @@ class _TaskRunnerMixin:
         finally:
             locked_call(self._state_lock, _end_agent_loop, state)
             end_event_broadcast = False
-            # Whether the LAST child row's ``subagentDone`` went out on
-            # the normal path below; the mandatory-cleanup finally
-            # backstops it on exception paths so a watching sub-agent
-            # tab can never keep spinning forever.
-            subagent_done_sent = False
+            # The LAST child row, kept past ``cleanup_task`` (which
+            # nulls ``task_history_id``) for the ``subagentDone`` owed
+            # to it in the mandatory-cleanup finally below.
+            last_row_id = task_history_id
             try:
                 # Warnings left by the pre-run retirement of a
                 # carried-over worktree (``_retire_previous_worktree``
@@ -2384,14 +2541,16 @@ class _TaskRunnerMixin:
                         if not self._present_pending_worktree(tab_id, discard_if_empty=False):
                             branch = agent._wt_branch
                             message = agent.discard(rescue_ignored=True)
-                            self.printer.broadcast({
-                                "type": "worktree_result",
-                                "tabId": tab_id,
-                                "action": "discard",
-                                "branch": branch,
-                                "success": not agent._wt_pending,
-                                "message": message,
-                            })
+                            self.printer.broadcast(
+                                {
+                                    "type": "worktree_result",
+                                    "tabId": tab_id,
+                                    "action": "discard",
+                                    "branch": branch,
+                                    "success": not agent._wt_pending,
+                                    "message": message,
+                                }
+                            )
                     except BaseException:
                         logger.debug("Worktree presentation error", exc_info=True)
                 locked_call(self._state_lock, setattr, state, "is_task_active", False)
@@ -2428,22 +2587,15 @@ class _TaskRunnerMixin:
                         }
                         stamp_event_ts(followup_event)
                         self.printer.broadcast_transient(
-                            followup_event, task_id=hist_id, tab_id=tab_id,
+                            followup_event,
+                            task_id=hist_id,
+                            tab_id=tab_id,
                         )
                         _append_chat_event(
-                            dict(followup_event), task_id=hist_id, task=prompt,
+                            dict(followup_event),
+                            task_id=hist_id,
+                            task=prompt,
                         )
-                    if parent_task_id:
-                        # After the follow-up broadcast — the frontend
-                        # may close the sub-agent tab on this signal —
-                        # and before ``cleanup_task`` drops the task's
-                        # state.  (The fan-out subscriber registry the
-                        # viewer list is read from outlives the
-                        # cleanup by design.)
-                        self._broadcast_dispatch_subagent_done(
-                            hist_id, tab_id, model, parent_tab_id,
-                        )
-                        subagent_done_sent = True
                     self.printer.cleanup_task(hist_id)
                     task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
@@ -2475,15 +2627,17 @@ class _TaskRunnerMixin:
                 # the printer's persist-agent/recording, or the worker
                 # thread-local task id.
                 locked_call(self._state_lock, setattr, state, "is_task_active", False)
+                if parent_task_id and last_row_id is not None:
+                    # The completion signal of a run_parallel worker
+                    # (``subagentDone`` to every watching tab) is owed
+                    # to the LAST row; ``_run_task`` sends it once the
+                    # state's thread slot is released, so a parent
+                    # replay can never announce the finished child as
+                    # live after the signal went out (C3-F1).  (The
+                    # fan-out subscriber registry the viewer list is
+                    # read from outlives ``cleanup_task`` by design.)
+                    cmd["_subagent_done"] = (last_row_id, model, parent_tab_id)
                 if task_history_id is not None:
-                    if parent_task_id and not subagent_done_sent:
-                        # The normal path above was interrupted (e.g.
-                        # a persistence failure) before it sent the
-                        # completion signal: send it here so the
-                        # watching sub-agent tab still stops spinning.
-                        self._broadcast_dispatch_subagent_done(
-                            task_history_id, tab_id, model, parent_tab_id,
-                        )
                     try:
                         self.printer.cleanup_task(task_history_id)
                     except BaseException:
@@ -2501,7 +2655,10 @@ class _TaskRunnerMixin:
                 self.printer._thread_local.stop_event = None
 
     def _broadcast_setup_result(
-        self, setup_result: dict[str, Any], state: AgentState | None, tab_id: str,
+        self,
+        setup_result: dict[str, Any],
+        state: AgentState | None,
+        tab_id: str,
     ) -> None:
         """Under ``delivery_lock``: broadcast a setup failure's ``result`` to the launcher and
         every viewer.
@@ -2518,9 +2675,7 @@ class _TaskRunnerMixin:
         # as the normal end-of-run result fan-out does.  The copies
         # drop ``taskId`` so they stay transient: the launcher's copy
         # above already recorded the result once for replay.
-        viewer_result = {
-            k: v for k, v in setup_result.items() if k not in ("tabId", "taskId")
-        }
+        viewer_result = {k: v for k, v in setup_result.items() if k not in ("tabId", "taskId")}
         for viewer_tab_id in self.printer._fanout_targets(state.task_id):
             if viewer_tab_id != tab_id:
                 self.printer.broadcast({**viewer_result, "tabId": viewer_tab_id})
@@ -2601,8 +2756,14 @@ class _TaskRunnerMixin:
             # finds the finished row and adds to it
             # (charge_side_channel_usage).
             locked_call(
-                TASK_USAGE_LOCK, _save_subtask_extra, state, task_id, model, work_dir,
-                sub_start_ms, end_ms if end_ms is not None else int(time.time() * 1000),
+                TASK_USAGE_LOCK,
+                _save_subtask_extra,
+                state,
+                task_id,
+                model,
+                work_dir,
+                sub_start_ms,
+                end_ms if end_ms is not None else int(time.time() * 1000),
             )
             self.printer.broadcast({"type": "tasks_updated"})
             logger.info(
@@ -2835,7 +2996,10 @@ class _TaskRunnerMixin:
         # On the task thread at startup: every ``_state_lock`` hold
         # goes through ``locked_call`` (see ``kiss.core.locked``).
         viewers = locked_call(
-            self._state_lock, self._chat_viewer_tabs_locked, chat_id, source_tab_id,
+            self._state_lock,
+            self._chat_viewer_tabs_locked,
+            chat_id,
+            source_tab_id,
         )
         _race_delay()  # test hook: widens the scan-to-subscribe window
         viewer_status: dict[str, Any] = {
@@ -2853,8 +3017,12 @@ class _TaskRunnerMixin:
             # ``clear`` would wipe that run's fresh transcript while
             # every later event of THIS task fanned out into it.
             locked_call(
-                self._state_lock, self._subscribe_idle_viewer_locked,
-                task_id, chat_id, viewer_tab_id, viewer_status,
+                self._state_lock,
+                self._subscribe_idle_viewer_locked,
+                task_id,
+                chat_id,
+                viewer_tab_id,
+                viewer_status,
             )
 
     def _chat_viewer_tabs_locked(self, chat_id: str, source_tab_id: str) -> list[str]:
@@ -2889,7 +3057,9 @@ class _TaskRunnerMixin:
         self.printer.broadcast({**viewer_status, "tabId": viewer_tab_id})
 
     def _resolve_running_state(
-        self, tab_id: str, run_token: str = "",
+        self,
+        tab_id: str,
+        run_token: str = "",
     ) -> AgentState | None:
         """Resolve *tab_id* to the running task state a stop-like command targets.
 
@@ -2915,9 +3085,7 @@ class _TaskRunnerMixin:
         owner_state = agent_state.find_by_tab(tab_id)
         if owner_state is not None and owner_state.stop_event is None:
             owner_state = None
-        if owner_state is not None and run_token and (
-            owner_state.client_run_token != run_token
-        ):
+        if owner_state is not None and run_token and (owner_state.client_run_token != run_token):
             # The tab's current run is not the one this command was
             # minted for: the original run already finished and the
             # tab was reused.  Nothing to act on.
@@ -2937,7 +3105,10 @@ class _TaskRunnerMixin:
         return owner_state
 
     def _interrupt_tool_call(
-        self, tab_id: str, tool_name: str = "", call_id: int | None = None,
+        self,
+        tab_id: str,
+        tool_name: str = "",
+        call_id: int | None = None,
     ) -> None:
         """Interrupt the tool call the task on *tab_id* is running.
 
@@ -2976,13 +3147,11 @@ class _TaskRunnerMixin:
             # A finished thread's ident may already name another
             # thread running another task's tool: only a live thread
             # is a target.
-            tid = (
-                task_thread.ident
-                if task_thread is not None and task_thread.is_alive()
-                else None
-            )
+            tid = task_thread.ident if task_thread is not None and task_thread.is_alive() else None
             accepted = tid is not None and tool_interrupt.interrupt_tool_call(
-                tid, tool_name, call_id,
+                tid,
+                tool_name,
+                call_id,
             )
             if accepted and pending_ask and owner_state is not None:
                 # Cleared here, under the lock, rather than by the task
@@ -3007,7 +3176,9 @@ class _TaskRunnerMixin:
             # on every tab showing it (an answer would do this through
             # _cmd_user_answer's askUserDone).
             self.printer.broadcast_transient(
-                {"type": "askUserDone"}, owner_task_id, tab_id,
+                {"type": "askUserDone"},
+                owner_task_id,
+                tab_id,
             )
 
     def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
@@ -3075,7 +3246,9 @@ class _TaskRunnerMixin:
             return
 
         logger.info(
-            "Stop requested for tab %s (task %s)", tab_id, owner_task_id,
+            "Stop requested for tab %s (task %s)",
+            tab_id,
+            owner_task_id,
         )
         # Acknowledged BEFORE the event is set: the task can die on the
         # very next bytecode, and the user needs to see that the click
@@ -3105,7 +3278,8 @@ class _TaskRunnerMixin:
                 logger.warning(
                     "Stop watchdog thread for tab %s could not be started; "
                     "enforcing the stop inline",
-                    tab_id, exc_info=True,
+                    tab_id,
+                    exc_info=True,
                 )
                 self._force_stop_thread(task_thread, still_owns)
 
@@ -3128,7 +3302,8 @@ class _TaskRunnerMixin:
         )
 
     def _find_viewer_task_states(
-        self, viewer_tab_id: str,
+        self,
+        viewer_tab_id: str,
     ) -> list[AgentState]:
         """Return the agent states of the tasks *viewer_tab_id* views.
 
@@ -3157,7 +3332,6 @@ class _TaskRunnerMixin:
                 if state is not None:
                     states.append(state)
         return states
-
 
     @staticmethod
     def _force_stop_thread(
@@ -3205,7 +3379,9 @@ class _TaskRunnerMixin:
         # and end the wait.  The 30 s give-up is a backstop only: the
         # handshake honors the accepted stop even when it fires.
         if not wait_for_thread_start(
-            task_thread, still_owns, deadline=time.monotonic() + 30.0,
+            task_thread,
+            still_owns,
+            deadline=time.monotonic() + 30.0,
         ):
             return
         task_thread.join(timeout=1)

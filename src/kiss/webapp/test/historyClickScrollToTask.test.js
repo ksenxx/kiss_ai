@@ -20,11 +20,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-}
+const {makePage, send, sendEmptyWorkDir} = require('./simplify2_harness');
 
 function chatTabs(win) {
   return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
@@ -105,9 +101,7 @@ function setupTabWithNeighbour() {
     chat_id: 'chat-1',
     task_id: '42',
     task: 'Task B',
-    events: [
-      {type: 'system_output', text: 'output of task B\n'},
-    ],
+    events: [{type: 'system_output', text: 'output of task B\n'}],
   });
   send(win, {
     type: 'adjacent_task_events',
@@ -115,9 +109,7 @@ function setupTabWithNeighbour() {
     direction: 'prev',
     task: 'Task A',
     task_id: '41',
-    events: [
-      {type: 'system_output', text: 'output of task A\n'},
-    ],
+    events: [{type: 'system_output', text: 'output of task A\n'}],
   });
   const O = win.document.getElementById('output');
   assert.ok(
@@ -259,9 +251,7 @@ function testClickLoadsTaskNotInTranscript() {
     chat_id: 'chat-1',
     task_id: '40',
     task: 'Task Z',
-    events: [
-      {type: 'system_output', text: 'output of task Z\n'},
-    ],
+    events: [{type: 'system_output', text: 'output of task Z\n'}],
   });
   assert.strictEqual(
     shownTask(win),
@@ -328,9 +318,7 @@ function testClickOwnTaskWithoutRegionReclaimsPanel() {
     direction: 'prev',
     task: 'Task A',
     task_id: '41',
-    events: [
-      {type: 'system_output', text: 'output of task A\n'},
-    ],
+    events: [{type: 'system_output', text: 'output of task A\n'}],
   });
   const O = win.document.getElementById('output');
   const container = O.querySelector('.adjacent-task[data-task-id="41"]');

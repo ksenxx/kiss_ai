@@ -40,12 +40,9 @@ const {
   pick,
   errorNotifications,
 } = require('./workdir_helpers');
+const {click} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
 
 const NOW = Date.now() / 1000;
 const RECENTS = [
@@ -668,18 +665,17 @@ function testRemoteWorkDirChangedRescopes() {
   assert.ok(!picker.hidden);
 
   // Another browser picked a folder: the daemon's broadcast re-scopes
-  // this client -- the drop-down follows and the folder browser, which
-  // was browsing for a pick that is now moot, closes.  Nothing is
-  // echoed back to the daemon (no setWorkDir loop, no saveConfig).
+  // this client -- the drop-down follows; the folder browser this user
+  // is in stays (a pick made here still applies, audit1020_workdir_picker
+  // covers it).  Nothing is echoed back to the daemon (no setWorkDir
+  // loop, no saveConfig).
   send(win, {type: 'workDirChanged', workDir: '/picked/elsewhere'});
   assert.strictEqual(currentDir(win), '/picked/elsewhere');
-  assert.ok(picker.hidden, 'the folder browser closes');
+  assert.ok(!picker.hidden, 'the folder browser stays open');
   assert.strictEqual(msgs(posted, 'setWorkDir').length, 0);
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
 
   // The same value again, or a non-string, changes nothing.
-  pick(win, CHOOSE);
-  assert.ok(!picker.hidden);
   send(win, {type: 'workDirChanged', workDir: '/picked/elsewhere'});
   send(win, {type: 'workDirChanged', workDir: 42});
   assert.ok(!picker.hidden, 'an unchanged value leaves the browser alone');

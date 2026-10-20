@@ -29,6 +29,8 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     start_fake_composio,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import setup_muse_env, teardown_muse_env
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
 from kiss.tests.conftest import install_cli_script
 
 # Scripted signal-cli for the ``link`` flow (``test_muse_connect_flows``,
@@ -160,6 +162,12 @@ def muse_env(
     setup_muse_env(monkeypatch, request.module.MUSE_POLICY)
     yield isolated_kiss_home
     teardown_muse_env()
+
+
+@pytest.fixture(scope="module")
+def invalid_auth_server() -> Iterator[RecordingServer]:
+    """One loopback ``invalid_auth`` Slack API for the whole test module."""
+    yield from serve_recording(InvalidAuthHandler)
 
 
 @pytest.fixture

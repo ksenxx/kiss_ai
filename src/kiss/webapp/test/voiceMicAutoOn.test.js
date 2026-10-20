@@ -10,10 +10,10 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {micBtn} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-
 
 // The in-page pipeline's engine loads from a script tag the page injects;
 // it never arrives in jsdom, so the mic parks in "loading" and nothing is
@@ -40,10 +40,6 @@ function makeWindow(storedEnabled) {
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
   win.document.body.appendChild(script);
   return {win, posted};
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
 }
 
 function engineInjected(win) {

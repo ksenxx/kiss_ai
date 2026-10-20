@@ -124,7 +124,8 @@ class MemoryTools:
                     f"hyphens, starting and ending with a letter or digit, not {GENERAL!r}."
                 )
             self.indexes[name] = VectorIndex(
-                MemoryDir(self.memory.root / name), embed=self.index.embed,
+                MemoryDir(self.memory.root / name),
+                embed=self.index.embed,
                 model_code=self.index.model_code,
             )
 
@@ -162,9 +163,7 @@ class MemoryTools:
         if not memory:
             return self.indexes
         if memory not in self.indexes:
-            raise ValueError(
-                f"unknown memory {memory!r}; memories: {', '.join(self.indexes)}."
-            )
+            raise ValueError(f"unknown memory {memory!r}; memories: {', '.join(self.indexes)}.")
         return {memory: self.indexes[memory]}
 
     def _locate(self, name: str) -> tuple[str, MemoryDir, str]:
@@ -201,9 +200,7 @@ class MemoryTools:
             query_vector = pool.submit(index.embed_query, query)
             index.sync()
             query_vector.result()  # re-raises an embedding failure
-        return [
-            replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)
-        ]
+        return [replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)]
 
     def _search(self, query: str, k: int, memory: str) -> list[SearchHit]:
         """Search the selected memories concurrently and merge the best *k* hits."""
@@ -384,8 +381,10 @@ class MemoryTools:
         lines = []
         for memory_name, index in selected.items():
             report = index.sync(verify=True)
-            label = "Index" if memory_name == GENERAL and len(selected) == 1 else (
-                f"Index of {memory_name}"
+            label = (
+                "Index"
+                if memory_name == GENERAL and len(selected) == 1
+                else (f"Index of {memory_name}")
             )
             lines.append(
                 f"{label} refreshed: {report.added} added, {report.updated} updated, "
@@ -401,7 +400,7 @@ class MemoryTools:
                     f"(similarity {score:.3f})"
                     for a, b, score in duplicates[:20]
                 )
-            stale = self._stale_pages(index.memory, stale_days)
+            stale = self._stale_pages(index, stale_days)
             if stale:
                 lines.append(f"Pages not updated in {stale_days} days (re-verify or delete):")
                 lines.extend(
@@ -413,21 +412,19 @@ class MemoryTools:
         return "\n".join(lines)
 
     @staticmethod
-    def _stale_pages(memory_dir: MemoryDir, stale_days: int) -> list[tuple[str, str]]:
+    def _stale_pages(index: VectorIndex, stale_days: int) -> list[tuple[str, str]]:
         """Return ``(name, updated)`` for pages older than *stale_days* days.
 
-        Pages whose ``updated`` frontmatter is missing or unparseable are
-        skipped: staleness cannot be established for them, and reporting
-        them would train the agent to "fix" pages that may be fresh.
+        Reads the frontmatter the just-finished sync stored in *index*
+        rather than every page file again.  Pages whose ``updated``
+        frontmatter is missing or unparseable are skipped: staleness
+        cannot be established for them, and reporting them would train
+        the agent to "fix" pages that may be fresh.
         """
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         stale: list[tuple[str, str]] = []
-        for name in memory_dir.page_names():
-            try:
-                raw_updated = str(memory_dir.read(name).frontmatter.get("updated", ""))
-            except FileNotFoundError:
-                # Deleted by another process after page_names() listed it.
-                continue
+        for name, frontmatter in index.frontmatters().items():
+            raw_updated = str(frontmatter.get("updated", ""))
             try:
                 updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
             except ValueError:

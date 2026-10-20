@@ -651,10 +651,10 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         # A previous worktree's warning that a failing broadcast put
         # back into the slot — exactly what `_flush_warnings` does.
         stale_dir = Path(self.tmpdir) / "an-older-worktree"
-        agent._set_warnings(merge=(
+        agent.add_warning(
             f"Branch 'kiss/wt-older' still has uncommitted changes. Its "
             f"worktree directory {stale_dir} was kept."
-        ))
+        )
 
         class _BrokenPrinter:
             def broadcast(self, event: dict[str, Any]) -> None:
@@ -678,7 +678,13 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             f"the commit onto {branch!r} succeeded, but the stale "
             f"warning suppressed the branch the user needs: {warnings}"
         )
-        assert not any(str(stale_dir) in w for w in warnings), (
+        # The stale warning is still owed to the user, so it stays as
+        # its own line; the notice about this task's branch must not
+        # name the older worktree's directory.
+        (warning,) = warnings
+        stale_line, notice = warning.split("\n", 1)
+        assert str(stale_dir) in stale_line, warnings
+        assert str(stale_dir) not in notice, (
             f"a directory from an older worktree was reported as the "
             f"home of this task's work: {warnings}"
         )
@@ -704,7 +710,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             f"Branch 'kiss/wt-older' still has uncommitted changes. Its "
             f"worktree directory {stale_dir} was kept."
         )
-        agent._set_warnings(merge=stale)
+        agent.add_warning(stale)
         agent.discard()
         assert not agent._wt_pending, "the fixture must leave nothing pending"
 

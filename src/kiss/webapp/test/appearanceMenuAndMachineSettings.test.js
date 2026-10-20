@@ -21,7 +21,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, pickMachine} = require('./simplify2_harness');
 const {lastMsg, click, byId} = require('./settings_helpers');
 
 function label(win, id) {
@@ -36,15 +36,14 @@ const MACHINES = [
 /** A page whose chat header lists `laptop` (this daemon) and `gpu-box`. */
 function pageWithMachines(opts) {
   const page = makePage(opts);
-  send(page.win, {type: 'configData', config: {}, apiKeys: {}, machine: 'laptop'});
+  send(page.win, {
+    type: 'configData',
+    config: {},
+    apiKeys: {},
+    machine: 'laptop',
+  });
   send(page.win, {type: 'machines', machines: MACHINES, checkedAt: 1});
   return page;
-}
-
-function pickMachine(win, value) {
-  const sel = byId(win, 'chat-machine');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 // ---- Bedrock subpanel ----
@@ -113,7 +112,9 @@ function testBedrockSubpanel() {
   });
   assert.strictEqual(byId(win, 'cfg-key-AWS_REGION').value, 'eu-west-1');
   win.close();
-  console.log('  ok - Bedrock is its own collapsible subpanel after Custom Models');
+  console.log(
+    '  ok - Bedrock is its own collapsible subpanel after Custom Models',
+  );
 }
 
 // ---- Appearance items ----
@@ -143,9 +144,15 @@ function testThemeAndContrastItems() {
   const body = win.document.body;
   assert.ok(body.classList.contains('light-theme'), 'light by default');
   assert.strictEqual(label(win, 'theme-btn'), 'Dark mode');
-  assert.strictEqual(byId(win, 'theme-btn').getAttribute('aria-label'), 'Dark mode');
+  assert.strictEqual(
+    byId(win, 'theme-btn').getAttribute('aria-label'),
+    'Dark mode',
+  );
   assert.strictEqual(label(win, 'contrast-btn'), 'High contrast');
-  assert.ok(!body.classList.contains('high-contrast'), 'low contrast by default');
+  assert.ok(
+    !body.classList.contains('high-contrast'),
+    'low contrast by default',
+  );
   assert.strictEqual(
     byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
     'false',
@@ -164,10 +171,16 @@ function testThemeAndContrastItems() {
 
   click(win, byId(win, 'theme-btn'));
   assert.ok(body.classList.contains('light-theme'), 'Light mode paints light');
-  assert.ok(body.classList.contains('high-contrast'), 'contrast survives a theme flip');
+  assert.ok(
+    body.classList.contains('high-contrast'),
+    'contrast survives a theme flip',
+  );
 
   click(win, byId(win, 'contrast-btn'));
-  assert.ok(!body.classList.contains('high-contrast'), 'Low contrast turns it off');
+  assert.ok(
+    !body.classList.contains('high-contrast'),
+    'Low contrast turns it off',
+  );
   assert.strictEqual(label(win, 'contrast-btn'), 'High contrast');
   assert.strictEqual(win.localStorage.getItem('kissRemoteContrast'), 'low');
   win.close();
@@ -191,11 +204,17 @@ function testAutoMode() {
   const intervals = [];
   const {win} = pageAtHour(hour, intervals);
   const body = win.document.body;
-  assert.ok(body.classList.contains('light-theme'), 'light until Auto mode is picked');
+  assert.ok(
+    body.classList.contains('light-theme'),
+    'light until Auto mode is picked',
+  );
 
   click(win, byId(win, 'theme-auto-btn'));
   assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'auto');
-  assert.strictEqual(byId(win, 'theme-auto-btn').getAttribute('aria-checked'), 'true');
+  assert.strictEqual(
+    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    'true',
+  );
   assert.ok(!body.classList.contains('light-theme'), 'dark at 8 pm');
   assert.strictEqual(label(win, 'theme-btn'), 'Light mode');
 
@@ -221,10 +240,16 @@ function testAutoMode() {
   click(win, byId(win, 'theme-btn'));
   assert.ok(body.classList.contains('light-theme'), 'Light mode pins light');
   assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'light');
-  assert.strictEqual(byId(win, 'theme-auto-btn').getAttribute('aria-checked'), 'false');
+  assert.strictEqual(
+    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    'false',
+  );
   hour.value = 23;
   check.fn();
-  assert.ok(body.classList.contains('light-theme'), 'pinned light stays at 11 pm');
+  assert.ok(
+    body.classList.contains('light-theme'),
+    'pinned light stays at 11 pm',
+  );
   win.close();
 
   // Auto mode comes back on the next load and reads the clock at once.
@@ -239,7 +264,10 @@ function testAutoMode() {
       };
     },
   });
-  assert.ok(!reload.win.document.body.classList.contains('light-theme'), 'dark at 2 am');
+  assert.ok(
+    !reload.win.document.body.classList.contains('light-theme'),
+    'dark at 2 am',
+  );
   assert.strictEqual(
     byId(reload.win, 'theme-auto-btn').getAttribute('aria-checked'),
     'true',
@@ -260,8 +288,16 @@ function testSettingsOpenForTheSelectedMachine() {
   click(win, byId(win, 'settings-btn'));
   const getConfig = lastMsg(posted.slice(before), 'getConfig');
   const getModels = lastMsg(posted.slice(before), 'getMyModels');
-  assert.strictEqual(getConfig && getConfig.machine, 'gpu-box', 'getConfig is for gpu-box');
-  assert.strictEqual(getModels && getModels.machine, 'gpu-box', 'getMyModels is for gpu-box');
+  assert.strictEqual(
+    getConfig && getConfig.machine,
+    'gpu-box',
+    'getConfig is for gpu-box',
+  );
+  assert.strictEqual(
+    getModels && getModels.machine,
+    'gpu-box',
+    'getMyModels is for gpu-box',
+  );
   const line = byId(win, 'settings-machine');
   assert.strictEqual(line.hidden, false, 'the sheet names its machine');
   assert.strictEqual(line.textContent, 'Settings of gpu-box');
@@ -326,7 +362,11 @@ function testSettingsOpenForTheSelectedMachine() {
   );
   click(win, byId(win, 'custom-model-add-btn'));
   const save = lastMsg(posted, 'saveMyModel');
-  assert.strictEqual(save && save.machine, 'gpu-box', 'saveMyModel is for gpu-box');
+  assert.strictEqual(
+    save && save.machine,
+    'gpu-box',
+    'saveMyModel is for gpu-box',
+  );
   assert.strictEqual(save.name, 'new-model');
 
   // A machine that does not answer is reported, not painted as blank.
@@ -346,14 +386,23 @@ function testSettingsOpenForTheSelectedMachine() {
   // Closing saves to gpu-box, then asks this daemon for its own
   // values back and drops the machine line.
   byId(win, 'cfg-remote-password').value = 'gpu-pw-2';
-  byId(win, 'cfg-remote-password').dispatchEvent(new win.Event('input', {bubbles: true}));
+  byId(win, 'cfg-remote-password').dispatchEvent(
+    new win.Event('input', {bubbles: true}),
+  );
   const beforeClose = posted.length;
   click(win, byId(win, 'settings-panel-close'));
   const saved = lastMsg(posted.slice(beforeClose), 'saveConfig');
-  assert.strictEqual(saved && saved.machine, 'gpu-box', 'saveConfig is for gpu-box');
+  assert.strictEqual(
+    saved && saved.machine,
+    'gpu-box',
+    'saveConfig is for gpu-box',
+  );
   assert.strictEqual(saved.config.remote_password, 'gpu-pw-2');
   const reload = lastMsg(posted.slice(beforeClose), 'getConfig');
-  assert.ok(reload && !('machine' in reload), 'this daemon is asked for its config');
+  assert.ok(
+    reload && !('machine' in reload),
+    'this daemon is asked for its config',
+  );
   assert.ok(
     lastMsg(posted.slice(beforeClose), 'getMyModels') &&
       !('machine' in lastMsg(posted.slice(beforeClose), 'getMyModels')),
@@ -402,18 +451,28 @@ function testRemoteSheetKeepsThisDaemonsStateApart() {
   });
   send(win, {
     type: 'myModelsData',
-    models: [{name: 'laptop-model', endpoint: 'http://laptop:1/v1', api_key: 'sk-laptop'}],
+    models: [
+      {
+        name: 'laptop-model',
+        endpoint: 'http://laptop:1/v1',
+        api_key: 'sk-laptop',
+      },
+    ],
   });
   assert.strictEqual(byId(win, 'cfg-use-web-tools').checked, false);
 
   api.createNewTab();
   pickMachine(win, 'gpu-box');
   click(win, byId(win, 'settings-btn'));
-  assert.ok(panel.classList.contains('for-machine'), 'the sheet is marked as a machine sheet');
+  assert.ok(
+    panel.classList.contains('for-machine'),
+    'the sheet is marked as a machine sheet',
+  );
   // This daemon's model list is gone before gpu-box's arrives: no row
   // to edit, so nothing of this daemon's can be posted to gpu-box.
   assert.strictEqual(
-    win.document.querySelectorAll('#custom-models-list .custom-model-name').length,
+    win.document.querySelectorAll('#custom-models-list .custom-model-name')
+      .length,
     0,
     "this daemon's custom models are not on offer for gpu-box",
   );
@@ -424,21 +483,40 @@ function testRemoteSheetKeepsThisDaemonsStateApart() {
     config: {use_web_browser: true, use_memory: false},
     apiKeys: {},
   });
-  assert.strictEqual(byId(win, 'cfg-use-web-tools').checked, true, "gpu-box's toggle");
-  assert.strictEqual(byId(win, 'cfg-use-memory').checked, false, "gpu-box's toggle");
+  assert.strictEqual(
+    byId(win, 'cfg-use-web-tools').checked,
+    true,
+    "gpu-box's toggle",
+  );
+  assert.strictEqual(
+    byId(win, 'cfg-use-memory').checked,
+    false,
+    "gpu-box's toggle",
+  );
 
   // Closing restores this daemon's toggles at once, before its reply.
   const beforeClose = posted.length;
   click(win, byId(win, 'settings-panel-close'));
   assert.ok(!panel.classList.contains('for-machine'));
-  assert.strictEqual(byId(win, 'cfg-use-web-tools').checked, false, "this daemon's toggle is back");
-  assert.strictEqual(byId(win, 'cfg-use-memory').checked, true, "this daemon's toggle is back");
   assert.strictEqual(
-    win.document.querySelectorAll('#custom-models-list .custom-model-name').length,
+    byId(win, 'cfg-use-web-tools').checked,
+    false,
+    "this daemon's toggle is back",
+  );
+  assert.strictEqual(
+    byId(win, 'cfg-use-memory').checked,
+    true,
+    "this daemon's toggle is back",
+  );
+  assert.strictEqual(
+    win.document.querySelectorAll('#custom-models-list .custom-model-name')
+      .length,
     0,
     "gpu-box's models are not on offer for this daemon",
   );
-  assert.ok(lastMsg(posted.slice(beforeClose), 'saveConfig').machine === 'gpu-box');
+  assert.ok(
+    lastMsg(posted.slice(beforeClose), 'saveConfig').machine === 'gpu-box',
+  );
   // The machine refused the close's save: still reported.
   send(win, {
     type: 'configData',
@@ -464,7 +542,10 @@ function testAppearanceSurvivesRefusedStorage() {
   });
   const body = win.document.body;
   click(win, byId(win, 'contrast-btn'));
-  assert.ok(body.classList.contains('high-contrast'), 'contrast switches without storage');
+  assert.ok(
+    body.classList.contains('high-contrast'),
+    'contrast switches without storage',
+  );
   assert.strictEqual(label(win, 'contrast-btn'), 'Low contrast');
   click(win, byId(win, 'theme-auto-btn'));
   assert.strictEqual(
@@ -472,9 +553,14 @@ function testAppearanceSurvivesRefusedStorage() {
     'true',
     'auto mode switches on without storage',
   );
-  assert.ok(body.classList.contains('high-contrast'), 'contrast survives the mode change');
+  assert.ok(
+    body.classList.contains('high-contrast'),
+    'contrast survives the mode change',
+  );
   win.close();
-  console.log('  ok - appearance choices work for the session when storage refuses writes');
+  console.log(
+    '  ok - appearance choices work for the session when storage refuses writes',
+  );
 }
 
 // ---- CHATS row details: machine, max budget, agent ----
@@ -534,10 +620,12 @@ function testHistoryRowSettingsLine() {
   assert.strictEqual(
     lines['task 2'],
     'machine laptop',
-    "a local row without a budget or agent names this daemon only",
+    'a local row without a budget or agent names this daemon only',
   );
   win.close();
-  console.log('  ok - CHATS row details list the machine, max budget and agent');
+  console.log(
+    '  ok - CHATS row details list the machine, max budget and agent',
+  );
 }
 
 try {

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -31,17 +30,12 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     _token_path,
     main,
 )
-from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingServer,
-    serve_recording,
-)
-from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
 
 
-@pytest.fixture(scope="module")
-def invalid_auth_server() -> Iterator[RecordingServer]:
-    """One loopback ``invalid_auth`` Slack API for the whole module."""
-    yield from serve_recording(InvalidAuthHandler)
+def _auth_test_called(server: RecordingServer) -> bool:
+    """Return whether *server* recorded a ``POST /api/auth.test``."""
+    return ("POST", "/api/auth.test") in [(r["method"], r["path"]) for r in server.requests]
 
 
 class TestTokenPersistence:
@@ -142,7 +136,7 @@ class TestListWorkspaces:
         main()
         out = capsys.readouterr().out
         assert ws in out
-        assert {"method": "POST", "path": "/api/auth.test"} in invalid_auth_server.requests
+        assert _auth_test_called(invalid_auth_server)
 
 
 class TestDeleteWorkspace:
@@ -248,4 +242,4 @@ class TestSlackAgent:
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = json.loads(check())
         assert result["ok"] is False
-        assert {"method": "POST", "path": "/api/auth.test"} in invalid_auth_server.requests
+        assert _auth_test_called(invalid_auth_server)

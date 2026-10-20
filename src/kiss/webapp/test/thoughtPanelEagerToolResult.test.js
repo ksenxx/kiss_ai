@@ -12,7 +12,22 @@ const {
   stubRaf,
   sleep,
   waitFor,
+  fakeIntervals,
 } = require('./simplify2_harness');
+
+// A page whose 1 s panel-footer tick runs on a fake interval clock, so a
+// test advances it with `clock.tick(1000)` and `win.Date.now` instead of
+// sleeping past the real interval.
+function makeTickedPage() {
+  let clock;
+  const wv = makePage({
+    beforeScripts: w => {
+      stubRaf(w);
+      clock = fakeIntervals(w);
+    },
+  });
+  return {win: wv.win, clock};
+}
 
 function parsePanelTimeMs(text) {
   const t = String(text || '').trim();
@@ -102,7 +117,8 @@ async function testEagerPanelAfterToolResult() {
     2,
     'BUG: a new Thoughts panel must be appended EAGERLY right after ' +
       'tool_result (before the model streams anything); got ' +
-      panels.length + ' .llm-panel elements',
+      panels.length +
+      ' .llm-panel elements',
   );
   const eager = panels[1];
   assert.ok(
@@ -146,7 +162,9 @@ async function testEagerPanelAfterToolResult() {
     panels.length,
     2,
     'BUG: streamed thinking must reuse the eager Thoughts panel, not ' +
-      'create a new one (got ' + panels.length + ' panels)',
+      'create a new one (got ' +
+      panels.length +
+      ' panels)',
   );
   assert.ok(
     eager.textContent.includes('EAGER-TOKEN-XYZ'),
@@ -182,7 +200,9 @@ async function testEagerPanelAfterToolResult() {
   assert.ok(
     msFinal >= 1000,
     'final footer must cover the time spent waiting for the model ' +
-      '(got ' + msFinal + 'ms)',
+      '(got ' +
+      msFinal +
+      'ms)',
   );
   assert.strictEqual(
     eager.lastElementChild,
@@ -335,7 +355,8 @@ async function testEagerPanelBackgroundTab() {
     panels.length,
     2,
     'BUG: background tab must show exactly two Thoughts panels ' +
-      '(provisional empty panel removed), got ' + panels.length,
+      '(provisional empty panel removed), got ' +
+      panels.length,
   );
   assert.ok(
     panels[1].textContent.includes('BG-EAGER-TOK'),
@@ -397,8 +418,7 @@ async function testEagerPanelSurvivesTabSwitch() {
 }
 
 async function testEagerPanelFooterTicksAfterTabRestore() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
+  const {win, clock} = makeTickedPage();
   const api = win._testApi;
   const tab1 = api.getActiveTabId();
 
@@ -411,9 +431,12 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   send(win, {type: 'tool_result', content: 'w\n', tabId: tab1});
 
   api.createNewTab();
-  // Stay detached across at least one 1 s tick: that is the tick that
-  // used to prune the detached panel from the live set.
-  await sleep(1150);
+  // Stay detached across one 1 s tick: that is the tick that used to
+  // prune the detached panel from the live set.  The clock carries the
+  // elapsed time the footer reads.
+  const realNow = win.Date.now;
+  win.Date.now = () => realNow() + 1150;
+  clock.tick(1000);
 
   switchBack(win, tab1);
   const output = win.document.getElementById('output');
@@ -424,19 +447,21 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
     panelFooter(eager),
     'restored eager panel must still have a footer',
   );
-  // The footer must stay anchored at the panel's original start: within
-  // 1.5 s of the restore it can only read >= 2000 ms if it kept the
-  // ~1.15 s accumulated while detached (a footer re-anchored at restore
+  // The footer must stay anchored at the panel's original start: one
+  // tick after the restore it can only read >= 2000 ms if it kept the
+  // 1.15 s accumulated while detached (a footer re-anchored at restore
   // would read ~1 s here).
-  await waitForPanelTimeAtLeast(
-    eager,
-    2000,
+  win.Date.now = () => realNow() + 2150;
+  clock.tick(1000);
+  const footer = panelFooter(eager);
+  assert.ok(
+    parsePanelTimeMs(footer.textContent) >= 2000,
     'BUG: the eager panel footer must RESUME live ticking after the ' +
       'tab is restored (expected >= 2000ms of accumulated wait; the ' +
-      'ticker pruned the detached panel and never re-registered it)',
-    1500,
+      'ticker pruned the detached panel and never re-registered it; got ' +
+      parsePanelTimeMs(footer.textContent) +
+      'ms)',
   );
-  const footer = panelFooter(eager);
 
   send(win, {type: 'thinking_start', tabId: tab1});
   send(win, {type: 'thinking_delta', text: 'RESUMED-TOK', tabId: tab1});
@@ -486,8 +511,7 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
 }
 
 async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
+  const {win, clock} = makeTickedPage();
   const api = win._testApi;
   const tab1 = api.getActiveTabId();
   const output = win.document.getElementById('output');
@@ -503,12 +527,18 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   const footer = panelFooter(panel);
   assert.ok(footer, 'the filled panel must keep its .panel-time footer');
   const frozenMs = parsePanelTimeMs(footer.textContent);
-  await sleep(1150);
+  // A tick with the clock 1.15 s on: a still-live footer would re-render.
+  const realNow = win.Date.now;
+  win.Date.now = () => realNow() + 1150;
+  clock.tick(1000);
   const laterMs = parsePanelTimeMs(panelFooter(panel).textContent);
   assert.ok(
     Math.abs(laterMs - frozenMs) < 200,
     'BUG: task_error must freeze the open panel footer (changed from ' +
-      frozenMs + 'ms to ' + laterMs + 'ms)',
+      frozenMs +
+      'ms to ' +
+      laterMs +
+      'ms)',
   );
 
   api.createNewTab();
@@ -526,7 +556,9 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
     bgPanels.length,
     1,
     'BUG: a background tab whose task stopped must not keep its empty ' +
-      'provisional Thoughts panel (got ' + bgPanels.length + ' panels)',
+      'provisional Thoughts panel (got ' +
+      bgPanels.length +
+      ' panels)',
   );
   assert.ok(bgPanels[0].textContent.includes('bg'));
   win.close();

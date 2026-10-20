@@ -72,12 +72,17 @@ class TestD3TempFileLeaks:
                 cfg_path.unlink()
             cfg_path.mkdir()
             (cfg_path / "child").write_text("occupied")
+            # The config dir is the test session's: a daemon an earlier
+            # test killed mid-save may have left staging files there.
+            # Only what this save leaves behind counts.
+            before = set(cfg_dir.iterdir())
             with pytest.raises(OSError):
                 vc.save_config({"work_dir": "/wave3-d3"})
             leftovers = sorted(
                 p.name
                 for p in cfg_dir.iterdir()
-                if p.name.startswith((".kiss-config-", f".{cfg_path.name}-"))
+                if p not in before
+                and p.name.startswith((".kiss-config-", f".{cfg_path.name}-"))
             )
             assert leftovers == [], (
                 f"staging temp files leaked into {cfg_dir}: {leftovers}"

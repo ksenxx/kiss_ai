@@ -28,6 +28,7 @@ const {
   send,
   stubRaf,
   MEDIA,
+  readyTabId,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -43,12 +44,6 @@ function makePage(opts) {
       opts && opts.highlight ? ['highlight.min.js', 'marked.min.js'] : [],
     sourceUrl: 'share-main.js',
   });
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function click(el) {
@@ -68,7 +63,7 @@ function click(el) {
  */
 function runSmallTask(wv, chatId, taskId) {
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const now = Date.now();
   // The daemon's order: the prompt echo, then the 'clear' that opens
   // the transcript with the task panel, then the live stream.
@@ -199,7 +194,7 @@ async function run() {
 
   await test('tab id is used as the chat id before the daemon names one', () => {
     const wv = makePage();
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     click(wv.win.document.getElementById('share-btn'));
     const req = wv.posted.find(m => m.type === 'shareChatTasks');
     assert.ok(req, 'share must work on a tab with no backend chat id yet');
@@ -569,7 +564,7 @@ async function run() {
     // used to show just that one task.
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     send(win, {
       type: 'task_events',
       tabId: TAB,
@@ -675,7 +670,7 @@ async function run() {
   await test('deferred-highlight code is highlighted in the export', () => {
     const wv = makePage({highlight: true});
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     send(win, {
       type: 'task_events',
       tabId: TAB,

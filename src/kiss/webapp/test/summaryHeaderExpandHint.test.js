@@ -10,6 +10,7 @@ const {
   makePage: makeHarnessPage,
   send,
   loadMainCss,
+  output,
 } = require('./simplify2_harness');
 
 const HINT = '(click to expand)';
@@ -27,10 +28,6 @@ function sendToolPanels(win, n) {
     send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
     send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
   }
-}
-
-function output(win) {
-  return win.document.getElementById('output');
 }
 
 function summaryPanels(win) {

@@ -38,6 +38,7 @@ const {
   clickTab,
   stubRaf,
   MEDIA,
+  readyTabId,
 } = require('./simplify2_harness');
 const {test, report} = makeRunner();
 
@@ -46,12 +47,6 @@ function makePage() {
     sourceUrl: 'taskinfo-main.js',
     beforeScripts: stubRaf,
   });
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function click(el) {
@@ -102,7 +97,7 @@ const SETTINGS = {
 test('live task_settings paints the info block; new submit clears it', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   send(win, {type: 'setTaskText', text: 'do the thing', tabId: TAB});
   assert.strictEqual(infoText(win), '', 'no settings known yet');
   send(win, {
@@ -181,7 +176,7 @@ test('live task_settings paints the info block; new submit clears it', () => {
 test('a run with an agent script shows the Agent row; a plain run hides it', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const doc = win.document;
   send(win, {type: 'setTaskText', text: 'plain', tabId: TAB});
   send(win, {
@@ -225,7 +220,7 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
 test('subagent settings show sequential and parentage', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   send(win, {type: 'setTaskText', text: 'sub work', tabId: TAB});
   send(win, {
     type: 'task_settings',
@@ -272,7 +267,7 @@ test('subagent settings show sequential and parentage', () => {
 test('task_events replay repopulates the info from its own stream', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   send(win, {
     type: 'task_events',
     tabId: TAB,
@@ -308,7 +303,7 @@ test('task_events replay repopulates the info from its own stream', () => {
 test('adjacent replay never repaints the live panel; scrolling does', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   win._testApi.hideWelcome();
   send(win, {
     type: 'task_events',
@@ -370,7 +365,7 @@ test('adjacent replay never repaints the live panel; scrolling does', () => {
 test('a neighbour without settings shows dashes', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   win._testApi.hideWelcome();
   send(win, {
     type: 'task_events',
@@ -401,7 +396,7 @@ test('a neighbour without settings shows dashes', () => {
 test('a background tab keeps its settings and shows them on switch', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   send(win, {type: 'setTaskText', text: 'first task', tabId: TAB});
   send(win, {
     type: 'task_settings',
@@ -439,7 +434,7 @@ test('a background tab keeps its settings and shows them on switch', () => {
 test('share export gives every task panel its own settings info', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const now = Date.now();
   send(win, {type: 'clear', chat_id: 'chat-777', tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
@@ -534,7 +529,7 @@ const PANEL_ROWS = [
 test('a saved page lists every Task Info row for every task', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const doc = win.document;
   send(win, {type: 'configData', config: {}, machine: 'box-a', tabId: TAB});
   send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
@@ -703,7 +698,7 @@ test('a saved page lists every Task Info row for every task', () => {
 test('the Machine row names the bound machine, else this daemon', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   assert.strictEqual(infoRows(win).machine, DASH, 'unknown until configData');
   send(win, {type: 'configData', config: {}, machine: 'box-a', tabId: TAB});
   assert.strictEqual(infoRows(win).machine, 'box-a', "this daemon's machine");
@@ -744,7 +739,7 @@ test('the Machine row names the bound machine, else this daemon', () => {
 test('share markup: the info block follows the task text', () => {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   send(win, {type: 'clear', chat_id: 'chat-1', tabId: TAB});
   send(win, {type: 'setTaskText', text: 'a task', tabId: TAB});
   click(win.document.getElementById('share-btn'));

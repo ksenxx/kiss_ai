@@ -18,7 +18,7 @@ order of the two commands.
 
 The fix orders the duplicate close on the registry's publication
 clock: a token-0 close reads :meth:`TabRegistry.clock` and the cleanup
-tail's guards (``AgentServer._tab_reopened_since``) stand down when a
+tail's guards (``TabRegistry.reopened_since``) stand down when a
 publication newer than the reading stamped the tab OR the tab is
 simply PRESENT in the registry — presence after an absent-close is
 always a later republication, which covers the gap between the
@@ -52,7 +52,7 @@ class _ReopenAfterAbsentClose:
     the duplicate close's registry step but before its clock read":
     the publication can stamp a generation at or below the close's
     observation, so only the registry-PRESENCE clause of
-    ``_tab_reopened_since`` saves the reopened tab.
+    ``TabRegistry.reopened_since`` saves the reopened tab.
     """
 
     def __init__(self, real: Any, reopen: Any, tab_id: str) -> None:
@@ -74,7 +74,7 @@ class _ReopenBeforeTheDrop:
 
     Wraps ``AgentServer._drop_tab_state`` — the reopen republishes
     the tab AFTER the duplicate close's clock observation, so the
-    ``republished_since`` clause of ``_tab_reopened_since`` stands the
+    ``republished_since`` clause of ``TabRegistry.reopened_since`` stands the
     drop down.
     """
 
@@ -118,11 +118,17 @@ class TestToken0DuplicateClose(_Base):
     """The duplicate-close cleanup tail must respect a reopen."""
 
     def _register_running_state(
-        self, tab_id: str, task_id: str, chat_id: str,
+        self,
+        tab_id: str,
+        task_id: str,
+        chat_id: str,
     ) -> AgentState:
         """Register a busy state exactly as ``_cmd_run`` would."""
         state = AgentState(
-            task_id, tab_id=tab_id, chat_id=chat_id, is_task_active=True,
+            task_id,
+            tab_id=tab_id,
+            chat_id=chat_id,
+            is_task_active=True,
         )
         with self.server._state_lock:
             agent_state.register(state)
@@ -160,7 +166,8 @@ class TestToken0DuplicateClose(_Base):
                 "the stale duplicate close re-marked the reopened state",
             )
             self.assertEqual(
-                self.server._tab_chat_views.get("t"), "c1",
+                self.server._tab_chat_views.get("t"),
+                "c1",
                 "the stale duplicate close tore down the rebound chat view",
             )
 
@@ -255,7 +262,9 @@ class TestToken0DuplicateClose(_Base):
         (generation 0), so its close must keep dropping the state even
         though the close now carries a clock observation."""
         state = AgentState(
-            "task-conc2026-sub", tab_id="p__sub_x", chat_id="c-sub",
+            "task-conc2026-sub",
+            tab_id="p__sub_x",
+            chat_id="c-sub",
         )
         with self.server._state_lock:
             agent_state.register(state)
@@ -359,7 +368,9 @@ class TestToken0DuplicateClose(_Base):
         so the reopened tab keeps receiving the running task's events.
         """
         source = self._register_running_state(
-            "source-tab", "task-conc2026-live", "c1",
+            "source-tab",
+            "task-conc2026-live",
+            "c1",
         )
         self.server.printer.subscribe_tab(source.task_id, source.tab_id)
         close_at_drop = threading.Event()
@@ -370,17 +381,13 @@ class TestToken0DuplicateClose(_Base):
         real_update = self.server._registry_update_tab
 
         def gated_drop(tab_id: str, **kwargs: Any) -> None:
-            if tab_id == "viewer" and (
-                threading.current_thread().name == "f2-close"
-            ):
+            if tab_id == "viewer" and (threading.current_thread().name == "f2-close"):
                 close_at_drop.set()
                 assert allow_close_drop.wait(10)
             real_drop(tab_id, **kwargs)
 
         def gated_update(tab_id: str, **kwargs: Any) -> int:
-            if tab_id == "viewer" and (
-                threading.current_thread().name == "f2-replay"
-            ):
+            if tab_id == "viewer" and (threading.current_thread().name == "f2-replay"):
                 # The replay reached its publication: release the
                 # stale close's cleanup tail and let it finish FIRST.
                 allow_close_drop.set()
@@ -418,11 +425,13 @@ class TestToken0DuplicateClose(_Base):
             self.assertTrue(self.server.tab_registry.has_tab("viewer"))
             with self.server._state_lock:
                 self.assertEqual(
-                    self.server._tab_chat_views.get("viewer"), "c1",
+                    self.server._tab_chat_views.get("viewer"),
+                    "c1",
                 )
             targets = self.server.printer._fanout_targets(source.task_id)
             self.assertIn(
-                "viewer", targets,
+                "viewer",
+                targets,
                 "the reopened viewer lost the running task's fan-out",
             )
             self.assertIn(source.tab_id, targets)
@@ -432,7 +441,7 @@ class TestToken0DuplicateClose(_Base):
 
     def test_clock_contract(self) -> None:
         """API control: the clock reading orders a token-0 close
-        against later republications, and ``_tab_reopened_since``
+        against later republications, and ``TabRegistry.reopened_since``
         treats presence as a reopen."""
         reg = self.server.tab_registry
         self.server._registry_update_tab("t", chat_id="c1", create=True)
@@ -442,11 +451,11 @@ class TestToken0DuplicateClose(_Base):
         observed = reg.clock()
         self.assertGreaterEqual(observed, removal)
         self.assertFalse(reg.republished_since("t", observed))
-        self.assertFalse(self.server._tab_reopened_since("t", observed))
+        self.assertFalse(reg.reopened_since("t", observed))
         self.server._registry_update_tab("t", chat_id="c1", create=True)
         self.assertTrue(reg.republished_since("t", observed))
-        self.assertTrue(self.server._tab_reopened_since("t", observed))
+        self.assertTrue(reg.reopened_since("t", observed))
         # Presence alone (a publication stamped at or below the
         # observation is indistinguishable from this at the guard) is
         # already a reopen.
-        self.assertTrue(self.server._tab_reopened_since("t", reg.clock()))
+        self.assertTrue(reg.reopened_since("t", reg.clock()))

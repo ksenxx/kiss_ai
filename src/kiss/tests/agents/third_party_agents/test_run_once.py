@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -27,7 +27,10 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     main,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
-from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import (
+    InvalidAuthHandler,
+    slack_method,
+)
 
 BOT_USER_ID = "U_BOT"
 PARENT_TS = "1234.5678"
@@ -43,13 +46,11 @@ class _SlackThreadApiHandler(InvalidAuthHandler):
     replies: dict[str, Any] = {}
 
     def _respond(self) -> None:
-        method = self.path.split("?", 1)[0].rsplit("/", 1)[-1]
+        method = slack_method(self.path)
         if method not in ("auth.test", "conversations.replies"):
             super()._respond()
             return
-        cast(RecordingServer, self.server).requests.append(
-            {"method": self.command, "path": self.path.split("?", 1)[0]}
-        )
+        self.record_request(None)
         self._read_raw()
         if method == "auth.test":
             body: dict[str, Any] = {"ok": True, "user_id": BOT_USER_ID, "user": "bot", "team": "T1"}

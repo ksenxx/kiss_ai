@@ -47,7 +47,7 @@ class _HeaderRecorder(RecordingHandler):
     server: RecordingServer  # type: ignore[assignment]
 
     def do_POST(self) -> None:  # noqa: N802
-        self.server.requests.append({"probe": self.headers.get("X-Probe", "")})
+        self.record_request(None, probe=self.headers.get("X-Probe", ""))
         self.send_response(204)
         self.end_headers()
 
@@ -71,7 +71,7 @@ def test_raw_post_status_sends_header_values_as_latin1() -> None:
     """A non-ASCII header value arrives as the one character written."""
     with recording_server(_HeaderRecorder) as server:
         assert raw_post_status(server.server_address[1], "X-Probe: \u00b2\r\n") == 204
-    assert server.requests == [{"probe": "\u00b2"}]
+    assert [r["probe"] for r in server.requests] == ["\u00b2"]
 
 
 def test_recording_daemon_close_is_idempotent() -> None:

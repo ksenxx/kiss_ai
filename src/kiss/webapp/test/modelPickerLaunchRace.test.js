@@ -7,6 +7,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {clickTab} = harness;
 
 const {makePage: makeChatPage, send, stubRaf} = harness;
 
@@ -16,12 +17,6 @@ function makePage(templateModel, seededState) {
     initialState: seededState,
     beforeScripts: stubRaf,
   });
-}
-
-// Put chat *tabId* on screen and check it got there.
-function clickTab(win, tabId) {
-  harness.clickTab(win, tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 function pickerText(win) {

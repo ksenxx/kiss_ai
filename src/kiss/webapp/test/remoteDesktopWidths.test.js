@@ -8,23 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {
-  makePage: makeChatPage,
-  fakeMatchMedia,
-  MEDIA,
-} = require('./simplify2_harness');
+const {MEDIA} = require('./simplify2_harness');
+const {makeResizePage: makePage, panelW} = require('./panel_resize_helpers');
 const {inlineDesignTokens} = require('./designTokens');
 
-function makePage(opts) {
-  const {desktopMatches = true} = opts || {};
-  return makeChatPage({
-    bodyClass: 'remote-chat',
-    beforeScripts: win => fakeMatchMedia(win, desktopMatches === true),
-  });
-}
-
 function sidebarW(win) {
-  return win.document.documentElement.style.getPropertyValue('--sidebar-w');
+  return panelW(win, '--sidebar-w');
 }
 
 const CSS = inlineDesignTokens(

@@ -19,6 +19,7 @@ const {
   send,
   stubRaf,
   MEDIA,
+  sendEmptyWorkDir,
 } = require('./simplify2_harness');
 
 // main.css with its design tokens inlined (jsdom resolves no var()), so
@@ -47,10 +48,6 @@ function tick() {
 
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
 }
 
 function makeRow(overrides) {

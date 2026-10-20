@@ -45,9 +45,9 @@ from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
     WORKER_DEFAULTS,
-    declared_literal,
     declares_channel,
     declares_hidden,
+    parsed_sea,
     resolve_settings,
 )
 from kiss.core.models.model_info import model
@@ -191,8 +191,8 @@ def test_worker_is_a_base_not_an_alias_and_infrastructure_seas_are_hidden() -> N
     for hidden in ("sorcar", "coding", "oai"):
         assert hidden not in commands, hidden
     assert declares_hidden(Path(DEFAULT_AGENT_PATH))
-    assert declared_literal(Path(DEFAULT_AGENT_PATH), "hidden") is True
-    assert declared_literal(Path("/no/such/file.py"), "hidden") is None
+    assert parsed_sea(Path(DEFAULT_AGENT_PATH)).literals.get("hidden") is True
+    assert parsed_sea(Path("/no/such/file.py")).literals == {}
     assert not declares_channel(Path(DEFAULT_AGENT_PATH))
     # A channel derives from ``ChannelSea`` by name; ``a2a`` is a command but not a channel.
     channels = available_channels()

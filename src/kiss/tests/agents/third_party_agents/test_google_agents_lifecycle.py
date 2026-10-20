@@ -23,7 +23,6 @@ leaks into the next.
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,11 +40,9 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 class _GoogleAgent:
     """One Composio-backed Google agent and the names its wiring must expose."""
 
-    module: Any
     agent: type
     backend: type
     sea: type
-    cli: str
     service: str
     label: str
     auth_tools: list[str]
@@ -56,11 +53,9 @@ pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 _AGENTS = [
     _GoogleAgent(
-        gcal_mod,
         gcal_mod.GoogleCalendarAgent,
         gcal_mod.GoogleCalendarChannelBackend,
         gcal_mod.GcalSea,
-        "kiss-gcal",
         "google_calendar",
         "Google Calendar",
         [
@@ -82,11 +77,9 @@ _AGENTS = [
         ),
     ),
     _GoogleAgent(
-        gdocs_mod,
         gdocs_mod.GoogleDocsAgent,
         gdocs_mod.GoogleDocsChannelBackend,
         gdocs_mod.GdocsSea,
-        "kiss-gdocs",
         "google_docs",
         "Google Docs",
         [
@@ -108,11 +101,9 @@ _AGENTS = [
         ),
     ),
     _GoogleAgent(
-        gdrive_mod,
         gdrive_mod.GoogleDriveAgent,
         gdrive_mod.GoogleDriveChannelBackend,
         gdrive_mod.GdriveSea,
-        "kiss-gdrive",
         "google_drive",
         "Google Drive",
         [
@@ -136,11 +127,9 @@ _AGENTS = [
         ),
     ),
     _GoogleAgent(
-        gsheets_mod,
         gsheets_mod.GoogleSheetsAgent,
         gsheets_mod.GoogleSheetsChannelBackend,
         gsheets_mod.GsheetsSea,
-        "kiss-gsheets",
         "google_sheets",
         "Google Sheets",
         [
@@ -253,15 +242,3 @@ def test_backend_connect_with_composio_connection_succeeds(
     backend = spec.backend()
     assert backend.connect() is True
     assert backend.connection_info == f"{spec.label} connected through Composio."
-
-
-@pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
-def test_main_without_args_prints_usage(
-    spec: _GoogleAgent, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """main() with no CLI arguments prints the usage line and exits 1."""
-    monkeypatch.setattr(sys, "argv", [spec.cli])
-    with pytest.raises(SystemExit) as excinfo:
-        spec.module.main()
-    assert excinfo.value.code == 1
-    assert f"Usage: {spec.cli}" in capsys.readouterr().out

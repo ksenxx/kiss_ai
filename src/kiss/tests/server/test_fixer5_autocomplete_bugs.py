@@ -205,7 +205,7 @@ class TestStaleFilePickerReplyDropped(_AutocompleteHarness):
                     and str(fast_dir) in self.registry._indexes
                 )
             with self.server._state_lock:
-                return built and conn_id not in self.server._files_request_map()
+                return built and conn_id not in self.server._files_latest_request
 
         # The worker is FIFO: once the newer reply has released the
         # token, the older reply has already run (and stood down).

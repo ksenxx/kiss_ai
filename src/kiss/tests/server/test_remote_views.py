@@ -43,7 +43,7 @@ from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import web_stealth
 from kiss.server.remote_views import RemoteViews, RemoteViewStream, namespaced, split_tab_id
 from kiss.tests.remote_daemon import start_remote_daemon
-from kiss.tests.server.pause import Pause
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
@@ -267,12 +267,13 @@ class RemoteViewsTest(TwoClientHarness):
             "type": "terminalInput", "tab_id": "term-own",
             "data": "echo mine-$((6*7)); stty size\n",
         })
+        # The size comes in a later read than the echo: wait for both.
         self.wait_for(
-            lambda: "mine-42" in self._output(a, "term-own"), timeout=60, what="a's own echo",
+            lambda: "30 100" in self._output(a, "term-own"), timeout=60, what="a's own size",
         )
         out = self._output(a, "term-own")
+        self.assertIn("mine-42", out)
         self.assertNotIn("unexpected-91", out)
-        self.assertIn("30 100", out)
         self.assertEqual(a.of_type("terminalExit"), [])
         self.assertEqual(b.of_type("terminalData") + b.of_type("terminalError"), [])
         # Neither daemon treated b's commands as its own.
@@ -323,6 +324,58 @@ class RemoteViewsTest(TwoClientHarness):
         self.assertEqual(c.of_type("terminalExit"), [])
         self.assertFalse(opened["attached"])  # the open waited for the hang-up
         c.send({"type": "terminalClose", "tab_id": "term-race"})
+        self.wait_for(lambda: not self._views()._streams, timeout=30, what="idle stream closed")
+
+    def test_the_hung_up_shells_exit_never_reaches_the_page_that_reopened_its_tab(self) -> None:
+        """The old shell's exit, relayed after the re-open was booked, goes to nobody.
+
+        The hang-up is held right after its ``terminalClose`` (before it
+        could retire the idle stream), so the reload's ``terminalOpen``
+        is booked on that same stream; the hung-up shell's
+        ``terminalExit`` is held at the stream's relay until that
+        booking is in, so it is relayed to a stream that has an owner
+        for the tab, who must not get it.
+        """
+        a = self.a
+        self._open_terminal(a, "term-again")
+        views, stream = self._views(), self._views()._streams["box"]
+        with stream.lock:
+            conn_a = stream.terminals["term-again"]
+        a.close()
+        self.wait_for(lambda: a.closed, what="page gone")
+        c = self.open_client("c")
+        old_exit = Pause(
+            RemoteViewStream._relay_terminal.__code__,
+            lambda local: local["msg"].get("type") == "terminalExit",
+        )
+        pause = Pause(RemoteViews.close_if_idle.__code__, lambda local: True)
+        with Pauses(old_exit, pause):
+            hang_up = threading.Thread(
+                target=views._hang_up_detached, args=(stream, "term-again", conn_a),
+            )
+            hang_up.start()
+            self.assertTrue(pause.paused.wait(10), "the hang-up sent its close")
+            c.send({
+                "type": "terminalOpen", "tab_id": "term-again", "cols": 80, "rows": 24,
+                "workDir": "", "machine": "box",
+            })
+            self.wait_for(
+                lambda: "term-again" in stream.terminals, what="c's open booked on the stream",
+            )
+            self.assertTrue(old_exit.paused.wait(10), "the old shell's exit reached the relay")
+            old_exit.release()
+            pause.release()
+            hang_up.join(30)
+        self.assertIs(self._views()._streams.get("box"), stream)  # kept: c's terminal
+        opened = self.wait_event(c, "terminalOpened", timeout=60, tab_id="term-again")
+        self.assertFalse(opened["attached"])
+        c.send({"type": "terminalInput", "tab_id": "term-again", "data": "echo kept-$((6*7))\n"})
+        self.wait_for(
+            lambda: "kept-42" in self._output(c, "term-again") or c.of_type("terminalExit"),
+            timeout=60, what="c's shell answering",
+        )
+        self.assertEqual(c.of_type("terminalExit"), [])
+        c.send({"type": "terminalClose", "tab_id": "term-again"})
         self.wait_for(lambda: not self._views()._streams, timeout=30, what="idle stream closed")
 
     def test_losing_the_machine_fails_a_pending_browser_open(self) -> None:

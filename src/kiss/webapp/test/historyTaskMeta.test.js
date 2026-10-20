@@ -6,7 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const {loadMainCss, makePage, send} = require('./simplify2_harness');
+const {
+  loadMainCss,
+  makePage,
+  send,
+  sendEmptyWorkDir,
+  rowsByTitle,
+} = require('./simplify2_harness');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
@@ -123,26 +129,6 @@ const SESSIONS_FIXTURE = [
     endTs: 1_700_000_501_000,
   },
 ];
-
-function rowsByTitle(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
-}
 
 function workspaceSpan(row) {
   return row.querySelector('.running-item-workspace');

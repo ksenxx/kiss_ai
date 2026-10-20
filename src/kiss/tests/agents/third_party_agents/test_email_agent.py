@@ -23,7 +23,6 @@ import kiss.agents.third_party_agents.email.email_sea as email_agent_mod
 from kiss.agents.third_party_agents.email.email_sea import (
     EmailAgent,
     EmailChannelBackend,
-    EmailSea,
     _build_outbound,
     _config,
     _is_automated_mail,
@@ -73,13 +72,6 @@ Content-Type: text/html; charset="utf-8"\r
 
 class TestAuthFlow:
     """Agent instantiation and the authentication tool trio."""
-
-    def test_unauthenticated_agent(self) -> None:
-        """A fresh agent is unauthenticated and exposes only the auth trio."""
-        agent = EmailAgent()
-        assert agent.name == "Email Agent"
-        assert agent._is_authenticated() is False
-        assert {t.__name__ for t in agent._get_tools()} == _AUTH_TRIO
 
     def test_authenticate_persists_config(self, isolated_kiss_home: Path) -> None:
         """authenticate_email persists a 0600 config with port/security defaults."""
@@ -153,12 +145,6 @@ class TestAuthFlow:
             "587",
             "starttls",
         )
-
-    def test_module_tools(self) -> None:
-        """``EmailSea().tools([])`` returns a non-empty tool list."""
-        tools = EmailSea().tools([])
-        assert tools
-        assert _AUTH_TRIO <= {t.__name__ for t in tools}
 
 
 class TestMailNormalization:

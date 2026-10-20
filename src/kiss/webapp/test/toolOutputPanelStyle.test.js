@@ -24,6 +24,7 @@ const {
   send,
   loadMainCss,
   MEDIA,
+  readyTabId,
 } = require('./simplify2_harness');
 
 const CSS = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
@@ -42,12 +43,6 @@ function makePage() {
       win.document.head.appendChild(remoteStyle);
     },
   });
-}
-
-function readyTabId(posted) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready, 'main.js must post a ready message');
-  return ready.tabId;
 }
 
 // Replays a transcript containing a thought, a Bash tool call

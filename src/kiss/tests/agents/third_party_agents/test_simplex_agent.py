@@ -16,7 +16,6 @@ import json
 import stat
 import sys
 import threading
-import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -29,7 +28,7 @@ from kiss.agents.third_party_agents.simplex.simplex_sea import (
     SimpleXChannelBackend,
     _config,
 )
-from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name, wait_until
 
 _NEW_CHAT_ITEMS_EVENT: dict[str, Any] = {
     "resp": {
@@ -275,13 +274,15 @@ def test_poll_filters_by_channel(simplex_server: str) -> None:
     try:
         # The server handler pushes newChatItems asynchronously after the WS
         # handshake, so retry the poll until the push has been queued.
-        messages: list[dict[str, str]] = []
-        deadline = time.time() + 10.0
-        while time.time() < deadline and not messages:
+        polled: list[dict[str, str]] = []
+
+        def _polled_team_message() -> bool:
             messages, _ = backend.poll_messages("team", "0", limit=10)
-            if not messages:
-                time.sleep(0.05)
-        assert [m["text"] for m in messages] == ["hi from group"]
+            polled.extend(messages)
+            return bool(polled)
+
+        assert wait_until(_polled_team_message, timeout=10.0)
+        assert [m["text"] for m in polled] == ["hi from group"]
         # The non-matching direct message was discarded; the queue is empty now.
         again, _ = backend.poll_messages("", "0", limit=10)
         assert again == []

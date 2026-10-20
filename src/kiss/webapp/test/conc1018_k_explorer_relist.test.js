@@ -17,7 +17,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {newDom, send, stubRaf} = require('./simplify2_harness');
+const {newDom, send, stubRaf, click} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const WD = '/ws/repo';
@@ -56,10 +56,6 @@ function makeExplorerPage() {
     click(win, sec.querySelector('.meta-section-toggle'));
   }
   return {win, posted};
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function listings(posted) {

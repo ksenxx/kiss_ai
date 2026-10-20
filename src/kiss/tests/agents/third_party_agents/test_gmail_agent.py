@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import json
 import sys
-from typing import cast
 
 import pytest
 
@@ -38,7 +37,6 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     recording_server,
 )
 
@@ -148,9 +146,7 @@ class _GmailHandler(RecordingHandler):
     """Answers the profile call for the Composio-injected token, else 401."""
 
     def _handle(self) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {"method": self.command, "path": self.path}
-        )
+        self.record_request(None)
         if self.path.split("?", 1)[0].endswith("/users/me/profile") and (
             self.headers.get("Authorization") == f"Bearer {TOKEN}"
         ):
