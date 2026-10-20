@@ -922,12 +922,6 @@ class FileIndexRegistry:
             self._enqueue(root, None)
         return index
 
-    def view_for(self, work_dir: str) -> FileView | None:
-        """Return the current view of *work_dir*, or ``None`` if unindexed."""
-        root, sub_dir = self.root_for(work_dir)
-        index = self._current(root)
-        return None if index is None else index.view(sub_dir)
-
     def picker_for(self, work_dir: str) -> Picker | None:
         """Return the :class:`Picker` of *work_dir*, or ``None`` if unindexed.
 
@@ -944,14 +938,20 @@ class FileIndexRegistry:
         index = self._current(root)
         if index is None:
             return None
+        local = index.view(sub_dir)
         if root != self.home:
             home = self._current(self.home)
             home_all = None if home is None else home.view("")
             # A work dir above home (``/home``) lists home's files itself.
             above_home = self.home.startswith(os.path.join(root, ""))
-            return Picker(index.view(""), None if above_home else home_all, home_all)
+            return Picker(local, None if above_home else home_all, home_all)
         home_rest = index.view(sub_dir, complement=True) if sub_dir else None
-        return Picker(index.view(sub_dir), home_rest, index.view(""))
+        return Picker(local, home_rest, index.view(""))
+
+    def view_for(self, work_dir: str) -> FileView | None:
+        """Return the view of *work_dir* (its picker's local part), or ``None`` if unindexed."""
+        picker = self.picker_for(work_dir)
+        return None if picker is None else picker.local
 
     def ensure(self, work_dir: str, on_ready: Callable[[], object] | None = None) -> bool:
         """Build (or refresh) the index covering *work_dir* in the background.

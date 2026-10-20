@@ -6,7 +6,7 @@
 
 ``ChatSorcarAgent._retire_previous_worktree`` (new task / new chat
 with a worktree the agent never merged) and
-``_preserve_pending_worktree_for_review`` (stopped/failed task, tab
+``_retire_previous_worktree`` (stopped/failed task, tab
 close) deliberately leave the worktree on disk and write the durable
 preserve marker (a file under the repo's git dir) so a later
 ``GitWorktreeOps.reclaim_orphaned_worktrees`` — in a fresh process,
@@ -161,26 +161,13 @@ def _assert_kept_and_not_reclaimed(env: IsolatedKissHome, report: dict) -> None:
 def test_retire_previous_worktree_keeps_claim_until_marker_is_durable(
     env: IsolatedKissHome,
 ) -> None:
-    """``_retire_previous_worktree`` (new task / new chat) must not drop
-    ``_wt`` when the preserve marker cannot be written."""
+    """``_retire_previous_worktree`` (new task / new chat / stop / tab
+    close) must not drop ``_wt`` when the preserve marker cannot be
+    written."""
     report = _run_owner(
         env,
         first_call="_retire_previous_worktree()",
         retry_call="_retire_previous_worktree()",
-    )
-    assert report["first_result"] == "None"
-    _assert_kept_and_not_reclaimed(env, report)
-
-
-def test_preserve_for_review_keeps_claim_until_marker_is_durable(
-    env: IsolatedKissHome,
-) -> None:
-    """``_preserve_pending_worktree_for_review`` (stop / tab close) must not
-    drop ``_wt`` when the preserve marker cannot be written."""
-    report = _run_owner(
-        env,
-        first_call="_preserve_pending_worktree_for_review()",
-        retry_call="_preserve_pending_worktree_for_review()",
     )
     # The work WAS preserved (committed on its branch); only the claim is kept.
     assert report["first_result"] == "True"

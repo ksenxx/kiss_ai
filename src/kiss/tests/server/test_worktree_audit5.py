@@ -8,7 +8,7 @@ BUG-19: discard() now acquires repo_lock — checkout serialized with
         merge/release from other tabs.
 BUG-20: merge() reports a checkout failure instead of silently failing.
 BUG-21: checkout_error() removed — checkout() returns (bool, stderr).
-BUG-22: _check_merge_conflict misses staged files — KNOWN LIMITATION.
+BUG-22: _conflict_of misses staged files — KNOWN LIMITATION.
 BUG-23: _try_setup_worktree now checks commit_staged return value and
         uses --no-verify for the baseline commit.
 BUG-24: _get_worktree_changed_files returns [] on git diff failure —
@@ -34,11 +34,12 @@ from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
     _redirect_db,
     _restore_db,
 )
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 class TestBug22ConflictMissesStaged:
     """BUG-22: This is a known limitation. The fix would require
-    adding a staged-files check to _check_merge_conflict. Kept as-is
+    adding a staged-files check to _conflict_of. Kept as-is
     because git merge --squash handles it at merge time.
     """
 
@@ -75,7 +76,7 @@ class TestBug22ConflictMissesStaged:
         )
         agent_state.register(state)
         try:
-            has_conflict = server._check_merge_conflict("t22")
+            has_conflict = merge_conflict(server, "t22")
         finally:
             agent_state.unregister(state.task_id, state)
         assert has_conflict is True

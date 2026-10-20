@@ -41,12 +41,7 @@ _AUTH_TRIO = {"check_webhook_auth", "authenticate_webhook", "clear_webhook_auth"
 _SECRET = "test-secret-123"
 
 
-@pytest.fixture(autouse=True)
-def _fresh_webhook_config():
-    """Start and end every test with no persisted webhook config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _github_headers(body: bytes, delivery: str = "", secret: str = _SECRET) -> dict[str, str]:

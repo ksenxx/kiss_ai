@@ -79,8 +79,10 @@ instead of mocked):
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
+import socket
 import threading
 import time
 from pathlib import Path
@@ -90,13 +92,16 @@ from urllib.parse import parse_qs, quote
 import pytest
 import requests
 
+from kiss.agents.third_party_agents._channel_agent_utils import config_file_lock, write_private_file
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
 from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import _make_backend as ms_make_backend
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     muse_auth_dir,
+    policy_service,
     request_action,
+    scratch_root,
     socket_path,
     valid_credential_path_value,
     valid_token_endpoint,
@@ -111,9 +116,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
+from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
+from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 from kiss.agents.third_party_agents.telegram.telegram_sea import (
     TelegramAgent,
     TelegramChannelBackend,
+    _scrub_config_token,
 )
 from kiss.agents.third_party_agents.telegram.telegram_sea import (
     _config as tg_config,
@@ -122,6 +130,7 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import _make_backend a
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     loopback_policy,
+    set_policy,
     teardown_muse_env,
     wait_until,
 )
@@ -131,6 +140,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     serve_recording,
     serving,
 )
+from kiss.tests.server.pause import Pause
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
 _REAL_MS_SECRET = "msteams-real-client-secret"
@@ -904,17 +914,13 @@ def test_msteams_probe_policy_denial_and_nonjson_graph(
     agent._backend = backend
     tools = auth_tools(agent)
     # Sentinel reloads policy per decision: flip Graph reads to "ask".
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"]["msteams"]["read"] = "ask"
-    policy_path.write_text(json.dumps(policy))
+    set_policy("msteams", read="ask")
     checked = json.loads(tools["check_msteams_auth"]())
     assert checked["ok"] is False
     assert "requires user approval" in checked["error"]
     assert backend.connect() is False
     assert "MS Teams auth failed" in backend._connection_info
-    policy["services"]["msteams"].pop("read")
-    policy_path.write_text(json.dumps(policy))
+    set_policy("msteams", read="allow")
     # A non-JSON Graph response still proves the exchange succeeded.
     api_server.graph_nonjson = True
     ok, message = backend._muse_probe()
@@ -1034,8 +1040,6 @@ def test_telegram_adapter_and_scrub_edges(muse_env: Path, api_server: _TokenXApi
     doc = json.loads(tg_config.path.read_text())  # config survives ops
     assert doc == {"note": "keep-me"}
     # The scrub itself tolerates odd configs.
-    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
-
     tg_config.path.write_text("not json")
     _scrub_config_token()  # unreadable: a no-op
     assert tg_config.path.read_text() == "not json"
@@ -1499,10 +1503,7 @@ def test_scratch_validation_obeys_root_deny_policy(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """An explicit telegram read-deny also denies candidate validation."""
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"]["telegram"]["read"] = "deny"
-    policy_path.write_text(json.dumps(policy))
+    set_policy("telegram", read="deny")
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
     result = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
@@ -1546,10 +1547,7 @@ def test_ask_policy_grant_is_inherited_by_scratch_validation(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A root ``read: ask`` grant approves candidate validation."""
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"]["telegram"]["read"] = "ask"
-    policy_path.write_text(json.dumps(policy))
+    set_policy("telegram", read="ask")
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
     # Without a grant, validation cannot proceed (read is ask).
@@ -1593,8 +1591,6 @@ def test_atomic_store_if_absent_never_clobbers(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """store-if-absent leaves an already-present vault credential intact."""
-    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
-
     # First store creates the entry.
     assert (
         store_credentials(
@@ -1639,11 +1635,6 @@ def test_prefix_infinity_cache_is_not_trusted(
 
 def test_slack_workspace_named_pending_stays_isolated(muse_env: Path) -> None:
     """A slack-<ws>-<hash> name containing 'pending' is not a scratch service."""
-    from kiss.agents.third_party_agents.muse_auth._common import (
-        policy_service,
-        scratch_root,
-    )
-
     # The exact token-exchange scratch grammar resolves to its root.
     assert scratch_root("telegram-pending-0123456789abcdef") == "telegram"
     assert policy_service("telegram-pending-0123456789abcdef") == "telegram"
@@ -1660,8 +1651,6 @@ def test_slack_workspace_named_pending_stays_isolated(muse_env: Path) -> None:
 
 def test_abandoned_pending_file_is_swept(muse_env: Path) -> None:
     """A stale scratch file is swept when the next scratch entry is stored."""
-    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
-
     ensure_daemon()
     vault_dir = muse_auth_dir() / "vault"
     vault_dir.mkdir(parents=True, exist_ok=True)
@@ -1701,10 +1690,7 @@ def test_ask_remediation_names_the_grantable_root(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """The ask instruction names the grantable root, not the scratch id."""
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"]["telegram"]["read"] = "ask"
-    policy_path.write_text(json.dumps(policy))
+    set_policy("telegram", read="ask")
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
     denied = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
@@ -1732,8 +1718,6 @@ def test_compare_and_scrub_keeps_a_newer_config_value(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """The scrub removes only the migrated token, never a newer one."""
-    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
-
     # A newer token was written to config after the migrated one; the
     # compare-and-scrub must leave it in place.
     tg_config.save({"bot_token": "9:newer-token-from-another-writer"})
@@ -1799,6 +1783,11 @@ def test_stale_boundary_surrogate_reports_reconnect(
         )
 
 
+def _on_candidate_thread(frame_locals: dict[str, Any]) -> bool:
+    """Match ``vault.locked()`` entered by the ``candidate`` thread (not the test's own)."""
+    return threading.current_thread().name == "candidate"
+
+
 def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> None:
     """A concurrent authoritative store makes a malformed candidate moot.
 
@@ -1812,10 +1801,10 @@ def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> N
     connect that issued it succeeds.  This runs the REAL daemon handler
     and vault in-process (no test doubles); the interleaving cannot be
     scheduled from outside a subprocess daemon precisely because the
-    section is now atomic.
+    section is now atomic.  A ``Pause`` at the candidate's entry into
+    ``vault.locked()`` proves it got there without replying: validation
+    moved before the section would reply first and never reach it.
     """
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
-
     daemon = MuseAuthDaemon()
     result: dict[str, Any] = {}
 
@@ -1831,13 +1820,13 @@ def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> N
         )
 
     with daemon.vault.locked():
-        thread = threading.Thread(target=candidate, daemon=True)
-        thread.start()
-        # The candidate is blocked at (or will block at) the critical
-        # section; the authoritative store lands first either way.
-        time.sleep(0.2)
-        assert "reply" not in result
-        daemon.vault.store("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
+        with Pause(inspect.unwrap(CredentialVault.locked).__code__, _on_candidate_thread) as pause:
+            thread = threading.Thread(target=candidate, name="candidate", daemon=True)
+            thread.start()
+            assert pause.paused.wait(10.0), "candidate replied before the vault critical section"
+            assert "reply" not in result
+            daemon.vault.store("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
+        # Released, the candidate now blocks on the vault lock this thread holds.
     thread.join(10.0)
     assert result["reply"] == {"ok": True, "created": False}
     payload = json.loads((muse_auth_dir() / "vault" / "telegram.json").read_text())
@@ -1858,12 +1847,6 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
     demonstrably BLOCKS while a writer holds the lock, then honors the
     value that writer landed.
     """
-    from kiss.agents.third_party_agents._channel_agent_utils import (
-        config_file_lock,
-        write_private_file,
-    )
-    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
-
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     scrubbed = threading.Event()
 
@@ -1892,21 +1875,18 @@ def _wait_for_blocked_connect(port: int, timeout: float = 10.0) -> bool:
     SYN-SENT (``02``) proves the daemon has authorized the request and
     resolved the credential -- pinning the vault generation, which happens
     strictly before the transport connect -- and is now blocked in the
-    kernel on the saturated accept backlog.  On platforms without
-    ``/proc/net/tcp`` a fixed grace sleep is the best approximation.
+    kernel on the saturated accept backlog.  ``/proc/net/tcp`` is always
+    there: ``muse_env`` already skips the test off Linux.
 
     Args:
         port: The listener port the daemon's connect is aimed at.
         timeout: Deadline in seconds for the half-open connect to appear.
 
     Returns:
-        True once the half-open connect is visible (or after the
-        fallback sleep), False if the deadline passed without one.
+        True once the half-open connect is visible, False if the
+        deadline passed without one.
     """
     proc_tcp = Path("/proc/net/tcp")
-    if not proc_tcp.exists():  # pragma: no cover - non-Linux fallback
-        time.sleep(1.0)
-        return True
     want_remote = f"0100007F:{port:04X}"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1938,8 +1918,6 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
     blocked; draining the backlog then lets the connect complete — and
     the accepted socket must receive ZERO bytes.
     """
-    import socket
-
     store_credentials("telegram", {"kind": "path", "token": "1:old-generation-token"}, [])
     handle = mint_surrogate("telegram")
     assert handle is not None

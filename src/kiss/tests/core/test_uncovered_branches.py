@@ -83,14 +83,19 @@ class TestGetAvailableModels:
 class TestPrintToConsole:
     def test_format_result_summary_no_success(self) -> None:
         """Dict with summary but no success key should skip the success label."""
+        import io
+
         import yaml
 
         from kiss.core.print_to_console import ConsolePrinter
 
-        p = ConsolePrinter()
+        buf = io.StringIO()
+        p = ConsolePrinter(file=buf)
         content = yaml.dump({"summary": "Done without status"})
-        result = p.print(content, type="result", total_tokens=0, cost=0.0)
-        assert isinstance(result, str)
+        p.print(content, type="result", total_tokens=0, cost=0.0)
+        out = buf.getvalue()
+        assert "Done without status" in out
+        assert "Status:" not in out
 
 
 class TestSubstitutePromptArgs(TestCase):

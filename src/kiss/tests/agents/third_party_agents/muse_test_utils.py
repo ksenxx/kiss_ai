@@ -74,7 +74,7 @@ def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> N
     (directory / "policy.json").write_text(json.dumps(policy))
 
 
-def teardown_muse_env() -> None:
+def teardown_muse_env(timeout: float = 10.0) -> None:
     """Stop the Muse-auth daemon and wait until its process has exited.
 
     ``stop_daemon`` only asks the daemon to exit.  The daemon unlinks its
@@ -85,14 +85,30 @@ def teardown_muse_env() -> None:
     is therefore read before the stop and awaited afterwards; waiting
     for the socket to vanish also keeps a follow-up ``ensure_daemon``
     from handshaking with the dying daemon.
+
+    A daemon that is still there when *timeout* runs out is reported as
+    a failure of the test that leaked it: silently returning would let
+    the next daemon start on the same socket path while the old one is
+    alive, and the subprocess reaper would blame the next test.
+
+    Args:
+        timeout: Seconds to wait for the socket and the process to go.
+
+    Raises:
+        AssertionError: When the socket or the daemon process outlives
+            *timeout*.
     """
     pid = _daemon_pid()
     stop_daemon()
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and (
         socket_path().exists() or (pid is not None and _process_running(pid))
     ):
         time.sleep(0.02)
+    assert not socket_path().exists(), f"Muse daemon socket still present after {timeout}s"
+    assert pid is None or not _process_running(pid), (
+        f"Muse daemon pid={pid} still running after {timeout}s"
+    )
 
 
 def _daemon_pid() -> int | None:
@@ -195,3 +211,19 @@ def loopback_policy(*services: str) -> dict[str, Any]:
         "defaults": {"read": "allow", "write": "ask"},
         "services": {service: {"extra_hosts": ["127.0.0.1"]} for service in services},
     }
+
+
+def set_policy(service: str, **fields: Any) -> None:
+    """Merge *fields* into *service*'s entry of the installed ``policy.json``.
+
+    Sentinel reloads the policy per decision, so a test flips a service
+    rule (``read="ask"``) or adds a loopback host after the daemon is up.
+
+    Args:
+        service: Muse-auth service name (added when not in the policy).
+        fields: Policy keys to set on that service.
+    """
+    policy_path = muse_auth_dir() / "policy.json"
+    policy = json.loads(policy_path.read_text())
+    policy["services"].setdefault(service, {}).update(fields)
+    policy_path.write_text(json.dumps(policy))

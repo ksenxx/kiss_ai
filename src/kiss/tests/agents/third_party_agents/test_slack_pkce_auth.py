@@ -57,8 +57,10 @@ def slack(
         monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
         monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
         yield oauth, server
-        ConsentSession.cancel_active("slack")
     finally:
+        # Also on a failing test: the consent session owns the redirect
+        # listener thread and port and would otherwise outlive the test.
+        ConsentSession.cancel_active("slack")
         server.stop()
 
 

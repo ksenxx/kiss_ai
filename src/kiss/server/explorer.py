@@ -113,23 +113,6 @@ def _entry_sort_key(item: dict[str, Any]) -> tuple[str, str]:
     return (name.casefold(), name)
 
 
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run git, turning a missing/unlaunchable ``git`` into a failed result.
-
-    :func:`kiss.agents.sorcar.git_worktree._git` raises ``OSError``
-    (e.g. ``FileNotFoundError``) when the executable itself cannot
-    start; the providers here must always produce a reply, so that
-    becomes an ordinary non-zero result whose ``stderr`` carries the
-    reason.
-    """
-    try:
-        return _git(*args, cwd=cwd)
-    except OSError as exc:
-        return subprocess.CompletedProcess(
-            ["git", *args], 127, "", f"git could not be run: {exc}"
-        )
-
-
 def _chomp(text: str) -> str:
     """Drop exactly the line terminator git appends to a single-line value.
 
@@ -149,7 +132,7 @@ def repo_root(work_dir: str) -> str:
         The absolute top-level path, or ``""`` when *work_dir* is not
         inside a git work tree (or git failed).
     """
-    result = _run_git(work_dir, "rev-parse", "--show-toplevel")
+    result = _git("rev-parse", "--show-toplevel", cwd=work_dir)
     if result.returncode != 0:
         return ""
     # git answers "C:/Users/..." on Windows; keep every path the
@@ -186,7 +169,7 @@ def git_worktrees(repo: str) -> list[dict[str, Any]]:
     """
     # -z terminates every attribute with NUL (records with two), which
     # is the only way a path containing a newline survives.
-    result = _run_git(repo, "worktree", "list", "--porcelain", "-z")
+    result = _git("worktree", "list", "--porcelain", "-z", cwd=repo)
     rows: list[dict[str, Any]] = []
     if result.returncode == 0:
         for record in result.stdout.split("\0\0"):
@@ -201,8 +184,8 @@ def git_worktrees(repo: str) -> list[dict[str, Any]]:
         # An old git, or a repository whose worktree list does not name
         # this checkout: the current worktree is still what the view
         # asked about.  (A bare repository has no worktree to add.)
-        head = _run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD")
-        branch = _run_git(repo, "symbolic-ref", "--short", "-q", "HEAD")
+        head = _git("rev-parse", "--verify", "--quiet", "HEAD", cwd=repo)
+        branch = _git("symbolic-ref", "--short", "-q", "HEAD", cwd=repo)
         rows.insert(
             0,
             {
@@ -228,7 +211,7 @@ def _is_unborn_head(value: str) -> bool:
 
 def _is_bare(repo: str) -> bool:
     """Whether *repo* is a bare repository (no working tree)."""
-    result = _run_git(repo, "rev-parse", "--is-bare-repository")
+    result = _git("rev-parse", "--is-bare-repository", cwd=repo)
     return result.returncode == 0 and _chomp(result.stdout) == "true"
 
 
@@ -298,17 +281,17 @@ def git_status(work_dir: str) -> dict[str, Any]:
     repo = repo_root(work_dir)
     if not repo:
         return {"error": f"Not a git repository: {work_dir}"}
-    status = _run_git(
-        repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    status = _git(
+        "status", "--porcelain=v1", "-z", "--untracked-files=all", cwd=repo,
     )
     if status.returncode != 0:
         return {"error": status.stderr.strip() or "git status failed"}
     # symbolic-ref names the branch even before its first commit (an
     # unborn branch has no commit for rev-parse to resolve); a detached
     # HEAD has no symbolic ref, and rev-parse then reports "HEAD".
-    branch = _run_git(repo, "symbolic-ref", "--short", "-q", "HEAD")
+    branch = _git("symbolic-ref", "--short", "-q", "HEAD", cwd=repo)
     if branch.returncode != 0:
-        branch = _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     branch_name = _chomp(branch.stdout) if branch.returncode == 0 else ""
     changes = parse_porcelain_status(status.stdout, repo)
     worktrees = git_worktrees(repo)
@@ -316,9 +299,9 @@ def git_status(work_dir: str) -> dict[str, Any]:
         if wt["current"]:
             wt["changes"] = changes
             continue
-        other = _run_git(
-            wt["path"], "status", "--porcelain=v1", "-z",
-            "--untracked-files=all",
+        other = _git(
+            "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            cwd=wt["path"],
         )
         if other.returncode != 0:
             wt["error"] = other.stderr.strip() or "git status failed"
@@ -406,9 +389,7 @@ def _change_row(
 
 
 def git_log(
-    work_dir: str,
-    limit: int = GIT_LOG_DEFAULT_LIMIT,
-    legacy_merge_diffs: bool = False,
+    work_dir: str, limit: int = GIT_LOG_DEFAULT_LIMIT,
 ) -> dict[str, Any]:
     """Describe the recent commits of the repository at *work_dir*.
 
@@ -416,10 +397,6 @@ def git_log(
         work_dir: A directory inside the repository.
         limit: Maximum number of commits (clamped to
             ``1..GIT_LOG_MAX_LIMIT``).
-        legacy_merge_diffs: Skip ``--diff-merges=first-parent`` and use
-            the pre-2.31 ``-m`` spelling right away (what the fallback
-            does when git rejects the option); exposed so the fallback
-            path can be exercised on a modern git.
 
     Returns:
         On success ``{"repo", "head", "commits": [...]}`` where each
@@ -443,7 +420,7 @@ def git_log(
     if not repo:
         return {"error": f"Not a git repository: {work_dir}"}
     limit = max(1, min(int(limit), GIT_LOG_MAX_LIMIT))
-    head = _run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD")
+    head = _git("rev-parse", "--verify", "--quiet", "HEAD", cwd=repo)
     worktrees = git_worktrees(repo)
     if head.returncode != 0 and (head.returncode != 1 or head.stderr.strip()):
         # --verify --quiet exits 1 silently when HEAD names nothing (an
@@ -459,7 +436,7 @@ def git_log(
             starts.append(wt["head"])
     if not starts:
         return {"repo": repo, "head": "", "commits": [], "worktrees": worktrees}
-    result = _log_from(repo, starts, limit, legacy_merge_diffs)
+    result = _log_from(repo, starts, limit)
     if result.returncode != 0:
         return {"error": result.stderr.strip() or "git log failed"}
     commits: list[dict[str, Any]] = []
@@ -477,7 +454,7 @@ def git_log(
     for sha in starts:
         if sha in seen:
             continue
-        one = _log_from(repo, [sha], 1, legacy_merge_diffs)
+        one = _log_from(repo, [sha], 1)
         if one.returncode != 0:
             continue
         for commit in parse_git_log(one.stdout):
@@ -493,11 +470,17 @@ def git_log(
 
 
 def _log_from(
-    repo: str, starts: list[str], limit: int, legacy_merge_diffs: bool,
+    repo: str, starts: list[str], limit: int,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the ``git log`` :func:`git_log` parses, walking from *starts*."""
+    """Run the ``git log`` :func:`git_log` parses, walking from *starts*.
+
+    On an old git the merge rows come from ``-m``, which prints a merge
+    once per parent (the first-parent diff first); the sha
+    de-duplication in :func:`git_log` folds them back into one row
+    carrying the first-parent files.
+    """
     fmt = "%x00".join(("%H", "%P", "%an", "%aI", "%D", "%s", "%B"))
-    base_args = (
+    args = (
         "log",
         "-z",
         "--date-order",
@@ -506,22 +489,7 @@ def _log_from(
         "--name-status",
         f"--format={fmt}",
     )
-    revs = (*starts, "--")
-    # --diff-merges=first-parent (git >= 2.31) makes a merge list its
-    # changes against its first parent.  Older gits reject the option;
-    # their ``-m`` prints a merge once per parent (the first-parent
-    # diff first), which the sha de-duplication in git_log folds back
-    # into one row carrying the first-parent files.
-    result = None
-    if not legacy_merge_diffs:
-        result = _run_git(
-            repo, *base_args, "--diff-merges=first-parent", *revs,
-        )
-    if result is None or (
-        result.returncode != 0 and "diff-merges" in result.stderr
-    ):
-        result = _run_git(repo, *base_args, "-m", *revs)
-    return result
+    return _first_parent_merge(repo, args, ("-m",), (*starts, "--"))
 
 
 def parse_git_log(text: str) -> list[dict[str, Any]]:
@@ -625,20 +593,23 @@ def _valid_sha(sha: str) -> bool:
     return bool(re.match(r"^[0-9a-fA-F]{4,64}$", sha))
 
 
-def _merge_diff_args(
-    repo: str, *args: str, revs: tuple[str, ...] = (),
+def _first_parent_merge(
+    repo: str,
+    args: tuple[str, ...],
+    fallback: tuple[str, ...],
+    revs: tuple[str, ...],
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args> <merge option> <revs>`` with a merge shown against its first parent.
 
     ``--diff-merges=first-parent`` needs git >= 2.31; an older git
-    rejects it and gets ``--first-parent -m`` instead (``-m`` alone
-    would print a merge's diff once per parent).  The option goes
-    BEFORE *revs*, which end with ``--`` and any pathspec: after
-    ``--`` git would read it as a path.
+    rejects it and gets the *fallback* flags instead (``-m`` for a log
+    walk, ``--first-parent -m`` for ``show``).  The option goes BEFORE
+    *revs*, which end with ``--`` and any pathspec: after ``--`` git
+    would read it as a path.
     """
-    result = _run_git(repo, *args, "--diff-merges=first-parent", *revs)
+    result = _git(*args, "--diff-merges=first-parent", *revs, cwd=repo)
     if result.returncode != 0 and "diff-merges" in result.stderr:
-        result = _run_git(repo, *args, "--first-parent", "-m", *revs)
+        result = _git(*args, *fallback, *revs, cwd=repo)
     return result
 
 
@@ -667,14 +638,14 @@ def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
         return {"error": f"Not a commit id: {sha}"}
     if path.startswith("/"):
         return {"error": f"Not a repository path: {path}"}
-    subject = _run_git(repo, "log", "-1", "--format=%s", sha, "--")
+    subject = _git("log", "-1", "--format=%s", sha, "--", cwd=repo)
     if subject.returncode != 0:
         return {"error": subject.stderr.strip() or f"Unknown commit: {sha}"}
     # --literal-pathspecs: a file literally named ``:(glob)*.txt`` or
     # ``*.py`` is that one file, not a pattern (``--`` only ends option
     # parsing, it does not switch pathspec magic off); after ``--`` a
     # name such as ``--all`` is a path too.
-    args = [
+    args = (
         "--literal-pathspecs",
         "show",
         "--no-color",
@@ -682,9 +653,9 @@ def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
         "--format=medium",
         "--stat",
         "--patch",
-    ]
+    )
     revs = (sha, "--", path) if path else (sha, "--")
-    result = _merge_diff_args(repo, *args, revs=revs)
+    result = _first_parent_merge(repo, args, ("--first-parent", "-m"), revs)
     if result.returncode != 0:
         return {"error": result.stderr.strip() or "git show failed"}
     text, truncated = _truncate(result.stdout)
@@ -719,7 +690,7 @@ def git_file_at(work_dir: str, sha: str, path: str) -> dict[str, Any]:
         return {"error": f"Not a commit id: {sha}"}
     if not path or path.startswith("/"):
         return {"error": f"Not a repository path: {path}"}
-    result = _run_git(repo, "show", f"{sha}:{path}")
+    result = _git("show", f"{sha}:{path}", cwd=repo)
     if result.returncode != 0:
         return {"error": result.stderr.strip() or "git show failed"}
     if "\0" in result.stdout[:8192]:
@@ -741,7 +712,7 @@ def _blob_text(repo: str, spec: str) -> tuple[str | None, str]:
     path does not exist at that revision, and ``(None, <message>)`` for
     a binary blob or any other git failure.
     """
-    result = _run_git(repo, "show", spec)
+    result = _git("show", spec, cwd=repo)
     if result.returncode != 0:
         err = result.stderr.strip()
         if "does not exist" in err or "exists on disk, but not in" in err:
@@ -827,7 +798,7 @@ def git_file_diff(
     if sha:
         if not _valid_sha(sha):
             return {"error": f"Not a commit id: {sha}"}
-        check = _run_git(repo, "rev-parse", "--verify", "--quiet", sha + "^{commit}")
+        check = _git("rev-parse", "--verify", "--quiet", sha + "^{commit}", cwd=repo)
         if check.returncode != 0:
             return {"error": f"Unknown commit: {sha}"}
         base_rev = sha + "^"
@@ -835,7 +806,7 @@ def git_file_diff(
         base_rev = "HEAD"
     # A root commit (or an unborn HEAD) has no parent: the left side is
     # empty.
-    parent = _run_git(repo, "rev-parse", "--verify", "--quiet", base_rev + "^{commit}")
+    parent = _git("rev-parse", "--verify", "--quiet", base_rev + "^{commit}", cwd=repo)
     parent_sha = _chomp(parent.stdout) if parent.returncode == 0 else ""
     original, err = (
         _blob_text(repo, f"{parent_sha}:{orig_path}") if parent_sha else (None, "")
@@ -884,11 +855,11 @@ def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
         return {"error": f"Not a commit id: {sha}"}
     if not base or base.startswith("-") or not _REVISION_RE.match(base):
         return {"error": f"Not a revision: {base}"}
-    check = _run_git(repo, "rev-parse", "--verify", "--quiet", base + "^{commit}")
+    check = _git("rev-parse", "--verify", "--quiet", base + "^{commit}", cwd=repo)
     if check.returncode != 0:
         return {"error": f"Unknown revision: {base}"}
-    result = _run_git(
-        repo, "diff", "--no-color", "--stat", "--patch", base, sha, "--",
+    result = _git(
+        "diff", "--no-color", "--stat", "--patch", base, sha, "--", cwd=repo,
     )
     if result.returncode != 0:
         return {"error": result.stderr.strip() or "git diff failed"}
@@ -946,7 +917,7 @@ def git_action(
     if action in ("createBranch", "createTag"):
         if not name or name.startswith("-") or not _REF_NAME_RE.match(name):
             return {"error": f"Not a valid name: {name!r}"}
-        check = _run_git(repo, "check-ref-format", "--branch", name)
+        check = _git("check-ref-format", "--branch", name, cwd=repo)
         if check.returncode != 0:
             return {"error": f"Not a valid name: {name!r}"}
     if action == "checkoutDetached":
@@ -959,7 +930,7 @@ def git_action(
             args += ["-a", "-m", message]
         args += [name, sha]
     else:
-        parents = _run_git(repo, "rev-list", "--parents", "-n", "1", sha)
+        parents = _git("rev-list", "--parents", "-n", "1", sha, cwd=repo)
         is_merge = (
             parents.returncode == 0 and len(parents.stdout.split()) > 2
         )
@@ -971,7 +942,7 @@ def git_action(
     # main-tree mutation (auto-commit, the worktree merge transaction,
     # spare-worktree creation) is serialised by the same per-repo lock.
     with repo_lock(Path(repo)):
-        result = _run_git(repo, *args)
+        result = _git(*args, cwd=repo)
     # A hook can print anything; bound what goes on the wire.
     output, _ = _truncate((result.stdout + result.stderr).strip())
     if result.returncode != 0:

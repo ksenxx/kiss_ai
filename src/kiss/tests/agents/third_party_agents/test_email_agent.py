@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _normalize_mail,
 )
 from kiss.tests.agents.third_party_agents.email_test_utils import raw_plain
+from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
 _BACKEND_TOOLS = {"send_email", "list_unread_emails", "read_email", "mark_email_read"}
@@ -38,17 +39,9 @@ _BACKEND_TOOLS = {"send_email", "list_unread_emails", "read_email", "mark_email_
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def _tool(agent: EmailAgent, name: str):
-    """Return the agent tool callable with the given name."""
-    for tool in agent._get_tools():
-        if tool.__name__ == name:
-            return tool
-    raise AssertionError(f"tool {name!r} not found")
-
-
 def _authenticate(agent: EmailAgent) -> None:
     """Configure the agent with valid test credentials."""
-    result = _tool(agent, "authenticate_email")(
+    result = tools_by_name(agent)["authenticate_email"](
         imap_host="imap.example.com",
         smtp_host="smtp.example.com",
         email_address="bot@example.com",
@@ -109,13 +102,13 @@ class TestAuthFlow:
     def test_check_and_clear_auth(self) -> None:
         """check_email_auth reports the config; clear_email_auth removes it."""
         agent = EmailAgent()
-        assert "Not configured" in _tool(agent, "check_email_auth")()
+        assert "Not configured" in tools_by_name(agent)["check_email_auth"]()
         _authenticate(agent)
-        status = json.loads(_tool(agent, "check_email_auth")())
+        status = json.loads(tools_by_name(agent)["check_email_auth"]())
         assert status["ok"] is True
         assert status["email_address"] == "bot@example.com"
         assert status["smtp_security"] == "ssl"
-        assert "cleared" in _tool(agent, "clear_email_auth")()
+        assert "cleared" in tools_by_name(agent)["clear_email_auth"]()
         assert not _config.path.exists()
         assert agent._is_authenticated() is False
 
@@ -131,7 +124,7 @@ class TestAuthFlow:
     def test_authenticate_rejects_bad_input(self) -> None:
         """Empty fields, bad security modes, and bad ports are rejected unsaved."""
         agent = EmailAgent()
-        auth = _tool(agent, "authenticate_email")
+        auth = tools_by_name(agent)["authenticate_email"]
         assert auth("", "s", "e@x.com", "p") == "imap_host cannot be empty."
         assert auth("i", "s", "e@x.com", "p", smtp_security="tls") == (
             "smtp_security must be 'ssl' or 'starttls'."
@@ -144,7 +137,7 @@ class TestAuthFlow:
     def test_authenticate_accepts_starttls(self) -> None:
         """Custom ports and starttls security are persisted verbatim."""
         agent = EmailAgent()
-        result = _tool(agent, "authenticate_email")(
+        result = tools_by_name(agent)["authenticate_email"](
             imap_host="imap.example.com",
             smtp_host="smtp.example.com",
             email_address="bot@example.com",

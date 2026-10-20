@@ -23,9 +23,11 @@ import copy
 import hashlib
 import json
 import shutil
+import socket
 import stat
 import subprocess
 import sys
+import threading
 from email.parser import BytesParser
 from email.policy import HTTP
 from io import BufferedIOBase
@@ -43,7 +45,7 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _meta_content,
     _normalize_cookie,
 )
-from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -217,9 +219,16 @@ def _ws_send(wfile: BufferedIOBase, opcode: int, payload: bytes) -> None:
     wfile.flush()
 
 
-def _ws_recv(rfile: BufferedIOBase) -> tuple[int, bytes]:
-    """Read one (masked) client WebSocket frame; return (opcode, payload)."""
-    first, second = rfile.read(2)
+def _ws_recv(rfile: BufferedIOBase) -> tuple[int, bytes] | None:
+    """Read one (masked) client WebSocket frame; return (opcode, payload).
+
+    Returns ``None`` at EOF, i.e. when the client dropped the connection
+    without a close frame, so the reader loop ends normally.
+    """
+    head = rfile.read(2)
+    if len(head) < 2:
+        return None
+    first, second = head
     size = second & 0x7F
     if size == 126:
         size = int.from_bytes(rfile.read(2), "big")
@@ -388,8 +397,8 @@ class _OverleafHandler(RecordingHandler):
             frames = ["1::", "7:::1+0"]
         for frame in frames:
             _ws_send(self.wfile, 1, frame.encode())
-        while True:
-            opcode, data = _ws_recv(self.rfile)
+        while (received := _ws_recv(self.rfile)) is not None:
+            opcode, data = received
             if opcode == 8:
                 _ws_send(self.wfile, 8, data)
                 break
@@ -751,6 +760,35 @@ def test_list_files_realtime_and_fallback(backend) -> None:
     assert "entity ids unavailable" in fallback["note"] and "7:::1+0" in fallback["note"]
     assert fallback["entities"] == [{"path": "/x.tex", "type": "doc"}]
     assert "HTTP 404" in b.overleaf_list_files("pnone")
+
+
+def test_realtime_emulator_survives_client_dropping_connection(
+    overleaf_server, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A client that closes the TCP connection without a close frame ends the handler quietly.
+
+    The emulator's frame reader must treat EOF as a close so the handler
+    thread returns instead of dying with a traceback on stderr, which
+    would hide real failures in the test output.
+    """
+    base_url, server = overleaf_server
+    port = int(base_url.rsplit(":", 1)[1])
+    threads_before = threading.active_count()
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(
+            b"GET /socket.io/1/websocket/sid-p1?projectId=p1 HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+            + f"Cookie: overleaf_session2={_COOKIE}\r\n\r\n".encode()
+        )
+        greeting = sock.recv(4096)
+        assert greeting.startswith(b"HTTP/1.1 101")
+        # Drain the join exchange so the emulator is idle in its frame reader.
+        while b"joinProjectResponse" not in greeting:
+            greeting += sock.recv(4096)
+    # The connection is gone; the handler thread must finish on its own.
+    assert wait_until(lambda: threading.active_count() <= threads_before, timeout=10.0)
+    assert capfd.readouterr().err == ""
 
 
 def test_read_and_download_files(backend, tmp_path: Path) -> None:

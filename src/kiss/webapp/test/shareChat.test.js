@@ -23,76 +23,26 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  MEDIA,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 function makePage(opts) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  if (opts && opts.highlight) {
+  return makeChatPage({
+    beforeScripts: stubRaf,
     // The REAL production renderers, so the deferred-highlight test
     // exercises the same hljs/marked paths the page runs.
-    win.eval(fs.readFileSync(path.join(MEDIA, 'highlight.min.js'), 'utf8'));
-    win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=share-main.js',
-  );
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+    extraScripts:
+      opts && opts.highlight ? ['highlight.min.js', 'marked.min.js'] : [],
+    sourceUrl: 'share-main.js',
+  });
 }
 
 function tabIdOf(wv) {
@@ -230,7 +180,10 @@ async function run() {
     assert.ok(msg, 'the share_tasks reply must produce a shareChat command');
     assert.strictEqual(msg.tabId, TAB);
     assert.strictEqual(msg.chatId, 'chat-777');
-    assert.ok(msg.html.includes('class="ev task-panel'), 'task panel serialized');
+    assert.ok(
+      msg.html.includes('class="ev task-panel'),
+      'task panel serialized',
+    );
     assert.ok(
       msg.html.includes('list the files'),
       'task panel text serialized',
@@ -732,7 +685,10 @@ async function run() {
       // The code sits in the prompt: a replay folds that panel and
       // defers its highlighting (a Thoughts panel is never folded).
       events: [
-        {type: 'prompt', text: 'show some code\n```js\nconst answer = 42;\n```'},
+        {
+          type: 'prompt',
+          text: 'show some code\n```js\nconst answer = 42;\n```',
+        },
         {type: 'result', text: 'done', success: true},
       ],
     });
@@ -969,7 +925,7 @@ async function run() {
     );
   });
 
-  await test("an old failure in the export never marks the tab failed", () => {
+  await test('an old failure in the export never marks the tab failed', () => {
     const wv = makePage();
     const win = wv.win;
     const TAB = runSmallTask(wv, 'chat-flag', 'task-f2');
@@ -1112,17 +1068,15 @@ async function run() {
       'the refusal must be visible in the transcript',
     );
     assert.ok(
-      win.document
-        .getElementById('share-btn')
-        .classList.contains('share-err'),
+      win.document.getElementById('share-btn').classList.contains('share-err'),
       'the button flashes red on refusal',
     );
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
+  report('shareChat');
   // The pages leave live timers behind (the running-task clock,
   // the button flash), so exit explicitly instead of draining them.
-  process.exit(failures.length > 0 ? 1 : 0);
+  process.exit(0);
 }
 
 run().catch(err => {

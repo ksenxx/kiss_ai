@@ -422,6 +422,7 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_
     gate.set()
     for thread in threads:
         thread.join(15)
+        assert not thread.is_alive(), "open_for_user() did not return"
     # Nothing opened anywhere: neither caller claims the user sees the page.
     assert results == [NOT_OPENED, NOT_OPENED]
     # The waiter retried the tab itself once the first claim was released.
@@ -440,9 +441,18 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_
         "condition not met in time"
     )
     threads[1].start()
+    # The second caller must be queued behind the in-flight launch before it
+    # is released; otherwise it would arrive after the launch settled and be
+    # answered by the reopen guard, which also opens nothing.
+    assert wait_until(
+        lambda: len(_browser_handoff._lock._waiters) == 1,  # type: ignore[attr-defined]
+        timeout=10.0,
+    ), "condition not met in time"
+    assert results == []
     gate.set()
     for thread in threads:
         thread.join(15)
+        assert not thread.is_alive(), "open_for_user() did not return"
     assert results == [BROWSER_TAB, BROWSER_TAB] and slow.urls.count(other) == 1
 
 
@@ -690,7 +700,6 @@ def test_prompts_describe_the_browser_tab_hand_off() -> None:
     assert "Do not drive the portal" not in prompt
     discord_prompt = DiscordAgent.channel_system_prompt
     assert "Do not drive the portal" not in discord_prompt
-    assert "authenticate_discord() with no arguments" in discord_prompt
     from kiss.agents.third_party_agents.github.github_sea import GitHubAgent
 
     prompt = GitHubAgent.channel_system_prompt
@@ -700,4 +709,3 @@ def test_prompts_describe_the_browser_tab_hand_off() -> None:
     assert "never ask them to open a URL or file" in SignalAgent.channel_system_prompt
     assert "'browser_tab'" in GoogleCalendarAgent.channel_system_prompt
     assert "never ask them to open a URL" in GoogleCalendarAgent.channel_system_prompt
-    assert _browser_handoff.__doc__ is not None

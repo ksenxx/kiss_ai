@@ -140,7 +140,7 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         self._writers.append(writer_b)
         await self._send_ready(writer_b, "tab-b")
         await self._wait_for_event(reader_b, "tabs_state")
-        # Window A ticks "Do not show this".
+        # Window A ticks "Do not show this again".
         writer_a.write(
             json.dumps({"type": "dismissNotice", "id": NOTICE_ID}).encode("utf-8") + b"\n"
         )

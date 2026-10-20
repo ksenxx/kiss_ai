@@ -203,5 +203,7 @@ class TestClientsSkipHeartbeatsBeforeAuthOk(IsolatedAsyncioTestCase):
         """
         async with fake_daemon(self.scratch, _heartbeat_flood, answer_auth=False) as endpoint_file:
             took = await asyncio.to_thread(_auth_reply_under_flood, endpoint_file, 0.5)
-        self.assertGreaterEqual(took, 0.5)
+        # The last ``recv`` wait may end a millisecond early on Windows
+        # (its wait primitives round the timeout to the timer tick).
+        self.assertGreaterEqual(took, 0.45, f"recv_auth_reply gave up after only {took:.3f}s")
         self.assertLess(took, 3.0, f"recv_auth_reply gave up only after {took:.2f}s")

@@ -9,9 +9,13 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  answerCheckPaths,
+} = require('./simplify2_harness');
+const {findLinks, findMissing} = require('./file_link_helpers');
 
 // A real temp workspace; each test creates the files it links to.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtrecheck-'));
@@ -42,76 +46,16 @@ function checkPathsOnRealFs(msg) {
 // `pathsExist` reply computed against the REAL filesystem, exactly like
 // the remote web server does.
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    beforeScripts: win => answerCheckPaths(win, checkPathsOnRealFs),
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => {
-        posted.push(msg);
-        if (msg.type === 'checkPaths') {
-          send(win, {
-            type: 'pathsExist',
-            results: checkPathsOnRealFs(msg),
-            workDir: msg.workDir,
-            tabId: msg.tabId,
-          });
-        }
-      },
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
 }
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function findLinks(win, p) {
-  return Array.from(
-    win.document.querySelectorAll('#output [data-path]'),
-  ).filter(el => el.dataset.path === p);
-}
-
-function clickEl(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 
 // End-to-end tests of recheckFileLinksForTab(): a worktree_result event
 // (merge or discard finished) must re-verify the tab's file links, so a
 // report committed on the task's branch becomes clickable the moment
 // the merge lands it in the checkout, and a link that resolved against
 // the discarded worktree copy greys out.
-
-function findMissing(win, p) {
-  return Array.from(
-    win.document.querySelectorAll('#output [data-path-missing]'),
-  ).filter(el => el.getAttribute('data-path-missing') === p);
-}
 
 function testMergeFlipsMissingResultLinkClickable() {
   const {win, posted} = makePage();
@@ -157,7 +101,7 @@ function testMergeFlipsMissingResultLinkClickable() {
       0,
       'the missing marker must be gone after the merge',
     );
-    clickEl(win, links[0]);
+    click(win, links[0]);
     const opens = posted.filter(m => m.type === 'openFile');
     assert.strictEqual(opens.length, 1, 'click must post one openFile');
     assert.strictEqual(opens[0].path, report);

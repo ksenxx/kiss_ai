@@ -26,6 +26,8 @@ import json
 import os
 import unittest
 
+import pytest
+
 from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelRunner,
@@ -37,7 +39,7 @@ from kiss.agents.third_party_agents.signal.signal_sea import (
     _config,
 )
 from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.third_party_agents.recording_daemon import serve_recording_daemon
 
 # A Python program (not a shell script) so the same stand-in runs on
 # Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
@@ -73,6 +75,7 @@ def _envelope(sender: str, ts: int, text: str) -> str:
     )
 
 
+@pytest.mark.usefixtures("isolated_kiss_home")
 class TestSignalRunnerForeignSender(unittest.TestCase):
     """The real runner tick must neither act on nor reply about foreign mail."""
 
@@ -92,20 +95,17 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         os.environ["KISS_TEST_SPOOL"] = str(self._spool)
         self.addCleanup(os.environ.pop, "KISS_TEST_SENDS", None)
         os.environ["KISS_TEST_SENDS"] = str(self._sends)
-        # The session conftest points KISS_HOME at a temp dir, so this
-        # config write is sandboxed away from any real user config.
-        self.addCleanup(_config.clear)
         _config.save({"phone_number": "+1BOT"})
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
         # The daemon stand-in the runner's real ``_launch_task`` reaches:
         # ``run_agent_via_kiss_web`` resolves its endpoint file from the
         # module-level ``_ENDPOINT_FILE_OVERRIDE`` when none is passed.
-        self._daemon = RecordingDaemon(text="handled", chat_id="chat-1")
-        self.addCleanup(self._daemon.close)
-        saved_override = _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE
-        self.addCleanup(setattr, _kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", saved_override)
-        _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = str(self._daemon.endpoint_file)
+        self._daemon = self.enterContext(
+            serve_recording_daemon(
+                _kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", text="handled", chat_id="chat-1"
+            )
+        )
 
     def _launched_prompts(self) -> list[str]:
         """Prompts of the ``run`` commands the daemon received, in order."""

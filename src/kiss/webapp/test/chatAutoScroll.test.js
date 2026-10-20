@@ -19,33 +19,14 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeChatPage, send} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  // jsdom has no layout engine: stub scrollIntoView (used by the tab
-  // bar) so main.js can initialize.
-  win.Element.prototype.scrollIntoView = function () {};
-
-  // Class-keyed fake geometry lets a test give scroll geometry to
-  // panels that are created *during* event handling (per-element
-  // fakeGeometry own properties still take precedence).
+/**
+ * Class-keyed fake geometry lets a test give scroll geometry to panels
+ * that are created *during* event handling (per-element fakeGeometry
+ * own properties still take precedence).
+ */
+function stubGeometry(win) {
   const geoByClass = {};
   win._geoByClass = geoByClass;
   Object.defineProperty(win.Element.prototype, 'scrollHeight', {
@@ -66,33 +47,15 @@ function makePage() {
       return 0;
     },
   });
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8') +
-      '\n//# sourceURL=autoscroll-api.js',
-  );
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=autoscroll-main.js',
-  );
-  return {win, posted};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+function makePage() {
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    sourceUrl: 'autoscroll-main.js',
+    beforeScripts: stubGeometry,
+  });
+  return {win, posted};
 }
 
 function fakeGeometry(el, geo) {
@@ -179,9 +142,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     smallTop,
-    'BUG (' +
-      label +
-      '): a small user scroll-up did not disable auto-scroll',
+    'BUG (' + label + '): a small user scroll-up did not disable auto-scroll',
   );
 
   // A larger scroll up keeps auto-scroll disabled too.
@@ -291,9 +252,7 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): streamed thinking did not scroll the chat to its end',
+    'BUG (' + label + '): streamed thinking did not scroll the chat to its end',
   );
 
   // A user scroll away from the thoughts panel's bottom engages the
@@ -340,7 +299,10 @@ async function testThinkPanelAutoScrolls() {
   geoL.sh += 200;
   send(win, {type: 'thinking_delta', text: 'e'.repeat(80)});
   send(win, {type: 'thinking_end'});
-  assert.ok(think.textContent.endsWith('e'.repeat(80)), 'thinking_end flushes the text');
+  assert.ok(
+    think.textContent.endsWith('e'.repeat(80)),
+    'thinking_end flushes the text',
+  );
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
@@ -353,7 +315,10 @@ async function testThinkPanelAutoScrolls() {
   // flush; the pending text must still land in the panel.
   send(win, {type: 'thinking_start'});
   const think2 = lp.querySelectorAll(':scope > .think')[1];
-  assert.ok(think2, 'a second thinking_start adds a second text block to the panel');
+  assert.ok(
+    think2,
+    'a second thinking_start adds a second text block to the panel',
+  );
   send(win, {type: 'thinking_delta', text: 'f'.repeat(80)});
   await nextFrames(win);
   userScroll(win, lp, 30);
@@ -492,16 +457,12 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     rp.scrollTop,
     bottom(geoR),
-    'BUG (' +
-      label +
-      '): the tool result subpanel was not scrolled to its end',
+    'BUG (' + label + '): the tool result subpanel was not scrolled to its end',
   );
   delete win._geoByClass['tr-content'];
   delete win._geoByClass['bash-panel-content'];
   win.close();
-  console.log(
-    '  ok - bash subpanel auto-scrolls to its end (' + label + ')',
-  );
+  console.log('  ok - bash subpanel auto-scrolls to its end (' + label + ')');
 }
 
 // --------------------------------------------------------------------
@@ -537,9 +498,7 @@ async function testThoughtsPanelAutoScrolls() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): streamed text did not scroll the chat to its end',
+    'BUG (' + label + '): streamed text did not scroll the chat to its end',
   );
 
   // A user scroll away from the thoughts panel's bottom engages its
@@ -650,9 +609,7 @@ async function testReplayLandsAtEnd() {
   );
   win.close();
   console.log(
-    '  ok - task replay lands at the end of the latest panel (' +
-      label +
-      ')',
+    '  ok - task replay lands at the end of the latest panel (' + label + ')',
   );
 }
 
@@ -679,7 +636,13 @@ async function testReconnectReplayKeepsReadingPosition() {
     {type: 'text_end'},
   ];
   const replay = () =>
-    send(win, {type: 'task_events', tabId, task: 'replayed', task_id: 3, events});
+    send(win, {
+      type: 'task_events',
+      tabId,
+      task: 'replayed',
+      task_id: 3,
+      events,
+    });
 
   // Reading an earlier part of the transcript when the socket drops.
   const readingAt = 700;
@@ -801,9 +764,7 @@ async function testStaticSubpanelsAutoScroll() {
   assert.strictEqual(
     tcb.scrollTop,
     bottom(geoTcb),
-    'BUG (' +
-      label +
-      '): the tool-call body was not scrolled to its end',
+    'BUG (' + label + '): the tool-call body was not scrolled to its end',
   );
 
   // A user scroll away from the tool body's bottom engages its lock:
@@ -931,9 +892,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): a warning banner auto-scrolled the locked chat',
+    'BUG (' + label + '): a warning banner auto-scrolled the locked chat',
   );
 
   geoO.sh += 100;
@@ -941,9 +900,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): an error banner auto-scrolled the locked chat',
+    'BUG (' + label + '): an error banner auto-scrolled the locked chat',
   );
 
   // Back at the bottom, auto-scroll resumes for banners.
@@ -1071,9 +1028,7 @@ async function testTabRestoreLandsAtEnd() {
   );
   win.close();
   console.log(
-    '  ok - tab restore lands at the end of the latest panel (' +
-      label +
-      ')',
+    '  ok - tab restore lands at the end of the latest panel (' + label + ')',
   );
 }
 
@@ -1186,9 +1141,7 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'streaming must pin the bash panel to its bottom first (' +
-      label +
-      ')',
+    'streaming must pin the bash panel to its bottom first (' + label + ')',
   );
 
   // 1px above the subpanel's bottom is within the fractional-scroll
@@ -1202,7 +1155,7 @@ async function testSubpanelLockThresholdAndResume() {
     bottom(geoB),
     'BUG (' +
       label +
-      "): a 1px offset (fractional-scroll tolerance) disabled the " +
+      '): a 1px offset (fractional-scroll tolerance) disabled the ' +
       "bash panel's auto-scroll",
   );
 
@@ -1217,7 +1170,7 @@ async function testSubpanelLockThresholdAndResume() {
     lockedTop,
     'BUG (' +
       label +
-      "): scrolling a subpanel away from its bottom did not disable " +
+      '): scrolling a subpanel away from its bottom did not disable ' +
       'its auto-scroll',
   );
 
@@ -1286,8 +1239,7 @@ async function testSubpanelStaleLockReleasedByShrink() {
   assert.strictEqual(
     bp.scrollTop,
     0,
-    'precondition (' + label + "): the subpanel's lock must be " +
-      'engaged',
+    'precondition (' + label + "): the subpanel's lock must be " + 'engaged',
   );
 
   // The subpanel shrinks until it is not scrollable at all; scrollTop
@@ -1383,7 +1335,7 @@ async function testSubpanelLockSurvivesTabSwitch() {
     25,
     'BUG (' +
       label +
-      '): switching tabs and back lost a locked subpanel\'s reading ' +
+      "): switching tabs and back lost a locked subpanel's reading " +
       'position',
   );
   assert.strictEqual(
@@ -1425,9 +1377,7 @@ async function testSubpanelLockSurvivesTabSwitch() {
   );
   win.close();
   console.log(
-    '  ok - a subpanel lock survives a tab switch and back (' +
-      label +
-      ')',
+    '  ok - a subpanel lock survives a tab switch and back (' + label + ')',
   );
 }
 
@@ -1452,9 +1402,7 @@ async function testSendMessageKeepsLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'precondition (' +
-      label +
-      '): the user scroll lock must be engaged',
+    'precondition (' + label + '): the user scroll lock must be engaged',
   );
 
   // The user submits a follow-up message while the task is running and
@@ -1599,9 +1547,7 @@ async function testClearEventResetsLock() {
   );
   win.close();
   console.log(
-    '  ok - a clear event (new task) resets the scroll lock (' +
-      label +
-      ')',
+    '  ok - a clear event (new task) resets the scroll lock (' + label + ')',
   );
 }
 
@@ -1695,9 +1641,7 @@ async function testReadingPreviousTaskNeverYanked() {
   );
   win.close();
   console.log(
-    '  ok - reading a previous task is never yanked to the end (' +
-      label +
-      ')',
+    '  ok - reading a previous task is never yanked to the end (' + label + ')',
   );
 }
 

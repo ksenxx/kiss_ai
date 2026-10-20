@@ -36,7 +36,12 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _REMEMBER_PATH = Path(remember_sea.__file__).resolve()
@@ -98,16 +103,10 @@ def test_slash_commands_resolve_to_the_bundled_seas() -> None:
     """``/remember text`` and ``/forget text`` resolve to the text and these files."""
     assert sea_commands.get_command("remember") == _REMEMBER_PATH
     assert sea_commands.get_command("forget") == _FORGET_PATH
-    hit = sea_commands.slash_command_task("/remember Always reply tersely")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _REMEMBER_PATH
-    assert task_text == "Always reply tersely"
-    hit = sea_commands.slash_command_task("/forget Always reply tersely")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _FORGET_PATH
-    assert task_text == "Always reply tersely"
+    assert sea_commands.slash_command_task("/remember Always reply tersely") == (
+        "Always reply tersely", _REMEMBER_PATH)
+    assert sea_commands.slash_command_task("/forget Always reply tersely") == (
+        "Always reply tersely", _FORGET_PATH)
     for path in (_REMEMBER_PATH, _FORGET_PATH):
         assert sea_commands.sea_settings(path) == _WORKER_SETTINGS
     assert sea_commands.help_text_if_command("/remember help") == RememberSea().description()
@@ -341,15 +340,15 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_agents
 
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert names == {"Bash", "finish", "remember_instruction", "list_instructions"}, names
         assert system_message(request).startswith(remember_sea.SYSTEM_PROMPT)
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert instruction in str(user["content"])
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1
+    results = tool_results(agentic[1])
+    assert len(results) == 1
     # The agent appends a usage line to every tool result; the reply comes first.
-    assert str(tool_results[0]["content"]).startswith(
+    assert results[0].startswith(
         f"Remembered in {_fresh_agents_md}: {instruction}\n"
     )
 
@@ -385,18 +384,18 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
 
     assert len(agentic) == 3, [list(r) for r in agentic]
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert names == {"Bash", "finish", "forget_instruction", "list_instructions"}, names
         system = system_message(request)
         assert system.startswith(forget_sea.SYSTEM_PROMPT)
         # perform_task appended AGENTS.md: the run itself followed both rules.
         assert "- Always reply in British English\n- Prefer uv over pip" in system
-    tool_results = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 2
-    assert str(tool_results[0]["content"]).startswith(
+    results = tool_results(agentic[2])
+    assert len(results) == 2
+    assert results[0].startswith(
         f"Error: no instruction in {_fresh_agents_md} matches: the British English one\n"
         "Stored instructions:\n1. Always reply in British English\n2. Prefer uv over pip\n"
     )
-    assert str(tool_results[1]["content"]).startswith(
+    assert results[1].startswith(
         f"Forgot from {_fresh_agents_md}: Always reply in British English\n"
     )

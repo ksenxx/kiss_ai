@@ -12,8 +12,7 @@ pinned here:
 
 * :class:`JsonPrinter` cuts the output one tool call streams at
   ``MAX_SYSTEM_OUTPUT_CHARS`` (a marker line ends the stream; the next
-  tool call starts a fresh budget), and the one-shot ``tool_output``
-  message path is cut the same way;
+  tool call starts a fresh budget);
 * :func:`persistence._fetch_events_for_task_id` never loads a row
   above ``MAX_EVENT_ROW_CHARS`` into Python: SQLite returns the event
   type and the head of its text, and the row becomes a clipped event
@@ -153,21 +152,6 @@ class StreamCapTest(unittest.TestCase):
         printer._flush_bash()
         text = _system_output_text(printer.captured)
         self.assertEqual(text, "e" * MAX_SYSTEM_OUTPUT_CHARS + SYSTEM_OUTPUT_CAP_MARKER)
-        printer.stop_recording()
-
-    def test_tool_output_message_is_clipped(self) -> None:
-        """The one-shot ``tool_output`` message path is cut the same way."""
-        printer = self._printer()
-
-        class _Msg:
-            subtype = "tool_output"
-            data = {"content": "z" * (MAX_SYSTEM_OUTPUT_CHARS + 5)}
-
-        printer._handle_message(_Msg())
-        text = _system_output_text(printer.captured)
-        self.assertEqual(
-            text, "z" * MAX_SYSTEM_OUTPUT_CHARS + SYSTEM_OUTPUT_CAP_MARKER,
-        )
         printer.stop_recording()
 
 

@@ -32,7 +32,7 @@ Consequences in ``AnthropicModel._build_create_kwargs``:
 * ``tool_choice={"type": "any"}`` was force-set whenever tools were
   present, which by itself silently disables thinking on the API side;
 * the ``max_tokens`` default was the plain 16384: the 64000-vs-65536
-  selection lived inside the ``if _supports_extended_thinking(...)``
+  selection lived inside the ``if _supports_extended_thinking(_claude_profile(...))``
   block that opus-5 never entered, and the branch's own
   ``startswith("claude-opus-4")`` family test was version-blind anyway
   (it is now version-aware).
@@ -67,6 +67,7 @@ import pytest
 
 from kiss.core.models.anthropic_model import (
     AnthropicModel,
+    _claude_profile,
     _supports_extended_thinking,
     _uses_adaptive_thinking,
 )
@@ -344,10 +345,10 @@ class TestClaudeOpus5ThinkingConfig:
         assert info.adaptive_thinking is True, info.adaptive_thinking
 
     def test_supports_extended_thinking_helper_returns_true(self) -> None:
-        assert _supports_extended_thinking("claude-opus-5") is True
+        assert _supports_extended_thinking(_claude_profile("claude-opus-5")) is True
 
     def test_uses_adaptive_thinking_helper_returns_true(self) -> None:
-        assert _uses_adaptive_thinking("claude-opus-5") is True
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-5")) is True
 
     def test_build_kwargs_sets_thinking_adaptive_for_opus_5(self) -> None:
         """The wire request must carry adaptive thinking with summarized
@@ -465,8 +466,8 @@ class TestVersionAwareHeuristicBranches:
         ],
     )
     def test_non_thinking_names(self, name: str) -> None:
-        assert _supports_extended_thinking(name) is False, name
-        assert _uses_adaptive_thinking(name) is False, name
+        assert _supports_extended_thinking(_claude_profile(name)) is False, name
+        assert _uses_adaptive_thinking(_claude_profile(name)) is False, name
 
     @pytest.mark.parametrize(
         "name",
@@ -483,8 +484,8 @@ class TestVersionAwareHeuristicBranches:
     )
     def test_extended_but_not_adaptive_4x(self, name: str) -> None:
         """Claude 4.x rules preserved: extended yes, adaptive only opus>=4.6."""
-        assert _supports_extended_thinking(name) is True, name
-        assert _uses_adaptive_thinking(name) is False, name
+        assert _supports_extended_thinking(_claude_profile(name)) is True, name
+        assert _uses_adaptive_thinking(_claude_profile(name)) is False, name
 
     @pytest.mark.parametrize(
         "name",
@@ -495,8 +496,8 @@ class TestVersionAwareHeuristicBranches:
         ],
     )
     def test_opus_4_6_plus_is_adaptive(self, name: str) -> None:
-        assert _supports_extended_thinking(name) is True, name
-        assert _uses_adaptive_thinking(name) is True, name
+        assert _supports_extended_thinking(_claude_profile(name)) is True, name
+        assert _uses_adaptive_thinking(_claude_profile(name)) is True, name
 
     @pytest.mark.parametrize(
         "name",
@@ -512,8 +513,8 @@ class TestVersionAwareHeuristicBranches:
     )
     def test_major_5_plus_is_adaptive(self, name: str) -> None:
         """Every modern-family Claude with major >= 5 thinks adaptively."""
-        assert _supports_extended_thinking(name) is True, name
-        assert _uses_adaptive_thinking(name) is True, name
+        assert _supports_extended_thinking(_claude_profile(name)) is True, name
+        assert _uses_adaptive_thinking(_claude_profile(name)) is True, name
 
     def test_explicit_false_flag_still_wins(
         self, monkeypatch: pytest.MonkeyPatch
@@ -523,8 +524,8 @@ class TestVersionAwareHeuristicBranches:
         info = MODEL_INFO["claude-opus-5"]
         monkeypatch.setattr(info, "extended_thinking", False)
         monkeypatch.setattr(info, "adaptive_thinking", False)
-        assert _supports_extended_thinking("claude-opus-5") is False
-        assert _uses_adaptive_thinking("claude-opus-5") is False
+        assert _supports_extended_thinking(_claude_profile("claude-opus-5")) is False
+        assert _uses_adaptive_thinking(_claude_profile("claude-opus-5")) is False
         m = AnthropicModel("claude-opus-5", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs()

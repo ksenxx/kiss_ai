@@ -22,8 +22,8 @@ agent now uses the QR-paired whatsapp-mcp bridge and has no Meta webhook.)
 from __future__ import annotations
 
 import json
-from typing import Any, cast
-from urllib.parse import urlparse
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,61 +31,19 @@ from kiss.agents.third_party_agents.phone.phone_sea import PhoneControlChannelBa
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
+    EyreHandler,
+    PhoneApiHandler,
     RecordingServer,
     recording_server,
 )
 
 
-class _RecordingHandler(RecordingHandler):
-    """Handler that records requests and returns service-shaped JSON."""
-
-    def _record(self, body: bytes) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
-        )
-
-    def _read_body(self) -> bytes:
-        return self._read_raw()
-
-    def do_GET(self) -> None:  # noqa: N802
-        """Serve the phone REST GET endpoints."""
-        self._record(b"")
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/device/info":
-            self._json(200, {"device_name": "testphone"})
-        elif parsed.path == "/api/sms/messages":
-            self._json(
-                200,
-                {
-                    "messages": [
-                        {"timestamp": 1, "from": "SENDER_A", "body": "from A", "id": "1"},
-                        {"timestamp": 2, "from": "SENDER_B", "body": "from B", "id": "2"},
-                    ]
-                },
-            )
-        else:
-            self._json(404, {"error": "Not Found"})
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Serve Eyre login and legacy poke endpoints."""
-        self._record(self._read_body())
-        if self.path == "/~/login" or self.path.startswith("/~/channel"):
-            self.send_response(204)
-            self.end_headers()
-        else:
-            self._json(200, {})
-
-    def do_PUT(self) -> None:  # noqa: N802
-        """Serve Eyre channel PUT (poke) endpoints."""
-        self._record(self._read_body())
-        if self.path.startswith("/~/channel"):
-            self.send_response(204)
-            self.end_headers()
-        else:
-            self._json(404, {"error": "Not Found"})
+class _PhoneHandler(PhoneApiHandler):
+    messages = [
+        {"timestamp": 1, "from": "SENDER_A", "body": "from A", "id": "1"},
+        {"timestamp": 2, "from": "SENDER_B", "body": "from B", "id": "2"},
+    ]
 
 
 def _channel_requests(server: RecordingServer) -> list[dict[str, Any]]:
@@ -96,17 +54,16 @@ class TestTlonPokeProtocol:
     """Tlon poke must follow the Eyre channel protocol with the configured ship."""
 
     @pytest.fixture(autouse=True)
-    def _connected(self):
+    def _connected(self, isolated_kiss_home: Path):
         """Recording ship server, isolated config with a ship, connected backend."""
-        with config_backup(_tlon_config.path):
-            with recording_server(_RecordingHandler) as server:
-                self.server = server
-                _tlon_config.save(
-                    {"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
-                )
-                self.backend = TlonChannelBackend()
-                assert self.backend.connect() is True
-                yield
+        with recording_server(EyreHandler) as server:
+            self.server = server
+            _tlon_config.save(
+                {"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
+            )
+            self.backend = TlonChannelBackend()
+            assert self.backend.connect() is True
+            yield
 
     def test_poke_uses_eyre_put_with_uid_array_and_ship(self) -> None:
         """poke must PUT a one-element JSON array to /~/channel/{uid}."""
@@ -158,15 +115,14 @@ class TestTlonPokeWithoutShip:
     """poke must raise RuntimeError when no ship is configured (legacy config)."""
 
     @pytest.fixture(autouse=True)
-    def _connected(self):
+    def _connected(self, isolated_kiss_home: Path):
         """Recording ship server, isolated legacy config (no ship), connected backend."""
-        with config_backup(_tlon_config.path):
-            with recording_server(_RecordingHandler) as server:
-                self.server = server
-                _tlon_config.save({"ship_url": server.base_url, "code": "lidlut-tabwed"})
-                self.backend = TlonChannelBackend()
-                assert self.backend.connect() is True, "config without 'ship' must still load"
-                yield
+        with recording_server(EyreHandler) as server:
+            self.server = server
+            _tlon_config.save({"ship_url": server.base_url, "code": "lidlut-tabwed"})
+            self.backend = TlonChannelBackend()
+            assert self.backend.connect() is True, "config without 'ship' must still load"
+            yield
 
     def test_poke_without_ship_raises_runtime_error(self) -> None:
         """poke without a configured ship must raise instead of sending junk."""
@@ -179,15 +135,14 @@ class TestPhoneControlSenderFilter:
     """poll_messages must only return SMS from the requested channel_id sender."""
 
     @pytest.fixture(autouse=True)
-    def _connected(self):
+    def _connected(self, isolated_kiss_home: Path):
         """Recording device server, isolated phone config, connected backend."""
-        with config_backup(_phone_config.path):
-            with recording_server(_RecordingHandler) as server:
-                port = server.server_address[1]
-                _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
-                self.backend = PhoneControlChannelBackend()
-                assert self.backend.connect() is True
-                yield
+        with recording_server(_PhoneHandler) as server:
+            port = server.server_address[1]
+            _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
+            self.backend = PhoneControlChannelBackend()
+            assert self.backend.connect() is True
+            yield
 
     def test_poll_filters_to_requested_sender(self) -> None:
         """poll_messages('SENDER_A', '') must not return SENDER_B's SMS."""

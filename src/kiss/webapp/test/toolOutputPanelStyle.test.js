@@ -19,61 +19,29 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  loadMainCss,
+  MEDIA,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const CSS = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    sourceUrl: 'toolstyle-main.js',
+    beforeScripts(win) {
+      loadMainCss(win);
+      const remoteStyle = win.document.createElement('style');
+      remoteStyle.textContent = fs.readFileSync(
+        path.join(MEDIA, 'remote-codex.css'),
+        'utf8',
+      );
+      win.document.head.appendChild(remoteStyle);
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const style = win.document.createElement('style');
-  style.textContent = CSS;
-  win.document.head.appendChild(style);
-  const remoteStyle = win.document.createElement('style');
-  remoteStyle.textContent = fs.readFileSync(
-    path.join(MEDIA, 'remote-codex.css'),
-    'utf8',
-  );
-  win.document.head.appendChild(remoteStyle);
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=toolstyle-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function readyTabId(posted) {
@@ -111,10 +79,25 @@ function testToolOutputPaintsThePanelTint() {
   assert.ok(think, 'the thought is a text block inside the Thoughts panel');
   assert.strictEqual(think.textContent, 'pondering');
   const thinkStyle = win.getComputedStyle(think);
-  assert.strictEqual(thinkStyle.background, '', 'the thinking text paints no box of its own');
-  assert.strictEqual(thinkStyle.borderStyle, 'none', 'the thinking text draws no border');
-  assert.strictEqual(thinkStyle.fontStyle, 'italic', 'the thinking text is italic');
-  assert.ok(!think.querySelector('.lbl'), 'the thinking text has no "Thinking" header');
+  assert.strictEqual(
+    thinkStyle.background,
+    '',
+    'the thinking text paints no box of its own',
+  );
+  assert.strictEqual(
+    thinkStyle.borderStyle,
+    'none',
+    'the thinking text draws no border',
+  );
+  assert.strictEqual(
+    thinkStyle.fontStyle,
+    'italic',
+    'the thinking text is italic',
+  );
+  assert.ok(
+    !think.querySelector('.lbl'),
+    'the thinking text has no "Thinking" header',
+  );
 
   const standalone = d.querySelector('#output > .bash-panel');
   assert.ok(standalone, 'the bare tool_result must render a standalone panel');
@@ -150,9 +133,8 @@ function testToolOutputPaintsThePanelTint() {
 function testModelPillWidthCaps() {
   const page = makePage();
   assert.strictEqual(
-    page.win.getComputedStyle(
-      page.win.document.getElementById('model-btn'),
-    ).maxWidth,
+    page.win.getComputedStyle(page.win.document.getElementById('model-btn'))
+      .maxWidth,
     'clamp(72px, 21vw, 220px)',
     'the pill cap must be clamp(72px, 21vw, 220px)',
   );
@@ -160,10 +142,7 @@ function testModelPillWidthCaps() {
 }
 
 function runTests() {
-  const tests = [
-    testToolOutputPaintsThePanelTint,
-    testModelPillWidthCaps,
-  ];
+  const tests = [testToolOutputPaintsThePanelTint, testModelPillWidthCaps];
   for (const t of tests) {
     t();
     console.log('PASS', t.name);

@@ -9,23 +9,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
 
 // The in-page pipeline's engine loads from a script tag the page injects;
 // it never arrives in jsdom, so the mic parks in "loading" and nothing is
@@ -101,7 +89,4 @@ test('turning the mic off is remembered for next launch', () => {
   assert.ok(micBtn(second.win).classList.contains('voice-off'));
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-if (failures.length > 0) {
-  process.exit(1);
-}
+report('voiceMicAutoOn');

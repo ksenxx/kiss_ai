@@ -140,9 +140,8 @@ class RecordingPrinter(Printer):
         self.events: list[tuple[str, Any, dict[str, Any]]] = []
         self.token_callback = None  # type: ignore[method-assign,assignment]
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:  # noqa: A002
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:  # noqa: A002
         self.events.append((type, content, kwargs))
-        return str(content)
 
     def token_callback(self, token: str) -> None:  # type: ignore[no-redef]
         return None

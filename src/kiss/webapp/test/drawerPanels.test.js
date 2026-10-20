@@ -17,10 +17,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {makePage: makeSharedPage, send, MEDIA} = require('./simplify2_harness');
 const {inlineDesignTokens} = require('./designTokens');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 let persistedState;
 
@@ -30,78 +28,80 @@ function makePage(opts) {
     userAgent,
     userAgentData,
     maxTouchPoints,
+    timeouts,
   } = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  if (stripDrawerButtons) {
-    html = html.replace(/<button id="input-drawer-btn"[\s\S]*?<\/button>/, '');
-  }
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makeSharedPage({
+    bodyClass: 'remote-chat',
+    initialState: persistedState,
+    userAgent,
+    sourceUrl: 'drawer-main.js',
+    beforeScripts: win => {
+      mirrorPersistedState(win);
+      if (stripDrawerButtons) {
+        win.document.getElementById('input-drawer-btn').remove();
+      }
+      if (userAgentData !== undefined) {
+        Object.defineProperty(win.navigator, 'userAgentData', {
+          value: userAgentData,
+          configurable: true,
+        });
+      }
+      if (maxTouchPoints !== undefined) {
+        Object.defineProperty(win.navigator, 'maxTouchPoints', {
+          value: maxTouchPoints,
+          configurable: true,
+        });
+      }
+      for (const css of ['main.css', 'remote-codex.css']) {
+        const style = win.document.createElement('style');
+        style.textContent = inlineDesignTokens(
+          fs.readFileSync(path.join(MEDIA, css), 'utf8'),
+        );
+        win.document.head.appendChild(style);
+      }
+      if (timeouts) captureTimeouts(win, timeouts);
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  if (userAgent) {
-    Object.defineProperty(win.navigator, 'userAgent', {
-      value: userAgent,
-      configurable: true,
-    });
-  }
-  if (userAgentData !== undefined) {
-    Object.defineProperty(win.navigator, 'userAgentData', {
-      value: userAgentData,
-      configurable: true,
-    });
-  }
-  if (maxTouchPoints !== undefined) {
-    Object.defineProperty(win.navigator, 'maxTouchPoints', {
-      value: maxTouchPoints,
-      configurable: true,
-    });
-  }
-
-  const style = win.document.createElement('style');
-  style.textContent = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  win.document.head.appendChild(style);
-  const remoteStyle = win.document.createElement('style');
-  remoteStyle.textContent = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
-  );
-  win.document.head.appendChild(remoteStyle);
-
-  const posted = [];
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => persistedState,
-      setState: s => {
-        persistedState = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=drawer-main.js',
-  );
   return {win, posted};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+/**
+ * Mirror every state the page persists into the module-level
+ * `persistedState`, which the next `makePage()` seeds its transport from
+ * (a reopen of the page).
+ */
+function mirrorPersistedState(win) {
+  const acquire = win.acquireTransport;
+  win.acquireTransport = function () {
+    const transport = acquire();
+    const setState = transport.setState;
+    transport.setState = s => {
+      persistedState = s;
+      setState(s);
+    };
+    return transport;
+  };
+}
+
+/**
+ * Record every `setTimeout` the page arms in *timeouts* as `{fn, ms, id}`
+ * (the timer still runs) so a test can fire or cancel one on demand.
+ */
+function captureTimeouts(win, timeouts) {
+  const realSetTimeout = win.setTimeout.bind(win);
+  win.setTimeout = function (fn, ms, ...args) {
+    const id = realSetTimeout(fn, ms, ...args);
+    timeouts.push({fn, ms, id});
+    return id;
+  };
+}
+
+/** Run every timer armed since *from* now, instead of at its due time. */
+function fireTimeouts(win, timeouts, from) {
+  for (const t of timeouts.splice(from)) {
+    win.clearTimeout(t.id);
+    t.fn();
+  }
 }
 
 function click(win, id, el) {
@@ -660,24 +660,22 @@ function testMalformedStateGracefulBoot() {
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // On a phone a code-driven focus of the composer raises the software
 // keyboard over whatever the user was looking at. Touching a tab, closing
 // one, opening a new chat, the server's `focusInput` nudge (sent on every
 // reconnect) and a task finishing must all leave the focus alone there,
-// including the composer's deferred 100/300 ms re-focus timers. On a
-// desktop the same actions focus the composer as before.
-async function testMobileRemoteNeverFocusesComposerByCode() {
-  for (const [name, opts, focuses] of [
-    ['iPhone remote', {userAgent: UA_IPHONE}, false],
-    ['Android remote', {userAgent: UA_ANDROID}, false],
-    ['desktop remote', {userAgent: UA_DESKTOP}, true],
+// including the composer's deferred 100/300 ms re-focus timers, which
+// the test fires by hand right after each action. On a desktop the same
+// actions focus the composer as before.
+function testMobileRemoteNeverFocusesComposerByCode() {
+  for (const [name, userAgent, focuses] of [
+    ['iPhone remote', UA_IPHONE, false],
+    ['Android remote', UA_ANDROID, false],
+    ['desktop remote', UA_DESKTOP, true],
   ]) {
     persistedState = undefined;
-    const {win, posted} = makePage(opts);
+    const timeouts = [];
+    const {win, posted} = makePage({userAgent, timeouts});
     const d = win.document;
     const inp = d.getElementById('task-input');
     let focusCalls = 0;
@@ -747,8 +745,9 @@ async function testMobileRemoteNeverFocusesComposerByCode() {
     for (const [what, act] of steps) {
       inp.blur();
       focusCalls = 0;
+      const armedBefore = timeouts.length;
       act();
-      await sleep(350);
+      fireTimeouts(win, timeouts, armedBefore);
       if (focuses) {
         assert.ok(focusCalls > 0, `${name}: ${what} must focus the composer`);
       } else {

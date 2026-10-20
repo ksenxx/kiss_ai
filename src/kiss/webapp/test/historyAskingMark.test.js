@@ -13,58 +13,31 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {inlineDesignTokens} = require('./designTokens');
+const {
+  makePage: buildPage,
+  send,
+  stubRaf,
+  MEDIA,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
+// main.css with its design tokens inlined (jsdom resolves no var()), so
+// the "?" mark's computed display can be asserted.
+function loadTokenisedCss(win) {
   const styleEl = win.document.createElement('style');
   styleEl.textContent = inlineDesignTokens(
     fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
   );
   win.document.head.appendChild(styleEl);
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+function makePage() {
+  return buildPage({
+    beforeScripts: win => {
+      stubRaf(win);
+      loadTokenisedCss(win);
+    },
+  });
 }
 
 /** Let main.js's end-of-tick history refetch coalescing settle. */
@@ -128,15 +101,31 @@ function assertSpinner(row, where) {
 function assertAskingMark(win, row, where) {
   const mark = statusMark(row);
   assert.ok(mark, 'a waiting row carries a status mark ' + where);
-  assert.strictEqual(row.firstElementChild, mark, 'in the spinner\'s place ' + where);
-  assert.ok(mark.classList.contains('sidebar-item-asking'), '"?" class ' + where);
+  assert.strictEqual(
+    row.firstElementChild,
+    mark,
+    "in the spinner's place " + where,
+  );
+  assert.ok(
+    mark.classList.contains('sidebar-item-asking'),
+    '"?" class ' + where,
+  );
   assert.ok(!mark.classList.contains('status-spinner'), 'no spinner ' + where);
   assert.strictEqual(mark.textContent, '?', 'the glyph is "?" ' + where);
   assert.strictEqual(mark.dataset.tooltip, 'Waiting for your answer');
-  assert.strictEqual(mark.getAttribute('aria-label'), 'Waiting for your answer');
+  assert.strictEqual(
+    mark.getAttribute('aria-label'),
+    'Waiting for your answer',
+  );
   const cs = win.getComputedStyle(mark);
-  assert.strictEqual(cs.color, 'var(--warning)', 'warning colour; got ' + cs.color);
-  const anim = (cs.getPropertyValue('animation-name') || '') + (cs.getPropertyValue('animation') || '');
+  assert.strictEqual(
+    cs.color,
+    'var(--warning)',
+    'warning colour; got ' + cs.color,
+  );
+  const anim =
+    (cs.getPropertyValue('animation-name') || '') +
+    (cs.getPropertyValue('animation') || '');
   assert.ok(anim.indexOf('running-pulse') >= 0, 'the "?" pulses; got ' + anim);
   assert.ok(anim.indexOf('status-spin') < 0, 'and does not spin');
 }
@@ -150,8 +139,18 @@ function testAskingRowShowsQuestionMark() {
     offset: 0,
     sessions: [
       makeRow({task_id: 1, title: 'running task', is_running: true}),
-      makeRow({task_id: 2, title: 'asking task', is_running: true, awaiting_answer: true}),
-      makeRow({task_id: 3, title: 'finished task', awaiting_answer: true, endTs: 1}),
+      makeRow({
+        task_id: 2,
+        title: 'asking task',
+        is_running: true,
+        awaiting_answer: true,
+      }),
+      makeRow({
+        task_id: 3,
+        title: 'finished task',
+        awaiting_answer: true,
+        endTs: 1,
+      }),
     ],
   });
   assertSpinner(rowByTitle(win, 'running task'), 'on a plain running row');
@@ -164,7 +163,9 @@ function testAskingRowShowsQuestionMark() {
     'a stale awaiting_answer on a finished row draws nothing',
   );
   win.close();
-  console.log('  ok - a task waiting for an answer shows "?" instead of the spinner');
+  console.log(
+    '  ok - a task waiting for an answer shows "?" instead of the spinner',
+  );
 }
 
 async function testMarkFlipsWithTasksUpdated() {
@@ -189,10 +190,19 @@ async function testMarkFlipsWithTasksUpdated() {
     offset: 0,
     generation: req.generation,
     sessions: [
-      makeRow({task_id: 5, title: 'live task', is_running: true, awaiting_answer: true}),
+      makeRow({
+        task_id: 5,
+        title: 'live task',
+        is_running: true,
+        awaiting_answer: true,
+      }),
     ],
   });
-  assertAskingMark(win, rowByTitle(win, 'live task'), 'while the question is open');
+  assertAskingMark(
+    win,
+    rowByTitle(win, 'live task'),
+    'while the question is open',
+  );
 
   // Answered: the next nudge brings the spinner back.  (A refresh in the
   // same tick as the previous one folds into its end-of-tick refetch,
@@ -201,7 +211,7 @@ async function testMarkFlipsWithTasksUpdated() {
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   req = posted.find(m => m && m.type === 'getHistory');
-  assert.ok(req, 'the answer\'s tasks_updated refetches the history');
+  assert.ok(req, "the answer's tasks_updated refetches the history");
   send(win, {
     type: 'history',
     offset: 0,
@@ -210,7 +220,9 @@ async function testMarkFlipsWithTasksUpdated() {
   });
   assertSpinner(rowByTitle(win, 'live task'), 'after the answer');
   win.close();
-  console.log('  ok - the "?" comes and goes with the daemon\'s tasks_updated nudges');
+  console.log(
+    '  ok - the "?" comes and goes with the daemon\'s tasks_updated nudges',
+  );
 }
 
 async function main() {

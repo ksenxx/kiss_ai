@@ -48,12 +48,26 @@ needs_sshd = pytest.mark.skipif(not SSHD, reason="no sshd on this host")
 ID_SHARED = "a" * 32
 
 
+def _clear_registry_and_pins() -> None:
+    """Empty the registry and drop every pinned certificate.
+
+    Other test modules of this process register a ``box`` too and only
+    reset the registry on teardown; their stale ``box.pem`` would fail
+    the assertions here that a rejected enrollment leaves no pin.
+    """
+    mach.save_machines([])
+    certs_dir = mach.kiss_home() / mach.MACHINE_CERTS_DIR
+    if certs_dir.is_dir():
+        for pin in certs_dir.iterdir():
+            pin.unlink(missing_ok=True)
+
+
 @pytest.fixture(autouse=True)
 def _empty_registry() -> Iterator[None]:
-    """Every test starts and ends with no registered machine."""
-    mach.save_machines([])
+    """Every test starts and ends with no registered machine and no pin."""
+    _clear_registry_and_pins()
     yield
-    mach.save_machines([])
+    _clear_registry_and_pins()
 
 
 @pytest.fixture(scope="module")
@@ -376,6 +390,52 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     os.unlink(dead.cert_file())
 
 
+def test_registry_change_keeps_the_links_of_unchanged_machines(
+    remote: RemoteDaemon, remote_leaf: RemoteDaemon,
+) -> None:
+    """Adding, re-adding or removing a machine leaves the other machines' sockets alone.
+
+    Only a machine whose registry entry changed or vanished loses its
+    cached link (and the ssh tunnel of a login no longer registered).
+    """
+    box = mach.add_machine("box", remote.url, "secret-1")
+    leaf = mach.add_machine("leaf", remote_leaf.url)
+    link = mach.link_for(box)
+    assert _titles(mach.fetch_history(box, "alpha", "", 50)) == ["remote alpha"]
+    ws = link._ws
+    assert ws is not None
+    leaf_link = mach.link_for(leaf)
+    assert _titles(mach.fetch_history(leaf, "", "", 50)) == ["leaf task"]
+
+    # A third machine, the same machine again, a removed one: the links
+    # to "box" and "leaf" and their open sockets are untouched.
+    extra = mach.add_machine("extra", remote_leaf.url)
+    extra_link = mach.link_for(extra)
+    assert extra_link.request({"type": "ping"}, "pong")["type"] == "pong"
+    assert mach.add_machine("leaf", remote_leaf.url) == leaf
+    assert mach.remove_machine("extra") is True
+    assert mach.link_for(box) is link and link._ws is ws
+    assert mach.link_for(leaf) is leaf_link and leaf_link._ws is not None
+    assert _titles(mach.fetch_history(box, "beta", "", 50)) == ["remote beta"]
+    assert link._ws is ws
+    # The removed machine's link is retired: it does not reconnect.
+    assert extra_link._retired and extra_link._ws is None
+    with pytest.raises(mach.MachineError):
+        extra_link.request({"type": "ping"}, "pong")
+    assert mach.link_for(extra) is not extra_link
+
+    # A changed entry (another password) replaces the link; the stale
+    # one is retired, every other link is still untouched.
+    with pytest.raises(mach.MachineError):
+        mach.add_machine("box", remote.url, "wrong")
+    assert mach.link_for(box) is link and link._ws is ws
+    mach.save_machines([mach.Machine("box", remote.url, "secret-2"), leaf])
+    assert link._retired and link._ws is None
+    assert mach.link_for(leaf) is leaf_link and leaf_link._ws is not None
+    mach.close_links()
+    assert leaf_link._retired and mach._links == {}
+
+
 def _local_row(task_id: str, title: str, timestamp: float, running: bool) -> dict[str, Any]:
     return {
         "id": "chat-" + title, "task_id": task_id, "title": title, "timestamp": timestamp,
@@ -647,9 +707,9 @@ def test_ssh_enrollment_tunnels_the_daemon_port_and_the_client_certificate_is_ad
     merged = mach.merged_history(mach.HistoryPage(), [box, leaf], "", "", 0, 50)
     assert set(_titles(merged)) == {"lan alpha", "lan beta", "leaf task"}
 
-    # Enrolling again restarted the tunnel (the registry changed); the
-    # links to "box" and to the machine's default name share it.
-    assert lan_sshd.login in mach._tunnels and mach._tunnels[lan_sshd.login] is not tunnel
+    # Enrolling again kept the tunnel (its login is still registered);
+    # the links to "box" and to the machine's default name share it.
+    assert mach._tunnels[lan_sshd.login] is tunnel
     assert _titles(mach.fetch_history(box, "alpha", "", 50)) == ["lan alpha"]
     assert _tunnel_peer_port(mach.link_for(box)) == mach._tunnels[lan_sshd.login].local_port
 
@@ -666,6 +726,10 @@ def test_ssh_enrollment_tunnels_the_daemon_port_and_the_client_certificate_is_ad
     assert _trusted_files(lan_remote) == [trusted]
     assert mach.machine_status(box) == "reachable"
     assert mach.remove_machine("box") is True and not box.cert_file().exists()
+    # The machine's default name still owns the login: its forward stays up
+    # until the last machine on that login is gone.
+    assert lan_sshd.login in mach._tunnels
+    assert mach.remove_machine(machine.name) is True
     assert mach._tunnels == {}
     mach.close_links()
 

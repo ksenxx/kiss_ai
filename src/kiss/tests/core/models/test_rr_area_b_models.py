@@ -18,8 +18,9 @@ servers, real threads, real sockets):
 * B-R5 — ``OpenAICompatibleModel.initialize()`` reuses the SDK client
   (and its connection pool) across calls, rebuilding only when the
   client's constructor inputs change.
-* B-R6 — the id-only unanswered-function-call scan is a thin view over
-  the names variant and reports the same outstanding calls.
+* B-R6 — the one validating conversation scan reports the outstanding
+  function calls with their names, for the generation guard and the
+  restored-conversation fallback of ``add_function_results`` alike.
 * B-R7 — the audio format/MIME/extension tables are derived from the
   one canonical table in ``model.py`` and carry the exact values the
   three hand-written tables used to.
@@ -303,7 +304,7 @@ class TestClientReuse:
 
 
 class TestUnansweredFunctionCallScan:
-    """B-R6: the id-only scan is a view over the single names-scan loop."""
+    """B-R6: the one validating scan reports the outstanding calls with names."""
 
     def _model(self) -> OpenAICompatibleModel2:
         model = OpenAICompatibleModel2(
@@ -313,27 +314,51 @@ class TestUnansweredFunctionCallScan:
             {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
             {"type": "function_call", "call_id": "call_a", "name": "f", "arguments": "{}"},
             {"type": "function_call", "call_id": "call_b", "name": "g", "arguments": "{}"},
-            {"type": "function_call", "call_id": "", "name": "no_id", "arguments": "{}"},
             "not-a-dict",
             {"type": "function_call_output", "call_id": "call_a", "output": "done"},
         ]
         return model
 
-    def test_id_scan_matches_names_scan(self) -> None:
-        """Both scans report the same outstanding calls, in order."""
+    def test_scan_reports_outstanding_calls_with_names(self) -> None:
+        """The unanswered call is reported with its name, in declaration order."""
         model = self._model()
-        with_names = model._unanswered_function_calls_from_conversation_with_names()
-        assert with_names == [{"name": "g", "call_id": "call_b"}]
-        assert model._unanswered_function_calls_from_conversation() == ["call_b"]
+        assert model._validate_function_call_conversation() == [
+            {"name": "g", "call_id": "call_b"}
+        ]
 
     def test_all_answered_is_empty(self) -> None:
-        """Answering the last call empties both scans."""
+        """Answering the last call empties the scan."""
         model = self._model()
         model.conversation.append(
             {"type": "function_call_output", "call_id": "call_b", "output": "done"}
         )
-        assert model._unanswered_function_calls_from_conversation() == []
-        assert model._unanswered_function_calls_from_conversation_with_names() == []
+        assert model._validate_function_call_conversation() == []
+
+    def test_restored_conversation_fallback_answers_by_name(self) -> None:
+        """With the pending queue lost, results are matched to calls by name via the scan."""
+        model = self._model()
+        assert model._pending_function_calls == []
+        model.add_function_results_to_conversation_and_return([("g", {"result": "ok"})])
+        assert model.conversation[-1] == {
+            "type": "function_call_output",
+            "call_id": "call_b",
+            "output": "ok",
+        }
+        assert model._validate_function_call_conversation() == []
+
+    def test_fallback_skips_what_the_generation_guard_rejects(self) -> None:
+        """The fallback tolerates an id-less call; the next generation still rejects it."""
+        model = self._model()
+        model.conversation.insert(
+            3, {"type": "function_call", "call_id": "", "name": "no_id", "arguments": "{}"}
+        )
+        assert model._validate_function_call_conversation(strict=False) == [
+            {"name": "g", "call_id": "call_b"}
+        ]
+        model.add_function_results_to_conversation_and_return([("g", {"result": "ok"})])
+        assert model.conversation[-1]["call_id"] == "call_b"
+        with pytest.raises(KISSError, match="missing call_id"):
+            model._validate_function_call_conversation()
 
 
 # ---------------------------------------------------------------------------

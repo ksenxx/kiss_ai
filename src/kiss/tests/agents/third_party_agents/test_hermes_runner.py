@@ -23,6 +23,7 @@ endpoint file when the test needs the launch to fail; no LLM runs.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import stat
 import sys
@@ -57,8 +58,12 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import main as telegra
 from kiss.core import config as config_module
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.third_party_agents.recording_daemon import (
+    RecordingDaemon,
+    serve_recording_daemon,
+)
 from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.server.pause import Pause
 
 
 class RecordingBackend(ToolMethodBackend):
@@ -176,7 +181,7 @@ _CONTINUATION_TEXT = "continuation done"
 
 
 @pytest.fixture()
-def launch_daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+def launch_daemon() -> Iterator[RecordingDaemon]:
     """A recording daemon the real ``ChannelRunner._launch_task`` reaches.
 
     ``run_agent_via_kiss_web`` resolves its endpoint file from the
@@ -184,12 +189,13 @@ def launch_daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
     task launched here is answered with ``_CONTINUATION_TEXT`` on chat
     ``chat-cont``.
     """
-    stand_in = RecordingDaemon(text=_CONTINUATION_TEXT, chat_id="chat-cont")
-    _point_launcher_at(monkeypatch, stand_in.endpoint_file)
-    try:
+    with serve_recording_daemon(
+        _kiss_web_launcher,
+        "_ENDPOINT_FILE_OVERRIDE",
+        text=_CONTINUATION_TEXT,
+        chat_id="chat-cont",
+    ) as stand_in:
         yield stand_in
-    finally:
-        stand_in.close()
 
 
 def _point_launcher_at(monkeypatch: pytest.MonkeyPatch, endpoint_file: Path) -> None:
@@ -562,6 +568,16 @@ class TestDmPairing:
         assert "the channel CLI --approve" in runner._pairing_reply_text("c0dec0de")
 
 
+def _admin_leaving_lock(frame_locals: dict[str, Any]) -> bool:
+    """Match the ``admin`` thread resuming ``channel_state_lock`` after its yield.
+
+    The generator's ``fp`` local is bound only after the lock file was
+    opened, so its presence at a ``call`` event marks the resume (in
+    ``__exit__``), not the first entry.
+    """
+    return threading.current_thread().name == "admin" and "fp" in frame_locals
+
+
 class TestPairingAdminCli:
     """channel_main --approve / --list-pending driven through a real main()."""
 
@@ -611,24 +627,32 @@ class TestPairingAdminCli:
         the lock is held (otherwise a running tick's stale in-memory
         save could overwrite the approval); once the lock is released
         the approval proceeds and is persisted.
+
+        The admin polls the non-blocking lock.  A ``Pause`` holds it
+        where ``channel_state_lock`` resumes after its yield, i.e. once
+        one attempt's ``with`` body has run: with the tick lock held
+        that body did nothing, so the approval is not on disk yet.  The
+        tick's save then lands before the admin's next attempt.
         """
         state_path = self._seed_state("pair-lockrace", {"bob": {"code": "abcd1234", "ts": 1.0}})
         admin = threading.Thread(
             target=_handle_pairing_admin,
             args=(TelegramAgent, "Telegram", "default", "pair-lockrace", "abcd1234", False),
+            name="admin",
             daemon=True,
         )
         with channel_state_lock(state_path, blocking=False) as lock_fp:
             assert lock_fp is not None
-            admin.start()
-            deadline = time.time() + 0.5
-            while time.time() < deadline:
-                assert admin.is_alive(), "admin approve ran while the tick lock was held"
-                time.sleep(0.05)
-            # Simulate the running tick's save happening under the lock.
-            state = load_channel_state(state_path)
-            state["failures"] = 1
-            save_channel_state(state_path, state)
+            with Pause(inspect.unwrap(channel_state_lock).__code__, _admin_leaving_lock) as pause:
+                admin.start()
+                assert pause.paused.wait(10), "admin approve never tried the tick lock"
+                assert load_channel_state(state_path)["approved_users"] == [], (
+                    "admin approve ran while the tick lock was held"
+                )
+                # Simulate the running tick's save happening under the lock.
+                state = load_channel_state(state_path)
+                state["failures"] = 1
+                save_channel_state(state_path, state)
         admin.join(timeout=10)
         assert not admin.is_alive()
         final = load_channel_state(state_path)

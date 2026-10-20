@@ -23,96 +23,45 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 const pages = [];
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
+    sourceUrl: 'conc2026-races-main.js',
+    beforeScripts(win) {
+      pages.push(win);
+      stubRaf(win);
+      fakeMatchMedia(win, true);
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {writeText: () => Promise.resolve()},
+        configurable: true,
+      });
+      // Native dialogs are gone from main.js; any call is a regression.
+      win.prompt = () => {
+        throw new Error('window.prompt must not be called');
+      };
+      win.confirm = () => {
+        throw new Error('window.confirm must not be called');
+      };
+    },
   });
-  const win = dom.window;
-  pages.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  Object.defineProperty(win.navigator, 'clipboard', {
-    value: {writeText: () => Promise.resolve()},
-    configurable: true,
-  });
-  // Native dialogs are gone from main.js; any call is a regression.
-  win.prompt = () => {
-    throw new Error('window.prompt must not be called');
-  };
-  win.confirm = () => {
-    throw new Error('window.confirm must not be called');
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=conc2026-races-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 const WD = '/ws/repo';
@@ -120,10 +69,6 @@ const WD2 = '/ws/other';
 
 function pinWorkspace(win, wd) {
   send(win, {type: 'configData', config: {work_dir: wd || WD}});
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function rightClick(win, el) {
@@ -550,9 +495,8 @@ async function main() {
     );
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
+  report('conc2026_sidebar_scm_races');
   for (const win of pages) win.close();
-  if (failures.length) process.exitCode = 1;
 }
 
 main().catch(err => {

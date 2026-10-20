@@ -108,20 +108,21 @@ def _compute_sign(secret: str, timestamp_ms: str) -> str:
 def _port_from_config(cfg: dict[str, Any]) -> int:
     """Return the configured callback port, falling back to the default.
 
-    Defensively handles non-numeric and out-of-range values persisted in
-    the config file.
+    A persisted ``"0"`` binds an OS-assigned port (the bound port is read
+    back from the live server).  Non-numeric and out-of-range values
+    persisted in the config file fall back to the default.
 
     Args:
         cfg: Loaded DingTalk config dictionary.
 
     Returns:
-        A valid port in 1..65535 (``_DEFAULT_WEBHOOK_PORT`` on invalid input).
+        A port in 0..65535 (``_DEFAULT_WEBHOOK_PORT`` on invalid input).
     """
     try:
         port = int(cfg.get("port") or _DEFAULT_WEBHOOK_PORT)
     except ValueError:
         return _DEFAULT_WEBHOOK_PORT
-    if not 1 <= port <= 65535:
+    if not 0 <= port <= 65535:
         return _DEFAULT_WEBHOOK_PORT
     return port
 

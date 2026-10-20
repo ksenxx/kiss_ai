@@ -190,13 +190,10 @@ def test_finish_connect_without_pending(composio: FakeComposioServer) -> None:
     }
 
 
-def test_finish_connect_pending_timeout(
-    composio: FakeComposioServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_finish_connect_pending_timeout(composio: FakeComposioServer) -> None:
     # The pending grace: the SDK polls once, sleeps 1 s, then gives up.
-    monkeypatch.setattr(cg, "_FINISH_WAIT_SECONDS", 0.2)
     assert cg.start_connect("gmail", "Gmail")["ok"]
-    answer = cg.finish_connect("gmail", "Gmail")
+    answer = cg.finish_connect("gmail", "Gmail", wait_seconds=0.2)
     assert answer["ok"] is False
     assert answer["status"] == "pending"
     assert _state("gmail") == {"pending_id": "ca_new"}
@@ -321,6 +318,7 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
         answer = cg.finish_connect("gmail", "Gmail")
     finally:
         injector.join(timeout=15.0)
+    assert not injector.is_alive(), "start_connect(B) did not return"
     assert started_b["polled"] and started_b["ok"]
     assert answer == {
         "ok": False,
@@ -385,6 +383,7 @@ def test_overlapping_finish_calls_keep_the_recorded_account(
         for finisher in finishers:
             if finisher.ident is not None:
                 finisher.join(timeout=15.0)
+    assert not any(finisher.is_alive() for finisher in finishers), "finish_connect did not return"
     assert first == {"ok": True, "message": "Gmail connected through Composio."}
     assert composio.paths("DELETE") == []
     assert _state("gmail") == {"connected_account_id": "ca_new"}

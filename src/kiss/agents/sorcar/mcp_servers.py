@@ -538,7 +538,15 @@ class FileTokenStorage:
         )
 
     async def get_client_info(self) -> Any:
-        """Return the stored OAuth client registration, if any."""
+        """Return the stored OAuth client registration, if any (the SDK's coroutine form)."""
+        return self.client_info()
+
+    def client_info(self) -> Any:
+        """Return the stored OAuth client registration, if any.
+
+        A plain file read; callers outside the SDK (the sign-in flow)
+        need no event loop for it.
+        """
         from mcp.shared.auth import OAuthClientInformationFull
 
         return self._load(self._read(), "client_info", OAuthClientInformationFull)
@@ -629,6 +637,17 @@ def _child_errlog() -> Any:
     stream = getattr(sys, "stderr", None)
     if stream is not None and not getattr(stream, "closed", False):
         return stream
+    return _fallback_errlog()
+
+
+@functools.cache
+def _fallback_errlog() -> Any:
+    """The stream MCP children inherit as stderr while ``sys.stderr`` is unusable.
+
+    Opened once per process: the SDK only hands the stream to the child
+    and never closes it, so a fresh ``dup`` per spawn would leak one
+    descriptor per reconnect of the long-lived daemon.
+    """
     try:
         return open(os.dup(2), "w", closefd=True)  # noqa: SIM115
     except OSError:
@@ -853,21 +872,19 @@ class MCPManager:
         if manager is not None:
             manager.disconnect_all()
 
-    def connect(
-        self, config: MCPServerConfig, auth: Any = None,
-    ) -> _Connection:
+    def connect(self, config: MCPServerConfig) -> _Connection:
         """Connect to *config* (reusing a live connection when possible).
+
+        An http/sse server is authenticated by a non-interactive OAuth
+        provider (stored tokens only).
 
         Args:
             config: The server to connect to.
-            auth: Optional ``httpx.Auth`` for remote servers; when
-                ``None`` a non-interactive OAuth provider (stored
-                tokens only) is built for http/sse servers.
 
         Returns:
             The connection record; ``error`` is non-empty on failure.
         """
-        key, conn = self._start(config, auth)
+        key, conn = self._start(config)
         self._evict_surplus({key})
         self._await_ready(key, conn, time.monotonic() + CONNECT_TIMEOUT)
         return conn
@@ -891,17 +908,17 @@ class MCPManager:
             One connection record per config, in order; ``error`` is
             non-empty on the failed ones.
         """
-        started = [self._start(config, None) for config in configs]
+        started = [self._start(config) for config in configs]
         self._evict_surplus({key for key, _ in started})
         deadline = time.monotonic() + CONNECT_TIMEOUT
         for key, conn in started:
             self._await_ready(key, conn, deadline)
         return [conn for _, conn in started]
 
-    def _start(self, config: MCPServerConfig, auth: Any) -> tuple[str, _Connection]:
+    def _start(self, config: MCPServerConfig) -> tuple[str, _Connection]:
         """Start (or reuse) the connection for *config*; return its key and record."""
         key = _connection_key(config)
-        return key, locked_call(self._lock, self._connection_for, key, config, auth)
+        return key, locked_call(self._lock, self._connection_for, key, config)
 
     def _await_ready(self, key: str, conn: _Connection, deadline: float) -> None:
         """Wait until *conn* is ready or *deadline* (``time.monotonic()``) passes.
@@ -922,7 +939,7 @@ class MCPManager:
             self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn)
 
-    def _connection_for(self, key: str, config: MCPServerConfig, auth: Any) -> _Connection:
+    def _connection_for(self, key: str, config: MCPServerConfig) -> _Connection:
         """Return the live connection under *key*, starting one when there is none (locked)."""
         if self._shut_down:
             conn = _Connection(config=config)
@@ -936,8 +953,7 @@ class MCPManager:
             return existing
         if existing is not None:
             self._loop.call_soon_threadsafe(existing.stop.set)
-        if config.transport in ("http", "sse") and auth is None:
-            auth = build_oauth_provider(config)
+        auth = build_oauth_provider(config) if config.transport in ("http", "sse") else None
         conn = _Connection(config=config)
         self._connections[key] = conn
         conn.task = asyncio.run_coroutine_threadsafe(

@@ -36,56 +36,16 @@
 
 const assert = require('assert');
 const {send} = require('./simplify2_harness');
-const {
-  newDom,
-  loadPageScripts,
-  readShimJs,
-  installFakeWebSocket,
-} = require('./transport_page_helpers');
+const {makeWebappClient} = require('./transport_page_helpers');
 const {
   runParallelPanel,
   subagentTabEls,
   togglePanel,
   clickClose,
   finishFanOut,
+  announceFinished,
+  openSubTabIds,
 } = require('./subagent_tab_helpers');
-
-function makeWebappClient() {
-  const win = newDom();
-  const sockets = [];
-  installFakeWebSocket(win, sockets);
-  win.eval(readShimJs());
-  assert.strictEqual(
-    typeof win.acquireTransport,
-    'function',
-    'media/transport.js must define acquireTransport()',
-  );
-  loadPageScripts(win);
-  const sock = sockets[0];
-  assert.ok(sock, 'the webapp shim must open a WebSocket');
-  // Complete the shim's real handshake: onopen makes it send `auth`,
-  // and `auth_ok` marks the socket authenticated and flushes the
-  // commands the app queued while it was connecting.
-  sock.onopen();
-  const authFrame = JSON.parse(sock.sent[0]);
-  assert.strictEqual(
-    authFrame.type,
-    'auth',
-    'the shim must authenticate before sending commands',
-  );
-  sock.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  const posted = [];
-  // Drain the socket into `posted`.  The shim buffers pre-auth frames,
-  // so read everything it has sent so far each time the assertions
-  // look at `posted`.
-  const drain = () => {
-    while (posted.length < sock.sent.length) {
-      posted.push(JSON.parse(sock.sent[posted.length]));
-    }
-    return posted;
-  };
-  return {win, posted, drain, sock};
-}
 
 // ---------------------------------------------------------------------------
 // scenario helpers
@@ -169,31 +129,6 @@ function bootFanOut(n, declared) {
     liveTabIds,
     all: () => client.drain(),
   });
-}
-
-/** Every open sub-agent tab id, in tab-bar order. */
-function openSubTabIds(win) {
-  return subagentTabEls(win).map(el => el.dataset.tabId);
-}
-
-/**
- * The daemon's replay burst for finished sub-agents (history click,
- * reconnect, resume): one `openSubagentTab{isDone:true}` per task under
- * *tabIdFor(taskId, i)*.
- */
-function announceFinished(win, parentId, taskIds, tabIdFor) {
-  taskIds.forEach((taskId, i) =>
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: tabIdFor(taskId, i),
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-      isSubagentTab: true,
-      isDone: true,
-    }),
-  );
 }
 
 function deterministicId(parentId) {

@@ -78,19 +78,17 @@ _PAGE_READ_NAVIGATIONS = 3
 # browser to show up in this tool's own CDP client.
 _LIVE_PAGE_TIMEOUT = 15.0
 
-# Upper bound of the liveness round trip to a Browser-tab page
-# (``WebUseTool._is_alive``).  A closed page or an exited browser fails
-# it at once; the bound only caps the wait on a page that is not
-# answering, which counts as alive.
-_LIVE_PROBE_TIMEOUT_MS = 3000
-
-# Deadline for the CDP round trips that read a Browser-tab page's target
-# id (``WebUseTool._target_id``): attaching a session and
+# Deadline, on this side of the driver, for the round trips to a
+# Browser-tab page that have no usable one of their own: the liveness
+# probe (``WebUseTool._is_alive``; a closed page or an exited browser
+# fails it at once, the bound only caps the wait on a page that is not
+# answering, which counts as alive) and the CDP session calls that read
+# a page's target id (``WebUseTool._target_id``: attaching a session and
 # ``Target.getTargetInfo``, both answered by the browser process in
-# milliseconds.  Playwright gives neither a timeout, and its driver fails
+# milliseconds; Playwright gives neither a timeout, and its driver fails
 # a pending request of a CDP session only on the session's own detach
-# event, never when the browser stops answering or exits under it.
-_CDP_CALL_TIMEOUT_SECS = _LIVE_PROBE_TIMEOUT_MS / 1000
+# event, never when the browser stops answering or exits under it).
+_CDP_CALL_TIMEOUT_SECS = 3.0
 
 # Deadline for raw input operations (keyboard.press/type, mouse.move/wheel)
 # that have no Playwright timeout parameter.  A page event handler that
@@ -686,15 +684,15 @@ class WebUseTool:
             # such a session only on the session's own detach event, never
             # when the browser exits under it, so that round trip hung
             # forever on a browser closing at that very moment.  A closed
-            # page fails the read at once; a slow or wedged page merely
-            # times out, and is alive.
+            # or crashed page fails the read at once; a slow or wedged
+            # page merely times out, and is alive.  The deadline is
+            # ``_cdp_call``'s, on this side: the driver's own timeout
+            # (``wait_for_function``'s) never fires on a page whose
+            # renderer crashed while it showed ``about:blank``, and the
+            # driver does not abort that call either.
             try:
-                self._page.wait_for_function(
-                    "() => 1",
-                    timeout=_LIVE_PROBE_TIMEOUT_MS,
-                    polling=100,
-                )
-            except Exception:  # noqa: BLE001 - closed, exited, or not answering
+                _cdp_call(self._page, self._page._impl_obj.evaluate("1"))
+            except Exception:  # noqa: BLE001 - closed, exited, crashed, or not answering
                 logger.debug("Exception caught", exc_info=True)
             # The round trip delivers a crash or an exit to the handlers
             # that drop the page.
@@ -751,11 +749,19 @@ class WebUseTool:
     def _on_browser_lost(self, _obj: Any = None) -> None:
         """Drop page/context/browser references after a browser exit or context close.
 
-        Called when the browser main process exits (``context.on("close")``).
+        Called when the browser main process exits (``context.on("close")``)
+        or the Browser tab's connection drops (``browser.on("disconnected")``).
         The Playwright driver (``self._playwright``) is kept running so that the
         next tool call can launch a fresh browser without paying the driver
         start-up again (:meth:`close` is what stops it).
+
+        The listeners stay armed on every context and browser ever
+        attached, so the event of a replaced one must not clear the
+        references to its successor: only the event of the current
+        context or browser (or a call without an object) drops them.
         """
+        if _obj is not None and _obj is not self._browser and _obj is not self._context:
+            return
         self._page = None
         self._context = None
         self._browser = None
@@ -776,6 +782,7 @@ class WebUseTool:
         tab = self._live_browser.open_for_agent()
         try:
             if not self._live_connected(tab.cdp_url):
+                self._disconnect_live()
                 self._browser = self._playwright.chromium.connect_over_cdp(tab.cdp_url)
                 self._browser.on("disconnected", self._on_browser_lost)
                 self._live_cdp_url = tab.cdp_url
@@ -879,13 +886,23 @@ class WebUseTool:
                 logger.debug("Could not close the Browser tab's page", exc_info=True)
         self._live_tab = None
         self._cdp_sessions = {}
+        self._disconnect_live()
+        self._on_browser_lost()
+
+    def _disconnect_live(self) -> None:
+        """Drop this client's connection to the Browser tab's browser, if any.
+
+        A ``Browser`` object left behind without ``close()`` keeps its
+        ``disconnected`` listener and its place in the driver; closing a
+        connected-over-CDP browser only disconnects this client, the
+        daemon's browser keeps running.
+        """
         browser, self._browser = self._browser, None
         if browser is not None:
             try:
-                browser.close()  # a connected browser only disconnects
+                browser.close()
             except Exception:  # noqa: BLE001 - the browser may already be gone
                 logger.debug("Could not disconnect from the Browser tab", exc_info=True)
-        self._on_browser_lost()
 
     def _close_browser_only(self, keep_live_tab: bool = False) -> None:
         """Close context/browser if present, leaving self._playwright running.

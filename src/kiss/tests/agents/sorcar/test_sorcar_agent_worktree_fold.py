@@ -91,7 +91,7 @@ def test_retired_worktree_is_committed_with_the_previous_task_prompt(
         # What the model would do next: isolate the repository and edit
         # it there, then end without ``commit_and_merge``.
         assert agent.create_worktree().startswith("Created worktree")
-        wt = agent.worktree
+        wt = agent._wt
         assert wt is not None
         (wt.wt_dir / "greeting.txt").write_text("hello\n")
         branch = wt.branch

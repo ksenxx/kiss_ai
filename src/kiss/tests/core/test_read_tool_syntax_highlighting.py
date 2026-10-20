@@ -379,9 +379,8 @@ class _RecordingPrinter:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, dict[str, Any]]] = []
 
-    def print(self, content: Any, **kwargs: Any) -> str:
+    def print(self, content: Any, **kwargs: Any) -> None:
         self.calls.append((content, kwargs))
-        return ""
 
 
 class TestAgentForwardsToolInputOnReadResult(unittest.TestCase):

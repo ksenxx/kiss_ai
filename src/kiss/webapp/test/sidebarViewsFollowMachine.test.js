@@ -20,120 +20,56 @@
 //   the machine, and the views keep browsing the machine while that
 //   content tab is shown.
 
-/* global require, __dirname, console, process */
+/* global require, console, process */
 
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-const {waitFor} = require('./simplify2_harness');
+const {
+  makePage: buildPage,
+  send,
+  click,
+  byId,
+  waitFor,
+  stubRaf,
+  stubMonaco,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const openWindows = [];
 
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  openWindows.push(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  // The desktop layout docks the task-info panel, so the views are on
-  // screen as soon as their section is expanded.
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
+// The harness's recording Monaco, exposing the editors themselves in
+// creation order (a suite types into them and reads their models).
+function stubEditors(win) {
+  stubMonaco(win);
   const editors = [];
-  win.monaco = {
-    editor: {
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        let value = String(opts.value === undefined ? '' : opts.value);
-        let version = 1;
-        const listeners = [];
-        const model = {
-          getAlternativeVersionId: () => version,
-          getValue: () => value,
-          getLineCount: () => value.split('\n').length,
-        };
-        const editor = {
-          getModel: () => model,
-          onDidChangeModelContent: cb => listeners.push(cb),
-          setPosition: () => {},
-          revealLineInCenter: () => {},
-          getDomNode: () => holder,
-          dispose: () => {},
-          layout: () => {},
-          focus: () => {},
-          _type: text => {
-            value = String(text);
-            version += 1;
-            listeners.slice().forEach(cb => cb());
-          },
-        };
-        editors.push(editor);
-        return editor;
-      },
-    },
+  const create = win.monaco.editor.create;
+  win.monaco.editor.create = (holder, opts) => {
+    const editor = create(holder, opts);
+    editors.push(editor);
+    return editor;
   };
-  // A folder added to this daemon's Explorer earlier (Add Folder to
-  // Explorer...), remembered across reloads.
-  win.localStorage.setItem('kiss-explorer-roots', JSON.stringify(['/extra']));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  return editors;
+}
+
+function makePage() {
+  let editors;
+  const {win, posted} = buildPage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['treeContextMenu.js'],
+    beforeScripts: w => {
+      stubRaf(w);
+      // The desktop layout docks the task-info panel, so the views are on
+      // screen as soon as their section is expanded.
+      fakeMatchMedia(w, true);
+      editors = stubEditors(w);
+      // A folder added to this daemon's Explorer earlier (Add Folder to
+      // Explorer...), remembered across reloads.
+      w.localStorage.setItem('kiss-explorer-roots', JSON.stringify(['/extra']));
+    },
+  });
+  openWindows.push(win);
   return {win, posted, editors};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function byId(win, id) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  return node;
-}
-
-function click(win, el) {
-  assert.ok(el, 'the element to click exists');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function msgs(posted, type) {
@@ -170,8 +106,17 @@ function answerListing(win, posted, p, machine, entries) {
     m => m.path === p && (m.machine || '') === machine,
   );
   const req = reqs[reqs.length - 1];
-  assert.ok(req, `a listDir for ${p} on '${machine || 'this machine'}' was sent`);
-  const reply = {type: 'dirListing', token: req.token, path: p, root: req.workDir, entries};
+  assert.ok(
+    req,
+    `a listDir for ${p} on '${machine || 'this machine'}' was sent`,
+  );
+  const reply = {
+    type: 'dirListing',
+    token: req.token,
+    path: p,
+    root: req.workDir,
+    entries,
+  };
   if (machine) reply.machine = machine;
   send(win, reply);
   return req;
@@ -179,14 +124,27 @@ function answerListing(win, posted, p, machine, entries) {
 
 const NOW = Date.now() / 1000;
 const MACHINES = [
-  {name: 'laptop', local: true, status: 'reachable', address: 'https://10.0.0.5:8787'},
-  {name: 'gpu-box', label: 'gpu.lab', status: 'reachable', address: 'https://gpu:8787'},
+  {
+    name: 'laptop',
+    local: true,
+    status: 'reachable',
+    address: 'https://10.0.0.5:8787',
+  },
+  {
+    name: 'gpu-box',
+    label: 'gpu.lab',
+    status: 'reachable',
+    address: 'https://gpu:8787',
+  },
 ];
 const BOX_DIRS = {
   type: 'machineWorkDirs',
   machine: 'gpu-box',
   workDir: '/srv/proj',
-  recentWorkDirs: [{path: '/srv/proj', ts: NOW}, {path: '/srv/other', ts: NOW - 50}],
+  recentWorkDirs: [
+    {path: '/srv/proj', ts: NOW},
+    {path: '/srv/other', ts: NOW - 50},
+  ],
   error: '',
 };
 const FILE = {name: 'main.py', path: '/srv/proj/main.py', isDir: false};
@@ -201,13 +159,18 @@ function boot() {
   const {win, posted} = made;
   send(win, {
     type: 'configData',
-    config: {work_dir: '/work/ws', recent_work_dirs: [{path: '/work/ws', ts: NOW}]},
+    config: {
+      work_dir: '/work/ws',
+      recent_work_dirs: [{path: '/work/ws', ts: NOW}],
+    },
     machine: 'laptop',
   });
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
   showSection(win, 'meta-explorer');
   showSection(win, 'meta-scm');
-  answerListing(win, posted, '/work/ws', '', [{name: 'home.txt', path: '/work/ws/home.txt', isDir: false}]);
+  answerListing(win, posted, '/work/ws', '', [
+    {name: 'home.txt', path: '/work/ws/home.txt', isDir: false},
+  ]);
   assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
   assert.strictEqual(msgs(posted, 'gitStatus')[0].machine, undefined);
   posted.length = 0;
@@ -215,14 +178,19 @@ function boot() {
 }
 
 /** Bind the active chat to gpu-box and let its directories arrive. */
-function goToBox(win, posted) {
+function goToBox(win) {
   pickMachine(win, 'gpu-box');
   send(win, BOX_DIRS);
 }
 
 function rightClick(win, el) {
   el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 10, clientY: 10}),
+    new win.MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    }),
   );
 }
 
@@ -233,12 +201,16 @@ function menuItem(win, label) {
 }
 
 function rowFor(win, p) {
-  return all(win, '.explorer-row[data-explorer-path]').find(r => r.dataset.explorerPath === p);
+  return all(win, '.explorer-row[data-explorer-path]').find(
+    r => r.dataset.explorerPath === p,
+  );
 }
 
 /** The Save button of the content tab on screen (each tab's view has its own). */
 function saveButton(win) {
-  const view = all(win, '.content-tab-view').find(v => v.style.display !== 'none');
+  const view = all(win, '.content-tab-view').find(
+    v => v.style.display !== 'none',
+  );
   assert.ok(view, 'a content tab view is shown');
   return view.querySelector('.content-save-btn');
 }
@@ -249,14 +221,28 @@ async function testTheExplorerShowsTheMachinesFolder() {
   // Until the machine's directories arrive there is nothing to show;
   // this daemon's tree (and its added folder) is gone.
   assert.deepStrictEqual(rootPaths(win), []);
-  assert.ok(win.document.querySelector('#explorer-tree .sidebar-empty'), 'No workspace folder');
+  assert.ok(
+    win.document.querySelector('#explorer-tree .sidebar-empty'),
+    'No workspace folder',
+  );
   assert.strictEqual(msgs(posted, 'listDir').length, 0);
   send(win, BOX_DIRS);
-  assert.deepStrictEqual(rootPaths(win), ['/srv/proj'], "the machine's working directory alone");
+  assert.deepStrictEqual(
+    rootPaths(win),
+    ['/srv/proj'],
+    "the machine's working directory alone",
+  );
   const req = answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
-  assert.strictEqual(req.workDir, '/srv/proj', "confined to the machine's folder");
+  assert.strictEqual(
+    req.workDir,
+    '/srv/proj',
+    "confined to the machine's folder",
+  );
   assert.ok(rowFor(win, '/srv/proj/main.py'), 'the listing rendered');
-  assert.ok(byId(win, 'explorer-add-folder').hidden, 'no "Add Folder" for a machine');
+  assert.ok(
+    byId(win, 'explorer-add-folder').hidden,
+    'no "Add Folder" for a machine',
+  );
   // Expanding a folder and opening a file ask the machine.
   posted.length = 0;
   click(win, rowFor(win, '/srv/proj/pkg'));
@@ -270,14 +256,24 @@ async function testTheExplorerShowsTheMachinesFolder() {
   // The top-level folder's menu offers no "Add Folder"; "New File..."
   // on a folder makes the file on the machine.
   rightClick(win, rootRows(win)[0]);
-  assert.ok(menuItem(win, 'Add Folder to Explorer...').classList.contains('disabled'));
-  win.document.dispatchEvent(new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  assert.ok(
+    menuItem(win, 'Add Folder to Explorer...').classList.contains('disabled'),
+  );
+  win.document.dispatchEvent(
+    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+  );
   rightClick(win, rowFor(win, '/srv/proj/pkg'));
   click(win, menuItem(win, 'New File...'));
   const input = win.document.querySelector('input.explorer-input');
   assert.ok(input, 'the name box');
   input.value = 'new.py';
-  input.dispatchEvent(new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+  input.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
   const fs = msgs(posted, 'fsAction');
   assert.strictEqual(fs.length, 1);
   assert.strictEqual(fs[0].machine, 'gpu-box');
@@ -285,7 +281,10 @@ async function testTheExplorerShowsTheMachinesFolder() {
   assert.strictEqual(fs[0].path, '/srv/proj/pkg');
   posted.length = 0;
   send(win, {
-    type: 'fsResult', token: fs[0].token, action: 'newFile', path: '/srv/proj/pkg/new.py',
+    type: 'fsResult',
+    token: fs[0].token,
+    action: 'newFile',
+    path: '/srv/proj/pkg/new.py',
     machine: 'gpu-box',
   });
   const reopened = msgs(posted, 'openFile');
@@ -303,7 +302,7 @@ async function testTheExplorerShowsTheMachinesFolder() {
 
 function testSourceControlShowsTheMachinesRepository() {
   const {win, posted} = boot();
-  goToBox(win, posted);
+  goToBox(win);
   const status = msgs(posted, 'gitStatus');
   const log = msgs(posted, 'gitLog');
   assert.strictEqual(status.length, 1);
@@ -313,10 +312,19 @@ function testSourceControlShowsTheMachinesRepository() {
   assert.strictEqual(log[0].machine, 'gpu-box');
   assert.strictEqual(log[0].token, status[0].token);
   send(win, {
-    type: 'gitStatus', token: status[0].token, machine: 'gpu-box', branch: 'box-main',
-    repo: '/srv/proj', changes: [],
+    type: 'gitStatus',
+    token: status[0].token,
+    machine: 'gpu-box',
+    branch: 'box-main',
+    repo: '/srv/proj',
+    changes: [],
   });
-  send(win, {type: 'gitLog', token: log[0].token, machine: 'gpu-box', commits: []});
+  send(win, {
+    type: 'gitLog',
+    token: log[0].token,
+    machine: 'gpu-box',
+    commits: [],
+  });
   assert.strictEqual(byId(win, 'scm-branch').textContent, 'box-main');
   // The refresh button asks the machine again.
   posted.length = 0;
@@ -351,7 +359,13 @@ function testTheDaemonsBindingMovesTheViews() {
   // this daemon's folders.
   posted.length = 0;
   send(win, {type: 'tabMachine', tabId: tab, machine: 'office'});
-  send(win, {type: 'machineWorkDirs', machine: 'office', workDir: '', recentWorkDirs: [], error: 'office: down'});
+  send(win, {
+    type: 'machineWorkDirs',
+    machine: 'office',
+    workDir: '',
+    recentWorkDirs: [],
+    error: 'office: down',
+  });
   assert.deepStrictEqual(rootPaths(win), []);
   assert.strictEqual(msgs(posted, 'listDir').length, 0);
   assert.strictEqual(msgs(posted, 'gitStatus').length, 0);
@@ -361,12 +375,17 @@ function testTheDaemonsBindingMovesTheViews() {
 
 async function testAFileOfTheMachineIsSavedAndReloadedThere() {
   const {win, posted, editors} = boot();
-  goToBox(win, posted);
+  goToBox(win);
   answerListing(win, posted, '/srv/proj', 'gpu-box', [FILE]);
   const chat = win._testApi.getActiveTabId();
   send(win, {
-    type: 'fileContent', tabId: chat, machine: 'gpu-box', path: '/srv/proj/main.py',
-    name: 'main.py', content: 'print(1)\n', version: 'v1',
+    type: 'fileContent',
+    tabId: chat,
+    machine: 'gpu-box',
+    path: '/srv/proj/main.py',
+    name: 'main.py',
+    content: 'print(1)\n',
+    version: 'v1',
   });
   await waitFor(() => editors.length === 1, 'the file opened as a content tab');
   const content = win._testApi.openTabs().find(t => t.isContentTab);
@@ -389,12 +408,20 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
   // The machine refuses the save (the file changed there): "Reload
   // from disk" reads the file from the machine again.
   send(win, {
-    type: 'fileSaved', ok: false, conflict: true, error: 'changed on disk',
-    token: saves[0].token, tabId: chat, path: '/srv/proj/main.py', name: 'main.py',
+    type: 'fileSaved',
+    ok: false,
+    conflict: true,
+    error: 'changed on disk',
+    token: saves[0].token,
+    tabId: chat,
+    path: '/srv/proj/main.py',
+    name: 'main.py',
     machine: 'gpu-box',
   });
   posted.length = 0;
-  const toast = win.document.querySelector('[data-notification-id^="file-save-conflict-"]');
+  const toast = win.document.querySelector(
+    '[data-notification-id^="file-save-conflict-"]',
+  );
   assert.ok(toast, 'the conflict toast');
   click(
     win,
@@ -408,8 +435,13 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
   assert.strictEqual(reloads[0].path, '/srv/proj/main.py');
   assert.strictEqual(reloads[0].workDir, '/srv/proj');
   send(win, {
-    type: 'fileContent', tabId: chat, machine: 'gpu-box', path: '/srv/proj/main.py',
-    name: 'main.py', content: 'print(9)\n', version: 'v3',
+    type: 'fileContent',
+    tabId: chat,
+    machine: 'gpu-box',
+    path: '/srv/proj/main.py',
+    name: 'main.py',
+    content: 'print(9)\n',
+    version: 'v3',
   });
   await waitFor(() => editors.length === 2, 'the reload rebuilt the editor');
   assert.strictEqual(editors[1].getModel().getValue(), 'print(9)\n');
@@ -430,18 +462,30 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
   // machine stamp tells them apart, whatever the chat's machine is
   // when it lands (the pick was made before the machine's reply came).
   send(win, {
-    type: 'fileContent', tabId: chat, path: '/work/ws/notes.txt', name: 'notes.txt',
-    content: 'home\n', version: 'h1',
+    type: 'fileContent',
+    tabId: chat,
+    path: '/work/ws/notes.txt',
+    name: 'notes.txt',
+    content: 'home\n',
+    version: 'h1',
   });
   await waitFor(() => editors.length === 1, 'the home file opened');
-  goToBox(win, posted);
+  goToBox(win);
   win._testApi.switchToTab(chat);
   pickMachine(win, '');
   send(win, {
-    type: 'fileContent', tabId: chat, machine: 'gpu-box', path: '/work/ws/notes.txt',
-    name: 'notes.txt', content: 'box\n', version: 'b1',
+    type: 'fileContent',
+    tabId: chat,
+    machine: 'gpu-box',
+    path: '/work/ws/notes.txt',
+    name: 'notes.txt',
+    content: 'box\n',
+    version: 'b1',
   });
-  await waitFor(() => editors.length === 2, "the machine's file opened as its own tab");
+  await waitFor(
+    () => editors.length === 2,
+    "the machine's file opened as its own tab",
+  );
   const contentTabs = win._testApi.openTabs().filter(t => t.isContentTab);
   assert.strictEqual(contentTabs.length, 2, 'two tabs for the two files');
   assert.strictEqual(editors[0].getModel().getValue(), 'home\n');
@@ -467,8 +511,12 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
   win._testApi.switchToTab(chat);
   pickMachine(win, 'gpu-box');
   send(win, {
-    type: 'fileContent', tabId: chat, path: '/srv/proj/out.txt', name: 'out.txt',
-    content: 'out\n', version: 'o1',
+    type: 'fileContent',
+    tabId: chat,
+    path: '/srv/proj/out.txt',
+    name: 'out.txt',
+    content: 'out\n',
+    version: 'o1',
   });
   await waitFor(() => editors.length === 3, 'the local file opened');
   const local = win._testApi.openTabs().filter(t => t.isContentTab)[2];
@@ -481,7 +529,7 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
 
 async function testAnActionKeepsTheMachineItWasPickedOn() {
   const {win, posted} = boot();
-  goToBox(win, posted);
+  goToBox(win);
   answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
   // Delete asks first; the chat comes home while the question is up.
   rightClick(win, rowFor(win, '/srv/proj/main.py'));
@@ -491,7 +539,9 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
     {name: 'home.txt', path: '/work/ws/home.txt', isDir: false},
   ]);
   posted.length = 0;
-  const toast = win.document.querySelector('[data-notification-id="fs-delete"]');
+  const toast = win.document.querySelector(
+    '[data-notification-id="fs-delete"]',
+  );
   click(
     win,
     Array.from(toast.querySelectorAll('.kiss-notification-action')).find(
@@ -500,12 +550,21 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   );
   const deletes = msgs(posted, 'fsAction');
   assert.strictEqual(deletes.length, 1);
-  assert.strictEqual(deletes[0].machine, 'gpu-box', 'deleted where it was picked');
+  assert.strictEqual(
+    deletes[0].machine,
+    'gpu-box',
+    'deleted where it was picked',
+  );
   assert.strictEqual(deletes[0].path, '/srv/proj/main.py');
   // An overwrite retry keeps it too.
   send(win, {
-    type: 'fsResult', token: deletes[0].token, action: 'delete', path: '/srv/proj/main.py',
-    machine: 'gpu-box', error: 'exists', exists: true,
+    type: 'fsResult',
+    token: deletes[0].token,
+    action: 'delete',
+    path: '/srv/proj/main.py',
+    machine: 'gpu-box',
+    error: 'exists',
+    exists: true,
   });
   // Cut on this machine, pasted on the machine: refused.
   rightClick(win, rowFor(win, '/work/ws/home.txt'));
@@ -517,8 +576,8 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   click(win, menuItem(win, 'Paste'));
   assert.strictEqual(msgs(posted, 'fsAction').length, 0, 'nothing moved');
   assert.ok(
-    Array.from(win.document.querySelectorAll('.kiss-notification-error')).some(el =>
-      el.textContent.includes('another machine'),
+    Array.from(win.document.querySelectorAll('.kiss-notification-error')).some(
+      el => el.textContent.includes('another machine'),
     ),
     'the refusal is reported',
   );
@@ -545,12 +604,27 @@ function testAHomeChatSendsNothingStamped() {
 }
 
 const tests = [
-  ["the Explorer shows the machine's folder", testTheExplorerShowsTheMachinesFolder],
-  ["Source Control shows the machine's repository", testSourceControlShowsTheMachinesRepository],
+  [
+    "the Explorer shows the machine's folder",
+    testTheExplorerShowsTheMachinesFolder,
+  ],
+  [
+    "Source Control shows the machine's repository",
+    testSourceControlShowsTheMachinesRepository,
+  ],
   ["the daemon's binding moves the views", testTheDaemonsBindingMovesTheViews],
-  ['a file of the machine is saved and reloaded there', testAFileOfTheMachineIsSavedAndReloadedThere],
-  ['the same path on two machines is two files', testTheSamePathOnTwoMachinesIsTwoFiles],
-  ['an action keeps the machine it was picked on', testAnActionKeepsTheMachineItWasPickedOn],
+  [
+    'a file of the machine is saved and reloaded there',
+    testAFileOfTheMachineIsSavedAndReloadedThere,
+  ],
+  [
+    'the same path on two machines is two files',
+    testTheSamePathOnTwoMachinesIsTwoFiles,
+  ],
+  [
+    'an action keeps the machine it was picked on',
+    testAnActionKeepsTheMachineItWasPickedOn,
+  ],
   ['a home chat sends nothing stamped', testAHomeChatSendsNothingStamped],
 ];
 

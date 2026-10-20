@@ -14,14 +14,6 @@ function click(el) {
   );
 }
 
-async function waitForFalsy(predicate, message) {
-  for (let i = 0; i < 100; i++) {
-    if (!predicate()) return;
-    await new Promise(r => setTimeout(r, 20));
-  }
-  throw new Error(message || 'waitForFalsy timed out');
-}
-
 async function runTests() {
   const wv = makePage();
   try {
@@ -80,8 +72,8 @@ async function runTests() {
       latest: '',
       current: '',
     });
-    await waitForFalsy(
-      () => wv.win.document.querySelector('.kiss-notification'),
+    await waitFor(
+      () => !wv.win.document.querySelector('.kiss-notification'),
       'available:false broadcast must dismiss the permanent update notification',
     );
 

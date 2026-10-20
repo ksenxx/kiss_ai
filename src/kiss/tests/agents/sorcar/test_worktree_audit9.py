@@ -28,7 +28,7 @@ BUG-43: Manual merge instructions now use `git cherry-pick --no-commit
 BUG-44 (obsolete): covered the `_new_chat` guard's dependence on the
     since-removed per-tab `use_worktree` flag.
 
-INC-6: `_check_merge_conflict` now checks both unstaged AND staged
+INC-6: `_conflict_of` now checks both unstaged AND staged
     files for dirty-file overlap (historically via the since-removed
     `unstaged_files()`/`staged_files()` helpers).
 

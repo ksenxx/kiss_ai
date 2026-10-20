@@ -4,8 +4,8 @@
 # add your name here
 
 
-"""Server-only tests extracted from
-``kiss.tests.agents.third_party_agents.test_config_custom_headers``.
+"""Server-only tests extracted from the channel tests (whose remaining
+cases live in ``kiss.tests.agents.third_party_agents.test_100pct_branch_coverage``).
 
 Moved here because their full dependency closure touches only
 kiss.core, kiss.agents.sorcar and kiss.server (task: relocate

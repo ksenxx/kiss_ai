@@ -4,7 +4,7 @@
 # add your name here
 """Audit 11: Integration tests for bugs in worktree and non-worktree workflows.
 
-BUG-56: ``_check_merge_conflict`` uses ``baseline^`` / ``baseline``
+BUG-56: ``_conflict_of`` uses ``baseline^`` / ``baseline``
     without validating the baseline SHA exists (unlike ``_resolve_base_ref``
     which has the BUG-51 ``git cat-file -t`` check).  An invalid baseline
     makes both ``git diff`` commands fail silently (empty file sets),
@@ -13,7 +13,7 @@ BUG-56: ``_check_merge_conflict`` uses ``baseline^`` / ``baseline``
 
 (BUG-55 and BUG-57 covered the pre-task snapshot and the interactive
 merge-review view, both removed together with the diff/merge review
-workflow; ``_check_merge_conflict`` is kept and still guards the direct
+workflow; ``_conflict_of`` is kept and still guards the direct
 worktree merge action.)
 """
 
@@ -26,6 +26,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 def _register_wt_state(
@@ -108,16 +109,16 @@ def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
 
 
 class TestBug56ConflictCheckBaselineValidation:
-    """BUG-56: ``_check_merge_conflict`` uses ``baseline^`` and
+    """BUG-56: ``_conflict_of`` uses ``baseline^`` and
     ``baseline`` directly without validating the SHA exists.  An invalid
     baseline causes both ``git diff`` commands to fail silently, making
     the method return ``False`` (no conflict) even when there IS one.
 
     ``_resolve_base_ref`` validates with ``git cat-file -t`` (BUG-51 fix)
-    but ``_check_merge_conflict`` doesn't.
+    but ``_conflict_of`` doesn't.
 
     FIX: Validate baseline with ``git cat-file -t`` in
-    ``_check_merge_conflict`` before using it; fall back to merge-base
+    ``_conflict_of`` before using it; fall back to merge-base
     when invalid.
     """
 
@@ -158,9 +159,9 @@ class TestBug56ConflictCheckBaselineValidation:
         state = _register_wt_state("bug56a-tab", agent)
 
         try:
-            has_conflict = server._check_merge_conflict("bug56a-tab")
+            has_conflict = merge_conflict(server, "bug56a-tab")
             assert has_conflict is True, (
-                "BUG-56: _check_merge_conflict returned False with invalid "
+                "BUG-56: _conflict_of returned False with invalid "
                 "baseline despite a real conflict — both sides edited init.txt"
             )
         finally:
@@ -202,7 +203,7 @@ class TestBug56ConflictCheckBaselineValidation:
         state = _register_wt_state("bug56b-tab", agent)
 
         try:
-            has_conflict = server._check_merge_conflict("bug56b-tab")
+            has_conflict = merge_conflict(server, "bug56b-tab")
             assert has_conflict is True, (
                 "Regression: valid baseline should still detect conflicts"
             )
@@ -232,7 +233,7 @@ class TestBug56ConflictCheckBaselineValidation:
         state = _register_wt_state("bug56c-tab", agent)
 
         try:
-            has_conflict = server._check_merge_conflict("bug56c-tab")
+            has_conflict = merge_conflict(server, "bug56c-tab")
             assert has_conflict is False
         finally:
             agent_state.unregister(state.task_id, state)

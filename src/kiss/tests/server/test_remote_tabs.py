@@ -29,10 +29,13 @@ client on the local connection:
 * losing the remote daemon mid-binding ends the tab with an error, and
   the sub-agent tabs its stream relayed with ``subagentDone``.
 
-Not covered here: a ``closeTab`` or a second ``submit`` landing while
-the first connect is still in flight (``RemoteTabs._bind`` stands down
-or keeps the winner); that needs the connect paused, which no real
-daemon offers.
+A ``closeTab`` landing while the first connect is still in flight is
+covered by ``test_remote_bind_does_not_block_connection.py`` (a
+listener that never answers the TLS handshake pauses the connect); a
+second ``submit`` racing the first from another page (``RemoteTabs._bind``
+keeps the winner) by ``test_remote_bound_tab_browser_pages.py``.  From
+the same page the two cannot be in flight at once: the per-connection,
+per-tab ordering of ``ServerApi._dispatch_detached`` serialises them.
 """
 
 from __future__ import annotations
@@ -114,8 +117,8 @@ class _FinishingModel(BaseHTTPRequestHandler):
             pass  # the daemon was killed while its call was held
 
 
-class TestRemoteTabs(IsolatedAsyncioTestCase):
-    """One local daemon, one remote daemon with a fake model, one client."""
+class RemoteTabsHarness(IsolatedAsyncioTestCase):
+    """One local daemon, one remote daemon ("box") with a fake model, one client."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -213,9 +216,30 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         """The tab ids the remote daemon's registry holds."""
         box = next(m for m in mach.load_machines() if m.name == "box")
         reply = await asyncio.to_thread(
-            mach.link_for(box).request, {"type": "getTabsState"}, "tabs_state",
+            mach.link_for(box).request, {"type": "ready"}, "tabs_state",
         )
         return [str(t["tabId"]) for t in reply["tabs"]]
+
+    async def _fan_out(self, tab: str, hold: float = 60.0) -> dict[str, Any]:
+        """Submit a fanning-out run on *tab* to "box" and return the relayed ``new_tab``.
+
+        The sub-agent's model call is held for *hold* seconds (or until
+        ``_FinishingModel.released`` is set), so it is still running
+        when the caller acts on the announcement.
+        """
+        _FinishingModel.parallel_on_first_call = True
+        _FinishingModel.hold_sub_agent = hold
+        _FinishingModel.calls = 0
+        await self._submit(tab, "Fan out", "box")
+        for _ in range(400):
+            msg = await self._next()
+            if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
+                return msg
+        raise AssertionError("the sub-agent's new_tab never arrived")
+
+
+class TestRemoteTabs(RemoteTabsHarness):
+    """A bound tab's run, replay, sub-agent tabs and loss."""
 
     async def test_submit_runs_on_the_selected_machine(self) -> None:
         tab = "tab-remote"
@@ -277,7 +301,7 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.assertNotIn("Say hello", await self._titles(mach.LOCAL_MACHINE))
         self.assertIn("Say hello", await self._titles("box"))
         # The tab is published in the local registry for every surface.
-        tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
+        tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")
         self.assertIn(tab, [t["tabId"] for t in tabs["tabs"]])
         self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "box")
 
@@ -572,7 +596,7 @@ class TestRemoteTabs(IsolatedAsyncioTestCase):
         self.assertEqual(seen["task_events"]["chat_id"], hello["id"])
         self.assertIn(SUMMARY, json.dumps(seen["task_events"]["events"]))
         self.assertEqual(remote_tabs.machine_of(tab), "box")
-        tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
+        tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")
         self.assertEqual(
             next(t["title"] for t in tabs["tabs"] if t["tabId"] == tab), "Say hello",
             "the registry names the tab after the task",

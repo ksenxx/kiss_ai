@@ -90,7 +90,7 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
 
 
     def test_server_filters_history_with_query(self) -> None:
-        """AgentServer._get_history passes query to _search_history."""
+        """AgentServer._get_history passes query to _load_history."""
         server = AgentServer()
         events: list[dict] = []
         server.printer.broadcast = lambda ev: events.append(ev)  # type: ignore[assignment]

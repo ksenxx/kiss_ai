@@ -43,7 +43,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
 )
-from kiss.core.processes import process_identity
+from kiss.core.processes import pid_alive, process_identity
 
 
 def _make_repo(path: Path) -> Path:
@@ -202,7 +202,7 @@ class TestOwnerLiveness:
         assert wt_dir.is_dir()
         dead_pid = GitWorktreeOps.load_owner_pid(self.repo, branch)
         assert dead_pid is not None and dead_pid != os.getpid()
-        assert not GitWorktreeOps._pid_alive(dead_pid)
+        assert not pid_alive(dead_pid)
 
         with caplog.at_level(logging.INFO, logger="kiss.agents.sorcar.git_worktree"):
             reclaimed = GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)

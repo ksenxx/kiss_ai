@@ -9,7 +9,7 @@ Covers the exact code paths touched by the sorcar-misc simplification:
 * ``GitWorktreeOps.copy_dirty_state`` rename handling (old-path removal
   for plain files, directories, and symlinks in the target worktree).
 * ``ChatSorcarAgent._finalize_worktree`` /
-  ``_preserve_pending_worktree_for_review`` (commit to the task branch,
+  ``_retire_previous_worktree`` (commit to the task branch,
   late-arriver retry, worktree removal) — exercised via real temp git
   repos (the commit message falls back to the generic one without a
   model).
@@ -178,11 +178,11 @@ class TestFinalizeWorktree:
 
 
 class TestPreserveForReview:
-    """``_preserve_pending_worktree_for_review`` end-to-end."""
+    """``_retire_previous_worktree`` end-to-end."""
 
     def test_no_pending_worktree_returns_false(self, tmp_path: Path) -> None:
         agent = ChatSorcarAgent("regr-test")
-        assert agent._preserve_pending_worktree_for_review() is False
+        assert agent._retire_previous_worktree() is False
 
     def test_dirty_worktree_is_committed_to_its_branch(
         self, tmp_path: Path
@@ -191,7 +191,7 @@ class TestPreserveForReview:
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
         (wt_dir / "partial.txt").write_text("partial work\n")
-        assert agent._preserve_pending_worktree_for_review() is True
+        assert agent._retire_previous_worktree() is True
         assert agent._wt is None
         assert not agent._wt_pending
         assert not wt_dir.exists()
@@ -206,7 +206,7 @@ class TestPreserveForReview:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        assert agent._preserve_pending_worktree_for_review() is True
+        assert agent._retire_previous_worktree() is True
         assert agent._wt is None
         assert not agent._wt_pending
         assert not wt_dir.exists()

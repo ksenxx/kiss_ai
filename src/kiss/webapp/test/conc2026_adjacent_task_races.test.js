@@ -45,31 +45,13 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send} = harness;
+const {send, clickTab} = harness;
 
 function makePage() {
   const page = harness.makePage();
   page.win._testApi.endLaunch();
   page.win._testApi.hideWelcome();
   return page;
-}
-
-// Sub-agent tabs are clicked on the group strip (#tab-list); a chat has
-// no tab of its own any more, it is picked in the Chats panel, which
-// switchToTab stands in for.
-function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) {
-    el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    return;
-  }
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  win._testApi.switchToTab(tabId);
 }
 
 function fakeGeometry(el) {
@@ -114,9 +96,7 @@ function setupWithHistoryTask(win, posted) {
     chat_id: 'chat-abc',
     task_id: '42',
     task: 'My old task',
-    events: [
-      {type: 'system_output', text: 'hello\n'},
-    ],
+    events: [{type: 'system_output', text: 'hello\n'}],
   });
   return {tabId, O};
 }
@@ -134,9 +114,7 @@ function loadPrevTask41(win, posted, tabId, O) {
     direction: 'prev',
     task: 'Older task',
     task_id: '41',
-    events: [
-      {type: 'system_output', text: 'older\n'},
-    ],
+    events: [{type: 'system_output', text: 'older\n'}],
   });
   assert.strictEqual(
     O.querySelectorAll('.adjacent-task[data-task-id="41"]').length,
@@ -177,7 +155,8 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
     assert.ok(
       adj.length >= 2,
       'overscroll after the switch must still be able to request older ' +
-        'tasks; got ' + JSON.stringify(adj),
+        'tasks; got ' +
+        JSON.stringify(adj),
     );
     send(win, {
       type: 'adjacent_task_events',
@@ -185,9 +164,7 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
       direction: 'prev',
       task: 'Older task',
       task_id: '41',
-      events: [
-        {type: 'system_output', text: 'older\n'},
-      ],
+      events: [{type: 'system_output', text: 'older\n'}],
     });
     assert.strictEqual(
       O.querySelectorAll('.adjacent-task[data-task-id="41"]').length,
@@ -336,9 +313,7 @@ function testDetachedLoaderRemovedOnRestore() {
       direction: 'prev',
       task: 'Older task',
       task_id: '41',
-      events: [
-        {type: 'system_output', text: 'older\n'},
-      ],
+      events: [{type: 'system_output', text: 'older\n'}],
     });
 
     clickTab(win, tabId);

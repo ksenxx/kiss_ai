@@ -33,7 +33,12 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -103,14 +108,10 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     when the caller names no timeout.
     """
     assert sea_commands.get_command("revise_and_review_paper") == _SEA_PATH
-    hit = sea_commands.slash_command_task(
+    assert sea_commands.slash_command_task(
         "/revise_and_review_paper Writing: a paper. Review: for ICLR."
-    )
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "Writing: a paper. Review: for ICLR."
-    settings = sea_commands.sea_settings(path)
+    ) == ("Writing: a paper. Review: for ICLR.", _SEA_PATH)
+    settings = sea_commands.sea_settings(_SEA_PATH)
     assert settings == ReviseAndReviewPaperSea().settings({})
     assert resolve_timeout(None, settings) == 86400.0
     loaded = sea_commands.load_sea(_SEA_PATH)
@@ -393,7 +394,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
 
     assert len(agentic) == 3
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert {
             "writer_task",
             "reviewer_task",
@@ -407,12 +408,10 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
         assert not system.startswith(sea.SYSTEM_PROMPT)
         assert "# Revise-and-review loop coordinator" in system
         assert sea.REVIEW_PAPER_SEA in system
-    tool_results = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 2, agentic[2]["messages"]
-    assert str(tool_results[0]["content"]).startswith(
+    results = tool_results(agentic[2])
+    assert len(results) == 2, agentic[2]["messages"]
+    assert results[0].startswith(
         "You ARE the paper-writing agent. Writing round 1:"
     )
-    assert "round 1: strong accept (rank 6/6); scores: Rating: 10" in str(
-        tool_results[1]["content"]
-    )
+    assert "round 1: strong accept (rank 6/6); scores: Rating: 10" in results[1]
     assert review.exists()

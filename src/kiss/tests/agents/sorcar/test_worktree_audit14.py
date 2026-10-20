@@ -51,15 +51,17 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.printer import Printer
 
 
-class _RecordingPrinter:
+class _RecordingPrinter(Printer):
     """Minimal concrete printer that records every broadcast event.
 
     Not a mock/fake — a real recording object used in place of the
     production ``_Printer`` to capture broadcast events for
     assertions.  Production code interacts with it via the exact
-    same ``broadcast(event)`` method contract.
+    same ``broadcast(event)`` method contract; the rendering methods
+    of :class:`Printer` have nowhere to render to and are no-ops.
     """
 
     def __init__(self) -> None:
@@ -67,6 +69,15 @@ class _RecordingPrinter:
 
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
+
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
+        """Nothing to render."""
+
+    def token_callback(self, token: str) -> None:
+        """Nothing to render."""
+
+    def reset(self) -> None:
+        """No streaming state."""
 
 
 def _make_repo(path: Path) -> Path:

@@ -8,7 +8,7 @@ Each test CONFIRMS the bug exists (assertions pass when buggy behaviour
 is present).
 
 BUG-37: Non-worktree agent's dirty files in the main repo cause
-        _check_merge_conflict to report false-positive conflicts for
+        _conflict_of to report false-positive conflicts for
         worktree merges — the main-repo dirty-file listing (at the
         time, GitWorktreeOps.unstaged_files — since removed) counts the
         agent's in-progress writes as "user dirty state", and the
@@ -33,6 +33,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 def _make_repo(path: Path) -> Path:
@@ -64,7 +65,7 @@ def _make_repo(path: Path) -> Path:
 
 
 class TestBug37FalseConflictFromNonWorktreeAgent:
-    """BUG-37: _check_merge_conflict lists the main repo's dirty files
+    """BUG-37: _conflict_of lists the main repo's dirty files
     (historically via GitWorktreeOps.unstaged_files, since removed)
     and checks overlap with worktree changes.  If a non-worktree
     agent has edited files that the worktree also changed, the overlap
@@ -83,7 +84,7 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
 
     def test_false_conflict_from_non_worktree_agent_dirty_file(self) -> None:
         """BUG-37 functional: A file dirtied by a non-worktree agent causes
-        _check_merge_conflict to report a false conflict for a worktree merge.
+        _conflict_of to report a false conflict for a worktree merge.
         """
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
@@ -119,7 +120,7 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         agent_state.register(state)
 
         try:
-            has_conflict = server._check_merge_conflict("wt_tab")
+            has_conflict = merge_conflict(server, "wt_tab")
 
             assert has_conflict is True, (
                 "BUG-37 confirmed: non-worktree agent's dirty file causes "

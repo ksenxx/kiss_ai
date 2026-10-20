@@ -34,15 +34,6 @@ class TestResolveTask:
         assert result == "File task content"
 
 
-class TestDefaultTaskNoCredentials:
-    def test_no_password_in_default_task(self) -> None:
-        from kiss.agents.third_party_agents._channel_cli import _DEFAULT_TASK
-
-        assert "password" not in _DEFAULT_TASK.lower()
-        assert "kissagent" not in _DEFAULT_TASK.lower()
-        assert "@gmail" not in _DEFAULT_TASK.lower()
-
-
 class TestBuildArgParser:
     def test_custom_args(self) -> None:
         parser = _build_arg_parser()

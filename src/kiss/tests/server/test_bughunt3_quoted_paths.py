@@ -11,10 +11,10 @@ headers, ``--name-only`` output, ``ls-files --others`` output, and
 
 * ``merge_flow._capture_untracked``: returned the quoted string, which
   does not exist on disk, making the file invisible to callers.
-* the dirty-main side of ``_check_merge_conflict``: ``.strip('"')``
+* the dirty-main side of ``_conflict_of``: ``.strip('"')``
   removed the quotes but never unescaped ``\\"`` / ``\\\\``.
 * ``merge_flow._get_worktree_changed_files`` and
-  ``_check_merge_conflict``: ``--name-only`` parse sites kept the
+  ``_conflict_of``: ``--name-only`` parse sites kept the
   quoted form, so changedFiles showed bogus names and the conflict
   file-overlap sets could never intersect the real dirty paths.
 
@@ -35,6 +35,7 @@ from kiss.server import agent_state
 from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 # With ``core.quotepath=false`` (which the project sets) git C-quotes only
 # names containing ``"``, ``\\`` or control characters; none of those is a
@@ -142,7 +143,7 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
             main_file.read_text().replace("line9\n", "line9-user\n"),
         )
         self.assertTrue(
-            self.server._check_merge_conflict(self.tab_id),
+            merge_conflict(self.server, self.tab_id),
             "conflict check missed the overlap because the worktree "
             "side kept git's C-quoted name while the dirty-main side "
             "used the real name",

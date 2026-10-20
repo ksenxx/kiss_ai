@@ -15,7 +15,8 @@
 // events, when the page is hidden (the window closing), and, as a
 // move raises no event, by looking once a second.  Outside that
 // popup (a browser tab, the Linux app window) nothing happens: the
-// browser keeps the bounds itself.
+// browser keeps the bounds itself.  (Whether the popup is open the
+// daemon learns from its WebSocket connection, see transport.js.)
 (function () {
   'use strict';
 

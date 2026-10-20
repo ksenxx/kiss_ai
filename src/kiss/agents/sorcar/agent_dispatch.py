@@ -109,6 +109,9 @@ installed file so the default works from any work directory, not only
 a checkout of this repository.
 """
 
+EMPTY_TASK_ERROR = "Error: task must be a non-empty string."
+"""The ``run_agent`` / ``run_parallel`` result for a blank task text."""
+
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 3600.0
 """Default bound on how long a ``run_agent`` call blocks for its sub-task.
 
@@ -915,8 +918,10 @@ def dispatch_result(
     *sea_path* and returns the daemon's
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
     carries the sub-task's persisted ``task_id``) — or a clean error
-    string.  It raises only for the inherited-budget case described
-    under *inherit*.  Callers that need the sub-task's id
+    string.  Every production dispatch runs this on a job thread
+    (:func:`start_agent_job`), which records anything it raises (the
+    inherited-budget case described under *inherit*) as the job's
+    error text.  Callers that need the sub-task's id
     (rsi7d's clone replays) use this; :func:`format_dispatch_result`
     formats the result for a model.
 
@@ -968,7 +973,8 @@ def dispatch_result(
             container.  ``False`` (the default) also for programmatic
             callers that pass every value explicitly (rsi7d's clone
             replays).  When the budget is inherited and the caller has
-            nothing left to spend, ``BudgetExceededError`` propagates.
+            nothing left to spend, ``BudgetExceededError`` propagates
+            (the job thread turns it into the job's error text).
         settings: The SEA's resolved settings
             (:func:`~kiss.agents.sorcar.sea_commands.sea_settings`),
             when the caller has them; a ``model`` in them blocks the
@@ -1048,14 +1054,6 @@ def dispatch_result(
         )
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
-    except BaseException as e:
-        # The calling task was stopped (an injected KeyboardInterrupt)
-        # while waiting: the sub-task is stopped too, and what it spent
-        # so far still counts towards the caller's cost.
-        _attribute_dispatch_usage(
-            parent_agent, getattr(e, "task_result", None), epoch, parent_task_id,
-        )
-        raise
     _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id)
     return result
 
@@ -1225,11 +1223,11 @@ def start_run_agent(
 ) -> AgentJob | str:
     """Resolve, check and start a SEA sub-task as an :class:`AgentJob`.
 
-    The one body behind ``run_agent`` (:func:`_run_agent`) and
-    ``run_parallel`` (:func:`run_agents_parallel`, which starts one
-    job per task): :func:`plan_run_agent` resolves and checks the call,
-    then the dispatch runs on a job thread.  The arguments are those
-    of :func:`plan_run_agent`.
+    The body behind ``run_agent`` (:func:`_run_agent`):
+    :func:`plan_run_agent` resolves and checks the call, then the
+    dispatch runs on a job thread (``run_parallel`` plans once and
+    starts one such job per task, see :func:`run_agents_parallel`).
+    The arguments are those of :func:`plan_run_agent`.
 
     Returns:
         The started job, or :func:`plan_run_agent`'s error message.
@@ -1320,7 +1318,7 @@ def plan_run_agent(
         locked key the call contradicts).
     """
     if not task.strip():
-        return "Error: task must be a non-empty string."
+        return EMPTY_TASK_ERROR
     try:
         run_options = parse_run_options(options, tool_profile, model, max_budget, timeout)
     except ValueError as e:
@@ -1380,10 +1378,9 @@ def plan_run_agent(
     else:
         chosen = run_options.work_dir or str(settings.get("work_dir") or "")
         work_dir = anchored_work_dir(chosen, base_dir) if chosen else base_dir
-        if inherit and DEFAULT_CONFIG.dispatch_path_rewrite:
-            task = rewrite_parent_repo_paths(task, parent_work_dir)
     kwargs: dict[str, Any] = {
-        "name": name, "prompt": task, "sea_path": sea_path, "work_dir": work_dir,
+        "name": name, "prompt": sub_task_prompt(task, parent_work_dir, inherit, machine_name),
+        "sea_path": sea_path, "work_dir": work_dir,
         "model_name": run_options.model, "budget": run_options.max_budget, "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
@@ -1392,6 +1389,28 @@ def plan_run_agent(
         "alias": command_alias(resolved[0]) if is_sea_path(agent.strip()) else "",
     }
     return kwargs
+
+
+def sub_task_prompt(task: str, parent_work_dir: str, inherit: bool, machine: str) -> str:
+    """Return the prompt a sub-task planned by :func:`plan_run_agent` gets for *task*.
+
+    The one part of a plan that depends on the task text: a sub-task
+    that inherits from the caller and runs on this daemon gets the
+    caller's main-repository paths rewritten to its worktree
+    (:func:`rewrite_parent_repo_paths`, when
+    ``dispatch_path_rewrite`` is on); a channel, an ``inherit: false``
+    call or a run on another *machine* (whose paths mean nothing
+    here) gets *task* as given.
+
+    Args:
+        task: The task text.
+        parent_work_dir: Work directory of the calling task.
+        inherit: The plan's ``inherit`` flag.
+        machine: The plan's ``machine`` name; empty for this daemon.
+    """
+    if inherit and not machine and DEFAULT_CONFIG.dispatch_path_rewrite:
+        return rewrite_parent_repo_paths(task, parent_work_dir)
+    return task
 
 
 def remote_sea(sea_path: str) -> tuple[str, str]:
@@ -1505,13 +1524,15 @@ def run_agents_parallel(
     """Run *tasks* as N ``run_agent`` sub-tasks at once and wait for them together.
 
     The implementation behind the ``run_parallel`` tool
-    (:func:`make_run_parallel_tool`): one :func:`start_run_agent` per
-    task with the same agent and arguments — so a child is exactly
-    what ``run_agent`` would start, with the caller's remaining budget
-    shared among the N children plus the caller — then one wait of the
-    call's ``timeout`` for all of them.  A child still running when
-    the wait ends is not stopped: its entry is the job notice, and
-    ``agent_job`` collects or kills it.
+    (:func:`make_run_parallel_tool`): one :func:`plan_run_agent` for
+    the call (the agent and arguments are the same for every task, so
+    the SEA is resolved, loaded and checked once) and one job per task
+    from that plan — so a child is exactly what ``run_agent`` would
+    start, with the caller's remaining budget shared among the N
+    children plus the caller — then one wait of the call's ``timeout``
+    for all of them.  A child still running when the wait ends is not
+    stopped: its entry is the job notice, and ``agent_job`` collects
+    or kills it.
 
     Args:
         parent_work_dir: Work directory of the calling task (see
@@ -1536,12 +1557,25 @@ def run_agents_parallel(
         checks are the same for every task, so nothing is started then).
     """
     started: list[AgentJob | str] = []
+    plan: dict[str, Any] | str | None = None
     try:
         for task in tasks:
-            job = start_run_agent(
-                parent_work_dir, task, agent, model, tool_profile, max_budget, timeout, options,
-                parent_agent, siblings=len(tasks),
-            )
+            job: AgentJob | str
+            if not task.strip():
+                job = EMPTY_TASK_ERROR
+            else:
+                if plan is None:
+                    plan = plan_run_agent(
+                        parent_work_dir, task, agent, model, tool_profile, max_budget, timeout,
+                        options, parent_agent, siblings=len(tasks),
+                    )
+                if isinstance(plan, str):
+                    job = plan
+                else:
+                    prompt = sub_task_prompt(
+                        task, parent_work_dir, plan["inherit"], plan["machine"],
+                    )
+                    job = start_agent_job(plan["name"], {**plan, "prompt": prompt}, parent_agent)
             if isinstance(job, str) and not started:
                 return job
             started.append(job)

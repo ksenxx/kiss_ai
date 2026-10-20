@@ -82,6 +82,28 @@ CRON_RUN_DIR_PATTERN = "%/cron/runs/%"
 """``LIKE`` pattern of the run directory a job without a ``work_dir`` of its own ran in."""
 
 
+def missing_columns(
+    conn: sqlite3.Connection, table: str, columns: Iterable[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Return the listed columns the table lacks.
+
+    A read-only check (``PRAGMA table_info`` needs no lock), so a
+    caller can find out whether a migration is due before taking
+    SQLite's write lock for it.
+
+    Args:
+        conn: Connection to the database.
+        table: The table to inspect.
+        columns: ``(name, declaration)`` pairs, as in
+            :data:`ADDED_TASK_COLUMNS`.
+
+    Returns:
+        The absent ``(name, declaration)`` pairs, in declaration order.
+    """
+    present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return [(name, declaration) for name, declaration in columns if name not in present]
+
+
 def add_missing_columns(
     conn: sqlite3.Connection, table: str, columns: Iterable[tuple[str, str]]
 ) -> list[str]:
@@ -96,11 +118,8 @@ def add_missing_columns(
     Returns:
         The names of the columns this call added, in declaration order.
     """
-    present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     added: list[str] = []
-    for name, declaration in columns:
-        if name in present:
-            continue
+    for name, declaration in missing_columns(conn, table, columns):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         added.append(name)
     return added

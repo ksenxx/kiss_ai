@@ -376,14 +376,17 @@ class TestRepoMemoryDomains:
         assert "Domain memories:" not in seen["system"]
 
         # A work dir the run will create inside the repo, and the default work
-        # dir (artifact_dir/kiss_workdir) when it lies inside a repo, both attach it.
+        # dir (the current directory, where the run executes) when it is the
+        # repo, both attach it.  artifact_dir/kiss_workdir is not the run's
+        # directory and must not decide the domain: it points outside the repo.
         SorcarAgent("new-dir-memory").run(
             model_name="claude-haiku-4-5", prompt_template="x",
             work_dir=str(repo / "not" / "yet"), web_tools=False, is_parallel=False,
             verbose=False,
         )
         assert list(seen["tools"].domains) == ["kissy"]
-        monkeypatch.setattr(config_module, "artifact_dir", str(repo / "artifacts"))
+        monkeypatch.setattr(config_module, "artifact_dir", str(plain / "artifacts"))
+        monkeypatch.chdir(repo)
         SorcarAgent("default-dir-memory").run(
             model_name="claude-haiku-4-5", prompt_template="x", web_tools=False,
             is_parallel=False, verbose=False,

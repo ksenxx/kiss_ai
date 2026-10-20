@@ -33,7 +33,12 @@ from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -188,12 +193,9 @@ def test_sea_methods_follow_the_user_contract() -> None:
 def test_slash_review_paper_resolves_to_the_bundled_sea() -> None:
     """``/review_paper <instructions>`` resolves to the instructions and this file."""
     assert sea_commands.get_command("review_paper") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/review_paper Review x.pdf for ICLR")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "Review x.pdf for ICLR"
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings([ReviewPaperSea()])
+    assert sea_commands.slash_command_task("/review_paper Review x.pdf for ICLR") == (
+        "Review x.pdf for ICLR", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([ReviewPaperSea()])
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="poppler not installed")
@@ -375,17 +377,15 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
 
     assert len(agentic) == 3
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         expected = {"read_paper", "check_review", "Bash", "run_parallel", "go_to_url", "finish"}
         assert expected <= names, names
         system = system_message(request)
         assert not system.startswith(review_paper_sea.SYSTEM_PROMPT)
         assert "# Paper-reviewing agent" in system
         assert "Judge the novelty" in system
-    tool_results = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 2, agentic[2]["messages"]
-    assert f"paper: {paper} (1 page)\n=== page 1 ===\n\\section{{Intro}}" in str(
-        tool_results[0]["content"]
-    )
-    assert "summary: 7 gate(s) failed" in str(tool_results[1]["content"])
-    assert "reviewer boilerplate: 4 (limit 0) FAIL" in str(tool_results[1]["content"])
+    results = tool_results(agentic[2])
+    assert len(results) == 2, agentic[2]["messages"]
+    assert f"paper: {paper} (1 page)\n=== page 1 ===\n\\section{{Intro}}" in results[0]
+    assert "summary: 7 gate(s) failed" in results[1]
+    assert "reviewer boilerplate: 4 (limit 0) FAIL" in results[1]

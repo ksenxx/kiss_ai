@@ -25,7 +25,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send, stubRaf} = harness;
+const {send, stubRaf, clickTab} = harness;
 
 const TS = 1767225600000;
 
@@ -34,15 +34,6 @@ function makePage() {
   win._testApi.endLaunch();
   win._testApi.hideWelcome();
   return {win};
-}
-
-// The Chats-panel pick: chat tabs have no row of their own any more.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  win._testApi.switchToTab(tabId);
 }
 
 /** Top-level collapsible panels of the visible transcript, in order. */
@@ -159,7 +150,9 @@ function testVisibleStreamKeepsNewestTwoOpen() {
     'the end of the task leaves the open panels open inside the Trajectory',
   );
   win.close();
-  console.log('  ok - a visible stream folds its tool panels, keeps Thoughts open');
+  console.log(
+    '  ok - a visible stream folds its tool panels, keeps Thoughts open',
+  );
 }
 
 function testOneOrTwoPanelsFoldNothing() {

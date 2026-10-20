@@ -124,19 +124,27 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
                 if (p < 0) { tabs.push(subTab); return; }
                 tabs.splice(p + 1, 0, subTab);
             }
+            function getTab(id) {
+                return tabs.find(function(t) { return t.id === id; }) || null;
+            }
             function renderTabBar() {}
             function persistTabState() {}
             """
             + helper_src
             + r"""
             var beforeActive = activeTabId;
-            var sub = createBackgroundSubagentTab('parent-1');
+            var sub = createBackgroundSubagentTab('parent-1', 'sub-uuid-1');
+            // The daemon names the sub-agent tab's id, so a second spawn
+            // under the same id reuses the open tab instead of stacking one.
+            var again = createBackgroundSubagentTab('parent-1', 'sub-uuid-1');
 
             var errors = [];
             if (activeTabId !== beforeActive)
                 errors.push('activeTabId changed: ' + activeTabId);
             if (!sub || sub.id !== 'sub-uuid-1')
                 errors.push('helper did not return new tab');
+            if (again !== sub)
+                errors.push('second spawn did not reuse the open tab');
             if (tabs.length !== 2)
                 errors.push('tabs length not 2: ' + tabs.length);
             if (tabs[0].id !== 'parent-1')

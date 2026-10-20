@@ -43,7 +43,11 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
 from kiss.core.kiss_error import BudgetExceededError
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
+from kiss.tests.agents.third_party_agents.recording_daemon import (
+    RecordingDaemon,
+    serve_recording_daemon,
+)
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -76,19 +80,17 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKis
 
 
 @pytest.fixture()
-def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+def daemon() -> Iterator[RecordingDaemon]:
     """A daemon stand-in every dispatch reaches; each ``run`` costs 0.25 on chat ``chat-child``.
 
     The dispatcher hands ``cron_agent._daemon_endpoint_file`` to
     ``daemon_client.run`` as its explicit endpoint file, which takes
     precedence over the unreachable ``KISS_SORCAR_LOCAL`` of :func:`env`.
     """
-    stand_in = RecordingDaemon(cost=0.25, tokens=10, steps=1, chat_id="chat-child")
-    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(stand_in.endpoint_file))
-    try:
+    with serve_recording_daemon(
+        cron_agent, "_daemon_endpoint_file", cost=0.25, tokens=10, steps=1, chat_id="chat-child"
+    ) as stand_in:
         yield stand_in
-    finally:
-        stand_in.close()
 
 
 def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
@@ -772,18 +774,8 @@ class TestFullRunInheritance:
         parent.discard()
 
 
-def _docker_available() -> bool:
-    try:
-        import docker
-
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.mark.slow
-@pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running")
+@pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
 def test_parent_container_is_attached_by_the_sub_task(
     env: IsolatedKissHome,
     daemon: RecordingDaemon,

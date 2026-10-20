@@ -68,7 +68,7 @@ class _StopDuringRetireAgent(ChatSorcarAgent):
     run_entered = False
     claimed_during_retire = False
 
-    def _retire_previous_worktree(self) -> None:
+    def _retire_previous_worktree(self) -> bool:
         """Press Stop, dwell 1.6 s (an injection would land here), drop the pending worktree."""
         state = agent_state.find_by_tab(self.tab_id)
         self.claimed_during_retire = bool(
@@ -80,6 +80,7 @@ class _StopDuringRetireAgent(ChatSorcarAgent):
         time.sleep(1.6)
         self._wt = None
         self.retire_completed = True
+        return True
 
     def run(self, *args: Any, **kwargs: Any) -> str:
         """Record that the loop was reached (it must not be after a Stop)."""

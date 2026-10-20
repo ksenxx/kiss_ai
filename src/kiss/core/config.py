@@ -131,6 +131,10 @@ def kiss_home() -> Path:
     return Path(env) if env else Path.home() / HOME_DIR
 
 
+ADOPTION_LOCK_TIMEOUT = 30.0
+"""Seconds :func:`adopt_legacy_file` waits for a concurrent adopter before giving up."""
+
+
 def adopt_legacy_file(
     path: Path,
     legacy_name: str,
@@ -172,6 +176,12 @@ def adopt_legacy_file(
             rename; ``""`` is the file itself.
         stale: Tells whether an existing file at *path* is a leftover of
             a version older than the one that wrote the legacy file.
+
+    Raises:
+        TimeoutError: When another adopter held the lock for longer
+            than :data:`ADOPTION_LOCK_TIMEOUT` seconds; the holder only
+            renames files, so such a wait means it is wedged, and
+            waiting on would hang the caller for good.
     """
     legacy = path.with_name(legacy_name)
     if not legacy.exists():
@@ -179,7 +189,9 @@ def adopt_legacy_file(
     # Everything else is decided under the lock: a file another adopter
     # is moving aside right now looks unreadable, and reading that as
     # "nothing to do" would open (and create) *path* while it is absent.
-    with exclusive_file_lock(path.with_name(path.name + ".rename.lock")):
+    with exclusive_file_lock(
+        path.with_name(path.name + ".rename.lock"), timeout=ADOPTION_LOCK_TIMEOUT,
+    ):
         if not _adoption_pending(path, legacy, stale):
             return
         if path.exists():
@@ -396,10 +408,11 @@ class Config(BaseModel):
         description=(
             "cc/ models bill the Claude subscription the `claude` CLI is logged "
             "in to (or CLAUDE_CODE_OAUTH_TOKEN): ANTHROPIC_API_KEY and "
-            "ANTHROPIC_AUTH_TOKEN are kept out of the CLI's environment.  Off, "
-            "the CLI inherits the environment and an API key bills tokens "
-            "(KISS_CLAUDE_CODE_USE_SUBSCRIPTION=0; the settings panel's "
-            "Claude Code switch overrides it)."
+            "ANTHROPIC_AUTH_TOKEN are kept out of the CLI's environment and a "
+            "turn costs $0.  Off, the CLI inherits the environment, an API key "
+            "bills tokens, and a turn is priced at the resolved Claude model's "
+            "catalog rate (KISS_CLAUDE_CODE_USE_SUBSCRIPTION=0; the settings "
+            "panel's Claude Code switch overrides it)."
         ),
     )
     # Codex (``codex/<model>``): the ``codex`` CLI bills the user's ChatGPT
@@ -418,9 +431,10 @@ class Config(BaseModel):
         description=(
             "codex/ models bill the ChatGPT subscription the `codex` CLI is "
             "logged in to (or CODEX_ACCESS_TOKEN): OPENAI_API_KEY and "
-            "CODEX_API_KEY are kept out of the CLI's environment.  Off, the "
-            "CLI inherits the environment and an API key bills tokens "
-            "(KISS_CODEX_USE_SUBSCRIPTION=0; the settings panel's Codex "
+            "CODEX_API_KEY are kept out of the CLI's environment and a turn "
+            "costs $0.  Off, the CLI inherits the environment, an API key bills "
+            "tokens, and a turn is priced at the named OpenAI model's catalog "
+            "rate (KISS_CODEX_USE_SUBSCRIPTION=0; the settings panel's Codex "
             "switch overrides it)."
         ),
     )

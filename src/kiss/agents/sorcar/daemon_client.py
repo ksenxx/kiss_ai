@@ -1106,9 +1106,15 @@ def run(
                 # Stop the task and keep reading until its terminal
                 # status confirms it is dead — the same stop-and-confirm
                 # as a stop-on-timeout, decided below in the
-                # ``stopping`` branches with ``cancelled`` set.
-                cancelled = stopping = True
-                deadline = _stop_and_await_confirmation(ws, tab_id, run_token, "cancelled")
+                # ``stopping`` branches with ``cancelled`` set.  A stop
+                # already pending (a timeout stop the task has not yet
+                # confirmed) is not sent again: its confirmation grace
+                # stays as it is, so a cancel cannot push the wait past
+                # the grace the timeout started.
+                cancelled = True
+                if not stopping:
+                    stopping = True
+                    deadline = _stop_and_await_confirmation(ws, tab_id, run_token, "cancelled")
                 continue
             if deadline is None:
                 # No deadline: wake periodically so an injected

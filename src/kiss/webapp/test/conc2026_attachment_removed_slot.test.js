@@ -34,65 +34,44 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {paste} = require('./attachment_helpers');
+const {makePage: buildPage} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const SHORT_DEADLINE_MS = 300;
 
-function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  // A wedged decoder: every call parks for ever, so only the deadline
-  // (or nothing) can settle a HEIC slot.
+// A wedged decoder: every call parks for ever, so only the deadline
+// (or nothing) can settle a HEIC slot.
+function wedgeDecoder(win) {
   let decodes = 0;
   win.createImageBitmap = function () {
     decodes += 1;
     return new Promise(() => {});
   };
+  return () => decodes;
+}
 
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  const mainSrc = fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8');
+function shortenDeadline(mainSrc) {
   const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
   assert.ok(
     mainSrc.includes(needle),
     'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
   );
-  win.eval(
-    mainSrc.replace(
-      needle,
-      `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
-    ) + '\n//# sourceURL=conc2026-attachment-removed-slot-main.js',
+  return mainSrc.replace(
+    needle,
+    `const ATTACH_PREPARE_TIMEOUT_MS = ${SHORT_DEADLINE_MS};`,
   );
-  return {win, decodeCount: () => decodes};
+}
+
+function makePage() {
+  let decodeCount;
+  const {win} = buildPage({
+    beforeScripts: w => {
+      decodeCount = wedgeDecoder(w);
+    },
+    mainSource: shortenDeadline,
+    sourceUrl: 'conc2026-attachment-removed-slot-main.js',
+  });
+  return {win, decodeCount};
 }
 
 function delay(ms) {

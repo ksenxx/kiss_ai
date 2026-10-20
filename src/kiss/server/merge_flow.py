@@ -123,6 +123,28 @@ def _capture_untracked(work_dir: str) -> set[str]:
     return set(_unquoted_name_lines(result.stdout))
 
 
+def _stage_all(work_path: Path) -> tuple[str, str]:
+    """Run ``git add -A`` in *work_path* and identify the commit it would make.
+
+    Returns:
+        ``(snapshot, "")`` where *snapshot* is ``"<HEAD> <index tree>"``:
+        the object ids ``git rev-parse HEAD`` (empty on an unborn branch)
+        and ``git write-tree`` print.  Two equal snapshots denote the same
+        commit, parent and content alike, however large the change; the
+        bounded diff text handed to the LLM cannot tell that, as a change
+        past its cap leaves it unchanged.  ``("", <reason>)`` when staging
+        failed.
+    """
+    add_result = _git("add", "-A", cwd=str(work_path))
+    if add_result.returncode != 0:
+        return "", _git_error_line(add_result, "git add failed")
+    tree_result = _git("write-tree", cwd=str(work_path))
+    if tree_result.returncode != 0:
+        return "", _git_error_line(tree_result, "git write-tree failed")
+    head = _git("rev-parse", "--verify", "-q", "HEAD", cwd=str(work_path)).stdout.strip()
+    return f"{head} {tree_result.stdout.strip()}", ""
+
+
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     """Check if *sha* refers to a valid commit object in *git_dir*.
 
@@ -135,6 +157,22 @@ def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     """
     check = _git("cat-file", "-t", sha, cwd=git_dir)
     return check.returncode == 0 and check.stdout.strip() == "commit"
+
+
+def _flatten_changed(
+    listing: list[tuple[GitWorktree, list[str]]], primary: GitWorktree | None,
+) -> list[str]:
+    """Merge per-worktree file lists into one.
+
+    Files of *primary* (the worktree the task's work dir is in) stay
+    relative to it; files of any other worktree are prefixed with that
+    repository's root.
+    """
+    files: list[str] = []
+    for wt, names in listing:
+        prefix = "" if wt is primary else f"{wt.repo_root}/"
+        files.extend(prefix + name for name in names)
+    return sorted(set(files))
 
 
 def _pending_worktrees(agent: Any) -> list[GitWorktree]:
@@ -256,31 +294,53 @@ class _MergeFlowMixin:
                     message="Not a git repository.", work_dir=requested_dir, reply_to=reply_to,
                 )
                 return
+            # The repository lock serializes this with the other git
+            # users of the repo (a new task's worktree setup, Source
+            # Control actions, Merge / Discard).  The message generation
+            # may take minutes, so the lock is held only around the git
+            # steps: stage + read the diff, then stage again + commit
+            # once the staged tree and parent are still the ones the
+            # message describes.
             with repo_lock(repo):
-                add_result = _git("add", "-A", cwd=str(work_path))
-                if add_result.returncode != 0:
+                snapshot, error = _stage_all(work_path)
+                diff_text = "" if error else GitWorktreeOps.staged_diff(work_path)
+            if error:
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="Staging failed: " + error,
+                    work_dir=requested_dir, reply_to=reply_to,
+                )
+                return
+            if not diff_text:
+                self._broadcast_autocommit_done(
+                    tab_id, success=True, committed=False,
+                    message="Nothing to commit.", work_dir=requested_dir, reply_to=reply_to,
+                )
+                return
+            if not reply_to:
+                self.printer.broadcast({
+                    "type": "notification",
+                    "id": f"manual-commit:{tab_id}",
+                    "severity": "info",
+                    "message": "Auto-generating commit message…",
+                    "tabId": tab_id,
+                })
+            msg = generate_commit_message_from_diff(diff_text)
+            with repo_lock(repo):
+                staged, error = _stage_all(work_path)
+                if error:
+                    error = "Staging failed: " + error
+                elif staged != snapshot:
+                    error = (
+                        "The working tree changed while the commit message "
+                        "was being generated; press Git Commit again."
+                    )
+                if error:
                     self._broadcast_autocommit_done(
                         tab_id, success=False, committed=False,
-                        message="Staging failed: " + _git_error_line(add_result, "git add failed"),
-                        work_dir=requested_dir, reply_to=reply_to,
+                        message=error, work_dir=requested_dir, reply_to=reply_to,
                     )
                     return
-                diff_text = GitWorktreeOps.staged_diff(work_path)
-                if not diff_text:
-                    self._broadcast_autocommit_done(
-                        tab_id, success=True, committed=False,
-                        message="Nothing to commit.", work_dir=requested_dir, reply_to=reply_to,
-                    )
-                    return
-                if not reply_to:
-                    self.printer.broadcast({
-                        "type": "notification",
-                        "id": f"manual-commit:{tab_id}",
-                        "severity": "info",
-                        "message": "Auto-generating commit message…",
-                        "tabId": tab_id,
-                    })
-                msg = generate_commit_message_from_diff(diff_text)
                 # Commit directly (the staged diff was verified
                 # non-empty above) so a failure's actual git output —
                 # pre-commit hook rejection text, identity/config
@@ -385,7 +445,7 @@ class _MergeFlowMixin:
 
     def _present_pending_worktree(
         self, tab_id: str, *, discard_if_empty: bool = True,
-    ) -> None:
+    ) -> bool:
         """Auto-discard an empty pending worktree or emit ``worktree_done``.
 
         Single source of truth for post-task / session-resume handling
@@ -397,21 +457,26 @@ class _MergeFlowMixin:
         - Worktree has no changes and *discard_if_empty* is True:
           auto-discard the empty branch (stale resumed sessions).
         - Worktree has no changes and *discard_if_empty* is False:
-          preserve the branch.  The post-task path passes False so the
-          branch stays visible in ``git branch`` for manual inspection.
+          leave the branch to the caller (the post-task path discards
+          it itself, announcing the discard).
 
         Args:
             tab_id: The tab with a pending worktree.
             discard_if_empty: When True (default), auto-discard the
                 branch if no files changed.
+
+        Returns:
+            ``True`` when ``worktree_done`` was broadcast, ``False``
+            otherwise.
         """
         state = agent_state.find_by_tab(tab_id)
         if state is None:
-            return
+            return False
         wt_agent = state.agent
         if wt_agent is None or not wt_agent._wt_pending:
-            return
-        changed = self._get_worktree_changed_files(tab_id)
+            return False
+        listing = self._list_pending(wt_agent)
+        changed = _flatten_changed(listing, wt_agent._wt)
         if not changed and discard_if_empty:
             with self._state_lock:
                 # Ownership re-check: the reads above ran outside the
@@ -426,9 +491,9 @@ class _MergeFlowMixin:
                     or state.agent is not wt_agent
                     or not wt_agent._wt_pending
                 ):
-                    return
+                    return False
                 if state.busy() and state.merge_thread is not threading.current_thread():
-                    return
+                    return False
                 prev_merging = state.is_merging
                 prev_thread = state.merge_thread
                 state.is_merging = True
@@ -439,7 +504,8 @@ class _MergeFlowMixin:
                 # above and the claim.  With the claim held, task
                 # admission refuses new runs on this tab, so this
                 # answer cannot go stale before it is acted on.
-                changed = self._get_worktree_changed_files(tab_id)
+                listing = self._list_pending(wt_agent)
+                changed = _flatten_changed(listing, wt_agent._wt)
                 if not changed:
                     # Automatic path: rescue git-ignored task output
                     # the changed-files probe cannot see (see
@@ -454,24 +520,24 @@ class _MergeFlowMixin:
                 # would dispose it.
                 self._dispose_if_closed(tab_id)
         if not changed:
-            return
+            return False
         # The singular fields describe the worktree the task's work dir
         # is in (the clients' file-link fallback directory and SCM
         # view); ``worktrees`` lists every pending worktree, one per
         # repository, which Merge / Discard / Do nothing all act on.
-        # Each worktree is probed once; the singular ``hasConflict`` is
-        # derived from the rows (``_conflict_of`` spawns 7 git processes
-        # per worktree).
+        # Each worktree's files were listed once above and the singular
+        # ``hasConflict`` is derived from the rows (``_conflict_of``
+        # spawns 7 git processes per worktree).
         rows = [
             {
                 "repoRoot": str(wt.repo_root),
                 "branch": wt.branch,
                 "worktreeDir": str(wt.wt_dir),
                 "originalBranch": wt.original_branch,
-                "changedFiles": self._changed_files_of(wt),
+                "changedFiles": files,
                 "hasConflict": self._conflict_of(wt),
             }
-            for wt in _pending_worktrees(wt_agent)
+            for wt, files in listing
         ]
         self.printer.broadcast({
             "type": "worktree_done",
@@ -484,23 +550,7 @@ class _MergeFlowMixin:
             "worktrees": rows,
             "tabId": tab_id,
         })
-
-    def _check_merge_conflict(self, tab_id: str = "") -> bool:
-        """Check if merging any pending worktree branch into its original would conflict.
-
-        Pure query — does **not** commit or otherwise mutate git state.
-        ``_present_pending_worktree`` derives the same answer from its
-        per-worktree rows; this is the direct accessor the tests use.
-
-        Args:
-            tab_id: The tab whose worktrees to check.
-
-        Returns:
-            True if a merge would likely fail, False otherwise.
-        """
-        state = agent_state.find_by_tab(tab_id)
-        wt_agent = state.agent if state is not None else None
-        return any(self._conflict_of(wt) for wt in _pending_worktrees(wt_agent))
+        return True
 
     def _conflict_of(self, wt: GitWorktree) -> bool:
         """Whether merging *wt*'s branch into its original branch would conflict.
@@ -600,12 +650,11 @@ class _MergeFlowMixin:
         state = agent_state.find_by_tab(tab_id)
         if state is None or state.agent is None:
             return []
-        primary = state.agent._wt
-        files: list[str] = []
-        for wt in _pending_worktrees(state.agent):
-            prefix = "" if wt is primary else f"{wt.repo_root}/"
-            files.extend(prefix + name for name in self._changed_files_of(wt))
-        return sorted(set(files))
+        return _flatten_changed(self._list_pending(state.agent), state.agent._wt)
+
+    def _list_pending(self, wt_agent: Any) -> list[tuple[GitWorktree, list[str]]]:
+        """Pair every pending worktree of *wt_agent* with its changed files, probed once."""
+        return [(wt, self._changed_files_of(wt)) for wt in _pending_worktrees(wt_agent)]
 
     def _changed_files_of(self, wt: GitWorktree) -> list[str]:
         """List files changed in *wt* vs its original branch.

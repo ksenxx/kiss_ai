@@ -17,9 +17,10 @@ Branches that cannot be reached without doubles: the headed
 ``_mask_headless_user_agent`` no-op needs a display; the "page closed
 while being scanned" skip in ``_find_live_page``, the tab clean-up when
 ``connect_over_cdp`` itself fails in ``_attach_live``, and the
-``except`` arms of ``_live_tab_id``/``_detach_live`` need the browser or
-the page to vanish between two CDP round trips; the localStorage restore
-failure needs the page's origin to be unreachable at exactly that moment.
+``except`` arms of ``_live_tab_id``/``_disconnect_live`` need the browser
+or the page to vanish between two CDP round trips; the localStorage
+restore failure needs the page's origin to be unreachable at exactly that
+moment.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.server.browser_tab import BrowserTabService
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.pause import Pause
 
 pytestmark = pytest.mark.skipif(
     not (Path.home() / ".cache" / "ms-playwright").is_dir(),
@@ -658,3 +660,60 @@ def test_browser_exiting_during_the_liveness_probe_is_noticed(tool, service, ser
 
     assert tool.go_to_url(f"{server}/inert").startswith("Page:")
     assert tool._live_tab in svc._pages and tool._browser is not connection
+
+
+def test_tab_crashed_while_blank_is_reported_dead_within_the_probe_deadline(tool, service, server):
+    """A renderer crash of the tab while it still shows ``about:blank`` is
+    answered by the driver with neither the crash nor its own timeout: the
+    probe's loop-side deadline must report the page dead, and the next call
+    gets a fresh tab."""
+    svc, printer = service
+    tool.show_browser()
+    tab_id = tool._live_tab
+    svc.navigate(tab_id, "go", "chrome://crash")
+    _wait(lambda: _events(printer, "browserError", tab_id=tab_id), "crash reported")
+    started = time.monotonic()
+    alive = tool._is_alive()
+    elapsed = time.monotonic() - started
+    assert not alive and elapsed < wut._CDP_CALL_TIMEOUT_SECS + 5, (alive, elapsed)
+    assert tool._page is None and tool._browser is not None
+
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert tool._live_tab in svc._pages
+
+
+def test_browser_replaced_under_a_pending_reattach_is_adopted_once(tool, service, server):
+    """The tab's renderer crashed (``_page`` dropped, the connection kept);
+    before the next call reattaches, the user closes that last tab and the
+    daemon's browser exits.  The call must land on the relaunched browser
+    with exactly one tab, and the replaced connection's late ``disconnected``
+    must not clear the new one."""
+    svc, printer = service
+    tool.show_browser()
+    tool.go_to_url(f"{server}/inert")
+    tab_id = tool._live_tab
+    old = tool._browser
+    svc.navigate(tab_id, "go", "chrome://crash")
+    _wait(lambda: not tool._is_alive(), "crash noticed")
+    assert tool._page is None and tool._browser is old and old.is_connected()
+
+    def close_the_last_tab(pause: Pause) -> None:
+        assert pause.paused.wait(30)
+        svc.close(tab_id)
+        _wait(lambda: svc._context is None, "browser exited")
+        pause.release()
+
+    with Pause(WebUseTool._attach_live.__code__, lambda _locals: True) as pause:
+        closer = threading.Thread(target=close_the_last_tab, args=(pause,), daemon=True)
+        closer.start()
+        tree = tool.go_to_url(f"{server}/inert")
+        closer.join(60)
+    assert tree.startswith("Page:"), tree
+    assert tool._browser is not old and not old.is_connected()
+    assert list(svc._pages) == [tool._live_tab]
+
+    page, context, browser = tool._page, tool._context, tool._browser
+    tool._on_browser_lost(old)
+    assert (tool._page, tool._context, tool._browser) == (page, context, browser)
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert list(svc._pages) == [tool._live_tab]

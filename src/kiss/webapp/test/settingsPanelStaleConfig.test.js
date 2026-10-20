@@ -28,16 +28,9 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
+const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 // Typing for real: set the value and fire the event the browser fires.
-function typeInto(win, id, value) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
-
 const STORED = {
   max_budget: 100,
   remote_password: 'pw-from-install',
@@ -86,11 +79,11 @@ function testLateConfigDataDoesNotClobberTypedKey() {
     'X-Old: 1',
     'untouched fields must still be populated from configData',
   );
-  // The remote password: configData carries it and the plain text box
-  // shows it, editable.
+  // The remote password: configData carries it and the box holds it,
+  // editable, masked until its eye toggle reveals it.
   const pw = win.document.getElementById('cfg-remote-password');
   assert.strictEqual(pw.readOnly, false, 'the remote password box is editable');
-  assert.strictEqual(pw.type, 'text', 'the remote password is shown in plain text');
+  assert.strictEqual(pw.type, 'password', 'the remote password is masked');
   assert.strictEqual(
     pw.value,
     'pw-from-install',

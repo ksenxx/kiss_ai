@@ -231,6 +231,34 @@ def test_a_concurrent_process_that_renamed_first_wins(tmp_path: Path) -> None:
     assert not (tmp_path / "old.md").exists()
 
 
+def test_a_wedged_adopter_is_waited_for_only_so_long(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A holder that never finishes its renames makes the adoption fail, not hang."""
+    (tmp_path / "old.md").write_text("rule")
+    lock_taken = threading.Event()
+    release = threading.Event()
+
+    def wedged_process() -> None:
+        with exclusive_file_lock(tmp_path / "new.md.rename.lock"):
+            lock_taken.set()
+            release.wait(timeout=30)
+
+    wedged = threading.Thread(target=wedged_process)
+    wedged.start()
+    assert lock_taken.wait(timeout=10)
+    monkeypatch.setattr(config, "ADOPTION_LOCK_TIMEOUT", 0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            config.adopt_legacy_file(tmp_path / "new.md", "old.md")
+        assert time.monotonic() - started < 10
+        assert (tmp_path / "old.md").read_text() == "rule"  # nothing was moved
+    finally:
+        release.set()
+        wedged.join(timeout=10)
+
+
 #: ``task_history`` as the versions of March/April 2026 created it, when
 #: the database was already called ``history.db``: integer ids, no
 #: ``extra`` column yet (that came 2026-04-13), none of today's columns.

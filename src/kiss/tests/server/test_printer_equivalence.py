@@ -379,34 +379,6 @@ class PrinterEquivalenceTest(unittest.TestCase):
         ]
         self.assertEqual(text_deltas, [])
 
-    def test_message_with_non_error_content_block_appears_in_both(self) -> None:
-        """A ``message`` carrying ``content`` blocks with ``is_error=False``
-        must reach both sinks.  Previously the ConsolePrinter only
-        rendered the block when ``is_error`` was truthy, hiding
-        successful tool blocks that the browser surfaces.
-        """
-        pair = _make_pair()
-
-        class _Block:
-            def __init__(self, content: str, is_error: bool) -> None:
-                self.content = content
-                self.is_error = is_error
-
-        class _Msg:
-            def __init__(self, blocks: list[_Block]) -> None:
-                self.content = blocks
-
-        block_text = "tool finished successfully"
-        msg = _Msg([_Block(block_text, is_error=False)])
-        pair.both_print(msg, type="message")
-        self._assert_in_both(block_text, pair)
-        tool_results = [
-            ev for ev in pair.browser.events if ev.get("type") == "tool_result"
-        ]
-        self.assertEqual(len(tool_results), 1)
-        self.assertIs(tool_results[0]["is_error"], False)
-        self.assertIn(block_text, tool_results[0]["content"])
-
     def test_known_divergence_non_error_tool_result(self) -> None:
         """``tool_result`` with ``is_error=False`` for a core tool
         (Bash/Read/Edit/Write) must reach both sinks.

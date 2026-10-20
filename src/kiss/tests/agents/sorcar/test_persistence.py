@@ -246,7 +246,7 @@ class TestSaveTaskExtra:
     def test_extra_in_search_results(self):
         task_id, _ = th._add_task("searchable extra", chat_id="1003")
         th._save_task_extra({"model": "test-model"}, task_id=task_id)
-        results = th._search_history("searchable")
+        results = th._load_history(query="searchable")
         assert len(results) == 1
         stored = json.loads(str(results[0]["extra"]))
         assert stored["model"] == "test-model"

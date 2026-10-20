@@ -87,7 +87,11 @@ class TestNoDrainAfterKissToolCallStop:
         )
         assert content == tc
         assert m._stopped_for_tool_calls is True
-        assert result_json == {"usage": {"input_tokens": 11, "output_tokens": 7}}
+        assert result_json == {
+            "usage": {"input_tokens": 11, "output_tokens": 7},
+            "api_billed": False,
+            "requests": 1,
+        }
         assert "post-stop output" not in "".join(rec.text_tokens())
 
 def _se(event: dict) -> dict:
@@ -118,7 +122,11 @@ class TestPerMessageUsageAccounting:
         ]
         _parse(m, events)
         response = m.take_partial_usage_response()
-        assert response == {"usage": {**self._START, "output_tokens": 10}}
+        assert response == {
+            "usage": {**self._START, "output_tokens": 10},
+            "api_billed": False,
+            "requests": 1,
+        }
         assert m.extract_input_output_token_counts_from_response(response) == (
             100, 10, 400, 1000, 0,
         )

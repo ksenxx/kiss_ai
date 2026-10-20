@@ -94,14 +94,14 @@ class TestUpdateIdleCancelLeavesBarrierOwnerAlone(_UpdateCheckTestBase):
         await super().asyncTearDown()
         ws._IDLE_UPDATE_POLL_S = self._orig_poll
 
-    def _gated_arm(self) -> bool:
+    def _gated_arm(self, gen: int) -> bool:
         """Executor thread: the real idle check, parked once it owns the launch.
 
         The park sits after the critical section that raised the
-        barrier and consumed the armed flag, and before the result
-        resumes the poller: the window the Cancel must land in.
+        barrier and consumed the armed generation, and before the
+        result resumes the poller: the window the Cancel must land in.
         """
-        armed = self._real_arm()
+        armed = self._real_arm(gen)
         if armed:
             self.verdict_reached.set()
             self.release_verdict.wait(timeout=30)

@@ -36,7 +36,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, _kill_process_group
 from kiss.core.processes import pid_alive
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
@@ -45,6 +45,7 @@ from kiss.core.tool_interrupt import (
     interrupt_tool_call,
     unregister_tool_call,
 )
+from kiss.tests.server.pause import Pause
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX shell/process-group semantics"
@@ -223,6 +224,32 @@ class TestBashJob:
         _wait_pid_dead(child_pid)
         # With the whole group gone, a second kill finds nothing (ESRCH).
         assert "exited with code 0" in tools.bash_job(job_id, action="kill")
+
+    def test_kill_reaches_descendants_of_a_shell_that_exits_during_the_kill(
+        self, tmp_path: Path,
+    ) -> None:
+        # The kill finds the shell running, then the shell exits (and the
+        # watcher reaps it) before the group is signalled: the daemonized
+        # child is still in the group named after the shell's pid and
+        # must not outlive the kill.
+        tools = UsefulTools(work_dir=str(tmp_path))
+        child_pid_file = tmp_path / "daemon.pid"
+        job_id, pid, _log = _start(tools, f"sleep 60 & echo $! > {child_pid_file}; sleep 1")
+        _wait_for_text(child_pid_file, "\n")
+        child_pid = int(child_pid_file.read_text().strip())
+        report: list[str] = []
+        with Pause(_kill_process_group.__code__, lambda f: f["process"].pid == pid) as pause:
+            killer = threading.Thread(
+                target=lambda: report.append(tools.bash_job(job_id, action="kill")), daemon=True
+            )
+            killer.start()
+            assert pause.paused.wait(10), "the kill never reached the group signal"
+            _wait_pid_dead(pid)
+            assert pid_alive(child_pid)
+            pause.release()
+            killer.join(20)
+        assert report and "exited with code 0" in report[0], report
+        _wait_pid_dead(child_pid)
 
     def test_tail_reads_only_the_end_of_a_large_log(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))

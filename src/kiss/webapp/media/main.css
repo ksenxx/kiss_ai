@@ -38,7 +38,6 @@
   --yellow: var(--theme-charts-yellow, #cca700);
   --purple: var(--theme-charts-purple, #b180d7);
   --cyan: var(--theme-terminal-ansiCyan, #11a8cd);
-  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --error: var(--theme-errorForeground, #f85149);
   --warning: var(--theme-editorWarning-foreground, #cca700);
 
@@ -152,7 +151,6 @@
   --panel-tint-solid: color-mix(in srgb, var(--fg) 4%, var(--bg));
   --panel-line: color-mix(in srgb, var(--fg) 10%, transparent);
   --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
-  --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
 
   /* The two speech bubbles of the thread: the user's (task panel,
@@ -341,7 +339,6 @@ body {
   background: color-mix(in srgb, var(--fg) 6%, transparent);
   color: var(--fg);
   cursor: pointer;
-  font-family: inherit;
   font-size: var(--fs-sm);
   padding: var(--space-1) var(--space-2-5);
   display: inline-flex;
@@ -375,7 +372,6 @@ body {
 
 .kiss-notification-input {
   width: 100%;
-  box-sizing: border-box;
   height: 24px;
 }
 
@@ -639,8 +635,6 @@ body.content-tab-open #chat-header { display: none; }
   border-radius: var(--radius-sm);
   color: var(--fg);
   font-size: var(--fs-base);
-  font-family: inherit;
-  box-sizing: border-box;
 }
 
 .config-label textarea { resize: vertical; }
@@ -683,7 +677,7 @@ body.content-tab-open #chat-header { display: none; }
   display: flex; align-items: center; gap: var(--space-1);
   width: 100%; padding: var(--space-0-5) 0; margin: 0 0 var(--space-1-5);
   background: none; border: none;
-  font-family: inherit; font-size: var(--fs-md); font-weight: 600;
+  font-size: var(--fs-md); font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.05em;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   text-align: left;
@@ -800,7 +794,6 @@ body.content-tab-open #chat-header { display: none; }
   border-radius: var(--radius-sm);
   color: var(--fg);
   font-size: var(--fs-md);
-  font-family: inherit;
   cursor: pointer;
 }
 
@@ -838,6 +831,12 @@ body.content-tab-open #chat-header { display: none; }
 }
 .config-password-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .config-password-toggle:focus-visible { outline: 1px solid var(--accent); }
+
+/* Settings > Remote password: the refresh button (new random password,
+   setupRemotePasswordField in main.js) sits left of the eye toggle, so
+   the box keeps room for both. */
+.config-password-wrap-refresh input { padding-right: calc(var(--space-8) + 28px) !important; }
+.config-password-refresh { right: 34px; }
 
 #tab-list::-webkit-scrollbar { display: none; }
 
@@ -878,7 +877,7 @@ body.content-tab-open #chat-header { display: none; }
    failed.  Every icon takes its colour from `currentcolor`, so the
    element that carries the state class only has to set `color`. */
 .status-spinner, .status-tick, .status-cross, #wait-spinner {
-  display: inline-block; flex-shrink: 0; box-sizing: border-box;
+  display: inline-block; flex-shrink: 0;
   width: 12px; height: 12px;
 }
 
@@ -1054,9 +1053,10 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 .user-msg.collapsed .task-panel-text,
 .task-panel.collapsed .task-panel-info { display: none; }
 
-/* The task's settings info on a shared page (model, worktree / parallel
-   modes, budget, start time, chat / task / parent ids), like the info
-   rows of the history sidebar. */
+/* The task's info rows on a saved page: the Task Info panel's rows
+   (Tokens, Cost, Steps, Time, Machine, Workdir, Max budget, Date,
+   Base model, Chat id, Task id, Parent task, Agent), one per line,
+   labelled like the panel's. */
 .task-panel-info {
   margin: 0 var(--space-3) var(--space-2);
   padding-top: var(--space-1);
@@ -1071,6 +1071,12 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 .task-panel-info-line {
   display: block;
   word-break: break-word;
+}
+
+.task-panel-info-label {
+  font-weight: 600;
+  white-space: nowrap;
+  margin-right: var(--space-1);
 }
 
 #output {
@@ -1091,7 +1097,7 @@ body.remote-chat.remote-desktop #output {
 #welcome {
   display: flex; flex-direction: column; align-items: center;
   justify-content: center; padding: var(--space-5) var(--space-3); text-align: center;
-  min-height: 100%; box-sizing: border-box;
+  min-height: 100%;
 }
 
 /* The logo is transparent art in two colourings: navy wordmark for
@@ -1166,7 +1172,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
    panel nested inside another (a tool error under its tool call, the
    panels a summary adopts into its .summary-sub) fills its parent
    instead. */
-.ev, .llm-panel { width: 95%; box-sizing: border-box; }
+.ev, .llm-panel { width: 95%; }
 .ev .ev, .ev .llm-panel { width: auto; }
 .ev { margin-bottom: var(--space-1-5); animation: fadeIn var(--dur-base) var(--ease); }
 
@@ -1516,7 +1522,7 @@ body.ask-answering #input-container {
   margin: var(--space-1-5) 0; max-height: 350px; overflow-y: auto;
   padding: var(--space-2) var(--space-2-5); background: var(--surface);
 }
-.llm-panel .txt { font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 79%, transparent); }
+.llm-panel .txt { font-size: var(--fs-md); color: color-mix(in srgb, var(--fg) 79%, transparent); }
 
 /* The composer's wait spinner: the shared ring (see .status-spinner)
    in the accent colour, faded in while a task runs. */
@@ -1690,7 +1696,7 @@ body.content-tab-open #send-btn { display: none !important; }
 
 #task-input {
   width: 100%; background: transparent; border: none; color: var(--fg);
-  font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
+  font-size: var(--fs-base); line-height: 1.5;
   resize: none; outline: none; min-height: 4.5em;
   padding: var(--space-0-5) var(--space-4) var(--space-0-5) var(--space-0-5);
 }
@@ -1752,7 +1758,7 @@ body.content-tab-open #send-btn { display: none !important; }
 #model-btn {
   display: flex; align-items: center; gap: var(--space-1-5);
   background: color-mix(in srgb, var(--fg) 3%, transparent); border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
-  border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); font-size: var(--fs-base); font-family: inherit;
+  border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); font-size: var(--fs-base);
   color: color-mix(in srgb, var(--fg) 58%, transparent); cursor: pointer; transition: border-color var(--dur-slow);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(300px, 50vw);
 }
@@ -1835,7 +1841,7 @@ body.content-tab-open #send-btn { display: none !important; }
   display: flex; align-items: center; gap: var(--space-2);
   background: none; border: none; border-radius: var(--radius-md);
   padding: var(--space-1-5) var(--space-2); cursor: pointer; text-align: left;
-  font-size: var(--fs-base); font-family: inherit;
+  font-size: var(--fs-base);
   color: color-mix(in srgb, var(--fg) 66%, transparent);
   transition: background var(--dur-fast), color var(--dur-base);
   white-space: nowrap;
@@ -1899,7 +1905,7 @@ body.remote-chat #terminal-btn { display: flex; }
 #model-search {
   width: 100%; background: transparent; border: none;
   border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg);
-  font-size: var(--fs-base); padding: var(--space-2) 28px var(--space-2) var(--space-3); font-family: inherit;
+  font-size: var(--fs-base); padding: var(--space-2) 28px var(--space-2) var(--space-3);
 }
 #model-search:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 #model-search::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
@@ -2383,7 +2389,6 @@ body.meta-section-resizing {
 .sidebar-inline-form select,
 .sidebar-inline-form textarea {
   width: 100%;
-  box-sizing: border-box;
   font: inherit;
   font-size: var(--fs-sm);
   color: var(--fg);
@@ -2620,7 +2625,6 @@ button.app-row-main .app-state { color: var(--accent); }
    cell rows, so it could no longer clear a weekend cell. */
 .spend-tip {
   position: absolute;
-  box-sizing: border-box;
   max-width: calc(100% - 4px);
   padding: 2px var(--space-1-5);
   border: 1px solid var(--border);
@@ -2881,7 +2885,6 @@ button.app-row-main .app-state { color: var(--accent); }
   font-size: var(--fs-base);
   padding: var(--space-1-5) var(--space-2-5);
   outline: none;
-  box-sizing: border-box;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -3144,7 +3147,6 @@ button.app-row-main .app-state { color: var(--accent); }
   background: none;
   border: none;
   color: var(--fg);
-  font-family: inherit;
   font-size: var(--fs-md);
   font-weight: 600;
   text-align: left;
@@ -3205,8 +3207,6 @@ button.app-row-main .app-state { color: var(--accent); }
   color: var(--fg);
   border-radius: var(--radius-sm);
 }
-
-.scm-row .explorer-icon { flex: 0 0 16px; }
 
 .scm-path {
   overflow: hidden;
@@ -3623,7 +3623,6 @@ button.app-row-main .app-state { color: var(--accent); }
 
 .pdf-toolbar button,
 .pdf-toolbar .pdf-download {
-  box-sizing: border-box;
   min-width: var(--space-8);
   height: var(--space-6);
   padding: 0 var(--space-2);
@@ -3660,7 +3659,6 @@ button.app-row-main .app-state { color: var(--accent); }
 /* The page number is a field (its width is set per document, from the
    number of digits in the page count); Enter jumps to the typed page. */
 .pdf-page-input {
-  box-sizing: border-box;
   height: var(--space-6);
   padding: 0 var(--space-1);
   border: 1px solid var(--border);
@@ -3691,13 +3689,12 @@ button.app-row-main .app-state { color: var(--accent); }
   padding: var(--space-3);
   width: max-content;
   min-width: 100%;
-  box-sizing: border-box;
 }
 
 .pdf-page {
   flex: 0 0 auto;
   box-shadow: var(--shadow-sm);
-  background: white;
+  background: var(--paper);
 }
 
 .pdf-page canvas {
@@ -3755,7 +3752,7 @@ button.app-row-main .app-state { color: var(--accent); }
 #tricks-add-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: var(--radius-md); color: var(--fg); font-size: var(--fs-base); padding: var(--space-1-5) 28px var(--space-1-5) var(--space-2-5);
-  outline: none; box-sizing: border-box;
+  outline: none;
 }
 .sidebar-section .search-wrap { margin-bottom: var(--space-2-5); }
 
@@ -3878,7 +3875,7 @@ button.app-row-main .app-state { color: var(--accent); }
 .history-filter-daterange {
   display: inline-flex; align-items: center; gap: var(--space-1);
   flex-wrap: nowrap; white-space: nowrap;
-  max-width: 100%; box-sizing: border-box; overflow: hidden;
+  max-width: 100%; overflow: hidden;
   padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -3893,7 +3890,7 @@ button.app-row-main .app-state { color: var(--accent); }
    <select>; the pill takes the accent when a tag is active. */
 .history-filter-tag {
   display: inline-flex; align-items: center; gap: var(--space-1);
-  white-space: nowrap; box-sizing: border-box;
+  white-space: nowrap;
   padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -3906,7 +3903,7 @@ button.app-row-main .app-state { color: var(--accent); }
 
 .history-filter-tag-select {
   background: transparent; border: none; outline: none;
-  color: var(--fg); font-size: var(--fs-sm); font-family: inherit;
+  color: var(--fg); font-size: var(--fs-sm);
   padding: var(--space-0-5) 0; cursor: pointer; min-width: 0;
 }
 
@@ -3933,7 +3930,7 @@ button.app-row-main .app-state { color: var(--accent); }
 .history-filter-sea {
   display: inline-flex; align-items: center; gap: var(--space-1);
   flex-wrap: nowrap; white-space: nowrap;
-  max-width: 100%; box-sizing: border-box;
+  max-width: 100%;
   padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -3944,8 +3941,8 @@ button.app-row-main .app-state { color: var(--accent); }
   background: transparent;
   border: none; border-bottom: 1px solid transparent;
   color: var(--fg); font-size: var(--fs-sm);
-  padding: var(--space-0-5) 0; outline: none; box-sizing: border-box;
-  font-family: inherit; cursor: pointer;
+  padding: var(--space-0-5) 0; outline: none;
+  cursor: pointer;
 }
 .history-filter-sea-select:focus { border-bottom-color: var(--accent); }
 
@@ -3973,8 +3970,7 @@ button.app-row-main .app-state { color: var(--accent); }
   background: transparent;
   border: none; border-bottom: 1px solid transparent;
   color: var(--fg); font-size: var(--fs-sm);
-  padding: var(--space-0-5) 0; outline: none; box-sizing: border-box;
-  font-family: inherit;
+  padding: var(--space-0-5) 0; outline: none;
 }
 .history-filter-date:focus { border-bottom-color: var(--accent); }
 
@@ -3994,7 +3990,6 @@ button.app-row-main .app-state { color: var(--accent); }
   border: none; border-radius: var(--radius-sm);
   color: color-mix(in srgb, var(--fg) 65%, transparent);
   padding: var(--space-0-5); cursor: pointer; line-height: 1;
-  font-family: inherit;
 }
 
 .history-filter-date-btn svg {
@@ -4051,7 +4046,6 @@ button.app-row-main .app-state { color: var(--accent); }
   color: var(--fg); cursor: pointer;
   padding: var(--space-1) 0; font-size: var(--fs-md);
   border-radius: var(--radius-sm); text-align: center;
-  font-family: inherit;
 }
 
 .kiss-datepicker .dp-day.dp-empty {
@@ -4075,7 +4069,7 @@ button.app-row-main .app-state { color: var(--accent); }
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   border: 1px solid var(--border); color: var(--fg);
   padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); cursor: pointer;
-  font-size: var(--fs-sm); font-family: inherit;
+  font-size: var(--fs-sm);
 }
 
 .kiss-datepicker .dp-foot button:hover {
@@ -4189,7 +4183,6 @@ button.app-row-main .app-state { color: var(--accent); }
    looks like the title it replaces. */
 .history-chat-title-input {
   width: 100%;
-  box-sizing: border-box;
   font: inherit;
   color: var(--fg);
   background: var(--input-bg, var(--bg));
@@ -4302,8 +4295,6 @@ button.app-row-main .app-state { color: var(--accent); }
   align-items: center;
   row-gap: var(--space-2);
   padding-left: 19px;
-  background-color: transparent;
-  color: var(--fg);
 }
 
 .running-item:hover {
@@ -4329,8 +4320,6 @@ body.remote-chat .running-item.history-active-task:hover {
   font-weight: 400;
   white-space: normal;
   word-break: break-word;
-  overflow: hidden;
-  text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   line-clamp: 3;
@@ -4529,7 +4518,6 @@ body.remote-chat .running-item.history-active-task:hover {
 .auth-modal-content {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: var(--radius-xl); padding: var(--space-5); width: 90%; max-width: 360px;
-  box-sizing: border-box;
 }
 
 /* The title, button row and buttons are shared with the server-reset
@@ -4540,7 +4528,7 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .auth-modal-input {
-  width: 100%; box-sizing: border-box;
+  width: 100%;
   background: color-mix(in srgb, var(--fg) 5%, transparent);
   border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg);
   font-size: var(--fs-lg); padding: var(--space-2) var(--space-2-5); outline: none; margin-bottom: var(--space-3);
@@ -4577,14 +4565,14 @@ body.remote-chat .running-item.history-active-task:hover {
   position: absolute; inset: 0;
   background: var(--scrim-strong);
   align-items: center; justify-content: center;
-  z-index: var(--z-alert); padding: var(--space-4); box-sizing: border-box;
+  z-index: var(--z-alert); padding: var(--space-4);
 }
 #server-reset-confirm-modal.open { display: flex; }
 
 .server-reset-confirm-content {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: var(--radius-xl); padding: var(--space-5); width: 90%; max-width: 360px;
-  box-sizing: border-box; box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-lg);
 }
 
 .server-reset-confirm-message {
@@ -4648,7 +4636,7 @@ code { font-family: var(--font-mono); }
   /* Never taller than the viewport (main.js slides it to fit): a text
      longer than a screen, such as a scheduled job's prompt, is cut at
      the bottom edge; its copy button gives the whole of it. */
-  max-height: calc(100vh - 16px); overflow: hidden; box-sizing: border-box;
+  max-height: calc(100vh - 16px); overflow: hidden;
 }
 #custom-tooltip.visible { opacity: 1; }
 
@@ -4668,7 +4656,7 @@ code { font-family: var(--font-mono); }
 
 .wt-btn {
   padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);
-  font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
+  font-size: var(--fs-sm); cursor: pointer;
   transition: background var(--dur-base), border-color var(--dur-base), color var(--dur-base); background: transparent; color: var(--fg);
 }
 .wt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -4736,7 +4724,7 @@ code { font-family: var(--font-mono); }
   align-self: center; margin-top: calc(-1 * var(--space-8)); margin-bottom: var(--space-1-5);
   padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg);
   background: var(--bg2); color: var(--fg);
-  font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
+  font-size: var(--fs-sm); cursor: pointer;
   box-shadow: var(--shadow-md);
 }
 .new-output-btn:hover { background: color-mix(in srgb, var(--accent) 15%, var(--bg)); }
@@ -4956,7 +4944,7 @@ code { font-family: var(--font-mono); }
   border: 3px solid var(--border);
   border-top-color: var(--accent);
   border-radius: var(--radius-round);
-  animation: kiss-server-loading-spin 1s linear infinite;
+  animation: status-spin 1s linear infinite;
 }
 
 .kiss-server-loading-msg {
@@ -4974,7 +4962,6 @@ code { font-family: var(--font-mono); }
   max-width: calc(100vw - 16px);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  background: var(--bg);
   box-shadow: var(--shadow-sm);
   pointer-events: none;
 }
@@ -4994,11 +4981,6 @@ code { font-family: var(--font-mono); }
 #kiss-server-loading.kiss-server-loading--banner .kiss-server-loading-msg {
   font-size: var(--fs-sm);
   white-space: nowrap;
-}
-
-@keyframes kiss-server-loading-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 #content-tab-area {
@@ -5026,7 +5008,6 @@ code { font-family: var(--font-mono); }
   flex-direction: column;
   background: var(--bg);
   padding: var(--space-1) 0 0 var(--space-1);
-  box-sizing: border-box;
 }
 
 #content-tab-area .terminal-surface {
@@ -5201,7 +5182,6 @@ code { font-family: var(--font-mono); }
 
 #content-tab-area .content-code-fallback {
   height: 100%;
-  box-sizing: border-box;
   overflow: auto;
   margin: 0;
   padding: var(--space-2) var(--space-3);

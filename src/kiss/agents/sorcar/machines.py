@@ -73,7 +73,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -338,7 +338,7 @@ def find_machine(name_or_host: str) -> Machine | None:
 
 
 def save_machines(machines: list[Machine]) -> None:
-    """Write the registry atomically (created 0600) and drop cached links."""
+    """Write the registry atomically (created 0600); drop the links of machines no longer in it."""
     path = machines_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{MACHINES_FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -346,7 +346,7 @@ def save_machines(machines: list[Machine]) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump({"machines": [asdict(m) for m in machines]}, handle, indent=2)
     os.replace(tmp, path)
-    close_links()
+    close_links(keep=machines)
 
 
 @contextmanager
@@ -841,11 +841,10 @@ def _cached_tunnel(ssh: str, remote_port: int) -> SshTunnel:
     return tunnel
 
 
-def _drain(cache: dict[Any, Any]) -> list[Any]:
-    """Empty *cache* and return what it held (under its lock)."""
-    items = list(cache.values())
-    cache.clear()
-    return items
+def _evict_tunnels(kept: set[str]) -> list[SshTunnel]:
+    """Forget and return the tunnels of every ssh login not in *kept* (under the lock)."""
+    gone = [ssh for ssh in _tunnels if ssh not in kept]
+    return [_tunnels.pop(ssh) for ssh in gone]
 
 
 def tunnel_port(ssh: str, remote_port: int) -> int:
@@ -880,9 +879,13 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
     raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
 
 
-def close_tunnels() -> None:
-    """Close and forget every ssh port-forward (after a registry change, at exit)."""
-    tunnels: list[SshTunnel] = locked_call(_tunnels_lock, _drain, _tunnels)
+def close_tunnels(keep: Iterable[str] = ()) -> None:
+    """Close and forget the ssh port-forward of every login not in *keep*.
+
+    Called with the logins of the registry just written (a forward to
+    a machine still registered stays up) and with none at exit.
+    """
+    tunnels: list[SshTunnel] = locked_call(_tunnels_lock, _evict_tunnels, set(keep))
     for tunnel in tunnels:
         tunnel.close()
 
@@ -1340,16 +1343,27 @@ def link_for(machine: Machine, lane: str = "") -> MachineLink:
     return locked_call(_links_lock, _cached_link, machine, lane)
 
 
-def close_links() -> None:
-    """Retire and forget every cached link and ssh tunnel (after a registry change, at exit).
+def _evict_links(kept: set[tuple[str, str, str, str]]) -> list[MachineLink]:
+    """Forget and return the cached links of every machine not in *kept* (under the lock)."""
+    gone = [key for key in _links if key[:4] not in kept]
+    return [_links.pop(key) for key in gone]
 
-    A machine registered again gets a fresh tunnel (its daemon port may
-    have changed), a removed one leaves no ssh process behind.
+
+def close_links(keep: Iterable[Machine] = ()) -> None:
+    """Retire and forget the cached links and ssh tunnels of every machine not in *keep*.
+
+    :func:`save_machines` passes the registry it wrote, so only a
+    machine whose entry changed or vanished loses its links (an open
+    stream to any other machine survives the change); the ``atexit``
+    call keeps nothing.  A machine registered again gets a fresh link
+    and tunnel (its password or daemon port may have changed), a
+    removed one leaves no ssh process behind.
     """
-    links: list[MachineLink] = locked_call(_links_lock, _drain, _links)
+    kept = {(m.name, m.url, m.password, m.ssh) for m in keep}
+    links: list[MachineLink] = locked_call(_links_lock, _evict_links, kept)
     for link in links:
         link.retire()
-    close_tunnels()
+    close_tunnels({m.ssh for m in keep if m.ssh})
 
 
 atexit.register(close_links)

@@ -18,6 +18,7 @@ import json
 import sys
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -29,7 +30,6 @@ from kiss.agents.third_party_agents.nextcloud import nextcloud_sea as nc_mod
 from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkChannelBackend
 from kiss.agents.third_party_agents.synology import synology_sea as syno_mod
 from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
-from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
@@ -113,12 +113,11 @@ class TestBlueBubbles:
     """BlueBubbles backend: cursor handling, chat filtering, send errors."""
 
     @pytest.fixture(autouse=True)
-    def _isolated(self):
+    def _isolated(self, isolated_kiss_home: Path):
         """Clean BlueBubbles config plus a fresh recording server per test."""
-        with config_backup(bb_mod._config.path):
-            with recording_server(_Handler, _ResponderServer) as server:
-                self._server, self._url = server, server.base_url
-                yield
+        with recording_server(_Handler, _ResponderServer) as server:
+            self._server, self._url = server, server.base_url
+            yield
 
     def _make_backend(self) -> BlueBubblesChannelBackend:
         backend = BlueBubblesChannelBackend()
@@ -222,12 +221,11 @@ class TestNextcloudTalk:
     """Nextcloud Talk backend: URL normalization, poll cursor/ts, send/join."""
 
     @pytest.fixture(autouse=True)
-    def _isolated(self):
+    def _isolated(self, isolated_kiss_home: Path):
         """Clean Nextcloud config plus a fresh recording server per test."""
-        with config_backup(nc_mod._config.path):
-            with recording_server(_Handler, _ResponderServer) as server:
-                self._server, self._url = server, server.base_url
-                yield
+        with recording_server(_Handler, _ResponderServer) as server:
+            self._server, self._url = server, server.base_url
+            yield
 
     def _save_config_with_trailing_slash(self) -> None:
         nc_mod._config.save({"url": self._url + "/", "username": "bot", "password": "pw"})
@@ -329,17 +327,16 @@ class TestSynologyChat:
     """Synology Chat backend: webhook form parsing, send body, poll drain."""
 
     @pytest.fixture(autouse=True)
-    def _isolated(self):
+    def _isolated(self, isolated_kiss_home: Path):
         """Clean Synology config plus a fresh recording server per test."""
         self._backend: SynologyChatChannelBackend | None = None
-        with config_backup(syno_mod._config.path):
-            with recording_server(_Handler, _ResponderServer) as server:
-                self._server, self._url = server, server.base_url
-                try:
-                    yield
-                finally:
-                    if self._backend is not None:
-                        self._backend.disconnect()
+        with recording_server(_Handler, _ResponderServer) as server:
+            self._server, self._url = server, server.base_url
+            try:
+                yield
+            finally:
+                if self._backend is not None:
+                    self._backend.disconnect()
 
     def _post_webhook(self, fields: dict[str, str]) -> None:
         assert self._backend is not None and self._backend._webhook_server is not None
@@ -353,30 +350,28 @@ class TestSynologyChat:
         with urllib.request.urlopen(req, timeout=10) as resp:
             assert resp.status == 200
 
-    def test_webhook_parses_synology_form_fields(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_webhook_parses_synology_form_fields(self) -> None:
         """Synology outgoing webhooks POST form fields directly (not a
         Slack-style payload= JSON blob); the handler must parse them and
         verify the configured token.
 
         Drives the PUBLIC configured ``connect()`` end to end — config
         loading, attribute wiring, and the webhook server start.  The
-        webhook port is a constant baked into
-        ``_start_webhook_server``'s default argument, so that default
-        (a config value, not a test double) is rebound to 0 for the
-        test: the OS assigns a free port, where the fixed 18083 would
-        race with parallel pytest processes.
+        config's ``webhook_port`` of ``0`` makes the OS assign a free
+        port (the fixed 18083 would race with parallel pytest
+        processes); the bound port is reported in the connection info.
         """
-        syno_mod._config.save({"webhook_url": self._url + "/webhook", "token": "sekret"})
-        self._backend = SynologyChatChannelBackend()
-        monkeypatch.setattr(
-            SynologyChatChannelBackend._start_webhook_server,
-            "__defaults__",
-            (0,),
+        syno_mod._config.save(
+            {"webhook_url": self._url + "/webhook", "token": "sekret", "webhook_port": "0"}
         )
+        self._backend = SynologyChatChannelBackend()
         assert self._backend.connect() is True
+        assert self._backend._webhook_server is not None
+        bound = self._backend._webhook_server.server_address[1]
+        assert bound != 0
+        assert self._backend._connection_info == (
+            f"Synology Chat configured (webhook port {bound})"
+        )
         assert self._backend._webhook_url == self._url + "/webhook"
         assert self._backend._token == "sekret"
         self._post_webhook(
@@ -395,6 +390,18 @@ class TestSynologyChat:
         assert messages[0]["user"] == "42"
         assert messages[0]["text"] == "hello bot"
         assert messages[0]["ts"] == "1700000000"
+
+    def test_webhook_port_from_config(self) -> None:
+        """``webhook_port`` is honoured (0 included); absent, non-numeric or
+        out-of-range values fall back to the default so a bad config still
+        starts the server."""
+        default = syno_mod._DEFAULT_WEBHOOK_PORT
+        assert syno_mod._webhook_port({}) == default
+        assert syno_mod._webhook_port({"webhook_port": ""}) == default
+        assert syno_mod._webhook_port({"webhook_port": "0"}) == 0
+        assert syno_mod._webhook_port({"webhook_port": "18090"}) == 18090
+        for bad in ("abc", "-1", "65536"):
+            assert syno_mod._webhook_port({"webhook_port": bad}) == default
 
     def test_send_message_posts_payload_in_body_without_channel_id(self) -> None:
         """send_message must send payload= in the POST body (not URL params)

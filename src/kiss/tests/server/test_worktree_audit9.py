@@ -16,7 +16,7 @@ BUG-42 / INC-5: Auto-discard of an empty pending worktree is safe and
 BUG-43: Manual merge instructions now use `git cherry-pick --no-commit
     baseline..branch` when a baseline commit exists, matching what the
     merge actually does.
-INC-6: `_check_merge_conflict` now checks both unstaged AND staged
+INC-6: `_conflict_of` now checks both unstaged AND staged
     files for dirty-file overlap (historically via the since-removed
     `unstaged_files()`/`staged_files()` helpers).
 """
@@ -35,10 +35,11 @@ from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_worktree_audit9 import (  # noqa: F401
     _make_repo,
 )
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 class TestInc6Fix:
-    """INC-6 FIX: _check_merge_conflict checks both unstaged and staged files."""
+    """INC-6 FIX: _conflict_of checks both unstaged and staged files."""
 
 
     def test_staged_overlap_detected(self, tmp_path):
@@ -77,7 +78,7 @@ class TestInc6Fix:
         )
         agent_state.register(st)
         try:
-            has_conflict = server._check_merge_conflict("inc6-tab")
+            has_conflict = merge_conflict(server, "inc6-tab")
             assert has_conflict, (
                 "INC-6 fix: staged file overlap must be detected"
             )

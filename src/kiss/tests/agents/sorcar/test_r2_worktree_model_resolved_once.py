@@ -99,4 +99,4 @@ def test_run_without_a_model_keeps_its_first_resolution(
         standin.stop()
     # ``run`` creates no worktree by itself: that is the agent's
     # ``create_worktree`` tool, which the stopped run never reached.
-    assert agent.worktree is None
+    assert agent._wt is None

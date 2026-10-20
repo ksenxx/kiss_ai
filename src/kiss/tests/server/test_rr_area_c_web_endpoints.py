@@ -4,12 +4,13 @@
 # add your name here
 """C-R1 / C-RC3: endpoint-send delegation and local-endpoint publication.
 
-* C-R1 — ``RemoteAccessServer._endpoint_send`` duplicated
-  ``WebPrinter._locked_send`` but silently dropped the dead-peer
+* C-R1 — the daemon's direct replies once went through a copy of
+  ``WebPrinter._locked_send`` that silently dropped the dead-peer
   removal ``_timed_send`` performs, so a local peer that died
   mid-session stayed in the broadcast set forever and every direct
-  reply to it raised out of the dispatch path.  After the fix it
-  delegates to the printer's send, so a failed write removes the peer.
+  reply to it raised out of the dispatch path.  Direct replies now
+  go through the printer's send itself, so a failed write removes
+  the peer.
 
 * C-RC3 — two daemons starting concurrently used to race on the
   shared local channel.  In the WSS era the shared resource is the
@@ -77,7 +78,7 @@ class TestEndpointSendRemovesDeadLocalClient(IsolatedAsyncioTestCase):
         # Must NOT raise (the old inline write/drain propagated the
         # write failure into the dispatch path) ...
         for _ in range(3):
-            await server._endpoint_send(server_side, '{"type":"ping"}')
+            await server._printer._locked_send(server_side, '{"type":"ping"}')
             if server_side not in server._printer._local_clients:
                 break
             await asyncio.sleep(0.05)

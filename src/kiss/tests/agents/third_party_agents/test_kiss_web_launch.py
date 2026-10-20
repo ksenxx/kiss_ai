@@ -41,7 +41,6 @@ import os
 import re
 import sys
 import threading
-import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +59,7 @@ from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import start_serving
+from kiss.tests.agents.third_party_agents.test_hermes_runner import RecordingBackend, ThreadBackend
 from kiss.tests.server.parallel_agent_harness import (
     _PROVIDER_KEYS,
     STANDIN_MODEL,
@@ -277,12 +277,7 @@ class _ApiLaunchBase(LocalDaemonTestCase):
         )
         thread.start()
         try:
-            deadline = time.monotonic() + 30
-            while (
-                not model_server.seen.is_set() and thread.is_alive() and time.monotonic() < deadline
-            ):
-                model_server.seen.wait(timeout=0.1)
-            assert model_server.seen.is_set(), "the task never ran"
+            assert model_server.seen.wait(timeout=30), "the task never ran"
             states = agent_state.snapshot()
             assert len(states) == 1, states
             daemon_agent, task_thread = states[0].agent, states[0].task_thread
@@ -1029,46 +1024,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
         )
 
 
-class _RecordingBackend:
-    """A channel backend that records what the runner posts."""
-
-    def __init__(self) -> None:
-        self.outbox: list[tuple[str, str, str]] = []
-
-    def strip_bot_mention(self, text: str) -> str:
-        """Return *text* unchanged (no bot mention syntax in this backend)."""
-        return text
-
-    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Record the posted message."""
-        self.outbox.append((channel_id, text, thread_ts))
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """Return whether *msg* carries a ``bot_id``."""
-        return bool(msg.get("bot_id"))
-
-    def disconnect(self) -> None:
-        """Nothing to close."""
-
-
-class _ThreadPollingBackend(_RecordingBackend):
-    """A recording backend that can also list a thread's replies."""
-
-    def __init__(self, thread_replies: list[dict[str, Any]]) -> None:
-        super().__init__()
-        self.thread_replies = thread_replies
-
-    def poll_thread_messages(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        oldest: str,
-        limit: int = 100,
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Return the fixed thread replies and a zero cursor."""
-        return list(self.thread_replies), "0"
-
-
 class TestChannelRunnerViaApi(_ApiLaunchBase):
     """ChannelRunner._handle_message must launch through the API."""
 
@@ -1081,8 +1036,10 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             ChannelRunner,
         )
 
-        backend: _RecordingBackend = (
-            _RecordingBackend() if thread_replies is None else _ThreadPollingBackend(thread_replies)
+        backend = (
+            RecordingBackend()
+            if thread_replies is None
+            else ThreadBackend(thread_replies={"1.0": thread_replies})
         )
         runner = ChannelRunner(
             backend=backend,
@@ -1091,7 +1048,7 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             sea_path=sea_path,
             work_dir=str(Path(self.tmpdir) / "chanwork"),
         )
-        return runner, backend.outbox
+        return runner, backend.sent
 
     def test_handle_message_passes_sea_path_and_context(self) -> None:
         tools_py = Path(self.tmpdir) / "chan_tools.py"
@@ -1140,7 +1097,7 @@ class Sea(BaseSea):
     def test_handle_message_skips_summary_when_bot_replied(self) -> None:
         runner, outbox = self._make_runner(
             thread_replies=[
-                {"user": "U_BOT", "bot_id": "B1", "ts": "1.5", "text": "done"},
+                {"user": "U_BOT", "bot": True, "ts": "1.5", "text": "done"},
             ],
         )
         self.model_server.script = [finish_response("already answered in-thread")]

@@ -42,7 +42,7 @@ const path = require('path');
 const {spawnSync} = require('child_process');
 const harness = require('./simplify2_harness');
 
-const {send} = harness;
+const {send, clickTab} = harness;
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 
 // `JsonPrinter._filter_and_coalesce` is the function `stop_recording()`
@@ -83,20 +83,6 @@ function makePage() {
   page.win._testApi.endLaunch();
   page.win._testApi.hideWelcome();
   return page;
-}
-
-// A sub-agent or content tab on the group strip is clicked; a chat tab
-// has no row of its own, so it is picked the way the Chats panel does.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  const el = win.document.querySelector(
-    '#tab-list ' + `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
 }
 
 const TS = 1767225600000;
@@ -485,7 +471,13 @@ function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
   // A runs live with numbers of its own, distinct from B's.
   const aRun = recordedRun().map(ev => {
     if (ev.type === 'usage_info')
-      return {...ev, text: '', total_tokens: 999, cost: '$9.99', total_steps: 9};
+      return {
+        ...ev,
+        text: '',
+        total_tokens: 999,
+        cost: '$9.99',
+        total_steps: 9,
+      };
     if (ev.type === 'result')
       return {...ev, total_tokens: 999, cost: '$9.99', step_count: 9};
     return ev;
@@ -524,9 +516,7 @@ function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
   assert.strictEqual(hidden.budget, '', 'nor a cost');
   assert.strictEqual(hidden.steps, '', 'nor a step count');
   win.close();
-  console.log(
-    '  ok - a metric-free replay does not steal the visible numbers',
-  );
+  console.log('  ok - a metric-free replay does not steal the visible numbers');
 }
 
 // The replay's collapse pass can take the screen away mid-flight: a

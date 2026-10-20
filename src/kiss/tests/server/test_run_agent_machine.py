@@ -378,11 +378,11 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         )
         # No top-level tab for the sub-agent anywhere: not in the local
         # registry, not in the remote's.
-        tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
+        tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")
         self.assertEqual([t["tabId"] for t in tabs["tabs"]], [tab])
         box = next(m for m in mach.load_machines() if m.name == "box")
         remote_tabs = await asyncio.to_thread(
-            mach.link_for(box).request, {"type": "getTabsState"}, "tabs_state",
+            mach.link_for(box).request, {"type": "ready"}, "tabs_state",
         )
         self.assertEqual(remote_tabs["tabs"], [])
         # The task is the remote daemon's: its history has the row (nested
@@ -416,9 +416,11 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         # While it runs, every surface shows the dispatcher's tab, bound
         # to the box (the registry entry a local run publishes).
         api_tab = ""
+        registry = self.server._agent_server.tab_registry
         for _ in range(100):
-            tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
-            api_tab = next((t["tabId"] for t in tabs["tabs"] if t["tabId"].startswith("api-")), "")
+            api_tab = next(
+                (t["tabId"] for t in registry.snapshot() if t["tabId"].startswith("api-")), "",
+            )
             if api_tab:
                 break
             await asyncio.sleep(0.1)
@@ -431,8 +433,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         # The call's closeTab took the tab out of the registry and unbound it.
         published = [api_tab]
         for _ in range(100):
-            tabs = await self._ask({"type": "getTabsState"}, "tabs_state")
-            published = [t["tabId"] for t in tabs["tabs"]]
+            published = [t["tabId"] for t in registry.snapshot()]
             if api_tab not in published:
                 break
             await asyncio.sleep(0.1)
@@ -545,6 +546,88 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
             else:
                 seas_md.write_text(saved)
             refresh_registry()
+
+    async def test_a_sub_agent_that_fails_before_its_first_step_reports_why(self) -> None:
+        """A work dir the box cannot create: the caller sees the reason, not "Task failed".
+
+        What ``/sync`` hit when it forced a Mac's ``/Users/...`` path on
+        a Linux box: ``SorcarAgent.run``'s catch-all answered ``success:
+        False / summary: Task failed with error: ...`` without printing
+        a ``result`` event, and the sub-task's text relayed to the caller
+        was empty.  Here the path sits under a plain file, which no
+        machine can create a directory beneath.
+        """
+        blocker = Path(self.tmpdir) / "not-a-dir"
+        blocker.write_text("")
+        impossible = json.dumps({"work_dir": str(blocker / "work")})
+        _DelegatingModel.script = [
+            _run_agent(task=CHILD_TASK, machine="box", options=impossible),
+            _finish(PARENT_SUMMARY),
+        ]
+        tab = "tab-impossible"
+        seen, child = await self._delegate(tab)
+        tool_result = next(
+            (t for t in _DelegatingModel.tool_results if "machine=box" in t), "",
+        )
+        self.assertTrue(tool_result, f"no run_agent result among {_DelegatingModel.tool_results}")
+        self.assertIn("success: false", tool_result)
+        self.assertIn("Task failed with error:", tool_result)
+        self.assertIn("not-a-dir", tool_result)
+        # The failure is the sub-task's terminal result event on its tab
+        # too: live when the tab's ``resumeSession`` reached the box
+        # before the run ended, else in the transcript the resume
+        # replays (the run ends milliseconds after its ``new_tab``, and
+        # the box's agent stopped recording before the result went out).
+        # Rendered as a surface does: a replay replaces the transcript,
+        # a live event appends to it.
+        self.assertTrue(child, f"no new_tab; the model saw {_DelegatingModel.tool_results}")
+        transcript: list[dict[str, Any]] = []
+        for m in seen:
+            if m.get("tabId") != child:
+                continue
+            if m["type"] == "task_events":
+                transcript = list(m.get("events", []))
+            elif m["type"] == "result":
+                transcript.append(m)
+        child_results = [ev for ev in transcript if ev.get("type") == "result"]
+        self.assertEqual(len(child_results), 1, child_results)
+        self.assertFalse(child_results[0].get("success", True))
+        self.assertIn("Task failed with error:", json.dumps(child_results[0]))
+        self.assertIn(
+            ("subagentDone", child),
+            [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen],
+        )
+
+    async def test_a_sub_agent_that_finishes_unsuccessfully_reports_once(self) -> None:
+        """``finish(success=False)`` prints its own result: the daemon adds none.
+
+        The guard that broadcasts a result for a run that failed before
+        its first step must look at the finished task's own recording
+        (not the worker thread's binding, restored by then), else an
+        ordinary failed finish would be shown twice.
+        """
+        _DelegatingModel.script = [
+            _run_agent(task=CHILD_TASK, machine="box"),
+            {"pause": 1.0, "calls": [
+                ("finish", {"success": False, "summary_in_html": "<p>Could not say hi</p>"}),
+            ]},
+            _finish(PARENT_SUMMARY),
+        ]
+        tab = "tab-unsuccessful"
+        seen, child = await self._delegate(tab)
+        self.assertTrue(child, f"no new_tab; the model saw {_DelegatingModel.tool_results}")
+        tool_result = next(
+            (t for t in _DelegatingModel.tool_results if "machine=box" in t), "",
+        )
+        self.assertIn("success: false", tool_result)
+        self.assertIn("Could not say hi", tool_result)
+        child_results = [
+            m for m in seen if m["type"] == "result" and m.get("tabId") == child
+        ]
+        self.assertEqual(len(child_results), 1, child_results)
+        self.assertIn("Could not say hi", json.dumps(child_results[0]))
+        parent_results = [m for m in seen if m["type"] == "result" and m.get("tabId") == tab]
+        self.assertEqual(len(parent_results), 1, parent_results)
 
     async def test_this_machines_own_name_runs_the_agent_here(self) -> None:
         """``machine="localhost"`` or this host's IP is an ordinary local call.

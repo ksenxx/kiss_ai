@@ -12,6 +12,7 @@
 // asked once per connection; a reconnect still asks again.
 
 const assert = require('assert');
+const {sleep} = require('./simplify2_harness');
 const {
   newDom,
   loadPageScripts,
@@ -27,8 +28,6 @@ const PANEL_COMMANDS = [
   'getSpendReport',
   'getRecommendations',
 ];
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /** How many frames of each subpanel command *socket* carried. */
 function panelCounts(socket) {

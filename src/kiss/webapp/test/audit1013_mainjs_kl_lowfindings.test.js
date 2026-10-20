@@ -36,11 +36,18 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  sleep,
+  click,
+  byId,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+const {test, report} = makeRunner();
 
 /**
  * Build the page; `opts.noMonaco` leaves window.monaco unset (the
@@ -49,63 +56,9 @@ const MEDIA = path.join(__dirname, '..', 'media');
  */
 function makePage(opts) {
   opts = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  // The sidebar poll is recorded, never run.
-  win.setInterval = function () {
-    return 1;
-  };
-  win.clearInterval = function () {};
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
   const copied = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    value: {
-      writeText: text => {
-        copied.push(text);
-        return Promise.resolve();
-      },
-    },
-    configurable: true,
-  });
   // A fake Monaco rich enough for an editable content tab; every
-  // created editor is recorded.
+  // created editor is recorded with the lines it was asked to reveal.
   const created = [];
   const monaco = {
     editor: {
@@ -134,16 +87,34 @@ function makePage(opts) {
       },
     },
   };
-  if (!opts.noMonaco) win.monaco = monaco;
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=audit1013-kl-main.js',
-  );
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: [
+      'marked.min.js',
+      'contentContextMenu.js',
+      'treeContextMenu.js',
+    ],
+    sourceUrl: 'audit1013-kl-main.js',
+    beforeScripts(win) {
+      stubRaf(win);
+      // The sidebar poll is recorded, never run.
+      win.setInterval = function () {
+        return 1;
+      };
+      win.clearInterval = function () {};
+      fakeMatchMedia(win, true);
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          writeText: text => {
+            copied.push(text);
+            return Promise.resolve();
+          },
+        },
+        configurable: true,
+      });
+      if (!opts.noMonaco) win.monaco = monaco;
+    },
+  });
   return {win, posted, copied, created, monaco};
 }
 
@@ -164,24 +135,8 @@ function openText(win, path, content, version, line) {
   });
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /** Press Enter in a form input: sidebarInlineForm submits the form. */
@@ -201,19 +156,6 @@ function openForm(win, list) {
 
 function saveButton(form) {
   return form.querySelector('.sidebar-inline-form-save');
-}
-
-let failures = 0;
-
-async function test(name, fn) {
-  try {
-    await fn();
-    console.log(`  ok - ${name}`);
-  } catch (e) {
-    failures++;
-    console.log(`  FAIL - ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
 }
 
 /** Open the Schedule `+` form with a job typed in; returns the form. */
@@ -600,7 +542,11 @@ async function main() {
     assert.ok(contentViews(win)[0].querySelector('.content-mode-btn'));
     send(win, {type: 'task_done', success: true});
     await sleep(20);
-    assert.strictEqual(contentViews(win).length, 1, 'the report reuses the tab');
+    assert.strictEqual(
+      contentViews(win).length,
+      1,
+      'the report reuses the tab',
+    );
     assert.ok(
       contentViews(win)[0].querySelector('iframe.content-html-frame'),
       'the report view replaced the preview',
@@ -686,7 +632,11 @@ async function main() {
     assert.strictEqual(again.elements.address.value, 'me@gpu');
     assert.ok(saveButton(again).disabled, 'the retry is still in flight');
     pressEnter(win, again.elements.address);
-    assert.strictEqual(ofType(posted, 'machineAction').length, 2, 'no third add');
+    assert.strictEqual(
+      ofType(posted, 'machineAction').length,
+      2,
+      'no third add',
+    );
     send(win, {
       type: 'machines',
       machines: [{name: 'gpu', address: 'me@gpu', status: 'reachable'}],
@@ -724,8 +674,8 @@ async function main() {
     win.close();
   });
 
-  console.log(failures ? `\n${failures} failed` : '\nall passed');
-  process.exit(failures ? 1 : 0);
+  report('audit1013_mainjs_kl_lowfindings');
+  process.exit(0);
 }
 
 main();

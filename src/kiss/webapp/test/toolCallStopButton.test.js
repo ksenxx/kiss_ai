@@ -9,7 +9,7 @@
 // `interruptTool` for the panel's tab and tool; the `tool_interrupt_ack`
 // receipt resets a rejected click; the arriving tool_result hides it.
 
-/* global require, __dirname, console, process */
+/* global require, __dirname, console, process, setTimeout */
 
 'use strict';
 
@@ -17,60 +17,22 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  makePage: makeSharedPage,
+  send,
+  loadMainCss,
+} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = makeRunner();
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
   // The real stylesheet, so the running/finished visibility of the
   // button is checked through the cascade, not through class names.
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  html = html.replace('</head>', '<style>' + css + '</style></head>');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => undefined,
-      setState: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  const {win, posted} = makeSharedPage({beforeScripts: loadMainCss});
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function click(el) {
@@ -420,17 +382,13 @@ async function run() {
     panelStopBody,
   );
   await pageTests();
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) {
-    failures.forEach(f => console.error(`FAILED: ${f.name}\n${f.error.stack}`));
-    process.exit(1);
-  }
+  report('toolCallStopButton');
   // The pages keep their panel tickers and stop-button reset timers
   // alive; the suite is done, so end the process explicitly.
   process.exit(0);
 }
 
-function panelStopBody() {
+async function panelStopBody() {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     runScripts: 'dangerously',
     pretendToBeVisual: true,
@@ -484,25 +442,26 @@ function panelStopBody() {
 
   click(btn);
   assert.strictEqual(stops, 2);
-  return new Promise(resolve => {
-    win.setTimeout(() => {
-      assert.ok(
-        !btn.classList.contains('stopping'),
-        'the stopping state clears by itself after resetMs',
-      );
-      assert.strictEqual(btn.disabled, false);
-      click(btn);
-      assert.strictEqual(stops, 3, 'the button can be used again');
-      // Default reset delay (no resetMs given).
-      const panel2 = doc.createElement('div');
-      doc.body.appendChild(panel2);
-      const btn2 = PanelCopy.addStopButton(panel2, () => {});
-      click(btn2);
-      assert.ok(btn2.classList.contains('stopping'));
-      btn2._kissClearStopping();
-      resolve();
-    }, 80);
-  });
+  // The 30 ms reset timer is a jsdom window timer; it is armed before
+  // this node timer, so it fires first.  The assertions run here, in
+  // the test body: an assertion thrown inside a jsdom timer callback is
+  // swallowed by jsdom's error reporting and cannot fail the suite.
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.ok(
+    !btn.classList.contains('stopping'),
+    'the stopping state clears by itself after resetMs',
+  );
+  assert.strictEqual(btn.disabled, false);
+  click(btn);
+  assert.strictEqual(stops, 3, 'the button can be used again');
+  // Default reset delay (no resetMs given).
+  const panel2 = doc.createElement('div');
+  doc.body.appendChild(panel2);
+  const btn2 = PanelCopy.addStopButton(panel2, () => {});
+  click(btn2);
+  assert.ok(btn2.classList.contains('stopping'));
+  btn2._kissClearStopping();
+  win.close();
 }
 
 run().catch(e => {

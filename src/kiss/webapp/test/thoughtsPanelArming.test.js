@@ -29,27 +29,13 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send} = harness;
+const {send, clickTab} = harness;
 
 function makePage() {
   const page = harness.makePage();
   page.win._testApi.endLaunch();
   page.win._testApi.hideWelcome();
   return page;
-}
-
-// A sub-agent or content tab on the group strip is clicked; a chat tab
-// has no row of its own, so it is picked the way the Chats panel does.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
 }
 
 const TS = 1767225600000;
@@ -77,7 +63,10 @@ function panelOfThought(win, text) {
   const out = win.document.getElementById('output');
   const thoughts = Array.from(out.querySelectorAll('.think'));
   const hit = thoughts.find(el => el.textContent.includes(text));
-  assert.ok(hit, `the transcript must contain the thought ${JSON.stringify(text)}`);
+  assert.ok(
+    hit,
+    `the transcript must contain the thought ${JSON.stringify(text)}`,
+  );
   return hit.closest('.llm-panel');
 }
 

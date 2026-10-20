@@ -155,7 +155,7 @@ class _SubtaskPersister:
 
     def __call__(self) -> None:
         self.runner._persist_subtask_row(
-            self.state, task_id="audit1013-row", task_prompt="p", result_summary="r",
+            self.state, task_id="audit1013-row", result_summary="r",
             model="m", work_dir="/tmp", sub_start_ms=0,
         )
 

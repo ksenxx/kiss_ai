@@ -90,7 +90,7 @@ def test_page_links_brand_icons_and_the_manifest() -> None:
     assert f'<link rel="apple-touch-icon" href="{_media_url("kiss-icon.png")}">' in head
     assert '<link rel="manifest" href="/manifest.webmanifest">' in head
     # The icons are part of the offline app shell the service worker precaches.
-    shell = web_server._app_shell_urls()
+    shell = web_server._app_shell_urls(web_server._brand_css_asset_names())
     assert _media_url("kiss-icon.svg") in shell and _media_url("kiss-icon.png") in shell
 
 

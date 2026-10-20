@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 import requests
+from nio import AsyncClient
 
 from kiss.agents.third_party_agents import _device_auth
 from kiss.agents.third_party_agents._device_auth import (
@@ -1454,7 +1455,6 @@ def test_session_registry_is_race_safe_and_backs_off_on_timeouts() -> None:
         [requests.ConnectionError("boom"), requests.Timeout("slow"), {"access_token": "t"}],
         0.1,
     )
-    flaky._interval = 0.1
     flaky.register()
     flaky._thread.join(timeout=30.0)
     assert flaky.result == {"access_token": "t"} and flaky.polls == 3
@@ -1659,14 +1659,11 @@ def test_nextcloud_uses_the_server_url_the_login_flow_reports(
 # ------------------------------------------------------------------- Matrix
 
 
-class _MatrixCredentials:
-    """nio ``AsyncClient`` data contract (matrix-nio is not installed here)."""
-
-    def __init__(self, homeserver: str, access_token: str) -> None:
-        self.homeserver = homeserver
-        self.access_token = access_token
-        self.user_id = ""
-        self.device_id = ""
+def _matrix_client(homeserver: str, access_token: str) -> AsyncClient:
+    """A real nio client for *homeserver* carrying *access_token*."""
+    client = AsyncClient(homeserver)
+    client.access_token = access_token
+    return client
 
 
 def test_matrix_oauth_device_flow_registers_client_and_refreshes(
@@ -1707,7 +1704,11 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     done = _finish(tools["finish_matrix_auth"])
     assert done["ok"] is True and done["user_id"] == "@alice:example.org"
     assert done["device_id"] == device_id
-    assert "matrix-nio is not installed" in done["warning"]
+    assert "warning" not in done
+    client = agent._backend._client
+    assert isinstance(client, AsyncClient) and client.homeserver == auth_server.base_url
+    assert client.access_token == "access-1" and client.user_id == "@alice:example.org"
+    assert client.device_id == device_id
     cfg = json.loads(mx_config.path.read_text())
     assert cfg["access_token"] == "access-1" and cfg["refresh_token"] == "refresh-1"
     assert cfg["oauth_client_id"] == "mas-client-1"
@@ -1719,7 +1720,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
 
     # The backend renews the short-lived token by itself before it expires.
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base_url, cfg["access_token"])
+    backend._client = _matrix_client(auth_server.base_url, cfg["access_token"])
     backend.refresh_if_needed()
     assert backend._client.access_token == "access-1" and auth_server.refreshes == 0
     cfg["expires_at"] = str(time.time() + 30)  # inside the skew
@@ -1771,7 +1772,7 @@ def test_matrix_refresh_failures_follow_the_spec(
         }
     )
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base_url, "old")
+    backend._client = _matrix_client(auth_server.base_url, "old")
     # The emulator refuses unknown refresh tokens with 400 invalid_grant.
     auth_server.refresh_error = "server_error"
     auth_server.refresh_status = 503
@@ -1782,7 +1783,7 @@ def test_matrix_refresh_failures_follow_the_spec(
     assert backend._run(_noop()) == "ran"  # 5xx: session kept
     assert backend._client.access_token == "old"
     backend2 = MatrixChannelBackend()
-    backend2._client = _MatrixCredentials("http://127.0.0.1:9", "old")
+    backend2._client = _matrix_client("http://127.0.0.1:9", "old")
     cfg = mx_config.load() or {}
     cfg["token_url"] = "http://127.0.0.1:9/token"
     mx_config.save(cfg)
@@ -1822,7 +1823,7 @@ def test_matrix_refresh_never_resurrects_a_cleared_or_replaced_session(
         }
     )
     backend = MatrixChannelBackend()
-    backend._client = _MatrixCredentials(auth_server.base_url, "old")
+    backend._client = _matrix_client(auth_server.base_url, "old")
     backend.refresh_if_needed()
     assert not mx_config.path.exists()
     assert backend._client.access_token == "old"
@@ -1898,14 +1899,19 @@ def test_matrix_without_oauth_api_and_failure_paths(
     assert auth_server.revoked == []
     auth_server.matrix_insecure_revocation = False
 
-    # A hand-supplied token supersedes a pending sign-in (legacy path; nio
-    # is not installed here, so the pre-existing ImportError surfaces).
+    # A hand-supplied token supersedes a pending sign-in (legacy path).
     assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
         "consent_required"
     )
     pending = ConsentSession._active["matrix"]
     legacy = json.loads(tools["authenticate_matrix"](auth_server.base_url, "tok"))
-    assert legacy["ok"] is False and "nio" in legacy["error"]
+    assert legacy == {
+        "ok": True,
+        "message": "Matrix credentials saved.",
+        "homeserver": auth_server.base_url,
+    }
+    assert json.loads(mx_config.path.read_text())["access_token"] == "tok"
+    assert agent._backend._client.access_token == "tok"
     assert pending._cancelled is True and "matrix" not in ConsentSession._active
     assert tools["clear_matrix_auth"]() == "Matrix authentication cleared."
 

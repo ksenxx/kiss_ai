@@ -9,6 +9,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -27,20 +29,6 @@ function input(win) {
   return win.document.getElementById('task-input');
 }
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
 
 test('spoken task is submitted to the idle highlighted tab', () => {
   const {win, posted} = makePage();
@@ -162,5 +150,5 @@ test('two speakers submit two distinct prefixed tasks', () => {
   ]);
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length > 0 ? 1 : 0);
+report('voiceSubmitToAgent');
+process.exit(0);

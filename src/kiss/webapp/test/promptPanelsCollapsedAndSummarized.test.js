@@ -13,50 +13,14 @@
 // task panel.  A later summary stops at the earlier one, as before.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: buildPage, loadMainCss, send} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
   // Markdown rendering, so a prompt can show a picture.
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(styleEl);
+  const {win, posted} = buildPage({extraScripts: ['marked.min.js']});
+  loadMainCss(win);
   win.__posted = posted;
   return win;
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function readyTabId(win) {
@@ -91,7 +55,12 @@ function sendStep(win, i) {
     command: 'echo ' + i,
     description: 'step ' + i,
   });
-  send(win, {type: 'tool_result', name: 'Bash', output: String(i), success: true});
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    output: String(i),
+    success: true,
+  });
 }
 
 function topLevel(win) {
@@ -110,7 +79,10 @@ function testPromptPanelsStartCollapsed() {
   const sys = output(win).querySelector('.ev.system-prompt');
   const pr = output(win).querySelector('.ev.prompt');
   assert.ok(sys && pr, 'both panels render');
-  for (const [panel, cls] of [[sys, 'system-prompt'], [pr, 'prompt']]) {
+  for (const [panel, cls] of [
+    [sys, 'system-prompt'],
+    [pr, 'prompt'],
+  ]) {
     assert.ok(
       panel.classList.contains('collapsed'),
       'the ' + cls + ' panel starts collapsed while the task runs',
@@ -147,9 +119,15 @@ function testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced() {
   sys = output(win).querySelector('.ev.system-prompt');
   pr = output(win).querySelector('.ev.prompt');
   assert.strictEqual(output(win).querySelectorAll('.ev.prompt').length, 1);
-  assert.ok(sys.classList.contains('collapsed'), 'replaced system prompt folded');
+  assert.ok(
+    sys.classList.contains('collapsed'),
+    'replaced system prompt folded',
+  );
   assert.ok(pr.classList.contains('collapsed'), 'replaced prompt folded');
-  assert.strictEqual(header(pr, 'prompt').getAttribute('aria-expanded'), 'false');
+  assert.strictEqual(
+    header(pr, 'prompt').getAttribute('aria-expanded'),
+    'false',
+  );
   assert.ok(pr.textContent.includes('authoritative prompt'));
   win.close();
   console.log('  ok - early placeholders and their replacements are collapsed');
@@ -170,9 +148,14 @@ function testUserUnfoldSurvivesEarlyReplace() {
     !pr.classList.contains('collapsed'),
     'the authoritative text lands in the panel the user unfolded, still open',
   );
-  assert.strictEqual(header(pr, 'prompt').getAttribute('aria-expanded'), 'true');
+  assert.strictEqual(
+    header(pr, 'prompt').getAttribute('aria-expanded'),
+    'true',
+  );
   win.close();
-  console.log('  ok - a prompt the user unfolded stays open when its text arrives');
+  console.log(
+    '  ok - a prompt the user unfolded stays open when its text arrives',
+  );
 }
 
 function testUserCanUnfoldAndRefold() {
@@ -181,7 +164,9 @@ function testUserCanUnfoldAndRefold() {
   send(win, {type: 'system_prompt', text: 'system text'});
   const sys = output(win).querySelector('.ev.system-prompt');
   const hdr = header(sys, 'system-prompt');
-  hdr.dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
   assert.ok(!sys.classList.contains('collapsed'), 'a click opens the panel');
   assert.ok(sys.classList.contains('user-pinned'), 'and pins it open');
   assert.strictEqual(hdr.getAttribute('aria-expanded'), 'true');
@@ -192,8 +177,13 @@ function testUserCanUnfoldAndRefold() {
     !sys.classList.contains('collapsed'),
     'the streaming sweep leaves a pinned panel open',
   );
-  hdr.dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
-  assert.ok(sys.classList.contains('collapsed'), 'a second click folds it again');
+  hdr.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    sys.classList.contains('collapsed'),
+    'a second click folds it again',
+  );
   win.close();
   console.log('  ok - the user can unfold and refold a prompt panel');
 }
@@ -218,9 +208,17 @@ function testFirstSummaryFoldsPromptsUnderIt() {
   assert.ok(summary.classList.contains('collapsed'), 'the summary folds');
   const sub = summary.querySelector(':scope > .summary-sub');
   const nested = Array.from(sub.children);
-  assert.strictEqual(nested[0], sys, 'the System Prompt is the first panel in the digest');
+  assert.strictEqual(
+    nested[0],
+    sys,
+    'the System Prompt is the first panel in the digest',
+  );
   assert.strictEqual(nested[1], pr, 'the Prompt follows it');
-  assert.strictEqual(nested.length, 8, '2 prompts + 3 Thoughts + 3 tool panels');
+  assert.strictEqual(
+    nested.length,
+    8,
+    '2 prompts + 3 Thoughts + 3 tool panels',
+  );
   assert.deepStrictEqual(
     nested,
     expectNested,
@@ -232,8 +230,14 @@ function testFirstSummaryFoldsPromptsUnderIt() {
     ['ev task-panel', 'ev tc'],
     'above the digest only the task panel remains',
   );
-  assert.ok(sys.classList.contains('collapsed'), 'the adopted System Prompt stays folded');
-  assert.ok(pr.classList.contains('collapsed'), 'the adopted Prompt stays folded');
+  assert.ok(
+    sys.classList.contains('collapsed'),
+    'the adopted System Prompt stays folded',
+  );
+  assert.ok(
+    pr.classList.contains('collapsed'),
+    'the adopted Prompt stays folded',
+  );
   win.close();
   console.log('  ok - the first summary folds the prompts under itself');
 }
@@ -256,7 +260,9 @@ function testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem() {
     'the summary digest recounts the prompt too, pinned or not',
   );
   win.close();
-  console.log('  ok - a pinned prompt is folded under the first summary as well');
+  console.log(
+    '  ok - a pinned prompt is folded under the first summary as well',
+  );
 }
 
 function testPromptWithImageIsFoldedUnderSummary() {
@@ -283,7 +289,9 @@ function testPromptWithImageIsFoldedUnderSummary() {
     'nothing is moved after the summary',
   );
   win.close();
-  console.log('  ok - a prompt showing an image is folded under the summary too');
+  console.log(
+    '  ok - a prompt showing an image is folded under the summary too',
+  );
 }
 
 function testSecondSummaryStopsAtTheFirst() {
@@ -301,14 +309,20 @@ function testSecondSummaryStopsAtTheFirst() {
   assert.strictEqual(summaries.length, 2);
   const first = summaries[0];
   const second = summaries[1];
-  assert.strictEqual(first.parentElement, output(win), 'the first summary stays top-level');
+  assert.strictEqual(
+    first.parentElement,
+    output(win),
+    'the first summary stays top-level',
+  );
   assert.ok(
     first.querySelector(':scope > .summary-sub > .ev.prompt') &&
       first.querySelector(':scope > .summary-sub > .ev.system-prompt'),
     'the prompts sit under the first summary',
   );
   assert.strictEqual(
-    second.querySelectorAll(':scope > .summary-sub > .ev.prompt, :scope > .summary-sub > .ev.system-prompt').length,
+    second.querySelectorAll(
+      ':scope > .summary-sub > .ev.prompt, :scope > .summary-sub > .ev.system-prompt',
+    ).length,
     0,
     'the second summary adopts no prompt',
   );
@@ -331,8 +345,16 @@ function testSteerMessageStaysOutsideWhilePromptEchoFolds() {
   send(win, {type: 'tool_call', name: 'summary', description: 'two steps'});
   const summary = output(win).querySelector('.tc-summary');
   const msg = output(win).querySelector('.ev.user-msg');
-  assert.strictEqual(msg.parentElement, output(win), 'the steer message stays top-level');
-  assert.strictEqual(msg.previousElementSibling, summary, 'right after the summary');
+  assert.strictEqual(
+    msg.parentElement,
+    output(win),
+    'the steer message stays top-level',
+  );
+  assert.strictEqual(
+    msg.previousElementSibling,
+    summary,
+    'right after the summary',
+  );
   assert.ok(
     summary.querySelector(':scope > .summary-sub > .ev.prompt'),
     'while the Prompt panel folds under the summary',
@@ -366,11 +388,23 @@ function testReplayOfRunningTaskFoldsPromptsUnderSummary() {
   const sys = output(win).querySelector('.ev.system-prompt');
   const pr = output(win).querySelector('.ev.prompt');
   const sub = summary.querySelector(':scope > .summary-sub');
-  assert.strictEqual(sys.parentElement, sub, 'replayed System Prompt under the summary');
-  assert.strictEqual(pr.parentElement, sub, 'replayed Prompt under the summary');
-  assert.ok(sys.classList.contains('collapsed') && pr.classList.contains('collapsed'));
+  assert.strictEqual(
+    sys.parentElement,
+    sub,
+    'replayed System Prompt under the summary',
+  );
+  assert.strictEqual(
+    pr.parentElement,
+    sub,
+    'replayed Prompt under the summary',
+  );
+  assert.ok(
+    sys.classList.contains('collapsed') && pr.classList.contains('collapsed'),
+  );
   win.close();
-  console.log('  ok - a replayed running task folds the prompts under its summary');
+  console.log(
+    '  ok - a replayed running task folds the prompts under its summary',
+  );
 }
 
 function testFinishedTaskFoldsEverythingIntoTrajectory() {

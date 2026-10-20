@@ -566,21 +566,49 @@ class TestGitLog:
         )
         assert len(reply["commits"]) == GIT_LOG_DEFAULT_LIMIT + 3
 
+    @posix_only("the old-git shim is a shell script")
     def test_legacy_merge_diff_path_matches_first_parent_output(
-        self, harness,
+        self, harness, monkeypatch,
     ) -> None:
-        """The pre-2.31 ``-m`` fallback (forced here) yields the same
-        rows as ``--diff-merges=first-parent``: one row per commit, the
-        merge listing its first-parent files."""
-        from kiss.server.explorer import git_log
+        """A git that rejects ``--diff-merges`` (a real executable on
+        ``PATH`` that refuses the option and hands everything else to
+        the installed git) yields the same ``gitLog`` rows and the same
+        ``gitShow`` patch as a modern one: one row per commit, the merge
+        listing its first-parent files."""
+        from kiss.server.explorer import git_log, git_show
 
         modern = git_log(str(harness.work_dir), 20)
-        legacy = git_log(str(harness.work_dir), 20, legacy_merge_diffs=True)
+        modern_show = git_show(str(harness.work_dir), harness.shas["merge"])
+        real_git = shutil.which("git")
+        assert real_git
+        shim_dir = Path(harness.tmpdir) / "old-git"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do\n"
+            "  case \"$arg\" in\n"
+            "    --diff-merges=*)\n"
+            "      echo \"error: unknown option \\`diff-merges=first-parent'\" >&2\n"
+            "      exit 129;;\n"
+            "    --) break;;\n"
+            "  esac\n"
+            "done\n"
+            f"exec {real_git} \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+        assert subprocess.run(
+            ["git", "log", "--diff-merges=first-parent", "-1"],
+            capture_output=True, text=True, cwd=harness.work_dir,
+        ).returncode == 129
+        legacy = git_log(str(harness.work_dir), 20)
         assert legacy == modern
         shas = [c["sha"] for c in legacy["commits"]]
         assert len(shas) == len(set(shas)) == 5
         merge = next(c for c in legacy["commits"] if c["sha"] == harness.shas["merge"])
         assert merge["files"] == [{"status": "A", "path": "feature.txt"}]
+        assert git_show(str(harness.work_dir), harness.shas["merge"]) == modern_show
 
     @posix_only("a tab is not a valid NTFS file-name character")
     def test_unusual_names_come_through_verbatim(self, harness) -> None:

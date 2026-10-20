@@ -100,8 +100,11 @@ def test_run_now_is_registered_and_refused_while_running(tmp_path: Path) -> None
     assert runs.read_text().count("run") == 2
 
 
-def test_run_now_forgets_its_registration_when_the_run_raises(tmp_path: Path) -> None:
-    """A run that fails is still unregistered, so the job is not stuck as running."""
+def test_run_now_forgets_its_registration_when_the_run_fails(tmp_path: Path) -> None:
+    """A run that fails before it runs anything is recorded and unregistered.
+
+    The job is not stuck as running, and the next ``run_now`` runs it.
+    """
     created = yaml.safe_load(
         cron_job(
             "create",
@@ -115,8 +118,8 @@ def test_run_now_forgets_its_registration_when_the_run_raises(tmp_path: Path) ->
     # A file where the runs directory belongs makes _execute_job fail
     # before it runs anything.
     cron_agent._runs_dir().write_text("")
-    with pytest.raises(FileExistsError):
-        cron_job("run_now", job_id=job_id)
+    assert yaml.safe_load(cron_job("run_now", job_id=job_id))["ran"]["last_status"] == "error"
+    assert load_jobs()[0]["last_summary"].startswith("FileExistsError:")
     assert job_id not in cron_agent.running_job_ids()
     cron_agent._runs_dir().unlink()
     assert yaml.safe_load(cron_job("run_now", job_id=job_id))["ran"]["last_status"] == "ok"

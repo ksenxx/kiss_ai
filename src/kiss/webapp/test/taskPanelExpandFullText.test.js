@@ -8,9 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  loadMainCss,
+  MEDIA,
+} = require('./simplify2_harness');
 
 const LONG_TASK = Array.from(
   {length: 12},
@@ -20,56 +23,19 @@ const LONG_TASK = Array.from(
 ).join('\n');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    sourceUrl: 'taskpanel-main.js',
+    beforeScripts(win) {
+      loadMainCss(win);
+      const remoteStyle = win.document.createElement('style');
+      remoteStyle.textContent = fs.readFileSync(
+        path.join(MEDIA, 'remote-codex.css'),
+        'utf8',
+      );
+      win.document.head.appendChild(remoteStyle);
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(style);
-  const remoteStyle = win.document.createElement('style');
-  remoteStyle.textContent = fs.readFileSync(
-    path.join(MEDIA, 'remote-codex.css'),
-    'utf8',
-  );
-  win.document.head.appendChild(remoteStyle);
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=taskpanel-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function click(win, id) {
@@ -285,7 +251,10 @@ function testChevronPassWorksWithoutButton() {
     'precondition: the fan-out panel is open while the task runs',
   );
   // A tool-call panel starts folded; the user opens the adopted one.
-  assert.ok(adopted.classList.contains('collapsed'), 'adopted: folded at birth');
+  assert.ok(
+    adopted.classList.contains('collapsed'),
+    'adopted: folded at birth',
+  );
   adopted.querySelector(':scope > .collapse-header').click();
   assert.ok(!adopted.classList.contains('collapsed'), 'the user opened it');
 
@@ -334,9 +303,11 @@ function testChevronPassWorksWithoutButton() {
     rpPanel.classList.contains('collapsed') && !isDisplayed(win, rpPanel),
     'the finished run_parallel panel folds behind the Trajectory too',
   );
-  traj.querySelector('.collapse-header').dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
+  traj
+    .querySelector('.collapse-header')
+    .dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    );
   assert.ok(
     isDisplayed(win, readPanel) && isDisplayed(win, rpPanel),
     'opening the Trajectory shows the folded panels, one click away',
@@ -352,9 +323,11 @@ function testChevronPassWorksWithoutButton() {
 
   // The user opens a folded panel: a later chevron pass (any trailing
   // event) leaves the panel the user pinned open.
-  readPanel.querySelector('.collapse-header').dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
+  readPanel
+    .querySelector('.collapse-header')
+    .dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    );
   assert.ok(
     !readPanel.classList.contains('collapsed') &&
       readPanel.classList.contains('user-pinned'),
@@ -369,7 +342,12 @@ function testChevronPassWorksWithoutButton() {
   // A panel that lands after the end (a late tool call) stands outside
   // the Trajectory: the chevron pass that follows every rendered event
   // folds it to its digest, and it stays on screen.
-  send(win, {type: 'tool_call', name: 'Bash', command: 'late', tabId: parentId});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'late',
+    tabId: parentId,
+  });
   const late = O.querySelector(':scope > .tc-bash');
   assert.ok(late, 'the late panel renders outside the Trajectory');
   assert.ok(
@@ -436,12 +414,16 @@ function testTrajectoryPanelsSkipChevronPass() {
 
   const traj = d.querySelector('#output > .trajectory');
   assert.ok(traj, 'the finish folded the panels into a Trajectory panel');
-  const inner = Array.from(traj.querySelectorAll('.trajectory-sub .collapsible'));
+  const inner = Array.from(
+    traj.querySelectorAll('.trajectory-sub .collapsible'),
+  );
   assert.ok(inner.length > 0, 'the Trajectory holds the event panels');
   // The user opens the Trajectory and one panel inside it.
-  traj.querySelector('.collapse-header').dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
+  traj
+    .querySelector('.collapse-header')
+    .dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    );
   inner[0].classList.remove('collapsed');
   const before = inner.map(p => p.classList.contains('collapsed'));
 

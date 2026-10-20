@@ -600,6 +600,44 @@ class TestReplayBoundary(TabMirroringBase):
         results = [ev for ev in view if ev.get("type") == "result"]
         self.assertEqual([ev.get("text") for ev in results], ["all done"])
 
+    async def test_i3_result_broadcast_after_stop_recording_before_attach(
+        self,
+    ) -> None:
+        """A result broadcast after ``stop_recording`` joins the retired recording.
+
+        The task runner broadcasts the ``result`` of a run that failed
+        before its first step after the agent already stopped recording
+        (the state still counts as running).  B attaches after that
+        broadcast: its replay must carry the late result, or a surface
+        that resumes the task's tab a few milliseconds after it ended
+        never shows why it failed.
+        """
+        assert self.server is not None
+        printer = self.server._printer
+        vs = self.server._agent_server
+        task_id, chat_id = await self._running_task_viewed_by_a()
+        await asyncio.to_thread(self._emit_delta, task_id, "HEAD ")
+        ws_b, conn_b = await self._connect_b()
+
+        def stop_then_fail() -> None:
+            printer._thread_local.task_id = task_id
+            printer.stop_recording()
+            printer.broadcast(
+                {"type": "result", "text": "Task failed with error: no dir",
+                 "success": False, "taskId": task_id},
+            )
+
+        await asyncio.to_thread(stop_then_fail)
+        await asyncio.to_thread(
+            vs._replay_session, chat_id, "tab-t", conn_id=conn_b,
+        )
+        view = _rendered(await self._drain(ws_b), "tab-t")
+        agent_state.agent_states.clear()
+        results = [ev for ev in view if ev.get("type") == "result"]
+        self.assertEqual(
+            [ev.get("text") for ev in results], ["Task failed with error: no dir"], view,
+        )
+
     async def test_i3_retired_recording_evicted_right_after_attach(
         self,
     ) -> None:

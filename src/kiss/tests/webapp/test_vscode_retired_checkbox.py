@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 # ruff: noqa: F811  (module fixtures imported from other test modules)
-"""End-to-end test of the "Do not show this" checkbox on the "VS Code
+"""End-to-end test of the "Do not show this again" checkbox on the "VS Code
 extension removed" toast, in a REAL headless Chromium against a REAL
 :class:`RemoteAccessServer`: the toast renders with the box, ticking
 it removes the toast, writes ``$KISS_HOME/.vscode-retired-dismissed``,
@@ -49,7 +49,7 @@ def test_do_not_show_this_retires_the_notice_everywhere(browser, harness, retire
         for p in (page, other):
             p.wait_for_selector(TOAST, timeout=15000)
             label = p.locator(TOAST + " label.kiss-notification-opt-out")
-            assert label.inner_text().strip() == "Do not show this"
+            assert label.inner_text().strip() == "Do not show this again"
             assert p.locator(BOX).is_checked() is False
         # Tick it in the first window.
         page.click(BOX)

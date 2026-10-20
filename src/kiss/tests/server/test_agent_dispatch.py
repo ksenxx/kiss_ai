@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import channel_work_dir
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
@@ -33,7 +34,6 @@ from kiss.agents.sorcar.sea_settings import (
     WORKER_DEFAULTS,
     SeaError,
     base_class_defaults,
-    channel_work_dir,
 )
 from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW

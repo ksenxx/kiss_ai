@@ -160,7 +160,7 @@ def drop_stale_registration(storage: FileTokenStorage) -> bool:
     Returns:
         True when a stale registration (and its tokens) was removed.
     """
-    info = asyncio.run(storage.get_client_info())
+    info = storage.client_info()
     if info is None:
         return False
     if MCP_REDIRECT_URI in [str(uri) for uri in (info.redirect_uris or [])]:

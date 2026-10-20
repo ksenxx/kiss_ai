@@ -11,72 +11,30 @@
 // and a reconnect that re-sends tipsData does not open a second one.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {makePage, stubRaf, fakeMatchMedia} = require('./simplify2_harness');
+const {test, report} = makeRunner();
 
 function loadChatDom() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win} = makePage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['marked.min.js', 'tips.js'],
+    sourceUrl: 'tips-only-in-chat-main.js',
+    beforeScripts(win) {
+      win.localStorage.clear();
+      stubRaf(win);
+      win.setInterval = function () {
+        return 0;
+      };
+      win.clearInterval = function () {};
+      win.ResizeObserver = class {
+        observe() {}
+        disconnect() {}
+      };
+      fakeMatchMedia(win, true);
+      win.__TIPS__ = {tips: [], show: false, version: ''};
+    },
   });
-  const win = dom.window;
-  win.localStorage.clear();
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  win.setInterval = function () {
-    return 0;
-  };
-  win.clearInterval = function () {};
-  win.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
-  };
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: () => {},
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  // Same script order as chat.html: panelCopy.js, tips.js, api.js,
-  // then main.js.
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval('window.__TIPS__ = {"tips":[],"show":false,"version":""};');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=tips-only-in-chat-main.js',
-  );
   return win;
 }
 
@@ -93,20 +51,6 @@ function sendTips(win) {
 
 function tipsPanels(win) {
   return win.document.body.querySelectorAll('kiss-tips-panel').length;
-}
-
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  not ok - ${name}`);
-  }
 }
 
 test('the page opens the tips window once, centered over the chat', () => {
@@ -131,8 +75,4 @@ test('the page opens the tips window once, centered over the chat', () => {
   assert.strictEqual(tipsPanels(win), 1);
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-for (const {name, err} of failures) {
-  console.log(`\n${name}\n${err && err.stack}`);
-}
-if (failures.length) process.exit(1);
+report('tipsOnlyInChatPage');

@@ -906,9 +906,15 @@ class DockerManager:
 
         Handles cleanup of both the container and any temporary directories
         created for shared volumes — including a directory an earlier
-        ``close()`` failed to delete, which is retried here.
+        ``close()`` failed to delete, which is retried here — and
+        releases the Docker client's pooled connections to the daemon
+        (a later ``open()`` or a reaper still polling an exec gets a
+        fresh connection on demand).
         """
-        locked_call(self._lifecycle_lock, self._close_locked)
+        try:
+            locked_call(self._lifecycle_lock, self._close_locked)
+        finally:
+            self.client.close()
 
     def _close_locked(self) -> None:
         """Body of :meth:`close`; the caller holds ``_lifecycle_lock``."""

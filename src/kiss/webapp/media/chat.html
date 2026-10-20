@@ -120,9 +120,9 @@
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
                 </button>
-                <button id="share-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Share chat: save it as reports/chat-&lt;id&gt;.html" aria-label="Share chat: save it as reports/chat-&lt;id&gt;.html">
+                <button id="share-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Save chat as reports/chat-&lt;id&gt;.html" aria-label="Save chat as reports/chat-&lt;id&gt;.html">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></span>
-                  <span class="more-item-label">Share chat</span>
+                  <span class="more-item-label">Save chat</span>
                 </button>
                 <button id="upload-btn" class="more-menu-item" role="menuitem" data-tooltip="Attach files" aria-label="Attach files">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></span>
@@ -352,6 +352,9 @@
           <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
+          <!-- The registered machine the task runs on (the tab's bound
+               machine, else this daemon's). -->
+          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
           <!-- The task's own settings (a task_settings event). -->
@@ -544,7 +547,11 @@
                (the first install chooses a random one; updates keep
                it).  Editable: saved with the rest of the form through
                saveConfig and in force from the daemon's next frame;
-               empty disables remote access. -->
+               empty disables remote access.  main.js
+               (setupRemotePasswordField) masks the box, adds the eye
+               toggle (#cfg-remote-password-toggle) and a refresh
+               button (#cfg-remote-password-refresh) that fills in a
+               new random 20-character password. -->
           <label class="config-label">Remote password
             <input type="text" id="cfg-remote-password" autocomplete="off" spellcheck="false" aria-label="Remote password" title="The remote access password: type it in the web app on another device. Edit it to change it; leave it empty to disable remote access.">
           </label>

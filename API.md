@@ -143,7 +143,7 @@
   - `tools`: List of tools to be added in addition to bash and web tools.
   - `max_steps`: Maximum steps per sub-session. Defaults to 10000.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
-  - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+  - `work_dir`: Working directory for the agent. Defaults to the current directory.
   - `printer`: Printer instance for output display.
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
@@ -166,7 +166,6 @@
   - `tools_hook`: The SEA's ``tools`` method (:func:`kiss.agents.sorcar.sea_commands.base_tools`): called once by :meth:`perform_task` with the built-in toolset plus *tools* and *inherited_tools*, and its return value is the run's toolset.  ``None`` (default) changes nothing.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **worktree** — The first worktree pending merge/discard, or ``None``.<br/>`worktree() -> GitWorktree | None` *(property)*
 - **worktrees** — Every worktree pending merge/discard, in creation order.<br/>`worktrees() -> list[GitWorktree]` *(property)*
 - **create_worktree** — Create a git worktree for the repository of *path* (default: the work dir). Call this once per repository, before the first change (create, edit, write, or make a folder) to a Git-tracked file or folder of that repository.  The task's edits to the repository then land on a private ``kiss/wt-*`` branch checked out under ``<repo>/.kiss-worktrees/`` instead of the user's checkout.  For the repository containing the work dir the work dir moves into the worktree, so relative paths and Bash commands use it from then on; for any other repository, edit its files under the returned worktree directory (``<repo>/x.py`` becomes ``<worktree>/x.py``).  Call ``commit_and_merge`` when the work is done: it merges every worktree.  A no-op when the repository already has a worktree or *path* is not inside a git repository.<br/>`create_worktree(path: str = '') -> str`
   - `path`: A file or directory inside the repository to isolate; relative to the work dir.  Empty: the work dir itself.
@@ -253,9 +252,41 @@
   - `prompt`: The original task prompt.
   - **Returns:** The augmented prompt with chat history prepended, or the original prompt if no prior context exists.
 
-- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history. Only the result summary is persisted here.  Callers that record chat events (e.g. the daemon) persist events incrementally via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
-  - `prompt_template`: The task prompt.
-  - `**kwargs`: All other arguments forwarded to ``SorcarAgent.run()``.
+- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history. Only the result summary is persisted here.  Callers that record chat events (e.g. the daemon) persist events incrementally via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.<br/>`run(prompt_template: str = '', model_name: str | None = None, arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None, base_system_prompt: str = '', append_basic_tools: bool = True, inherited_tools: list[Callable[..., Any]] | None = None, llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None, tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None, use_memory: bool | None = None, tool_profile: str = '', live_browser: Any = None, prompt_suffix: str = '', system_prompt_hook: Callable[[str], str] | None = None, tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = None, _skip_persistence: bool = False, _on_task_id_allocated: Callable[[str, str], None] | None = None, _history_prompt: str | None = None, _open_bare_path: bool = True, _start_ms: int = 0) -> str`
+  - `prompt_template`: The task prompt.  First so the historical ``run("task", ...)`` call keeps working; every other parameter up to *tools_hook* is forwarded verbatim to :meth:`SorcarAgent.run`, in that method's order and with its defaults — see its docstring for what each one does.  *model_name* is resolved here once (:meth:`_resolve_model_name`) and the resolved name is what the base run receives.
+  - `model_name`: LLM model to use.  Defaults to the config value.
+  - `arguments`: Values filling the placeholders of *prompt_template*.
+  - `system_prompt`: Suffix appended to the actual system prompt.
+  - `tools`: Tools added on top of the built-in toolset.
+  - `max_steps`: Maximum steps per sub-session.
+  - `max_budget`: Maximum budget in USD; also recorded on the task-history row (``DEFAULT_MAX_BUDGET`` when omitted).
+  - `model_config`: Extra model configuration.
+  - `work_dir`: Working directory; its resolved absolute path is recorded on the task-history row.
+  - `printer`: Printer for output display; its ``broadcast`` (if any) carries the ``task_settings`` / ``new_tab`` / ``tasks_updated`` events of this run.
+  - `max_sub_sessions`: Maximum continuation sub-sessions.
+  - `docker_image`: Docker image to run tools inside.
+  - `web_tools`: Whether to include browser/web tools.
+  - `is_parallel`: Whether to include the ``run_parallel`` tool.
+  - `verbose`: Whether to print output to the console.
+  - `current_editor_file`: Active editor file appended to the prompt.
+  - `attachments`: File attachments for the initial prompt.
+  - `ask_user_question_callback`: Callback of the ``ask_user_question`` tool.
+  - `base_system_prompt`: Replacement for the default base system prompt.  A non-blank value also disables the bare-path "open it" directive (see *_open_bare_path*).
+  - `append_basic_tools`: Whether the built-in toolset is prepended.
+  - `inherited_tools`: Tools taken over from the dispatching task.
+  - `llm_call_hook`: Hook called before every LLM call.
+  - `tool_call_hook`: Hook called before every tool call.
+  - `use_memory`: Per-run persistent-memory toggle.
+  - `tool_profile`: Tool profile name the toolset is cut down to; the EFFECTIVE profile (``review`` for a reviewer sub-agent asked for none) is what the ``task_settings`` event reports.
+  - `live_browser`: The daemon's ``BrowserTabService``.
+  - `prompt_suffix`: Caller-supplied suffix already appended to *prompt_template*, recorded so a ``run_agent`` sub-task inherits it.
+  - `system_prompt_hook`: The SEA's ``system_prompt`` method.
+  - `tools_hook`: The SEA's ``tools`` method.
+  - `_skip_persistence`: When True the final result / usage / replay-event save is skipped (the daemon persists them itself); the task-history row is still allocated.
+  - `_on_task_id_allocated`: Called with ``(task_id, chat_id)`` as soon as the history row exists, before any event of the run is broadcast.
+  - `_history_prompt`: The raw user text to persist and display (history row, frequent-tasks table, last-user-prompt cache) in place of *prompt_template*, which may carry an internal directive the LLM must see (a slash-command run).  ``None`` or blank: *prompt_template* is used.
+  - `_open_bare_path`: Whether a *prompt_template* that is only a filesystem path gets the "open it" directive.  The task runner passes False for a run it starts on behalf of a SEA or of another agent.
+  - `_start_ms`: The run's start as a ms epoch, when the caller stamped it before calling (the daemon's ``<task>`` block); 0 (default) dates the run at row allocation.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 ---
@@ -412,7 +443,7 @@
   - `cmd`: The ``shareChatTasks`` command (``chatId``, optional ``tabId``, optional ``taskId`` — a sub-agent tab's share narrows the reply to that one task and its sub-agents).
   - `ctx`: The transport context of the current call.
 
-- **voice_transcribe** — Transcribe a browser's post-wake utterance. The chat page heard the "Abracadabra" wake word and captured the utterance that followed.  The audio is translated by gpt-audio (:func:`kiss.server.speech.transcribe_pcm`) and answered with the ``voiceSpeech`` message ``voice.js`` handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **voice_transcribe** — Transcribe a browser's post-wake utterance. The chat page heard the "Abracadabra" wake word and captured the utterance that followed.  The audio is translated by gpt-audio (:func:`kiss.server.speech.transcribe_pcm`) and answered with the ``voiceSpeech`` message ``voice.js`` handles.  The transcription is a network round-trip (and, on first use, the speaker model's download), so it runs in the background: a ``stop`` or ``submit`` the page sends meanwhile is not held up behind it.  The page's dictations are answered in the order they were sent, though: ``voice.js`` pairs each ``voiceSpeech`` with the oldest of its outstanding rounds (the conversation the words were spoken into), so a short dictation answered before a longer earlier one would put each transcript into the other's conversation.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``voiceTranscribe`` command carrying the audio.
   - `ctx`: The transport context of the current call.
 
@@ -440,7 +471,7 @@
   - `cmd`: The ``tipsOptOut`` command with an optional boolean ``optOut``.
   - `ctx`: The transport context of the current call (unused).
 
-- **dismiss_notice** — Service a toast's "Do not show this" checkbox. Only the "VS Code extension removed" notice offers the box today; its dismissal is a marker file under ``$KISS_HOME``, so the choice holds in every browser of this daemon.  Every window then gets a ``close`` for the toast.  An unknown id is ignored.<br/>`async dismiss_notice(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **dismiss_notice** — Service a toast's "Do not show this again" checkbox. Only the "VS Code extension removed" notice offers the box today; its dismissal is a marker file under ``$KISS_HOME``, so the choice holds in every browser of this daemon.  Every window then gets a ``close`` for the toast.  An unknown id is ignored.<br/>`async dismiss_notice(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``dismissNotice`` command with the notification ``id``.
   - `ctx`: The transport context of the current call (unused — the close must reach every window).
 

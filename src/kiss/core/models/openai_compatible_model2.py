@@ -30,6 +30,7 @@ from openai import APITimeoutError
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -46,11 +47,24 @@ from kiss.core.models.model import (
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleBase,
     OpenAICompatibleModel,
+    _decode_tool_call_arguments,
     _extract_deepseek_reasoning,
+    _merge_tools_prompt_into_content,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error, stop_or_stall_error
 
 logger = logging.getLogger(__name__)
+
+
+def _new_tool_slot() -> dict[str, str]:
+    """Return an empty streamed function-call accumulator slot."""
+    return {"id": "", "name": "", "arguments": "", "item_id": ""}
+
+
+def _content_index(event: Any) -> int:
+    """Return the content-part index of a text stream *event* (``0`` when absent)."""
+    return int(getattr(event, "content_index", 0) or 0)
+
 
 # The request parameters a Responses call accepts, taken from the SDK's own
 # signature (keyword-only, no **kwargs), and the sub-keys its
@@ -608,8 +622,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         except (TypeError, ValueError):
             return default
 
-    @staticmethod
     def _commit_final_text(
+        self,
         key: tuple[int, int],
         final_text: str,
         text_part_buffers: dict[tuple[int, int], str],
@@ -618,21 +632,26 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     ) -> str:
         """Record an authoritative final text value for a content part.
 
-        Overrides the per-part buffer with ``final_text`` and returns the
-        text (if any) that the caller must append to ``content`` and forward
-        to the token callback: the full value for done-only parts (marking
-        ``key`` as seen so the terminal merge doesn't duplicate it), or —
-        when ``allow_suffix`` — the missing suffix when earlier deltas
-        streamed a strict prefix of the final value.
+        Overrides the per-part buffer with ``final_text``, forwards to the
+        token callback the text the deltas did not already stream, and
+        returns that text for the caller to append to its ``content``:
+        the full value for done-only parts (marking ``key`` as seen so the
+        terminal merge doesn't duplicate it), or — when ``allow_suffix`` —
+        the missing suffix when earlier deltas streamed a strict prefix of
+        the final value.
         """
         old_text = text_part_buffers.get(key, "")
         text_part_buffers[key] = final_text
         if key not in text_delta_seen and final_text:
             text_delta_seen.add(key)
-            return final_text
-        if allow_suffix and key in text_delta_seen and final_text.startswith(old_text):
-            return final_text[len(old_text) :]
-        return ""
+            emitted = final_text
+        elif allow_suffix and key in text_delta_seen and final_text.startswith(old_text):
+            emitted = final_text[len(old_text) :]
+        else:
+            emitted = ""
+        if emitted:
+            self._invoke_token_callback(emitted)
+        return emitted
 
     def _tool_slot_index(
         self,
@@ -875,127 +894,95 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
         return kwargs
 
-    def _unanswered_function_calls_from_conversation_with_names(
-        self,
-    ) -> list[dict[str, str]]:
-        """Return ``(name, call_id)`` pairs for every unanswered prior function_call.
+    def _validate_function_call_conversation(self, strict: bool = True) -> list[dict[str, str]]:
+        """Return every ``function_call`` item that still lacks its ``function_call_output``.
 
-        Walks the entire conversation (not just the trailing run) and
-        collects every ``function_call`` item that has not yet received
-        a matching ``function_call_output``.  Used as the fallback path
-        in :meth:`add_function_results_to_conversation_and_return` when
-        the in-memory pending queue has been lost (process restart /
-        object reconstruction from a serialized conversation).
+        Walks the entire conversation (not just the trailing run).  The
+        single scan serves two callers:
+
+        * the guard of every new generation (``strict``), which also
+          rejects what the Responses API would reject — a
+          ``function_call_output`` with no prior matching
+          ``function_call`` (orphan outputs in restored/mutated
+          conversations), a duplicate ``function_call_output`` for the
+          same ``call_id``, a ``function_call`` / ``function_call_output``
+          missing its ``call_id``, and a user message ahead of pending
+          outputs — locally, so callers see the problem immediately
+          instead of paying for a wasted round-trip;
+        * the fallback of
+          :meth:`add_function_results_to_conversation_and_return` when
+          the in-memory pending queue has been lost (process restart /
+          object reconstruction from a serialized conversation), which
+          only collects the outstanding calls (``strict=False``): an
+          id-less call or an orphan output is skipped there and left for
+          the next generation's guard to report.
+
+        Args:
+            strict: Raise on the contract violations listed above instead
+                of skipping the offending item.
 
         Returns:
-            A list of ``{"name": ..., "call_id": ...}`` dicts in
-            declaration order.  Empty when every prior
+            ``{"name": ..., "call_id": ...}`` dicts of the unanswered prior
+            function_calls, in declaration order.  Empty when every prior
             ``function_call`` has been answered.
+
+        Raises:
+            KISSError: If ``strict`` and any of the conditions above is
+                detected.
         """
+        seen_calls: set[str] = set()
+        answered_calls: set[str] = set()
         outstanding: list[dict[str, str]] = []
         for item in self.conversation:
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
+            call_id = str(item.get("call_id", "") or "")
+            if strict and item.get("role") == "user" and outstanding:
+                raise KISSError(
+                    "user message appears before function_call_output "
+                    f"items for pending call_ids: {[p['call_id'] for p in outstanding]!r}"
+                )
             if itype == "function_call":
-                call_id = str(item.get("call_id", "") or "")
                 name = str(item.get("name", "") or "")
+                if strict:
+                    if not call_id:
+                        raise KISSError("function_call item missing call_id")
+                    if not name:
+                        raise KISSError(f"function_call item missing name for call_id {call_id!r}")
+                    if not isinstance(item.get("arguments", ""), str):
+                        raise KISSError(
+                            f"function_call.arguments must be a string for call_id {call_id!r}"
+                        )
+                    if call_id in seen_calls:
+                        raise KISSError(f"Duplicate function_call call_id: {call_id!r}")
                 if call_id:
+                    seen_calls.add(call_id)
                     outstanding.append({"name": name, "call_id": call_id})
             elif itype == "function_call_output":
-                call_id = str(item.get("call_id", "") or "")
+                if strict:
+                    if not call_id:
+                        raise KISSError("function_call_output item missing call_id")
+                    if "output" not in item:
+                        raise KISSError(
+                            f"function_call_output missing output for call_id {call_id!r}"
+                        )
+                    if not isinstance(item.get("output"), str):
+                        raise KISSError(
+                            f"function_call_output.output must be a string for call_id {call_id!r}"
+                        )
+                    if call_id not in seen_calls:
+                        raise KISSError(
+                            f"function_call_output has no prior function_call: {call_id!r}"
+                        )
+                    if call_id in answered_calls:
+                        raise KISSError(f"Duplicate function_call_output for call_id: {call_id!r}")
+                answered_calls.add(call_id)
                 for j, pending in enumerate(outstanding):
                     if pending["call_id"] == call_id:
                         outstanding.pop(j)
                         break
         return outstanding
-
-    def _validate_function_call_conversation(self) -> list[str]:
-        """Validate ``function_call`` / ``function_call_output`` pairing.
-
-        Beyond detecting unanswered function_calls, also catches:
-
-        * ``function_call_output`` items with no prior matching
-          ``function_call`` (orphan outputs — restored/mutated
-          conversations).
-        * Duplicate ``function_call_output`` for the same ``call_id``.
-        * ``function_call`` / ``function_call_output`` items missing a
-          ``call_id``.
-
-        These all violate the Responses-API conversation contract and
-        would be rejected by the server.  Fail locally so callers see
-        the problem immediately instead of paying for a wasted
-        round-trip.
-
-        Returns:
-            ``call_id`` strings of unanswered prior function_calls, in
-            declaration order.
-
-        Raises:
-            KISSError: If any of the conditions above is detected.
-        """
-        seen_calls: set[str] = set()
-        answered_calls: set[str] = set()
-        outstanding: list[str] = []
-        for item in self.conversation:
-            if not isinstance(item, dict):
-                continue
-            itype = item.get("type")
-            if item.get("role") == "user" and outstanding:
-                raise KISSError(
-                    "user message appears before function_call_output "
-                    f"items for pending call_ids: {outstanding!r}"
-                )
-            if itype == "function_call":
-                call_id = str(item.get("call_id", "") or "")
-                if not call_id:
-                    raise KISSError("function_call item missing call_id")
-                name = str(item.get("name", "") or "")
-                if not name:
-                    raise KISSError(f"function_call item missing name for call_id {call_id!r}")
-                arguments = item.get("arguments", "")
-                if not isinstance(arguments, str):
-                    raise KISSError(
-                        f"function_call.arguments must be a string for call_id {call_id!r}"
-                    )
-                if call_id in seen_calls:
-                    raise KISSError(f"Duplicate function_call call_id: {call_id!r}")
-                seen_calls.add(call_id)
-                outstanding.append(call_id)
-            elif itype == "function_call_output":
-                call_id = str(item.get("call_id", "") or "")
-                if not call_id:
-                    raise KISSError("function_call_output item missing call_id")
-                if "output" not in item:
-                    raise KISSError(f"function_call_output missing output for call_id {call_id!r}")
-                if not isinstance(item.get("output"), str):
-                    raise KISSError(
-                        f"function_call_output.output must be a string for call_id {call_id!r}"
-                    )
-                if call_id not in seen_calls:
-                    raise KISSError(f"function_call_output has no prior function_call: {call_id!r}")
-                if call_id in answered_calls:
-                    raise KISSError(f"Duplicate function_call_output for call_id: {call_id!r}")
-                answered_calls.add(call_id)
-                if call_id in outstanding:
-                    outstanding.remove(call_id)
-        return outstanding
-
-    def _unanswered_function_calls_from_conversation(self) -> list[str]:
-        """Return ``call_id`` of every prior ``function_call`` lacking an output.
-
-        Thin id-only view over
-        :meth:`_unanswered_function_calls_from_conversation_with_names`,
-        which owns the single scanning loop.
-
-        Returns:
-            ``call_id`` strings of unanswered function_calls, in
-            declaration order.
-        """
-        return [
-            pending["call_id"]
-            for pending in self._unanswered_function_calls_from_conversation_with_names()
-        ]
 
     def _ensure_no_pending_function_calls(self) -> None:
         """Reject new generations while prior ``function_call`` outputs are pending.
@@ -1021,7 +1008,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         pending = [
             p.get("call_id") or p.get("name") or "<unknown>" for p in self._pending_function_calls
         ]
-        outstanding = self._validate_function_call_conversation()
+        outstanding = [p["call_id"] for p in self._validate_function_call_conversation()]
         if pending or outstanding:
             raise KISSError(
                 "Cannot generate a new response while function_call outputs "
@@ -1266,23 +1253,18 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if nested_item is not None:
                     ev_item_id = str(getattr(nested_item, "id", "") or "")
             if ev_item_id:
-                ev_output_idx = getattr(event, "output_index", None)
-                if ev_output_idx is not None:
-                    try:
-                        item_output_indexes[ev_item_id] = int(ev_output_idx)
-                    except (TypeError, ValueError):
-                        pass
+                ev_output_idx = self._stream_output_index(event, -1)
+                if ev_output_idx >= 0:
+                    item_output_indexes[ev_item_id] = ev_output_idx
 
             if etype in (
                 "response.output_text.delta",
                 "response.refusal.delta",
             ):
                 self._close_thinking_if_open()
-                output_index = self._stream_output_index(event, 0)
-                content_index = int(getattr(event, "content_index", 0) or 0)
-                text_delta_seen.add((output_index, content_index))
+                key = (self._stream_output_index(event, 0), _content_index(event))
+                text_delta_seen.add(key)
                 delta = getattr(event, "delta", "") or ""
-                key = (output_index, content_index)
                 text_part_buffers[key] = text_part_buffers.get(key, "") + delta
                 content += delta
                 self._invoke_token_callback(delta)
@@ -1322,36 +1304,22 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.refusal.done",
             ):
                 self._close_thinking_if_open()
-                output_index = self._stream_output_index(event, 0)
-                content_index = int(getattr(event, "content_index", 0) or 0)
+                key = (self._stream_output_index(event, 0), _content_index(event))
                 if etype == "response.output_text.done":
                     final_text = str(getattr(event, "text", "") or "")
                 else:
                     final_text = str(getattr(event, "refusal", "") or "")
-                emitted = self._commit_final_text(
-                    (output_index, content_index),
-                    final_text,
-                    text_part_buffers,
-                    text_delta_seen,
+                content += self._commit_final_text(
+                    key, final_text, text_part_buffers, text_delta_seen
                 )
-                if emitted:
-                    content += emitted
-                    self._invoke_token_callback(emitted)
             elif etype == "response.content_part.done":
                 self._close_thinking_if_open()
-                output_index = self._stream_output_index(event, 0)
-                content_index = int(getattr(event, "content_index", 0) or 0)
+                key = (self._stream_output_index(event, 0), _content_index(event))
                 part_text = self._part_final_text(getattr(event, "part", None))
                 if part_text is not None:
-                    emitted = self._commit_final_text(
-                        (output_index, content_index),
-                        part_text,
-                        text_part_buffers,
-                        text_delta_seen,
+                    content += self._commit_final_text(
+                        key, part_text, text_part_buffers, text_delta_seen
                     )
-                    if emitted:
-                        content += emitted
-                        self._invoke_token_callback(emitted)
             elif etype == "response.output_item.added":
                 self._close_thinking_if_open()
                 item = getattr(event, "item", None)
@@ -1378,10 +1346,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         args_from_added,
                         make_room=True,
                     )
-                    slot = tool_calls.setdefault(
-                        idx,
-                        {"id": "", "name": "", "arguments": "", "item_id": ""},
-                    )
+                    slot = tool_calls.setdefault(idx, _new_tool_slot())
                     if call_id and not slot.get("id"):
                         slot["id"] = call_id
                     if name and not slot.get("name"):
@@ -1411,9 +1376,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     args_from_added,
                     make_room=False,
                 )
-                slot = tool_calls.setdefault(
-                    idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-                )
+                slot = tool_calls.setdefault(idx, _new_tool_slot())
                 if item_id and not slot.get("item_id"):
                     slot["item_id"] = item_id
                     item_to_idx[item_id] = idx
@@ -1447,19 +1410,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         args_from_added,
                         make_room=True,
                     )
-                    slot = tool_calls.setdefault(
-                        idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-                    )
+                    slot = tool_calls.setdefault(idx, _new_tool_slot())
                     call_id = str(getattr(item, "call_id", "") or "")
                     name = str(getattr(item, "name", "") or "")
                     if call_id:
                         slot["id"] = call_id
                     if name:
                         slot["name"] = name
-                    if hasattr(item, "arguments"):
-                        raw_args = getattr(item, "arguments")
-                        if raw_args is not None:
-                            slot["arguments"] = str(raw_args)
+                    raw_args = getattr(item, "arguments", None)
+                    if raw_args is not None:
+                        slot["arguments"] = str(raw_args)
                     if item_id:
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
@@ -1471,16 +1431,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         part_text = self._part_final_text(part)
                         if part_text is None:
                             continue
-                        emitted = self._commit_final_text(
+                        content += self._commit_final_text(
                             (output_index, content_index),
                             part_text,
                             text_part_buffers,
                             text_delta_seen,
                             allow_suffix=False,
                         )
-                        if emitted:
-                            content += emitted
-                            self._invoke_token_callback(emitted)
             elif etype in ("response.failed", "error"):
                 resp = getattr(event, "response", None)
                 # Any usage the failed response carries was billed: stored
@@ -1535,6 +1492,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         # clear the slot when they hand the response to their caller.
         self._rejected_response = response
         self._close_thinking_if_open()
+        # Leaving the loop with ``break`` skips the post-loop stop check
+        # inside ``stop_aware_events`` (closing the generator runs only its
+        # cleanup), so a Stop that landed once the terminal event was
+        # already handed out is honoured here, as the Chat Completions
+        # transport does after its own ``break``; the usage recorded above
+        # is billed to the stopped run via ``take_partial_usage_response``.
+        if stop_signal.stop_requested():
+            raise stop_error()
         if not saw_completed:
             raise KISSError(
                 "Responses API stream ended without a terminal response.completed event."
@@ -1787,15 +1752,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ``arguments`` is the JSON-decoded argument object (or ``{}``
             if decoding fails).
         """
-        out: list[dict[str, Any]] = []
-        for tc in tool_calls:
-            try:
-                args = json.loads(tc.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                logger.debug("Failed to decode tool-call args", exc_info=True)
-                args = {}
-            out.append({"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args})
-        return out
+        return [
+            {
+                "id": tc.get("id", ""),
+                "name": tc.get("name", ""),
+                "arguments": _decode_tool_call_arguments(tc.get("arguments") or "{}"),
+            }
+            for tc in tool_calls
+        ]
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response with no tools.
@@ -1997,23 +1961,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if modified:
             first = modified[0]
             if isinstance(first, dict) and first.get("role") == "user":
-                parts = first.get("content")
-                if isinstance(parts, list):
-                    new_parts = [dict(p) if isinstance(p, dict) else p for p in parts]
-                    found = False
-                    for p in new_parts:
-                        if isinstance(p, dict) and p.get("type") == "input_text":
-                            p["text"] = (p.get("text", "") or "") + "\n" + tools_prompt
-                            found = True
-                            break
-                    if not found:
-                        new_parts.append({"type": "input_text", "text": tools_prompt})
-                    modified[0] = {"role": "user", "content": new_parts}
-                elif isinstance(parts, str):
-                    modified[0] = {
-                        "role": "user",
-                        "content": parts + "\n" + tools_prompt,
-                    }
+                modified[0] = {
+                    "role": "user",
+                    "content": _merge_tools_prompt_into_content(
+                        first.get("content"), tools_prompt, "input_text"
+                    ),
+                }
             else:
                 modified.insert(
                     0,
@@ -2079,7 +2032,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     ) -> None:
         """Inner mutating implementation guarded by atomic snapshots."""
         fallback_unanswered = (
-            self._unanswered_function_calls_from_conversation_with_names()
+            self._validate_function_call_conversation(strict=False)
             if not self._pending_function_calls
             else None
         )
@@ -2115,7 +2068,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         if (
             not self._pending_function_calls
-            and not self._unanswered_function_calls_from_conversation()
+            and not self._validate_function_call_conversation(strict=False)
             and sentinel_indexes
         ):
             sentinel_attachments = [

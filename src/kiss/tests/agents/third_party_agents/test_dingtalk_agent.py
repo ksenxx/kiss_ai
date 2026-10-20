@@ -43,21 +43,14 @@ _AUTH_TRIO = {"check_dingtalk_auth", "authenticate_dingtalk", "clear_dingtalk_au
 def _connected_backend(config: dict[str, Any]) -> tuple[DingTalkChannelBackend, int]:
     """Persist *config* and connect via the public path on an ephemeral port.
 
-    ``_port_from_config`` remaps port 0 to ``_DEFAULT_WEBHOOK_PORT``, so
-    that default (a module config constant, not a test double) is
-    temporarily rebound to 0: the public ``connect()`` then binds an
-    OS-assigned port in the server that keeps it — no
-    reserve-close-rebind race — and the really bound port is read back
-    from the live server.
+    A persisted ``"port": "0"`` makes the public ``connect()`` bind an
+    OS-assigned port in the server that keeps it (no reserve-close-rebind
+    race); the really bound port is read back from the live server.
     """
     dingtalk_mod._config.save({**config, "port": "0"})
-    patcher = pytest.MonkeyPatch()
-    try:
-        patcher.setattr(dingtalk_mod, "_DEFAULT_WEBHOOK_PORT", 0)
-        backend = DingTalkChannelBackend()
-        assert backend.connect() is True
-    finally:
-        patcher.undo()
+    backend = DingTalkChannelBackend()
+    assert backend.connect() is True
+    assert backend._port == 0
     assert backend._webhook_server is not None
     return backend, int(backend._webhook_server.server_address[1])
 
@@ -90,7 +83,7 @@ def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
     assert agent._is_authenticated() is False
     tool_names = {t.__name__ for t in agent._get_tools()}
     assert tool_names == _AUTH_TRIO
-    check = next(t for t in agent._get_tools() if t.__name__ == "check_dingtalk_auth")
+    check = tools_by_name(agent)["check_dingtalk_auth"]
     assert "authenticate_dingtalk" in check()
 
 

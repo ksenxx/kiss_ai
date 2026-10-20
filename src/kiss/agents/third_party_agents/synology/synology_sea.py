@@ -49,6 +49,20 @@ _SYNOLOGY_DIR = kiss_home() / "third_party_agents" / "synology"
 _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
+def _webhook_port(cfg: dict[str, Any]) -> int:
+    """Return the configured ``webhook_port`` (0 = OS-assigned), or the default.
+
+    A missing, non-numeric or out-of-range value falls back to
+    ``_DEFAULT_WEBHOOK_PORT`` so a bad config file still starts the
+    server.
+    """
+    try:
+        port = int(cfg.get("webhook_port") or _DEFAULT_WEBHOOK_PORT)
+    except ValueError:
+        return _DEFAULT_WEBHOOK_PORT
+    return port if 0 <= port <= 65535 else _DEFAULT_WEBHOOK_PORT
+
+
 class SynologySea(ChannelSea):
     """The ``/synology`` SEA."""
 
@@ -289,13 +303,13 @@ class SynologyChatChannelBackend(ToolMethodBackend):
                 return False
             self._webhook_url = cfg["webhook_url"]
             self._token = cfg.get("token", "")
-        self._connection_info = "Synology Chat configured"
-        if not self._start_webhook_server():  # pragma: no branch
-            return False
-        return True
+        return self._start_webhook_server(_webhook_port(_config.load_metadata() or {}))
 
     def _start_webhook_server(self, port: int = _DEFAULT_WEBHOOK_PORT) -> bool:
-        """Start the outgoing webhook HTTP server."""
+        """Start the outgoing webhook HTTP server on *port* (0 = OS-assigned).
+
+        On success ``connection_info`` names the port actually bound.
+        """
         backend = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -336,9 +350,11 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             error_prefix="Synology webhook bind failed",
             error_log="Could not start Synology webhook server: %s",
         )
-        if error is not None:
-            self._connection_info = error
+        if self._webhook_server is None:
+            self._connection_info = str(error)
             return False
+        bound = self._webhook_server.server_address[1]
+        self._connection_info = f"Synology Chat configured (webhook port {bound})"
         return True
 
     def poll_messages(

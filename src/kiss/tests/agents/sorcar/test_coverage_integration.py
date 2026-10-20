@@ -42,7 +42,7 @@ class TestTaskHistory(TestCase):
     def test_search_history_empty_query(self) -> None:
         th = self.th
         th._add_task("task one")
-        results = th._search_history("", limit=10)
+        results = th._load_history(query="", limit=10)
         assert len(results) >= 1
 
 

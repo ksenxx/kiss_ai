@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {loadMainCss, makePage, send} = require('./simplify2_harness');
 
 function visibleTitles(win) {
   const list = win.document.getElementById('history-list');
@@ -213,54 +209,53 @@ function testChipTogglingFiltersRows() {
 }
 
 function testChipCss() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-
-  const chipRule = /\.hf-chip\s*\{([^}]*)\}/.exec(css);
-  assert.ok(chipRule, 'main.css must declare a .hf-chip rule');
+  const {win} = makePage();
+  loadMainCss(win);
+  const doc = win.document;
+  const chips = Array.from(doc.querySelectorAll('.hf-chip'));
+  assert.ok(chips.length >= 2, 'the filter bar renders status chips');
+  const [first, second] = chips;
+  const chip = win.getComputedStyle(first);
   assert.ok(
-    /border-radius\s*:/.test(chipRule[1]),
+    chip.borderRadius && chip.borderRadius !== '0px',
     '.hf-chip must be pill-shaped (border-radius)',
   );
-  assert.ok(
-    /cursor\s*:\s*pointer/.test(chipRule[1]),
+  assert.strictEqual(
+    chip.cursor,
+    'pointer',
     '.hf-chip must look interactive (cursor: pointer)',
   );
-
-  const hiddenRule =
-    /\.hf-chip\s+input\[type="checkbox"\]\s*\{([^}]*)\}/.exec(css);
-  assert.ok(
-    hiddenRule,
-    'main.css must declare a .hf-chip input[type="checkbox"] rule',
-  );
-  assert.ok(
-    /opacity\s*:\s*0/.test(hiddenRule[1]),
+  assert.strictEqual(
+    win.getComputedStyle(first.querySelector('input[type="checkbox"]')).opacity,
+    '0',
     'the chip checkbox must be visually hidden (opacity: 0)',
   );
 
-  assert.ok(
-    /\.hf-chip:has\([^)]*input:checked\)/.test(css),
-    'main.css must style the selected chip via .hf-chip:has(input:checked)',
+  first.querySelector('input').checked = true;
+  second.querySelector('input').checked = false;
+  assert.notStrictEqual(
+    win.getComputedStyle(first).background,
+    win.getComputedStyle(second).background,
+    'a selected chip is painted differently from an unselected one',
   );
 
-  const groupRule = /\.history-filter-chips\s*\{([^}]*)\}/.exec(css);
-  assert.ok(groupRule, 'main.css must declare .history-filter-chips');
-  assert.ok(
-    /flex-wrap\s*:\s*wrap/.test(groupRule[1]),
+  assert.strictEqual(
+    win.getComputedStyle(doc.querySelector('.history-filter-chips')).flexWrap,
+    'wrap',
     '.history-filter-chips must wrap chips to new rows',
   );
 
-  console.log('  ok - chip CSS: pill, hidden checkbox, :has selected state');
+  win.close();
+  console.log('  ok - chip CSS: pill, hidden checkbox, selected state');
 }
 
 function testNoEmojiCalendarButtons() {
-  const html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  assert.ok(
-    !html.includes('\u{1F4C5}'),
-    'chat.html must not use the 📅 emoji for the date picker buttons',
-  );
-
   const {win} = makePage();
   const doc = win.document;
+  assert.ok(
+    !doc.body.textContent.includes('\u{1F4C5}'),
+    'the page must not show the 📅 emoji for the date picker buttons',
+  );
   const range = doc.querySelector('.history-filter-daterange');
   assert.ok(
     range,

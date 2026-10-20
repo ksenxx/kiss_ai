@@ -15,8 +15,8 @@ Each test class targets one confirmed bug (see ``tmp/findings-1.md``):
   column, destroying the ``is_favorite`` flag that
   ``_set_task_favorite`` merge-updates.
 * **A4** — ``_prefix_match_tasks`` lacked the
-  sub-agent exclusion filter used by ``_load_history`` /
-  ``_search_history``, so their row indexing disagreed with the UI list
+  sub-agent exclusion filter used by ``_load_history``, so their row
+  indexing disagreed with the UI list
   and sub-agent internal task text leaked into autocomplete.
 
 All tests run against a real SQLite database redirected to a temp dir

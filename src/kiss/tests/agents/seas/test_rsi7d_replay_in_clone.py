@@ -33,9 +33,8 @@ from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.core import user_config
-from kiss.tests.agents.seas.conftest import persist_task
+from kiss.tests.agents.seas.conftest import commit, git, persist_task
 from kiss.tests.agents.seas.sea_contract import system_message
-from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
@@ -118,11 +117,10 @@ class ReplayInCloneTest(DaemonLocalHarness):
     def test_replay_runs_the_seas_of_this_checkout_in_a_clone_at_the_tasks_commit(self) -> None:
         """The replay edits the clone at the pre-task commit and comes back with its task id."""
         repo = Path(self.repo)
-        base = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        base = git(repo, "rev-parse", "HEAD")
         task = f"Add a results section to {repo}/seed.txt"
         (repo / "seed.txt").write_text("seed\nresults\n", encoding="utf-8")
-        run_git(repo, "add", "-A")
-        run_git(repo, "commit", "-q", "-m", f"docs: add results{USER_PROMPT_HEADING}{task}")
+        commit(repo, f"docs: add results{USER_PROMPT_HEADING}{task}")
         task_id = persist_task(task, work_dir=str(repo), sea="demo_sea", steps=3)
 
         out = json.loads(
@@ -136,7 +134,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         assert (clone / "seed.txt").read_text(encoding="utf-8") == "seed\n"  # pre-task state
         assert (clone / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
         assert not (repo / "replayed.txt").exists()
-        assert run_git(repo, "status", "--porcelain").stdout == ""  # the repo is untouched
+        assert git(repo, "status", "--porcelain") == ""  # the repo is untouched
         result = out["result"]
         assert result["success"] is True and "replayed in the clone" in result["summary"]
         assert result["steps"] >= 2
@@ -157,13 +155,13 @@ class ReplayInCloneTest(DaemonLocalHarness):
     def test_replay_of_a_plain_sorcar_run_uses_this_checkouts_system_prompt(self) -> None:
         """A run without a SEA replays as a plain task on the checkout's (patched) SYSTEM.md."""
         # The scope over KISS Sorcar itself needs the checkout to be a git repository.
-        run_git(self.checkout, "init", "-q")
+        git(self.checkout, "init", "-q")
         marker = "You are the patched Sorcar prompt under test. Finish quickly."
         (self.checkout / "src" / "kiss" / "SYSTEM.md").write_text(
             "{{IDENTITY}}\n\n" + marker + "\n", encoding="utf-8"
         )
         repo = Path(self.repo)
-        base = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        base = git(repo, "rev-parse", "HEAD")
         # No auto-commit to go back from: the replay starts at the HEAD of the
         # task's start, so the task must have started after the seed commit.
         now_ms = int(time.time() * 1000)

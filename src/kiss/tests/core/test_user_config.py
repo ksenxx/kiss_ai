@@ -848,13 +848,12 @@ class TestLoadApiKeys:
         """When neither ``PATH`` nor fallback paths contain the shell,
         the sourcing fallback logs a warning and the loader still runs.
 
-        The key is assigned in a file the RC *sources*, so the textual
-        scan cannot see it and only the (unavailable) shell could.
+        The RC names the key but assembles its value from a variable, so
+        the textual scan cannot import it and only the (unavailable)
+        shell could.
         """
-        side = Path.home() / ".zshrc_keys"
-        side.write_text('export GEMINI_API_KEY="never-set"\n')
         rc = Path.home() / ".zshrc"
-        rc.write_text(f'. "{side}"\n')
+        rc.write_text('V=never\nexport GEMINI_API_KEY="$V-set"\n')
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -1331,11 +1330,10 @@ class TestReviewRegressions:
 
         shell = _installed_posix_shell()
         rc = _shell_rc_path(shell)
-        # The key is defined indirectly so the textual scan cannot skip
-        # the sourcing fallback, and a child outlives the shell.
-        side = Path.home() / ".rc_keys"
-        side.write_text("export GEMINI_API_KEY=indirect\n")
-        rc.write_text(f'. "{side}"\nsleep 30 &\n')
+        # The RC names the key but assembles its value indirectly, so
+        # the textual scan cannot import it and the migration reaches
+        # the sourcing fallback; a child outlives the shell.
+        rc.write_text('V=indirect\nexport GEMINI_API_KEY="$V"\nsleep 30 &\n')
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setattr(user_config, "_MIGRATION_TIMEOUT_S", 0.5)

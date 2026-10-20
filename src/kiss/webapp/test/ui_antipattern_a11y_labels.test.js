@@ -15,22 +15,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  not ok - ${name}`);
-  }
-}
 
 const {win} = makePage();
 const doc = win.document;
@@ -152,8 +141,4 @@ test('disabled menu items keep their label readable', () => {
 
 // Close the page so no timer main.js armed keeps node alive.
 win.close();
-console.log(`\n${passed} passed, ${failures.length} failed`);
-for (const f of failures) {
-  console.error(`\n${f.name}\n${f.err && f.err.stack}`);
-}
-if (failures.length) process.exit(1);
+report('ui_antipattern_a11y_labels');

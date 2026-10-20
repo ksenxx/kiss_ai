@@ -32,11 +32,14 @@
 //     surprise content tabs.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeSharedPage,
+  send,
+  sleep,
+  waitFor,
+  click,
+  stubMonaco,
+} = require('./simplify2_harness');
 
 // The page harness of workspaceScopedTabs.test.js plus a fake Monaco
 // rich enough for the EDITABLE content-tab path: renderCodeContent needs
@@ -46,78 +49,13 @@ const MEDIA = path.join(__dirname, '..', 'media');
 // editor is recorded (with its initial value) and exposes _type(text) so
 // a test can make the tab dirty like a real keystroke would.
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  const created = [];
-  win.monaco = {
-    editor: {
-      // main.js defines a kiss-light/kiss-dark theme from the page palette
-      // before every create(); real Monaco always exposes both calls.
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        let value = String(opts.value === undefined ? '' : opts.value);
-        let version = 1;
-        const listeners = [];
-        const model = {
-          getAlternativeVersionId: () => version,
-          getValue: () => value,
-          getLineCount: () => value.split('\n').length,
-        };
-        const editor = {
-          getModel: () => model,
-          onDidChangeModelContent: cb => listeners.push(cb),
-          setPosition: () => {},
-          revealLineInCenter: () => {},
-          getDomNode: () => holder,
-          dispose: () => {},
-          layout: () => {},
-          focus: () => {},
-          _type: text => {
-            value = String(text);
-            version += 1;
-            listeners.slice().forEach(cb => cb());
-          },
-        };
-        created.push({holder, editor, value: opts.value, opts});
-        return editor;
-      },
+  let created;
+  const {win, posted} = makeSharedPage({
+    beforeScripts: win => {
+      created = stubMonaco(win);
     },
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  });
   return {win, posted, created};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function setWorkspace(win, dir) {
@@ -126,26 +64,6 @@ function setWorkspace(win, dir) {
 
 function entry(tabId, workDir, chatId) {
   return {tabId, chatId: chatId || '', title: tabId, workDir: workDir || ''};
-}
-
-function clickEl(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-async function waitFor(predicate, message, timeoutMs = 2000) {
-  const start = Date.now();
-  for (;;) {
-    const value = predicate();
-    if (value) return value;
-    if (Date.now() - start >= timeoutMs) {
-      throw new Error(message || 'waitFor timed out');
-    }
-    await sleep(10);
-  }
 }
 
 function conflictToast(win) {
@@ -174,7 +92,7 @@ function discardEditsAndClose(win) {
     '[data-notification-id^="close-dirty-"]',
   );
   assert.ok(toast, 'closing a dirty tab must ask in-page first');
-  clickEl(win, toastActionButton(win, toast, "Don't save"));
+  click(win, toastActionButton(win, toast, "Don't save"));
 }
 
 const FILE_PATH = '/shared/notes.txt';
@@ -213,7 +131,7 @@ async function openDirtyConflictedTab(ctx) {
   const saveBtn = win.document.querySelector('.content-save-btn');
   assert.ok(saveBtn, 'the editable content tab must have a Save button');
   assert.strictEqual(saveBtn.disabled, false, 'dirty tab: Save enabled');
-  clickEl(win, saveBtn);
+  click(win, saveBtn);
   const saves = posted.filter(m => m && m.type === 'saveFile');
   assert.strictEqual(saves.length, 1, 'Save must send exactly one saveFile');
 
@@ -242,7 +160,7 @@ async function testForeignScopeErrorMustNotSwallowReload() {
   // contentReloadRequested and sends openFile for the tab's own scope.
   const reloadBtn = toastActionButton(win, toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
-  clickEl(win, reloadBtn);
+  click(win, reloadBtn);
   assert.strictEqual(
     posted.filter(m => m && m.type === 'openFile').length,
     1,
@@ -297,7 +215,7 @@ async function testSameScopeErrorStillClearsReloadFlag() {
 
   const reloadBtn = toastActionButton(win, toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
-  clickEl(win, reloadBtn);
+  click(win, reloadBtn);
 
   // The tab's own reload FAILS (same scope: the reply is attributed to
   // the very conversation that owns the tab). The edits survive, and
@@ -347,7 +265,7 @@ async function testClosingTabRemovesConflictToast() {
   assert.ok(strip, 'the content tab must have a strip in the tab bar');
   const closeBtn = strip.querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the content tab strip must have a close button');
-  clickEl(win, closeBtn);
+  click(win, closeBtn);
   discardEditsAndClose(win);
   assert.strictEqual(
     contentTabStrips(win).length,
@@ -376,7 +294,7 @@ async function testDeadConflictActionsOpenNoSurpriseTabs() {
   const closeBtn = win.document.querySelector(
     '.chat-tab.content-tab .chat-tab-close',
   );
-  clickEl(win, closeBtn);
+  click(win, closeBtn);
   discardEditsAndClose(win);
   assert.strictEqual(contentTabStrips(win).length, 0);
 
@@ -386,9 +304,9 @@ async function testDeadConflictActionsOpenNoSurpriseTabs() {
   const leftover = conflictToast(win);
   if (leftover) {
     const overwriteBtn = toastActionButton(win, leftover, 'Overwrite');
-    if (overwriteBtn) clickEl(win, overwriteBtn);
+    if (overwriteBtn) click(win, overwriteBtn);
     const reloadBtn = toastActionButton(win, leftover, 'Reload from disk');
-    if (reloadBtn) clickEl(win, reloadBtn);
+    if (reloadBtn) click(win, reloadBtn);
   }
   // Every openFile a dead action managed to send gets the reply the
   // daemon would produce.
@@ -406,8 +324,7 @@ async function testDeadConflictActionsOpenNoSurpriseTabs() {
   assert.strictEqual(
     contentTabStrips(win).length,
     0,
-    "a closed tab's conflict actions must not open a surprise " +
-      'content tab',
+    "a closed tab's conflict actions must not open a surprise " + 'content tab',
   );
   win.close();
   console.log('  ok - dead conflict actions open no surprise tabs');
@@ -435,5 +352,7 @@ async function testDeadConflictActionsOpenNoSurpriseTabs() {
     console.error(failures + ' test(s) failed');
     process.exit(1);
   }
-  console.log('All ' + tests.length + ' conc2026_content_tab_races tests passed');
+  console.log(
+    'All ' + tests.length + ' conc2026_content_tab_races tests passed',
+  );
 })();

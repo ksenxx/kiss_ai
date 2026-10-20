@@ -28,93 +28,27 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-const {sleep, waitFor} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  sleep,
+  waitFor,
+  fakeMatchMedia,
+  stubMonaco,
+} = require('./simplify2_harness');
 
 function makePage(initialState) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let state = initialState;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  const created = [];
-  win.monaco = {
-    editor: {
-      // main.js defines a kiss-light/kiss-dark theme from the page palette
-      // before every create(); real Monaco always exposes both calls.
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        let value = String(opts.value === undefined ? '' : opts.value);
-        let version = 1;
-        const listeners = [];
-        const model = {
-          getAlternativeVersionId: () => version,
-          getValue: () => value,
-          getLineCount: () => value.split('\n').length,
-        };
-        const editor = {
-          getModel: () => model,
-          onDidChangeModelContent: cb => listeners.push(cb),
-          setPosition: () => {},
-          revealLineInCenter: () => {},
-          getDomNode: () => holder,
-          dispose: () => {},
-          layout: () => {},
-          focus: () => {},
-          _type: text => {
-            value = String(text);
-            version += 1;
-            listeners.slice().forEach(cb => cb());
-          },
-        };
-        created.push(editor);
-        return editor;
-      },
+  let created;
+  const {win, posted, getState} = makeChatPage({
+    bodyClass: 'remote-chat',
+    initialState,
+    beforeScripts(win) {
+      fakeMatchMedia(win, false);
+      created = stubMonaco(win);
     },
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  return {win, posted, created, getState: () => state};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  });
+  return {win, posted, created, getState};
 }
 
 function uiState(win) {
@@ -125,10 +59,6 @@ function uiState(win) {
     banner: overlay.classList.contains('kiss-server-loading--banner'),
     appShown: app.style.display !== 'none',
   };
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function clickSend(win) {
@@ -356,7 +286,7 @@ async function testSaveHeldBackWhileDaemonDown() {
     version: 'ver-1',
   });
   await waitFor(() => created.length >= 1, 'the file tab creates its editor');
-  created[0]._type('v1 edited');
+  created[0].editor._type('v1 edited');
   const saveBtn = win.document.querySelector('.content-save-btn');
   assert.strictEqual(saveBtn.disabled, false, 'dirty tab: Save enabled');
 

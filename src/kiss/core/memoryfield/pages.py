@@ -51,6 +51,13 @@ MAX_PAGE_BYTES = 8192
 # and no sync -- takes it for a page or a domain memory.
 TOMBSTONES_DIR = ".tombstones"
 
+# Longest wait for another holder of ``<root>.lock``.  A write or delete
+# holds it for milliseconds, so a wait this long means the holder is
+# wedged (a sync script stuck on a network filesystem, a daemon paused
+# in a debugger): the mutation fails with ``TimeoutError`` instead of
+# blocking in C where the task's Stop cannot reach it.
+MUTATION_LOCK_TIMEOUT = 60.0
+
 FRONTMATTER_KEYS = ("title", "uuid", "summary", "created", "updated")
 
 
@@ -312,6 +319,8 @@ class MemoryDir:
 
         Raises:
             ValueError: If the name is invalid or the body is empty.
+            TimeoutError: If another process holds the memory's lock past
+                :data:`MUTATION_LOCK_TIMEOUT`; nothing is written.
         """
         path = self.page_path(name)
         tombstone = self.tombstone_path(path.stem)
@@ -373,9 +382,10 @@ class MemoryDir:
         with no tombstone (W publishes the page, D unlinks it and writes
         the tombstone, W unlinks the tombstone), and two writes of one page
         could lose an update between reading the old frontmatter and
-        publishing the new page.
+        publishing the new page.  Entering raises ``TimeoutError`` when
+        the lock is still held after :data:`MUTATION_LOCK_TIMEOUT`.
         """
-        return exclusive_file_lock(Path(f"{self.root}.lock"))
+        return exclusive_file_lock(Path(f"{self.root}.lock"), timeout=MUTATION_LOCK_TIMEOUT)
 
     def tombstone_path(self, name: str) -> Path:
         """Return where the tombstone of page *name* lives once the page is deleted.
@@ -407,6 +417,8 @@ class MemoryDir:
             FileNotFoundError: If the page does not exist.
             ValueError: If the name is invalid, or the tombstone cannot be
                 placed (see :meth:`tombstone_path`); the page is then kept.
+            TimeoutError: If another process holds the memory's lock past
+                :data:`MUTATION_LOCK_TIMEOUT`; the page is then kept.
         """
         tombstone = self.tombstone_path(name)
         path = self.page_path(name)

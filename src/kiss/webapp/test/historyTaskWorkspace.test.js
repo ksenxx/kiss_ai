@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {makePage, send} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
@@ -191,30 +187,9 @@ function testWorkspaceRendersAfterMetrics() {
   );
 }
 
-function testWorkspaceLineBreaksToOwnVisualLine() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const re = /\.running-item-workspace\s*\{([^}]*)\}/g;
-  let m;
-  let found = false;
-  while ((m = re.exec(css)) !== null) {
-    const body = m[1];
-    if (/flex-basis\s*:\s*100%/.test(body)) {
-      found = true;
-      break;
-    }
-  }
-  assert.ok(
-    found,
-    '.running-item-workspace rule in main.css must declare ' +
-      '"flex-basis: 100%" so the workspace span renders on its own ' +
-      'line below the metrics row',
-  );
-  console.log('  ok - workspace span has flex-basis: 100%');
-}
-
+// The span's own-line layout is asserted by historyTaskMeta.test.js.
 function main() {
   testWorkspaceRendersAfterMetrics();
-  testWorkspaceLineBreaksToOwnVisualLine();
   console.log('historyTaskWorkspace.test.js: all assertions passed.');
 }
 

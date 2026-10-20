@@ -34,32 +34,7 @@
 const assert = require('assert');
 const {send} = require('./simplify2_harness');
 const {subagentTabEls} = require('./subagent_tab_helpers');
-const {
-  newDom,
-  loadPageScripts,
-  readShimJs,
-  installFakeWebSocket,
-} = require('./transport_page_helpers');
-
-function makeWebappClient() {
-  const win = newDom();
-  const sockets = [];
-  installFakeWebSocket(win, sockets);
-  win.eval(readShimJs());
-  loadPageScripts(win);
-  const sock = sockets[0];
-  assert.ok(sock, 'the webapp shim must open a WebSocket');
-  sock.onopen();
-  sock.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  const posted = [];
-  const drain = () => {
-    while (posted.length < sock.sent.length) {
-      posted.push(JSON.parse(sock.sent[posted.length]));
-    }
-    return posted;
-  };
-  return {win, posted, drain, sock};
-}
+const {makeWebappClient} = require('./transport_page_helpers');
 
 /** Boot a client, start the parent task, and return the parent tab id. */
 function bootParent(client) {

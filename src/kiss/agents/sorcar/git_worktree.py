@@ -17,6 +17,7 @@ import fnmatch
 import logging
 import os
 import re
+import selectors
 import shlex
 import shutil
 import subprocess
@@ -32,11 +33,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar._concurrency import _race_delay, interruptible_locked_call
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.html_to_markdown import html_to_markdown
+from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked_call
 from kiss.core.processes import (
+    IS_WINDOWS,
     SIGKILL,
     kill_process_group,
     pid_alive,
@@ -45,6 +48,36 @@ from kiss.core.processes import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The most seconds a taker waits for another PROCESS's hold on one of
+#: the repository's cross-process locks (:func:`_file_lock`,
+#: :func:`_reclaim_process_lock`).  A holder that wedged (a daemon
+#: stuck in an un-stoppable merge) then costs the waiter a bounded
+#: wait and a clear :class:`KISSError` instead of a silent hang.
+PROCESS_LOCK_TIMEOUT_SECONDS = 300.0
+
+
+def _lock_across_processes(handle: IO[Any], timeout: float) -> None:
+    """Take the flock on *handle*, waiting at most *timeout* seconds.
+
+    The bounded wait polls (see :func:`kiss.core.file_lock.lock_exclusive`),
+    so an injected Stop reaches the waiting task thread too.
+
+    Args:
+        handle: The open lock file.
+        timeout: The most seconds to wait for another process.
+
+    Raises:
+        KISSError: When another process still holds the lock after
+            *timeout* seconds.
+    """
+    try:
+        lock_exclusive(handle, timeout=timeout)
+    except TimeoutError as exc:
+        raise KISSError(
+            f"{handle.name}: {exc}; another Sorcar process (a daemon or a CLI run)"
+            " is holding this repository's lock and not releasing it"
+        ) from None
 
 
 @contextmanager
@@ -56,12 +89,16 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
     or two checkouts sharing a ``--git-common-dir``) mutate the same
     repo-local plumbing files.  A ``flock`` is held by the OS on the
     open file description, so it serialises across processes and is
-    released automatically if the holder dies.
+    released automatically if the holder dies.  The wait is bounded by
+    :data:`PROCESS_LOCK_TIMEOUT_SECONDS`.
 
     Args:
         handle: An open file object to lock.
+
+    Raises:
+        KISSError: When another process keeps the lock past the bound.
     """
-    lock_exclusive(handle)
+    _lock_across_processes(handle, PROCESS_LOCK_TIMEOUT_SECONDS)
     try:
         yield
     finally:
@@ -114,7 +151,9 @@ def _held_reclaim_locks() -> dict[str, weakref.ref[_ReclaimLockToken]]:
 
 
 @contextmanager
-def _reclaim_process_lock(repo: Path) -> Iterator[None]:
+def _reclaim_process_lock(
+    repo: Path, timeout: float = PROCESS_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
     """Hold the cross-process orphan-reclaim lock for *repo*.
 
     ``repo_lock`` is a ``threading.RLock`` — it serialises reclaim
@@ -150,9 +189,14 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
 
     Args:
         repo: Git repo root path.
+        timeout: The most seconds to wait for another process's hold;
+            the default is the production bound.
 
     Yields:
         Nothing; the lock is held for the duration of the block.
+
+    Raises:
+        KISSError: When another process keeps the lock past *timeout*.
     """
     git_common = _git_common_dir(repo)
     if git_common is None:  # pragma: no cover — not a git repo
@@ -180,7 +224,7 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     # both together; running the finally withdraws both in order.
     token = _ReclaimLockToken(handle)
     try:
-        lock_exclusive(handle)
+        _lock_across_processes(handle, timeout)
         held[lock_path] = weakref.ref(token)
         yield
     finally:
@@ -547,13 +591,20 @@ def _git_stdout_head(
         ``(text, truncated)``: the decoded stdout (cut back to the last
         complete line when truncated) and whether it is incomplete,
         either because more output existed or because git was killed
-        by the timeout.
+        by the timeout.  ``("", False)`` when git could not start (no
+        ``git`` on the PATH): the caller takes its "no output" path,
+        as it does for a :func:`_git` that failed to start.
     """
     cmd, env = _git_command(args, cwd)
-    proc = popen_process_group(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-    )
+    try:
+        proc = popen_process_group(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning("git %s could not start: %s", args[:1], exc)
+        return "", False
     timed_out = threading.Event()
+    give_up = time.monotonic() + timeout + _PIPE_GIVE_UP_SECONDS
     timer = threading.Timer(
         timeout, _kill_git_on_timeout, args=(proc, args, timed_out, timeout),
     )
@@ -566,13 +617,13 @@ def _git_stdout_head(
     truncated = False
     try:
         while size < max_bytes:
-            chunk = stdout.read(min(65536, max_bytes - size))
+            chunk = _read_some(stdout, min(65536, max_bytes - size), give_up)
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
         else:
-            truncated = bool(stdout.read(1))
+            truncated = bool(_read_some(stdout, 1, give_up))
     finally:
         timer.cancel()
         _kill_git(proc)
@@ -584,6 +635,54 @@ def _git_stdout_head(
     if truncated and "\n" in text:
         text = text[: text.rfind("\n")]
     return text, truncated
+
+
+#: How long :func:`_read_some` keeps reading git's stdout after the
+#: timeout watchdog killed git's process group.
+_PIPE_GIVE_UP_SECONDS = 5.0
+
+
+def _read_some(stdout: IO[bytes], limit: int, give_up: float) -> bytes:
+    """Read up to *limit* bytes of git's *stdout*; ``b""`` at EOF or past *give_up*.
+
+    A plain ``read`` would stay blocked for as long as ANY process
+    holds the pipe's write end: a hook git ran that started a daemon
+    in its own session (``setsid``) survives the watchdog's
+    process-group kill with the pipe inherited, and the merge thread,
+    which holds the tab's ``is_merging`` claim, would sit in ``read``
+    until that daemon exits — or, if that daemon keeps writing, keep
+    reading its output for as long as it runs.  The read therefore
+    waits for the pipe only until *give_up*, one deadline shared by
+    every read of the command, and returns nothing once it has
+    passed even when output is ready.  The wait uses the platform's
+    readiness API (``epoll``/``kqueue``), not ``select``, whose
+    ``FD_SETSIZE`` limit rejects a pipe numbered 1024 or higher in a
+    daemon with that many sockets and files open.  On Windows the
+    watchdog's Job Object kills every descendant, so a plain read
+    cannot be held open there (and readiness APIs do not work on pipes).
+
+    Args:
+        stdout: Git's stdout pipe.
+        limit: The most bytes to return.
+        give_up: ``time.monotonic()`` deadline, :data:`_PIPE_GIVE_UP_SECONDS`
+            past the watchdog's timeout.
+
+    Returns:
+        The bytes read, possibly fewer than *limit*; ``b""`` at EOF or
+        once *give_up* has passed.
+    """
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        return stdout.read(limit)
+    remaining = give_up - time.monotonic()
+    if remaining > 0:
+        with selectors.DefaultSelector() as ready:
+            ready.register(stdout, selectors.EVENT_READ)
+            if ready.select(remaining):
+                return os.read(stdout.fileno(), limit)
+    logger.warning(
+        "git stdout still open %ss after the kill; giving up", _PIPE_GIVE_UP_SECONDS,
+    )
+    return b""
 
 
 COMMIT_MESSAGE_DIFF_LIMIT_BYTES: int = 200_000
@@ -972,7 +1071,9 @@ class GitWorktreeOps:
         # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
         # ``repo_lock`` is an RLock, so callers already holding it are
         # unaffected.
-        return locked_call(repo_lock(repo), GitWorktreeOps._create_locked, repo, branch, wt_dir)
+        return interruptible_locked_call(
+            repo_lock(repo), GitWorktreeOps._create_locked, repo, branch, wt_dir,
+        )
 
     @staticmethod
     def _create_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
@@ -1014,7 +1115,9 @@ class GitWorktreeOps:
             True when the worktree exists and is stamped, False
             otherwise (nothing is left on disk).
         """
-        return locked_call(repo_lock(repo), GitWorktreeOps._reattach_locked, repo, branch, wt_dir)
+        return interruptible_locked_call(
+            repo_lock(repo), GitWorktreeOps._reattach_locked, repo, branch, wt_dir,
+        )
 
     @staticmethod
     def _reattach_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
@@ -1057,7 +1160,7 @@ class GitWorktreeOps:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        locked_call(repo_lock(repo), GitWorktreeOps._remove_locked, repo, wt_dir)
+        interruptible_locked_call(repo_lock(repo), GitWorktreeOps._remove_locked, repo, wt_dir)
 
     @staticmethod
     def _remove_locked(repo: Path, wt_dir: Path) -> None:
@@ -1123,7 +1226,7 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
+        interruptible_locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
 
     @staticmethod
     def _prune_locked(repo: Path) -> None:
@@ -1659,7 +1762,7 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        locked_call(
+        interruptible_locked_call(
             repo_lock(repo), GitWorktreeOps._append_info_line_locked, repo, filename, entry,
         )
 
@@ -1953,7 +2056,7 @@ class GitWorktreeOps:
     def save_preserve_marker(repo: Path, branch: str) -> bool:
         """Mark *branch* as intentionally preserved for manual review.
 
-        When :meth:`SorcarAgent._preserve_pending_worktree_for_review`
+        When :meth:`SorcarAgent._retire_previous_worktree`
         deliberately leaves a worktree on disk (task stopped, pre-commit
         hook rejection, or a task that never merged), the
         original agent process may die before the user chooses
@@ -2102,21 +2205,6 @@ class GitWorktreeOps:
             return None
 
     @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        """Whether a process with *pid* is currently running.
-
-        Thin alias of the shared :func:`pid_alive` probe (kept for
-        callers and tests that address it through this class).
-
-        Args:
-            pid: The process id to probe.
-
-        Returns:
-            True when the process exists, False when it is gone.
-        """
-        return pid_alive(pid)
-
-    @staticmethod
     def _owner_alive(repo: Path, branch: str, owner_pid: int) -> bool:
         """Whether the process that stamped *branch* (:meth:`save_owner_pid`) still runs.
 
@@ -2135,7 +2223,7 @@ class GitWorktreeOps:
         Returns:
             True when the stamping process is still alive.
         """
-        if not GitWorktreeOps._pid_alive(owner_pid):
+        if not pid_alive(owner_pid):
             return False
         stamped = GitWorktreeOps._load_branch_config(repo, branch, "kiss-owner-identity")
         prefix = f"{owner_pid}:"
@@ -3296,7 +3384,9 @@ class GitWorktreeOps:
         Returns:
             The number of branches deleted.
         """
-        return locked_call(repo_lock(repo), GitWorktreeOps._sweep_orphaned_state_locked, repo)
+        return interruptible_locked_call(
+            repo_lock(repo), GitWorktreeOps._sweep_orphaned_state_locked, repo,
+        )
 
     @staticmethod
     def _sweep_orphaned_state_locked(repo: Path) -> int:
@@ -3473,7 +3563,7 @@ class GitWorktreeOps:
             removed — or, for never-consumed pool spares, simply
             removed).
         """
-        return locked_call(
+        return interruptible_locked_call(
             repo_lock(repo), GitWorktreeOps._reclaim_orphaned_worktrees_locked,
             repo, exclude_branches or set(),
         )

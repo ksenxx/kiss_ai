@@ -21,11 +21,7 @@
 // the real voice.js, main.js and DOM run.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, sleep, stubRaf} = require('./simplify2_harness');
 
 const recognizers = [];
 
@@ -89,67 +85,42 @@ function makeTrack(win, log) {
 }
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.Audio = function (src) {
-    return {src, play: () => Promise.resolve()};
-  };
   const log = [];
   const tracks = [];
-  Object.defineProperty(win.navigator, 'mediaDevices', {
-    configurable: true,
-    value: {
-      getUserMedia: () => {
-        const track = makeTrack(win, log);
-        tracks.push(track);
-        return Promise.resolve({
-          getTracks: () => [track],
-          getAudioTracks: () => [track],
-        });
+  function stubVoiceSurface(win) {
+    stubRaf(win);
+    win.Audio = function (src) {
+      return {src, play: () => Promise.resolve()};
+    };
+    Object.defineProperty(win.navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: () => {
+          const track = makeTrack(win, log);
+          tracks.push(track);
+          return Promise.resolve({
+            getTracks: () => [track],
+            getAudioTracks: () => [track],
+          });
+        },
+        enumerateDevices: () => Promise.resolve([]),
       },
-      enumerateDevices: () => Promise.resolve([]),
-    },
+    });
+    win.Vosk = {
+      createModel: () => Promise.resolve({KaldiRecognizer: FakeRecognizer}),
+    };
+    win.AudioContext = makeAudioContextClass(log);
+    win.__VOICE__ = {
+      voskSrc: '/media/vosk.js',
+      modelUrl: 'https://models.example.com/model.tar.gz',
+      ackAudioUrl: '/media/working-on-it.mp3',
+    };
+    win.localStorage.setItem('kissVoiceEnabled', '0');
+  }
+  const {win, posted} = makeChatPage({
+    beforeScripts: stubVoiceSurface,
+    extraScripts: ['voice.js'],
   });
-  win.Vosk = {
-    createModel: () => Promise.resolve({KaldiRecognizer: FakeRecognizer}),
-  };
-  win.AudioContext = makeAudioContextClass(log);
-  win.__VOICE__ = {
-    voskSrc: '/media/vosk.js',
-    modelUrl: 'https://models.example.com/model.tar.gz',
-    ackAudioUrl: '/media/working-on-it.mp3',
-  };
-  win.localStorage.setItem('kissVoiceEnabled', '0');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   return {win, log, tracks, posted};
 }
 
@@ -157,22 +128,18 @@ function micBtn(win) {
   return win.document.getElementById('voice-btn');
 }
 
-function tick(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms || 20));
-}
-
 async function main() {
   const {win, log, tracks} = makePage();
   const btn = micBtn(win);
   btn.click();
-  await tick();
+  await sleep(20);
   assert.ok(btn.classList.contains('voice-listening'), 'pipeline is live');
   assert.strictEqual(tracks.length, 1);
   assert.deepStrictEqual(log, ['ctx-open']);
 
   // The microphone goes away under the live pipeline.
   tracks[0].end();
-  await tick();
+  await sleep(20);
   assert.ok(
     !btn.classList.contains('voice-listening'),
     'a pipeline whose microphone ended must not claim to listen',
@@ -187,22 +154,27 @@ async function main() {
       btn.getAttribute('data-tooltip'),
   );
   assert.deepStrictEqual(
-    log, ['ctx-open', 'track-stopped', 'ctx-closed'],
+    log,
+    ['ctx-open', 'track-stopped', 'ctx-closed'],
     'the audio graph is released',
   );
   assert.strictEqual(
-    win.localStorage.getItem('kissVoiceEnabled'), '0',
+    win.localStorage.getItem('kissVoiceEnabled'),
+    '0',
     'the trigger is remembered as off, like after a failed start',
   );
 
   // The next click asks for the microphone again and comes back live.
   btn.click();
-  await tick();
+  await sleep(20);
   assert.strictEqual(tracks.length, 2, 'a fresh microphone request');
   assert.ok(btn.classList.contains('voice-listening'), 'listening again');
-  assert.deepStrictEqual(
-    log, ['ctx-open', 'track-stopped', 'ctx-closed', 'ctx-open'],
-  );
+  assert.deepStrictEqual(log, [
+    'ctx-open',
+    'track-stopped',
+    'ctx-closed',
+    'ctx-open',
+  ]);
 
   // Audit 2026-10-16 (webapp-other F1): the microphone goes away in the
   // middle of a wake-word capture.  The "Listening ..." overlay and the
@@ -215,7 +187,7 @@ async function main() {
   assert.ok(wrap.classList.contains('listening'), 'overlay on after wake');
   assert.ok(btn.classList.contains('voice-triggered'), 'flash on after wake');
   tracks[1].end();
-  await tick();
+  await sleep(20);
   assert.ok(btn.classList.contains('voice-error'), 'error state shown');
   assert.ok(
     !wrap.classList.contains('listening'),
@@ -226,22 +198,24 @@ async function main() {
     'the wake flash is gone with the microphone: ' + btn.className,
   );
   btn.click();
-  await tick();
+  await sleep(20);
   assert.strictEqual(tracks.length, 3, 'a fresh microphone request');
   assert.ok(btn.classList.contains('voice-listening'), 'listening again');
 
   // An `ended` from the track of a pipeline that was already torn down
   // (the user turned the mic off first) changes nothing.
   btn.click();
-  await tick();
+  await sleep(20);
   assert.ok(btn.classList.contains('voice-off'));
   const after = log.slice();
   tracks[2].end();
-  await tick();
+  await sleep(20);
   assert.ok(btn.classList.contains('voice-off'), 'still off');
   assert.deepStrictEqual(log, after, 'nothing torn down twice');
 
-  console.log('  ok - a microphone that ends under the live pipeline turns the trigger off with an error');
+  console.log(
+    '  ok - a microphone that ends under the live pipeline turns the trigger off with an error',
+  );
   console.log('audit1016_voice_mic_track_ended: all passed');
 }
 

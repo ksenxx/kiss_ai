@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -19,6 +20,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
+from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -29,6 +31,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_commands import SeaRun
+from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve
@@ -92,6 +95,77 @@ def git(
         timeout=timeout,
         env={**os.environ, **HERMETIC_GIT, **(env or {})},
     ).stdout.strip()
+
+
+def seed_repo(repo: Path) -> None:
+    """Create a git repository at *repo*, on branch ``main``, with one committed ``seed.txt``.
+
+    The repository gets its own identity and ``commit.gpgsign = false``
+    for the commits the SEA under test makes in it with the process
+    environment; the test's own calls go through :func:`git`.
+    """
+    repo.mkdir(parents=True, exist_ok=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    git(repo, "config", "commit.gpgsign", "false")
+    commit(repo, "seed", {"seed.txt": "seed\n"})
+
+
+def remote_and_clones(root: Path, *names: str) -> list[Path]:
+    """Create a bare ``origin.git`` under *root* with one commit on ``main``; return one
+    clone ``root/<name>`` per name, in order."""
+    origin = root / "origin.git"
+    git(root, "init", "-q", "--bare", "-b", "main", str(origin))
+    seed = root / "seed"
+    git(root, "clone", "-q", str(origin), str(seed))
+    git(seed, "checkout", "-q", "-b", "main")
+    commit(seed, "README.md: hello", {"README.md": "hello\n"})
+    git(seed, "push", "-q", "origin", "main")
+    clones = []
+    for name in names:
+        clone = root / name
+        git(root, "clone", "-q", str(origin), str(clone))
+        clones.append(clone)
+    return clones
+
+
+def set_known_work_dirs(work_dir: str, recent: Sequence[str]) -> None:
+    """Write *work_dir* and *recent* (most recent first) as the ``work_dir`` and
+    ``recent_work_dirs`` keys of the session's ``config.json``; a test that calls this
+    requests :func:`restored_config` so the file goes back afterwards."""
+    config = kiss_home() / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+    data["work_dir"] = work_dir
+    data["recent_work_dirs"] = [{"path": path, "ts": 1.0} for path in recent]
+    config.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.fixture
+def restored_config() -> Iterator[None]:
+    """Put the session's ``config.json`` back to what it was when the test ends."""
+    config = kiss_home() / "config.json"
+    before = config.read_bytes() if config.exists() else None
+    yield
+    if before is None:
+        config.unlink(missing_ok=True)
+    else:
+        config.write_bytes(before)
+
+
+@pytest.fixture
+def recommendations_path() -> Iterator[Path]:
+    """Start and end the test without the stored recommendations file; yield its path.
+
+    The file lives in the session-wide ``KISS_HOME``: a test that wrote
+    it and failed before its own clean-up would otherwise leak it into
+    the next test reading "the stored recommendations".
+    """
+    path = recommendations_file()
+    path.unlink(missing_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    yield path
+    path.unlink(missing_ok=True)
 
 
 def run_sea(
@@ -194,6 +268,7 @@ def persist_task(
     result: str | None = None,
     *,
     success: bool | None = None,
+    timestamp: float | None = None,
     **columns: object,
 ) -> str:
     """Persist a finished task row with *events* and *result* and return its id.
@@ -206,7 +281,8 @@ def persist_task(
     the row unfinished (no outcome recorded); any other text, the empty
     string included, is saved as the task's result with the outcome
     *success*, as the daemon does for a run that finished with nothing
-    to say.
+    to say.  *timestamp* (epoch seconds) backdates the row's
+    ``timestamp`` column, which the insert stamps with the current time.
     """
     now_ms = int(time.time() * 1000)
     payload: dict[str, object] = {
@@ -225,6 +301,11 @@ def persist_task(
     _flush_chat_events(task_id)
     if result is not None:
         _save_task_result(result, task_id=task_id, success=success)
+    if timestamp is not None:
+        db = _get_db()
+        with _rw_lock.write_lock():
+            db.execute("UPDATE task_history SET timestamp = ? WHERE id = ?", (timestamp, task_id))
+            db.commit()
     return task_id
 
 

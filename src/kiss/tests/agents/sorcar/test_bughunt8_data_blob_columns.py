@@ -11,7 +11,7 @@ hand-edited / 3rd-party-source DB store a BLOB in those TEXT columns;
 ``json.dumps(bytes)`` raises ``TypeError`` — caught neither by the
 local ``(KeyError, IndexError)`` handler nor by ``_dumps_extra``'s
 ``ValueError`` handler — which propagated out of ``_load_history`` /
-``_search_history`` / ``_load_chat_events_by_task_id`` and blanked
+``_load_history`` / ``_load_chat_events_by_task_id`` and blanked
 the whole history sidebar over one corrupt row (the exact threat
 model of the earlier bughunt2 TEXT-in-REAL coercion fixes).
 
@@ -31,7 +31,6 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_chat_events_by_task_id,
     _load_history,
-    _search_history,
 )
 
 
@@ -88,7 +87,7 @@ class TestBlobInTextColumns(_TempDbTestBase):
         tid, _ = _add_task("findme alpha")
         self._corrupt_column(tid, "work_dir", b"\xde\xad\xbe\xef")
 
-        entries = _search_history("findme")
+        entries = _load_history(query="findme")
 
         assert [e["id"] for e in entries] == [tid]
         extra = entries[0]["extra"]

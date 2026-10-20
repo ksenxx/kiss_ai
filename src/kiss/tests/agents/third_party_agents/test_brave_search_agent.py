@@ -395,11 +395,14 @@ def test_brave_web_search_clamps_count_and_offset(backend) -> None:
     assert server.requests[-1]["params"]["count"] == "1"
 
 
-def test_brave_web_search_empty_query(backend) -> None:
+@pytest.mark.parametrize(
+    "tool", ["brave_web_search", "brave_news_search", "brave_image_search", "brave_video_search"]
+)
+def test_empty_query_makes_no_request(backend, tool: str) -> None:
     """An empty or blank query yields ok:false without any HTTP request."""
     b, server = backend
-    assert json.loads(b.brave_web_search("")) == {"ok": False, "error": "query cannot be empty"}
-    assert json.loads(b.brave_web_search("   "))["ok"] is False
+    assert json.loads(getattr(b, tool)("")) == {"ok": False, "error": "query cannot be empty"}
+    assert json.loads(getattr(b, tool)("   "))["ok"] is False
     assert server.requests == []
 
 
@@ -438,13 +441,6 @@ def test_brave_news_search_freshness_and_clamp(backend) -> None:
     assert server.requests[-1]["params"] == {"q": "climate", "count": "50", "freshness": "pd"}
 
 
-def test_brave_news_search_empty_query(backend) -> None:
-    """An empty news query yields ok:false without any HTTP request."""
-    b, server = backend
-    assert json.loads(b.brave_news_search(""))["ok"] is False
-    assert server.requests == []
-
-
 def test_brave_image_search_happy_path(backend) -> None:
     """brave_image_search hits /images/search and condenses image results."""
     b, server = backend
@@ -470,13 +466,6 @@ def test_brave_image_search_clamps_count(backend) -> None:
     b, server = backend
     b.brave_image_search("mountain", count=1000)
     assert server.requests[-1]["params"]["count"] == "200"
-
-
-def test_brave_image_search_empty_query(backend) -> None:
-    """An empty image query yields ok:false without any HTTP request."""
-    b, server = backend
-    assert json.loads(b.brave_image_search(" "))["ok"] is False
-    assert server.requests == []
 
 
 def test_brave_video_search_happy_path(backend) -> None:
@@ -505,13 +494,6 @@ def test_brave_video_search_clamps_count(backend) -> None:
     b, server = backend
     b.brave_video_search("tutorial", count=500)
     assert server.requests[-1]["params"]["count"] == "50"
-
-
-def test_brave_video_search_empty_query(backend) -> None:
-    """An empty video query yields ok:false without any HTTP request."""
-    b, server = backend
-    assert json.loads(b.brave_video_search(""))["ok"] is False
-    assert server.requests == []
 
 
 def test_wrong_token_returns_ok_false(brave_server) -> None:

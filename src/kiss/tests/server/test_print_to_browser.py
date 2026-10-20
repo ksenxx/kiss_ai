@@ -5,8 +5,7 @@
 """Tests for JsonPrinter.
 
 Tests verify correctness and accuracy of all browser streaming logic.
-Uses real objects with duck-typed attributes (SimpleNamespace) as
-message inputs and real queue subscribers.
+Uses real objects and real queue subscribers.
 """
 
 import unittest
@@ -37,19 +36,11 @@ class TestCoalesceEvents(unittest.TestCase):
         assert len(result) == 2
 
 
-class TestHandleMessage(unittest.TestCase):
-    def test_subtype_not_tool_output(self):
+class TestUnknownPrintType(unittest.TestCase):
+    def test_unknown_type_records_nothing(self):
         p = JsonPrinter()
         _start(p)
-        msg = SimpleNamespace(subtype="other", data={"content": "x"})
-        p.print(msg, type="message")
-        assert _drain(p) == []
-
-    def test_unknown_message_type_no_crash(self):
-        p = JsonPrinter()
-        _start(p)
-        msg = SimpleNamespace(unknown_attr="value")
-        p.print(msg, type="message")
+        p.print(SimpleNamespace(unknown_attr="value"), type="no_such_type")
         assert _drain(p) == []
 
 

@@ -20,70 +20,26 @@
 // leaking into any other tab and without being shown twice.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeHarnessPage,
+  send,
+  clickTab,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const LATE_MS = 18000;
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
   // A controllable wall clock so the 18 s gap is real page time
   // without the test having to wait for it.
   const clock = {now: 1790457672532};
-  win.Date.now = function () {
-    return clock.now;
-  };
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: function () {},
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  const {win} = makeHarnessPage({
+    beforeScripts(win) {
+      win.Date.now = function () {
+        return clock.now;
+      };
+    },
+  });
   return {win, clock};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-}
-
-// Reaches a tab the way the user does: a click on the group strip when
-// the tab is listed there, else the Chats-panel pick (chat tabs have no
-// row of their own any more).
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  const el = tabEl(win, tabId);
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
 }
 
 function outputBars(win) {
@@ -100,8 +56,16 @@ function runTaskWithReport(win, clock, tabId, taskId) {
   send(win, {type: 'clear', chat_id: 'chat-' + taskId, tabId});
   send(win, {type: 'task_events', tabId, task_id: taskId});
   const file = 'reports/' + taskId + '/index.html';
-  const body = '<!DOCTYPE html><html><body><h1>' + taskId + '</h1></body></html>';
-  send(win, {type: 'tool_call', name: 'Write', path: file, content: body, tabId, taskId});
+  const body =
+    '<!DOCTYPE html><html><body><h1>' + taskId + '</h1></body></html>';
+  send(win, {
+    type: 'tool_call',
+    name: 'Write',
+    path: file,
+    content: body,
+    tabId,
+    taskId,
+  });
   send(win, {
     type: 'tool_result',
     content: 'Successfully wrote ' + body.length + ' characters to ' + file,
@@ -143,7 +107,11 @@ test('a bar arriving 18 s after task_done survives the report tab taking focus',
     activeContentTab(win),
     'task_done must have opened the report tab and made it active',
   );
-  assert.notStrictEqual(api.getActiveTabId(), taskTab, 'the task tab is now in the background');
+  assert.notStrictEqual(
+    api.getActiveTabId(),
+    taskTab,
+    'the task tab is now in the background',
+  );
 
   lateFollowup(win, clock, taskTab, 'late_next_step_QX01');
   assert.strictEqual(
@@ -190,7 +158,11 @@ test('the bar is shown once when the task tab is still active', () => {
   send(win, {type: 'task_done', success: true, tabId: taskTab, ts: clock.now});
 
   lateFollowup(win, clock, taskTab, 'active_next_step_QX02');
-  assert.strictEqual(outputBars(win).length, 1, 'exactly one bar on the active tab');
+  assert.strictEqual(
+    outputBars(win).length,
+    1,
+    'exactly one bar on the active tab',
+  );
   assert.ok(outputBars(win)[0].textContent.includes('active_next_step_QX02'));
   win.close();
 });

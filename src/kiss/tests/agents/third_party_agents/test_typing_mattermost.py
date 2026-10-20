@@ -11,46 +11,27 @@ actual wire behavior with no mocks or test doubles.
 
 from __future__ import annotations
 
-import json
-from typing import cast
+from collections.abc import Iterator
 
 import pytest
 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
-    RecordingServer,
-    serve_recording,
+    JsonWebhookHandler,
+    JsonWebhookServer,
+    recording_server,
 )
 
 
-class _MattermostServer(RecordingServer):
-    """Recording server whose POST reply status the test can set."""
-
-    response_status = 200
-
-
-class _RecordingHandler(RecordingHandler):
-    """Records request method/path/body/headers and replies with a set status."""
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        """Record the POST request and respond with the configured status."""
-        body = self._read_raw().decode()
-        server = cast(_MattermostServer, self.server)
-        server.requests.append(
-            {"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)}
-        )
-        status = server.response_status
-        self._json(status, {"status": "OK" if status == 200 else "error"})
-
-
 @pytest.fixture()
-def mm_server():
+def mm_server() -> Iterator[JsonWebhookServer]:
     """Start a recording HTTP server that mimics the Mattermost REST API."""
-    yield from serve_recording(_RecordingHandler, _MattermostServer)
+    with recording_server(JsonWebhookHandler, JsonWebhookServer) as server:
+        server.response_body = {"status": "OK"}
+        yield server
 
 
-def _make_backend(server: RecordingServer) -> MattermostChannelBackend:
+def _make_backend(server: JsonWebhookServer) -> MattermostChannelBackend:
     """Create a Mattermost backend pointed at the local recording server."""
     return MattermostChannelBackend(base_url=server.base_url, token="test-token")
 
@@ -63,7 +44,7 @@ def test_send_typing_posts_typing_endpoint(mm_server) -> None:
     request = mm_server.requests[0]
     assert request["method"] == "POST"
     assert request["path"] == "/api/v4/users/me/typing"
-    assert json.loads(request["body"]) == {"channel_id": "chan1"}
+    assert request["json"] == {"channel_id": "chan1"}
     assert request["headers"].get("Authorization") == "Bearer test-token"
     assert request["headers"].get("Content-Type") == "application/json"
 
@@ -74,7 +55,7 @@ def test_send_typing_includes_parent_id_for_thread(mm_server) -> None:
     backend.send_typing("chan1", thread_ts="root42")
     request = mm_server.requests[0]
     assert request["path"] == "/api/v4/users/me/typing"
-    assert json.loads(request["body"]) == {"channel_id": "chan1", "parent_id": "root42"}
+    assert request["json"] == {"channel_id": "chan1", "parent_id": "root42"}
 
 
 def test_send_typing_swallows_http_error(mm_server) -> None:

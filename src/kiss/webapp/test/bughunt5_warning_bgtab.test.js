@@ -3,6 +3,10 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// A live warning for a tab open in the background is routed into that
+// tab's transcript (the active-tab, foreign-tab and escaping cases are
+// bughunt3_warning_event.test.js).
+
 'use strict';
 
 const assert = require('assert');
@@ -58,44 +62,13 @@ function testBackgroundTabWarningSurvivesTabSwitch() {
   console.log('  ok - bg-tab warning survives switching to the tab');
 }
 
-function testForeignWindowTabWarningStillDropped() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  send(win, {
-    type: 'warning',
-    message: 'foreign-window stash warning',
-    tabId: 'some-other-window-tab',
-  });
-  const text = win.document.getElementById('output').textContent;
-  assert.ok(
-    !text.includes('foreign-window stash warning'),
-    'a warning for an unknown (foreign-window) tab must not render',
-  );
-  win.close();
-  console.log('  ok - foreign-window tab warning still dropped');
-}
-
-function testActiveTabWarningStillRendersOnce() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  send(win, {type: 'warning', message: 'active live warning AAA1'});
-  const banners = win.document.querySelectorAll('#output .warn');
-  assert.strictEqual(banners.length, 1, 'active-tab warning renders once');
-  assert.ok(
-    banners[0].textContent.includes('active live warning AAA1'),
-    'active-tab warning text must render',
-  );
-  win.close();
-  console.log('  ok - active-tab live warning still renders exactly once');
-}
-
 function runTests() {
   testBackgroundTabWarningSurvivesTabSwitch();
-  testForeignWindowTabWarningStillDropped();
-  testActiveTabWarningStillRendersOnce();
 }
 
 try {
   runTests();
-  console.log('\n3 passed, 0 failed');
+  console.log('\n1 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

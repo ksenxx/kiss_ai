@@ -300,22 +300,27 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             server_owned=True, task_thread=worker,
         )
         agent_state.register(starting)
-        # The check only arms for a pending "Update when idle".
-        self.server._update_when_idle_armed = True
+        # The check only arms for a pending "Update when idle" of the
+        # caller's generation.
+        self.server._update_when_idle_armed = 1
         try:
             self.assertFalse(
-                await asyncio.to_thread(self.server._arm_update_barrier_if_idle),
+                await asyncio.to_thread(self.server._arm_update_barrier_if_idle, 1),
             )
             self.assertFalse(self._barrier_up())
         finally:
             agent_state.unregister(starting.task_id, starting)
+        self.assertFalse(
+            await asyncio.to_thread(self.server._arm_update_barrier_if_idle, 2),
+        )
+        self.assertFalse(self._barrier_up())
         self.assertTrue(
-            await asyncio.to_thread(self.server._arm_update_barrier_if_idle),
+            await asyncio.to_thread(self.server._arm_update_barrier_if_idle, 1),
         )
         self.assertTrue(self._barrier_up())
         with agent_state.STATE_LOCK:
             self.agent_server._update_installing = False
-        self.server._update_when_idle_armed = False
+        self.server._update_when_idle_armed = 0
 
     async def test_cmd_run_refuses_under_barrier_without_state_or_thread(self) -> None:
         # No installer involved: the barrier set the way the daemon
@@ -337,17 +342,17 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         # alive under a raised barrier — either the submit saw the
         # barrier (refused) or the poller saw the live thread (deferred).
         violations = 0
-        self.server._update_when_idle_armed = True
         for i in range(25):
             with agent_state.STATE_LOCK:
                 self.agent_server._update_installing = False
+            self.server._update_when_idle_armed = 1
             self._clear_tab()
             start = threading.Barrier(2)
             outcome: dict[str, Any] = {}
 
             def arm() -> None:
                 start.wait()
-                outcome["armed"] = self.server._arm_update_barrier_if_idle()
+                outcome["armed"] = self.server._arm_update_barrier_if_idle(1)
 
             def submit() -> None:
                 start.wait()
@@ -371,5 +376,5 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             await self._wait_tab_idle()
         with agent_state.STATE_LOCK:
             self.agent_server._update_installing = False
-        self.server._update_when_idle_armed = False
+        self.server._update_when_idle_armed = 0
         self.assertEqual(violations, 0)

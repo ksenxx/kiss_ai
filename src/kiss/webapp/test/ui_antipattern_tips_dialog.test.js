@@ -15,20 +15,14 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {newDom, MEDIA} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
+// The dialog is tips.js alone on the chat page: main.js must not run,
+// so this is the bare chat.html window with only tips.js eval'd.
 function loadChatDom(cfg, storage) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
+  const win = newDom('outside-only');
   win.localStorage.clear();
   if (storage) {
     for (const k of Object.keys(storage))
@@ -59,20 +53,6 @@ function key(win, target, name, init) {
       ),
     ),
   );
-}
-
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  not ok - ${name}`);
-  }
 }
 
 const TIPS = {tips: ['# One\n\nfirst', '# Two\n\nsecond'], show: false};
@@ -192,8 +172,4 @@ test('auto-show on first run is skipped once the user opted out', () => {
   assert.strictEqual(part(optedOut, '.tips-optout-input').checked, true);
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-for (const f of failures) {
-  console.error(`\n${f.name}\n${f.err && f.err.stack}`);
-}
-if (failures.length) process.exit(1);
+report('ui_antipattern_tips_dialog');

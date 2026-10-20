@@ -26,7 +26,12 @@ from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
@@ -92,13 +97,10 @@ def test_sea_methods_follow_the_contract() -> None:
 def test_slash_machine_resolves_to_the_bundled_sea() -> None:
     """``/machine list`` resolves to the request text and this SEA."""
     assert sea_commands.get_command("machine") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/machine add box https://10.0.0.5:8787 s3cret")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "add box https://10.0.0.5:8787 s3cret"
-    hit = sea_commands.slash_command_task("/machine add ksen@10.0.0.5")
-    assert hit is not None and hit == ("add ksen@10.0.0.5", _SEA_PATH)
+    assert sea_commands.slash_command_task("/machine add box https://10.0.0.5:8787 s3cret") == (
+        "add box https://10.0.0.5:8787 s3cret", _SEA_PATH)
+    assert sea_commands.slash_command_task("/machine add ksen@10.0.0.5") == (
+        "add ksen@10.0.0.5", _SEA_PATH)
     assert sea_commands.help_text_if_command("/machine help") == MachineSea().description()
 
 
@@ -156,14 +158,14 @@ def test_agent_lists_the_machines_and_finishes_with_the_text(
 
     assert len(agentic) == 2
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert names == {"finish", "machine_add", "machine_remove", "machine_list"}, names
         system = system_message(request)
         assert system.startswith(sea.SYSTEM_PROMPT)
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1
+    results = tool_results(agentic[1])
+    assert len(results) == 1
     # The tool result is followed by the step/usage footer the agent appends.
-    assert str(tool_results[0]["content"]).startswith(f"box  {remote.url}  reachable\n")
+    assert results[0].startswith(f"box  {remote.url}  reachable\n")
 
 
 @pytest.mark.skipif(not SSHD, reason="no sshd on this host")
@@ -184,7 +186,7 @@ def test_agent_adds_an_ssh_machine_from_the_short_request(
     parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
     assert parsed["success"] is True and parsed["summary"] == expected
     assert mach.load_machines() == [mach.Machine("127.0.0.1", remote.url, ssh=sshd.login)]
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert str(tool_results[0]["content"]).startswith(
+    results = tool_results(agentic[1])
+    assert results[0].startswith(
         f"Registered machine '127.0.0.1' at ssh {sshd.login} ({remote.url}).\n"
     )

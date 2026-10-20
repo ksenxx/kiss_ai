@@ -3,7 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-/* global require, __dirname, console, process */
+/* global require, console, process */
 'use strict';
 
 // End-to-end (jsdom, real media/main.js + api.js) regressions for the
@@ -29,78 +29,36 @@
 //     surface re-opened under the same id is never hidden.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: buildPage,
+  send,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-// `desktop` adds remote-desktop to the body, as the page does on a wide screen.
-function makePage(desktop) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace(
-    '<body',
-    '<body class="remote-chat' + (desktop ? ' remote-desktop' : '') + '"',
-  );
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  // Intervals are recorded, not run, so a test fires a poll tick by hand.
+// Intervals are recorded, not run, so a test fires a poll tick by hand.
+function recordIntervals(win) {
   const intervals = [];
   win.setInterval = function (fn, ms) {
     intervals.push({fn, ms});
     return intervals.length;
   };
   win.clearInterval = function () {};
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=mainjs-reconnect-races-main.js',
-  );
-  return {win, posted, intervals};
+  return intervals;
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+// `desktop` adds remote-desktop to the body, as the page does on a wide screen.
+function makePage(desktop) {
+  let intervals;
+  const {win, posted} = buildPage({
+    bodyClass: 'remote-chat' + (desktop ? ' remote-desktop' : ''),
+    beforeScripts: w => {
+      stubRaf(w);
+      intervals = recordIntervals(w);
+      fakeMatchMedia(w, true);
+    },
+  });
+  return {win, posted, intervals};
 }
 
 function msgsOf(posted, type) {

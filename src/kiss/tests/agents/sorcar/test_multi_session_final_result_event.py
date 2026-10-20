@@ -48,9 +48,8 @@ class RecordingPrinter(Printer):
         self.events: list[tuple[str, Any, dict[str, Any]]] = []
         self.token_callback = None  # type: ignore[method-assign,assignment]
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:  # noqa: A002
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:  # noqa: A002
         self.events.append((type, content, kwargs))
-        return str(content)
 
     def token_callback(self, token: str) -> None:  # type: ignore[no-redef]
         return None
@@ -344,7 +343,7 @@ class OffsetAwarePrinter(RecordingPrinter):
     budget_offset: float = 0.0
     steps_offset: int = 0
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:  # noqa: A002
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:  # noqa: A002
         if type == "result":
             resolved = dict(kwargs)
             resolved["total_tokens"] = (
@@ -362,7 +361,7 @@ class OffsetAwarePrinter(RecordingPrinter):
                 except ValueError:  # pragma: no cover
                     resolved["cost"] = cost_str
             self.events.append((type, content, resolved))
-            return str(content)
+            return
         return super().print(content, type=type, **kwargs)
 
 

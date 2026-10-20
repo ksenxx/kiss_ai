@@ -15,20 +15,10 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
+const {makePage, send, clickTab} = require('./simplify2_harness.js');
 
 function statusColor(win) {
   return win.document.getElementById('status-text').style.color;
-}
-
-// Bring a background chat on screen the way the Chats panel's pick does
-// (a background chat has no entry on the group strip).
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  win._testApi.switchToTab(tabId);
 }
 
 function testFreshTabIsDimAndRunningIsAccent() {
@@ -56,7 +46,9 @@ function testFreshTabIsDimAndRunningIsAccent() {
     "switching back restores the running tab's accent timer",
   );
   win.close();
-  console.log('  ok - fresh tab is dim, running tab is accent, survives a switch');
+  console.log(
+    '  ok - fresh tab is dim, running tab is accent, survives a switch',
+  );
 }
 
 function testDoneTabIsDimAfterSwitchingAway() {
@@ -94,11 +86,15 @@ function testHiddenTabFinishingRecordsDim() {
   // task_done for the hidden tab A: setReady writes A's saved state and
   // focusFinishedTab switches to it, restoring that saved colour.
   send(win, {type: 'task_done', tabId: tabA, startTs: 1000, endTs: 3000});
-  assert.strictEqual(win._testApi.getActiveTabId(), tabA, 'the finished tab is focused');
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    tabA,
+    'the finished tab is focused',
+  );
   assert.strictEqual(
     statusColor(win),
     'var(--dim)',
-    "a hidden tab finishing records the --dim timer in its saved state",
+    'a hidden tab finishing records the --dim timer in its saved state',
   );
   win.close();
   console.log('  ok - a hidden tab finishing records the dim timer');

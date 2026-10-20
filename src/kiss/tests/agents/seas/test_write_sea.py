@@ -73,14 +73,11 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     explicit argument wins over it.
     """
     assert sea_commands.get_command("write") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/write a release note from CHANGELOG.md")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "a release note from CHANGELOG.md"
+    assert sea_commands.slash_command_task("/write a release note from CHANGELOG.md") == (
+        "a release note from CHANGELOG.md", _SEA_PATH)
     assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
-    settings = sea_commands.sea_settings(path)
+    settings = sea_commands.sea_settings(_SEA_PATH)
     assert settings == {"timeout": 3600.0}
     assert resolve_timeout(None, settings) == 3600.0
     assert resolve_timeout(120.0, settings) == 120.0

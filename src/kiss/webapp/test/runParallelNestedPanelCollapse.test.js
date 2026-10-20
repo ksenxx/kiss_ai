@@ -21,121 +21,31 @@
 // (media/transport.js driven over a stub WebSocket), so the frames the
 // daemon would see are exactly the ones the assertions inspect.
 
-/* global require, __dirname, console, process */
+/* global require, console, process */
 
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM, VirtualConsole} = require('jsdom');
 const {
-  runParallelPanel,
   subagentTabEls,
   togglePanel,
+  bootParallelRun: bootSharedRun,
 } = require('./subagent_tab_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
-/**
- * The webapp's `acquireTransport` shim, read from the shipped source.
- *
- * @returns {string} The shim JavaScript source.
- */
-function webappShimSource() {
-  return fs.readFileSync(path.join(MEDIA, 'transport.js'), 'utf8');
-}
+const {makeWebappClient} = require('./transport_page_helpers');
 
 /**
- * Install a WebSocket stub on *win* that records every frame the shim
- * sends and hands the live socket to the caller.
+ * Boot the chat page on the real webapp transport.
  *
- * @param {object} win The jsdom window.
- * @param {Array<string>} frames Array that receives sent frames.
- * @returns {function(): object} Getter for the current socket stub.
+ * @returns {object} {win, posted, deliver, drain} for the booted page:
+ *     `deliver(data)` plays a frame from the daemon into the socket and
+ *     drains the frames the app sent in response into `posted`.
  */
-function installWebSocketStub(win, frames) {
-  let socket = null;
-  class WebSocketStub {
-    constructor() {
-      this.readyState = WebSocketStub.OPEN;
-      this.onopen = null;
-      this.onmessage = null;
-      this.onclose = null;
-      this.onerror = null;
-      socket = this;
-    }
-    send(data) {
-      frames.push(data);
-    }
-    close() {
-      this.readyState = WebSocketStub.CLOSED;
-    }
-  }
-  WebSocketStub.CONNECTING = 0;
-  WebSocketStub.OPEN = 1;
-  WebSocketStub.CLOSING = 2;
-  WebSocketStub.CLOSED = 3;
-  win.WebSocket = WebSocketStub;
-  return () => socket;
-}
-
-/**
- * Boot the chat page in jsdom.
- *
- * @param {boolean} quiet Swallow page errors, for the scenario that
- *     feeds the page a broken transcript on purpose.
- * @returns {object} {win, posted, deliver} for the booted page.
- */
-function makePage(quiet) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const domOpts = {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  };
-  // A VirtualConsole nobody listens to keeps the deliberate page error
-  // of the broken-transcript scenario out of the test output.
-  if (quiet) domOpts.virtualConsole = new VirtualConsole();
-  const dom = new JSDOM(html, domOpts);
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  const frames = [];
-  const currentSocket = installWebSocketStub(win, frames);
-  win.eval(webappShimSource());
-  const ws = currentSocket();
-  assert.ok(ws, 'the webapp shim must open a WebSocket on load');
-  ws.onopen();
-  assert.deepStrictEqual(
-    JSON.parse(frames.shift()),
-    {type: 'auth', password: ''},
-    'the webapp shim must start with an auth handshake',
-  );
-  ws.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  frames.length = 0;
-  // Every command the app sends now leaves as a JSON frame on the
-  // socket; mirror them into `posted` for the assertions.
-  const drain = () => {
-    while (frames.length) posted.push(JSON.parse(frames.shift()));
-  };
+function makePage() {
+  const {win, posted, drain, sock} = makeWebappClient();
   const deliver = data => {
-    currentSocket().onmessage({data: JSON.stringify(data)});
+    sock.onmessage({data: JSON.stringify(data)});
     drain();
   };
-  win.__drain = drain;
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   // The real parser fires DOMContentLoaded once every body script has
   // run; the webapp shim defers app-bound events until then so none
   // are lost while main.js is still being fetched.  jsdom keeps
@@ -144,9 +54,8 @@ function makePage(quiet) {
   win.document.dispatchEvent(
     new win.Event('DOMContentLoaded', {bubbles: true}),
   );
-  win.__drain();
-
-  return {win, posted, deliver};
+  drain();
+  return {win, posted, deliver, drain};
 }
 
 function summaryPanel(win) {
@@ -158,67 +67,14 @@ function summaryPanel(win) {
  * with its own open sub-agent tab.
  *
  * @param {number} n How many sub-agents to spawn.
- * @param {boolean} [quiet] Swallow deliberate page errors.
  * @param {boolean} [done=true] Resume completed history, or live children.
  * @returns {object} Boot state for the assertions.
  */
-function bootParallelRun(n, quiet, done = true) {
-  const {win, posted, deliver} = makePage(quiet);
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-  const drain = win.__drain;
-
-  deliver({
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
-  deliver({
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(taskNames)},
-  });
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a .ev.tc panel');
-
-  const taskIds = [];
-  const subTabIds = [];
-  for (let i = 0; i < n; i++) {
-    const taskId = 'sub-task-' + (i + 1);
-    taskIds.push(taskId);
-    const before = posted.length;
-    deliver({
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    deliver({
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-      isDone: done,
-    });
-  }
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    n,
-    'each spawned sub-agent must get its own tab',
-  );
-  return {win, posted, deliver, drain, parentId, panel, taskIds, subTabIds};
+function bootParallelRun(n, done = true) {
+  const page = makePage();
+  const {deliver, drain} = page;
+  const st = bootSharedRun(n, page, {deliver, done});
+  return Object.assign(st, {deliver, drain});
 }
 
 /**
@@ -267,7 +123,7 @@ function openNewChat(st) {
 
 // Folding an ancestor transcript panel cannot hide a running child.
 function testSummaryAdoptionPreservesRunningTabs() {
-  const st = bootParallelRun(2, false, false);
+  const st = bootParallelRun(2, false);
   sendSummary(st);
   assert.strictEqual(
     subagentTabEls(st.win).length,
@@ -665,9 +521,12 @@ function testReplayWhileViewingSubagentKeepsWholeTranscript() {
 // and later collapses still close their sub-agent tabs at once instead
 // of queueing them behind a replay that never finished.
 function testFailedReplayDoesNotStrandLaterCloses() {
-  const st = bootParallelRun(2, true);
+  const st = bootParallelRun(2);
   openNewChat(st);
 
+  // The broken transcript is meant to throw inside the page; marking the
+  // error handled keeps jsdom from printing it as an uncaught exception.
+  st.win.addEventListener('error', e => e.preventDefault(), {once: true});
   try {
     st.deliver({
       type: 'task_events',
@@ -676,7 +535,7 @@ function testFailedReplayDoesNotStrandLaterCloses() {
       task_id: 'parent-task',
       events: [null],
     });
-  } catch (_e) {
+  } catch {
     // The webapp shim hands the throw straight back to the caller.
   }
   if (st.drain) st.drain();

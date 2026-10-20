@@ -19,7 +19,9 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const harness = require('./simplify2_harness');
+
+const {makePage, send, click} = harness;
 
 function startRunningTask(win, posted) {
   const tabId = posted.find(m => m.type === 'ready').tabId;
@@ -32,18 +34,9 @@ function stopBtn(win) {
   return win.document.getElementById('stop-btn');
 }
 
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 function clickTab(win, tabId) {
-  // Chat tabs have no row of their own: the Chats panel's pick is
-  // switchToTab, and the group strip then lists the chat on screen.
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    'tab ' + tabId + ' must be open',
-  );
-  win._testApi.switchToTab(tabId);
+  // Once the chat is picked, the group strip must list it on screen.
+  harness.clickTab(win, tabId);
   assert.strictEqual(
     win._testApi.getActiveTabId(),
     tabId,

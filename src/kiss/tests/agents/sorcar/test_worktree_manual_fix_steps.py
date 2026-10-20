@@ -209,7 +209,7 @@ class TestPendingReviewClearedByExplicitAction:
 
         assert "Discarded branch" in result
         assert not agent._wt_pending
-        assert agent._preserve_pending_worktree_for_review() is False
+        assert agent._retire_previous_worktree() is False
 
     def test_merge_releases_claim(self) -> None:
         agent = ChatSorcarAgent("test")
@@ -223,4 +223,4 @@ class TestPendingReviewClearedByExplicitAction:
 
         assert "Successfully merged" in result
         assert not agent._wt_pending
-        assert agent._preserve_pending_worktree_for_review() is False
+        assert agent._retire_previous_worktree() is False

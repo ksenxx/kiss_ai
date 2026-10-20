@@ -158,8 +158,8 @@ class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
 
         # Global events reach every peer, link peers included: both an
         # unstamped one and one sent verbatim with an empty ``tabId``
-        # stamp (``tabs_state``, the reply a link's ``getTabsState``
-        # request waits for).
+        # stamp (``tabs_state``, the snapshot a ``ready`` is answered
+        # with).
         await asyncio.to_thread(printer.broadcast, {"type": "tasks_updated"})
         await asyncio.to_thread(
             printer.broadcast, {"type": "tabs_state", "tabs": [], "tabId": ""},
