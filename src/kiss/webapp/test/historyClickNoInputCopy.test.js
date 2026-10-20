@@ -15,65 +15,20 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
   // The app docks the sidebar permanently on wide screens, where
   // closeSidebar() is a no-op by design.  Pin the page to the narrow
   // (drawer) layout so the sidebar assertions below hold.
-  win.matchMedia = function (query) {
-    return {
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: win => fakeMatchMedia(win, false),
+  });
 }
 
 function input(win) {
@@ -102,7 +57,9 @@ function activeTabLabel(win) {
 }
 
 function historyRows(win) {
-  return Array.from(win.document.querySelectorAll('#history-list .sidebar-item'));
+  return Array.from(
+    win.document.querySelectorAll('#history-list .sidebar-item'),
+  );
 }
 
 function sidebarOpen(win) {
@@ -175,13 +132,11 @@ function clickOnlyRow(win) {
 // chat tab left.
 function assertOpenedInFreshTab(win, tabBefore, what) {
   const active = win._testApi.getActiveTabId();
-  assert.notStrictEqual(
-    active,
-    tabBefore,
-    `${what} must create a new tab`,
-  );
+  assert.notStrictEqual(active, tabBefore, `${what} must create a new tab`);
   assert.strictEqual(
-    chatTabs(win).map(t => t.id).join(','),
+    chatTabs(win)
+      .map(t => t.id)
+      .join(','),
     active,
     `the idle chat left behind is retired`,
   );
@@ -215,10 +170,7 @@ function testResumeBranchLeavesInputEmpty() {
   );
   assertOpenedInFreshTab(win, tabBefore, 'resuming an unopened chat');
   const resume = lastMessage(posted, 'resumeSession');
-  assert.ok(
-    resume,
-    `clicking a resumable row must post resumeSession`,
-  );
+  assert.ok(resume, `clicking a resumable row must post resumeSession`);
   assert.strictEqual(resume.id, 'chat-resume');
   assert.strictEqual(resume.taskId, 7);
   assert.strictEqual(
@@ -332,7 +284,9 @@ function testSwitchBranchLeavesInputEmpty() {
   // No duplicate tab for the chat; the empty new chat left behind is
   // retired, so the running chat is the only one open.
   assert.strictEqual(
-    chatTabs(win).map(t => t.id).join(','),
+    chatTabs(win)
+      .map(t => t.id)
+      .join(','),
     ready.tabId,
     `switching must not create a duplicate tab`,
   );

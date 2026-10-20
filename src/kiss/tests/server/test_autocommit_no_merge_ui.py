@@ -213,7 +213,7 @@ class TestResumeRefusesUnsafeState(_Base):
         """A stopped or failed task keeps its branch.
 
         A task that failed or was stopped leaves its worktree pending, and
-        :meth:`ChatSorcarAgent._preserve_pending_worktree_for_review`
+        :meth:`ChatSorcarAgent._retire_previous_worktree`
         states the contract: incomplete, unverified work stays on its
         ``kiss/wt-*`` branch and is never merged into the user's branch
         behind their back — so the history click must present the
@@ -426,7 +426,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         ``run`` has to retire the previous worktree before the new
         task can mint its own, and it used to do that by squash-merging
         unconditionally.  So the same unverified work that
-        :meth:`ChatSorcarAgent._preserve_pending_worktree_for_review`
+        :meth:`ChatSorcarAgent._retire_previous_worktree`
         refuses to publish when a tab closes got published anyway the
         moment the user typed a second prompt.  Typing a new prompt is
         not a decision about the old task's work.
@@ -515,7 +515,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
 
         self.events.clear()
         agent.printer = self.server.printer  # type: ignore[attr-defined]
-        assert agent._preserve_pending_worktree_for_review()
+        assert agent._retire_previous_worktree()
         agent._flush_warnings(self.server.printer)
 
         warnings = [
@@ -875,19 +875,19 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         # A presentation that cannot run: the probe it starts with
         # raises.  `_emit_pending_worktree` must still release the
         # claim it took, via its `finally`.
-        real_probe = self.server._get_worktree_changed_files
+        real_probe = self.server._list_pending
 
-        def failing_probe(*args: Any, **kwargs: Any) -> list[str]:
+        def failing_probe(*args: Any, **kwargs: Any) -> list[Any]:
             raise RuntimeError("worktree probe unavailable")
 
-        self.server._get_worktree_changed_files = failing_probe  # type: ignore[assignment,method-assign]
+        self.server._list_pending = failing_probe  # type: ignore[assignment,method-assign]
         try:
             row = self._latest_row()
             self.events.clear()
             with self.assertRaises(RuntimeError):
                 self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
         finally:
-            self.server._get_worktree_changed_files = real_probe  # type: ignore[method-assign]
+            self.server._list_pending = real_probe  # type: ignore[method-assign]
 
         assert not tab.is_merging, (
             "the speculative claim outlived the presentation attempt "

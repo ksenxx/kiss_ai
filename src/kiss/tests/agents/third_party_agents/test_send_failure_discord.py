@@ -23,34 +23,24 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import cast
-from urllib.parse import urlsplit
 
 import pytest
 import requests
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
+    JsonWebhookHandler,
     RecordingServer,
     serve_recording,
 )
 
 
-class _SendHandler(RecordingHandler):
+class _SendHandler(JsonWebhookHandler):
     """Records requests; 200 for channel OK, 500 for channel ERR."""
 
     def do_POST(self) -> None:  # noqa: N802
-        raw = self._read_raw()
-        path = urlsplit(self.path).path
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": path,
-                "body": json.loads(raw) if raw else None,
-                "authorization": self.headers.get("Authorization", ""),
-            }
-        )
+        """Answer the create-message endpoint, failing channel ``ERR`` like the Discord API."""
+        path = self.record()["path"]
         if path == "/channels/ERR/messages":
             self._json(500, {"message": "Internal Server Error", "code": 0})
         else:
@@ -80,7 +70,7 @@ class TestDiscordSendMessageFailures:
         req = self.server.requests[0]
         assert req["method"] == "POST"
         assert req["path"] == "/channels/ERR/messages"
-        assert req["body"] == {"content": "hello"}
+        assert req["json"] == {"content": "hello"}
 
     def test_send_message_raises_on_unreachable_server(self, refusing_port: int) -> None:
         """An unreachable server (connection refused) must raise."""
@@ -96,9 +86,9 @@ class TestDiscordSendMessageFailures:
         req = self.server.requests[0]
         assert req["method"] == "POST"
         assert req["path"] == "/channels/111/messages"
-        assert req["authorization"] == "Bot test-token"
-        assert req["body"]["content"] == "hello"
-        assert req["body"]["message_reference"] == {"message_id": "9999"}
+        assert req["headers"]["Authorization"] == "Bot test-token"
+        assert req["json"]["content"] == "hello"
+        assert req["json"]["message_reference"] == {"message_id": "9999"}
 
     def test_post_message_tool_returns_error_string_on_500(self) -> None:
         """The post_message tool must keep returning an error string, not raise."""

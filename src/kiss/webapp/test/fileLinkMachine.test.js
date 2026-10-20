@@ -22,63 +22,32 @@
 // src/kiss/tests/server/test_remote_check_paths.py.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const {JSDOM} = require('jsdom');
+const {makePage, send} = require('./simplify2_harness');
 
 const BOX_TAB = 'tab-on-box';
 const HOME_TAB = 'tab-at-home';
 
 function makeDomPage() {
-  const mediaDir = path.join(__dirname, '..', 'media');
-  let html = fs.readFileSync(path.join(mediaDir, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makePage({
+    initialState: {
+      tabs: [
+        {
+          title: 'box',
+          chatId: BOX_TAB,
+          backendChatId: 'chat-box',
+          parentTabId: '',
+        },
+        {
+          title: 'home',
+          chatId: HOME_TAB,
+          backendChatId: 'chat-home',
+          parentTabId: '',
+        },
+      ],
+      activeTabIndex: 0,
+      chatId: BOX_TAB,
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  let state = {
-    tabs: [
-      {
-        title: 'box',
-        chatId: BOX_TAB,
-        backendChatId: 'chat-box',
-        parentTabId: '',
-      },
-      {
-        title: 'home',
-        chatId: HOME_TAB,
-        backendChatId: 'chat-home',
-        parentTabId: '',
-      },
-    ],
-    activeTabIndex: 0,
-    chatId: BOX_TAB,
-  };
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  for (const name of ['panelCopy.js', 'api.js', 'main.js']) {
-    vm.runInContext(
-      fs.readFileSync(path.join(mediaDir, name), 'utf8'),
-      dom.getInternalVMContext(),
-    );
-  }
   send(win, {type: 'daemonStatus', connected: true});
   send(win, {
     type: 'tabs_state',
@@ -94,10 +63,6 @@ function makeDomPage() {
   });
   send(win, {type: 'tabMachine', tabId: BOX_TAB, machine: 'box'});
   return {win, posted, close: () => win.close()};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function checks(posted) {

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -37,8 +36,6 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingServer,
     serve_recording,
 )
-
-_TOKEN = TOKEN
 
 _FILES: dict[str, dict[str, Any]] = {
     "gdoc1": {
@@ -86,31 +83,19 @@ _BIN_CONTENT = b"hello plain content"
 class _DriveRequestHandler(RecordingHandler):
     """Emulates the Google Drive v3 REST API and records requests."""
 
-    def _record(self, raw: bytes) -> None:
+    def _handle(self) -> None:
+        raw = self._read_raw()
         body: Any = None
         if raw:
             try:
                 body = json.loads(raw.decode("utf-8"))
             except ValueError:
                 body = raw
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "content_type": self.headers.get("Content-Type", ""),
-                "body": body,
-            }
-        )
-
-    def _handle(self) -> None:
-        raw = self._read_raw()
-        self._record(raw)
-        if self.headers.get("Authorization") != f"Bearer {_TOKEN}":
+        req = self.record_request(body, content_type=self.headers.get("Content-Type", ""))
+        if not self.bearer_ok(TOKEN):
             self._json(401, {"error": {"code": 401, "message": "Unauthorized"}})
             return
-        parsed = urlparse(self.path)
-        path, query = parsed.path, parse_qs(parsed.query)
+        path, query = req["path"], req["query"]
         if path == "/files/boom" or path.startswith("/files/boom/"):
             self._json(500, {"error": {"code": 500, "message": "boom"}})
         elif self.command == "PATCH" and path == "/files/pboom":
@@ -188,9 +173,8 @@ def test_search_files_defaults(backend) -> None:
     assert result["next_page_token"] == "tok-next"
     req = _last(server)
     assert req["method"] == "GET"
-    parsed = urlparse(req["path"])
-    assert parsed.path == "/files"
-    query = parse_qs(parsed.query)
+    assert req["path"] == "/files"
+    query = req["query"]
     assert query["pageSize"] == ["20"]
     assert query["fields"] == [
         "files(id,name,mimeType,size,modifiedTime,webViewLink,parents),nextPageToken"
@@ -198,7 +182,7 @@ def test_search_files_defaults(backend) -> None:
     assert "q" not in query
     assert "pageToken" not in query
     assert "orderBy" not in query
-    assert req["authorization"] == f"Bearer {_TOKEN}"
+    assert req["authorization"] == f"Bearer {TOKEN}"
 
 
 def test_search_files_with_query_and_paging(backend) -> None:
@@ -213,7 +197,7 @@ def test_search_files_with_query_and_paging(backend) -> None:
         )
     )
     assert result["ok"] is True
-    query = parse_qs(urlparse(_last(server)["path"]).query)
+    query = _last(server)["query"]
     assert query["q"] == ["name contains 'report'"]
     assert query["pageSize"] == ["5"]
     assert query["pageToken"] == ["tok-1"]
@@ -226,11 +210,9 @@ def test_get_file(backend) -> None:
     result = json.loads(b.gdrive_get_file("bin1"))
     assert result["ok"] is True
     assert result["file"] == _FILES["bin1"]
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/files/bin1"
-    assert parse_qs(parsed.query)["fields"] == [
-        "id,name,mimeType,size,modifiedTime,webViewLink,parents"
-    ]
+    req = _last(server)
+    assert req["path"] == "/files/bin1"
+    assert req["query"]["fields"] == ["id,name,mimeType,size,modifiedTime,webViewLink,parents"]
 
 
 def test_read_google_doc_uses_export(backend) -> None:
@@ -241,9 +223,9 @@ def test_read_google_doc_uses_export(backend) -> None:
     assert result["name"] == "Design Doc"
     assert result["mime_type"] == "application/vnd.google-apps.document"
     assert result["content"] == "exported gdoc1 as text/plain"
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/files/gdoc1/export"
-    assert parse_qs(parsed.query)["mimeType"] == ["text/plain"]
+    req = _last(server)
+    assert req["path"] == "/files/gdoc1/export"
+    assert req["query"]["mimeType"] == ["text/plain"]
 
 
 def test_read_spreadsheet_defaults_to_csv_export(backend) -> None:
@@ -252,7 +234,7 @@ def test_read_spreadsheet_defaults_to_csv_export(backend) -> None:
     result = json.loads(b.gdrive_read_file("sheet1"))
     assert result["ok"] is True
     assert result["content"] == "exported sheet1 as text/csv"
-    assert parse_qs(urlparse(_last(server)["path"]).query)["mimeType"] == ["text/csv"]
+    assert _last(server)["query"]["mimeType"] == ["text/csv"]
 
 
 def test_read_with_export_mime_type_override(backend) -> None:
@@ -261,7 +243,7 @@ def test_read_with_export_mime_type_override(backend) -> None:
     result = json.loads(b.gdrive_read_file("gdoc1", export_mime_type="text/markdown"))
     assert result["ok"] is True
     assert result["content"] == "exported gdoc1 as text/markdown"
-    assert parse_qs(urlparse(_last(server)["path"]).query)["mimeType"] == ["text/markdown"]
+    assert _last(server)["query"]["mimeType"] == ["text/markdown"]
 
 
 def test_read_binary_file_uses_alt_media(backend) -> None:
@@ -270,12 +252,12 @@ def test_read_binary_file_uses_alt_media(backend) -> None:
     result = json.loads(b.gdrive_read_file("bin1"))
     assert result["ok"] is True
     assert result["content"] == _BIN_CONTENT.decode()
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/files/bin1"
-    assert parse_qs(parsed.query)["alt"] == ["media"]
+    req = _last(server)
+    assert req["path"] == "/files/bin1"
+    assert req["query"]["alt"] == ["media"]
     # The preceding metadata request used the fields projection, not alt=media.
     meta_req = server.requests[-2]
-    assert parse_qs(urlparse(meta_req["path"]).query)["fields"] == ["id,name,mimeType"]
+    assert meta_req["query"]["fields"] == ["id,name,mimeType"]
 
 
 def test_download_file_writes_bytes(backend, tmp_path) -> None:
@@ -308,9 +290,8 @@ def test_upload_file_multipart(backend, tmp_path) -> None:
     assert result["file"] == {"id": "up1", "name": "uploaded"}
     req = _last(server)
     assert req["method"] == "POST"
-    parsed = urlparse(req["path"])
-    assert parsed.path == "/upload/files"
-    assert parse_qs(parsed.query)["uploadType"] == ["multipart"]
+    assert req["path"] == "/upload/files"
+    assert req["query"]["uploadType"] == ["multipart"]
     content_type = req["content_type"]
     assert content_type.startswith("multipart/related; boundary=")
     boundary = content_type.split("boundary=", 1)[1]
@@ -370,7 +351,7 @@ def test_create_folder(backend) -> None:
     assert result["folder"]["id"] == "folder-new"
     req = _last(server)
     assert req["method"] == "POST"
-    assert urlparse(req["path"]).path == "/files"
+    assert req["path"] == "/files"
     assert req["body"] == {
         "name": "Reports",
         "mimeType": "application/vnd.google-apps.folder",
@@ -396,7 +377,7 @@ def test_share_file(backend) -> None:
     assert result["permission"]["id"] == "perm1"
     req = _last(server)
     assert req["method"] == "POST"
-    assert urlparse(req["path"]).path == "/files/bin1/permissions"
+    assert req["path"] == "/files/bin1/permissions"
     assert req["body"] == {"type": "user", "role": "writer", "emailAddress": "ada@example.com"}
 
 
@@ -407,10 +388,10 @@ def test_move_file_swaps_parents(backend) -> None:
     assert result["ok"] is True
     get_req, patch_req = server.requests[-2], server.requests[-1]
     assert get_req["method"] == "GET"
-    assert parse_qs(urlparse(get_req["path"]).query)["fields"] == ["parents"]
+    assert get_req["query"]["fields"] == ["parents"]
     assert patch_req["method"] == "PATCH"
-    assert urlparse(patch_req["path"]).path == "/files/bin1"
-    query = parse_qs(urlparse(patch_req["path"]).query)
+    assert patch_req["path"] == "/files/bin1"
+    query = patch_req["query"]
     assert query["addParents"] == ["newfolder"]
     assert query["removeParents"] == ["old1,old2"]
 
@@ -420,7 +401,7 @@ def test_move_file_without_existing_parents(backend) -> None:
     b, server = backend
     result = json.loads(b.gdrive_move_file("orphan1", "newfolder"))
     assert result["ok"] is True
-    query = parse_qs(urlparse(_last(server)["path"]).query)
+    query = _last(server)["query"]
     assert query["addParents"] == ["newfolder"]
     assert "removeParents" not in query
 
@@ -432,7 +413,7 @@ def test_trash_file(backend) -> None:
     assert result == {"ok": True}
     req = _last(server)
     assert req["method"] == "PATCH"
-    assert urlparse(req["path"]).path == "/files/bin1"
+    assert req["path"] == "/files/bin1"
     assert req["body"] == {"trashed": True}
 
 

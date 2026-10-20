@@ -6,97 +6,77 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
+const {loadMainCss, makePage, send} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+// A history row reserves a left column for its status icon: the row's
+// padding-left is 19px (a 13px icon column plus a 6px gap to the text)
+// and the icon sits 5px in, so it never overlaps the task text.  The
+// values are read off the rendered row, not the stylesheet source.
 
-function pickDeclaration(css, selector, prop) {
-  const ruleRe = new RegExp(
-    '(?:^|[\\s,}])' +
-      selector.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') +
-      '\\s*(?:,\\s*[^{]+)?\\{([^}]*)\\}',
-    'g',
-  );
-  let m;
-  while ((m = ruleRe.exec(css)) !== null) {
-    const body = m[1];
-    const declRe = new RegExp(
-      '(?:^|;)\\s*' +
-        prop.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') +
-        '\\s*:\\s*([^;]+)',
-    );
-    const dm = declRe.exec(body);
-    if (dm) {
-      return dm[1].trim();
-    }
-  }
-  return null;
+function renderRunningRow(win) {
+  loadMainCss(win);
+  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
+  send(win, {
+    type: 'history',
+    offset: 0,
+    sessions: [
+      {
+        id: 'chat-1',
+        task_id: 1,
+        title: 'running task',
+        preview: 'running task',
+        timestamp: 1_700_000_000,
+        has_events: false,
+        failed: false,
+        is_running: true,
+        tokens: 1,
+        cost: 0,
+        steps: 1,
+        is_favorite: false,
+        work_dir: '',
+        startTs: 1_700_000_000_000,
+        endTs: 0,
+      },
+    ],
+  });
+  const row = win.document.querySelector('#history-list .running-item');
+  assert.ok(row, 'the history list renders a .running-item row');
+  const dot = row.querySelector(':scope > .sidebar-item-running');
+  assert.ok(dot, 'the running row carries its status icon as a direct child');
+  return {row, dot};
 }
 
 function testRunningItemPaddingLeftHalved() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const value = pickDeclaration(css, '.running-item', 'padding-left');
-  assert.ok(
-    value,
-    'main.css must declare padding-left on .running-item ' +
-      '(the left whitespace column reserved for the status dot)',
-  );
+  const {win} = makePage();
+  const {row} = renderRunningRow(win);
   assert.strictEqual(
-    value,
+    win.getComputedStyle(row).paddingLeft,
     '19px',
-    `expected .running-item padding-left to be 19px (dot column of 13px + 6px gap to text), got "${value}"`,
+    'a history row keeps a 19px left column (13px icon + 6px gap)',
   );
+  win.close();
   console.log('  ok - .running-item padding-left is 19px (13px dot column + 6px gap)');
 }
 
 function testStatusIndicatorLeftHalved() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const ruleRe =
-    /\.running-item\s*>\s*\.sidebar-item-failed\s*,\s*\.running-item\s*>\s*\.sidebar-item-running\s*,\s*\.running-item\s*>\s*\.sidebar-item-completed\s*\{([^}]*)\}/;
-  const m = ruleRe.exec(css);
-  assert.ok(
-    m,
-    'main.css must define the compound rule positioning the ' +
-      'three .sidebar-item-* status dots inside .running-item',
-  );
-  const body = m[1];
-  const leftRe = /(?:^|;)\s*left\s*:\s*([^;]+)/;
-  const lm = leftRe.exec(body);
-  assert.ok(
-    lm,
-    'the .sidebar-item-* status-dot rule must declare a left offset',
-  );
+  const {win} = makePage();
+  const {dot} = renderRunningRow(win);
   assert.strictEqual(
-    lm[1].trim(),
+    win.getComputedStyle(dot).left,
     '5px',
-    `expected status dot left offset to be halved from 10px to 5px, got "${lm[1].trim()}"`,
+    'the status icon sits 5px into the row (halved from 10px)',
   );
+  win.close();
   console.log('  ok - status dot left offset is 5px (halved from 10px)');
 }
 
 function testDotFitsInsidePadding() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const paddingLeft = pickDeclaration(css, '.running-item', 'padding-left');
-  // The row icons take their box from the shared status-icon rule
-  // (.status-spinner, .status-tick, .status-cross share one block).
-  const dotWidth = pickDeclaration(
-    css,
-    '.status-spinner, .status-tick, .status-cross',
-    'width',
-  );
-  const dotLeftRe =
-    /\.running-item\s*>\s*\.sidebar-item-failed\s*,\s*\.running-item\s*>\s*\.sidebar-item-running\s*,\s*\.running-item\s*>\s*\.sidebar-item-completed\s*\{([^}]*)\}/;
-  const dotLeftMatch = dotLeftRe.exec(css);
-  assert.ok(dotLeftMatch, 'compound status-dot rule must exist');
-  const leftRe = /(?:^|;)\s*left\s*:\s*([^;]+)/;
-  const lm = leftRe.exec(dotLeftMatch[1]);
-  assert.ok(lm, 'compound status-dot rule must set "left"');
-
-  const padPx = Number.parseInt(paddingLeft, 10);
-  const widthPx = Number.parseInt(dotWidth, 10);
-  const leftPx = Number.parseInt(lm[1], 10);
-
+  const {win} = makePage();
+  const {row, dot} = renderRunningRow(win);
+  const padPx = Number.parseInt(win.getComputedStyle(row).paddingLeft, 10);
+  const dotStyle = win.getComputedStyle(dot);
+  const leftPx = Number.parseInt(dotStyle.left, 10);
+  const widthPx = Number.parseInt(dotStyle.width, 10);
   assert.ok(
     Number.isFinite(padPx) && Number.isFinite(widthPx) && Number.isFinite(leftPx),
     'padding-left / dot width / dot left must all be integer px values',
@@ -108,6 +88,7 @@ function testDotFitsInsidePadding() {
     }px) must fit inside the .running-item padding column (${padPx}px) ` +
       'so it never overlaps text content',
   );
+  win.close();
   console.log(
     `  ok - dot (${leftPx}px + ${widthPx}px) fits inside ${padPx}px padding column`,
   );

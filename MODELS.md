@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **788 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **787 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedrock model or inference-profile id>` (`bedrock/us.anthropic.claude-opus-4-6-v1:0`, `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`, with the same `-low`/`-medium`/`-high`/`-max` effort suffixes as the `claude-*` entries) and configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`. The catalog does not list Bedrock ids (they differ per model and region); a `bedrock/` name is priced and sized as the `claude-*` entry behind it, and adding it under Settings → Custom Models (name only, no endpoint) puts it in the model picker from the next daemon start.
 
@@ -9,17 +9,17 @@ The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedro
 | OpenAI | 111 |
 | Anthropic | 76 |
 | Gemini | 21 |
-| Together AI | 104 |
+| Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 431 |
+| OpenRouter | 429 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **751** generation-capable models
-- **590** function-calling-capable models
+- **750** generation-capable models
+- **591** function-calling-capable models
 - **7** embedding models
 - **23** decision models
 
@@ -252,7 +252,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (104)</strong></summary>
+<summary><strong>Together AI (105)</strong></summary>
 
 - `BAAI/bge-base-en-v1.5`
 - `Qwen/QwQ-32B`
@@ -298,6 +298,7 @@ Full model list:
 - `deepseek-ai/DeepSeek-V4-Pro`
 - `deepseek-ai/DeepSeek-V4-Pro-0813`
 - `deepseek-ai/DeepSeek-V4.1-Flash`
+- `deepseek-ai/DeepSeek-V4.1-Flash-1017`
 - `deepseek-ai/deepseek-coder-33b-instruct`
 - `essentialai/rnj-1-instruct`
 - `google/gemma-2-27b-it`
@@ -392,7 +393,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (431)</strong></summary>
+<summary><strong>OpenRouter (429)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -442,7 +443,6 @@ Full model list:
 - `openrouter/deepseek/deepseek-chat`
 - `openrouter/deepseek/deepseek-chat-v3-0324`
 - `openrouter/deepseek/deepseek-chat-v3.1`
-- `openrouter/deepseek/deepseek-r1`
 - `openrouter/deepseek/deepseek-r1-0528`
 - `openrouter/deepseek/deepseek-v3.1-terminus`
 - `openrouter/deepseek/deepseek-v3.2`
@@ -518,7 +518,6 @@ Full model list:
 - `openrouter/meta/muse-wonder`
 - `openrouter/microsoft/microsoft-decision-1`
 - `openrouter/microsoft/phi-4`
-- `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
 - `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
@@ -722,7 +721,6 @@ Full model list:
 - `openrouter/sakana/fugu-ultra-v2`
 - `openrouter/sao10k/l3-lunaris-8b`
 - `openrouter/sao10k/l3.1-euryale-70b`
-- `openrouter/sao10k/l3.3-euryale-70b`
 - `openrouter/scaledown/classify-1`
 - `openrouter/scaledown/summarize`
 - `openrouter/stepfun/step-3.5-flash`
@@ -743,6 +741,7 @@ Full model list:
 - `openrouter/togethercomputer/tev1-4b-experimental`
 - `openrouter/typesafe/jev-1.13`
 - `openrouter/typesafe/jev-1.14`
+- `openrouter/unbiased/pareto-26.10`
 - `openrouter/unbiased/pareto-26.9`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`

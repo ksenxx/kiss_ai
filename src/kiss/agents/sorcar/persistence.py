@@ -46,6 +46,7 @@ from kiss.agents.sorcar.history_columns import (
     TASK_TABLE,
     add_missing_columns,
     complete_rows,
+    missing_columns,
 )
 from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
@@ -168,6 +169,13 @@ class _RWLock:
     exclusive access — no readers or other writers may proceed while a
     write lock is held.  Pending writers block new readers to prevent
     writer starvation.
+
+    Not reentrant, in either mode.  A thread holding a read token that
+    takes a second one while a writer is pending waits for that writer,
+    which waits for the first token: deadlock.  Never call a locking
+    helper from inside a ``read_lock()`` / ``write_lock()`` block: a
+    helper that runs under its caller's lock takes the connection as
+    an argument and says so in its docstring.
 
     Interrupt safety.  The server stops a task by injecting
     ``KeyboardInterrupt`` at an ARBITRARY bytecode boundary
@@ -925,8 +933,12 @@ def _prune_dead_thread_conns() -> None:
                 pass
 
 
+#: One ``_attached_shm`` entry: ``(db_file_id, shm_file_id)``.
+_ShmMapping = tuple[tuple[int, int], tuple[int, int]]
+
+
 def _sidecars_orphaned(
-    current_path: str, current_id: tuple[int, int] | None,
+    current_path: str, current_id: tuple[int, int] | None, attached: _ShmMapping,
 ) -> bool:
     """Return ``True`` when this process is mapped to a dead ``-shm``.
 
@@ -954,10 +966,10 @@ def _sidecars_orphaned(
         current_id: Identity of the database file itself (already
             computed by the caller); the recorded ``-shm`` identity only
             applies to connections opened against this same file.
+        attached: The :data:`_attached_shm` entry of *current_path* as
+            the caller read it; the caller hands the same object to
+            :func:`_recover_orphaned_sidecars`.
     """
-    attached = _attached_shm.get(current_path)
-    if attached is None:
-        return False
     db_id, shm_id = attached
     if db_id != current_id:
         return False
@@ -972,8 +984,8 @@ def _sidecars_orphaned(
     return _db_file_identity(current_path) == db_id
 
 
-def _recover_orphaned_sidecars(current_path: str) -> None:
-    """Drop the dead ``-shm`` mapping: checkpoint, close every connection.
+def _recover_orphaned_sidecars(current_path: str, observed: _ShmMapping) -> None:
+    """Drop the dead ``-shm`` mapping *observed*: checkpoint, close every connection.
 
     Called by :func:`_get_db` when :func:`_sidecars_orphaned` is true or
     when a brand-new connection failed with ``SQLITE_IOERR``.  While the
@@ -999,20 +1011,32 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
     with ``ProgrammingError`` on a statement it runs on the old handle.
 
     Idempotent under ``_init_tables_lock``: a racing thread that finds
-    the mapping already dropped returns without doing anything.
+    *observed* no longer recorded returns without doing anything — a
+    recovery that completed while it queued for the lock dropped that
+    mapping, and the entry recorded now (if any) is the live mapping
+    the reconnects since then joined, whose handles must stay open.  A
+    recovery that gave up on a busy handle, and ``_close_db``, keep the
+    entry, so a queued observer of a still-dead mapping does recover it.
+
+    Args:
+        current_path: The active database path.
+        observed: The :data:`_attached_shm` entry the caller found dead
+            (or was mapped to when its open failed).
     """
-    if locked_call(_init_tables_lock, _recover_orphaned_sidecars_locked, current_path):
+    if locked_call(_init_tables_lock, _recover_orphaned_sidecars_locked, current_path, observed):
         _invalidate_chat_context_cache("")
 
 
-def _recover_orphaned_sidecars_locked(current_path: str) -> bool:
+def _recover_orphaned_sidecars_locked(current_path: str, observed: _ShmMapping) -> bool:
     """Body of :func:`_recover_orphaned_sidecars`; the caller holds ``_init_tables_lock``.
 
     Returns:
         True when connections were recovered, False when nothing was to do.
     """
     global _db_conn
-    if current_path not in _attached_shm:
+    # Identity, not equality: a recreated ``-shm`` may get the deleted
+    # one's inode number back, while every re-record stores a new tuple.
+    if _attached_shm.get(current_path) is not observed:
         return False
     _prune_dead_thread_conns()
     doomed = [
@@ -1609,10 +1633,23 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     transaction (``backfill_task_metadata``'s ``with conn:``) covers
     the atomicity itself, as in :func:`_repair_and_create_index`.
 
+    The transaction is opened only when a column is absent.  This runs
+    for every connection a thread opens, from inside the caller's
+    ``_rw_lock.read_lock()``, and ``BEGIN IMMEDIATE`` waits out SQLite's
+    ``busy_timeout`` behind any other process's write transaction; a
+    reader must not pay that (nor hold its read token for it) when
+    there is nothing to migrate.  The checks run again inside the
+    transaction, so a peer that migrated in between adds nothing twice.
+
     Args:
         conn: Connection whose ``task_history`` and ``chat_summaries``
             tables to extend.
     """
+    if not (
+        missing_columns(conn, TASK_TABLE, ADDED_TASK_COLUMNS)
+        or missing_columns(conn, CHAT_TABLE, ADDED_SUMMARY_COLUMNS)
+    ):
+        return
     txn = nullcontext() if conn.in_transaction else _immediate_txn(conn)
     with txn:
         complete_rows(conn, add_missing_columns(conn, TASK_TABLE, ADDED_TASK_COLUMNS))
@@ -1637,170 +1674,166 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         r[1]: (r[2] or "").upper()
         for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
     }
-    if not cols:
+    if not cols or cols.get("id") == "TEXT":
         return False
-    if cols.get("id") == "TEXT":
-        return False
-
-    def _bx(v: object, missing: int = 0) -> int:
-        """Coerce a legacy ``extra`` value to a 0/1 column value.
-
-        *missing* is returned for a key the old row never recorded —
-        the framework toggles predate their own persistence, so
-        mapping their absence to 0 would assert that a legacy run had
-        worktree/parallel/auto-commit explicitly DISABLED, the exact
-        opposite of the framework default at the time.
-        """
-        if v is None:
-            return missing
-        if isinstance(v, str):
-            return 0 if v.strip().lower() in {"", "0", "false", "no"} else 1
-        return 1 if bool(v) else 0
-
     conn.execute("PRAGMA foreign_keys=OFF")
-    conn.execute("BEGIN IMMEDIATE")
     try:
-        cols_locked = {
-            r[1]: (r[2] or "").upper()
-            for r in conn.execute(
-                "PRAGMA table_info(task_history)"
-            ).fetchall()
-        }
-        if not cols_locked or cols_locked.get("id") == "TEXT":
-            conn.execute("ROLLBACK")
-            conn.execute("PRAGMA foreign_keys=ON")
-            return False
-        extra_column = "extra" if "extra" in cols_locked else "''"
-        conn.execute("DROP TABLE IF EXISTS task_history__new")
-        conn.execute("DROP TABLE IF EXISTS events__new")
-        conn.execute(
-            "CREATE TABLE task_history__new ("
-            "id TEXT PRIMARY KEY, "
-            "timestamp REAL NOT NULL, "
-            "task TEXT NOT NULL, "
-            "has_events INTEGER DEFAULT 0, "
-            "result TEXT DEFAULT '', "
-            "chat_id CHAR(32) DEFAULT '', "
-            "model TEXT DEFAULT '', "
-            "work_dir TEXT DEFAULT '', "
-            "version TEXT DEFAULT '', "
-            "tokens INTEGER DEFAULT 0, "
-            "cost REAL DEFAULT 0.0, "
-            "steps INTEGER DEFAULT 0, "
-            "is_parallel INTEGER DEFAULT 1, "
-            "start_ts INTEGER DEFAULT 0, "
-            "end_ts INTEGER DEFAULT 0, "
-            "is_favorite INTEGER DEFAULT 0, "
-            "parent_task_id TEXT DEFAULT '', "
-            "owner TEXT DEFAULT ''"
-            ")"
-        )
-        conn.execute(
-            "CREATE TABLE events__new ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "task_id TEXT NOT NULL REFERENCES task_history__new(id), "
-            "seq INTEGER NOT NULL, "
-            "event_json TEXT NOT NULL, "
-            "timestamp REAL NOT NULL"
-            ")"
-        )
-        rows = conn.execute(
-            "SELECT id, timestamp, task, has_events, result, chat_id, "
-            f"{extra_column} FROM task_history ORDER BY id ASC"
+        with _immediate_txn(conn):
+            return _migrate_old_schema_locked(conn)
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _legacy_flag(v: object, missing: int = 0) -> int:
+    """Coerce a legacy ``extra`` value to a 0/1 column value.
+
+    *missing* is returned for a key the old row never recorded —
+    the framework toggles predate their own persistence, so
+    mapping their absence to 0 would assert that a legacy run had
+    worktree/parallel/auto-commit explicitly DISABLED, the exact
+    opposite of the framework default at the time.
+    """
+    if v is None:
+        return missing
+    if isinstance(v, str):
+        return 0 if v.strip().lower() in {"", "0", "false", "no"} else 1
+    return 1 if bool(v) else 0
+
+
+def _migrate_old_schema_locked(conn: sqlite3.Connection) -> bool:
+    """Body of :func:`_migrate_old_schema_if_needed` inside its write transaction.
+
+    Re-checks the schema under the lock (another process may have
+    migrated first) and returns ``False`` without writing when there
+    is nothing to port.
+    """
+    cols_locked = {
+        r[1]: (r[2] or "").upper()
+        for r in conn.execute(
+            "PRAGMA table_info(task_history)"
         ).fetchall()
-        id_map: dict[int, str] = {int(r[0]): uuid.uuid4().hex for r in rows}
-        dropped_unknown_keys = 0
-        known_extra_keys = {
-            "model", "work_dir", "version", "tokens", "cost", "steps",
-            "is_parallel", "startTs", "endTs", "is_favorite", "subagent",
-        }
-        for r in rows:
-            old_id = int(r[0])
-            extra_raw = r[6] or ""
+    }
+    if not cols_locked or cols_locked.get("id") == "TEXT":
+        return False
+    extra_column = "extra" if "extra" in cols_locked else "''"
+    conn.execute("DROP TABLE IF EXISTS task_history__new")
+    conn.execute("DROP TABLE IF EXISTS events__new")
+    conn.execute(
+        "CREATE TABLE task_history__new ("
+        "id TEXT PRIMARY KEY, "
+        "timestamp REAL NOT NULL, "
+        "task TEXT NOT NULL, "
+        "has_events INTEGER DEFAULT 0, "
+        "result TEXT DEFAULT '', "
+        "chat_id CHAR(32) DEFAULT '', "
+        "model TEXT DEFAULT '', "
+        "work_dir TEXT DEFAULT '', "
+        "version TEXT DEFAULT '', "
+        "tokens INTEGER DEFAULT 0, "
+        "cost REAL DEFAULT 0.0, "
+        "steps INTEGER DEFAULT 0, "
+        "is_parallel INTEGER DEFAULT 1, "
+        "start_ts INTEGER DEFAULT 0, "
+        "end_ts INTEGER DEFAULT 0, "
+        "is_favorite INTEGER DEFAULT 0, "
+        "parent_task_id TEXT DEFAULT '', "
+        "owner TEXT DEFAULT ''"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE events__new ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_id TEXT NOT NULL REFERENCES task_history__new(id), "
+        "seq INTEGER NOT NULL, "
+        "event_json TEXT NOT NULL, "
+        "timestamp REAL NOT NULL"
+        ")"
+    )
+    rows = conn.execute(
+        "SELECT id, timestamp, task, has_events, result, chat_id, "
+        f"{extra_column} FROM task_history ORDER BY id ASC"
+    ).fetchall()
+    id_map: dict[int, str] = {int(r[0]): uuid.uuid4().hex for r in rows}
+    dropped_unknown_keys = 0
+    known_extra_keys = {
+        "model", "work_dir", "version", "tokens", "cost", "steps",
+        "is_parallel", "startTs", "endTs", "is_favorite", "subagent",
+    }
+    for r in rows:
+        old_id = int(r[0])
+        extra_raw = r[6] or ""
+        try:
+            extra = json.loads(extra_raw) if extra_raw else {}
+        except (json.JSONDecodeError, TypeError):
+            extra = {}
+        if not isinstance(extra, dict):
+            extra = {}
+        parent_task_id = ""
+        sub = extra.get("subagent")
+        if isinstance(sub, dict):
+            old_parent = sub.get("parent_task_id")
+            if isinstance(old_parent, int):
+                parent_task_id = id_map.get(old_parent, "")
+            elif (
+                isinstance(old_parent, str)
+                and _TASK_ID_RE.fullmatch(old_parent)
+            ):
+                parent_task_id = old_parent
+        for k in extra:
+            if k not in known_extra_keys:
+                dropped_unknown_keys += 1
+        conn.execute(
+            "INSERT INTO task_history__new (id, timestamp, task, "
+            "has_events, result, chat_id, model, work_dir, version, "
+            "tokens, cost, steps, is_parallel, "
+            "start_ts, end_ts, is_favorite, "
+            "parent_task_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                id_map[old_id], r[1], r[2],
+                r[3] or 0, r[4] or "", r[5] or "",
+                _safe_str(extra.get("model")), _safe_str(extra.get("work_dir")),
+                _safe_str(extra.get("version")), _safe_int(extra.get("tokens")),
+                _safe_float(extra.get("cost")),
+                _safe_int(extra.get("steps")),
+                _legacy_flag(extra.get("is_parallel"), missing=1),
+                _safe_int(extra.get("startTs")),
+                _safe_int(extra.get("endTs")),
+                _legacy_flag(extra.get("is_favorite")), parent_task_id,
+            ),
+        )
+    has_events_table = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='events'"
+    ).fetchone() is not None
+    dropped_events = 0
+    if has_events_table:
+        ev_rows = conn.execute(
+            "SELECT task_id, seq, event_json, timestamp FROM events"
+        ).fetchall()
+        for er in ev_rows:
             try:
-                extra = json.loads(extra_raw) if extra_raw else {}
-            except (json.JSONDecodeError, TypeError):
-                extra = {}
-            if not isinstance(extra, dict):
-                extra = {}
-            parent_task_id = ""
-            sub = extra.get("subagent")
-            if isinstance(sub, dict):
-                old_parent = sub.get("parent_task_id")
-                if isinstance(old_parent, int):
-                    parent_task_id = id_map.get(old_parent, "")
-                elif (
-                    isinstance(old_parent, str)
-                    and _TASK_ID_RE.fullmatch(old_parent)
-                ):
-                    parent_task_id = old_parent
-            for k in extra:
-                if k not in known_extra_keys:
-                    dropped_unknown_keys += 1
+                new_tid = id_map.get(int(er[0]))
+            except (TypeError, ValueError):
+                new_tid = None
+            if new_tid is None:
+                dropped_events += 1
+                continue
             conn.execute(
-                "INSERT INTO task_history__new (id, timestamp, task, "
-                "has_events, result, chat_id, model, work_dir, version, "
-                "tokens, cost, steps, is_parallel, "
-                "start_ts, end_ts, is_favorite, "
-                "parent_task_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    id_map[old_id], r[1], r[2],
-                    r[3] or 0, r[4] or "", r[5] or "",
-                    _safe_str(extra.get("model")), _safe_str(extra.get("work_dir")),
-                    _safe_str(extra.get("version")), _safe_int(extra.get("tokens")),
-                    _safe_float(extra.get("cost")),
-                    _safe_int(extra.get("steps")),
-                    _bx(extra.get("is_parallel"), missing=1),
-                    _safe_int(extra.get("startTs")),
-                    _safe_int(extra.get("endTs")),
-                    _bx(extra.get("is_favorite")), parent_task_id,
-                ),
+                "INSERT INTO events__new "
+                "(task_id, seq, event_json, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                (new_tid, er[1], er[2], er[3]),
             )
-        has_events_table = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='events'"
-        ).fetchone() is not None
-        dropped_events = 0
-        if has_events_table:
-            ev_rows = conn.execute(
-                "SELECT task_id, seq, event_json, timestamp FROM events"
-            ).fetchall()
-            for er in ev_rows:
-                try:
-                    new_tid = id_map.get(int(er[0]))
-                except (TypeError, ValueError):
-                    new_tid = None
-                if new_tid is None:
-                    dropped_events += 1
-                    continue
-                conn.execute(
-                    "INSERT INTO events__new "
-                    "(task_id, seq, event_json, timestamp) "
-                    "VALUES (?, ?, ?, ?)",
-                    (new_tid, er[1], er[2], er[3]),
-                )
-            conn.execute("DROP TABLE events")
-        conn.execute("DROP TABLE task_history")
-        conn.execute(
-            "ALTER TABLE task_history__new RENAME TO task_history"
-        )
-        conn.execute(
-            "ALTER TABLE events__new RENAME TO events"
-        )
-        _apply_index_ddl(conn)
-        conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
-        try:
-            conn.execute("PRAGMA foreign_keys=ON")
-        except sqlite3.Error:
-            pass
-        raise
-    conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("DROP TABLE events")
+    conn.execute("DROP TABLE task_history")
+    conn.execute(
+        "ALTER TABLE task_history__new RENAME TO task_history"
+    )
+    conn.execute(
+        "ALTER TABLE events__new RENAME TO events"
+    )
+    _apply_index_ddl(conn)
     if dropped_unknown_keys:
         logger.warning(
             "task_history migration dropped %d unknown extra key(s)",
@@ -1888,8 +1921,9 @@ def _get_db() -> sqlite3.Connection:
     current_id = _db_file_identity(current_path)
     if current_id is not _FILE_ID_UNKNOWN:
         _maybe_reset_caches(current_path, current_id)
-    if _sidecars_orphaned(current_path, current_id):
-        _recover_orphaned_sidecars(current_path)
+    attached = _attached_shm.get(current_path)
+    if attached is not None and _sidecars_orphaned(current_path, current_id, attached):
+        _recover_orphaned_sidecars(current_path, attached)
     # Read AFTER the recovery above: it bumps the generation, and this
     # thread's cached handle (closed by it) must be seen as stale.
     gen_snapshot = _db_generation
@@ -1923,17 +1957,25 @@ def _get_db() -> sqlite3.Connection:
 
     _ensure_kiss_dir()
     _adopt_legacy_db_name(current_path)
+    attached = _attached_shm.get(current_path)
     try:
         conn = _open_db_connection(current_path)
     except sqlite3.OperationalError as exc:
         code = getattr(exc, "sqlite_errorcode", 0) or 0
-        if code & 0xFF != sqlite3.SQLITE_IOERR or current_path not in _attached_shm:
-            raise
         # A fresh connection failing with SQLITE_IOERR while older ones
         # are open is the dead -shm mapping (see ``_sidecars_orphaned``)
         # caught before the identity check could see it — e.g. the
         # sidecars were unlinked between the stat above and the open.
-        _recover_orphaned_sidecars(current_path)
+        # The mapping the open joined is the one recorded before it; a
+        # recovery completed since then (the entry is a new object, or
+        # gone) stands down.  When nothing was recorded before the open,
+        # the first connection of the process was registered during it
+        # and the entry it recorded is the one the open joined.
+        if attached is None:
+            attached = _attached_shm.get(current_path)
+        if code & 0xFF != sqlite3.SQLITE_IOERR or attached is None:
+            raise
+        _recover_orphaned_sidecars(current_path, attached)
         # The recovery bumped the generation; snapshot again BEFORE the
         # reopen (never after: a ``_close_db`` racing the open must
         # still retire this connection on the next call).
@@ -2258,7 +2300,7 @@ def _mark_legacy_side_channel_rows(task_template: str) -> int:
     """
     prefix, _, suffix = task_template.partition("{task_id}")
     db = _get_db()
-    with _rw_lock.write_lock(), _immediate_txn(db):
+    with _rw_lock.write_lock():
         cursor = db.execute(
             "UPDATE task_history SET is_side_channel = 1 "
             "WHERE is_side_channel = 0 AND parent_task_id IS NOT NULL "
@@ -2754,30 +2796,6 @@ def _evict_for_new_key(
         )
 
 
-def _search_history(
-    query: str, limit: int = 50, offset: int = 0, tag: str = "", *,
-    work_dir: str = "", running_task_ids: set[str] | None = None,
-) -> list[_HistoryEntry]:
-    """Search history entries by substring match. Thread-safe.
-
-    Args:
-        query: Case-insensitive substring to match against task text.
-        limit: Maximum number of matching entries to return.
-        offset: Number of entries to skip before returning results.
-        tag: When set, only entries carrying this tag are returned.
-        work_dir: When set, only entries that ran in this exact
-            working directory are returned.
-        running_task_ids: Matching tasks to put before completed history.
-
-    Returns:
-        List of matching entries, running first when requested, then newest first.
-    """
-    return _load_history(
-        limit=limit, offset=offset, tag=tag, query=query, work_dir=work_dir,
-        running_task_ids=running_task_ids,
-    )
-
-
 def _resolve_task_id(
     db: sqlite3.Connection,
     task_id: str | None,
@@ -3147,17 +3165,11 @@ def _recover_orphaned_tasks(
         # but the committed pages were later lost (e.g. the 2026-09-12
         # WAL loss after a ``disk I/O error``).  Restore the journalled
         # result instead of mislabeling the task as "process killed".
-        restored_rowids = [
-            rid for rid, tid in dead_rows if tid in journalled
-        ]
-        killed_rowids = [
-            rid for rid, tid in dead_rows if tid not in journalled
-        ]
+        restored = [(rid, tid) for rid, tid in dead_rows if tid in journalled]
+        killed_rowids = [rid for rid, tid in dead_rows if tid not in journalled]
         _log_orphaned_task_forensics(db, killed_rowids)
         rowcount = 0
-        for rid, tid in dead_rows:
-            if tid not in journalled:
-                continue
+        for rid, tid in restored:
             cursor = db.execute(
                 "UPDATE task_history SET result = ?, success = ? "
                 "WHERE rowid = ? AND result = ?",
@@ -3185,8 +3197,8 @@ def _recover_orphaned_tasks(
                 ],
             )
             rowcount += cursor.rowcount or 0
-        if restored_rowids or killed_rowids:
-            _backfill_orphan_progress(db, restored_rowids + killed_rowids)
+        if dead_rows:
+            _backfill_orphan_progress(db, [rid for rid, _tid in dead_rows])
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
@@ -3852,9 +3864,11 @@ def _journal_final_result(
 
     The append is serialised against concurrent appends and the
     sweep-time prune in other processes by
-    :func:`_journal_file_lock`.  Failures are logged and swallowed:
-    the journal is a safety net, and the primary database write has
-    already succeeded when this runs.
+    :func:`_journal_file_lock`; a record that could not take the lock
+    in time is spilled to its own file (see
+    :data:`_FINAL_RESULTS_SPILL_SUFFIX`).  Failures are logged and
+    swallowed: the journal is a safety net, and the primary database
+    write has already succeeded when this runs.
 
     Args:
         task_id: History row id whose result was just saved.
@@ -3872,7 +3886,10 @@ def _journal_final_result(
 def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
     """Append *line* to the final-results journal; caller holds ``_journal_lock``."""
     try:
-        with _journal_file_lock(sidecar):
+        with _journal_file_lock(sidecar) as locked:
+            if not locked:
+                _spill_final_result(sidecar, line)
+                return
             # A process killed mid-append can leave a torn last
             # record with no trailing newline; appending directly
             # onto that fragment would fuse THIS record into one
@@ -3893,8 +3910,54 @@ def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
         )
 
 
+#: Suffix of a final-result record journalled while a peer process
+#: kept the journal lock past :data:`_JOURNAL_LOCK_TIMEOUT_S`.  The
+#: record must not be appended to the sidecar itself without the lock:
+#: the holder may be the prune, which replaces the sidecar's inode, so
+#: an append landing in the old inode would be erased with it.  The
+#: record goes to its own ``<sidecar>.spill-<pid>-<uuid>`` file —
+#: written under a private name and renamed into place, so no reader
+#: ever sees a partial record — which :func:`_load_final_results`
+#: reads alongside the sidecar and the next locked prune folds back
+#: into it.
+_FINAL_RESULTS_SPILL_SUFFIX = ".spill-"
+
+
+def _final_results_spills(sidecar: str) -> list[str]:
+    """Return the spill files of *sidecar* (see :data:`_FINAL_RESULTS_SPILL_SUFFIX`).
+
+    Args:
+        sidecar: Path returned by :func:`_final_results_path`.
+    """
+    directory = os.path.dirname(sidecar) or "."
+    prefix = os.path.basename(sidecar) + _FINAL_RESULTS_SPILL_SUFFIX
+    try:
+        names = os.listdir(directory)
+    except OSError:  # pragma: no cover — unreadable journal directory
+        return []
+    return sorted(os.path.join(directory, name) for name in names if name.startswith(prefix))
+
+
+def _spill_final_result(sidecar: str, line: str) -> None:
+    """Write *line* to a fresh spill file of *sidecar* (see :data:`_FINAL_RESULTS_SPILL_SUFFIX`)."""
+    unique = f"{os.getpid()}-{uuid.uuid4().hex}"
+    writing = f"{sidecar}.writing-{unique}"
+    with open(writing, "w", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+    os.replace(writing, f"{sidecar}{_FINAL_RESULTS_SPILL_SUFFIX}{unique}")
+
+
+def _journal_lines(path: str) -> Iterator[str]:
+    """Yield the lines of the journal file at *path*; a missing or unreadable file has none."""
+    try:
+        with open(path, encoding="utf-8") as stream:
+            yield from stream
+    except OSError:
+        return
+
+
 def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
-    """Load the journalled final results from *sidecar*, last write wins.
+    """Load the journalled final results from *sidecar* and its spill files.
 
     Args:
         sidecar: Path returned by :func:`_final_results_path`.
@@ -3902,28 +3965,33 @@ def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
     Returns:
         Mapping of task id to its most recently journalled
         ``{"result": text, "success": 0 | 1 | None}`` (a record from
-        before the verdict was journalled loads with ``None``).
-        Missing or unreadable files and corrupt lines (a torn write
-        from a killed process) yield/skip to an empty or partial map.
+        before the verdict was journalled loads with ``None``).  The
+        record with the latest ``ts`` wins, whichever file holds it —
+        the sidecar and a spill file do not order each other.  Missing
+        or unreadable files and corrupt lines (a torn write from a
+        killed process) yield/skip to an empty or partial map.
     """
     results: dict[str, dict[str, object]] = {}
-    try:
-        with open(sidecar, encoding="utf-8") as stream:
-            for raw in stream:
-                try:
-                    entry = json.loads(raw)
-                    task_id = entry["task_id"]
-                    result = entry["result"]
-                    success = entry.get("success")
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    continue
-                if isinstance(task_id, str) and isinstance(result, str):
-                    results[task_id] = {
-                        "result": result,
-                        "success": success if success in (0, 1) else None,
-                    }
-    except OSError:
-        return results
+    journalled_at: dict[str, float] = {}
+    for path in (sidecar, *_final_results_spills(sidecar)):
+        for raw in _journal_lines(path):
+            try:
+                entry = json.loads(raw)
+                task_id = entry["task_id"]
+                result = entry["result"]
+                success = entry.get("success")
+                ts = _safe_float(entry.get("ts"), 0.0)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+            if not (isinstance(task_id, str) and isinstance(result, str)):
+                continue
+            if ts < journalled_at.get(task_id, ts):
+                continue
+            journalled_at[task_id] = ts
+            results[task_id] = {
+                "result": result,
+                "success": success if success in (0, 1) else None,
+            }
     return results
 
 
@@ -3932,7 +4000,8 @@ def _prune_final_results_journal(sidecar: str) -> None:
 
     Called after each orphan sweep so the sidecar stays a bounded
     incident log (one small line per finished task) instead of growing
-    forever.  The rewrite happens under :func:`_journal_file_lock` and
+    forever.  Spill files are folded into the sidecar at the same
+    time.  The rewrite happens under :func:`_journal_file_lock` and
     lands via an atomic rename, so a concurrent append in another
     process is either retained or ordered after the prune — never
     torn.  All failures are logged and swallowed.
@@ -3943,28 +4012,36 @@ def _prune_final_results_journal(sidecar: str) -> None:
     cutoff = time.time() - _FINAL_RESULTS_MAX_AGE_S
     with _journal_lock:
         try:
-            with _journal_file_lock(sidecar):
-                if not os.path.exists(sidecar):
+            with _journal_file_lock(sidecar) as locked:
+                # A rewrite without the lock could drop a peer's
+                # concurrent append; the next sweep prunes instead.
+                if not locked:
                     return
-                kept: list[str] = []
-                pruned = False
-                with open(sidecar, encoding="utf-8") as stream:
-                    for raw in stream:
+                spills = _final_results_spills(sidecar)
+                if not spills and not os.path.exists(sidecar):
+                    return
+                kept: list[tuple[float, str]] = []
+                dropped = False
+                for path in (sidecar, *spills):
+                    for raw in _journal_lines(path):
                         try:
                             entry_ts = float(json.loads(raw)["ts"])
                         except (ValueError, TypeError, KeyError):
-                            pruned = True
+                            dropped = True
                             continue
                         if entry_ts >= cutoff:
-                            kept.append(raw)
+                            kept.append((entry_ts, raw.rstrip("\n") + "\n"))
                         else:
-                            pruned = True
-                if not pruned:
+                            dropped = True
+                if not dropped and not spills:
                     return
+                kept.sort()
                 tmp_path = sidecar + ".pruning"
                 with open(tmp_path, "w", encoding="utf-8") as stream:
-                    stream.writelines(kept)
+                    stream.writelines(raw for _ts, raw in kept)
                 os.replace(tmp_path, sidecar)
+                for spill in spills:
+                    os.unlink(spill)
         except OSError:
             logger.warning(
                 "final-results journal %s could not be pruned",
@@ -3986,8 +4063,17 @@ _JOURNAL_CONSUMED_SUFFIX = ".consumed-"
 _CLAIM_KEY_WIDTH = 20
 
 
+#: Longest wait for a peer process's :func:`_journal_file_lock`.  The
+#: lock is taken on task threads (every final-result save flushes and
+#: replays), so a peer wedged under it must cost them a bounded time,
+#: not the peer's lifetime.
+_JOURNAL_LOCK_TIMEOUT_S = 5.0
+
+
 @contextmanager
-def _journal_file_lock(sidecar: str) -> Iterator[None]:
+def _journal_file_lock(
+    sidecar: str, timeout: float | None = _JOURNAL_LOCK_TIMEOUT_S,
+) -> Iterator[bool]:
     """Hold an inter-process lock on *sidecar* for the whole block.
 
     The database and its journal are shared by every Sorcar process on
@@ -4005,21 +4091,34 @@ def _journal_file_lock(sidecar: str) -> Iterator[None]:
 
     Args:
         sidecar: Path of the journal file being appended or replayed.
+        timeout: Longest wait for a peer's lock; ``None`` waits for as
+            long as the peer holds it.
 
     Yields:
-        Nothing; the lock is held for the duration of the block.  When
-        the lock file cannot be opened the block runs unserialised (the
-        in-process lock still applies), which is why replay also
-        consumes by rename.
+        ``True`` with the lock held for the duration of the block.
+        ``False`` when the lock file cannot be opened or a peer kept
+        the lock for *timeout*.  The block must then leave the shared
+        journal file alone: the peer may be replacing or unlinking its
+        inode, so an unlocked append could land in a file nobody reads
+        again.  A replay or prune skips and is retried by the next
+        flush or sweep; an append writes its record elsewhere.
     """
     try:
         handle = open(sidecar + ".lock", "a+", encoding="utf-8")
     except OSError:  # pragma: no cover — unwritable journal directory
-        yield
+        yield False
         return
     try:
-        lock_exclusive(handle)
-        yield
+        try:
+            lock_exclusive(handle, timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "journal lock %s.lock held by another process for over %.0fs; "
+                "proceeding without it", sidecar, timeout,
+            )
+            yield False
+            return
+        yield True
     finally:
         handle.close()
 
@@ -4046,6 +4145,12 @@ def _journal_failed_events(
     The append is serialised against every other process's append and
     replay by :func:`_journal_file_lock`, so a batch can never be
     written into a file another process is in the middle of consuming.
+    It waits for that lock without bound: the rows must reach the live
+    sidecar, and in order — a batch written anywhere else could be
+    replayed before rows this process appended earlier, and seqs are
+    assigned in replay order.  This runs on the event-writer thread,
+    and the holder is a replayer whose hold ends with its database
+    write attempt.
     """
     by_origin: dict[str, list[tuple[str, str, float, str]]] = {}
     for row in batch:
@@ -4054,7 +4159,7 @@ def _journal_failed_events(
         for origin, rows in by_origin.items():
             sidecar = _failed_events_path(origin)
             try:
-                with _journal_file_lock(sidecar), open(
+                with _journal_file_lock(sidecar, timeout=None), open(
                     sidecar, "a", encoding="utf-8",
                 ) as stream:
                     for task_id, event_json, timestamp, origin_path in rows:
@@ -4121,8 +4226,14 @@ def _replay_failed_events() -> None:
 
 
 def _replay_journal_files(path: str) -> None:
-    """Replay every snapshot of the journal at *path*; caller holds ``_journal_lock``."""
-    with _journal_file_lock(path):
+    """Replay every snapshot of the journal at *path*; caller holds ``_journal_lock``.
+
+    Without the cross-process lock nothing is replayed: a peer may be
+    replaying the same snapshots, and the next flush tries again.
+    """
+    with _journal_file_lock(path) as locked:
+        if not locked:
+            return
         for snapshot in _claim_journal_snapshots(path):
             if not _replay_journal_snapshot(snapshot):
                 break

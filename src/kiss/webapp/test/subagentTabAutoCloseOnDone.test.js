@@ -7,71 +7,14 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {runParallelPanel, subagentTabEls} = require('./subagent_tab_helpers');
+const {bootParallelRun, subagentTabEls} = require('./subagent_tab_helpers');
 
 function activeTabEl(win) {
   return win.document.querySelector('#tab-list .chat-tab.active');
 }
 
-function bootParallelRun(n) {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(taskNames)},
-  });
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a .ev.tc panel');
-
-  const taskIds = [];
-  const subTabIds = [];
-  for (let i = 0; i < n; i++) {
-    const taskId = 'sub-task-' + (i + 1);
-    taskIds.push(taskId);
-    const before = posted.length;
-    send(win, {
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-    });
-  }
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    n,
-    'each spawned sub-agent must get its own tab',
-  );
-  return {win, posted, parentId, panel, taskIds, subTabIds};
-}
-
 function testDoneClosesOnlyFinishedTab() {
-  const {win, posted, panel, subTabIds} = bootParallelRun(2);
+  const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
 
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
@@ -101,7 +44,7 @@ function testDoneClosesOnlyFinishedTab() {
 }
 
 function testLastDoneClosesTabAndCollapsesPanel() {
-  const {win, posted, panel, subTabIds} = bootParallelRun(2);
+  const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
 
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
   send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
@@ -127,7 +70,7 @@ function testLastDoneClosesTabAndCollapsesPanel() {
 }
 
 function testDoneOnActiveTabSwitchesAway() {
-  const {win, parentId, subTabIds} = bootParallelRun(2);
+  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   const subEl = subagentTabEls(win).find(
     el => el.dataset.tabId === subTabIds[0],
@@ -163,7 +106,7 @@ function testDoneOnActiveTabSwitchesAway() {
 }
 
 function testDoneUnknownTabIsNoop() {
-  const {win, posted, subTabIds} = bootParallelRun(2);
+  const {win, posted, subTabIds} = bootParallelRun(2, makePage());
 
   const before = posted.length;
   send(win, {type: 'subagentDone', tab_id: 'no-such-tab'});

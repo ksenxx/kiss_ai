@@ -38,15 +38,17 @@ carry ``connId`` and reach only the clients that show the tab):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import re
 import threading
 import time
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import quote
 
 from kiss.agents.sorcar.web_stealth import disabled_blink_features, virtual_display
@@ -60,6 +62,7 @@ if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 TAB_ID_PREFIX = "browser__"
 _FALLBACK_HOME = "https://www.google.com"
@@ -231,10 +234,7 @@ class BrowserTabService:
             RuntimeError: The service is shut down or the browser cannot
                 be launched.
         """
-        loop = self._ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(
-            asyncio.wait_for(self._open_for_agent(), _OPEN_TIMEOUT), loop
-        )
+        future = self._run_threadsafe(self._open_for_agent(), _OPEN_TIMEOUT)
         try:
             return future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:
@@ -259,10 +259,7 @@ class BrowserTabService:
             blank tab is closed again).
         """
         try:
-            loop = self._ensure_loop()
-            future = asyncio.run_coroutine_threadsafe(
-                asyncio.wait_for(self._open_for_user(url), _OPEN_TIMEOUT), loop
-            )
+            future = self._run_threadsafe(self._open_for_user(url), _OPEN_TIMEOUT)
             future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the caller falls back to another browser
             logger.warning("browser tab: cannot open %s for the user: %s", url, exc)
@@ -354,6 +351,42 @@ class BrowserTabService:
     # Loop plumbing
     # ------------------------------------------------------------------
 
+    def _run_threadsafe(
+        self, coro: Coroutine[Any, Any, _T], timeout: float | None = None
+    ) -> concurrent.futures.Future[_T]:
+        """Hand *coro* to the private loop (started on first use) and return its future.
+
+        The shutdown check and the hand-over are one critical section
+        under ``_lock``, the lock :meth:`shutdown` flips ``_closed``
+        under before it stops the loop: a coroutine accepted here is
+        queued ahead of the teardown and runs (finding the service
+        closed under ``_launch_lock`` at worst); one that arrives later
+        is refused at once instead of landing on a stopped loop, where
+        nothing would ever resolve its future and the caller would
+        wait out its whole timeout.
+
+        Args:
+            coro: The coroutine to run.
+            timeout: Seconds after which the loop cancels *coro*
+                (``asyncio.wait_for``); ``None`` for no limit.
+
+        Raises:
+            RuntimeError: The service is shut down (*coro* is closed).
+        """
+        try:
+            return locked_call(self._lock, self._run_threadsafe_locked, coro, timeout)
+        except RuntimeError:
+            coro.close()
+            raise
+
+    def _run_threadsafe_locked(
+        self, coro: Coroutine[Any, Any, _T], timeout: float | None
+    ) -> concurrent.futures.Future[_T]:
+        loop = self._ensure_loop_locked()
+        if timeout is not None:
+            coro = asyncio.wait_for(coro, timeout)
+        return asyncio.run_coroutine_threadsafe(coro, loop)
+
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         """Start the private event loop thread on first use."""
         return locked_call(self._lock, self._ensure_loop_locked)
@@ -370,14 +403,12 @@ class BrowserTabService:
             self._loop, self._thread = loop, thread
         return self._loop
 
-    def _submit(self, coro: Any) -> None:
+    def _submit(self, coro: Coroutine[Any, Any, Any]) -> None:
         """Run *coro* on the private loop without waiting; log failures."""
         try:
-            loop = self._ensure_loop()
+            future = self._run_threadsafe(coro)
         except RuntimeError:
-            coro.close()
             return
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
         future.add_done_callback(_log_future_error)
 
     def _emit(self, event: dict[str, Any], conn_id: str = "") -> None:
@@ -557,6 +588,10 @@ class BrowserTabService:
         close or teardown runs.
         """
         async with self._launch_lock:
+            if self._closed:
+                # Queued just ahead of the shutdown's teardown: launching
+                # now would hold the lock the teardown waits for.
+                raise RuntimeError("The browser service is shut down.")
             context = await self._launch()
             self._creating += 1
             try:

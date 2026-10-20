@@ -24,7 +24,7 @@ from typing import Any, NamedTuple, cast
 
 import yaml
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.agents.sorcar._concurrency import interruptible_locked_call, locked_call
 from kiss.agents.sorcar.agent_dispatch import (
     kill_jobs_of,
     live_agent_jobs,
@@ -1043,10 +1043,6 @@ class SorcarAgent(RelentlessAgent):
         # Set by ``_do_merge``: the last merge conflicted and the merge
         # SEA resolved it (``merge`` reports this in its message).
         self._last_merge_resolved_by_agent: bool = False
-        # Why ``create_worktree`` cannot isolate anything in this run
-        # (a Docker container): the write guard then lets the task edit
-        # the checkout directly.  Reset per run.
-        self._worktree_unavailable: str | None = None
         # Repositories whose worktree setup failed (detached HEAD, no
         # commits, a git failure): the task edits them in place.
         self._unisolated_repos: set[Path] = set()
@@ -2098,7 +2094,7 @@ class SorcarAgent(RelentlessAgent):
             tools: List of tools to be added in addition to bash and web tools.
             max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to config value.
-            work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
+            work_dir: Working directory for the agent. Defaults to the current directory.
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
@@ -2247,6 +2243,10 @@ class SorcarAgent(RelentlessAgent):
         # the classifier, the memory-root gate and ``_reset`` all get
         # this string, so they cannot disagree about the model.
         model_name = self._launch_model_name = self._resolve_model_name(model_name)
+        # Resolved ONCE as well: the repository memory domain, the skill
+        # probe of the restricted-profile note and ``_reset`` (hence the
+        # toolset) all see the directory the run executes in.
+        work_dir = resolve_work_dir(work_dir or ".")
         try:
             try:
                 # Pre-run task classification (idempotent per run: a driver
@@ -2289,7 +2289,7 @@ class SorcarAgent(RelentlessAgent):
                 )
                 if memory_root is not None:
                     self._memory_tools = MemoryTools(
-                        memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
+                        memory_root, domains=_repo_memory_domains(work_dir)
                     )
                 profile = self._tool_profile(prompt_template)
                 # No note without a built-in toolset to cut down: a run with
@@ -2315,7 +2315,7 @@ class SorcarAgent(RelentlessAgent):
                         offered -= MEMORY_TOOL_NAMES
                     if not decisions_tool_available():
                         offered.discard("decide")
-                    if "skill" in offered and make_skill_tool(resolve_work_dir(work_dir)) is None:
+                    if "skill" in offered and make_skill_tool(work_dir) is None:
                         offered.discard("skill")
                     listed = sorted(offered)
                     if allowed & MCP_AUTH_TOOL_NAMES:
@@ -2406,7 +2406,6 @@ class SorcarAgent(RelentlessAgent):
         """
         if printer is not None:
             self.set_printer(printer)
-        self._worktree_unavailable = None
         self._unisolated_repos = set()
         self._worktree_finish_gate_used = False
         if self._wts:
@@ -2529,11 +2528,6 @@ class SorcarAgent(RelentlessAgent):
         self._wts = {} if wt is None else {_repo_key(wt): wt}
 
     @property
-    def worktree(self) -> GitWorktree | None:
-        """The first worktree pending merge/discard, or ``None``."""
-        return self._wt
-
-    @property
     def worktrees(self) -> list[GitWorktree]:
         """Every worktree pending merge/discard, in creation order."""
         return list(self._wts.values())
@@ -2636,7 +2630,6 @@ class SorcarAgent(RelentlessAgent):
         """
         work_dir = self.work_dir or ""
         if self.docker_manager is not None:
-            self._worktree_unavailable = "the task runs in a Docker container"
             return (
                 "No worktree: the task runs in a Docker container, so edit "
                 f"the files in {work_dir} directly."
@@ -2849,10 +2842,9 @@ class SorcarAgent(RelentlessAgent):
             )
         if name not in ("Write", "Edit") or not isinstance(args.get("file_path"), str):
             return None
-        if self._worktree_unavailable is not None:
-            return None
         # A run without the tool (a WorkerSea, a profile without the
-        # edit group's worktree tools) edits the tree in place.
+        # edit group's worktree tools) or in a Docker container (no
+        # worktree can isolate it) edits the tree in place.
         if "create_worktree" not in self._run_tool_names or self.docker_manager is not None:
             return None
         path = Path(_absolutize(args["file_path"], self.work_dir)).resolve()
@@ -2987,28 +2979,12 @@ class SorcarAgent(RelentlessAgent):
         # merge/reclaim/discard stashes, checks out and resets that same
         # tree under the cross-process flock, so the capture takes the
         # flock too (repo_lock -> flock order, like every other taker).
-        #
         # Another tab's merge may hold ``repo_lock`` for minutes while
-        # its conflict resolver runs.  The daemon's Stop injects
-        # ``KeyboardInterrupt``, which CPython delivers only at a
-        # bytecode check point, and a thread parked in the untimed
-        # C-level ``acquire`` reaches none until the holder releases:
-        # acquire in short slices so the Stop lands within one.  The
-        # acquire stays inside the ``try`` (CPython gh-74174, see
-        # ``locked_call``): an interrupt landing right after a
-        # successful slice still reaches the ``finally``, and one
-        # landing after a failed slice makes ``release`` raise
-        # ``RuntimeError``, which is swallowed.
-        lock = repo_lock(repo)
-        try:
-            while not lock.acquire(timeout=0.5):
-                pass
-            return self._setup_worktree_locked(repo, work_dir_str)
-        finally:
-            try:
-                lock.release()
-            except RuntimeError:
-                pass  # the interrupt landed before the acquisition took effect
+        # its conflict resolver runs, so the acquire is sliced to keep
+        # this task stoppable (``interruptible_locked_call``).
+        return interruptible_locked_call(
+            repo_lock(repo), self._setup_worktree_locked, repo, work_dir_str,
+        )
 
     def _setup_worktree_locked(self, repo: Path, work_dir_str: str) -> Path | None:
         """Body of :meth:`_try_setup_worktree`; the caller holds ``repo_lock(repo)``."""
@@ -3312,7 +3288,9 @@ class SorcarAgent(RelentlessAgent):
             the repo.
         """
         self._last_merge_resolved_by_agent = False
-        return locked_call(repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver)
+        return interruptible_locked_call(
+            repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver,
+        )
 
     def _do_merge_locked(
         self,
@@ -3597,7 +3575,9 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             The confirmation or "Discard deferred" message.
         """
-        return locked_call(repo_lock(wt.repo_root), self._discard_one_locked, wt, rescue_ignored)
+        return interruptible_locked_call(
+            repo_lock(wt.repo_root), self._discard_one_locked, wt, rescue_ignored,
+        )
 
     def _discard_one_locked(self, wt: GitWorktree, rescue_ignored: bool) -> str:
         """Body of :meth:`_discard_one`; the caller holds ``repo_lock(wt.repo_root)``."""
@@ -3639,17 +3619,19 @@ class SorcarAgent(RelentlessAgent):
     # Pending worktrees of earlier runs
     # ------------------------------------------------------------------
 
-    def _preserve_pending_worktree_for_review(self) -> bool:
+    def _retire_previous_worktree(self) -> bool:
         """Commit pending worktree changes onto the branch, no merge.
 
-        Called before a new task, a new chat, or a tab disposal when a
-        worktree of an earlier run is still pending: the partial work
-        is committed to its ``kiss/wt-*`` branch (recoverable via ``git
-        checkout <branch>``), the worktree directory is removed and
-        pruned, and the branch is never squash-merged into the user's
-        original branch behind their back.  When the commit does not
-        happen (a hook refusing it) the directory is kept instead,
-        because it is then the only copy of the work.
+        Called before a new task, a new chat, a stopped or failed task's
+        cleanup, or a tab disposal when a worktree of an earlier run is
+        still pending: the partial work is committed to its
+        ``kiss/wt-*`` branch (recoverable via ``git checkout
+        <branch>``), the worktree directory is removed and pruned, and
+        the branch is never squash-merged into the user's original
+        branch behind their back (a new prompt is not a decision about
+        the old task's unmerged work).  When the commit does not happen
+        (a hook refusing it) the directory is kept instead, because it
+        is then the only copy of the work.
 
         Records the cleanup outcome in ``_last_preserve_outcome``.
 
@@ -3658,7 +3640,8 @@ class SorcarAgent(RelentlessAgent):
             uncommitted work and was just cleaned up).  False when
             there was nothing to do.  A preserved worktree whose keep
             decision could not be made durable (:meth:`_keep_for_review`)
-            still returns True but stays pending.
+            still returns True but stays pending (``self._wt`` is still
+            set on return).
         """
         self._last_preserve_outcome = None
         if not self._wts:
@@ -3670,7 +3653,7 @@ class SorcarAgent(RelentlessAgent):
         return True
 
     def _preserve_one_for_review(self, wt: GitWorktree) -> None:
-        """Preserve one pending worktree (see :meth:`_preserve_pending_worktree_for_review`).
+        """Preserve one pending worktree (see :meth:`_retire_previous_worktree`).
 
         Args:
             wt: A pending worktree of this agent.
@@ -3743,22 +3726,6 @@ class SorcarAgent(RelentlessAgent):
             "git config is writable again."
         )
         return False
-
-    def _retire_previous_worktree(self) -> None:
-        """Clear the way for a new task without publishing the old one.
-
-        A new task must not inherit the previous task's branch, and the
-        user typing a new prompt is not a decision about the old
-        task's unmerged work: the pending worktree is committed to its
-        own ``kiss/wt-*`` branch and kept for review
-        (:meth:`_preserve_pending_worktree_for_review`), never merged
-        into the user's branch behind their back.
-
-        When the retire kept the worktree but could not make that
-        decision durable (see :meth:`_keep_for_review`), ``self._wt``
-        is still set on return.
-        """
-        self._preserve_pending_worktree_for_review()
 
     def retire_for_disposal(self) -> bool:
         """Retire the pending worktree because its tab is going away.

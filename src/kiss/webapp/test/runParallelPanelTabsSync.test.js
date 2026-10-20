@@ -13,87 +13,16 @@ const {
   togglePanel,
   clickClose,
   finishFanOut,
+  bootParallelRun,
+  announceFinished,
 } = require('./subagent_tab_helpers');
 
-function bootParallelRun(n) {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(taskNames)},
-  });
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a .ev.tc panel');
+function testCollapseClosesSubagentTabs() {
+  const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
   assert.ok(
     !panel.classList.contains('collapsed'),
     'run_parallel panel must start uncollapsed',
   );
-
-  const taskIds = [];
-  const subTabIds = [];
-  for (let i = 0; i < n; i++) {
-    const taskId = 'sub-task-' + (i + 1);
-    taskIds.push(taskId);
-    const before = posted.length;
-    send(win, {
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-    });
-  }
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    n,
-    'each spawned sub-agent must get its own tab',
-  );
-  return {win, posted, parentId, panel, taskIds, subTabIds};
-}
-
-/** The daemon's reply to resuming finished children: history tabs. */
-function announceFinished(win, parentId, taskIds, subTabIds) {
-  taskIds.forEach((taskId, i) =>
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: subTabIds[i],
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-      isDone: true,
-    }),
-  );
-}
-
-function testCollapseClosesSubagentTabs() {
-  const {win, posted, panel, subTabIds} = bootParallelRun(2);
-
   togglePanel(win, panel);
   assert.ok(
     panel.classList.contains('collapsed'),
@@ -103,7 +32,7 @@ function testCollapseClosesSubagentTabs() {
     subagentTabEls(win).length,
     2,
     'collapsing the panel of a RUNNING fan-out must keep its sub-agent ' +
-      'tabs open (they are the children\'s question/answer surface)',
+      "tabs open (they are the children's question/answer surface)",
   );
   assert.ok(
     !posted.some(m => m.type === 'closeTab'),
@@ -127,11 +56,16 @@ function testCollapseClosesSubagentTabs() {
     'the panel stays collapsed once its children are gone',
   );
   win.close();
-  console.log('  ok - collapse keeps running sub tabs; subagentDone closes them');
+  console.log(
+    '  ok - collapse keeps running sub tabs; subagentDone closes them',
+  );
 }
 
 function testExpandReopensSubagentTabs() {
-  const {win, posted, panel, taskIds, subTabIds} = bootParallelRun(2);
+  const {win, posted, panel, taskIds, subTabIds} = bootParallelRun(
+    2,
+    makePage(),
+  );
 
   togglePanel(win, panel);
   let before = posted.length;
@@ -141,7 +75,9 @@ function testExpandReopensSubagentTabs() {
     'second click must uncollapse the run_parallel panel',
   );
   assert.deepStrictEqual(
-    subagentTabEls(win).map(el => el.dataset.tabId).sort(),
+    subagentTabEls(win)
+      .map(el => el.dataset.tabId)
+      .sort(),
     [...subTabIds].sort(),
     'the running sub-agent tabs stayed open across collapse/expand',
   );
@@ -182,7 +118,7 @@ function testExpandReopensSubagentTabs() {
 }
 
 function testManualSubTabCloseClosesOnlyThatTab() {
-  const {win, posted, panel, subTabIds} = bootParallelRun(2);
+  const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
 
   // A running sub-agent's tab stays open unless the USER closes it: the
   // hand close removes that tab alone and is echoed to the daemon, which
@@ -214,7 +150,10 @@ function testManualSubTabCloseClosesOnlyThatTab() {
 }
 
 function testManualSubTabCloseKeepsSiblingsOpen() {
-  const {win, posted, panel, parentId, subTabIds} = bootParallelRun(3);
+  const {win, posted, panel, parentId, subTabIds} = bootParallelRun(
+    3,
+    makePage(),
+  );
 
   clickClose(win, subTabIds[0]);
   assert.strictEqual(
@@ -279,8 +218,10 @@ function testManualSubTabCloseKeepsSiblingsOpen() {
 }
 
 function testManualCloseOfAllSubTabsThenExpandReopensAll() {
-  const {win, posted, panel, parentId, taskIds, subTabIds} =
-    bootParallelRun(2);
+  const {win, posted, panel, parentId, taskIds, subTabIds} = bootParallelRun(
+    2,
+    makePage(),
+  );
 
   for (const id of subTabIds) clickClose(win, id);
   assert.strictEqual(
@@ -296,7 +237,7 @@ function testManualCloseOfAllSubTabsThenExpandReopensAll() {
   finishFanOut(win, subTabIds);
   togglePanel(win, panel);
   assert.strictEqual(subagentTabEls(win).length, 2, 'finished tabs reopen');
-  announceFinished(win, parentId, taskIds, subTabIds);
+  announceFinished(win, parentId, taskIds, (_, i) => subTabIds[i]);
 
   for (const id of subTabIds) clickClose(win, id);
   assert.strictEqual(
@@ -330,11 +271,13 @@ function testManualCloseOfAllSubTabsThenExpandReopensAll() {
     );
   }
   win.close();
-  console.log('  ok - closing all finished sub tabs by hand, expand reopens all');
+  console.log(
+    '  ok - closing all finished sub tabs by hand, expand reopens all',
+  );
 }
 
 function testAutoCollapseKeepsInvariant() {
-  const {win, panel, parentId, subTabIds} = bootParallelRun(2);
+  const {win, panel, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   send(win, {
     type: 'tool_result',
@@ -481,7 +424,7 @@ function testOpenSubagentTabOnlyPathIsAssociated() {
 }
 
 function testSpawnWhileCollapsedDefersTabs() {
-  const {win, posted, panel, parentId} = bootParallelRun(2);
+  const {win, posted, panel, parentId} = bootParallelRun(2, makePage());
 
   togglePanel(win, panel);
   const before = posted.length;
@@ -524,13 +467,16 @@ function testSpawnWhileCollapsedDefersTabs() {
 }
 
 function testTaskEndFoldsUserOpenedFanOutIntoTrajectory() {
-  const {win, panel, parentId, taskIds, subTabIds} = bootParallelRun(2);
+  const {win, panel, parentId, taskIds, subTabIds} = bootParallelRun(
+    2,
+    makePage(),
+  );
 
   // The children finish and the user reopens their history tabs.
   finishFanOut(win, subTabIds);
   togglePanel(win, panel);
   assert.strictEqual(subagentTabEls(win).length, 2, 'finished tabs reopen');
-  announceFinished(win, parentId, taskIds, subTabIds);
+  announceFinished(win, parentId, taskIds, (_, i) => subTabIds[i]);
 
   send(win, {
     type: 'tool_result',
@@ -575,12 +521,16 @@ function testTaskEndFoldsUserOpenedFanOutIntoTrajectory() {
     'the removed Collapse/Uncollapse Chats button must not exist',
   );
   win.close();
-  console.log('  ok - task end folds a user-opened fan-out into the Trajectory');
+  console.log(
+    '  ok - task end folds a user-opened fan-out into the Trajectory',
+  );
 }
 
 function testRunParallelFinishAutoCollapseClosesSubTabs() {
-  const {win, posted, panel, parentId, taskIds, subTabIds} =
-    bootParallelRun(2);
+  const {win, posted, panel, parentId, taskIds, subTabIds} = bootParallelRun(
+    2,
+    makePage(),
+  );
 
   // run_parallel returns only after its last child finished.
   finishFanOut(win, subTabIds);
@@ -654,13 +604,11 @@ function testRunParallelFinishAutoCollapseClosesSubTabs() {
     );
   }
   win.close();
-  console.log(
-    '  ok - finished run_parallel auto-collapse closes sub tabs',
-  );
+  console.log('  ok - finished run_parallel auto-collapse closes sub tabs');
 }
 
 function testRunningFanOutStaysExemptFromAutoCollapse() {
-  const {win, panel, parentId} = bootParallelRun(2);
+  const {win, panel, parentId} = bootParallelRun(2, makePage());
 
   send(win, {type: 'thinking_start', tabId: parentId});
   send(win, {type: 'thinking_delta', tabId: parentId, text: 'waiting'});
@@ -681,14 +629,16 @@ function testRunningFanOutStaysExemptFromAutoCollapse() {
 }
 
 function testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse() {
-  const {win, posted, panel, parentId, taskIds, subTabIds} =
-    bootParallelRun(2);
+  const {win, posted, panel, parentId, taskIds, subTabIds} = bootParallelRun(
+    2,
+    makePage(),
+  );
 
   // A finished parent has finished children: reopen their history tabs.
   finishFanOut(win, subTabIds);
   togglePanel(win, panel);
   assert.strictEqual(subagentTabEls(win).length, 2, 'finished tabs reopen');
-  announceFinished(win, parentId, taskIds, subTabIds);
+  announceFinished(win, parentId, taskIds, (_, i) => subTabIds[i]);
   const closesBefore = posted.filter(m => m.type === 'closeTab').length;
 
   send(win, {
@@ -757,7 +707,7 @@ function testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse() {
 }
 
 function testParentReplayKeepsRunningFanOutOpen() {
-  const {win, panel, parentId} = bootParallelRun(2);
+  const {win, panel, parentId} = bootParallelRun(2, makePage());
 
   send(win, {
     type: 'task_events',

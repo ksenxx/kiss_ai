@@ -130,6 +130,15 @@ def _local_bash(command: str, description: str) -> str:
     return proc.stdout + proc.stderr
 
 
+# The Edit script stores its payload with the GNU/busybox ``mv -T`` and
+# ``stat -c`` of its Linux containers (Git bash on Windows has them too);
+# BSD ``mv`` (macOS) rejects ``-T``, so a host bash there cannot run it.
+gnu_coreutils_only = pytest.mark.skipif(
+    sys.platform == "darwin", reason="the store scripts need GNU/busybox mv -T and stat -c"
+)
+
+
+@gnu_coreutils_only
 def test_docker_edit_python_fallback_preserves_crlf(tmp_path: Path) -> None:
     path = tmp_path / "crlf.txt"
     path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
@@ -138,6 +147,7 @@ def test_docker_edit_python_fallback_preserves_crlf(tmp_path: Path) -> None:
     assert path.read_bytes() == b"alpha\r\nBETA\r\ngamma\r\n"
 
 
+@gnu_coreutils_only
 def test_docker_edit_python_fallback_matches_lf_old_string_in_crlf_file(tmp_path: Path) -> None:
     """A multi-line LF ``old_string`` edits a CRLF file like the host ``Edit`` does."""
     path = tmp_path / "crlf.txt"

@@ -7,7 +7,8 @@
 Three modules carried their own "is this pid alive" probe with
 divergent semantics:
 
-* ``git_worktree.GitWorktreeOps._pid_alive`` — ``pid <= 0`` -> False,
+* ``git_worktree.GitWorktreeOps._pid_alive`` (since removed: its one
+  caller, ``_owner_alive``, calls the shared probe directly) — ``pid <= 0`` -> False,
   ``ProcessLookupError`` -> False, any other ``OSError`` -> True;
 * ``web_use_tool._pid_alive`` — no ``pid <= 0`` guard (so ``os.kill(0, 0)``
   signalled the caller's own process group and answered True),
@@ -17,7 +18,7 @@ divergent semantics:
   ``OSError`` -> False.
 
 The single :func:`kiss.core.processes.pid_alive` now
-carries the ``web_server`` semantics and the three call sites delegate
+carries the ``web_server`` semantics and every call site delegates
 to it.  These tests probe real processes: a live child, a reaped
 child, pid ``0`` / ``-1``, and (when not root) pid ``1`` for the
 ``PermissionError`` branch.
@@ -37,7 +38,6 @@ import sys
 import pytest
 
 from kiss.agents.sorcar import web_use_tool
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.core.processes import pid_alive
 from kiss.server import web_server
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
@@ -85,7 +85,7 @@ def test_foreign_owned_process_is_alive() -> None:
 
 
 def test_call_sites_share_the_helper() -> None:
-    """All three former helpers now answer exactly like ``pid_alive``.
+    """The remaining helpers answer exactly like ``pid_alive``.
 
     Real processes again: the observable contract is identical for a
     live child, a reaped child, the non-positive guards, and (when
@@ -95,7 +95,7 @@ def test_call_sites_share_the_helper() -> None:
     try:
         live = proc.pid
         for probe in (
-            GitWorktreeOps._pid_alive,
+            pid_alive,
             web_use_tool._pid_alive,
             web_server._is_pid_alive,
         ):
@@ -106,14 +106,14 @@ def test_call_sites_share_the_helper() -> None:
         proc.kill()
         proc.wait()
     for probe in (
-        GitWorktreeOps._pid_alive,
+        pid_alive,
         web_use_tool._pid_alive,
         web_server._is_pid_alive,
     ):
         assert probe(proc.pid) is False
     if not IS_WINDOWS and not is_root():
         for probe in (
-            GitWorktreeOps._pid_alive,
+            pid_alive,
             web_use_tool._pid_alive,
             web_server._is_pid_alive,
         ):

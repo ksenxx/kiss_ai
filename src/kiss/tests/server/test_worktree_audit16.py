@@ -18,7 +18,7 @@ BUG-68: post-task pending-worktree cleanup silently left a pending
     about, and no meaningless merge/discard prompt.  See
     ``test_worktree_leak_when_main_tree_busy.py``.
 
-BUG-70: ``_check_merge_conflict`` only checks the unstaged and staged
+BUG-70: ``_conflict_of`` only checks the unstaged and staged
     files of the main repo (historically via the since-removed
     ``unstaged_files``/``staged_files`` helpers) but not **untracked**
     files.
@@ -32,7 +32,7 @@ BUG-70: ``_check_merge_conflict`` only checks the unstaged and staged
     3. ``stash_pop`` tries to restore the untracked file but it
        already exists — pop fails with a conflict.
 
-    The user had no warning.  ``_check_merge_conflict`` should report
+    The user had no warning.  ``_conflict_of`` should report
     the overlap so the user can resolve before merging.
 
 RED-10: The post-task pending-worktree handling blocks in
@@ -56,6 +56,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 @pytest.fixture(autouse=True)
@@ -217,7 +218,7 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
 
 
 class TestBug70UntrackedFileConflict:
-    """``_check_merge_conflict`` must detect untracked files in the
+    """``_conflict_of`` must detect untracked files in the
     main repo that overlap with worktree changes.
 
     Scenario:
@@ -225,7 +226,7 @@ class TestBug70UntrackedFileConflict:
     - Agent creates ``foo.py`` (different content) in the worktree.
     - Auto-merge's ``stash --include-untracked`` + squash + ``stash
       pop`` fails because the file exists after squash.
-    - ``_check_merge_conflict`` should report True so the user is
+    - ``_conflict_of`` should report True so the user is
       warned before clicking merge.
     """
 
@@ -264,9 +265,9 @@ class TestBug70UntrackedFileConflict:
             f"Precondition failed: worktree change not detected: {changed}"
         )
 
-        has_conflict = server._check_merge_conflict(tab_id)
+        has_conflict = merge_conflict(server, tab_id)
         assert has_conflict, (
-            "BUG-70: _check_merge_conflict returned False when an "
+            "BUG-70: _conflict_of returned False when an "
             "untracked file in main overlapped with a worktree change. "
             "The auto-merge will fail at stash-pop with an overwrite "
             "conflict, and the user had no warning."
@@ -302,7 +303,7 @@ class TestBug70UntrackedFileConflict:
 
         (repo / "bar.py").write_text("unrelated\n")
 
-        assert not server._check_merge_conflict(tab_id), (
+        assert not merge_conflict(server, tab_id), (
             "Regression: non-overlapping untracked file in main "
             "triggered a false-positive conflict."
         )

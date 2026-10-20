@@ -614,22 +614,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     families = task_families(tasks)
 
-    if args.embedding_model == HASHED_EMBEDDING_MODEL_CODE:
-        vector_index = VectorIndex(
-            memory, embed=hashed_embedding, model_code=HASHED_EMBEDDING_MODEL_CODE
-        )
-    else:
-        vector_index = VectorIndex(memory, embed=ModelEmbedder(args.embedding_model))
+    # Offline runs evaluate the hashed embedder as the "vector" retriever as
+    # well, so both retrievers share one index object and one sync.
     hashed_index = VectorIndex(
         memory, embed=hashed_embedding, model_code=HASHED_EMBEDDING_MODEL_CODE
     )
+    if args.embedding_model == HASHED_EMBEDDING_MODEL_CODE:
+        vector_index = hashed_index
+    else:
+        vector_index = VectorIndex(memory, embed=ModelEmbedder(args.embedding_model))
     if args.rebuild:
         vector_index.clear()
-        hashed_index.clear()
+        if hashed_index is not vector_index:
+            hashed_index.clear()
     t0 = time.perf_counter()
     report = vector_index.sync()
     logger.info("vector index sync: %s in %.1fs", report, time.perf_counter() - t0)
-    hashed_index.sync()
+    if hashed_index is not vector_index:
+        hashed_index.sync()
 
     probes = hand_probes(tasks)
     if args.llm_probes > 0:

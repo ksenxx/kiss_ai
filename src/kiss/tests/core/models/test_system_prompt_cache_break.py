@@ -39,19 +39,15 @@ class RecordingPrinter(Printer):
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Record the ``(type, content)`` pair of every print call.
 
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "system_prompt").
             **kwargs: Additional type-specific options (ignored).
-
-        Returns:
-            Always the empty string.
         """
         self.events.append((type, str(content)))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Ignore streamed tokens.

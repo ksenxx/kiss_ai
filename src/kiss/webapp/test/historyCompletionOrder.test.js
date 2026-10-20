@@ -11,46 +11,16 @@
 // timestamp.  Runs with: node test/historyCompletionOrder.test.js
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send} = require('./simplify2_harness');
 
 function makePage(legacy) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace('{{BODY_CLASS_ATTR}}', '');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makeChatPage({
+    beforeScripts(win) {
+      if (legacy) win.localStorage.setItem('kissSorcar.historyLegacyView', '1');
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  if (legacy) win.localStorage.setItem('kissSorcar.historyLegacyView', '1');
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.document.getElementById('sidebar').classList.add('open');
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 const DAY = 86_400;
@@ -106,13 +76,22 @@ function testChatsSortByLastCompletion() {
     ),
   ).map(el => el.dataset.chatId || 'sep:' + el.dataset.day);
   const chats = items.filter(x => !x.startsWith('sep:'));
-  assert.deepStrictEqual(chats, ['D', 'A', 'C', 'B'], 'running, then by completion');
+  assert.deepStrictEqual(
+    chats,
+    ['D', 'A', 'C', 'B'],
+    'running, then by completion',
+  );
   // A sits under the day it completed, not the day it launched.
   const aSep = items[items.indexOf('A') - 1];
   const dayA = new Date((T0 + 5 * DAY) * 1000);
   assert.strictEqual(
     aSep,
-    'sep:' + dayA.getFullYear() + '-' + (dayA.getMonth() + 1) + '-' + dayA.getDate(),
+    'sep:' +
+      dayA.getFullYear() +
+      '-' +
+      (dayA.getMonth() + 1) +
+      '-' +
+      dayA.getDate(),
   );
   const bRows = Array.from(
     win.document.querySelectorAll(
@@ -127,9 +106,17 @@ function testFlatRowsSortByCompletion() {
   const {win, posted} = makePage(true);
   sendHistory(win, posted, SESSIONS);
   const rows = Array.from(
-    win.document.querySelectorAll('#history-list > .sidebar-item .sidebar-item-text'),
+    win.document.querySelectorAll(
+      '#history-list > .sidebar-item .sidebar-item-text',
+    ),
   ).map(el => el.textContent);
-  assert.deepStrictEqual(rows, ['task d1', 'task a1', 'task c1', 'task b2', 'task b1']);
+  assert.deepStrictEqual(rows, [
+    'task d1',
+    'task a1',
+    'task c1',
+    'task b2',
+    'task b1',
+  ]);
   win.close();
 }
 
@@ -140,7 +127,9 @@ function localIso(sec) {
 }
 
 function visibleFlatRows(win) {
-  return Array.from(win.document.querySelectorAll('#history-list > .sidebar-item'))
+  return Array.from(
+    win.document.querySelectorAll('#history-list > .sidebar-item'),
+  )
     .filter(el => el.style.display !== 'none')
     .map(el => el.querySelector('.sidebar-item-text').textContent);
 }

@@ -22,25 +22,22 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send} = harness;
+const {send, clickTab} = harness;
 const WORK_DIR = '/tmp/kiss-link-cleanup';
 
 function makePage() {
   const page = harness.makePage();
-  send(page.win, {type: 'configData', config: {work_dir: WORK_DIR}, apiKeys: {}});
+  send(page.win, {
+    type: 'configData',
+    config: {work_dir: WORK_DIR},
+    apiKeys: {},
+  });
   page.win._testApi.endLaunch();
   return page;
 }
 
 function isOpen(win, tabId) {
   return win._testApi.openTabs().some(t => t.id === tabId);
-}
-
-// There is no row of chat tabs: the user picks a chat in the Chats
-// panel, which is what switchToTab stands in for.
-function clickTab(win, tabId) {
-  assert.ok(isOpen(win, tabId), `tab ${tabId} must be open`);
-  win._testApi.switchToTab(tabId);
 }
 
 // Without a row of chat tabs there is no close button for a chat; an

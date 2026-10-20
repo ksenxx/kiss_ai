@@ -33,12 +33,14 @@ from kiss.server import agent_state
 from kiss.tests.agents.seas.conftest import (
     commit,
     fake_checkout,
+    git,
     persist_task,
     registered,
     run_sea,
+    seed_repo,
 )
+from kiss.tests.agents.seas.sea_contract import tool_results
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
-from kiss.tests.server.conftest import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
 
@@ -74,7 +76,7 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (pkg / "SYSTEM_LITE.md").write_text("{{IDENTITY}}\n\nBe brief.\n", encoding="utf-8")
     (pkg / "greet.py").write_text(_CODE, encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'fake'\n", encoding="utf-8")
-    init_repo(tmp_path)
+    seed_repo(tmp_path)
     commit(tmp_path, "fake checkout")
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -365,7 +367,7 @@ def test_patch_sorcar_edits_granted_prompt_code_and_agents_md_targets(checkout: 
         assert code.read_text(encoding="utf-8") == _CODE.replace(
             'return "hi " + name', 'return f"hi {name}"'
         )
-        assert run_git(checkout, "status", "--porcelain").stdout.split() == [
+        assert git(checkout, "status", "--porcelain").split() == [
             "M", "src/kiss/SYSTEM.md", "M", "src/kiss/greet.py",
         ]
         # AGENTS.md: bullets through the storage layer, backed up before the first change.
@@ -436,14 +438,12 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         "instead) denies them."
     ]
     assert len(agentic) == 4
-    tool_results = [
-        str([m for m in r["messages"] if m["role"] == "tool"][-1]["content"]) for r in agentic[1:]
-    ]
-    assert tool_results[0].startswith(
+    results = [tool_results(r)[-1] for r in agentic[1:]]
+    assert results[0].startswith(
         "Permission granted for SYSTEM.md by the user's answer 'yes'."
     )
-    assert tool_results[1].startswith("Patched ")
-    assert tool_results[2].startswith(
+    assert results[1].startswith("Patched ")
+    assert results[2].startswith(
         "Error: no permission to change AGENTS.md; call request_sorcar_permission first"
     )
     assert (checkout / "src" / "kiss" / "SYSTEM.md").read_text(encoding="utf-8").endswith(

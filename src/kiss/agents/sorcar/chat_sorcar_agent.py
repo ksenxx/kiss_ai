@@ -16,6 +16,7 @@ import platform
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,9 @@ from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
-from kiss.core.printer import parse_result_yaml
+from kiss.core.models.model import Attachment
+from kiss.core.printer import Printer, parse_result_yaml
+from kiss.core.tool_verdict import Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +550,41 @@ class ChatSorcarAgent(SorcarAgent):
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
-        **kwargs: Any,
+        model_name: str | None = None,
+        arguments: dict[str, str] | None = None,
+        system_prompt: str | None = None,
+        tools: list[Callable[..., Any]] | None = None,
+        max_steps: int | None = None,
+        max_budget: float | None = None,
+        model_config: dict[str, Any] | None = None,
+        work_dir: str | None = None,
+        printer: Printer | None = None,
+        max_sub_sessions: int | None = None,
+        docker_image: str | None = None,
+        web_tools: bool = True,
+        is_parallel: bool = True,
+        verbose: bool | None = None,
+        current_editor_file: str | None = None,
+        attachments: list[Attachment] | None = None,
+        ask_user_question_callback: Callable[[str], str] | None = None,
+        base_system_prompt: str = "",
+        append_basic_tools: bool = True,
+        inherited_tools: list[Callable[..., Any]] | None = None,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
+        use_memory: bool | None = None,
+        tool_profile: str = "",
+        live_browser: Any = None,
+        prompt_suffix: str = "",
+        system_prompt_hook: Callable[[str], str] | None = None,
+        tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = None,
+        _skip_persistence: bool = False,
+        _on_task_id_allocated: Callable[[str, str], None] | None = None,
+        _history_prompt: str | None = None,
+        _open_bare_path: bool = True,
+        _start_ms: int = 0,
     ) -> str:
         """Run the agent with chat-session context management.
 
@@ -560,14 +597,78 @@ class ChatSorcarAgent(SorcarAgent):
         via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.
 
         Args:
-            prompt_template: The task prompt.
-            **kwargs: All other arguments forwarded to ``SorcarAgent.run()``.
+            prompt_template: The task prompt.  First so the historical
+                ``run("task", ...)`` call keeps working; every other
+                parameter up to *tools_hook* is forwarded verbatim to
+                :meth:`SorcarAgent.run`, in that method's order and
+                with its defaults — see its docstring for what each
+                one does.  *model_name* is resolved here once
+                (:meth:`_resolve_model_name`) and the resolved name is
+                what the base run receives.
+            model_name: LLM model to use.  Defaults to the config value.
+            arguments: Values filling the placeholders of *prompt_template*.
+            system_prompt: Suffix appended to the actual system prompt.
+            tools: Tools added on top of the built-in toolset.
+            max_steps: Maximum steps per sub-session.
+            max_budget: Maximum budget in USD; also recorded on the
+                task-history row (``DEFAULT_MAX_BUDGET`` when omitted).
+            model_config: Extra model configuration.
+            work_dir: Working directory; its resolved absolute path is
+                recorded on the task-history row.
+            printer: Printer for output display; its ``broadcast`` (if
+                any) carries the ``task_settings`` / ``new_tab`` /
+                ``tasks_updated`` events of this run.
+            max_sub_sessions: Maximum continuation sub-sessions.
+            docker_image: Docker image to run tools inside.
+            web_tools: Whether to include browser/web tools.
+            is_parallel: Whether to include the ``run_parallel`` tool.
+            verbose: Whether to print output to the console.
+            current_editor_file: Active editor file appended to the prompt.
+            attachments: File attachments for the initial prompt.
+            ask_user_question_callback: Callback of the
+                ``ask_user_question`` tool.
+            base_system_prompt: Replacement for the default base system
+                prompt.  A non-blank value also disables the bare-path
+                "open it" directive (see *_open_bare_path*).
+            append_basic_tools: Whether the built-in toolset is prepended.
+            inherited_tools: Tools taken over from the dispatching task.
+            llm_call_hook: Hook called before every LLM call.
+            tool_call_hook: Hook called before every tool call.
+            use_memory: Per-run persistent-memory toggle.
+            tool_profile: Tool profile name the toolset is cut down to;
+                the EFFECTIVE profile (``review`` for a reviewer
+                sub-agent asked for none) is what the ``task_settings``
+                event reports.
+            live_browser: The daemon's ``BrowserTabService``.
+            prompt_suffix: Caller-supplied suffix already appended to
+                *prompt_template*, recorded so a ``run_agent`` sub-task
+                inherits it.
+            system_prompt_hook: The SEA's ``system_prompt`` method.
+            tools_hook: The SEA's ``tools`` method.
+            _skip_persistence: When True the final result / usage /
+                replay-event save is skipped (the daemon persists them
+                itself); the task-history row is still allocated.
+            _on_task_id_allocated: Called with ``(task_id, chat_id)`` as
+                soon as the history row exists, before any event of the
+                run is broadcast.
+            _history_prompt: The raw user text to persist and display
+                (history row, frequent-tasks table, last-user-prompt
+                cache) in place of *prompt_template*, which may carry an
+                internal directive the LLM must see (a slash-command
+                run).  ``None`` or blank: *prompt_template* is used.
+            _open_bare_path: Whether a *prompt_template* that is only a
+                filesystem path gets the "open it" directive.  The task
+                runner passes False for a run it starts on behalf of a
+                SEA or of another agent.
+            _start_ms: The run's start as a ms epoch, when the caller
+                stamped it before calling (the daemon's ``<task>``
+                block); 0 (default) dates the run at row allocation.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        skip_persistence = kwargs.pop("_skip_persistence", False)
-        on_task_id_allocated = kwargs.pop("_on_task_id_allocated", None)
+        skip_persistence = _skip_persistence
+        on_task_id_allocated = _on_task_id_allocated
         # A caller (currently the slash-command dispatch in
         # ``TaskRunner._run_task_inner``) can supply the raw user text
         # to use for every history / display / frequent-task write,
@@ -575,10 +676,9 @@ class ChatSorcarAgent(SorcarAgent):
         # LLM must actually see.  Absent, the two are the same and
         # ``prompt_template`` is used everywhere — the original
         # behaviour.
-        raw_history_prompt = kwargs.pop("_history_prompt", None)
         history_prompt = (
-            raw_history_prompt
-            if isinstance(raw_history_prompt, str) and raw_history_prompt
+            _history_prompt
+            if isinstance(_history_prompt, str) and _history_prompt
             else prompt_template
         )
         if self._chat_id == "":
@@ -587,7 +687,7 @@ class ChatSorcarAgent(SorcarAgent):
         # while ``_commit_context`` still describes that task: the
         # commit message of its kept-for-review branch must not be
         # generated from the prompt below.
-        self._begin_task(kwargs.get("printer"))
+        self._begin_task(printer)
         # ``_last_task_id`` is deliberately NOT cleared here.  The next
         # two steps are a SQLite read (build_chat_prompt) and a SQLite
         # write (_add_task), and every server-thread reader of this
@@ -612,18 +712,17 @@ class ChatSorcarAgent(SorcarAgent):
         # base system prompt (an SEA's ``system_prompt()``) suppresses
         # it as well, so a direct ``ChatSorcarAgent.run`` of an agent
         # script is not sent off to ``xdg-open`` the path either.
-        open_bare_path = bool(kwargs.pop("_open_bare_path", True)) and not str(
-            kwargs.get("base_system_prompt") or "",
+        open_bare_path = bool(_open_bare_path) and not str(
+            base_system_prompt or "",
         ).strip()
         agent_prompt = self.build_chat_prompt(
-            with_open_directive(prompt_template, kwargs.get("work_dir") or ".")
+            with_open_directive(prompt_template, work_dir or ".")
             if open_bare_path
             else prompt_template,
         )
 
-        raw_budget = kwargs.get("max_budget")
         try:
-            run_max_budget = None if raw_budget is None else float(raw_budget)
+            run_max_budget = None if max_budget is None else float(max_budget)
         except (TypeError, ValueError):
             run_max_budget = None
         # One authoritative per-run settings snapshot, resolved exactly
@@ -634,9 +733,7 @@ class ChatSorcarAgent(SorcarAgent):
         # is resolved HERE, once, and passed down: the fallback reads
         # the user's config, which the picker may change between two
         # reads (see ``SorcarAgent._resolve_model_name``).
-        resolved_model = kwargs["model_name"] = self._resolve_model_name(
-            kwargs.get("model_name"),
-        )
+        resolved_model = self._resolve_model_name(model_name)
         # The verdict is about the task as submitted, not about the
         # conversation ``agent_prompt`` prepends to it: classify the
         # raw task here, ahead of ``SorcarAgent.run`` (which reuses the
@@ -647,14 +744,14 @@ class ChatSorcarAgent(SorcarAgent):
         self._classify_task_once(
             resolved_model,
             prompt_template,
-            kwargs.get("model_config"),
-            arguments=kwargs.get("arguments"),
+            model_config,
+            arguments=arguments,
         )
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
         )
-        resolved_work_dir = str(Path(kwargs.get("work_dir") or ".").resolve())
-        run_is_parallel = bool(kwargs.get("is_parallel", True))
+        resolved_work_dir = str(Path(work_dir or ".").resolve())
+        run_is_parallel = bool(is_parallel)
         # The row's start is the run's start, not the row's: the daemon
         # (``TaskRunner._run_task_inner``) stamps a ``<task>`` block
         # when it begins and passes it as ``_start_ms``, so the row,
@@ -662,7 +759,7 @@ class ChatSorcarAgent(SorcarAgent):
         # and ``task_done`` all count from one instant — the worktree
         # setup and SEA import that precede this row would otherwise
         # make a client that attaches mid-run start its timer late.
-        start_ts_ms = int(kwargs.pop("_start_ms", 0) or 0) or int(time.time() * 1000)
+        start_ts_ms = int(_start_ms or 0) or int(time.time() * 1000)
 
         early_extra = self._build_extra_payload(
             model=resolved_model,
@@ -683,7 +780,7 @@ class ChatSorcarAgent(SorcarAgent):
             history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
         locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
-        printer = kwargs.get("printer") or getattr(self, "printer", None)
+        run_printer = printer or getattr(self, "printer", None)
         task_key = str(task_id)
         result_summary = ""
         result_raw = ""
@@ -707,14 +804,14 @@ class ChatSorcarAgent(SorcarAgent):
         # orphan key, so the parent's tab under-counted until its own
         # thread rewrote the offset.
         previous_task_id = ""
-        broadcast = getattr(printer, "broadcast", None)
+        broadcast = getattr(run_printer, "broadcast", None)
         try:
-            if printer is not None:
-                tl = getattr(printer, "_thread_local", None)
+            if run_printer is not None:
+                tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None:
                     previous_task_id = getattr(tl, "task_id", "") or ""
                     tl.task_id = task_key
-                allocated = getattr(printer, "agent_task_allocated", None)
+                allocated = getattr(run_printer, "agent_task_allocated", None)
                 if allocated is not None:
                     allocated(self, task_id, self._chat_id)
                 if self._subagent_info is not None:
@@ -724,7 +821,7 @@ class ChatSorcarAgent(SorcarAgent):
                         "parent_tab_id": self._subagent_info.get("parent_tab_id", ""),
                         "taskId": "",
                     })
-                start_rec = getattr(printer, "start_recording", None)
+                start_rec = getattr(run_printer, "start_recording", None)
                 if start_rec is not None:
                     start_rec()
                 _safe_broadcast(broadcast, {"type": "tasks_updated", "taskId": ""})
@@ -741,7 +838,7 @@ class ChatSorcarAgent(SorcarAgent):
             # resolves the same rule from the same name a moment later):
             # a reviewer-marked sub-agent asked for no profile runs
             # ``review``, not the full toolset.
-            self._tool_profile_name = str(kwargs.get("tool_profile") or "")
+            self._tool_profile_name = str(tool_profile or "")
             self.task_settings = self._task_settings_payload(
                 model=resolved_model,
                 work_dir=resolved_work_dir,
@@ -751,7 +848,7 @@ class ChatSorcarAgent(SorcarAgent):
                 task_id=task_id,
                 tool_profile=self._tool_profile(prompt_template),
             )
-            if printer is None and task_id:
+            if run_printer is None and task_id:
                 # Headless (a fan-out child without a printer): persist
                 # the event ourselves, as :meth:`_persist_replay_events_if_missing`
                 # does for the prompt and result.
@@ -773,7 +870,37 @@ class ChatSorcarAgent(SorcarAgent):
                 _record_frequent_task(history_prompt)
 
             run_started = True
-            result = super().run(prompt_template=agent_prompt, **kwargs)
+            result = super().run(
+                model_name=resolved_model,
+                prompt_template=agent_prompt,
+                arguments=arguments,
+                system_prompt=system_prompt,
+                tools=tools,
+                max_steps=max_steps,
+                max_budget=max_budget,
+                model_config=model_config,
+                work_dir=work_dir,
+                printer=printer,
+                max_sub_sessions=max_sub_sessions,
+                docker_image=docker_image,
+                web_tools=web_tools,
+                is_parallel=is_parallel,
+                verbose=verbose,
+                current_editor_file=current_editor_file,
+                attachments=attachments,
+                ask_user_question_callback=ask_user_question_callback,
+                base_system_prompt=base_system_prompt,
+                append_basic_tools=append_basic_tools,
+                inherited_tools=inherited_tools,
+                llm_call_hook=llm_call_hook,
+                tool_call_hook=tool_call_hook,
+                use_memory=use_memory,
+                tool_profile=tool_profile,
+                live_browser=live_browser,
+                prompt_suffix=prompt_suffix,
+                system_prompt_hook=system_prompt_hook,
+                tools_hook=tools_hook,
+            )
             result_raw = result if isinstance(result, str) else ""
             result_summary = _extract_result_summary(result)
             return result
@@ -785,8 +912,8 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             self._last_result_summary = result_summary
-            if printer is not None:
-                finished = getattr(printer, "agent_task_finished", None)
+            if run_printer is not None:
+                finished = getattr(run_printer, "agent_task_finished", None)
                 if finished is not None:
                     try:
                         finished(self, task_key)
@@ -794,13 +921,13 @@ class ChatSorcarAgent(SorcarAgent):
                         logger.warning(
                             "agent_task_finished(%r) raised", task_key, exc_info=True,
                         )
-                stop_rec = getattr(printer, "stop_recording", None)
+                stop_rec = getattr(run_printer, "stop_recording", None)
                 if stop_rec is not None:
                     try:
                         stop_rec()
                     except Exception:
                         pass
-                tl = getattr(printer, "_thread_local", None)
+                tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None and getattr(tl, "task_id", "") == task_key:
                     tl.task_id = previous_task_id
             if not skip_persistence:

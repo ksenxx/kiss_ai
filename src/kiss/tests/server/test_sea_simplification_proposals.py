@@ -43,6 +43,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import channel_work_dir
 from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -62,7 +63,6 @@ from kiss.agents.sorcar.sea_settings import (
     WORKER_DEFAULTS,
     SeaError,
     base_class_defaults,
-    channel_work_dir,
     resolve_settings,
 )
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES

@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 3: ``_HISTORY_NOT_SUBAGENT`` LIKE filter false positives.
 
-``_load_history``, ``_search_history`` and ``_prefix_match_tasks``
+``_load_history`` and ``_prefix_match_tasks``
 filter sub-agent rows with the raw SQL
 substring predicate ``extra NOT LIKE '%"subagent"%'`` — with NO JSON
 re-validation.  A regular (parent) task whose ``extra`` JSON merely
@@ -35,7 +35,6 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context,
     _load_history,
     _prefix_match_tasks,
-    _search_history,
 )
 
 
@@ -79,7 +78,7 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         hist = _load_history()
         assert [h["id"] for h in hist] == [task_id]
 
-        found = _search_history("review")
+        found = _load_history(query="review")
         assert [h["id"] for h in found] == [task_id]
 
         assert _prefix_match_tasks("review sub", limit=1) == [task_text]
@@ -94,7 +93,7 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
 
         hist = _load_history()
         assert [h["id"] for h in hist] == [parent_id]
-        assert _search_history("child") == []
+        assert _load_history(query="child") == []
         assert _prefix_match_tasks("child", limit=1) == []
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == ["parent task"]

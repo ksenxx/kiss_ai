@@ -27,6 +27,7 @@ from kiss.server.web_server import (
     _DARK_MODERN_CSS,
     _LIGHT_MODERN_CSS,
     _app_shell_urls,
+    _brand_css_asset_names,
     _build_html,
     _build_share_page,
 )
@@ -217,7 +218,7 @@ def test_remote_page_inlines_vscode_fonts_and_both_palettes() -> None:
 def test_app_shell_precaches_both_highlight_sheets() -> None:
     """The service worker's app shell includes the light sheet main.js
     swaps in, so the theme toggle works offline too."""
-    urls = _app_shell_urls()
+    urls = _app_shell_urls(_brand_css_asset_names())
     assert any(u.startswith("/media/highlight-dark.css?v=") for u in urls)
     assert any(u.startswith("/media/highlight-light.css?v=") for u in urls)
     assert not any("highlight-github" in u for u in urls)

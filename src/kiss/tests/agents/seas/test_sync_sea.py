@@ -28,8 +28,20 @@ from kiss.agents.seas.sync.sync_sea import SyncSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.machines import Machine, save_machines
 from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
-from kiss.tests.agents.seas.conftest import HERMETIC_GIT_WITH_IDENTITY, commit, git, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.conftest import (
+    HERMETIC_GIT_WITH_IDENTITY,
+    commit,
+    git,
+    remote_and_clones,
+    run_sea,
+    set_known_work_dirs,
+)
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _SEA_PATH = Path(sync_sea.__file__).resolve()
@@ -49,23 +61,6 @@ def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
 def _commit(repo: Path, name: str, text: str) -> str:
     """Write *text* to *name* in *repo*, commit it and return the commit sha."""
     return commit(repo, f"{name}: {text.strip()[:20]}", {name: text})
-
-
-def _remote_and_clones(tmp_path: Path, *names: str) -> list[Path]:
-    """Create a bare ``origin`` with one commit on ``main`` and return one clone per name."""
-    origin = tmp_path / "origin.git"
-    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
-    seed = tmp_path / "seed"
-    git(tmp_path, "clone", "-q", str(origin), str(seed))
-    git(seed, "checkout", "-q", "-b", "main")
-    _commit(seed, "README.md", "hello\n")
-    git(seed, "push", "-q", "origin", "main")
-    clones = []
-    for name in names:
-        clone = tmp_path / name
-        git(tmp_path, "clone", "-q", str(origin), str(clone))
-        clones.append(clone)
-    return clones
 
 
 def _remote_main(repo: Path) -> str:
@@ -116,7 +111,12 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "ASSEMBLED" not in prompt
     assert "`git_sync`" in prompt
     assert "git merge --abort" in prompt
-    assert f'task="<ref> {sync_sea.THIS_MACHINE_ONLY}"' in prompt
+    # The sub-task sent to a machine names the repository by URL, never by this
+    # machine's path (the checkout lives elsewhere there).
+    assert f"{sync_sea.THIS_MACHINE_ONLY}\"" in prompt
+    assert 'task="<ref> of <the remote\'s URL' in prompt
+    assert "Pass no `options` and no `work_dir`" in prompt
+    assert '"work_dir": "<the work' not in prompt
     assert sea.settings({"model": "m"}) == {
         "model": "m",
         "tool_profile": "shell+edit+agents",
@@ -183,12 +183,16 @@ def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> No
 
 def test_sync_fast_forwards_when_the_branch_has_no_own_commits(tmp_path: Path) -> None:
     """A colleague's push is fast-forwarded in; the push then has nothing to send."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     pushed = _commit(theirs, "a.txt", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
     # The checkout is named the way git prints it (forward slashes on Windows too).
-    assert f"Checkout {mine.resolve().as_posix()}, branch main, syncing with origin/main." in report
+    origin = git(mine, "remote", "get-url", "origin")
+    assert (
+        f"Checkout {mine.resolve().as_posix()}, branch main, syncing with origin/main "
+        f"(origin = {origin})."
+    ) in report
     assert "main is 0 ahead and 1 behind." in report
     assert f"Fast-forwarded to origin/main: now at {pushed[:12]} (1 files changed)." in report
     assert "Pushed main to origin: Everything up-to-date" in report
@@ -204,7 +208,7 @@ def test_sync_fast_forwards_when_the_branch_has_no_own_commits(tmp_path: Path) -
 
 def test_sync_merges_and_pushes_when_both_sides_moved(tmp_path: Path) -> None:
     """Own commits plus a remote move give a merge commit that is pushed to origin."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "a.txt", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
@@ -223,7 +227,7 @@ def test_sync_merges_and_pushes_when_both_sides_moved(tmp_path: Path) -> None:
 
 def test_sync_pushes_when_there_is_nothing_to_merge(tmp_path: Path) -> None:
     """A branch that is only ahead is pushed without a merge; a dirty tree is reported."""
-    (mine,) = _remote_and_clones(tmp_path, "mine")
+    (mine,) = remote_and_clones(tmp_path, "mine")
     own = _commit(mine, "b.txt", "mine\n")
     (mine / "README.md").write_text("edited, not committed\n", encoding="utf-8")
     report = sync(str(mine))
@@ -238,7 +242,7 @@ def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
     tmp_path: Path,
 ) -> None:
     """Conflicts stop the sync with the files listed; once committed, a second sync pushes."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "README.md", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     _commit(mine, "README.md", "mine\n")
@@ -261,7 +265,7 @@ def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
 
 def test_sync_refuses_a_merge_that_would_overwrite_local_edits(tmp_path: Path) -> None:
     """git refuses to merge over an uncommitted edit of a file the remote changed."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "README.md", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     (mine / "README.md").write_text("edited, not committed\n", encoding="utf-8")
@@ -273,7 +277,7 @@ def test_sync_refuses_a_merge_that_would_overwrite_local_edits(tmp_path: Path) -
 
 def test_sync_warns_about_conflict_markers_the_remote_committed(tmp_path: Path) -> None:
     """Markers that arrive from origin are reported, not mistaken for this merge's."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "notes.rst", "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> theirs\n")
     _commit(theirs, "title.rst", "Title\n=======\n")
     git(theirs, "push", "-q", "origin", "main")
@@ -286,7 +290,7 @@ def test_sync_warns_about_conflict_markers_the_remote_committed(tmp_path: Path) 
 
 def test_sync_retries_the_round_when_the_remote_moves_during_the_push(tmp_path: Path) -> None:
     """A push the remote rejects because it moved is retried from the fetch, once per round."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(mine, "b.txt", "mine\n")
     marker = _race_once(mine, theirs, "main", tmp_path / "raced")
     report = sync(str(mine))
@@ -301,7 +305,7 @@ def test_sync_retries_the_round_when_the_remote_moves_during_the_push(tmp_path: 
 
 def test_sync_reports_a_push_the_remote_refuses(tmp_path: Path) -> None:
     """A push rejected for a reason other than a race is reported with git's words, no retry."""
-    (mine,) = _remote_and_clones(tmp_path, "mine")
+    (mine,) = remote_and_clones(tmp_path, "mine")
     _commit(mine, "b.txt", "mine\n")
     _pre_push_hook(mine, "echo 'pushes are frozen today' >&2\nexit 1\n")
     with pytest.raises(GitSyncError) as info:
@@ -323,7 +327,7 @@ def test_sync_refuses_what_it_cannot_sync(tmp_path: Path) -> None:
     plain.mkdir()
     with pytest.raises(GitSyncError, match="git rev-parse --show-toplevel failed"):
         sync(str(plain))
-    (mine,) = _remote_and_clones(tmp_path, "mine")
+    (mine,) = remote_and_clones(tmp_path, "mine")
     git(mine, "checkout", "-q", "--detach")
     with pytest.raises(GitSyncError, match="git symbolic-ref --short HEAD failed"):
         sync(str(mine))
@@ -341,7 +345,7 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     the system prompt, the real report in the tool-result message, and
     that origin really received the branch.
     """
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "a.txt", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
@@ -359,16 +363,16 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
 
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         assert {"git_sync", "Bash", "Read", "Edit", "Write", "run_agent", "finish"} <= names, names
         assert not {"create_worktree", "commit_and_merge", "go_to_url", "memory_search"} & names
         system = system_message(request)
         assert system.startswith(sync_sea.SYSTEM_PROMPT), system[:200]
         assert f"Work dir: {mine}" in system
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1, agentic[1]["messages"]
-    assert "Merged origin/main: now at" in str(tool_results[0]["content"])
-    assert "Pushed main to origin:" in str(tool_results[0]["content"])
+    results = tool_results(agentic[1])
+    assert len(results) == 1, agentic[1]["messages"]
+    assert "Merged origin/main: now at" in results[0]
+    assert "Pushed main to origin:" in results[0]
 
 
 def test_git_sync_tool_returns_the_failure_report_instead_of_raising(tmp_path: Path) -> None:
@@ -384,7 +388,7 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
     ``git clone --single-branch`` fetches only ``feature``; the explicit
     refspec still creates ``origin/main`` so the merge has a ref.
     """
-    (seed,) = _remote_and_clones(tmp_path, "seed2")
+    (seed,) = remote_and_clones(tmp_path, "seed2")
     git(seed, "checkout", "-q", "-b", "feature")
     _commit(seed, "f.txt", "feature\n")
     git(seed, "push", "-q", "origin", "feature")
@@ -396,7 +400,7 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
          str(tmp_path / "origin.git"), str(mine))
     assert git(mine, "branch", "-r") == "origin/feature"
     report = sync(str(mine))
-    assert "branch feature, syncing with origin/main." in report
+    assert "branch feature, syncing with origin/main (origin = " in report
     assert "Fetched origin/main: feature is 1 ahead and 1 behind." in report
     assert "Merged origin/main" in report
     assert "Pushed feature to origin:" in report
@@ -407,7 +411,7 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
 
 def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path: Path) -> None:
     """A rejected push of ``feature`` merges ``origin/feature`` too, not only origin/main again."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     git(mine, "checkout", "-q", "-b", "feature")
     _commit(mine, "f.txt", "feature\n")
     git(mine, "push", "-q", "origin", "feature")
@@ -428,7 +432,7 @@ def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path:
 
 def test_sync_warns_about_markers_in_a_file_with_a_non_ascii_name(tmp_path: Path) -> None:
     """Paths come from ``-z`` output, so a name git would quote still reaches the grep."""
-    mine, theirs = _remote_and_clones(tmp_path, "mine", "theirs")
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "r\u00e9sum\u00e9.txt", "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> x\n")
     git(theirs, "push", "-q", "origin", "main")
     report = sync(str(mine))
@@ -440,10 +444,180 @@ def test_sync_reports_git_that_cannot_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no ``git`` on PATH the tool reports the failure instead of raising ``OSError``."""
-    (mine,) = _remote_and_clones(tmp_path, "mine")
+    (mine,) = remote_and_clones(tmp_path, "mine")
     empty = tmp_path / "nobin"
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
     with pytest.raises(GitSyncError, match="git rev-parse --show-toplevel could not run"):
         sync(str(mine))
     assert "could not run" in sync_sea.git_sync(str(mine))
+
+
+def test_repo_key_identifies_a_repository_whatever_the_url_form() -> None:
+    """The https, ssh, scp-like and local forms of one repository compare equal.
+
+    What tells repositories apart is kept: the path's case, an explicit
+    port, a numeric directory in the scp-like form (which has no port).
+    """
+    key = ("github.com", "me/kiss")
+    assert git_sync.repo_key("https://github.com/me/kiss.git") == key
+    assert git_sync.repo_key("HTTPS://GitHub.com/me/kiss/") == key
+    assert git_sync.repo_key("git@github.com:me/kiss.git") == key
+    assert git_sync.repo_key("GIT@GitHub.COM:me/kiss.GIT") == key
+    assert git_sync.repo_key("ssh://git@github.com/me/kiss") == key
+    assert git_sync.repo_key("https://user:token@github.com/me/kiss") == key
+    assert git_sync.repo_key("https://github.com/me/other.git") != key
+    assert git_sync.repo_key("https://gitlab.com/me/kiss.git") != key
+    assert git_sync.repo_key("https://github.com/Me/Kiss.git") != key
+    assert git_sync.repo_key("ssh://git@host:2222/team/r.git") == ("host:2222", "team/r")
+    assert git_sync.repo_key("ssh://git@host:2222/team/r") != git_sync.repo_key(
+        "ssh://git@host:3333/team/r"
+    )
+    assert git_sync.repo_key("git@host:123/r.git") == ("host", "123/r")
+    assert git_sync.repo_key("git@host:123/r.git") != git_sync.repo_key("git@host:456/r.git")
+    assert git_sync.repo_key("alice@host:r.git") == ("host", "r")
+    # Only a user before the host is dropped; an ``@`` in the path stays.
+    assert git_sync.repo_key("git@server:team@other/repo.git") == ("server", "team@other/repo")
+    assert git_sync.repo_key("other:repo.git") == ("other", "repo")
+    assert git_sync.repo_key("git@[::1]:repo.git") == ("[::1]", "repo")
+    assert git_sync.repo_key("ssh://git@[::1]:2222/repo.git") == ("[::1]:2222", "repo")
+    assert git_sync.repo_key("ssh://git@[::1]/repo.git") == ("[::1]", "repo")
+    # A local path is the directory as written: ``r`` and ``r.git`` are two.
+    assert git_sync.repo_key("/tmp/x/origin.git") == ("", "/tmp/x/origin.git")
+    assert git_sync.repo_key("/tmp/x/origin.git/") == git_sync.repo_key("/tmp/x/origin.git")
+    assert git_sync.repo_key("/tmp/x/origin.git") != git_sync.repo_key("/tmp/x/origin")
+    assert git_sync.repo_key("/tmp/x/Origin") != git_sync.repo_key("/tmp/x/origin")
+    assert git_sync.repo_key("./rel/repo") == ("", "./rel/repo")
+    assert git_sync.repo_key("/") == ("", "/")
+    windows = git_sync.repo_key("C:\\repos\\r.git")
+    assert windows == git_sync.repo_key("C:/repos/r.git/") == ("", "C:/repos/r.git")
+    assert git_sync.repo_key("C:/repos/r.git") != git_sync.repo_key("C:/repos/r")
+
+
+def test_public_url_drops_the_credentials_a_url_carries() -> None:
+    """Reports and messages to machines show URLs without ``user:token@``."""
+    assert git_sync.public_url("https://oauth2:TOKEN@host/me/kiss.git") == "https://host/me/kiss.git"
+    assert git_sync.public_url("https://user@host/me/kiss") == "https://host/me/kiss"
+    assert git_sync.public_url("https://github.com/me/kiss.git") == "https://github.com/me/kiss.git"
+    assert git_sync.public_url("ssh://git@host:2222/r.git") == "ssh://host:2222/r.git"
+    assert git_sync.public_url("git@github.com:me/kiss.git") == "git@github.com:me/kiss.git"
+    assert git_sync.public_url("/tmp/x/origin.git") == "/tmp/x/origin.git"
+    assert git_sync.public_url("https://user:p@ss@host/r") == "https://host/r"
+
+
+def test_known_work_dirs_lists_the_configured_folder_then_the_recent_ones(
+    tmp_path: Path, restored_config: None,
+) -> None:
+    """``config.json``'s ``work_dir`` first, the recent dirs next, no duplicates or blanks."""
+    kiss, other = tmp_path / "kiss", tmp_path / "other"
+    kiss.mkdir()
+    other.mkdir()
+    set_known_work_dirs(str(kiss), [str(kiss), "", str(other), str(tmp_path / "gone")])
+    assert git_sync.known_work_dirs() == [str(kiss), str(other)]
+    set_known_work_dirs("", [])
+    assert git_sync.known_work_dirs() == []
+
+
+def test_sync_with_a_url_syncs_the_work_dir_when_it_is_a_clone_of_it(tmp_path: Path) -> None:
+    """A machine's work dir that is a clone of the repository is synced in place."""
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    pushed = _commit(theirs, "a.txt", "theirs\n")
+    git(theirs, "push", "-q", "origin", "main")
+    origin = git(mine, "remote", "get-url", "origin")
+    # The URL may be spelt differently from the clone's remote (a trailing slash here).
+    report = sync(str(mine), "origin/main", origin + "/")
+    assert report.startswith(f"Checkout {mine.resolve().as_posix()}, branch main")
+    assert f"Fast-forwarded to origin/main: now at {pushed[:12]}" in report
+    assert git(mine, "rev-parse", "HEAD") == pushed
+
+
+def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(
+    tmp_path: Path, restored_config: None,
+) -> None:
+    """The sub-task sent to a machine runs where its daemon runs; the clone may be elsewhere.
+
+    The work dir is the machine's home (not a checkout), then a clone of
+    another repository: in both cases the clone of the named repository
+    among the daemon's known work dirs is synced, and the report says so.
+    A path of the sending machine that does not exist here is fine too.
+    """
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    pushed = _commit(theirs, "a.txt", "theirs\n")
+    git(theirs, "push", "-q", "origin", "main")
+    origin = git(mine, "remote", "get-url", "origin")
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    (other,) = remote_and_clones(other_dir, "clone")
+    home = tmp_path / "home"
+    home.mkdir()
+    set_known_work_dirs(str(tmp_path / "missing"), [str(home), str(other), str(mine)])
+    report = sync(str(home), "origin/main", origin)
+    assert report.startswith(
+        f"{home} is not a git checkout with a remote 'origin'; syncing the checkout of that "
+        f"repository at {mine} instead.\nCheckout {mine.resolve().as_posix()}, branch main"
+    )
+    assert f"Fast-forwarded to origin/main: now at {pushed[:12]}" in report
+    assert git(mine, "rev-parse", "HEAD") == pushed
+    # The work dir is a clone of another repository: same thing, said differently.
+    report = sync(str(other), "origin/main", origin)
+    other_url = git(other, "remote", "get-url", "origin")
+    assert report.startswith(
+        f"{other} is a clone of {other_url}, not of {origin}; syncing the checkout of that "
+        f"repository at {mine} instead."
+    )
+    assert "Pushed main to origin: Everything up-to-date" in report
+    # The sending machine's path that does not exist here.
+    report = sync("/Users/someone/work/kiss", "origin/main", origin)
+    assert report.startswith("/Users/someone/work/kiss is not a git checkout")
+    assert f"at {mine} instead." in report.splitlines()[0]
+    # Nothing known is a clone of the repository: a clear error, nothing synced.
+    set_known_work_dirs(str(home), [str(other)])
+    with pytest.raises(GitSyncError) as info:
+        sync(str(home), "origin/main", origin)
+    message = str(info.value)
+    assert message.startswith(f"{home} is not a git checkout with a remote 'origin', and no ")
+    assert f"checkout of {origin} either." in message
+    assert "work_dir option" in message
+    assert sync_sea.git_sync(str(home), url=origin) == message
+    # Without a URL the work dir is taken as is, as before.
+    with pytest.raises(GitSyncError, match="git rev-parse --show-toplevel failed"):
+        sync(str(home))
+
+
+def test_sync_names_the_discovered_checkout_when_its_merge_stops_on_conflicts(
+    tmp_path: Path, restored_config: None,
+) -> None:
+    """A conflict in a checkout found from the URL is reported with that checkout's path.
+
+    The agent's shell and file tools work in its work dir; the report
+    tells it where the conflicted files and the merge in progress are.
+    """
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    _commit(theirs, "a.txt", "theirs\n")
+    git(theirs, "push", "-q", "origin", "main")
+    _commit(mine, "a.txt", "mine\n")
+    origin = git(mine, "remote", "get-url", "origin")
+    home = tmp_path / "home"
+    home.mkdir()
+    set_known_work_dirs(str(mine), [])
+    with pytest.raises(GitSyncError) as info:
+        sync(str(home), "origin/main", origin)
+    message = str(info.value)
+    assert message.startswith(
+        f"{home} is not a git checkout with a remote 'origin'; syncing the checkout of that "
+        f"repository at {mine} instead.\nMerging origin/main stopped on 1 conflicted file(s)"
+    )
+    assert "  a.txt\n" in message
+    assert message.endswith(
+        f"(The files above are relative to {mine}, not to the work dir: edit them there and "
+        f"run git with `-C {mine}`.)"
+    )
+    assert git(mine, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+    # Resolved there, the next call (same discovery) commits nothing new and pushes.
+    (mine / "a.txt").write_text("both\n", encoding="utf-8")
+    git(mine, "add", "a.txt")
+    git(mine, "commit", "-q", "--no-edit")
+    report = sync(str(home), "origin/main", origin)
+    assert report.startswith(f"{home} is not a git checkout")
+    assert "Pushed main to origin:" in report
+    assert git(mine, "rev-parse", "HEAD") == _remote_main(mine)

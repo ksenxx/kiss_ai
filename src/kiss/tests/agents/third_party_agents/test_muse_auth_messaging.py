@@ -1001,7 +1001,7 @@ def test_query_kind_store_validation(muse_env: Path) -> None:
     assert not vault_has_credentials("bluebubbles")
 
 
-def test_query_kind_vault_resolution(muse_env: Path) -> None:
+def test_query_kind_vault_resolution(isolated_kiss_home: Path) -> None:
     """The vault resolves query-kind credentials with their placement."""
     from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 
@@ -1173,7 +1173,7 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     assert line_config.load() is None
 
 
-def test_scrub_helpers_tolerate_malformed_configs(muse_env: Path) -> None:
+def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> None:
     """Scrub helpers no-op on unreadable, non-dict, or secret-free files."""
     from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _scrub_config_password
     from kiss.agents.third_party_agents.line.line_sea import _scrub_config_token

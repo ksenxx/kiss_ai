@@ -29,127 +29,35 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const POLL_MS = 5000;
 
-let passed = 0;
-const failures = [];
+const {
+  makePage: makeChatPage,
+  send,
+  loadMainCss,
+  fakeIntervals,
+  fakeMatchMedia,
+  MEDIA,
+} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
-
-/**
- * Replace the window's setInterval/clearInterval with a fake clock so
- * the 5s task-update poll can be advanced deterministically instead of
- * waited out. setTimeout stays real (message handlers debounce with it).
- *
- * @param {Window} win The jsdom window, before main.js is evaluated.
- * @returns {{tick: function(number), intervals: Array}} `tick(ms)`
- *   advances the clock and fires every due interval callback;
- *   `intervals` lists the live intervals as {cb, ms, next}.
- */
-function installFakeIntervals(win) {
-  let now = 0;
-  let nextId = 1;
-  const intervals = [];
-  win.setInterval = function (cb, ms) {
-    const iv = {
-      id: nextId++,
-      cb,
-      ms: Number(ms) || 0,
-      next: now + (Number(ms) || 0),
-    };
-    intervals.push(iv);
-    return iv.id;
-  };
-  win.clearInterval = function (id) {
-    const i = intervals.findIndex(iv => iv.id === id);
-    if (i >= 0) intervals.splice(i, 1);
-  };
-  function tick(ms) {
-    const target = now + ms;
-    for (;;) {
-      const due = intervals.filter(iv => iv.next <= target);
-      if (due.length === 0) break;
-      due.sort((a, b) => a.next - b.next);
-      const iv = due[0];
-      now = iv.next;
-      iv.next += iv.ms;
-      iv.cb();
-    }
-    now = target;
-  }
-  return {tick, intervals};
-}
+const {test, report} = makeRunner();
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  let timers;
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['marked.min.js'],
+    sourceUrl: 'remote-mobile-main.js',
+    beforeScripts(win) {
+      // A phone-sized window: no media query matches, so the task-info
+      // panel is a drawer and the history sidebar slides in from the burger.
+      fakeMatchMedia(win, false);
+      timers = fakeIntervals(win);
+    },
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  // A phone-sized window: no media query matches, so the task-info
-  // panel is a drawer and the history sidebar slides in from the burger.
-  win.matchMedia = function (query) {
-    return {
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  const timers = installFakeIntervals(win);
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=remote-mobile-main.js',
-  );
   return {win, posted, tick: timers.tick, intervals: timers.intervals};
-}
-
-function injectMainCss(win) {
-  const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(style);
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function click(win, id) {
@@ -606,7 +514,7 @@ async function main() {
       'Inject promptlet, model picker and Send (main.css)',
     () => {
       const {win} = makePage();
-      injectMainCss(win);
+      loadMainCss(win);
       assert.notStrictEqual(display(win, 'input-wrap'), 'none');
       assert.notStrictEqual(display(win, 'tricks-btn'), 'none');
       win.document.body.classList.add('content-tab-open');
@@ -833,8 +741,8 @@ async function main() {
     },
   );
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  process.exit(failures.length > 0 ? 1 : 0);
+  report('sidebarChatModeDrawerAndComposer');
+  process.exit(0);
 }
 
 main().catch(e => {

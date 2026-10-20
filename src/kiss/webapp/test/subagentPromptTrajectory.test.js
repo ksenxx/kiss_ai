@@ -6,15 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function clickTab(win, tabId) {
-  const el = Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab'),
-  ).find(e => e.dataset.tabId === tabId);
-  assert.ok(el, 'tab ' + tabId + ' must be in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
+const {makePage, send, clickTab} = require('./simplify2_harness');
 
 function promptPanels(win, text) {
   return Array.from(win.document.querySelectorAll('.ev.prompt')).filter(el =>
@@ -28,8 +20,12 @@ function bootWithSubagent() {
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
   const parentId = ready.tabId;
 
-  send(win, {type: 'status', running: true, tabId: parentId,
-    startTs: Date.now()});
+  send(win, {
+    type: 'status',
+    running: true,
+    tabId: parentId,
+    startTs: Date.now(),
+  });
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -37,8 +33,12 @@ function bootWithSubagent() {
     extras: {tasks: JSON.stringify(['sub 1'])},
   });
   const before = posted.length;
-  send(win, {type: 'new_tab', task_id: 'sub-task-1',
-    parent_tab_id: parentId, taskId: ''});
+  send(win, {
+    type: 'new_tab',
+    task_id: 'sub-task-1',
+    parent_tab_id: parentId,
+    taskId: '',
+  });
   const resume = posted
     .slice(before)
     .find(m => m.type === 'resumeSession' && m.taskId === 'sub-task-1');
@@ -69,10 +69,16 @@ function testSendPostsAppendUserMessageForSubTab() {
   const appended = posted
     .slice(before)
     .find(m => m.type === 'appendUserMessage');
-  assert.ok(appended, 'Send on a running sub-agent tab must post ' +
-    'appendUserMessage (not submit)');
-  assert.strictEqual(appended.tabId, subTabId,
-    'the injected prompt must be routed to the SUB-AGENT tab');
+  assert.ok(
+    appended,
+    'Send on a running sub-agent tab must post ' +
+      'appendUserMessage (not submit)',
+  );
+  assert.strictEqual(
+    appended.tabId,
+    subTabId,
+    'the injected prompt must be routed to the SUB-AGENT tab',
+  );
   assert.strictEqual(appended.prompt, 'HELLO SUBAGENT INJECTION');
   assert.ok(
     !posted.slice(before).some(m => m.type === 'submit'),

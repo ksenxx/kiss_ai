@@ -144,10 +144,11 @@ class TestSlackRenameBugs:
         assert not any(p.endswith(unused) for p in paths)
 
     def test_list_channels_tool_returns_channels(self) -> None:
-        """The list-channels tool must surface channels from the API response."""
+        """The list-channels tool surfaces the API's channels under its own ``channels`` key."""
         result = json.loads(self.backend.list_third_party_agents())
         assert result["ok"] is True
-        entries = result.get("channels") or result.get("third_party_agents") or []
+        assert "third_party_agents" not in result
+        entries = result["channels"]
         assert len(entries) == 1
         assert entries[0]["id"] == "C1"
         assert entries[0]["name"] == "general"

@@ -225,7 +225,7 @@ class TestWalSidecarOrphanRecovery:
         new_shm_id = th._db_file_identity(str(db_path) + "-shm")
         assert new_shm_id is not None
         th._attached_shm[str(db_path)] = (db_id, new_shm_id)
-        assert not th._sidecars_orphaned(str(db_path), db_id)
+        assert not th._sidecars_orphaned(str(db_path), db_id, th._attached_shm[str(db_path)])
         _task_id, exc = self._add_in_thread("new thread, IOERR path")
         assert exc is None, f"new connection failed: {exc!r}"
         assert _external_count(db_path) == 2

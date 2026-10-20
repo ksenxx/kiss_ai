@@ -97,7 +97,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 from kiss.agents.sorcar import cron_agent
@@ -130,6 +130,9 @@ from kiss.server.vscode_retired import NOTICE_ID as VSCODE_RETIRED_NOTICE_ID
 from kiss.server.vscode_retired import dismiss_vscode_retired_notice
 
 logger = logging.getLogger(__name__)
+
+K = TypeVar("K")
+"""The key of a pending-reply dict (see :meth:`ServerApi._spawn_after`)."""
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
     """Create (``opt_out``) or remove the tips opt-out marker file.
@@ -260,7 +263,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
     ApiCommand("openTab", required=("tabId",)),
-    ApiCommand("getTabsState"),
     ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
@@ -290,6 +292,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("browserNavigate", required=("tab_id", "action")),
     ApiCommand("browserInput", required=("tab_id", "event")),
     ApiCommand("browserViewport", required=("tab_id",)),
+    ApiCommand("browserList"),
     ApiCommand("terminalOpen", required=("tab_id",), handler="terminal_open"),
     ApiCommand(
         "terminalInput", required=("tab_id", "data"), handler="terminal_input"
@@ -301,6 +304,7 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("terminalClose", required=("tab_id",), handler="terminal_close"),
     ApiCommand("setWorkDir", required=("workDir",), handler="set_work_dir"),
+    ApiCommand("setMachine", required=("machine",)),
     ApiCommand(
         "getMachineWorkDirs", required=("machine",), handler="get_machine_work_dirs"
     ),
@@ -377,7 +381,14 @@ def validate_command(cmd: Any) -> str | None:
     spec = API.get(name)
     if spec is None:
         return f"Unknown command: {name}"
-    missing = [f for f in spec.required if cmd.get(f) is None]
+    missing = [
+        f for f in spec.required
+        if cmd.get(f) is None
+        # A tab id names a tab: blank or not a string, the command has
+        # none (``""`` is a valid value of the other required fields,
+        # a ``saveFile`` of an emptied file say).
+        or (f == "tabId" and not (isinstance(cmd[f], str) and cmd[f].strip()))
+    ]
     if missing:
         return f"Invalid {name} command: missing {', '.join(missing)}"
     return None
@@ -584,8 +595,6 @@ class ServerBackend(Protocol):
 
     def _lan_urls(self) -> list[str]: ...
 
-    async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
-
     async def _reply_direct(
         self, endpoint: Any, reply: dict[str, Any], what: str,
     ) -> None: ...
@@ -676,7 +685,7 @@ class ServerBackend(Protocol):
 
     def _peer_is_loopback(self, connection: Any) -> bool: ...
 
-    def _peer_client_ca(self, connection: Any) -> str: ...
+    async def _peer_client_ca(self, connection: Any) -> str: ...
 
     def _auth_lock_remaining(self, ip: str) -> float: ...
 
@@ -734,8 +743,8 @@ class ServerApi:
                 daemon startup instead of on first use.
         """
         self._backend = backend
-        self.remote_tabs = RemoteTabs(backend)
         self.remote_views = RemoteViews(backend)
+        self.remote_tabs = RemoteTabs(backend, self.remote_views)
         # In-flight background replies (``appsStatus``, ``machines``,
         # the subpanel forwards) and detached commands
         # (``worktreeAction``): the event loop keeps only weak
@@ -745,6 +754,13 @@ class ServerApi:
         # machine): a poll repeated while its predecessor is still
         # waiting on the machine is dropped (see ``_spawn_panel_reply``).
         self._panel_replies: dict[tuple[str, str, str], asyncio.Task[None]] = {}
+        # The latest detached command per (connection, tab) (see
+        # ``_dispatch_detached``): the tab's next command from that
+        # connection queues behind it.
+        self._pending_routes: dict[tuple[str, str], asyncio.Task[None]] = {}
+        # The latest dictation per connection (see ``voice_transcribe``):
+        # the connection's next one is answered after it.
+        self._pending_voice: dict[str, asyncio.Task[None]] = {}
         # Set by ``cancel_background_replies``: from then on no reply
         # is spawned (a frame can still arrive while the cancelled
         # tasks are awaited, before the listeners close).
@@ -825,13 +841,11 @@ class ServerApi:
             reply: dict[str, Any] = {"type": "error", "text": error}
             if tab_id:
                 reply["tabId"] = tab_id
-            await self._backend._endpoint_send(ctx.endpoint, json.dumps(reply))
+            await self._backend._printer._locked_send(ctx.endpoint, json.dumps(reply))
             return
         if tab_id:
             self._record_tab(tab_id, ctx)
         cmd["connId"] = ctx.conn_state["conn_id"]
-        name = cmd["type"]
-        handler = API[name].handler
         raw_wd = cmd.get("workDir")
         if isinstance(raw_wd, str) and is_root_dir(raw_wd):
             # A filesystem root is never a real workspace: it arrives
@@ -844,11 +858,21 @@ class ServerApi:
             # @-mention file scan at the whole disk.  The command then
             # falls back to the daemon's configured folder.
             cmd["workDir"] = ""
+        if self._dispatch_detached(cmd, tab_id, ctx):
+            return
+        await self._dispatch_now(cmd, ctx)
+
+    async def _dispatch_now(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Route, forward or handle the validated, stamped *cmd* (the body of :meth:`dispatch`).
+
+        Args:
+            cmd: The command, validated and stamped by :meth:`dispatch`.
+            ctx: The transport context of the current call.
+        """
+        name = cmd["type"]
         # A tab bound to a remote machine (chat header drop-down) sends
         # its task commands there; see ``kiss.server.remote_tabs``.
-        if name in ROUTED_COMMANDS and await asyncio.to_thread(
-            self.remote_tabs.route, cmd,
-        ):
+        if name in ROUTED_COMMANDS and await asyncio.to_thread(self.remote_tabs.route, cmd):
             return
         # The Terminal and Browser buttons of such a tab open a shell,
         # or a page, on the machine; see ``kiss.server.remote_views``.
@@ -886,7 +910,7 @@ class ServerApi:
             else:
                 await forwarded
             return
-        await getattr(self, handler)(cmd, ctx)
+        await getattr(self, API[name].handler)(cmd, ctx)
         if name == "ready":
             # The client has the tabs now: replay the ones running on
             # remote machines to it.
@@ -915,6 +939,97 @@ class ServerApi:
         self._background_replies.add(task)
         task.add_done_callback(self._background_replies.discard)
         return task
+
+    def _spawn_after(
+        self, pending: dict[K, asyncio.Task[None]], key: K, reply: Coroutine[Any, Any, None],
+    ) -> None:
+        """Run *reply* in the background once the task *pending* holds under *key* is done.
+
+        The replies sharing a key go out in the order they were asked
+        for, as they would have inline, while other keys are answered
+        meanwhile.  *pending* keeps the latest task per key, so the
+        next reply with the key queues behind this one; a finished
+        task leaves it.  Nothing is spawned once the server is
+        shutting down (*reply* is closed unrun, as by
+        :meth:`_spawn_reply`).
+
+        Args:
+            pending: The latest task per key.
+            key: The key *reply* queues under.
+            reply: The coroutine that sends the reply.
+        """
+        if self._closing:
+            reply.close()
+            return
+        task = self._spawn_reply(self._after(pending.get(key), reply))
+        assert task is not None
+        pending[key] = task
+        task.add_done_callback(functools.partial(self._forget_pending, pending, key))
+
+    @staticmethod
+    async def _after(
+        previous: asyncio.Task[None] | None, reply: Coroutine[Any, Any, None],
+    ) -> None:
+        """Await *reply* once *previous* (if any) is done, however it ended."""
+        if previous is not None:
+            await asyncio.wait({previous})
+        await reply
+
+    @staticmethod
+    def _forget_pending(
+        pending: dict[K, asyncio.Task[None]], key: K, task: asyncio.Task[None],
+    ) -> None:
+        """Drop *task* from *pending* when it is still the latest under *key*."""
+        if pending.get(key) is task:
+            del pending[key]
+
+    def _dispatch_detached(self, cmd: dict[str, Any], tab_id: str, ctx: ApiContext) -> bool:
+        """Dispatch *cmd* in the background when its tab binds to a machine or waits on one.
+
+        A ``submit``, ``run`` or ``resumeSession`` naming a ``machine``
+        connects to it first (:meth:`RemoteTabs.route` blocks for up
+        to the link's timeout when the host is black-holed), and
+        the connection's commands are dispatched one after another:
+        routed inline, the bind would hold up every other tab of the
+        surface and the ``closeTab`` that would stand the bind down.
+        So the bind runs as a background task, and every later command
+        the connection sends for the tab (a ``stop``, a ``closeTab`` or
+        an ``openTab`` sent while it still connects) queues behind it
+        in its order, as it would have been dispatched inline: a
+        ``stop`` reaches the machine after the run it refers to, a
+        ``closeTab`` unbinds the tab the bind registered and closes it
+        on the machine too, and an ``openTab`` after that ``closeTab``
+        reopens the tab instead of being undone by the close.  Only
+        that tab of that connection waits: the surface's other tabs
+        are answered meanwhile, and so is another surface showing the
+        same tab, whose commands never waited for this connection's
+        (the registry orders the two, see :mod:`kiss.server.remote_tabs`).
+
+        Args:
+            cmd: The validated, stamped command.
+            tab_id: The command's canonical tab id as :meth:`dispatch`
+                computed it: ``""`` when absent or not a string (a
+                ``ready`` carries whatever the page sent and names no
+                tab to queue under).
+            ctx: The transport context of the current call.
+
+        Returns:
+            ``True`` when *cmd* is handled in the background, ``False``
+            when the caller dispatches it inline.
+        """
+        key = (cmd["connId"], tab_id)
+        binds = cmd["type"] in ("submit", "run", "resumeSession") and cmd.get("machine")
+        if not tab_id or not (binds or key in self._pending_routes):
+            return False
+        self._spawn_after(self._pending_routes, key, self._dispatch_logged(cmd, ctx))
+        return True
+
+    async def _dispatch_logged(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Dispatch *cmd* now, logging a failure instead of dying silently in a background task."""
+        try:
+            await self._dispatch_now(cmd, ctx)
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("Error handling client command %r", cmd["type"], exc_info=True)
 
     def _spawn_panel_reply(
         self, key: tuple[str, str, str], reply: Coroutine[Any, Any, None],
@@ -997,6 +1112,28 @@ class ServerApi:
         """
         if ctx.is_local:
             self._backend._printer.register_local_tab(ctx.conn_state["conn_id"], tab_id)
+
+    async def _recv_auth_frame(self, websocket: Any, timeout: float) -> dict[str, Any] | None:
+        """The peer's next frame as a JSON object, for the handshake.
+
+        Args:
+            websocket: The connection awaiting its credentials.
+            timeout: Seconds to wait for the frame.
+
+        Returns:
+            The decoded object, or ``None`` when no frame came within
+            *timeout* seconds, the socket closed, or the frame was not
+            a JSON object; the caller refuses the peer then.
+        """
+        try:
+            msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=timeout))
+        except Exception:
+            logger.debug(
+                "Peer %s sent no usable auth frame", self._backend._client_ip(websocket),
+                exc_info=True,
+            )
+            return None
+        return msg if isinstance(msg, dict) else None
 
     def _is_local_auth(self, msg: Any, websocket: Any) -> bool:
         """Whether *msg* is an ``auth`` frame carrying this daemon's local token.
@@ -1228,19 +1365,14 @@ class ServerApi:
         """
         backend = self._backend
         ip = backend._client_ip(websocket)
-        trusted_ca = backend._peer_client_ca(websocket)
+        trusted_ca = await backend._peer_client_ca(websocket)
         if trusted_ca:
             # Another daemon's machine link, enrolled with its CA: the
             # client certificate it presented in the TLS handshake is
             # its credential, whatever the password setting or the
             # lockout (a 256-bit key, like the local token).
-            try:
-                msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
-            except Exception:
-                logger.debug("Enrolled peer %s sent no usable frame", ip, exc_info=True)
-                await self._refuse(websocket, _NOT_AUTH_REFUSAL)
-                return None
-            if not isinstance(msg, dict) or msg.get("type") != "auth":
+            msg = await self._recv_auth_frame(websocket, 30)
+            if msg is None or msg.get("type") != "auth":
                 await self._refuse(websocket, _NOT_AUTH_REFUSAL)
                 return None
             logger.info("Machine link from %s admitted with a certificate of %s", ip, trusted_ca)
@@ -1254,9 +1386,9 @@ class ServerApi:
             # token or the password-free loopback browser page still
             # gets through, then refuse everything else.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
+            msg = await self._recv_auth_frame(websocket, 30)
             try:
-                msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
-                if self._is_local_auth(msg, websocket):
+                if msg is not None and self._is_local_auth(msg, websocket):
                     return await self._admit_local(websocket, msg)
                 auth = await self._admit_loopback_browser(msg, websocket)
                 if auth is not None:
@@ -1287,8 +1419,10 @@ class ServerApi:
             return None
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
-                raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
-                msg = json.loads(raw)
+                msg = await self._recv_auth_frame(websocket, timeout)
+                if msg is None:
+                    await websocket.close()
+                    return None
                 # The local token first: it is a 256-bit secret the
                 # lockout below exists to protect passwords from, and
                 # the lockout must never shut the machine's own
@@ -2050,13 +2184,25 @@ class ServerApi:
         The chat page heard the "Abracadabra" wake word and captured the
         utterance that followed.  The audio is translated by gpt-audio
         (:func:`kiss.server.speech.transcribe_pcm`) and answered with
-        the ``voiceSpeech`` message ``voice.js`` handles.
+        the ``voiceSpeech`` message ``voice.js`` handles.  The
+        transcription is a network round-trip (and, on first use, the
+        speaker model's download), so it runs in the background: a
+        ``stop`` or ``submit`` the page sends meanwhile is not held up
+        behind it.  The page's dictations are answered in the order
+        they were sent, though: ``voice.js`` pairs each ``voiceSpeech``
+        with the oldest of its outstanding rounds (the conversation
+        the words were spoken into), so a short dictation answered
+        before a longer earlier one would put each transcript into the
+        other's conversation.
 
         Args:
             cmd: The ``voiceTranscribe`` command carrying the audio.
             ctx: The transport context of the current call.
         """
-        await self._backend._handle_voice_transcribe(cmd, ctx.endpoint)
+        self._spawn_after(
+            self._pending_voice, ctx.conn_state["conn_id"],
+            self._backend._handle_voice_transcribe(cmd, ctx.endpoint),
+        )
 
     async def active_tasks_query(
         self, cmd: dict[str, Any], ctx: ApiContext,
@@ -2144,7 +2290,7 @@ class ServerApi:
         await asyncio.to_thread(_write_tips_opt_out_marker, opt_out)
 
     async def dismiss_notice(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Service a toast's "Do not show this" checkbox.
+        """Service a toast's "Do not show this again" checkbox.
 
         Only the "VS Code extension removed" notice offers the box
         today; its dismissal is a marker file under ``$KISS_HOME``, so
@@ -2203,7 +2349,7 @@ class ServerApi:
             ctx: The transport context of the current call; the reply
                 goes to this sender only.
         """
-        await self._backend._endpoint_send(
+        await self._backend._printer._locked_send(
             ctx.endpoint, json.dumps({"type": "pong", "machine": local_machine_name()}),
         )
 

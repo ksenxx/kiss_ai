@@ -6,9 +6,10 @@
 // The settings panel's "Restart server" button: with a task running it
 // opens an in-page floating confirmation box (#server-reset-confirm-modal
 // inside #settings-panel); OK posts exactly one `serverReset` command,
-// Cancel posts none, a second click while the box is open neither
-// closes nor re-stacks it, and with no running task the reset goes out
-// at once without a box.
+// Cancel posts none, Escape closes the box and posts none, a second click
+// while the box is open neither closes nor re-stacks it, and with no
+// running task (or a task that has since stopped) the reset goes out at
+// once without a box and without an in-page confirmation toast.
 
 'use strict';
 
@@ -102,6 +103,43 @@ async function testNoRunningTaskResetsAtOnce() {
     () => resets(posted).length === 1,
     'no-agent click must post serverReset immediately',
   );
+  assert.strictEqual(
+    win.document.querySelectorAll('.kiss-notification').length,
+    0,
+    'the page must NOT render any in-page confirmation toast',
+  );
+  win.close();
+}
+
+async function testStoppedTaskResetsAtOnce() {
+  const {win, posted} = pageWithRunningTask();
+  send(win, {
+    type: 'status',
+    tabId: win._testApi.getActiveTabId(),
+    running: false,
+  });
+  clickInWindow(win, 'cfg-server-reset-btn');
+  await waitFor(
+    () => resets(posted).length === 1,
+    'click after the agent stops must post serverReset at once',
+  );
+  assert.strictEqual(
+    isFloatingModalOpen(win),
+    false,
+    'a click after the agent stopped must NOT open the floating dialog',
+  );
+  win.close();
+}
+
+async function testEscapeClosesWithoutPosting() {
+  const {win, posted} = pageWithRunningTask();
+  clickInWindow(win, 'cfg-server-reset-btn');
+  await waitFor(() => isFloatingModalOpen(win), 'click must open the box');
+  win.document.dispatchEvent(
+    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+  );
+  await waitFor(() => !isFloatingModalOpen(win), 'Escape must close the box');
+  assert.strictEqual(resets(posted).length, 0, 'Escape posts no reset');
   win.close();
 }
 
@@ -146,13 +184,40 @@ async function testCancelTwice() {
   win.close();
 }
 
+// A cancelled box must leave no confirmation listener behind: reopening it
+// and clicking OK posts exactly one reset, not one per earlier Cancel.
+async function testCancelThenOkPostsOneReset() {
+  const {win, posted} = pageWithRunningTask();
+  clickInWindow(win, 'cfg-server-reset-btn');
+  await waitFor(() => isFloatingModalOpen(win), 'first click opens the box');
+  clickInWindow(win, 'server-reset-confirm-cancel');
+  await waitFor(() => !isFloatingModalOpen(win), 'Cancel must close the box');
+  assert.strictEqual(resets(posted).length, 0, 'Cancel posts no reset');
+  clickInWindow(win, 'cfg-server-reset-btn');
+  await waitFor(
+    () => isFloatingModalOpen(win),
+    'a fresh click after Cancel must re-open the box',
+  );
+  clickInWindow(win, 'server-reset-confirm-ok');
+  await waitFor(() => !isFloatingModalOpen(win), 'OK must close the box');
+  assert.strictEqual(
+    resets(posted).length,
+    1,
+    'OK after a Cancel must produce exactly ONE serverReset post',
+  );
+  win.close();
+}
+
 async function main() {
   await testMarkup();
   await testOkPostsOneReset();
   await testCancelPostsNothing();
   await testNoRunningTaskResetsAtOnce();
+  await testStoppedTaskResetsAtOnce();
+  await testEscapeClosesWithoutPosting();
   await testDoubleClickThenOk();
   await testCancelTwice();
+  await testCancelThenOkPostsOneReset();
   console.log('serverResetFloatingDialog: all passed.');
 }
 

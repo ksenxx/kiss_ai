@@ -32,11 +32,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  stubRaf,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 
 let failures = 0;
 
@@ -79,85 +81,42 @@ function makePage(opts) {
     extraSection = false,
     tips = undefined,
   } = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  if (extraSection)
-    html = html.replace(
-      '<div id="meta-resizer"',
-      EXTRA_SECTION + '<div id="meta-resizer"',
-    );
-  const domOpts = {runScripts: 'dangerously', pretendToBeVisual: true};
-  if (url) domOpts.url = url;
-  const dom = new JSDOM(html, domOpts);
-  const win = dom.window;
-  pages.push(win);
-  if (url) {
-    for (const [k, v] of Object.entries(storage))
-      win.localStorage.setItem(k, v);
-  }
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
   // jsdom has no ResizeObserver: record the observers so a test can
   // fire a panel resize by hand.
   const observers = [];
-  win.ResizeObserver = class {
-    constructor(fn) {
-      this.fn = fn;
-      observers.push(this);
+  function beforeScripts(win) {
+    pages.push(win);
+    if (extraSection)
+      win.document
+        .getElementById('meta-resizer')
+        .insertAdjacentHTML('beforebegin', EXTRA_SECTION);
+    if (url) {
+      for (const [k, v] of Object.entries(storage))
+        win.localStorage.setItem(k, v);
     }
-    observe(target) {
-      this.target = target;
-    }
-  };
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
+    stubRaf(win);
+    win.ResizeObserver = class {
+      constructor(fn) {
+        this.fn = fn;
+        observers.push(this);
+      }
+      observe(target) {
+        this.target = target;
+      }
     };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  // The page embeds the daemon's tips bootstrap (with the running
-  // version) before main.js runs; *tips* stands in for it.
-  if (tips !== undefined) win.__TIPS__ = tips;
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=metasections-main.js',
-  );
+    fakeMatchMedia(win, true);
+    // The page embeds the daemon's tips bootstrap (with the running
+    // version) before main.js runs; *tips* stands in for it.
+    if (tips !== undefined) win.__TIPS__ = tips;
+  }
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    url,
+    beforeScripts,
+    extraScripts: ['marked.min.js'],
+    sourceUrl: 'metasections-main.js',
+  });
   return {win, posted, observers};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function click(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function el(win, id) {

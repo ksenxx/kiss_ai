@@ -39,7 +39,7 @@ def _finished(task: str, result: str = "done") -> str:
 
 
 class TestTagFilterQueries:
-    """``_load_history`` / ``_search_history`` filter by tag in SQL."""
+    """``_load_history`` (with and without ``query``) filters by tag in SQL."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -95,12 +95,12 @@ class TestTagFilterQueries:
         paper = _finished("Write the paper on parsers")
         _finished("Fix the parser bug")
         _finished("Write the paper on lexers")
-        both = th._search_history("parser", tag="paper")
+        both = th._load_history(query="parser", tag="paper")
         assert [str(r["id"]) for r in both] == [paper]
-        assert len(th._search_history("parser")) == 2
-        assert len(th._search_history("paper", tag="debugging")) == 0
+        assert len(th._load_history(query="parser")) == 2
+        assert len(th._load_history(query="paper", tag="debugging")) == 0
         # An empty query with a tag goes through the plain load.
-        assert len(th._search_history("", tag="paper")) == 2
+        assert len(th._load_history(query="", tag="paper")) == 2
 
     def test_subagent_rows_stay_out_of_the_listing(self) -> None:
         parent = _finished("Review the parser change with a sub-agent")

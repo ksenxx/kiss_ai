@@ -495,7 +495,6 @@ def test_tune_patch_settings_and_export_evals_use_the_persisted_runs(checkout: P
     # The earlier replay predates this change and does not count; a new one does.
     assert "started before the change" in sea.settle_sea_settings("tunedemo", replay)
     assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
-    time.sleep(0.01)
     fresh = persist_run("replay", "ok", True, 0.1, 0)
     assert sea.settle_sea_settings("tunedemo", fresh).startswith("Kept")
     assert sea_commands.sea_settings(path)["timeout"] == 7200
@@ -656,7 +655,7 @@ def test_narrower_profile_is_proposed_only_on_strong_evidence() -> None:
     assert report["proposals"]["tool_profile"]["proposed"] == "shell"
 
 
-def test_settings_literal_remove(checkout: Path) -> None:
+def test_settings_literal_remove() -> None:
     """``REMOVE`` deletes an entry wherever it stands; an absent key is a no-op."""
     multi = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -821,7 +820,6 @@ def test_settle_accepts_only_a_later_successful_replay_of_the_same_sea(checkout:
     path = checkout / "tunedemo" / "tunedemo_sea.py"
     earlier = persist_run("old run", "Fine.", True, 0.1, 10)
     other = persist_run("other sea", "Fine.", True, 0.1, 10, sea="slack_sea")
-    time.sleep(0.01)
     assert sea.patch_sea_settings("tunedemo", "timeout", "7200").startswith("Patched")
     # Neither an unrelated SEA's run nor a run from before the change settles it.
     assert sea.settle_sea_settings("tunedemo", other).startswith(

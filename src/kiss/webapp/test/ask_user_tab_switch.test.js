@@ -9,69 +9,27 @@
 // copy of a question already pending here changes nothing, and nothing
 // about the question is posted to the daemon beyond the answer.
 
-/* global require, __dirname, console, process */
+/* global require, console, process */
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  fakeMatchMedia,
+  clickTab,
+} = require('./simplify2_harness');
 
 function makePage(opts) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    initialState: opts && opts.initialState,
+    beforeScripts(win) {
+      stubRaf(win);
+      fakeMatchMedia(win, false);
+    },
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-
-  const posted = [];
-  let state = opts && opts.initialState;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted, getState: () => state};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 // The tab's entry on the group strip (#tab-list): rendered for the chat
@@ -85,15 +43,6 @@ function tabElement(win, tabId) {
 // The record of an open tab, or null once it is closed.
 function tabRecord(win, tabId) {
   return win._testApi.openTabs().find(t => t.id === tabId) || null;
-}
-
-// A tab on the strip is clicked there; a background chat is picked the
-// way the Chats panel does it.
-function clickTab(win, tabId) {
-  assert.ok(tabRecord(win, tabId), `tab ${tabId} must exist`);
-  const el = tabElement(win, tabId);
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
 }
 
 // The composer is in answer mode while the tab on screen has a question.

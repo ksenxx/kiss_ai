@@ -11,11 +11,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {loadMainCss, makePage, send} = require('./simplify2_harness');
 
 const ALL_TAGS = [
   'work',
@@ -239,14 +235,36 @@ function testTagExpandsChatGroups() {
 }
 
 function testTagCss() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  for (const sel of [
-    '.history-filter-tag {',
-    '.history-filter-tag.active {',
-    '.history-filter-tag-select {',
-  ]) {
-    assert.ok(css.includes(sel), `main.css must style ${sel}`);
-  }
+  const {win} = makePage();
+  loadMainCss(win);
+  const sel = win.document.getElementById('hf-tag');
+  const pill = sel.parentElement;
+  const pillStyle = win.getComputedStyle(pill);
+  assert.strictEqual(
+    pillStyle.display,
+    'inline-flex',
+    'the pill is a flex row',
+  );
+  assert.strictEqual(pillStyle.whiteSpace, 'nowrap', 'the pill never wraps');
+  assert.ok(
+    pillStyle.borderRadius && pillStyle.borderRadius !== '0px',
+    'the pill is rounded',
+  );
+  const idleBackground = pillStyle.background;
+  pill.classList.add('active');
+  assert.notStrictEqual(
+    win.getComputedStyle(pill).background,
+    idleBackground,
+    'an active tag pill is painted differently',
+  );
+  const selStyle = win.getComputedStyle(sel);
+  assert.strictEqual(selStyle.cursor, 'pointer', 'the dropdown is clickable');
+  assert.strictEqual(
+    selStyle.borderStyle,
+    'none',
+    'the dropdown draws no border of its own (the pill is the frame)',
+  );
+  win.close();
   console.log('  ok - tag dropdown is styled');
 }
 

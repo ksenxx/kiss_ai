@@ -704,44 +704,52 @@
       ? cfg.modelLoadTimeoutMs
       : 30000;
 
+  // The one createModel in flight (or done) for the page: the model is a
+  // 50 MB download and a worker, so every attempt shares it rather than
+  // starting a second one next to it.  A failed load is forgotten so
+  // the next attempt downloads afresh.
+  let modelPromise = null;
+
   /**
-   * Load (or reuse) the speech model, never hanging: the load is raced
-   * against MODEL_LOAD_TIMEOUT_MS so a worker that never reports settles
-   * this attempt into the ordinary failure path (error painted, `busy`
-   * cleared, re-enable retries). A model that arrives after its timeout
-   * already failed the attempt belongs to nobody: its worker is freed.
+   * Load (or reuse) the speech model, never hanging: this attempt is
+   * raced against MODEL_LOAD_TIMEOUT_MS so a worker that never reports
+   * settles it into the ordinary failure path (error painted, `busy`
+   * cleared, re-enable retries).  The download itself goes on: a
+   * re-enable waits for it instead of starting another, and a model
+   * that arrives after its attempt timed out is kept for the next one.
    */
   function loadModel() {
-    if (model) return Promise.resolve(model);
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        settled = true;
-        reject(new Error('speech model load timed out'));
-      }, MODEL_LOAD_TIMEOUT_MS);
-      window.Vosk.createModel(cfg.modelUrl).then(
+    if (!modelPromise) {
+      modelPromise = window.Vosk.createModel(cfg.modelUrl).then(
         m => {
-          if (settled) {
-            try {
-              m.terminate();
-            } catch (_e) {}
-            return;
-          }
-          settled = true;
-          clearTimeout(timer);
           model = m;
-          resolve(m);
+          return m;
         },
         err => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
+          modelPromise = null;
           // Realm-agnostic error check (`instanceof Error` fails across
           // window boundaries): anything carrying a message is reported
           // as-is; a rejection without one gets a message of its own.
-          reject(
-            err && err.message ? err : new Error('failed to load speech model'),
-          );
+          throw err && err.message
+            ? err
+            : new Error('failed to load speech model');
+        },
+      );
+    }
+    const load = modelPromise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('speech model load timed out')),
+        MODEL_LOAD_TIMEOUT_MS,
+      );
+      load.then(
+        m => {
+          clearTimeout(timer);
+          resolve(m);
+        },
+        err => {
+          clearTimeout(timer);
+          reject(err);
         },
       );
     });

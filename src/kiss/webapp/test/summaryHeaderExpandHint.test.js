@@ -6,11 +6,11 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage: makeHarnessPage,
+  send,
+  loadMainCss,
+} = require('./simplify2_harness');
 
 const HINT = '(click to expand)';
 
@@ -19,52 +19,7 @@ const DESC =
   'the missing header affordance, and then implemented the hint span.';
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: () => {},
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=summaryhint-main.js',
-  );
-  return win;
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function injectCss(win) {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = css;
-  win.document.head.appendChild(styleEl);
+  return makeHarnessPage({sourceUrl: 'summaryhint-main.js'}).win;
 }
 
 function sendToolPanels(win, n) {
@@ -119,7 +74,7 @@ function testHintRenderedNextToSummaryLabel() {
 
 function testHintHiddenWhenExpandedRestoredOnRecollapse() {
   const win = makePage();
-  injectCss(win);
+  loadMainCss(win);
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 3);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
@@ -251,7 +206,7 @@ function testHintExcludedFromCopyPayload() {
 
 function testHintStyledDimmerThanLabel() {
   const win = makePage();
-  injectCss(win);
+  loadMainCss(win);
   sendToolPanels(win, 1);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];

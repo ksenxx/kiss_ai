@@ -32,6 +32,8 @@ from kiss.tests.agents.third_party_agents.telegram_bot_api import (
     serve_bot_api,
 )
 
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
+
 
 @pytest.fixture()
 def receiver() -> Iterator[BotApiServer]:
@@ -40,9 +42,9 @@ def receiver() -> Iterator[BotApiServer]:
 
 
 @pytest.fixture()
-def backend(receiver: BotApiServer) -> Iterator[TelegramChannelBackend]:
-    """Yield a backend with a persisted token, pointed at the local receiver."""
-    yield from configured_backend(receiver)
+def backend(receiver: BotApiServer) -> TelegramChannelBackend:
+    """A backend with a persisted token, pointed at the local receiver."""
+    return configured_backend(receiver)
 
 
 def test_send_typing_posts_send_chat_action(
@@ -107,17 +109,13 @@ def test_send_typing_swallows_http_500(
 def test_send_typing_swallows_unreachable_server(refusing_port: int) -> None:
     """An unreachable API host (refused port) never raises."""
     _config.save({"bot_token": TOKEN})
-    try:
-        backend = TelegramChannelBackend()
-        backend._api_base = f"http://127.0.0.1:{refusing_port}"
-        backend.send_typing("123456789")
-    finally:
-        _config.clear()
+    backend = TelegramChannelBackend()
+    backend._api_base = f"http://127.0.0.1:{refusing_port}"
+    backend.send_typing("123456789")
 
 
 def test_send_typing_without_token_sends_nothing(receiver: BotApiServer) -> None:
     """With no Bot and no stored config, send_typing is a silent no-op."""
-    _config.clear()
     backend = TelegramChannelBackend()
     backend._api_base = receiver.base_url
     backend.send_typing("123456789")

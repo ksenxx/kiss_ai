@@ -12,6 +12,8 @@
 * ``RecordingDaemon.close`` is idempotent.
 * ``FakeComposioServer`` answers a per-poll status queue, refuses
   unknown API keys and undeletable accounts, and 404s unknown downloads.
+* ``EyreHandler`` and ``PhoneApiHandler`` answer their service's
+  endpoints, 404 anything else, and record every request.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 )
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.agents.third_party_agents.recording_http import (
+    EyreHandler,
+    PhoneApiHandler,
     RecordingHandler,
     RecordingServer,
     raw_post_status,
@@ -49,12 +53,18 @@ class _HeaderRecorder(RecordingHandler):
 
 
 def test_serving_teardown_does_not_wait_for_the_default_poll() -> None:
-    """Ten start/stop cycles finish well inside ten of the stdlib's 0.5 s polls."""
+    """Ten start/stop cycles finish well inside ten of the stdlib's 0.5 s polls.
+
+    With the stdlib default every idle teardown waits a whole 0.5 s poll,
+    so ten cycles take about 5 s; the bound is half of that, which leaves
+    room for a loaded machine without accepting the default poll.
+    """
+    stdlib_poll = 0.5
     started = time.monotonic()
     for _ in range(10):
         with serving(ThreadedHTTPServer(("127.0.0.1", 0), _HeaderRecorder)):
             pass
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < 10 * stdlib_poll / 2
 
 
 def test_raw_post_status_sends_header_values_as_latin1() -> None:
@@ -93,3 +103,45 @@ def test_fake_composio_status_queue_and_refusals(monkeypatch: pytest.MonkeyPatch
         assert requests.get(f"{composio.base_url}/download/0", timeout=10).status_code == 404
         composio.downloads.append(("text/plain", b"hi"))
         assert requests.get(f"{composio.base_url}/download/0", timeout=10).content == b"hi"
+
+
+def test_eyre_handler_routes_and_records() -> None:
+    with recording_server(EyreHandler) as server:
+        base = server.base_url
+        assert requests.post(f"{base}/~/login", data="password=x", timeout=10).status_code == 204
+        assert (
+            requests.put(f"{base}/~/channel/uid1", json=[{"id": 1}], timeout=10).status_code == 204
+        )
+        assert (
+            requests.post(f"{base}/~/channel/uid1", json=[{"id": 2}], timeout=10).status_code == 204
+        )
+        scry = requests.get(f"{base}/~/scry/channels/channels/~zod/g/light.json", timeout=10)
+        assert scry.status_code == 200 and scry.json() == {"channels": {}}
+        for method in (requests.get, requests.put, requests.post):
+            assert method(f"{base}/elsewhere", timeout=10).status_code == 404
+    assert [(r["method"], r["path"], r["body"]) for r in server.requests[:3]] == [
+        ("POST", "/~/login", "password=x"),
+        ("PUT", "/~/channel/uid1", '[{"id": 1}]'),
+        ("POST", "/~/channel/uid1", '[{"id": 2}]'),
+    ]
+    assert [r["method"] for r in server.requests[4:]] == ["GET", "PUT", "POST"]
+
+
+class _OneMessagePhone(PhoneApiHandler):
+    messages = [{"timestamp": 1, "from": "+1", "body": "hi", "id": "1"}]
+
+
+def test_phone_api_handler_routes_and_records() -> None:
+    with recording_server(_OneMessagePhone) as server:
+        base = server.base_url
+        assert requests.get(f"{base}/api/device/info", timeout=10).json() == {
+            "device_name": "testphone"
+        }
+        polled = requests.get(f"{base}/api/sms/messages?since=7&q=", timeout=10).json()
+        assert polled == {"messages": _OneMessagePhone.messages}
+        assert requests.get(f"{base}/api/nope", timeout=10).status_code == 404
+    assert server.requests == [
+        {"method": "GET", "path": "/api/device/info", "query": {}},
+        {"method": "GET", "path": "/api/sms/messages", "query": {"since": ["7"], "q": [""]}},
+        {"method": "GET", "path": "/api/nope", "query": {}},
+    ]

@@ -18,22 +18,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-// The Chats-panel pick: chat tabs have no row of their own any more, so a
-// chat is brought on screen through the test API (sub-agent and content
-// tabs on the group strip are still clicked).
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
-}
+const {makePage, send, clickTab} = require('./simplify2_harness');
 
 function progressLines(root) {
   return Array.from(root.querySelectorAll('.wt-progress')).map(

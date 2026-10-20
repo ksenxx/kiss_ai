@@ -17,51 +17,11 @@
 // managed from this webapp.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send} = require('./simplify2_harness');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: m => posted.push(m),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
+  const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function session(id, title, machine, extra) {
@@ -410,6 +370,44 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   );
   win.close();
   console.log('  ok - selection survives refreshes; a removed machine resets');
+}
+
+function testStaleReplyLeavesTheSelectionAlone() {
+  const {win, posted} = makePage();
+  send(win, historyReply(posted, SESSIONS, MACHINES));
+  selectMachine(win, 'lab');
+  const current = lastHistoryRequest(posted);
+  assert.strictEqual(current.machine, 'lab');
+  const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
+  // A late reply of the previous view (an older generation) whose
+  // machine list lacks the chosen one: renderHistory drops its rows,
+  // and the options must stay as they are too, or the selection would
+  // fall back to All and the pending current reply be dropped.
+  send(win, {
+    type: 'history',
+    sessions: SESSIONS,
+    offset: 0,
+    generation: current.generation - 1,
+    machines: ['box'],
+    localMachine: 'myhost',
+  });
+  const sel = win.document.getElementById('hf-machine');
+  assert.strictEqual(sel.value, 'lab', 'selection survives a stale reply');
+  assert.deepStrictEqual(
+    Array.from(sel.options).map(o => o.value),
+    ['', '__local__', 'box', 'lab'],
+    'options survive a stale reply',
+  );
+  assert.strictEqual(
+    posted.filter(m => m.type === 'getHistory').length,
+    requestsBefore,
+    'no refetch from a stale reply',
+  );
+  // The current reply then renders and is filtered as asked.
+  send(win, historyReply(posted, SESSIONS, MACHINES));
+  assert.deepStrictEqual(visibleTitles(win), ['lab task']);
+  win.close();
+  console.log('  ok - a stale-generation reply leaves the selection alone');
 }
 
 function resumes(posted) {
@@ -761,6 +759,7 @@ function runTests() {
   testSelectingAMachineFiltersRows();
   testSelectingAMachineKeepsChatsCollapsed();
   testSelectionSurvivesRefreshesAndRemoval();
+  testStaleReplyLeavesTheSelectionAlone();
   testClickingARemoteRowResumesTheChatHere();
   testChatHeaderOfARemoteChatResumesItHere();
   testACopyOfTheChatOnAnotherMachineGetsItsOwnTab();
@@ -769,7 +768,7 @@ function runTests() {
 
 try {
   runTests();
-  console.log('\n11 passed, 0 failed');
+  console.log('\n12 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

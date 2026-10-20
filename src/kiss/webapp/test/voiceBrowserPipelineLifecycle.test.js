@@ -26,11 +26,9 @@
 // real voice.js, main.js, DOM, message plumbing) is exercised for real.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {makePage: makeChatPage, stubRaf} = require('./simplify2_harness');
+const {test, report} = makeRunner();
 
 const VOICE_CFG = {
   voskSrc: '/media/vosk.js',
@@ -90,42 +88,21 @@ function makeAudioContextClass(log) {
  */
 function makePage(opts) {
   const options = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const log = [];
+  const mic = {calls: []};
+  const {win, posted} = makeChatPage({
+    extraScripts: ['voice.js'],
+    beforeScripts: win => stubVoiceBrowser(win, options, log, mic),
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
+  return {win, posted, log, mic};
+}
 
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
+/** The browser APIs the voice pipeline touches, stubbed before the page scripts run. */
+function stubVoiceBrowser(win, options, log, mic) {
+  stubRaf(win);
   win.Audio = function (src) {
     return {src, play: () => Promise.resolve()};
   };
-
-  const log = [];
-  const mic = {calls: []};
   Object.defineProperty(win.navigator, 'mediaDevices', {
     configurable: true,
     value: {
@@ -171,11 +148,6 @@ function makePage(opts) {
 
   win.__VOICE__ = Object.assign({}, VOICE_CFG);
   win.localStorage.setItem('kissVoiceEnabled', '0');
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return {win, posted, log, mic};
 }
 
 function micBtn(win) {
@@ -196,21 +168,6 @@ function setPageVisibility(win, state) {
 
 function tick(ms) {
   return new Promise(resolve => setTimeout(resolve, ms || 20));
-}
-
-let passed = 0;
-const failures = [];
-
-async function test(name, fn) {
-  try {
-    await fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
 }
 
 async function main() {
@@ -414,8 +371,7 @@ async function main() {
     );
   });
 
-  console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) process.exit(1);
+  report('voiceBrowserPipelineLifecycle');
 }
 
 main().then(

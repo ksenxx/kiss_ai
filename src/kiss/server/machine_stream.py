@@ -93,13 +93,21 @@ class MachineStream:
     def close(self) -> None:
         """Close the socket; the relay thread then ends without an error."""
         self._closed = True
+        self._close_socket()
+
+    def _close_socket(self) -> None:
         try:
             self._ws.close()
         except Exception:
             logger.debug("closing %s failed", self._thread.name, exc_info=True)
 
     def _relay(self) -> None:
-        """Hand every decoded frame to :meth:`_relay_frame`; tell the owner when the stream ends."""
+        """Hand every decoded frame to :meth:`_relay_frame`; tell the owner when the stream ends.
+
+        The socket goes with the relay, whatever ended it: a stream
+        reported lost because a frame's delivery raised must not keep
+        its socket (and the machine's resources for it) open.
+        """
         try:
             for raw in self._ws:
                 text = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
@@ -112,7 +120,9 @@ class MachineStream:
         except (ConnectionClosed, OSError):
             pass
         finally:
-            self._owner.dropped(self, lost=not self._closed)
+            lost = not self._closed
+            self._close_socket()
+            self._owner.dropped(self, lost=lost)
 
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
         """Deliver one decoded frame (*text* is its wire form) to this daemon's clients."""

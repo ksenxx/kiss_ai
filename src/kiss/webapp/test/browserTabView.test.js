@@ -9,8 +9,10 @@
 // (browserTab.js): the address bar follows browserState unless it is
 // being edited, Enter / Escape in it, the navigation error bar, the
 // first frame replacing the placeholder, viewport reports on show /
-// hide / resubscribe, and dispose.  jsdom lays nothing out, so the
-// screen's size is stubbed.
+// hide / resubscribe, and dispose: a tab hidden again before the
+// layout tick reports nothing, and a hide already retracted the
+// viewport so a later dispose does not repeat it.  jsdom lays nothing
+// out, so the screen's size is stubbed.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -36,9 +38,7 @@ function makeView() {
   return {win, view, sent, screen};
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const {sleep} = require('./simplify2_harness');
 
 function keydown(win, el, key) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key, bubbles: true}));
@@ -150,9 +150,37 @@ async function testViewportAndDispose() {
   assert.strictEqual(view.pageWidth, 0, 'no frame after dispose');
 }
 
+async function testShowHideBeforeTick() {
+  const {view, sent} = makeView();
+  view.setVisible(true);
+  view.setVisible(false);
+  await sleep(10);
+  assert.deepStrictEqual(sent, [], 'a tab hidden before layout reports nothing');
+  view.dispose();
+  assert.deepStrictEqual(sent, [], 'and dispose has nothing to retract');
+}
+
+async function testHideThenDispose() {
+  const {view, sent} = makeView();
+  view.setVisible(true);
+  await sleep(10);
+  assert.strictEqual(sent.length, 1);
+  assert.strictEqual(sent[0].visible, true);
+  view.setVisible(false);
+  assert.strictEqual(sent.length, 2);
+  assert.strictEqual(sent[1].visible, false);
+  view.dispose();
+  assert.strictEqual(sent.length, 2, 'hide already retracted the viewport');
+  view.setVisible(true);
+  await sleep(10);
+  assert.strictEqual(sent.length, 2, 'a disposed view never reports');
+}
+
 (async () => {
   await testAddressBarAndState();
   await testViewportAndDispose();
+  await testShowHideBeforeTick();
+  await testHideThenDispose();
   console.log('browserTabView.test.js passed');
 })().catch(err => {
   console.error(err);

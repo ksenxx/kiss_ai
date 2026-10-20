@@ -134,13 +134,17 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
         )
         # The drop-down's selected entry (its inner_text would be every
         # option, registered machines included), the same daemon-stamped
-        # name as the (hidden) status-bar span; the Task Info list has no
-        # Machine row.
+        # name as the (hidden) status-bar span and as the Task Info
+        # panel's Machine row (an unbound tab runs on this daemon).
         name = page.locator("#chat-machine").evaluate(
             "el => el.options[el.selectedIndex].textContent"
         )
         assert name == page.locator("#status-machine").text_content()
-        assert page.locator("#meta-machine").count() == 0
+        page.wait_for_function(
+            "name => document.getElementById('meta-machine').textContent === name",
+            arg=name,
+            timeout=15000,
+        )
         style = page.evaluate(
             """() => {
               const el = document.getElementById('chat-machine');

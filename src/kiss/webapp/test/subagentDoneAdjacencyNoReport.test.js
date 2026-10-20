@@ -26,195 +26,26 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  bootParallelRun,
+  writeReport,
+  contentTabs,
+  contentTabFor,
+  stripContentTabEls,
+  tabEl,
+  activeTabId,
+  clickTab,
+  chatSurfaceVisible,
+  swipeLeftToFileScreen,
+} = require('./subagent_tab_helpers');
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeChatPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: stubRaf,
+    extraScripts: ['marked.min.js', 'mobileSwipe.js'],
   });
-  const win = dom.window;
-
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'mobileSwipe.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
-
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-// A successful Write tool_result body, exactly as json_printer.py emits it.
-function writeSuccess(filePath, content) {
-  return (
-    'Successfully wrote ' +
-    String(content || '').length +
-    ' characters to ' +
-    filePath
-  );
-}
-
-function writeReport(win, filePath, content, extra) {
-  send(
-    win,
-    Object.assign(
-      {type: 'tool_call', name: 'Write', path: filePath, content: content},
-      extra || {},
-    ),
-  );
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'tool_result',
-        content: writeSuccess(filePath, content),
-        is_error: false,
-        tool_name: 'Write',
-        path: filePath,
-      },
-      extra || {},
-    ),
-  );
-}
-
-/** Every open content tab (file, report) of the tab registry. */
-function contentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
-}
-
-function contentTabFor(win, name) {
-  return contentTabs(win).find(t => t.title.indexOf(name) >= 0);
-}
-
-/** The content tabs the tab strip lists (the file screen only). */
-function stripContentTabEls(win) {
-  return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.content-tab'),
-  );
-}
-
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']',
-  );
-}
-
-function activeTabId(win) {
-  return win._testApi.getActiveTabId();
-}
-
-function clickTab(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function chatSurfaceVisible(win) {
-  const out = win.document.getElementById('output');
-  return !!out && out.style.display !== 'none';
-}
-
-function touchEvent(win, type, target, points, changed) {
-  const e = new win.Event(type, {bubbles: true, cancelable: true});
-  Object.defineProperty(e, 'touches', {value: points});
-  Object.defineProperty(e, 'changedTouches', {value: changed || points});
-  target.dispatchEvent(e);
-}
-
-/** The user swipes left on the chat: the file screen comes on view. */
-function swipeLeftToFileScreen(win) {
-  const page = win.document.getElementById('output');
-  touchEvent(win, 'touchstart', page, [{clientX: 300, clientY: 100}]);
-  touchEvent(win, 'touchmove', page, [{clientX: 100, clientY: 100}]);
-  touchEvent(win, 'touchend', page, [], [{clientX: 100, clientY: 100}]);
-}
-
-// Boot a parent task that spawns `n` sub-agents through run_parallel,
-// exactly the way the backend drives the page.
-function bootParallelRun(n) {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(taskNames)},
-  });
-
-  const subTabIds = [];
-  for (let i = 0; i < n; i++) {
-    const taskId = 'sub-task-' + (i + 1);
-    const before = posted.length;
-    send(win, {
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-    });
-  }
-  assert.strictEqual(
-    activeTabId(win),
-    parentId,
-    'precondition: spawning sub-agents must leave the user on the parent',
-  );
-  return {win, posted, parentId, subTabIds};
 }
 
 function testSoleSubagentReportDoesNotBecomeActiveOnClose() {
@@ -222,7 +53,7 @@ function testSoleSubagentReportDoesNotBecomeActiveOnClose() {
   // a report and finishes.  Its tab closes and the freshly appended
   // report tab sits right where the sub-agent tab used to be, so the
   // adjacency rule hands the user the report.
-  const {win, parentId, subTabIds} = bootParallelRun(1);
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   const subEl = tabEl(win, subTabIds[0]);
   assert.ok(subEl, 'the sub-agent tab must be in the tab bar');
@@ -269,7 +100,7 @@ function testSubagentReportNotActiveWithSiblingStillRunning() {
   // Two sub-agents, the user is on the first.  It finishes with a
   // report; the user must land on a chat tab (parent or the running
   // sibling), never on the report.
-  const {win, parentId, subTabIds} = bootParallelRun(2);
+  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, tabEl(win, subTabIds[0]));
   assert.strictEqual(activeTabId(win), subTabIds[0], 'precondition');
@@ -298,7 +129,7 @@ function testDeepSubagentLandsOnItsParentChatTab() {
   // A sub-agent of a sub-agent: when the grandchild finishes while the
   // user is on it, the user should land on its own parent chat tab, not
   // on the report and not on some unrelated tab.
-  const {win, posted, parentId, subTabIds} = bootParallelRun(1);
+  const {win, posted, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   const before = posted.length;
   send(win, {
@@ -352,7 +183,7 @@ function testDeepSubagentLandsOnItsParentChatTab() {
 function testClosingActiveSubagentWithoutReportStillPicksChatTab() {
   // No report at all: the plain close path must keep behaving, landing
   // the user on a chat tab.
-  const {win, parentId, subTabIds} = bootParallelRun(1);
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   clickTab(win, tabEl(win, subTabIds[0]));
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
@@ -377,7 +208,7 @@ function testUserOpenedContentTabSurvivesAndIsNotStolen() {
   // The user had deliberately opened a file tab earlier.  A sub-agent
   // finishing must not shove them onto ANY content tab - existing or
   // new - while the parent task runs.
-  const {win, parentId, subTabIds} = bootParallelRun(1);
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   send(win, {
     type: 'fileContent',
@@ -420,7 +251,7 @@ function testUserOpenedContentTabSurvivesAndIsNotStolen() {
 function testReportStaysBackgroundWhenSubagentTabIsNotActive() {
   // Anti-over-fix guard: the original invariant still holds when the
   // user is NOT on the finishing sub-agent tab.
-  const {win, parentId, subTabIds} = bootParallelRun(1);
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   assert.strictEqual(activeTabId(win), parentId, 'precondition');
   writeReport(win, 'reports/quiet.md', '# quiet', {tabId: subTabIds[0]});
@@ -451,7 +282,7 @@ function testReportStaysBackgroundWhenSubagentTabIsNotActive() {
 function testUserFileOpenStillFocusesAfterSubagentDone() {
   // Anti-over-fix guard: a genuine user file open still switches tabs,
   // even right after a sub-agent finished.
-  const {win, subTabIds} = bootParallelRun(1);
+  const {win, subTabIds} = bootParallelRun(1, makePage());
 
   writeReport(win, 'reports/bg.md', '# bg', {tabId: subTabIds[0]});
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
@@ -478,7 +309,7 @@ function testReportTabRemainsReachableAfterClose() {
   // The parked report must still be openable by the user afterwards:
   // a swipe left from the chat puts the file screen on view, where the
   // strip lists the report as the shown content tab.
-  const {win, subTabIds} = bootParallelRun(1);
+  const {win, subTabIds} = bootParallelRun(1, makePage());
 
   clickTab(win, tabEl(win, subTabIds[0]));
   writeReport(win, 'reports/late.md', '# Late Report', {tabId: subTabIds[0]});

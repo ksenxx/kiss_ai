@@ -33,6 +33,7 @@ from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (
     _redirect_db,
     _restore_db,
 )
+from kiss.tests.server.worktree_helpers import merge_conflict
 
 
 def _register_worktree_state(tab_id: str) -> AgentState:
@@ -79,14 +80,14 @@ class TestFormatToolCallBranches:
 class TestAgentServerUncoveredBranches:
     """Cover remaining uncovered branches in AgentServer."""
 
-    def test_check_merge_conflict_no_branches(self) -> None:
-        """_check_merge_conflict returns False when no wt_branch."""
+    def test_conflict_of_no_branches(self) -> None:
+        """_conflict_of returns False when no wt_branch."""
         server = AgentServer()
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
             state.agent._wt = None
-            assert server._check_merge_conflict("0") is False
+            assert merge_conflict(server, "0") is False
         finally:
             agent_state.unregister(state.task_id, state)
 
@@ -101,8 +102,8 @@ class TestAgentServerUncoveredBranches:
         finally:
             agent_state.unregister(state.task_id, state)
 
-    def test_check_merge_conflict_dirty_worktree(self, tmp_path: Path) -> None:
-        """_check_merge_conflict detects dirty files that overlap with merge."""
+    def test_conflict_of_dirty_worktree(self, tmp_path: Path) -> None:
+        """_conflict_of detects dirty files that overlap with merge."""
         saved = _redirect_db(str(tmp_path))
         try:
             repo = tmp_path / "repo"
@@ -150,7 +151,7 @@ class TestAgentServerUncoveredBranches:
             server.work_dir = str(repo)
 
             try:
-                assert server._check_merge_conflict("0") is True
+                assert merge_conflict(server, "0") is True
             finally:
                 agent_state.unregister(state.task_id, state)
                 # The server's orphan sweep commits on the redirected

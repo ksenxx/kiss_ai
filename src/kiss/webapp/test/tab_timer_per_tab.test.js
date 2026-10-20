@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send, waitFor, clickTab} = require('./simplify2_harness');
 
 function statusOf(win) {
   return win.document.getElementById('status-text').textContent;
@@ -23,14 +23,6 @@ async function waitForHeaderTick(win) {
     () => statusOf(win) !== before,
     `the header timer never ticked (still "${before}")`,
   );
-}
-
-function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
-  assert.ok(el, `no tab with id "${tabId}" in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 async function testForeignNewerRunDoesNotClobberActiveTimer() {

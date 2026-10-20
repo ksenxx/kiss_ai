@@ -19,8 +19,7 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import pytest
 
@@ -34,12 +33,8 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
-
-_TOKEN = TOKEN
-
 
 # Realistic Document payload: a string element (schema noise), a
 # section break, a paragraph with a non-text run in the middle, and a
@@ -156,24 +151,9 @@ _DRIVE_FILES = [
 class _DocsRequestHandler(RecordingHandler):
     """Emulates the Google Docs v1 + Drive v3 REST APIs and records requests."""
 
-    def _authorized(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _record(self, body: Any) -> None:
-        parsed = urlparse(self.path)
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": parsed.path,
-                "query": parse_qs(parsed.query),
-                "authorization": self.headers.get("Authorization", ""),
-                "body": body,
-            }
-        )
-
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._record(None)
-        if not self._authorized():
+        self.record_request(None)
+        if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"message": "Unauthorized"}}))
             return
         path = urlparse(self.path).path
@@ -192,8 +172,8 @@ class _DocsRequestHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         body = self._read_body()
-        self._record(body)
-        if not self._authorized():
+        self.record_request(body)
+        if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"message": "Unauthorized"}}))
             return
         path = urlparse(self.path).path
@@ -255,7 +235,7 @@ def test_create_document(backend) -> None:
     assert result == {"ok": True, "document_id": "newdoc", "title": "My Notes"}
     req = server.requests[-1]
     assert (req["method"], req["path"]) == ("POST", "/documents")
-    assert req["authorization"] == f"Bearer {_TOKEN}"
+    assert req["authorization"] == f"Bearer {TOKEN}"
     assert req["body"] == {"title": "My Notes"}
 
 
@@ -267,7 +247,7 @@ def test_read_document_extracts_text_with_tables(backend) -> None:
     req = server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/documents/doc123")
     assert req["query"]["includeTabsContent"] == ["true"]
-    assert req["authorization"] == f"Bearer {_TOKEN}"
+    assert req["authorization"] == f"Bearer {TOKEN}"
 
 
 def test_read_document_extracts_text_from_all_tabs(backend) -> None:

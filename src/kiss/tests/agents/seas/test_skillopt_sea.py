@@ -47,7 +47,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError, resolve_settings
 from kiss.core.tool_verdict import ALLOW, refuse
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, tool_names
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -659,8 +659,7 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     with serve(script) as (url, requests):
         report = run_optimization(_config(tmp_path, sea, evals, url))
     assert len(requests) == 11
-    tool_names = [{t["function"]["name"] for t in r["tools"]} for r in requests if r.get("tools")]
-    assert tool_names == [{"Bash", "finish"}] * 8
+    assert [tool_names(r) for r in requests if r.get("tools")] == [{"Bash", "finish"}] * 8
     bash_result = str(requests[1]["messages"][-1]["content"])
     assert "alpha" in bash_result
     analyst_prompt = str(requests[4]["messages"][-1]["content"])
@@ -1052,7 +1051,7 @@ class Sea(BaseSea):
             {"append_basic_tools": False, "max_steps": 7},
         )
     assert rollout.passed and rollout.steps == 1
-    assert {t["function"]["name"] for t in requests[0]["tools"]} == {"finish"}
+    assert tool_names(requests[0]) == {"finish"}
     user = [m for m in requests[0]["messages"] if m["role"] == "user"]
     assert "fixed prompt suffix" in str(user[0]["content"])
     assert "ignored task prompt" not in str(user[0]["content"])

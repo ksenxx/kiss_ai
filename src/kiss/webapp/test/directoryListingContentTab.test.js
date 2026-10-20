@@ -14,73 +14,26 @@
 // sandboxed content iframe.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: buildPage,
+  send,
+  stubMonaco,
+  waitFor,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
+// Monaco loads from a CDN, which jsdom never fetches (the loader would
+// only give up via its 10s timeout).  The harness's recording `monaco`
+// stands in for the unreachable CDN build: ensureMonaco() resolves with
+// it immediately, so the test can assert the exact text and language
+// handed to the editor.
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: () => {},
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  // Monaco loads from a CDN, which jsdom never fetches (the loader
-  // would only give up via its 10s timeout).  A window-level `monaco`
-  // that records editor.create calls stands in for the unreachable CDN
-  // build: ensureMonaco() resolves with it immediately, so the test can
-  // assert the exact text and language handed to the editor.
-  const created = [];
-  win.monaco = {
-    editor: {
-      // main.js defines a kiss-light/kiss-dark theme from the page palette
-      // before every create(); real Monaco always exposes both calls.
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        created.push({holder, value: opts.value, language: opts.language});
-        return {dispose: () => {}, layout: () => {}};
-      },
+  let created;
+  const {win} = buildPage({
+    beforeScripts: w => {
+      created = stubMonaco(w);
     },
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  });
   return {win, created};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-async function waitFor(predicate, message, timeoutMs = 2000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise(r => setTimeout(r, 10));
-  }
-  throw new Error(message || 'waitFor timed out');
 }
 
 const LISTING = '/ws/site.html:\n\n/ws/site.html/<img src=x>.txt\n';

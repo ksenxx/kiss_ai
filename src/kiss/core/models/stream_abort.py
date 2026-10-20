@@ -220,11 +220,7 @@ class StreamAbortWatchdog:
         try:
             extensions = self._stream.response.extensions
             network_stream = extensions.get("network_stream")
-            sock = (
-                network_stream.get_extra_info("socket")
-                if network_stream is not None
-                else None
-            )
+            sock = network_stream.get_extra_info("socket") if network_stream is not None else None
             if sock is not None:
                 sock.shutdown(socket.SHUT_RDWR)
                 if os.name == "nt":  # pragma: no cover — Windows-only branch
@@ -387,33 +383,29 @@ def stop_aware_events(
         stop_event=stop_event,
         name=name,
     )
+    failure: Exception | None = None
     try:
         for event in stream:
             watchdog.beat()
             yield event
-    except Exception:
-        # The abort may surface as a transport error rather than as EOF.
-        # Disarm BEFORE reading the flags, as the post-loop path below
-        # does via `finally`: stop() waits out an abort already claimed,
-        # so afterwards the flags are final.  Read first, a stall (or
-        # stop) claimed between the transport failure and this point
-        # would let the raw transport error escape unclassified.
-        watchdog.stop()
-        error = _abort_error(watchdog, stop_event, stall_timeout)
-        if error is None:
-            raise
-        if on_abort is not None:
-            on_abort()
-        raise error from None
+    except Exception as exc:
+        # The abort may surface as a transport error rather than as EOF;
+        # it is classified below, once the watchdog is disarmed.
+        failure = exc
     finally:
         watchdog.stop()
         _close_stream(stream)
-    # An aborted socket usually just ends the iterator, so a stop (or a
-    # stall) has to be reported after the loop as well; without this the
-    # caller would keep whatever partial text it accumulated and report
-    # it as a completion.
+    # Classify after disarming: stop() waits out an abort already
+    # claimed, so the flags are final here.  Read first, a stall (or
+    # stop) claimed between the transport failure and this point would
+    # let the raw transport error escape unclassified.  An aborted socket
+    # usually just ends the iterator, so the same check covers a normal
+    # EOF; without it the caller would keep whatever partial text it
+    # accumulated and report it as a completion.
     error = _abort_error(watchdog, stop_event, stall_timeout)
     if error is not None:
         if on_abort is not None:
             on_abort()
-        raise error
+        raise error from None
+    if failure is not None:
+        raise failure

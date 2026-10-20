@@ -41,6 +41,11 @@ What else the stream carries:
 * **The binding.**  ``tabMachine {tabId, machine}`` tells every surface
   which machine a tab is bound to (on bind, on unbind, and on
   ``ready``), so the chat header's drop-down agrees across surfaces.
+  The binding is also told to :class:`~kiss.server.remote_views.RemoteViews`,
+  which keeps a view stream to the machine open while a tab is bound
+  there: the Browser tab an agent of the machine opens for the user
+  (``show_browser``, a sign-in hand-off) reaches this daemon's
+  surfaces over it.
 
 A tab stays bound while it exists: a later ``submit`` or
 ``resumeSession`` for another machine re-binds it, an empty
@@ -49,6 +54,8 @@ A tab stays bound while it exists: a later ``submit`` or
 (``closeTab`` is forwarded too, so the remote drops its tab; its task
 keeps running there as a closed local tab's would).  Losing the socket
 ends the tab's running state with an ``error`` naming the machine.
+Either way the stream's sub-agent tabs end with a ``subagentDone`` of
+this daemon's: no frame of the machine reaches them any more.
 
 A ``run`` (the API command :func:`kiss.agents.sorcar.daemon_client.run`
 sends, e.g. for ``run_agent(..., machine="box")``) with a ``machine``
@@ -75,6 +82,7 @@ from typing import Any
 
 from kiss.agents.sorcar.machines import Machine, MachineError, load_machines
 from kiss.server.machine_stream import DROPPED_FIELDS, MachineStream
+from kiss.server.remote_views import RemoteViews
 
 FORWARDED_COMMANDS = frozenset({
     "submit", "run", "stop", "userAnswer", "appendUserMessage", "interruptTool",
@@ -310,13 +318,21 @@ class RemoteTab(MachineStream):
 class RemoteTabs:
     """The tabs of this daemon that run on remote machines."""
 
-    def __init__(self, backend: Any) -> None:
-        """*backend* is the daemon (``ServerBackend``): its printer and agent server."""
+    def __init__(self, backend: Any, views: RemoteViews) -> None:
+        """*backend* is the daemon (``ServerBackend``): its printer and agent server.
+
+        *views* is told every binding (:meth:`RemoteViews.bind`).
+        """
         self._backend = backend
+        self._views = views
         # Every tab a stream relays (the bound tab and its sub-agent tabs).
         self._tabs: dict[str, RemoteTab] = {}
-        # Bumped by every unbind of a tab: a bind whose connect spanned
-        # an unbind of the same tab stands down (its tab is gone).
+        # Per tab, the binds connecting for it, and the unbinds of it
+        # since the first of those started: a bind whose connect
+        # spanned an unbind stands down (its tab is gone).  Both
+        # entries go once no bind connects for the tab, so unbinds of
+        # the tabs of a long session leave nothing behind.
+        self._connecting: dict[str, int] = {}
         self._unbinds: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -399,11 +415,13 @@ class RemoteTabs:
         the link's timeout) outside the lock, so the other tabs'
         commands keep flowing meanwhile; what
         happened to the tab in between decides what the new stream is
-        worth: a ``closeTab`` (``_unbinds`` moved) stands it down, a
-        bind to the same machine that won the race is kept instead of
-        it, one to another machine is retired for it, and a stream the
-        remote dropped meanwhile (its relay thread ran :meth:`dropped`
-        before this registration) refuses the run instead of binding.
+        worth: an unbind (``_unbinds`` moved, counted while this bind
+        is in ``_connecting``) stands it down, a bind to the same
+        machine that won the race is kept instead of it, one to
+        another machine is retired for it (its sub-agent tabs ended),
+        and a stream the remote dropped meanwhile (its relay thread
+        ran :meth:`dropped` before this registration) refuses the run
+        instead of binding.
         """
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
@@ -413,71 +431,83 @@ class RemoteTabs:
             return None
         with self._lock:
             tab = self._tabs.get(tab_id)
+            self._connecting[tab_id] = self._connecting.get(tab_id, 0) + 1
             unbinds = self._unbinds.get(tab_id, 0)
-        if tab is not None and tab.machine != machine:
-            self._unbind(tab_id)
-            tab = None
-            unbinds += 1
-        announce = False
-        if tab is None:
-            try:
-                tab = RemoteTab(
-                    tab_id, machine, self, subagent=bool(cmd.get("parentTaskId")),
+        try:
+            if tab is not None and tab.machine != machine:
+                self._unbind(tab_id)
+                tab = None
+                unbinds += 1
+            announce = False
+            if tab is None:
+                try:
+                    tab = RemoteTab(
+                        tab_id, machine, self, subagent=bool(cmd.get("parentTaskId")),
+                    )
+                except MachineError as exc:
+                    self._backend._agent_server._refuse_run(tab_id, str(exc))
+                    return None
+                displaced: RemoteTab | None = None
+                orphans: list[str] = []
+                same: RemoteTab | None = None  # a bind to the same machine that won
+                lost = False
+                with self._lock:
+                    stood_down = self._unbinds.get(tab_id, 0) != unbinds
+                    winner = self._tabs.get(tab_id)
+                    if winner is not None and winner.machine == machine:
+                        same = winner
+                    elif not stood_down:
+                        with tab.lock:
+                            lost = tab.retired  # dropped before it could be registered
+                        if not lost:
+                            if winner is not None:
+                                orphans = self._retire(winner)
+                                displaced = winner
+                            self._tabs[tab_id] = tab
+                            self._views.bind(tab_id, machine.name)
+                if displaced is not None:
+                    self._end_stream(displaced, orphans)
+                if stood_down or same is not None or lost:
+                    tab.close()
+                if stood_down:
+                    return None
+                if lost:
+                    self._backend._agent_server._refuse_run(
+                        tab_id, f"lost the connection to {machine.name}",
+                    )
+                    return None
+                if same is not None:
+                    tab = same
+                announce = same is None
+            # Every surface shows the tab (same registry entry a local run
+            # publishes); its chat and task stay unbound here, they are the
+            # remote daemon's.  Registered before the binding is announced:
+            # a local client's delivery is narrowed to the tabs it can show.
+            # A sub-agent run (``parentTaskId``) gets no top-level tab, as
+            # one running here does not: the surfaces open its nested tab
+            # under the caller on the relayed ``new_tab``.
+            if not cmd.get("parentTaskId"):
+                self._backend._agent_server._registry_update_tab(
+                    tab_id,
+                    title=title,
+                    work_dir=str(cmd.get("workDir", "") or ""),
+                    task_id="",
+                    create=True,
                 )
-            except MachineError as exc:
-                self._backend._agent_server._refuse_run(tab_id, str(exc))
-                return None
-            displaced: RemoteTab | None = None
-            same: RemoteTab | None = None  # a bind to the same machine that won
-            lost = False
+            if announce:
+                self._announce(tab_id, tab)
+            # The run is forwarded only once the machine's pages are watched
+            # (a stream that could not be opened for an earlier bind is
+            # tried again): the page its agent opens for the user must not
+            # slip by before the stream is subscribed.
+            self._views.open_for(machine.name)
+            return tab
+        finally:
             with self._lock:
-                stood_down = self._unbinds.get(tab_id, 0) != unbinds
-                winner = self._tabs.get(tab_id)
-                if winner is not None and winner.machine == machine:
-                    same = winner
-                elif not stood_down:
-                    with tab.lock:
-                        lost = tab.retired  # dropped before it could be registered
-                    if not lost:
-                        if winner is not None:
-                            self._retire(winner)
-                            displaced = winner
-                        self._tabs[tab_id] = tab
-            # Closed outside the lock: a close handshake can wait on the
-            # peer (up to the socket's close timeout), and the other
-            # tabs' commands must not.
-            if displaced is not None:
-                displaced.close()
-            if stood_down or same is not None or lost:
-                tab.close()
-            if stood_down:
-                return None
-            if lost:
-                self._backend._agent_server._refuse_run(
-                    tab_id, f"lost the connection to {machine.name}",
-                )
-                return None
-            if same is not None:
-                tab = same
-            announce = same is None
-        # Every surface shows the tab (same registry entry a local run
-        # publishes); its chat and task stay unbound here, they are the
-        # remote daemon's.  Registered before the binding is announced:
-        # a local client's delivery is narrowed to the tabs it can show.
-        # A sub-agent run (``parentTaskId``) gets no top-level tab, as
-        # one running here does not: the surfaces open its nested tab
-        # under the caller on the relayed ``new_tab``.
-        if not cmd.get("parentTaskId"):
-            self._backend._agent_server._registry_update_tab(
-                tab_id,
-                title=title,
-                work_dir=str(cmd.get("workDir", "") or ""),
-                task_id="",
-                create=True,
-            )
-        if announce:
-            self._announce(tab_id, machine.name)
-        return tab
+                self._connecting[tab_id] -= 1
+                if not self._connecting[tab_id]:
+                    del self._connecting[tab_id]
+                    self._unbinds.pop(tab_id, None)
 
     def _retire(self, tab: RemoteTab) -> list[str]:
         """Take a stream out of service (under the lock): its frames dropped, its tabs unmapped.
@@ -494,36 +524,80 @@ class RemoteTabs:
         unmapped = [tid for tid in tab_ids if self._tabs.get(tid) is tab]
         for tid in unmapped:
             del self._tabs[tid]
+        if tab.tab_id in unmapped:
+            self._views.bind(tab.tab_id, "")
         return unmapped + [tid for tid in announced if tid not in self._tabs]
 
-    def _unbind(self, tab_id: str, forward_close: bool = False) -> None:
-        """Take *tab_id* off its stream: a bound tab's stream closes, a sub-agent tab leaves it.
+    def _detach(self, tab_id: str) -> tuple[RemoteTab | None, list[str]]:
+        """Take *tab_id* off its stream, under the lock.
 
         Counted even for a tab without a stream, so a bind still
-        connecting for it stands down.  With *forward_close* the remote
-        daemon closes the tab too.
+        connecting for it stands down.  A bound tab's stream is retired
+        and returned with the sub-agent tabs it leaves behind, for
+        :meth:`_end_stream` outside the lock; a sub-agent tab just
+        leaves its stream (``(None, [])``, as for a tab without one).
+        """
+        if tab_id in self._connecting:
+            self._unbinds[tab_id] = self._unbinds.get(tab_id, 0) + 1
+        tab = self._tabs.get(tab_id)
+        if tab is None:
+            return None, []
+        if tab.tab_id == tab_id:
+            return tab, self._retire(tab)
+        del self._tabs[tab_id]
+        with tab.lock:
+            tab.tab_ids.discard(tab_id)
+            tab.replay_sinks.pop(tab_id, None)
+            tab.replay_conn.pop(tab_id, None)
+        return None, []
+
+    def _end_stream(self, tab: RemoteTab, tab_ids: list[str]) -> None:
+        """Finish off the retired stream *tab* outside the lock.
+
+        *tab_ids* is what :meth:`_retire` returned.  The socket is
+        closed here (a close handshake can wait on the peer, up to the
+        socket's close timeout, and the other tabs' commands must
+        not), the sub-agent tabs it relayed end with
+        ``subagentDone`` as a sub-agent running here ends (the ones a
+        client resumed and the ones only announced so far: the
+        sub-agent may still run on the machine, but no frame of it
+        reaches this daemon's surfaces any more, and nothing else would
+        ever stop their spinners), the tab's binding is announced gone
+        (dropped by :meth:`_announce` when another stream has the tab
+        by now) and the machine's view stream is released.
+
+        A sub-agent tab is ended under the lock and only while the
+        registry still has no stream for it: a client that bound it
+        meanwhile (a History-panel click into the machine's chat
+        while the close handshake waited) owns it now, and a
+        ``subagentDone`` of the old stream would close its live tab
+        on every surface.
+        """
+        tab.close()
+        with self._lock:
+            for sub_tab_id in tab_ids:
+                if sub_tab_id != tab.tab_id and sub_tab_id not in self._tabs:
+                    self.deliver("", json.dumps(
+                        {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
+                    ))
+        self._announce(tab.tab_id, None)
+        self._views.release(tab.machine.name)
+
+    def _unbind(self, tab_id: str, forward_close: bool = False) -> None:
+        """Take *tab_id* off its stream: a bound tab's stream ends, a sub-agent tab leaves it.
+
+        With *forward_close* the remote daemon closes the tab too.
         """
         with self._lock:
-            self._unbinds[tab_id] = self._unbinds.get(tab_id, 0) + 1
             tab = self._tabs.get(tab_id)
-            if tab is None:
-                return
-            if tab.tab_id == tab_id:
-                self._retire(tab)
-            else:
-                del self._tabs[tab_id]
-                with tab.lock:
-                    tab.tab_ids.discard(tab_id)
-                    tab.replay_sinks.pop(tab_id, None)
-                    tab.replay_conn.pop(tab_id, None)
-        if forward_close:
+            ended, orphans = self._detach(tab_id)
+        if forward_close and tab is not None:
             try:
                 tab.send({"type": "closeTab", "tabId": tab_id})
             except MachineError:
                 pass
-        if tab.tab_id == tab_id:
-            tab.close()
-            self._announce(tab_id, "")
+        if ended is not None:
+            self._end_stream(ended, orphans)
 
     def adopt(self, tab: RemoteTab, sub_tab_id: str) -> None:
         """Map the sub-agent tab *sub_tab_id* a replay announced to *tab*'s stream."""
@@ -564,25 +638,32 @@ class RemoteTabs:
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
             self._forward(tab, tab_id, cmd)
             return True
+        ended: RemoteTab | None = None
+        orphans: list[str] = []
         with self._lock:
             tab = next(
                 (t for t in self._tabs.values() if task_id and task_id in t.task_ids), None,
             )
             if tab is None and task_id:
                 tab = self._tabs.get(str(cmd.get("parentTabId", "") or ""))
+            previous = self._tabs.get(tab_id)
             if tab is None:
-                bound = self._tabs.get(tab_id)
-                unbind = bound is not None and bound.tab_id == tab_id
+                if previous is not None and previous.tab_id == tab_id:
+                    ended, orphans = self._detach(tab_id)
             else:
-                unbind = False
+                # One stream per tab: a tab bound to a machine, or on
+                # another run's stream, leaves it (its own stream ends)
+                # before it joins the task's stream.
+                if previous is not None and previous is not tab:
+                    ended, orphans = self._detach(tab_id)
                 self._tabs[tab_id] = tab
                 with tab.lock:
                     tab.tab_ids.add(tab_id)
                     tab.task_ids.add(task_id)
                     tab.announced.pop(task_id, None)
                     tab.replay_sinks.setdefault(tab_id, []).append(conn_id)
-        if unbind:
-            self._unbind(tab_id)
+        if ended is not None:
+            self._end_stream(ended, orphans)
         if tab is None:
             return False
         self._forward(tab, tab_id, cmd)
@@ -607,7 +688,7 @@ class RemoteTabs:
                     if tab.spawn and not tab.retired:
                         self.deliver_to(conn_id, tab.spawn)
                 continue
-            self.deliver_to(conn_id, _tab_machine_frame(tab_id, tab.machine.name))
+            self._replay_binding(conn_id, tab_id, tab)
             with tab.lock:
                 chat_id = tab.chat_id
                 task_id = tab.shown_task_id
@@ -623,9 +704,35 @@ class RemoteTabs:
             except MachineError:
                 pass
 
-    def _announce(self, tab_id: str, machine_name: str) -> None:
-        """Tell every client which machine *tab_id* is bound to ("" when none)."""
-        self.deliver(tab_id, _tab_machine_frame(tab_id, machine_name))
+    def _replay_binding(self, conn_id: str, tab_id: str, tab: RemoteTab) -> None:
+        """Tell *conn_id* that *tab_id* is bound to *tab*'s machine, while the registry says so.
+
+        As :meth:`_announce`: a binding the registry moved past since
+        the replay copied it is not replayed (the change announced
+        itself, to this connection too), so the replay never lands
+        after a later unbind's frame.
+        """
+        with self._lock:
+            if self._tabs.get(tab_id) is tab:
+                self.deliver_to(conn_id, _tab_machine_frame(tab_id, tab.machine.name))
+
+    def _announce(self, tab_id: str, tab: RemoteTab | None) -> None:
+        """Tell every client that *tab_id* is bound to *tab*'s machine (None: to none).
+
+        Under the lock, and only while the registry still says so: the
+        announcement of a binding that changed again meanwhile (an
+        unbind under a bind still announcing, a re-bind under an
+        unbind) is dropped, as the later change announced its own, so
+        no client ends on a binding the registry does not have.  The
+        views learn of a binding as the registry changes (:meth:`_bind`,
+        :meth:`_retire`), not here: a bind that finds the tab registered
+        by another must find its stream wanted already.
+        """
+        with self._lock:
+            if self._tabs.get(tab_id) is not tab:
+                return
+            machine_name = tab.machine.name if tab is not None else ""
+            self.deliver(tab_id, _tab_machine_frame(tab_id, machine_name))
 
     def deliver(self, tab_id: str, text: str) -> None:
         """Send one frame of the remote daemon, stamped with *tab_id*, to every client."""
@@ -638,13 +745,10 @@ class RemoteTabs:
     def dropped(self, tab: RemoteTab, lost: bool) -> None:
         """A stream ended: forget its tabs, and when it was *lost* end the tab's task.
 
-        The sub-agent tabs the stream relayed end too (``subagentDone``,
-        as a sub-agent running here ends), the ones a client resumed
-        and the ones only announced so far (``announced``: the surfaces
-        opened them on the ``new_tab``): the sub-agent may still run
-        on the machine, but no surface of this daemon can reach it any
-        more, and nothing else would ever stop their spinners.  A stream
-        already retired (replaced, unbound) is nobody's loss.
+        The tab's run is refused (the surfaces show the loss) and the
+        stream finished off as an unbound one is (:meth:`_end_stream`:
+        its sub-agent tabs end too).  A stream already retired
+        (replaced, unbound) is nobody's loss.
         """
         with self._lock:
             # Retired even when not (or no longer) registered: a stream
@@ -656,12 +760,7 @@ class RemoteTabs:
             self._backend._agent_server._refuse_run(
                 tab.tab_id, f"lost the connection to {tab.machine.name}",
             )
-            for sub_tab_id in tab_ids:
-                if sub_tab_id != tab.tab_id:
-                    self.deliver("", json.dumps(
-                        {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
-                    ))
-            self._announce(tab.tab_id, "")
+            self._end_stream(tab, tab_ids)
 
     def close_all(self) -> None:
         """Close every stream (daemon shutdown)."""

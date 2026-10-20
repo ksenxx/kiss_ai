@@ -35,9 +35,41 @@ function installSpeech(win) {
 /** Assert that the robotic Web Speech voice was never used. */
 function assertNoSpeech(spoken, scenario) {
   assert.strictEqual(
-    spoken.length, 0,
+    spoken.length,
+    0,
     `${scenario}: Web Speech must never speak, spoke ` +
-      JSON.stringify(spoken.map(u => u.text)));
+      JSON.stringify(spoken.map(u => u.text)),
+  );
 }
 
-module.exports = {installSpeech, assertNoSpeech};
+/**
+ * Install a recording `Audio` constructor on a jsdom window.  Every
+ * player built is returned with its `src`, a `playCalls` counter and
+ * `fire(type)`, which invokes the `on<type>` handler the page set
+ * (`fire('ended')`, `fire('error')`).
+ *
+ * @param {*} [playResult] What `play()` returns: a promise, or a function
+ *   of the player returning one; `undefined` resolves at once.
+ * @returns {Array<object>} Every player the page constructed, in order.
+ */
+function installAudio(win, playResult) {
+  const players = [];
+  win.Audio = function Audio(src) {
+    this.src = src;
+    this.playCalls = 0;
+    this.play = () => {
+      this.playCalls++;
+      const result =
+        typeof playResult === 'function' ? playResult(this) : playResult;
+      return result === undefined ? Promise.resolve() : result;
+    };
+    this.fire = type => {
+      const handler = this['on' + type];
+      if (typeof handler === 'function') handler({type});
+    };
+    players.push(this);
+  };
+  return players;
+}
+
+module.exports = {installSpeech, assertNoSpeech, installAudio};

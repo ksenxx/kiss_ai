@@ -31,7 +31,12 @@ from kiss.agents.seas.write_paper.write_paper_sea import WritePaperSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -161,12 +166,9 @@ def test_sea_methods_follow_the_user_contract() -> None:
 def test_slash_write_paper_resolves_to_the_bundled_sea() -> None:
     """``/write_paper <instructions>`` resolves to the instructions and this file."""
     assert sea_commands.get_command("write_paper") == _SEA_PATH
-    hit = sea_commands.slash_command_task("/write_paper Write a paper on X")
-    assert hit is not None
-    task_text, path = hit
-    assert path == _SEA_PATH
-    assert task_text == "Write a paper on X"
-    assert sea_commands.sea_settings(path) == sea_commands.base_settings([WritePaperSea()])
+    assert sea_commands.slash_command_task("/write_paper Write a paper on X") == (
+        "Write a paper on X", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([WritePaperSea()])
 
 
 def test_check_paper_flags_the_sloppy_prose_and_skips_non_prose(tmp_path: Path) -> None:
@@ -494,14 +496,14 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
 
     assert len(agentic) == 2
     for request in agentic:
-        names = {t["function"]["name"] for t in request["tools"]}
+        names = tool_names(request)
         expected = {"check_paper", "build_paper", "Bash", "run_parallel", "go_to_url", "finish"}
         assert expected <= names, names
         system = system_message(request)
         assert not system.startswith(write_paper_sea.SYSTEM_PROMPT)
         assert "# Paper-writing agent" in system
         assert "Em dashes: zero in prose" in system
-    tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
-    assert len(tool_results) == 1, agentic[1]["messages"]
-    assert "summary: 7 gate(s) failed" in str(tool_results[0]["content"])
-    assert "antithesis: 6 (limit 5) FAIL" in str(tool_results[0]["content"])
+    results = tool_results(agentic[1])
+    assert len(results) == 1, agentic[1]["messages"]
+    assert "summary: 7 gate(s) failed" in results[0]
+    assert "antithesis: 6 (limit 5) FAIL" in results[0]

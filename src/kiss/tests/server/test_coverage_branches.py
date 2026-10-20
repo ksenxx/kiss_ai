@@ -17,7 +17,6 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -165,19 +164,6 @@ class TestAgentServerBranches:
         server._emit_pending_worktree()
         wt_events = [e for e in events if e.get("type") == "worktree_done"]
         assert len(wt_events) == 0
-
-
-class TestHandleMessageContentBlockNoIsError:
-    """Cover the case where content block lacks is_error/content attributes."""
-
-    def test_block_without_is_error(self):
-        p = JsonPrinter()
-        p.start_recording()
-        block = SimpleNamespace(some_other_attr="value")
-        msg = SimpleNamespace(content=[block])
-        p._handle_message(msg)
-        events = p.stop_recording()
-        assert len(events) == 0
 
 
 class TestAgentServerMoreBranches:

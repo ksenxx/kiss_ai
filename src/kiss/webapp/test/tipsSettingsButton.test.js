@@ -12,43 +12,23 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-
-const projectRoot = path.resolve(__dirname, '..');
-const MEDIA = path.join(projectRoot, 'media');
-
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok - ${name}`);
-  } catch (err) {
-    failures.push({name, err});
-    console.log(`  FAIL - ${name}: ${err && err.message}`);
-  }
-}
-
-const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
+const {JSDOM} = require('jsdom');
+const {newDom, MEDIA} = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
+const {test, report} = makeRunner();
 
 // The real chat.html markup with its placeholders blanked and its script
 // tags removed; tips.js (and marked) are then evaluated in the page the
-// way web_server._build_html serves them.
+// way web_server._build_html serves them (main.js is never loaded).
 function loadChatDom(cfg, {withConfig = true, withMarked = true} = {}) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {runScripts: 'outside-only'});
+  const win = newDom({runScripts: 'outside-only', bodyClass: 'remote-chat'});
   const run = file =>
-    dom.window.eval(fs.readFileSync(path.join(MEDIA, file), 'utf-8'));
+    win.eval(fs.readFileSync(path.join(MEDIA, file), 'utf-8'));
   if (withMarked) run('marked.min.js');
-  if (withConfig) dom.window.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
+  if (withConfig) win.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
   run('tips.js');
   run('panelCopy.js');
-  return dom.window;
+  return win;
 }
 
 function panel(win) {
@@ -185,7 +165,10 @@ test('bulb also dismisses-and-reopens after a fresh-install auto-show', () => {
   const win = loadChatDom({tips: THREE_TIPS, show: true});
   const btn = win.document.getElementById('tips-btn');
   btn.click();
-  assert.strictEqual(win.document.querySelectorAll('kiss-tips-panel').length, 1);
+  assert.strictEqual(
+    win.document.querySelectorAll('kiss-tips-panel').length,
+    1,
+  );
   panelParts(win).close.click();
   btn.click();
   assert.strictEqual(panelParts(win).counter.textContent, '1 / 3');
@@ -228,11 +211,10 @@ test('tips.js tolerates a DOM without #tips-btn', () => {
     `window.__TIPS__ = ${JSON.stringify({tips: THREE_TIPS, show: false})};`,
   );
   dom.window.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf-8'));
-  assert.strictEqual(dom.window.document.querySelector('kiss-tips-panel'), null);
+  assert.strictEqual(
+    dom.window.document.querySelector('kiss-tips-panel'),
+    null,
+  );
 });
 
-if (failures.length > 0) {
-  console.error(`\n${failures.length} test(s) failed, ${passed} passed`);
-  process.exit(1);
-}
-console.log(`\nAll ${passed} tipsSettingsButton tests passed`);
+report('tipsSettingsButton');

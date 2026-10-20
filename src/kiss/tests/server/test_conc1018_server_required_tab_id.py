@@ -10,7 +10,9 @@ used to write ``""`` back for an ABSENT field too, so
 ``validate_command`` (which treats only ``None`` as missing) never
 fired the ``required=("tabId",)`` declared for ``closeTab``, ``openTab``
 and ``interruptTool``: the handler then silently ignored the command
-and the client got no reply at all (findings H2-F2).
+and the client got no reply at all (findings H2-F2).  A whitespace-only
+``tabId`` had the same hole (V3-1): canonicalised to ``""`` it counted
+as present, and the handlers return silently on an empty id.
 
 Real daemon over its local WSS endpoint, one real client connection.
 """
@@ -34,6 +36,30 @@ class RequiredTabIdTest(TwoClientHarness):
                 text=f"Invalid {name} command: missing tabId",
             )
         self.assertEqual([e.get("tabId") for e in client.of_type("error")], [None] * 3)
+
+    def test_blank_tab_id_is_answered_with_an_error(self) -> None:
+        client = self.open_client("a")
+        client.ready()
+        for name, tab_id in (("closeTab", "   "), ("openTab", ""), ("interruptTool", 7)):
+            client.send({"type": name, "tabId": tab_id})
+            self.wait_event(
+                client,
+                "error",
+                text=f"Invalid {name} command: missing tabId",
+            )
+        self.assertEqual([e.get("tabId") for e in client.of_type("error")], [None] * 3)
+
+    def test_non_str_tab_id_on_a_tab_less_command_is_still_serviced(self) -> None:
+        # ``ready`` requires no ``tabId``: a non-string one is treated as
+        # absent and the frame is serviced, and the connection goes on
+        # to dispatch the next command (the detached-routing key used to
+        # be built from the raw value, which is unhashable here).
+        client = self.open_client("a")
+        client.send({"type": "ready", "tabId": {"bad": 1}, "restoredTabs": []})
+        self.wait_event(client, "focusInput", tabId="")
+        client.send({"type": "ready", "tabId": "t-after", "restoredTabs": []})
+        self.wait_event(client, "focusInput", tabId="t-after")
+        self.assertEqual(client.of_type("error"), [])
 
     def test_present_tab_id_is_stripped_and_accepted(self) -> None:
         client = self.open_client("a")

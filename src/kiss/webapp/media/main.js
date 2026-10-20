@@ -605,9 +605,12 @@
       else removeNotification(id);
     });
     if (ev.dontShowAgain) {
-      // "Do not show this": ticking it tells the daemon to retire the
-      // notice for good (every browser of this daemon), which answers
-      // with a close for the toast; this window drops it at once.
+      // "Do not show this again": ticking it retires the notice for
+      // good.  A page-side notice passes `onDontShowAgain`, which
+      // records the choice (localStorage, this browser); a daemon
+      // notice has none, so the daemon is told instead and retires it
+      // for every browser of this daemon, answering with a close for
+      // the toast.  This window drops the toast at once either way.
       const optOut = document.createElement('label');
       optOut.className = 'kiss-notification-opt-out';
       const box = document.createElement('input');
@@ -615,11 +618,12 @@
       box.className = 'kiss-notification-opt-out-box';
       box.addEventListener('change', () => {
         if (!box.checked) return;
-        api.send({type: 'dismissNotice', id: String(id)});
+        if (typeof ev.onDontShowAgain === 'function') ev.onDontShowAgain();
+        else api.send({type: 'dismissNotice', id: String(id)});
         removeNotification(id);
       });
       optOut.appendChild(box);
-      optOut.appendChild(document.createTextNode(' Do not show this'));
+      optOut.appendChild(document.createTextNode(' Do not show this again'));
       content.appendChild(optOut);
     }
     body.appendChild(icon);
@@ -753,7 +757,7 @@
     const composerHidden = document.body.classList.contains('content-tab-open');
     const fallback = composerHidden
       ? document.querySelector('#tab-list .chat-tab.active')
-      : document.getElementById('task-input');
+      : inp;
     if (fallback) fallback.focus();
   }
 
@@ -1111,12 +1115,16 @@
 
   let tabs = [];
   let activeTabId = '';
-  // Per tab, the registered machine its tasks run on ('' = this
-  // machine): the chat header's drop-down (renderChatMachine).  The
-  // tabs whose entry is a pick the user has not submitted yet: the
-  // daemon's binding (`tabMachine`) does not overwrite it.
-  const tabMachines = new Map();
-  const tabMachinePicked = new Set();
+  // The machine a new chat's tasks run on ('' = this machine): the chat
+  // header's drop-down pick, ONE global setting the daemon persists
+  // (config `last_machine`) and broadcasts to every surface
+  // (`machineChanged`).  See tabMachine for what the drop-down shows.
+  let globalMachine = '';
+  // Per tab, a drop-down pick the user has not submitted yet on a chat
+  // that shows a task: where that chat's NEXT task goes (the daemon's
+  // binding does not overwrite it).  '' is an explicit pick of this
+  // machine.
+  const tabMachinePicks = new Map();
   // Per tab, the machine the daemon bound it to (its `tabMachine`
   // announcements alone, never a pick): where the chat the tab SHOWS
   // lives.  Not persisted: the daemon announces it again on `ready`.
@@ -1479,7 +1487,6 @@
     }
     worktreeBar = null;
     if (inputContainer) inputContainer.style.display = '';
-    persistTabState();
   }
 
   // The single place that moves the on-screen chat tab. The empty
@@ -1644,8 +1651,7 @@
     if (tab.worktreeBarEl) {
       worktreeBar = tab.worktreeBarEl;
       tab.worktreeBarEl = null;
-      const area = document.getElementById('input-area');
-      area.insertBefore(worktreeBar, area.firstChild);
+      inputAreaEl.insertBefore(worktreeBar, inputAreaEl.firstChild);
     }
     const hideInput = worktreeBar || (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
@@ -1710,22 +1716,6 @@
     theme: readAppearance(REMOTE_THEME_KEY, ['light', 'dark', 'auto'], 'light'),
     contrast: readAppearance(REMOTE_CONTRAST_KEY, ['low', 'high'], 'low'),
   };
-
-  /**
-   * The theme mode in force: 'light', 'dark' or 'auto'.
-   * @returns {string}
-   */
-  function getSavedRemoteTheme() {
-    return appearance.theme;
-  }
-
-  /**
-   * The contrast in force: 'high' or 'low'.
-   * @returns {string}
-   */
-  function getSavedRemoteContrast() {
-    return appearance.contrast;
-  }
 
   /**
    * Adopt an appearance choice and remember it; private browsing may
@@ -1793,7 +1783,7 @@
   }
 
   function updateAutoThemeButton(btn) {
-    const auto = getSavedRemoteTheme() === 'auto';
+    const auto = appearance.theme === 'auto';
     btn.setAttribute('aria-checked', auto ? 'true' : 'false');
     btn.classList.toggle('checked', auto);
   }
@@ -1833,7 +1823,7 @@
     document.body.classList.toggle('light-theme', theme === 'light');
     document.body.classList.toggle(
       'high-contrast',
-      getSavedRemoteContrast() === 'high',
+      appearance.contrast === 'high',
     );
     setHljsTheme(theme);
     updateAppearanceButtons();
@@ -1877,10 +1867,12 @@
    * Define Monaco's 'kiss-light' or 'kiss-dark' theme, whichever matches
    * the page's current theme, from the page's --theme-* palette, and
    * switch Monaco to it.  Monaco's theme is global, so this recolours
-   * every open editor.  The palette is read from <body> because Monaco
-   * sets its own --theme-* variables on each .monaco-editor element.
+   * every open editor: it runs once when Monaco has loaded
+   * (ensureMonaco) and again whenever the page's palette changes
+   * (applyRemoteTheme).  The palette is read from <body> because
+   * Monaco sets its own --theme-* variables on each .monaco-editor
+   * element.
    * @param {object} monaco The loaded Monaco API (window.monaco).
-   * @returns {string} The name of the theme now in use.
    */
   function applyContentMonacoTheme(monaco) {
     const light = document.body.classList.contains('light-theme');
@@ -1900,7 +1892,6 @@
       colors,
     });
     monaco.editor.setTheme(name);
-    return name;
   }
 
   /** Pin the palette opposite to the one on screen (leaves auto mode). */
@@ -1918,7 +1909,7 @@
       ? 'low'
       : 'high';
     saveAppearance(REMOTE_CONTRAST_KEY, next);
-    applyRemoteTheme(getSavedRemoteTheme());
+    applyRemoteTheme(appearance.theme);
   }
 
   /** Follow the time of day: light from 7 am, dark from 7 pm. */
@@ -1933,7 +1924,7 @@
    * open page flips at 7 am and 7 pm.
    */
   function refreshAutoRemoteTheme() {
-    if (getSavedRemoteTheme() !== 'auto') return;
+    if (appearance.theme !== 'auto') return;
     const light = document.body.classList.contains('light-theme');
     if ((resolveRemoteTheme('auto') === 'light') !== light) {
       applyRemoteTheme('auto');
@@ -1946,7 +1937,7 @@
 
   /** Start the minute check when auto mode is on, stop it otherwise. */
   function syncAutoThemeTimer() {
-    const auto = getSavedRemoteTheme() === 'auto';
+    const auto = appearance.theme === 'auto';
     if (auto && autoThemeTimer === null) {
       autoThemeTimer = setInterval(refreshAutoRemoteTheme, AUTO_THEME_CHECK_MS);
     } else if (!auto && autoThemeTimer !== null) {
@@ -2353,6 +2344,10 @@
     }
     if (tabId === activeTabId) return;
     saveCurrentTab();
+    // One persist per switch.  The selection it records is a chat: a
+    // content tab taking over the stacked layout is persisted before
+    // it does, so a reload lands back on the chat.
+    if (tab.isContentTab) persistTabState();
     // activateAdjacentTab owns the activation tail (restore, running
     // state, timers, chevron, focus); only the bar render and the
     // selection persistence are this caller's extras.
@@ -2506,8 +2501,7 @@
    */
   function forgetClosedTabState(id) {
     forgetPendingFileLinks(id);
-    tabMachines.delete(id);
-    tabMachinePicked.delete(id);
+    tabMachinePicks.delete(id);
     tabBoundMachines.delete(id);
     discardReadyReports(id);
   }
@@ -2559,8 +2553,7 @@
     // window blurs with the frame as the active element.
     window.addEventListener('blur', onWindowBlurIntoContentFrame);
     const app = document.getElementById('app');
-    const inputArea = document.getElementById('input-area');
-    if (app) app.insertBefore(contentArea, inputArea || null);
+    if (app) app.insertBefore(contentArea, inputAreaEl);
     return contentArea;
   }
 
@@ -2784,12 +2777,18 @@
 
   /** A Monaco editor in the content pane re-measures after the split moves. */
   function layoutShownContentEditor() {
-    const tab = getTab(shownContentTabId());
-    if (tab && tab.contentEditor && tab.contentEditor.layout) {
-      try {
-        tab.contentEditor.layout();
-      } catch (_e) {}
-    }
+    layoutContentEditor(getTab(shownContentTabId()));
+  }
+
+  /**
+   * Re-measure a tab's Monaco editor (a shown tab, a moved split).
+   * @param {object|null} tab The content tab, or null for none.
+   */
+  function layoutContentEditor(tab) {
+    if (!tab || !tab.contentEditor || !tab.contentEditor.layout) return;
+    try {
+      tab.contentEditor.layout();
+    } catch (_e) {}
   }
 
   /**
@@ -2839,8 +2838,7 @@
     // actions). CSS scoped by `content-tab-open` hides the text box
     // and the chat-only controls (Inject promptlet, model picker,
     // Send) instead — they act on a transcript that is not on screen.
-    const inputArea = document.getElementById('input-area');
-    if (inputArea) inputArea.style.display = '';
+    inputAreaEl.style.display = '';
     document.body.classList.toggle('content-tab-open', !visible);
   }
 
@@ -2858,11 +2856,7 @@
       v.style.display = 'none';
     });
     if (tab.contentViewEl) tab.contentViewEl.style.display = '';
-    if (tab.contentEditor && tab.contentEditor.layout) {
-      try {
-        tab.contentEditor.layout();
-      } catch (_e) {}
-    }
+    layoutContentEditor(tab);
     syncBrowserTabVisibility(tab);
     syncTerminalTabVisibility(tab);
     // A path:NN link opened in the background rendered its editor at
@@ -2961,7 +2955,6 @@
     const shown = getTab(shownContentTabId());
     if (ev.focus && (!ev.popup || (shown && shown.isBrowserTab))) {
       switchToTab(tab.id);
-      renderTabBar();
     } else {
       renderBackgroundContentTab(tab);
     }
@@ -3043,7 +3036,6 @@
     );
     tab.isContentTab = true;
     tab.isTerminalTab = true;
-    tab.terminalMachine = machine;
     tab.contentNotAFile = true;
     tab.contentPath = '';
     tab.ownerTabId = owner ? owner.id : '';
@@ -3211,6 +3203,7 @@
     // or listing in the same tab must not keep the old one.
     tab.contentFileVersion = '';
     tab.contentPreviewHolder = null;
+    closeContentPreviewPort(tab);
     tab.contentMonacoHolder = null;
     tab.contentModeBtn = null;
     if (tab.contentMenuBar) {
@@ -3430,6 +3423,7 @@
     };
     const flight = new Promise((resolve, reject) => {
       if (window.monaco && window.monaco.editor) {
+        applyContentMonacoTheme(window.monaco);
         resolve(window.monaco);
         return;
       }
@@ -3449,6 +3443,7 @@
             () => {
               if (dead) return;
               clearTimeout(timer);
+              applyContentMonacoTheme(window.monaco);
               resolve(window.monaco);
             },
             err => {
@@ -3528,7 +3523,6 @@
         automaticLayout: true,
         minimap: {enabled: false},
         scrollBeyondLastLine: false,
-        theme: applyContentMonacoTheme(monaco),
       });
       tab.contentEditor = editor;
       appendContentMenuBar(tab, holder, editable);
@@ -3575,10 +3569,7 @@
    * When the Monaco CDN is unreachable, a unified line-by-line diff of
    * the two texts is shown as plain text instead.
    */
-  function renderDiffContent(tab, holder, ev) {
-    const language = languageFromPath(
-      String(ev.languageName || ev.name || '').toLowerCase(),
-    );
+  function renderDiffContent(tab, holder, ev, language) {
     const original = ev.diffOriginal || '';
     const modified = ev.content || '';
     function onMonaco(monaco) {
@@ -3590,7 +3581,6 @@
         renderSideBySide: true,
         minimap: {enabled: false},
         scrollBeyondLastLine: false,
-        theme: applyContentMonacoTheme(monaco),
       });
       const models = [
         monaco.editor.createModel(original, language),
@@ -4126,6 +4116,36 @@
   );
   window.addEventListener('resize', closeContentMenu);
 
+  /**
+   * Show *path* in a save bar's path label.  The CSS clips the START
+   * of a long path (direction: rtl) so the file name stays visible;
+   * the LRM marks keep the slashes at both ends from being reordered
+   * by the bidi algorithm.
+   *
+   * @param {HTMLElement} pathEl The `.content-save-path` span.
+   * @param {string} path The file's path.
+   */
+  function paintContentSavePath(pathEl, path) {
+    pathEl.textContent = '\u200e' + path + '\u200e';
+    pathEl.title = path;
+  }
+
+  /**
+   * Point a file tab at *to*, the path its file was renamed or moved
+   * to: the tab's title and its save bar follow.
+   *
+   * @param {object} tab The content tab.
+   * @param {string} to The new path.
+   */
+  function moveContentTab(tab, to) {
+    tab.contentPath = to;
+    tab.title = pathBaseName(to);
+    const pathEl =
+      tab.contentSaveBar &&
+      tab.contentSaveBar.querySelector('.content-save-path');
+    if (pathEl) paintContentSavePath(pathEl, to);
+  }
+
   // The bar above an editable content tab's editor: the file's path,
   // a status word (Unsaved changes / Saving / Saved / the error), and
   // the Save button.
@@ -4134,11 +4154,7 @@
     bar.className = 'content-save-bar';
     const pathEl = document.createElement('span');
     pathEl.className = 'content-save-path';
-    // The CSS clips the START of a long path (direction: rtl) so the
-    // file name stays visible; the LRM marks keep the slashes at both
-    // ends from being reordered by the bidi algorithm.
-    pathEl.textContent = '\u200e' + tab.contentPath + '\u200e';
-    pathEl.title = tab.contentPath;
+    paintContentSavePath(pathEl, tab.contentPath);
     const status = document.createElement('span');
     status.className = 'content-save-status';
     status.setAttribute('role', 'status');
@@ -4630,8 +4646,11 @@
   // test_hostile_preview_page_cannot_forge_a_save).
   function wireContentPreviewSaveKey(tab, iframe) {
     if (typeof MessageChannel !== 'function') return;
+    // The port of the iframe this one replaces is done with.
+    closeContentPreviewPort(tab);
     // eslint-disable-next-line no-undef -- MessageChannel is a browser global
     const channel = new MessageChannel();
+    tab.contentPreviewPort = channel.port1;
     iframe.addEventListener('load', () => {
       try {
         iframe.contentWindow.postMessage({kissPreviewSavePort: true}, '*', [
@@ -4646,6 +4665,13 @@
       if (!iframe.isConnected) return;
       saveContentTab(tab, false);
     };
+  }
+
+  /** Close a previewable tab's save port (its iframe is going away). */
+  function closeContentPreviewPort(tab) {
+    if (!tab.contentPreviewPort) return;
+    tab.contentPreviewPort.close();
+    tab.contentPreviewPort = null;
   }
 
   // A .md or .html file opens as its rendered preview — like VS Code's
@@ -4719,19 +4745,14 @@
       const holder = document.createElement('div');
       holder.className = 'content-monaco-holder';
       view.appendChild(holder);
+      const language = languageFromPath(
+        String(ev.languageName || ev.name || '').toLowerCase(),
+      );
       if (ev.isDiff) {
-        renderDiffContent(tab, holder, ev);
+        renderDiffContent(tab, holder, ev, language);
         return;
       }
-      renderCodeContent(
-        tab,
-        holder,
-        ev.content || '',
-        languageFromPath(
-          String(ev.languageName || ev.name || '').toLowerCase(),
-        ),
-        false,
-      );
+      renderCodeContent(tab, holder, ev.content || '', language, false);
       return;
     }
     // A path:NN link carries the line the file should open at (echoed
@@ -5333,26 +5354,23 @@
    * sub-agent.
    *
    * @param {string} parentId The parent's tab id ('' for none).
-   * @param {string} tabId Deterministic id for the new tab; '' keeps
-   *     the random id makeTab minted (legacy callers/tests).
+   * @param {string} tabId The new tab's deterministic id
+   *     (subagentTabIdFor).
    * @returns {object} The new tab object.
    */
   function createBackgroundSubagentTab(parentId, tabId) {
-    if (tabId) {
-      // One id, one tab: the deterministic id may already be open
-      // (e.g. the daemon's openSubagentTab announcement landed before
-      // this spawn was processed).  Reuse it instead of stacking a
-      // second tab under the same id.
-      const existing = getTab(tabId);
-      if (existing) {
-        existing.isSubagentTab = true;
-        if (parentId && parentId !== existing.id)
-          existing.parentTabId = parentId;
-        return existing;
-      }
+    // One id, one tab: the deterministic id may already be open
+    // (e.g. the daemon's openSubagentTab announcement landed before
+    // this spawn was processed).  Reuse it instead of stacking a
+    // second tab under the same id.
+    const existing = getTab(tabId);
+    if (existing) {
+      existing.isSubagentTab = true;
+      if (parentId && parentId !== existing.id) existing.parentTabId = parentId;
+      return existing;
     }
     const subTab = makeTab('new chat');
-    if (tabId) subTab.id = tabId;
+    subTab.id = tabId;
     if (parentId) subTab.parentTabId = parentId;
     subTab.isSubagentTab = true;
     placeSubagentTabAfterParent(subTab, parentId);
@@ -5487,11 +5505,11 @@
     saveCurrentTab();
     const tab = makeTab('new chat');
     tab.inputValue = pendingText;
-    // Bound before the tab shows, so its first header repaint and
-    // the side panels' sync (restoreTab) already see the machine.
-    if (machine) {
-      tabMachines.set(tab.id, machine);
-      tabMachinePicked.add(tab.id);
+    // Picked before the tab shows, so its first header repaint and
+    // the side panels' sync (restoreTab) already see the machine; a
+    // tab opened without one shows the global pick (tabMachine).
+    if (typeof machine === 'string' && machine !== globalMachine) {
+      tabMachinePicks.set(tab.id, machine);
     }
     tabs.push(tab);
     restoreTab(tab);
@@ -5518,7 +5536,6 @@
   // state persisted locally is what stays client-local by design: the
   // selected tab and the drawer preferences.
   function persistTabState() {
-    const composer = document.getElementById('task-input');
     const active = getTab(activeTabId);
     // Every tab's unsent prompt, keyed by tab id.  The user can reload
     // the page any time (a phone's browser also evicts and restores
@@ -5530,7 +5547,7 @@
     const inputDrafts = {};
     const askDrafts = {};
     tabs.forEach(t => {
-      const typed = t === active ? composer && composer.value : t.inputValue;
+      const typed = t === active ? inp.value : t.inputValue;
       // While the composer is the answer box the prompt is the parked
       // one (enterAnswerMode) and what is typed is the answer.
       const asked = t.askPendingQuestion !== null;
@@ -5551,8 +5568,7 @@
       chatId: activeTabId,
       inputDrafts,
       askDrafts,
-      tabMachines: Object.fromEntries(tabMachines),
-      tabMachinePicked: Array.from(tabMachinePicked),
+      tabMachinePicks: Object.fromEntries(tabMachinePicks),
       inputDrawerCollapsed: inputDrawerCollapsed,
       inputDrawerUserSet: inputDrawerUserSet,
       drawersVersion: DRAWERS_VERSION,
@@ -5825,6 +5841,11 @@
 
   const DRAWERS_VERSION = 3;
   const isMobileRemote = isMobileRemoteWebApp();
+  // A phone or tablet reaches the chats and the task info by swiping
+  // (the phone screens, see onMobileSwipe), so remote-codex.css drops
+  // the composer's two drawer buttons under this class.  A narrow
+  // mouse-only window keeps them: it cannot swipe.
+  if (isMobileRemote) document.body.classList.add('remote-mobile');
   // The composer stays reachable by default. On a phone the textbox folds
   // away while a task is running (see syncMobileInputDrawer) to give the
   // transcript more room; the button bar below it stays visible either way.
@@ -5897,18 +5918,10 @@
         }
       });
     }
-    const machines = saved && saved.tabMachines;
-    if (machines && typeof machines === 'object') {
-      Object.keys(machines).forEach(id => {
-        if (typeof machines[id] === 'string' && machines[id]) {
-          tabMachines.set(id, machines[id]);
-        }
-      });
-    }
-    const picked = saved && saved.tabMachinePicked;
-    if (Array.isArray(picked)) {
-      picked.forEach(id => {
-        if (typeof id === 'string' && id) tabMachinePicked.add(id);
+    const picks = saved && saved.tabMachinePicks;
+    if (picks && typeof picks === 'object') {
+      Object.keys(picks).forEach(id => {
+        if (typeof picks[id] === 'string') tabMachinePicks.set(id, picks[id]);
       });
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
@@ -6040,6 +6053,8 @@
   mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
 
   // metasections-coverage:start
+  /** The task-info panel (null on a page without one). */
+  const metaPanel = document.getElementById('meta-panel');
   // ---- Task-info panel sections: collapse, scroll, vertical resize ----
   //
   // #meta-panel stacks <section class="meta-section"> elements (Task
@@ -6148,17 +6163,19 @@
    * display:none panel).
    */
   function publishMetaSectionShare(expanded) {
-    const panel = document.getElementById('meta-panel');
-    if (!panel) return;
+    if (!metaPanel) return;
     let bodies = 0;
     for (const section of expanded) {
       const body = metaSectionBody(section);
       if (body) bodies += body.getBoundingClientRect().height;
     }
-    const overflow = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    const overflow = Math.max(
+      0,
+      metaPanel.scrollHeight - metaPanel.clientHeight,
+    );
     const free = Math.max(0, bodies - overflow);
     const share = expanded.length ? free / expanded.length : 0;
-    panel.style.setProperty('--meta-body-share', share.toFixed(2) + 'px');
+    metaPanel.style.setProperty('--meta-body-share', share.toFixed(2) + 'px');
   }
 
   /**
@@ -6168,6 +6185,15 @@
    * @param {boolean} collapsed True to show only its header.
    */
   function setMetaSectionCollapsed(section, collapsed) {
+    markMetaSectionCollapsed(section, collapsed);
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * setMetaSectionCollapsed without the layout, for a loop over every
+   * section that lays out once at its end.
+   */
+  function markMetaSectionCollapsed(section, collapsed) {
     section.classList.toggle('collapsed', collapsed);
     const toggle = section.querySelector('.meta-section-toggle');
     if (toggle)
@@ -6179,7 +6205,6 @@
     } catch (_e) {
       /* storage unavailable: the choice lasts for this page only */
     }
-    applyMetaSectionLayout();
   }
 
   /** The sections a task start expands (ids); every other one folds. */
@@ -6193,10 +6218,11 @@
    */
   function showMetaSectionsForRun() {
     for (const section of metaSections())
-      setMetaSectionCollapsed(
+      markMetaSectionCollapsed(
         section,
         !RUN_START_SECTIONS.includes(section.id),
       );
+    applyMetaSectionLayout();
   }
 
   /** The one section a fresh install or an update leaves expanded. */
@@ -6229,7 +6255,8 @@
     }
     if (seen === version) return;
     for (const section of metaSections())
-      setMetaSectionCollapsed(section, section.id !== FRESH_VERSION_SECTION);
+      markMetaSectionCollapsed(section, section.id !== FRESH_VERSION_SECTION);
+    applyMetaSectionLayout();
     try {
       localStorage.setItem(META_SECTIONS_VERSION_KEY, version);
     } catch (_e) {
@@ -6242,6 +6269,15 @@
    * return the body to its equal share of the panel.
    */
   function setMetaSectionHeight(section, height) {
+    storeMetaSectionHeight(section, height);
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * setMetaSectionHeight without the layout, for a loop over several
+   * sections that lays out once at its end.
+   */
+  function storeMetaSectionHeight(section, height) {
     if (height === undefined) delete metaSectionHeights[section.id];
     else metaSectionHeights[section.id] = height;
     try {
@@ -6255,7 +6291,6 @@
     } catch (_e) {
       /* storage unavailable: the height lasts for this page only */
     }
-    applyMetaSectionLayout();
   }
 
   /**
@@ -6291,11 +6326,12 @@
           metaSectionExpanded(other) &&
           metaSectionHeights[other.id] === undefined
         )
-          setMetaSectionHeight(
+          storeMetaSectionHeight(
             other,
             Math.round(otherBody.getBoundingClientRect().height),
           );
       }
+      applyMetaSectionLayout();
       startH = body.getBoundingClientRect().height;
       maxH = startH;
       for (const other of sections.slice(index + 1)) {
@@ -6372,7 +6408,8 @@
       return;
     }
     for (const other of metaSections())
-      setMetaSectionCollapsed(other, other !== section);
+      markMetaSectionCollapsed(other, other !== section);
+    applyMetaSectionLayout();
   }
 
   function setupMetaSections() {
@@ -6408,14 +6445,13 @@
       resetMetaSectionsForVersion(window.__TIPS__.version);
     // The equal share changes with the panel's height (a window resize,
     // the drawer opening): re-measure it then.
-    const panel = document.getElementById('meta-panel');
-    if (panel && typeof ResizeObserver === 'function')
-      new ResizeObserver(applyMetaSectionLayout).observe(panel);
+    if (metaPanel && typeof ResizeObserver === 'function')
+      new ResizeObserver(applyMetaSectionLayout).observe(metaPanel);
     // A section taken out of (or put back into) the stack with the
     // `hidden` attribute changes the shares and the separators too.
     // (The records are delivered later: a page torn down meanwhile,
     // as a test closes its window, has no document to lay out.)
-    if (panel && typeof MutationObserver === 'function') {
+    if (metaPanel && typeof MutationObserver === 'function') {
       const hiddenWatcher = new MutationObserver(() => {
         if (typeof document !== 'undefined') applyMetaSectionLayout();
       });
@@ -6445,10 +6481,9 @@
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
   const metaInfoRefreshBtn = document.getElementById('meta-info-refresh');
-  // The task-info panel and its mobile-drawer controls (the toggle in
-  // the composer's footer tools, the in-panel close button, the dimming
+  // The task-info panel's mobile-drawer controls (the toggle in the
+  // composer's footer tools, the in-panel close button, the dimming
   // backdrop — all remote mobile only, see remote-codex.css).
-  const metaPanel = document.getElementById('meta-panel');
   const metaOverlay = document.getElementById('meta-overlay');
   const metaDrawerBtn = document.getElementById('meta-drawer-btn');
   const metaCloseBtn = document.getElementById('meta-close');
@@ -6766,17 +6801,22 @@
     }
     // Focus follows the drawer: opening lands on its close button,
     // closing hands focus back to the toggle instead of stranding it
-    // on an off-screen control.
+    // on an off-screen control.  A phone hides the toggle (see
+    // body.remote-mobile), so there focus goes to the footer button
+    // beside its place; the textbox would raise the soft keyboard.
     try {
       if (open && !wasOpen) {
         if (metaCloseBtn) metaCloseBtn.focus();
       } else if (!open && wasOpen) {
+        const back = isMobileRemote
+          ? document.getElementById('new-chat-btn')
+          : metaDrawerBtn;
         if (
-          metaDrawerBtn &&
+          back &&
           document.activeElement &&
           metaPanel.contains(document.activeElement)
         ) {
-          metaDrawerBtn.focus();
+          back.focus();
         }
       }
     } catch (_e) {
@@ -6797,15 +6837,14 @@
    * @param {boolean} hidden True to slide the panel away.
    */
   function setMetaPanelHidden(hidden) {
-    const panel = document.getElementById('meta-panel');
-    if (!panel) return;
+    if (!metaPanel) return;
     hidden = !!hidden && document.body.classList.contains('content-pane-open');
     // Unchanged: leave `inert` alone (the phone drawer sets its own).
     if (document.body.classList.contains('meta-hidden') === hidden) return;
     document.body.classList.toggle('meta-hidden', hidden);
     // Off screen, the panel's controls leave the keyboard tab order.
-    if (typeof panel.toggleAttribute === 'function') {
-      panel.toggleAttribute('inert', hidden);
+    if (typeof metaPanel.toggleAttribute === 'function') {
+      metaPanel.toggleAttribute('inert', hidden);
     }
     const drawer = document.getElementById('meta-drawer');
     if (drawer) {
@@ -6814,7 +6853,7 @@
       // once the panel (and its close button) is inert, the panel's
       // close button once the drawer has faded out.
       const ae = document.activeElement;
-      if (hidden && ae && panel.contains(ae)) drawer.focus();
+      if (hidden && ae && metaPanel.contains(ae)) drawer.focus();
       else if (!hidden && ae === drawer && metaCloseBtn) metaCloseBtn.focus();
     }
     if (!hidden) refreshSidebarDataViews(false);
@@ -7056,17 +7095,21 @@
       api.getCronJobs(panelCommand()),
     );
     scheduleAddBtn.addEventListener('click', () =>
-      openScheduleAddForm({
-        values: {name: '', schedule: '', kind: 'prompt', what: ''},
-        saving: false,
-      }),
+      focusFirstFormField(
+        openScheduleAddForm({
+          values: {name: '', schedule: '', kind: 'prompt', what: ''},
+          saving: false,
+        }),
+      ),
     );
     machinesRefreshBtn.addEventListener('click', requestMachinesRefresh);
     machinesAddBtn.addEventListener('click', () =>
-      openMachineAddForm({
-        values: {name: '', address: '', password: ''},
-        saving: false,
-      }),
+      focusFirstFormField(
+        openMachineAddForm({
+          values: {name: '', address: '', password: ''},
+          saving: false,
+        }),
+      ),
     );
     appsRefreshBtn.addEventListener('click', requestAppsRefresh);
     spendRefreshBtn.addEventListener('click', () =>
@@ -7238,8 +7281,9 @@
    *     connection drops (releaseSidebarFormSaves): a repeated Enter
    *     or click meanwhile sends nothing again.
    * @param {function(): void} onCancel Closes the form.
-   * @returns {HTMLFormElement} The form; its first input gets focus
-   *     once attached (`form.querySelector('[name]').focus()`).
+   * @returns {HTMLFormElement} The form; the caller attaches it and,
+   *     when the user opened it, focuses its first field
+   *     (focusFirstFormField).
    */
   function sidebarInlineForm(fields, onSave, onCancel) {
     const form = document.createElement('form');
@@ -7362,6 +7406,103 @@
   }
 
   /**
+   * The field of a list's open in-place form that has the keyboard,
+   * with its caret, so a rebuild of the list (every poll reply) can
+   * give both back; null when the keyboard is elsewhere (the chat
+   * composer, say), which the rebuild must then leave alone.
+   *
+   * @param {HTMLElement} list The Schedule or Machines list.
+   * @returns {{name: string, start: number, end: number}|null} The
+   *     field's name and selection.
+   */
+  function openFormFocus(list) {
+    const active = document.activeElement;
+    if (!active || !active.name || !list.contains(active)) return null;
+    if (!active.closest('form.sidebar-inline-form')) return null;
+    return {
+      name: active.name,
+      start: active.selectionStart,
+      end: active.selectionEnd,
+    };
+  }
+
+  /**
+   * Give the keyboard back to the field openFormFocus recorded, in the
+   * list's rebuilt form.
+   *
+   * @param {HTMLElement} list The Schedule or Machines list.
+   * @param {{name: string, start: number, end: number}|null} focus
+   *     The record, or null for nothing to restore.
+   */
+  function restoreOpenFormFocus(list, focus) {
+    if (!focus) return;
+    const form = list.querySelector('form.sidebar-inline-form');
+    const field = form && form.elements[focus.name];
+    if (!field) return;
+    field.focus({preventScroll: true});
+    if (typeof focus.start === 'number' && typeof focus.end === 'number')
+      field.setSelectionRange(focus.start, focus.end);
+  }
+
+  /**
+   * The row of a list whose inline Delete confirmation is open, and
+   * which of its two buttons has the keyboard, so a rebuild of the
+   * list (every poll reply) can show the confirmation again instead
+   * of silently withdrawing a question the user is about to answer.
+   *
+   * @param {HTMLElement} list The Schedule or Machines list.
+   * @returns {{key: string, focused: string}|null} The row's
+   *     data-row-key and the class of the focused button ('' when the
+   *     keyboard is elsewhere), or null when no confirmation is open.
+   */
+  function openDeleteConfirm(list) {
+    for (const wrap of list.querySelectorAll('.sidebar-item-confirm')) {
+      if (wrap.style.display === 'none') continue;
+      const active = document.activeElement;
+      return {
+        key: wrap.closest('.sidebar-panel-row').dataset.rowKey,
+        focused: active && wrap.contains(active) ? active.className : '',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Show again, in the rebuilt list, the Delete confirmation
+   * openDeleteConfirm recorded, and give its button the keyboard back.
+   * A row that is gone (the entry was removed meanwhile) has nothing
+   * to restore.
+   *
+   * @param {HTMLElement} list The Schedule or Machines list.
+   * @param {{key: string, focused: string}|null} confirm The record,
+   *     or null for nothing to restore.
+   */
+  function restoreDeleteConfirm(list, confirm) {
+    if (!confirm) return;
+    const row = Array.from(list.querySelectorAll('.sidebar-panel-row')).find(
+      r => r.dataset.rowKey === confirm.key,
+    );
+    if (!row) return;
+    showSidebarDeleteConfirm(
+      row.querySelector('.sidebar-item-delete'),
+      row.querySelector('.sidebar-item-confirm'),
+    );
+    if (confirm.focused)
+      row.querySelector('.' + confirm.focused).focus({preventScroll: true});
+  }
+
+  /**
+   * Put the keyboard in the first field of an in-place form the user
+   * just opened (a rebuilt form keeps the keyboard where it was
+   * instead, see restoreOpenFormFocus).
+   *
+   * @param {HTMLFormElement} form The form.
+   */
+  function focusFirstFormField(form) {
+    form.querySelector('[name]').focus();
+  }
+
+  /**
    * Close the Schedule subpanel's open in-place form, if any (the add
    * row at the top of the list, or a row's editor), forgetting its
    * draft: one form at a time.
@@ -7395,6 +7536,7 @@
    * @param {{id: string, values: Object<string, string>, saving: boolean}} state
    *     The editor's state (see scheduleEdit): the values to show and
    *     whether its update is in flight.
+   * @returns {HTMLFormElement} The form.
    */
   function openScheduleEditor(li, job, state) {
     scheduleEdit = state;
@@ -7429,7 +7571,7 @@
     );
     form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
     li.appendChild(form);
-    form.querySelector('[name]').focus();
+    return form;
   }
 
   /**
@@ -7445,6 +7587,7 @@
    * @param {{values: Object<string, string>, saving: boolean}} state
    *     The form's state (see scheduleAdd): the values to show and
    *     whether its create is in flight.
+   * @returns {HTMLFormElement} The form.
    */
   function openScheduleAddForm(state) {
     closeScheduleForms();
@@ -7497,7 +7640,7 @@
     });
     row.appendChild(form);
     scheduleList.prepend(row);
-    form.querySelector('[name]').focus();
+    return form;
   }
 
   /**
@@ -7525,6 +7668,8 @@
     const draft = openFormValues(scheduleList);
     if (draft && scheduleEdit) scheduleEdit.values = draft;
     else if (draft && scheduleAdd) scheduleAdd.values = draft;
+    const focus = openFormFocus(scheduleList);
+    const confirm = openDeleteConfirm(scheduleList);
     scheduleList.textContent = '';
     scheduleStatus.textContent =
       error ||
@@ -7543,6 +7688,7 @@
       li.className = 'sidebar-panel-row sched-row';
       li.classList.toggle('paused', !job.enabled);
       li.tabIndex = 0;
+      li.dataset.rowKey = String(job.id);
       const task = String(job.what == null ? '' : job.what);
       const kind = job.kind === 'command' ? 'command' : 'task';
       const top = document.createElement('div');
@@ -7566,11 +7712,13 @@
           'Edit the job',
           () => {
             closeScheduleForms();
-            openScheduleEditor(li, job, {
-              id: job.id,
-              values: values,
-              saving: false,
-            });
+            focusFirstFormField(
+              openScheduleEditor(li, job, {
+                id: job.id,
+                values: values,
+                saving: false,
+              }),
+            );
           },
         ),
       );
@@ -7624,6 +7772,8 @@
         openScheduleEditor(li, job, scheduleEdit);
     }
     if (scheduleAdd) openScheduleAddForm(scheduleAdd);
+    restoreOpenFormFocus(scheduleList, focus);
+    restoreDeleteConfirm(scheduleList, confirm);
     applyMetaSectionLayout();
   }
 
@@ -7637,6 +7787,7 @@
    * @param {{values: Object<string, string>, saving: boolean}} state
    *     The form's state (see machineAdd): the values to show and
    *     whether its add is in flight.
+   * @returns {HTMLFormElement} The form.
    */
   function openMachineAddForm(state) {
     const open = machinesList.querySelector('.machine-add-row');
@@ -7677,7 +7828,7 @@
     form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
     row.appendChild(form);
     machinesList.prepend(row);
-    form.querySelector('[name]').focus();
+    return form;
   }
 
   /**
@@ -7714,6 +7865,8 @@
     if (added) revealMachinesSection();
     const draft = openFormValues(machinesList);
     if (draft && machineAdd) machineAdd.values = draft;
+    const focus = openFormFocus(machinesList);
+    const confirm = openDeleteConfirm(machinesList);
     machinesList.textContent = '';
     machinesStatusLine.textContent =
       error || (rows.length ? '' : 'No machines.');
@@ -7727,6 +7880,7 @@
       li.classList.toggle('unreachable', !reachable);
       li.tabIndex = 0;
       li.dataset.machine = String(m.name);
+      li.dataset.rowKey = String(m.name);
       const top = document.createElement('div');
       top.className = 'sidebar-panel-row-top';
       const dot = sidebarPanelSpan(
@@ -7772,6 +7926,8 @@
       machinesList.appendChild(li);
     }
     if (machineAdd) openMachineAddForm(machineAdd);
+    restoreOpenFormFocus(machinesList, focus);
+    restoreDeleteConfirm(machinesList, confirm);
     applyMetaSectionLayout();
   }
 
@@ -7796,12 +7952,15 @@
   }
 
   // -------------------------------------------------------------------
-  // The machine drop-down at the top of the chat pane shows, per tab,
-  // the registered machine the tab's tasks run on (tabMachines; '' =
-  // this machine); every submit carries the pick as `machine`, and the
-  // daemon binds the tab to that machine's daemon and relays its
-  // events (kiss.server.remote_tabs).  The picks are persisted with
-  // the drafts across reloads (persistTabState).  Next to it, after a
+  // The machine drop-down at the top of the chat pane shows the
+  // registered machine the active tab's next task runs on (tabMachine;
+  // '' = this machine): the machine of the task the chat shows, or the
+  // global pick for a new chat.  A pick is the global setting (the
+  // daemon persists it, every surface follows); every submit carries
+  // the tab's machine as `machine`, and the daemon binds the tab to
+  // that machine's daemon and relays its events
+  // (kiss.server.remote_tabs).  Unsent picks are persisted with the
+  // drafts across reloads (persistTabState).  Next to it, after a
   // ":", the working directory drop-down (renderChatWorkDir).
   const chatMachineSelect = document.getElementById('chat-machine');
   const chatWorkDirSelect = document.getElementById('chat-workdir');
@@ -7833,13 +7992,78 @@
   }
 
   /**
-   * The machine `tabId`'s tasks run on.
+   * Whether the chat `tab` shows a task, running or finished: the
+   * task it runs, the one it is waiting for, or a transcript.
+   *
+   * @param {Object} tab The chat tab.
+   * @returns {boolean} Whether a task is shown.
+   */
+  function tabShowsTask(tab) {
+    const shown = tab.id === activeTabId;
+    const taskId = shown ? currentTaskId : tab.currentTaskId;
+    if (taskId !== null && taskId !== undefined) return true;
+    if (tab.pendingTaskId) return true;
+    return !!String((shown ? currentTaskName : tab.taskText) || '').trim();
+  }
+
+  /**
+   * The machine of the chat `tab` shows: the daemon's binding (a bound
+   * tab shows, or is about to show, that machine's chat), this machine
+   * for an unbound chat that shows a task (tabShowsTask), null for a
+   * new chat (no task yet).
+   *
+   * @param {Object} tab The chat tab.
+   * @returns {?string} The registered machine's name, '' for this machine.
+   */
+  function tabChatMachine(tab) {
+    const bound = tabBoundMachine(tab.id);
+    if (bound) return bound;
+    return tabShowsTask(tab) ? '' : null;
+  }
+
+  /**
+   * The machine `tabId`'s next task runs on, what the drop-down shows
+   * for the tab: a pick not submitted yet; else the machine of the
+   * chat the tab shows (tabChatMachine); else -- a new chat -- the
+   * global pick.
    *
    * @param {string} tabId The tab.
    * @returns {string} The registered machine's name, '' for this machine.
    */
   function tabMachine(tabId) {
-    return tabMachines.get(tabId) || '';
+    const pick = tabMachinePicks.get(tabId);
+    if (typeof pick === 'string') return pick;
+    const tab = getTab(tabId);
+    const own = tab && !tab.isContentTab ? tabChatMachine(tab) : null;
+    return own === null ? globalMachine : own;
+  }
+
+  /**
+   * Adopt `machine` as the global pick (the daemon's broadcast, or
+   * this daemon's config on load) and repaint the drop-down, which
+   * shows it for a new chat.
+   *
+   * @param {*} machine The registered machine's name, '' for this machine.
+   */
+  function setGlobalMachine(machine) {
+    globalMachine = typeof machine === 'string' ? machine : '';
+    syncChatMachine();
+  }
+
+  /**
+   * The active tab's machine may have changed without a pick or a
+   * binding (the global pick moved, or the chat came to show a task --
+   * a history row opened, another surface's submit -- and no longer
+   * follows the global pick): when the drop-down shows another
+   * machine, repaint it and what follows it (the directory drop-down,
+   * the side panels).
+   */
+  function syncChatMachine() {
+    if (!chatMachineSelect) return;
+    const machine = activeMachine();
+    if (chatMachineSelect.value === machine) return;
+    renderChatMachine();
+    showMachineWorkDirs(machine);
   }
 
   /**
@@ -7866,9 +8090,9 @@
 
   /**
    * Repaint the drop-down for the active tab: this machine first, then
-   * every reachable registered machine, plus the tab's own pick when
-   * that machine is down right now (the pick is kept, the daemon
-   * refuses the submit with the reason).  A remote pick is `remote`
+   * every reachable registered machine, plus the tab's own machine
+   * (tabMachine) when it is down right now (the pick is kept, the
+   * daemon refuses the submit with the reason).  A remote pick is `remote`
    * (green: its machine answered the daemon's last ping) and, once a
    * `machines` reply has shown the machine down, `down` as well
    * (red).  Stays enabled while the chat
@@ -7885,14 +8109,10 @@
     if (localMachineName || reachable.length || chosen) {
       const names = reachable.slice();
       if (chosen && !names.includes(chosen)) names.push(chosen);
-      const option = (value, label) => {
-        const el = document.createElement('option');
-        el.value = value;
-        el.textContent = label;
-        chatMachineSelect.appendChild(el);
-      };
-      option('', localMachineName || 'this machine');
-      names.forEach(name => option(name, machineLabel(name)));
+      appendOption(chatMachineSelect, '', localMachineName || 'this machine');
+      names.forEach(name =>
+        appendOption(chatMachineSelect, name, machineLabel(name)),
+      );
       chatMachineSelect.value = chosen;
       chatMachineSelect.classList.toggle('remote', !!chosen);
       chatMachineSelect.classList.toggle(
@@ -7952,9 +8172,15 @@
       const tab = getTab(activeTabId);
       if (!tab || tab.isContentTab) return;
       const picked = chatMachineSelect.value;
-      if (picked) tabMachines.set(tab.id, picked);
-      else tabMachines.delete(tab.id);
-      tabMachinePicked.add(tab.id);
+      // The pick is the global setting (where every surface's new
+      // chats run; the daemon persists and broadcasts it).  On a chat
+      // that shows a task it is also where THAT chat's next task goes:
+      // kept until the submit, the daemon's binding standing meanwhile.
+      const own = tabChatMachine(tab);
+      if (own !== null && picked !== own) tabMachinePicks.set(tab.id, picked);
+      else tabMachinePicks.delete(tab.id);
+      globalMachine = picked;
+      api.setMachine({machine: picked});
       persistTabState();
       renderChatMachine();
       showMachineWorkDirs(picked);
@@ -9007,6 +9233,20 @@
     return rootIdentity(a) === rootIdentity(b);
   }
 
+  /**
+   * *p* after the entry *from* was renamed *to*: *p* itself when it
+   * is neither *from* nor inside it.
+   *
+   * @param {string} p A path.
+   * @param {string} from The renamed entry's old path.
+   * @param {string} to Its new path.
+   * @returns {string} The path *p* now has.
+   */
+  function pathAfterRename(p, from, to) {
+    if (p === from) return to;
+    return pathWithin(p, from) ? to + p.slice(from.length) : p;
+  }
+
   /** Whether *p* is *dir* itself or lies inside it (lexically). */
   function pathWithin(p, dir) {
     const win = isWindowsPath(dir);
@@ -9090,10 +9330,7 @@
     explorerDirs.clear();
     explorerTree.textContent = '';
     if (!roots.length) {
-      const empty = document.createElement('div');
-      empty.className = 'sidebar-empty';
-      empty.textContent = 'No workspace folder';
-      explorerTree.appendChild(empty);
+      sidebarEmpty(explorerTree, 'No workspace folder');
       return;
     }
     roots.forEach(dir => {
@@ -9868,6 +10105,17 @@
     }, 400);
   }
 
+  /**
+   * Reload Source Control now (a manual refresh, a git action done):
+   * the request goes out at once and supersedes any pending debounced
+   * one (its token would be stale anyway).
+   */
+  function reloadSourceControlNow() {
+    cancelScmRefreshTimer();
+    scmDirty = false;
+    requestSourceControl(sidebarWorkDir(), sidebarMachine());
+  }
+
   function cancelScmRefreshTimer() {
     if (scmRefreshTimer === null) return;
     clearTimeout(scmRefreshTimer);
@@ -9995,7 +10243,8 @@
     scmBadgeTimer = setInterval(pollScmBadge, SCM_BADGE_POLL_MS);
   }
 
-  function scmEmpty(container, text) {
+  /** Append the one-line placeholder of an empty Explorer / Git list. */
+  function sidebarEmpty(container, text) {
     const empty = document.createElement('div');
     empty.className = 'sidebar-empty';
     empty.textContent = text;
@@ -10081,17 +10330,17 @@
     }
     if (!scmWorkDir) {
       setScmChangesCount(0);
-      scmEmpty(scmChangesList, 'No workspace folder');
+      sidebarEmpty(scmChangesList, 'No workspace folder');
       return;
     }
     if (!scmStatus) {
       setScmChangesCount(0);
-      scmEmpty(scmChangesList, 'Loading...');
+      sidebarEmpty(scmChangesList, 'Loading...');
       return;
     }
     if (scmStatus.error) {
       setScmChangesCount(0);
-      scmEmpty(scmChangesList, String(scmStatus.error));
+      sidebarEmpty(scmChangesList, String(scmStatus.error));
       return;
     }
     const worktrees = scmWorktrees(scmStatus);
@@ -10101,7 +10350,7 @@
     });
     setScmChangesCount(total);
     if (!total && worktrees.length <= 1) {
-      scmEmpty(scmChangesList, 'No changes');
+      sidebarEmpty(scmChangesList, 'No changes');
       return;
     }
     // One repository (worktree) at a time: the current worktree's
@@ -10507,24 +10756,24 @@
     scmGraphList.textContent = '';
     if (!scmWorkDir) {
       scmGraphCount.textContent = '';
-      scmEmpty(scmGraphList, 'No workspace folder');
+      sidebarEmpty(scmGraphList, 'No workspace folder');
       return;
     }
     if (!scmLog) {
       scmGraphCount.textContent = '';
-      scmEmpty(scmGraphList, 'Loading...');
+      sidebarEmpty(scmGraphList, 'Loading...');
       return;
     }
     if (scmLog.error) {
       scmGraphCount.textContent = '';
-      scmEmpty(scmGraphList, String(scmLog.error));
+      sidebarEmpty(scmGraphList, String(scmLog.error));
       return;
     }
     const rows = scmGraphRows();
     const commitCount = rows.filter(r => !r.isWorktree).length;
     scmGraphCount.textContent = commitCount ? String(commitCount) : '';
     if (!rows.length) {
-      scmEmpty(scmGraphList, 'No commits');
+      sidebarEmpty(scmGraphList, 'No commits');
       return;
     }
     const layouts = computeGraphLanes(rows);
@@ -10617,14 +10866,13 @@
     container.textContent = '';
     const files = Array.isArray(commit.files) ? commit.files : [];
     if (!files.length) {
-      const note = document.createElement('div');
-      note.className = 'explorer-note';
-      note.style.setProperty('--depth', '1');
-      note.textContent =
+      explorerNote(
+        container,
+        1,
         commit.parents && commit.parents.length > 1
           ? '(merge commit)'
-          : '(no files)';
-      container.appendChild(note);
+          : '(no files)',
+      );
       return;
     }
     files.forEach(f => {
@@ -10792,8 +11040,10 @@
   // (or another Cut / Copy) replaces them, like VS Code's Explorer
   // clipboard.
   let explorerClipboard = null;
-  // "Select for Compare" remembers a file until "Compare with Selected".
-  let explorerCompareWith = '';
+  // "Select for Compare" remembers a file ({path, machine}) until
+  // "Compare with Selected"; it follows a rename and goes with a delete
+  // (handleFsResult), and is offered on its machine's tree only.
+  let explorerCompareWith = null;
   let sidebarRequestSeq = 0;
   // token -> the request that awaits a reply (fsResult / gitShow /
   // gitActionResult), so the reply can be acted on in context.
@@ -10808,11 +11058,6 @@
   function keyLabel(win, mac, linux) {
     if (IS_MAC) return mac;
     return IS_LINUX && linux ? linux : win;
-  }
-
-  /** Put *text* on the clipboard (Explorer / Git context menus). */
-  function copyTextToClipboard(text) {
-    window.PanelCopy.copyText(text);
   }
 
   /**
@@ -11068,36 +11313,51 @@
         request.machine || '',
       );
     }
+    // The editors and the Compare pick of the machine the action ran
+    // on: the same path on another machine is another file.
+    const machine = String(request.machine || '');
+    const compareOnMachine =
+      explorerCompareWith && explorerCompareWith.machine === machine;
     if (request.action === 'rename' && ev.path) {
       // An editor showing the renamed file (or one inside a renamed
       // folder) follows the new path, as VS Code's editors do.
       const from = String(request.path);
       const to = String(ev.path);
-      tabs.forEach(t => {
-        if (!t.isContentTab || typeof t.contentPath !== 'string') return;
-        if (t.contentPath === from) {
-          t.contentPath = to;
-          t.title = pathBaseName(to);
-        } else if (pathWithin(t.contentPath, from)) {
-          t.contentPath = to + t.contentPath.slice(from.length);
-        }
+      contentTabsOnMachine(machine).forEach(t => {
+        const moved = pathAfterRename(t.contentPath, from, to);
+        if (moved !== t.contentPath) moveContentTab(t, moved);
       });
+      if (compareOnMachine)
+        explorerCompareWith.path = pathAfterRename(
+          explorerCompareWith.path,
+          from,
+          to,
+        );
       renderTabBar();
     }
     if (request.action === 'delete') {
       const gone = String(request.path);
-      tabs
-        .filter(t => {
-          return (
-            t.isContentTab &&
-            typeof t.contentPath === 'string' &&
-            pathWithin(t.contentPath, gone)
-          );
-        })
-        .forEach(t => {
-          closeTab(t.id);
-        });
+      contentTabsOnMachine(machine)
+        .filter(t => pathWithin(t.contentPath, gone))
+        .forEach(t => closeTab(t.id));
+      if (compareOnMachine && pathWithin(explorerCompareWith.path, gone))
+        explorerCompareWith = null;
     }
+  }
+
+  /**
+   * The open file tabs of a machine ('' for this one).
+   *
+   * @param {string} machine The machine's name.
+   * @returns {Array<object>} The tabs, in tab order.
+   */
+  function contentTabsOnMachine(machine) {
+    return tabs.filter(
+      t =>
+        t.isContentTab &&
+        typeof t.contentPath === 'string' &&
+        String(t.ownerBrowseMachine || '') === machine,
+    );
   }
 
   // ---- Explorer inline input (New File / New Folder / Rename) ----
@@ -11275,14 +11535,16 @@
         label: 'Copy Path',
         key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
         run: () =>
-          copyTextToClipboard(rows.map(r => r.dataset.explorerPath).join('\n')),
+          window.PanelCopy.copyText(
+            rows.map(r => r.dataset.explorerPath).join('\n'),
+          ),
       },
       {
         id: 'copy-relative-path',
         label: 'Copy Relative Path',
         key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
         run: () =>
-          copyTextToClipboard(
+          window.PanelCopy.copyText(
             rows
               .map(r => {
                 return (
@@ -11450,18 +11712,29 @@
         id: 'select-for-compare',
         label: 'Select for Compare',
         run: () => {
-          explorerCompareWith = path;
+          explorerCompareWith = {path: path, machine: machine};
         },
       });
-      if (explorerCompareWith && explorerCompareWith !== path) {
+      if (
+        explorerCompareWith &&
+        explorerCompareWith.machine === machine &&
+        explorerCompareWith.path !== path
+      ) {
         items.push({
           id: 'compare-with-selected',
           label: 'Compare with Selected',
+          // The selection is read again when the item is activated:
+          // while the menu is open an fsResult may rename the selected
+          // file (the compare then uses its new path) or delete it
+          // (the selection is withdrawn and there is nothing to
+          // compare against).
           run: () => {
+            const selected = explorerCompareWith;
+            if (!selected) return;
             sendFsAction({
               machine: machine,
               action: 'compare',
-              path: explorerCompareWith,
+              path: selected.path,
               dest: path,
               root: root,
             });
@@ -11722,9 +11995,7 @@
       sidebarInfo(labels[ev.action] || ev.output || 'Done');
     }
     // The repository (may have) changed: reload both views.
-    cancelScmRefreshTimer();
-    scmDirty = false;
-    requestSourceControl(sidebarWorkDir(), sidebarMachine());
+    reloadSourceControlNow();
     explorerDirty = true;
     refreshSidebarDataViews(false);
   }
@@ -11932,12 +12203,13 @@
       {
         id: 'copy-commit-hash',
         label: 'Copy Commit Hash',
-        run: () => copyTextToClipboard(sha),
+        run: () => window.PanelCopy.copyText(sha),
       },
       {
         id: 'copy-commit-message',
         label: 'Copy Commit Message',
-        run: () => copyTextToClipboard(commit.message || commit.subject || ''),
+        run: () =>
+          window.PanelCopy.copyText(commit.message || commit.subject || ''),
       },
     ];
   }
@@ -11983,13 +12255,13 @@
         id: 'copy-path',
         label: 'Copy Path',
         key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
-        run: () => copyTextToClipboard(absPath),
+        run: () => window.PanelCopy.copyText(absPath),
       },
       {
         id: 'copy-relative-path',
         label: 'Copy Relative Path',
         key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-        run: () => copyTextToClipboard(relPath),
+        run: () => window.PanelCopy.copyText(relPath),
       },
     ];
     if (row.closest('#scm-graph')) {
@@ -12413,20 +12685,21 @@
   }
 
   /**
-   * Append an option to the chat header's working directory drop-down.
+   * Append an option to one of the chat header's drop-downs.
    *
-   * @param {string} value The directory ('' for the two non-directory
-   *     entries).
+   * @param {HTMLSelectElement} select The drop-down.
+   * @param {string} value The option's value.
    * @param {string} label The text shown.
-   * @param {string} [id] The option's id, for the non-directory entries.
+   * @param {string} [id] The option's id (the working directory
+   *     drop-down's two non-directory entries).
    * @returns {HTMLOptionElement} The appended option.
    */
-  function appendChatWorkDirOption(value, label, id) {
+  function appendOption(select, value, label, id) {
     const el = document.createElement('option');
     el.value = value;
     el.textContent = label;
     if (id) el.id = id;
-    chatWorkDirSelect.appendChild(el);
+    select.appendChild(el);
     return el;
   }
 
@@ -12586,17 +12859,18 @@
     const dirs = chatWorkDirList(machine);
     const listed = current ? dirs.find(p => samePath(p, current)) : undefined;
     if (!listed) {
-      appendChatWorkDirOption(
+      appendOption(
+        chatWorkDirSelect,
         '',
         'No working directory',
         'chat-workdir-none',
       ).disabled = true;
     }
-    dirs.forEach(dir => appendChatWorkDirOption(dir, dir));
+    dirs.forEach(dir => appendOption(chatWorkDirSelect, dir, dir));
     // Both non-directory entries carry the empty value (no path is
     // empty); only "Choose ..." can be picked, and it is told apart
     // by its id.
-    appendChatWorkDirOption('', 'Choose ...', 'chat-workdir-choose');
+    appendOption(chatWorkDirSelect, '', 'Choose ...', 'chat-workdir-choose');
     if (listed) {
       chatWorkDirSelect.value = listed;
     } else {
@@ -12832,13 +13106,7 @@
     }
     const scmRefresh = document.getElementById('scm-refresh');
     if (scmRefresh) {
-      scmRefresh.addEventListener('click', () => {
-        // A manual refresh goes out now and supersedes any pending
-        // debounced one (its token would be stale anyway).
-        cancelScmRefreshTimer();
-        scmDirty = false;
-        requestSourceControl(sidebarWorkDir(), sidebarMachine());
-      });
+      scmRefresh.addEventListener('click', reloadSourceControlNow);
     }
     if (explorerTree) {
       explorerTree.addEventListener('click', e => {
@@ -13014,6 +13282,9 @@
     if (t === shownTaskName) return;
     shownTaskName = t;
     renderTabBar();
+    // A chat that came to show a task (or none) may have left (or
+    // joined) the global machine pick.
+    syncChatMachine();
   }
 
   /**
@@ -13104,40 +13375,140 @@
   }
 
   /**
-   * A task's settings info as HTML for the task panels of the shared
-   * page (the live panels show none: the Task Info panel carries them)
-   * — the same shape the history sidebar's info rows use: a
-   * `workDir • model • parallel • budget • started` line and a
-   * `chat • task • parent • subagent` ids line.
+   * A task's info rows as HTML for the task panels of a saved page
+   * (the live panels show none: the Task Info panel carries them):
+   * every row of the Task Info panel, in its order and with its
+   * labels — Tokens, Cost, Steps, Time, Machine, Workdir, Max budget,
+   * Date, Base model, Chat id, Task id, then Parent task and Agent
+   * when the task has them — an unknown value shown as '—' like the
+   * panel shows it.
    *
    * @param {object|null} s A task_settings event's settings payload.
-   * @returns {string} The info HTML, '' when there is nothing to show.
+   * @param {object|null} metrics The task's run metrics as the panel
+   *     shows them (shareTaskMetricsText): {tokens, cost, steps, time}
+   *     texts.
+   * @returns {string} The info HTML, '' when nothing at all is known.
    */
-  function taskPanelInfoHTML(s) {
-    if (!s || typeof s !== 'object') return '';
-    const parts = [];
-    if (s.work_dir) parts.push(String(s.work_dir));
-    if (s.model) parts.push(String(s.model));
-    if ('is_parallel' in s) {
-      parts.push(s.is_parallel ? 'parallel' : 'sequential');
+  function taskPanelInfoHTML(s, metrics) {
+    if (!s || typeof s !== 'object') s = null;
+    if (!metrics || typeof metrics !== 'object') metrics = null;
+    if (!s && !metrics) return '';
+    const m = metrics || {};
+    const budget = finiteBudget(s ? s.max_budget : null);
+    const rows = [
+      ['Tokens', metaText(m.tokens)],
+      ['Cost', metaText(m.cost)],
+      ['Steps', metaText(m.steps)],
+      ['Time', metaText(m.time)],
+      ['Machine', metaText(taskMachineText(activeTabId))],
+      ['Workdir', metaText(s ? s.work_dir : '')],
+      ['Max budget', budget === null ? '\u2014' : '$' + budget.toFixed(2)],
+      ['Date', metaText(s ? taskStartText(s.start_ts) : '')],
+      ['Base model', metaText(s ? s.model : '')],
+      ['Chat id', metaText(s ? s.chat_id : '')],
+      ['Task id', metaTaskIdText(s)],
+    ];
+    if (s && s.parent_task_id) {
+      rows.push(['Parent task', metaText(s.parent_task_id)]);
     }
-    const budget = Number(s.max_budget || 0);
-    if (budget > 0) parts.push('budget $' + budget.toFixed(2));
-    const started = taskStartText(s.start_ts);
-    if (started) parts.push('started ' + started);
-    const ids = [];
-    if (s.chat_id) ids.push('chat ' + s.chat_id);
-    if (s.task_id !== undefined && s.task_id !== null && s.task_id !== '') {
-      ids.push('task ' + s.task_id);
-    }
-    if (s.parent_task_id) ids.push('parent ' + s.parent_task_id);
-    if (s.is_subagent) ids.push('subagent');
-    const lines = [];
-    if (parts.length) lines.push(parts.join(' \u2022 '));
-    if (ids.length) lines.push(ids.join(' \u2022 '));
-    return lines
-      .map(l => '<span class="task-panel-info-line">' + esc(l) + '</span>')
+    const agent = metaAgentText(s);
+    if (agent !== '\u2014') rows.push(['Agent', agent]);
+    return rows
+      .map(
+        r =>
+          '<span class="task-panel-info-line">' +
+          '<span class="task-panel-info-label">' +
+          esc(r[0]) +
+          ':</span>' +
+          esc(r[1]) +
+          '</span>',
+      )
       .join('');
+  }
+
+  /**
+   * A saved page's Tokens / Cost / Steps / Time texts for one task of
+   * the daemon's share_tasks reply: the texts the Task Info panel
+   * would show for that task. Tokens, cost and steps are the totals
+   * of the LAST usage_info / result event of the task's own stream
+   * (a running task's live recording ends with its newest one; the
+   * daemon synthesizes one for a finished task whose stream has
+   * none), else the row's `metrics` totals; the Time row is the
+   * row's start and end (`end_ts` 0 while the task runs).
+   *
+   * @param {Array<object>} events The task's events.
+   * @param {object|null} metrics The reply's `metrics` ({tokens, cost,
+   *     steps, start_ts, end_ts}).
+   * @returns {object|null} {tokens, cost, steps, time} texts, or null
+   *     when the task has neither a usage event nor metrics.
+   */
+  function shareTaskMetricsText(events, metrics) {
+    if (!metrics || typeof metrics !== 'object') metrics = null;
+    const usage = lastUsageEvent(events);
+    if (!usage && !metrics) return null;
+    const m = metrics || {};
+    let tokens = m.tokens;
+    let cost = Number(m.cost || 0);
+    let steps = m.steps;
+    if (usage) {
+      tokens = usage.total_tokens;
+      if (eventCost(usage) != null) cost = eventCost(usage);
+      if (usage.total_steps != null) steps = usage.total_steps;
+    }
+    const start = Number(m.start_ts || 0);
+    const end = Number(m.end_ts || 0);
+    let time = '\u2014';
+    if (start > 0 && end >= start) time = doneLabelFor(start, end);
+    else if (start > 0) time = 'Running';
+    return {
+      tokens: fmtTokens(tokens),
+      cost: fmtCost(cost),
+      steps: String(Math.max(0, Math.round(Number(steps) || 0))),
+      time,
+    };
+  }
+
+  /**
+   * The last usage_info / result event of *events* that carries a
+   * token total, or null.
+   *
+   * @param {Array<object>} events A task's events.
+   * @returns {object|null} The event.
+   */
+  function lastUsageEvent(events) {
+    const list = Array.isArray(events) ? events : [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      if (
+        e &&
+        (e.type === 'usage_info' || e.type === 'result') &&
+        e.total_tokens != null
+      )
+        return e;
+    }
+    return null;
+  }
+
+  /**
+   * The Tokens / Cost / Steps / Time texts of the tab's own task, as
+   * the Task Info panel shows them while the reader is on that task
+   * (the `Label: ` prefix dropped), for the saved page's section of
+   * the task on screen: a running task's newest figures are not in
+   * the database yet. The figures come from the tab's own stash
+   * (currentTaskMetrics), not the status bar's spans, which are lent
+   * to whichever neighbouring task the reader has scrolled onto.
+   *
+   * @returns {object} {tokens, cost, steps, time} texts.
+   */
+  function liveTaskMetricsText() {
+    const strip = text => (text || '').trim().replace(/^[^:]*:\s*/, '');
+    const status = document.getElementById('status-text');
+    return {
+      tokens: strip(currentTaskMetrics.tokens),
+      cost: strip(currentTaskMetrics.budget),
+      steps: strip(currentTaskMetrics.steps),
+      time: ((status && status.textContent) || '').trim(),
+    };
   }
 
   const metaWorkdirEl = document.getElementById('meta-workdir');
@@ -13269,21 +13640,44 @@
       metaMaxBudgetEl.textContent =
         budget === null ? '\u2014' : '$' + budget.toFixed(2);
     }
+    setMetaValue('meta-machine', metaText(taskMachineText(activeTabId)));
     setMetaValue('meta-date', metaText(s ? taskStartText(s.start_ts) : ''));
     setMetaValue('meta-model', metaText(s ? s.model : ''));
     setMetaValue('meta-chat-id', metaText(s ? s.chat_id : ''));
-    const taskId = metaText(s ? s.task_id : '');
-    setMetaValue(
-      'meta-task-id',
-      s && s.is_subagent && taskId !== '\u2014'
-        ? taskId + ' (subagent)'
-        : taskId,
-    );
+    setMetaValue('meta-task-id', metaTaskIdText(s));
     setMetaParentTask(metaText(s ? s.parent_task_id : ''));
     setMetaAgent(metaAgentText(s));
     setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);
+
+  /**
+   * The Task id row's text for the settings *s*: the id, suffixed
+   * ` (subagent)` for a sub-agent's task; '—' without an id.
+   *
+   * @param {object|null} s A task_settings payload.
+   * @returns {string} The row text.
+   */
+  function metaTaskIdText(s) {
+    const taskId = metaText(s ? s.task_id : '');
+    return s && s.is_subagent && taskId !== '\u2014'
+      ? taskId + ' (subagent)'
+      : taskId;
+  }
+
+  /**
+   * The name of the machine the tasks of the chat `tabId` shows run
+   * on, for the Machine row of the Task Info panel and of a saved
+   * page: the registered machine the daemon bound the tab to, else
+   * this daemon's own machine ('' until its configData arrives).
+   *
+   * @param {string} tabId The chat tab.
+   * @returns {string} The machine's label.
+   */
+  function taskMachineText(tabId) {
+    const bound = tabBoundMachine(tabId);
+    return bound ? machineLabel(bound) : localMachineName;
+  }
 
   /**
    * Adopt *s* as the active tab's own task's settings and show them.
@@ -14258,6 +14652,55 @@
   }
 
   /**
+   * Move the file-link bookkeeping of tab *oldId* onto *newId*.
+   *
+   * Every path span is stamped with the tab it was checked for, every
+   * linkified panel root with the tab it re-linkifies under, and every
+   * in-flight key starts with that id: a reply, the re-check after a
+   * merge, a reconnect's reissue and the release on close all match on
+   * it.  When the daemon renames the tab, the stamps of its transcript
+   * (*root*: #output or the saved fragment) and of the registered
+   * spans follow the rename so the new id keeps finding them.
+   *
+   * A check already on the wire is answered under the id it named
+   * (the daemon echoes the request's tabId), which no longer matches
+   * the restamped spans, and a key merely renamed would then suppress
+   * every later check of the same path for the rest of the session.
+   * So the old keys are dropped and the registered spans are asked
+   * about again under the new id, as after a reconnect; the stale
+   * reply resolves nothing.
+   *
+   * @param {string} oldId The tab id being retired.
+   * @param {string} newId The tab id the daemon uses from now on.
+   * @param {Node|null} root The tab's transcript container.
+   */
+  function retagFileLinks(oldId, newId, root) {
+    const old = String(oldId);
+    const fresh = String(newId);
+    const els = new Set(_pendingFileLinkSpans);
+    if (root && root.querySelectorAll) {
+      for (const el of root.querySelectorAll(
+        '[data-path-tab],[data-link-tab]',
+      )) {
+        els.add(el);
+      }
+    }
+    for (const el of els) {
+      if (el.getAttribute('data-path-tab') === old) {
+        el.setAttribute('data-path-tab', fresh);
+      }
+      if (el.getAttribute('data-link-tab') === old) {
+        el.setAttribute('data-link-tab', fresh);
+      }
+    }
+    const prefix = old + '\u0000';
+    for (const key of Array.from(_pendingPathChecks)) {
+      if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
+    }
+    reissueFileLinkChecks(fresh);
+  }
+
+  /**
    * Forget which checks are in flight after losing the daemon.
    *
    * Nothing can answer a request that was on the wire when the socket
@@ -14294,13 +14737,18 @@
    * pre-merge (or pre-discard) state forever. _fileLinkPath() reads
    * whichever state attribute holds the path, so those spans are
    * reissued too.
+   *
+   * @param {string} [tabId] Reissue only the spans of this tab (a tab
+   *     the daemon just renamed, see retagFileLinks); every tab's when
+   *     omitted.
    */
-  function reissueFileLinkChecks() {
+  function reissueFileLinkChecks(tabId) {
     const groups = new Map();
     for (const span of _pendingFileLinkSpans) {
       const raw = _fileLinkPath(span);
       if (!raw) continue;
       const owner = span.getAttribute('data-path-tab') || '';
+      if (tabId !== undefined && owner !== tabId) continue;
       const wd = span.getAttribute('data-path-wd') || '';
       const machine = span.getAttribute('data-path-machine') || '';
       const p = _stripLineSuffix(raw);
@@ -14973,6 +15421,16 @@
       delete readyReportsByTab[reportTabKey(oldId)];
       readyReportsByTab[reportTabKey(newTabId)] = oldReports;
     }
+    // The transcript's file links and its deferred tail sweep are keyed
+    // by tab id too; left on the old id, a later worktree_result,
+    // reconnect or close would find none of them and the pending frame
+    // would skip its collapse work.
+    retagFileLinks(
+      oldId,
+      newTabId,
+      activeTabId === oldId ? O : tab.outputFragment,
+    );
+    if (_tailSweepTabId === oldId) _tailSweepTabId = newTabId;
     if (activeTabId === oldId) activeTabId = newTabId;
     // A retag is an identity rename of the tab already on screen, not
     // a tab switch: the scroll tracker must follow the rename or the
@@ -15262,8 +15720,7 @@
   const addStopButton = window.PanelCopy.addStopButton;
   const addPanelTimestamp = window.PanelCopy.addPanelTimestamp;
   const formattedTextFromNode = window.PanelCopy.formattedTextFromNode;
-  const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
-  const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
+  const wireCopyButton = window.PanelCopy.wireCopyButton;
 
   /**
    * Whether a panel contains an image or video, including rendered
@@ -15923,6 +16380,25 @@
   }
 
   /**
+   * Close the thinking block of *tState*: flush the text its pending
+   * frame still holds into it, cancel that frame and drop the block.
+   *
+   * @param {object} tState The stream state whose block ends.
+   */
+  function endThinkingBlock(tState) {
+    if (tState.thinkRaf) {
+      cancelAnimationFrame(tState.thinkRaf);
+      tState.thinkRaf = 0;
+      if (tState.thinkEl && tState.thinkBuf) {
+        appendThinkText(tState);
+        autoScrollStreamed(tState.thinkEl);
+      }
+    }
+    tState.thinkBuf = '';
+    tState.thinkEl = null;
+  }
+
+  /**
    * A panel body of class *cls* holding *raw* rendered as Markdown
    * (highlighted, file paths linkified) — or as plain text without
    * marked — with the raw text kept for the copy button.
@@ -15982,9 +16458,13 @@
       // the Thinking panel (a dim `.think` block, no header or box of
       // its own), followed by its words (`.txt`).
       case 'thinking_start':
+        // A block the stream cut without its thinking_end (an LLM
+        // error mid-thought, then the retry's block) still owns a
+        // pending flush frame: settle it into the old block first, or
+        // the frame would write the new block's buffer one frame early
+        // and leave the old block empty.
+        endThinkingBlock(tState);
         tState.thinkEl = mkEl('div', 'think');
-        tState.thinkBuf = '';
-        tState.thinkRaf = 0;
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
@@ -16004,16 +16484,7 @@
         }
         break;
       case 'thinking_end':
-        if (tState.thinkRaf) {
-          cancelAnimationFrame(tState.thinkRaf);
-          tState.thinkRaf = 0;
-          if (tState.thinkEl && tState.thinkBuf) {
-            appendThinkText(tState);
-            autoScrollStreamed(tState.thinkEl);
-          }
-          tState.thinkBuf = '';
-        }
-        tState.thinkEl = null;
+        endThinkingBlock(tState);
         break;
       case 'text_delta':
         if (!tState.txtEl) {
@@ -17386,11 +17857,7 @@
         statusBudget.textContent = container.dataset.metricBudget || '';
       if (statusSteps)
         statusSteps.textContent = container.dataset.metricSteps || '';
-    } else {
-      if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
-      if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
-      if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
-    }
+    } else showLiveMetrics();
   }
   // visibletask-coverage:end
 
@@ -17723,8 +18190,7 @@
   function loadMoreHistory() {
     if (historyLoading || !historyHasMore) return;
     historyLoading = true;
-    const loader = document.createElement('div');
-    loader.className = 'sidebar-loading';
+    const loader = mkEl('div', 'sidebar-loading');
     loader.id = 'history-loader';
     loader.textContent = 'Loading...';
     historyList.appendChild(loader);
@@ -18675,6 +19141,11 @@
           adoptWorkDir(ev.workDir);
         }
         break;
+      case 'machineChanged':
+        // The global machine pick changed (the drop-down on this or
+        // any other surface): every surface's new chats go there.
+        setGlobalMachine(ev.machine);
+        break;
       case 'myModelsData':
         // The Custom Models list belongs to the machine the settings
         // sheet is for: another machine's list (or this daemon's while
@@ -18763,27 +19234,28 @@
         noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
         lastMachinesEvent = {machines: ev.machines, error: ev.error};
         renderMachines(ev);
+        // The reply may relabel the machine the Machine row names.
+        updateMetaTaskDetails(metaShownSettings);
         break;
       case 'machineWorkDirs':
         handleMachineWorkDirs(ev);
         break;
       case 'tabMachine':
         // The daemon bound (or unbound) a tab to a machine: every
-        // surface's drop-down shows the same pick for the tab.  A pick
-        // the user made here and has not submitted yet stands: it is
-        // where THEIR next task goes.
+        // surface's drop-down shows the same machine for the chat the
+        // tab shows.  A pick the user made here and has not submitted
+        // yet stands (unless it is this very binding): it is where
+        // THEIR next task goes.
         if (typeof ev.tabId === 'string' && ev.tabId) {
           const machine = ev.machine ? String(ev.machine) : '';
           if (machine) tabBoundMachines.set(ev.tabId, machine);
           else tabBoundMachines.delete(ev.tabId);
-          if (
-            tabMachinePicked.has(ev.tabId) &&
-            tabMachine(ev.tabId) !== machine
-          )
-            break;
-          if (machine) tabMachines.set(ev.tabId, machine);
-          else tabMachines.delete(ev.tabId);
-          tabMachinePicked.delete(ev.tabId);
+          // The Task Info panel's Machine row names the bound machine.
+          if (ev.tabId === activeTabId)
+            updateMetaTaskDetails(metaShownSettings);
+          if (tabMachinePicks.get(ev.tabId) === machine) {
+            tabMachinePicks.delete(ev.tabId);
+          }
           persistTabState();
           renderChatMachine();
           // The directory drop-down follows: a chat of a remote machine
@@ -18807,14 +19279,17 @@
         if (noteMachineLabels(ev.machineLabels)) {
           renderChatMachine();
           if (lastMachinesEvent) renderMachines(lastMachinesEvent);
+          // The Task Info panel's Machine row carries the label too.
+          updateMetaTaskDetails(metaShownSettings);
         }
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
-        refreshHistoryMachineOptions(ev.machines, ev.localMachine);
         // A stale reply (an older generation, dropped by renderHistory)
-        // must not rebuild the options either: its directory list may
-        // lack the one just chosen and would reset the selection.
+        // must not rebuild the filters either: its machine or directory
+        // list may lack the one just chosen and would reset the
+        // selection (and refetch, dropping the current reply).
         if ((ev.generation || 0) === historyGeneration) {
+          refreshHistoryMachineOptions(ev.machines, ev.localMachine);
           refreshHistoryWorkDirOptions(ev.workDirs);
         }
         break;
@@ -20102,8 +20577,7 @@
     }
     if (!line) {
       line = mkEl('div', 'ev launch-phase');
-      const ring = document.createElement('span');
-      ring.className = 'status-spinner';
+      const ring = mkEl('span', 'status-spinner');
       line.appendChild(ring);
       line.appendChild(document.createElement('span'));
     }
@@ -20159,14 +20633,15 @@
    * @param {string} taskText The task's description text.
    * @param {object|null} settings The task's task_settings payload,
    *     rendered into the panel's info block (cleared when null).
+   * @param {object|null} metrics The task's Tokens / Cost / Steps /
+   *     Time texts (shareTaskMetricsText, liveTaskMetricsText).
    * @returns {Element} The panel.
    */
-  function shareTaskPanel(taskText, settings) {
+  function shareTaskPanel(taskText, settings, metrics) {
     const panel = createTaskPanel(taskText);
     // taskinfo-coverage:start
-    const info = document.createElement('div');
-    info.className = 'task-panel-info';
-    info.innerHTML = taskPanelInfoHTML(settings || null);
+    const info = mkEl('div', 'task-panel-info');
+    info.innerHTML = taskPanelInfoHTML(settings || null, metrics || null);
     const text = panel.querySelector('.task-panel-text');
     panel.insertBefore(info, text.nextSibling);
     // taskinfo-coverage:end
@@ -20363,6 +20838,7 @@
       sub.task,
       body,
       taskSettingsFromEvents(sub.events),
+      shareTaskMetricsText(sub.events, sub.metrics),
     );
     section.classList.add('share-subagent');
     section.hidden = true;
@@ -20390,13 +20866,14 @@
    * @param {string} taskText The task's description text.
    * @param {Element} body Holder whose children are the transcript.
    * @param {object|null} settings The task's task_settings payload.
+   * @param {object|null} metrics The task's Tokens / Cost / Steps /
+   *     Time texts.
    * @returns {Element} The assembled section.
    */
-  function shareTaskSection(taskText, body, settings) {
-    const section = document.createElement('div');
-    section.className = 'share-task';
+  function shareTaskSection(taskText, body, settings, metrics) {
+    const section = mkEl('div', 'share-task');
     section.appendChild(
-      shareTaskPanel(taskText || '(untitled task)', settings),
+      shareTaskPanel(taskText || '(untitled task)', settings, metrics),
     );
     while (body.firstChild) section.appendChild(body.firstChild);
     return section;
@@ -20480,16 +20957,21 @@
         const byParent = shareSubagentsByParent(subs);
         let body;
         let settings = taskSettingsFromEvents(t.events);
+        // The task on screen reports what the Task Info panel shows
+        // for it (the tab's own figures, newer than the database's
+        // for a running task); every other task reports its stream's.
+        let metrics = shareTaskMetricsText(t.events, t.metrics);
         if (liveId && tid === liveId) {
           body = shareLiveTranscript();
           liveUsed = true;
           if (!settings) settings = currentTaskSettings;
+          metrics = liveTaskMetricsText();
         } else {
           body = replayDetachedTranscript(t.events || [], activeTabId);
           body.classList.remove('adjacent-task');
         }
         shareStampRunParallel(body, byParent.get(tid) || []);
-        out.appendChild(shareTaskSection(t.task, body, settings));
+        out.appendChild(shareTaskSection(t.task, body, settings, metrics));
         for (let s = 0; s < subs.length; s++) {
           if (!subs[s] || typeof subs[s] !== 'object') continue;
           subSections.push(shareSubagentSection(subs[s], byParent));
@@ -20514,7 +20996,12 @@
           // all (the chat was never persisted). It is the chat's
           // newest surface, so it closes the page.
           out.appendChild(
-            shareTaskSection(currentTaskName, live, currentTaskSettings),
+            shareTaskSection(
+              currentTaskName,
+              live,
+              currentTaskSettings,
+              liveTaskMetricsText(),
+            ),
           );
         }
       }
@@ -20603,17 +21090,14 @@
   }
 
   function _buildRemoteUrlBar(displayUrl, isNtfy, labelText) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'remote-url-bar';
-    const label = document.createElement('div');
-    label.className = 'remote-url-label';
+    const wrapper = mkEl('div', 'remote-url-bar');
+    const label = mkEl('div', 'remote-url-label');
     label.textContent =
       labelText ||
       (isNtfy
         ? 'Webapp: click the link in the first post at URL:'
         : 'Web/mobile app');
-    const row = document.createElement('div');
-    row.className = 'remote-url-row';
+    const row = mkEl('div', 'remote-url-row');
     const link = document.createElement('a');
     link.href = displayUrl;
     link.target = '_blank';
@@ -20634,8 +21118,7 @@
   }
 
   function _buildTlsTrustHint(baseUrl) {
-    const hint = document.createElement('div');
-    hint.className = 'remote-url-tls-hint';
+    const hint = mkEl('div', 'remote-url-tls-hint');
     hint.append('Certificate warning on the Local/LAN URLs? Run ');
     const cmd = document.createElement('code');
     cmd.textContent = 'kiss-web --trust-ca';
@@ -20702,8 +21185,9 @@
 
   const UPDATE_NOTIFICATION_ID = 'kiss-update-available';
 
-  const UPDATE_DOWNLOAD_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" ' +
+  // The download arrow, as the toast's 14px icon and the Config
+  // button's 12px badge.
+  const UPDATE_ICON_BODY =
     'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
@@ -20711,14 +21195,13 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
+  const UPDATE_DOWNLOAD_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" ' +
+    UPDATE_ICON_BODY;
+
   const UPDATE_BADGE_SVG =
     '<svg class="update-available-icon" width="12" height="12" ' +
-    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
-    '<polyline points="7 10 12 15 17 10"/>' +
-    '<line x1="12" y1="15" x2="12" y2="3"/>' +
-    '</svg>';
+    UPDATE_ICON_BODY;
 
   function renderUpdateAvailable(
     available,
@@ -21483,12 +21966,6 @@
     // stop the event from bubbling back up.
     document.addEventListener('pointerdown', closeLaunchSwitch, true);
     document.addEventListener('keydown', closeLaunchSwitch, true);
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && sidebar.classList.contains('open')) {
-        e.preventDefault();
-        closeSidebar();
-      }
-    });
     inp.addEventListener('keydown', e => {
       // Enter/Escape confirming an IME composition belong to the IME
       // (keyCode 229 on engines that report the real key).
@@ -21659,6 +22136,7 @@
     FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
       .concat(['cfg-custom-api-key'])
       .forEach(setupSecretInput);
+    setupRemotePasswordField();
 
     if (autocommitBtn) {
       autocommitBtn.addEventListener('click', e => {
@@ -21751,13 +22229,6 @@
     if (serverResetConfirmModal) {
       serverResetConfirmModal.addEventListener('click', e => {
         if (e.target === serverResetConfirmModal) closeServerResetConfirm();
-      });
-      document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && isServerResetConfirmOpen()) {
-          e.preventDefault();
-          e.stopPropagation();
-          closeServerResetConfirm();
-        }
       });
     }
 
@@ -21907,17 +22378,6 @@
           closeMoreMenu();
         }
       });
-      document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && moreMenu.classList.contains('open')) {
-          closeMoreMenu();
-          // The focused menu item just went display:none; without a
-          // hand-off, keyboard focus would be stranded on an invisible
-          // control.
-          try {
-            moreBtn.focus();
-          } catch (_e) {}
-        }
-      });
     }
     const settingsBtn = document.getElementById('settings-btn');
     if (settingsBtn) {
@@ -21981,18 +22441,44 @@
     if (contentPaneShow) {
       contentPaneShow.addEventListener('click', onContentPaneShowClick);
     }
-    if (metaPanel && metaDrawerBtn) {
-      // Escape dismisses the open mobile drawer like any dialog; the
-      // docked desktop panel never carries `open`, so this never fires
-      // there.
-      document.addEventListener('keydown', e => {
-        if (e.key !== 'Escape') return;
-        if (!metaPanel.classList.contains('open')) return;
-        if (document.body.classList.contains('remote-desktop')) return;
-        e.preventDefault();
+    /**
+     * Escape closes the topmost open popup, and only that one.  This
+     * runs in the bubble phase, after every control that answers
+     * Escape itself (a rename box, an inline confirm, a dialog toast,
+     * the sheets' capture-phase onSheetEscape) has prevented the
+     * default or stopped the event; then the first open one of the
+     * server-reset confirm, the "..." menu, the phone layout's Task
+     * Info drawer (the docked desktop panel never carries `open`) and
+     * the Chats drawer closes.
+     */
+    function onPopupEscape(e) {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      if (isServerResetConfirmOpen()) {
+        closeServerResetConfirm();
+      } else if (moreMenu && moreMenu.classList.contains('open')) {
+        closeMoreMenu();
+        // The focused menu item just went display:none; without a
+        // hand-off, keyboard focus would be stranded on an invisible
+        // control.
+        try {
+          moreBtn.focus();
+        } catch (_e) {}
+      } else if (
+        metaPanel &&
+        metaDrawerBtn &&
+        metaPanel.classList.contains('open') &&
+        !document.body.classList.contains('remote-desktop')
+      ) {
         setMetaDrawerOpen(false);
-      });
+      } else if (sidebar.classList.contains('open')) {
+        closeSidebar();
+      } else {
+        return;
+      }
+      e.preventDefault();
     }
+    document.addEventListener('keydown', onPopupEscape);
     // ---- The phone layout's four screens, swiped left and right ------
     //
     // Below the desktop breakpoint the remote page's four side-by-side
@@ -22112,9 +22598,49 @@
       });
       window.addEventListener('message', onPreviewSwipeMessage);
     }
+    // ---- The swipe hint ----------------------------------------------
+    //
+    // A phone has no buttons for the chats and task-info screens (see
+    // body.remote-mobile), and nothing on the page shows that they are
+    // swiped to.  So the first time the page is on the phone layout it
+    // says so in a sticky notice, until the user ticks "Do not show
+    // this again" (kept in this browser's localStorage: the gesture is
+    // this device's, and a desktop never shows the notice).
+    const SWIPE_HINT_KEY = 'kiss-swipe-hint-dismissed';
+    let swipeHintShown = false;
+
+    /** Record the hint's "Do not show this again" choice. */
+    function dismissSwipeHint() {
+      try {
+        window.localStorage.setItem(SWIPE_HINT_KEY, '1');
+      } catch {}
+    }
+
+    /** Show the swipe hint, once per page, on a phone that has not
+     *  opted out. */
+    function showSwipeHint() {
+      if (swipeHintShown || !isMobileRemote || !window.MobileSwipe) return;
+      let dismissed = false;
+      try {
+        dismissed = window.localStorage.getItem(SWIPE_HINT_KEY) === '1';
+      } catch {}
+      if (dismissed) return;
+      swipeHintShown = true;
+      showNotification({
+        id: 'swipe-hint',
+        severity: 'info',
+        sticky: true,
+        title: 'Swipe to see the other panels',
+        message:
+          'Swipe left or right across the middle of the screen to move ' +
+          'between the chats, the chat, the open file and the task info.',
+        dontShowAgain: true,
+        onDontShowAgain: dismissSwipeHint,
+      });
+    }
     setupWorkspaceViews();
     setupChatWorkDir();
-    applyRemoteTheme(getSavedRemoteTheme());
+    applyRemoteTheme(appearance.theme);
     if (typeof window.matchMedia === 'function') {
       const desktopMq = window.matchMedia('(min-width: 900px)');
       const applyRemoteDesktop = () => {
@@ -22141,6 +22667,7 @@
           // a desktop "hidden behind the drawer tab" state is over.
           setMetaPanelHidden(false);
           setMetaDrawerOpen(false);
+          showSwipeHint();
         }
         // Desktop splits the window into the chat and content panes;
         // narrower windows stack them (a content tab replaces the chat).
@@ -23218,7 +23745,6 @@
     // The run's system prompt names the file open in the editor.
     Object.assign(msg, editorContext(false));
     api.send(msg);
-    tabMachinePicked.delete(activeTabId);
     t0 = Date.now();
     endTs = 0;
     if (curTab) {
@@ -23232,6 +23758,17 @@
       // tableak-coverage:end
       curTab.unackedPrompt = prompt;
       curTab.unackedAttachments = attachments;
+      // Sent: the machine stays the chat's pick until the daemon's
+      // binding confirms it (`tabMachine` clears the pick) -- a refused
+      // run leaves the pick standing for the retry, and the chat's
+      // binding as it was.  A chat now showing a task of its own
+      // machine needs no pick.
+      if (msg.machine === tabChatMachine(curTab)) {
+        tabMachinePicks.delete(curTab.id);
+      } else {
+        tabMachinePicks.set(curTab.id, msg.machine);
+      }
+      persistTabState();
     }
     resetComposerAfterSend();
   }
@@ -23576,6 +24113,17 @@
   const SIDEBAR_DELETE_SVG =
     '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
 
+  /**
+   * Swap a row's Delete button for its Delete / Cancel confirmation.
+   *
+   * @param {HTMLButtonElement} delBtn The row's Delete button.
+   * @param {HTMLElement} confirmWrap Its confirmation, hidden so far.
+   */
+  function showSidebarDeleteConfirm(delBtn, confirmWrap) {
+    delBtn.style.display = 'none';
+    confirmWrap.style.display = '';
+  }
+
   function makeSidebarDeleteConfirm(opts) {
     const delBtn = document.createElement('button');
     delBtn.className = 'sidebar-item-delete';
@@ -23599,8 +24147,7 @@
     confirmWrap.addEventListener('keydown', onInlineConfirmKey);
     delBtn.addEventListener('click', e => {
       e.stopPropagation();
-      delBtn.style.display = 'none';
-      confirmWrap.style.display = '';
+      showSidebarDeleteConfirm(delBtn, confirmWrap);
       // The safe choice holds focus, so Enter keeps and Escape cancels.
       cancelBtn.focus();
     });
@@ -23697,6 +24244,23 @@
   // renderer classifies such rows as Undated — so it gets no label.
   const MAX_LAUNCH_EPOCH_MS = 8.64e15;
 
+  /**
+   * *v* as an epoch-millisecond instant a Date can hold, or NaN: a
+   * missing, non-numeric, negative or out-of-range value is no instant.
+   * Zero (1970) counts only where *allowZero* says so.
+   *
+   * @param {*} v The candidate (a number or numeric string).
+   * @param {boolean} [allowZero] Whether epoch zero is an instant.
+   * @returns {number} The milliseconds, or NaN.
+   */
+  function validEpochMs(v, allowZero) {
+    const ms = Number(v);
+    if (!(allowZero ? ms >= 0 : ms > 0) || ms > MAX_LAUNCH_EPOCH_MS) {
+      return NaN;
+    }
+    return ms;
+  }
+
   // The launch instant of a history session in epoch milliseconds:
   // ``startTs`` (already ms) when the daemon recorded a valid one,
   // otherwise the row's insertion ``timestamp`` (epoch seconds).
@@ -23704,14 +24268,12 @@
   // so only an absent, non-numeric, negative, or out-of-Date-range
   // timestamp yields NaN — meaning "render no label".
   function taskLaunchMs(session) {
-    const start = Number(session.startTs || 0);
-    if (start > 0 && start <= MAX_LAUNCH_EPOCH_MS) return start;
+    const start = validEpochMs(session.startTs);
+    if (isFinite(start)) return start;
     if (session.timestamp === undefined || session.timestamp === null) {
       return NaN;
     }
-    const ms = Number(session.timestamp) * 1000;
-    if (!(ms >= 0) || ms > MAX_LAUNCH_EPOCH_MS) return NaN;
-    return ms;
+    return validEpochMs(Number(session.timestamp) * 1000, true);
   }
 
   /**
@@ -23738,8 +24300,8 @@
    * launch instead.
    */
   function makeLaunchedAgoLabel(session) {
-    const endMs = Number(session.endTs || 0);
-    if (!(endMs > 0 && endMs <= MAX_LAUNCH_EPOCH_MS)) {
+    const endMs = validEpochMs(session.endTs);
+    if (!isFinite(endMs)) {
       return makeLaunchedAgoLabelFor(taskLaunchMs(session));
     }
     return makeFinishedAgoLabel(endMs);
@@ -23789,16 +24351,28 @@
   const HF_SEA_NONE = '__none__';
 
   /**
-   * Append one `<option>` to the history filter *select*; the WORKDIR
-   * filter also titles each option with its path, which the narrow
-   * select ellipsizes.
+   * Rebuild a history filter drop-down with *options* ([value, label]
+   * pairs, All first) and keep its selection where it is still
+   * offered; a selection no longer offered falls back to All with a
+   * change event, so the list refetches.  The WORKDIR filter also
+   * titles each option with its path, which the narrow select
+   * ellipsizes.
+   *
+   * @param {HTMLSelectElement} select The filter.
+   * @param {Array<[string, string]>} options Its new options.
+   * @param {boolean} [withTitle] Title each option with its label.
    */
-  function appendSelectOption(select, value, label, withTitle) {
-    const opt = document.createElement('option');
-    opt.value = value;
-    opt.textContent = label;
-    if (withTitle) opt.title = label;
-    select.appendChild(opt);
+  function rebuildFilterSelect(select, options, withTitle) {
+    const selected = select.value;
+    select.innerHTML = '';
+    for (const [value, label] of options) {
+      const opt = appendOption(select, value, label);
+      if (withTitle) opt.title = label;
+    }
+    select.value = options.some(o => o[0] === selected) ? selected : '';
+    if (selected !== select.value) {
+      select.dispatchEvent(new Event('change', {bubbles: true}));
+    }
   }
 
   /**
@@ -23816,13 +24390,12 @@
       if (typeof s.sea === 'string' && s.sea.trim()) names.add(s.sea.trim());
     });
     if (selected && selected !== HF_SEA_NONE) names.add(selected);
-    hfSea.innerHTML = '';
-    appendSelectOption(hfSea, '', 'All');
-    appendSelectOption(hfSea, HF_SEA_NONE, 'None');
-    Array.from(names)
-      .sort()
-      .forEach(name => appendSelectOption(hfSea, name, name));
-    hfSea.value = selected;
+    const options = [
+      ['', 'All'],
+      [HF_SEA_NONE, 'None'],
+    ];
+    for (const name of Array.from(names).sort()) options.push([name, name]);
+    rebuildFilterSelect(hfSea, options);
   }
 
   // The machine <select>'s value for the local daemon's own rows.
@@ -23843,23 +24416,13 @@
     const names = Array.isArray(machines)
       ? machines.filter(m => typeof m === 'string' && m)
       : [];
-    const selected = hfMachine.value;
-    hfMachine.innerHTML = '';
-    appendSelectOption(hfMachine, '', 'All');
-    appendSelectOption(
-      hfMachine,
-      HF_MACHINE_LOCAL,
-      (localMachine || 'local') + ' (this machine)',
-    );
-    names.forEach(name =>
-      appendSelectOption(hfMachine, name, machineLabel(name)),
-    );
-    hfMachine.value =
-      selected === HF_MACHINE_LOCAL || names.includes(selected) ? selected : '';
+    const options = [
+      ['', 'All'],
+      [HF_MACHINE_LOCAL, (localMachine || 'local') + ' (this machine)'],
+    ];
+    for (const name of names) options.push([name, machineLabel(name)]);
     hfMachine.parentElement.hidden = names.length === 0;
-    if (selected !== hfMachine.value) {
-      hfMachine.dispatchEvent(new Event('change', {bubbles: true}));
-    }
+    rebuildFilterSelect(hfMachine, options);
   }
 
   /** The trimmed name of the remote machine a history row came from ('' for a local row). */
@@ -23900,15 +24463,10 @@
     const hfWorkDir = document.getElementById('hf-workdir');
     if (!hfWorkDir || !Array.isArray(workDirs)) return;
     const paths = workDirs.filter(p => typeof p === 'string' && p);
-    const selected = hfWorkDir.value;
-    hfWorkDir.innerHTML = '';
-    appendSelectOption(hfWorkDir, '', 'All', true);
-    paths.forEach(p => appendSelectOption(hfWorkDir, p, p, true));
-    hfWorkDir.value = paths.includes(selected) ? selected : '';
+    const options = [['', 'All']];
+    for (const p of paths) options.push([p, p]);
+    rebuildFilterSelect(hfWorkDir, options, true);
     hfWorkDir.parentElement.classList.toggle('active', !!hfWorkDir.value);
-    if (selected !== hfWorkDir.value) {
-      hfWorkDir.dispatchEvent(new Event('change', {bubbles: true}));
-    }
   }
 
   // Keep every on-screen "... ago" launch-age label current: history
@@ -23954,34 +24512,6 @@
     return btn;
   }
 
-  /** Make *btn* copy *text* on click and flash a check mark on success. */
-  function wireCopyButton(btn, text) {
-    btn.innerHTML = PANEL_COPY_SVG;
-
-    // Every caller restarts the flash timer: the old resetFlashTimer
-    // flag left the sidebar copy buttons with a stale timer that cut
-    // a rapid second click's flash short.
-    let flashTimer = null;
-    const flash = () => {
-      btn.innerHTML = PANEL_CHECK_SVG;
-      btn.classList.add('copied');
-      if (flashTimer) clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        flashTimer = null;
-        btn.innerHTML = PANEL_COPY_SVG;
-        btn.classList.remove('copied');
-      }, 1500);
-    };
-
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      window.PanelCopy.copyText(String(text == null ? '' : text)).then(ok => {
-        if (ok) flash();
-      });
-    });
-  }
-
   function makeIdCopyButton(idText, kind) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -24014,11 +24544,8 @@
    * missing value.
    */
   function historyTimestamp(session) {
-    const endMs = Number(session.endTs || 0);
-    const raw =
-      endMs > 0 && endMs <= MAX_LAUNCH_EPOCH_MS
-        ? endMs / 1000
-        : session.timestamp;
+    const endMs = validEpochMs(session.endTs);
+    const raw = isFinite(endMs) ? endMs / 1000 : session.timestamp;
     if (raw === undefined || raw === null || raw === '') return NaN;
     const ts = Number(raw);
     // A number beyond what Date can represent is no date either.
@@ -24315,12 +24842,12 @@
     // telling tooltip beats the stamp's bare date.
     const candidates = [
       [taskLaunchMs(session), session.is_running ? 'Started ' : ''],
-      [Number(session.endTs || NaN), 'Finished '],
-      [Number(session.chat_last_launched || NaN), ''],
-      [Number(session.chat_last_finished || NaN), 'Finished '],
+      [validEpochMs(session.endTs), 'Finished '],
+      [validEpochMs(session.chat_last_launched), ''],
+      [validEpochMs(session.chat_last_finished), 'Finished '],
     ];
     for (const [t, p] of candidates) {
-      if (!isFinite(t) || t < 0 || t > MAX_LAUNCH_EPOCH_MS) continue;
+      if (!isFinite(t)) continue;
       if (isFinite(ms) && t <= ms) continue;
       ms = t;
       prefix = p;
@@ -24570,6 +25097,8 @@
       } else {
         titleEl.textContent = original;
       }
+      // A refresh that changed the rows waited for the box to close.
+      historyMaybeApplyPending();
     }
     input.addEventListener('click', e => e.stopPropagation());
     input.addEventListener('dblclick', e => e.stopPropagation());
@@ -24837,11 +25366,24 @@
     historyMaybeApplyPending();
   });
 
+  /** The chat-rename box open in the Chats panel, if any. */
+  function historyRenameBox() {
+    return historyList.querySelector('.history-chat-title-input');
+  }
+
+  /**
+   * Whether a changed-rows rebuild of the Chats panel must wait: a
+   * press is held on it (its click would land on a replaced row) or a
+   * rename box is open (the rebuild would throw the box and the text
+   * typed so far away).  The release, or the rename's end, lands the
+   * parked page (historyMaybeApplyPending).
+   */
   function historyPressHeld() {
     return (
       historyMouseHeld ||
       historyHeldKeys.size > 0 ||
-      historyActivePointers.size > 0
+      historyActivePointers.size > 0 ||
+      !!historyRenameBox()
     );
   }
 
@@ -24870,6 +25412,9 @@
     historyMouseHeld = false;
     historyHeldKeys.clear();
     historyActivePointers.clear();
+    // A rename is no stale press: the page stays parked until its box
+    // closes, which lands it.
+    if (historyRenameBox()) return;
     applyHistoryPendingRender();
   }
 
@@ -25701,8 +26246,12 @@
       closePicker();
     }
 
+    // Escape closes the picker and nothing under it (onPopupEscape
+    // yields to a prevented default).
     function onKey(e) {
-      if (e.key === 'Escape') closePicker();
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      closePicker();
     }
 
     pop.addEventListener('click', e => {
@@ -26875,10 +27424,15 @@
     const template = document.getElementById('secret-toggle-template');
     const proto = template && template.content.firstElementChild;
     if (!inp || !proto) return;
-    // The workspace id is an identifier, not a key; the toggle's
-    // accessible name must say what it actually reveals.
+    // The workspace id is an identifier, not a key, and the remote
+    // password is a password; the toggle's accessible name must say
+    // what it actually reveals.
     const noun =
-      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID' ? 'workspace ID' : 'API key';
+      inputId === 'cfg-key-ANTHROPIC_WORKSPACE_ID'
+        ? 'workspace ID'
+        : inputId === 'cfg-remote-password'
+          ? 'password'
+          : 'API key';
     inp.type = 'password';
     inp.setAttribute('autocomplete', 'off');
     const wrap = document.createElement('div');
@@ -26896,6 +27450,84 @@
     if (eyeOff) eyeOff.style.display = 'none';
     wrap.appendChild(btn);
     setupPasswordToggle(btn.id, inputId, noun);
+  }
+
+  // ---- Settings > Remote password: eye toggle + refresh button ----
+
+  // What the daemon's own generator uses (kiss.core.remote_password:
+  // PASSWORD_LENGTH / PASSWORD_ALPHABET), so a password made here looks
+  // like one chosen at install time.
+  const REMOTE_PASSWORD_LENGTH = 20;
+  const REMOTE_PASSWORD_ALPHABET =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const REMOTE_PASSWORD_REFRESH_SVG =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>' +
+    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.63 4.36A9 9 0 0 0 20.49 15"/>' +
+    '</svg>';
+
+  /**
+   * Make a random remote password: REMOTE_PASSWORD_LENGTH characters
+   * drawn uniformly from REMOTE_PASSWORD_ALPHABET with the browser's
+   * cryptographic generator (rejection sampling, so no modulo bias).
+   *
+   * @returns {string} The new password.
+   */
+  function generateRemotePassword() {
+    const alphabet = REMOTE_PASSWORD_ALPHABET;
+    // The largest multiple of the alphabet size that fits in a byte:
+    // bytes at or above it are redrawn.
+    const limit = 256 - (256 % alphabet.length);
+    const byte = new Uint8Array(1);
+    let out = '';
+    while (out.length < REMOTE_PASSWORD_LENGTH) {
+      crypto.getRandomValues(byte);
+      if (byte[0] < limit) out += alphabet[byte[0] % alphabet.length];
+    }
+    return out;
+  }
+
+  /**
+   * Dress the Settings > Remote password box: mask it with the eye
+   * toggle of the API-key boxes (setupSecretInput) and add a refresh
+   * button that fills it with a new random password.  The generated
+   * password is revealed and counts as typed (an `input` event, so
+   * settingsEditedFields keeps it over a configData repaint and
+   * closing Settings saves it like any edit); nothing is stored until
+   * then, so Escape / the close button still save it and a later edit
+   * of the box can still change it.
+   */
+  function setupRemotePasswordField() {
+    const inp = document.getElementById('cfg-remote-password');
+    setupSecretInput('cfg-remote-password');
+    const wrap = inp && inp.parentNode;
+    if (!wrap || !wrap.classList.contains('config-password-wrap')) return;
+    wrap.classList.add('config-password-wrap-refresh');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'cfg-remote-password-refresh';
+    btn.className = 'config-password-toggle config-password-refresh';
+    const label = 'Generate a new random password';
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute(
+      'title',
+      label +
+        ' (20 characters); it is saved when Settings closes and other ' +
+        'devices must sign in again with it',
+    );
+    btn.innerHTML = REMOTE_PASSWORD_REFRESH_SVG;
+    btn.addEventListener('click', () => {
+      inp.value = generateRemotePassword();
+      inp.dispatchEvent(new Event('input', {bubbles: true}));
+      // Show the new password: the user has to type it on the other
+      // device, so a masked box would be useless here.
+      const toggle = document.getElementById('cfg-remote-password-toggle');
+      if (toggle && inp.type !== 'text') toggle.click();
+      inp.focus();
+    });
+    wrap.appendChild(btn);
   }
 
   // ---- Collapsible settings subpanels (API Keys, Custom Models, Bedrock) ----
@@ -27294,6 +27926,9 @@
       refreshSidebarDataViews(false);
       renderChatWorkDir();
     }
+    // The machine drop-down's global pick is the daemon's too (where
+    // a new chat's tasks run; a pick on any surface updates it).
+    setGlobalMachine(cfg.last_machine);
     // The docked task-info panel's Workdir / Max budget items fall
     // back to these config values while the visible task has no
     // task_settings of its own, so a config change repaints them.

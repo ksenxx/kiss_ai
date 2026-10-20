@@ -20,11 +20,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
 // A launched window whose backend is live. `daemonStatus connected` is how
 // the socket shim announces that: it synthesises it the moment the password
@@ -33,50 +29,14 @@ const MEDIA = path.join(__dirname, '..', 'media');
 // begun and no gesture can end one.
 function makePage(opts) {
   const {state, connect = true} = opts || {};
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    initialState: state,
+    beforeScripts: stubRaf,
+    sourceUrl: 'launch-main.js',
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-
-  const posted = [];
-  let persisted = state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => persisted,
-      setState: s => {
-        persisted = s;
-      },
-    };
-  };
-
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=launch-main.js',
-  );
   if (connect) send(win, {type: 'daemonStatus', connected: true});
   return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function activeTabId(win) {
@@ -334,9 +294,7 @@ function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
   );
 
   send(win, {type: 'daemonStatus', connected: true});
-  tabsState(win, [
-    {tabId: 'tab-1', chatId: 'chat-1', title: 'still going'},
-  ]);
+  tabsState(win, [{tabId: 'tab-1', chatId: 'chat-1', title: 'still going'}]);
   statusRunning(win, 'tab-1', 5);
 
   assert.strictEqual(
@@ -370,9 +328,7 @@ function testPasswordPromptDoesNotSpendTheLaunch() {
   // auth_ok: the password was accepted, so the queued `ready` goes out and
   // the snapshot and replays come back.
   send(win, {type: 'daemonStatus', connected: true});
-  tabsState(win, [
-    {tabId: 'tab-1', chatId: 'chat-1', title: 'still going'},
-  ]);
+  tabsState(win, [{tabId: 'tab-1', chatId: 'chat-1', title: 'still going'}]);
   statusRunning(win, 'tab-1', 5);
 
   assert.strictEqual(
@@ -437,9 +393,7 @@ function testFinishedTaskIsNoLongerACandidate() {
 // The first tap ends the launch: replays after it must not move the user.
 function testPointerDownEndsTheLaunch() {
   const {win} = makePage({state: {chatId: 'tab-here'}});
-  tabsState(win, [
-    {tabId: 'tab-here', chatId: 'chat-here', title: 'reading'},
-  ]);
+  tabsState(win, [{tabId: 'tab-here', chatId: 'chat-here', title: 'reading'}]);
 
   win.document.dispatchEvent(
     new win.MouseEvent('pointerdown', {bubbles: true}),
@@ -546,7 +500,7 @@ function testBannerOutageKeepsTheUsersGesture() {
     'a reconnect under the banner must not relaunch and move the user',
   );
   win.close();
-  console.log('  ok - a banner outage keeps the user\'s gesture');
+  console.log("  ok - a banner outage keeps the user's gesture");
 }
 
 // A window left untouched is not launching forever: a task that starts much

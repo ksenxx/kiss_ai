@@ -120,14 +120,13 @@ class _UsagePrinter(Printer):
         self.contexts: list[int] = []
         self.calls: list[str] = []
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:  # noqa: A002
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:  # noqa: A002
         if type == "usage_info":
             match = re.search(r"Context: ([\d,]+)", str(content))
             if match:
                 self.contexts.append(int(match.group(1).replace(",", "")))
         elif type == "tool_call":
             self.calls.append(str(content))
-        return ""
 
     def token_callback(self, token: str) -> None:
         return None

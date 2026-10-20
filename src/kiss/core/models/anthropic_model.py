@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # The Anthropic SDK (>= 1.0) speaks HTTP through ``httpx2``, the
 # maintained fork of httpx, and rejects ``httpx`` objects (Timeout, clients)
@@ -39,6 +39,9 @@ from kiss.core.models.model import (
     transcribe_audio,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_error
+
+if TYPE_CHECKING:
+    from kiss.core.models.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -234,15 +237,42 @@ def _parse_claude_version(model_name: str) -> tuple[str, int, int | None] | None
     return family, int(major_str), minor
 
 
-def _uses_adaptive_thinking(model_name: str) -> bool:
+ClaudeProfile = tuple["ModelInfo | None", tuple[str, int, int | None] | None]
+
+
+def _claude_profile(model_name: str) -> ClaudeProfile:
+    """Resolve the catalog entry and parsed version the capability checks use.
+
+    A generated effort alias (``claude-opus-5-5-medium``) is judged by its
+    base id: the alias name itself falls outside the version grammar of
+    :func:`_parse_claude_version` and has no catalog flags of its own.
+
+    Args:
+        model_name: The catalog model name (``claude-*``, possibly an
+            effort alias).
+
+    Returns:
+        ``(info, version)`` where ``info`` is the ``MODEL_INFO`` entry of
+        the base id (``None`` when uncatalogued) and ``version`` the
+        ``(family, major, minor)`` tuple of :func:`_parse_claude_version`
+        (``None`` when the name is outside the grammar).
+    """
+    from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
+
+    model_name = _strip_thinking_alias(model_name)
+    return MODEL_INFO.get(model_name), _parse_claude_version(model_name)
+
+
+def _uses_adaptive_thinking(profile: ClaudeProfile) -> bool:
     """Return True if the Claude model requires ``thinking.type=adaptive``.
 
+    ``profile`` is the ``(info, version)`` pair of :func:`_claude_profile`.
     Consultation order:
 
-    1. ``MODEL_INFO[model_name].adaptive_thinking`` when explicitly set
-       (``True`` / ``False``) — the highest-priority source of truth.
-       This is loaded from ``MODEL_INFO.json`` at import time so a JSON
-       edit reconfigures the adapter without a code change.
+    1. ``info.adaptive_thinking`` when explicitly set (``True`` /
+       ``False``) — the highest-priority source of truth.  This is loaded
+       from ``MODEL_INFO.json`` at import time so a JSON edit reconfigures
+       the adapter without a code change.
     2. A version-aware heuristic on the model name, parsed as
        ``claude-<family>-<major>[-<minor>]``:
 
@@ -255,17 +285,9 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
          4.x still use ``enabled``. An 8-digit date segment (e.g.
          ``claude-opus-4-20250514``) is not treated as a minor version.
     """
-    from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
-
-    # A generated effort alias (``claude-opus-5-5-medium``) is judged by
-    # its base id: the alias name itself falls outside the version
-    # grammar below.
-    model_name = _strip_thinking_alias(model_name)
-    info = MODEL_INFO.get(model_name)
+    info, version = profile
     if info is not None and info.adaptive_thinking is not None:
         return info.adaptive_thinking
-
-    version = _parse_claude_version(model_name)
     if version is None:
         return False
     family, major, minor = version
@@ -276,12 +298,13 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
     return family == "opus" and major == 4 and minor is not None and minor >= 6
 
 
-def _supports_extended_thinking(model_name: str) -> bool:
+def _supports_extended_thinking(profile: ClaudeProfile) -> bool:
     """Return True if the Claude model should send the ``thinking`` param.
 
+    ``profile`` is the ``(info, version)`` pair of :func:`_claude_profile`.
     Consultation order:
 
-    1. ``MODEL_INFO[model_name].extended_thinking`` when explicitly set —
+    1. ``info.extended_thinking`` when explicitly set —
        the highest-priority source of truth. Setting the flag to
        ``False`` lets ``MODEL_INFO.json`` opt a specific model out of
        extended thinking without a code change.
@@ -299,17 +322,9 @@ def _supports_extended_thinking(model_name: str) -> bool:
     model's reasoning stayed invisible (or came back encrypted-only and
     ``KISSAgent`` misread it as "empty response").
     """
-    from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
-
-    # A generated effort alias (``claude-opus-5-5-medium``) is judged by
-    # its base id: the alias name itself falls outside the version
-    # grammar below.
-    model_name = _strip_thinking_alias(model_name)
-    info = MODEL_INFO.get(model_name)
+    info, version = profile
     if info is not None and info.extended_thinking is not None:
         return info.extended_thinking
-
-    version = _parse_claude_version(model_name)
     if version is None:
         return False
     family, major, _minor = version
@@ -1005,11 +1020,10 @@ class AnthropicModel(Model):
             "Anthropic Messages",
         )
 
-        if "thinking" not in kwargs and _supports_extended_thinking(self._catalog_model_name):
+        profile = _claude_profile(self._catalog_model_name)
+        if "thinking" not in kwargs and _supports_extended_thinking(profile):
             if not user_set_max_tokens:
-                from kiss.core.models.model_info import _strip_thinking_alias
-
-                version = _parse_claude_version(_strip_thinking_alias(self._catalog_model_name))
+                version = profile[1]
                 # Opus 4.6+ allows 65536 output tokens; Opus 4.5 (like
                 # every Sonnet) is capped at 64000 and answers HTTP 400
                 # "max_tokens: 65536 > 64000" otherwise (verified live
@@ -1020,7 +1034,7 @@ class AnthropicModel(Model):
                     and (version[1], version[2] or 0) >= (4, 6)
                 )
                 max_tokens = 65536 if is_big_opus else 64000
-            if _uses_adaptive_thinking(self._catalog_model_name):
+            if _uses_adaptive_thinking(profile):
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
                 budget = min(10000, max_tokens - 1)

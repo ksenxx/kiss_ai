@@ -15,7 +15,6 @@ deterministically fails fast (no daemon endpoint file under the fresh
 from __future__ import annotations
 
 import json
-import socket
 import stat
 import sys
 import time
@@ -36,6 +35,7 @@ from kiss.agents.third_party_agents.oai.oai_sea import (
     _system_prompt_text,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.recording_http import raw_post
 
 _API_KEY = "test-secret-key"
 
@@ -405,25 +405,10 @@ def _raw_post_chat(port: int, extra_headers: list[str]) -> tuple[int, dict]:
     Returns:
         Tuple of (HTTP status code, decoded JSON response body).
     """
-    lines = [
-        "POST /v1/chat/completions HTTP/1.1",
-        "Host: 127.0.0.1",
-        f"Authorization: Bearer {_API_KEY}",
-        "Connection: close",
-        *extra_headers,
-    ]
-    request = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        sock.settimeout(10)
-        sock.sendall(request)
-        raw = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            raw += chunk
-    head, _, payload = raw.partition(b"\r\n\r\n")
-    status = int(head.split(b" ", 2)[1])
+    headers = "".join(
+        f"{line}\r\n" for line in [f"Authorization: Bearer {_API_KEY}", *extra_headers]
+    )
+    status, payload = raw_post(port, headers, "/v1/chat/completions")
     return status, json.loads(payload)
 
 

@@ -258,19 +258,15 @@ class _RecordingPrinter(Printer):
         """Bind the calling thread to task *binding*."""
         self.bound.task_id = binding
 
-    def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
         """Record the event together with the printing thread's task binding.
 
         Args:
             content: The content to display.
             type: Content type (``tool_call``, ``tool_result``, ...).
             **kwargs: Type-specific options (``tool_input``, ...).
-
-        Returns:
-            An empty string (no streamed text extracted).
         """
         self.events.append((type, content, {**kwargs, "bound_to": self.thread_binding()}))
-        return ""
 
     def token_callback(self, token: str) -> None:
         """Record a streamed token.

@@ -13,100 +13,29 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  fakeMatchMedia,
+  fakeIntervals,
+} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const WD = '/ws/repo';
 
-/**
- * Replace the window's setInterval/clearInterval with a fake clock so
- * the poll can be advanced deterministically instead of waited out.
- */
-function installFakeIntervals(win) {
-  let now = 0;
-  let nextId = 1;
-  const intervals = [];
-  win.setInterval = function (cb, ms) {
-    const iv = {id: nextId++, cb, ms: Number(ms) || 0, next: now + (Number(ms) || 0)};
-    intervals.push(iv);
-    return iv.id;
-  };
-  win.clearInterval = function (id) {
-    const i = intervals.findIndex(iv => iv.id === id);
-    if (i >= 0) intervals.splice(i, 1);
-  };
-  function tick(ms) {
-    const target = now + ms;
-    for (;;) {
-      const due = intervals.filter(iv => iv.next <= target);
-      if (due.length === 0) break;
-      due.sort((a, b) => a.next - b.next);
-      const iv = due[0];
-      now = iv.next;
-      iv.next += iv.ms;
-      iv.cb();
-    }
-    now = target;
-  }
-  return {tick, intervals};
-}
-
 function makePage(narrow) {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  html = html.replace('<body', '<body class="remote-chat"');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  let clock;
+  const {win, posted} = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['marked.min.js'],
+    sourceUrl: 'scm-badge-main.js',
+    beforeScripts(win) {
+      clock = fakeIntervals(win);
+      stubRaf(win);
+      fakeMatchMedia(win, !narrow);
+    },
   });
-  const win = dom.window;
-  const clock = installFakeIntervals(win);
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.matchMedia = function (query) {
-    return {
-      matches: !narrow && query === '(min-width: 900px)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=scm-badge-main.js',
-  );
   return {win, posted, clock};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function byId(win, id) {
@@ -127,7 +56,14 @@ function statusReply(token, n) {
       group: 'changes',
     });
   }
-  return {type: 'gitStatus', token, workDir: WD, repo: WD, branch: 'main', changes};
+  return {
+    type: 'gitStatus',
+    token,
+    workDir: WD,
+    repo: WD,
+    branch: 'main',
+    changes,
+  };
 }
 
 function setHidden(win, hidden) {
@@ -303,7 +239,9 @@ function testUnchangedPollReplyKeepsFocus() {
   );
   assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '1');
   win.close();
-  console.log('  ok - an unchanged poll reply keeps focus; a changed one updates');
+  console.log(
+    '  ok - an unchanged poll reply keeps focus; a changed one updates',
+  );
 }
 
 function testNoPollWhileThePanelIsOffScreen() {

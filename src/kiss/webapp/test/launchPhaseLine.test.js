@@ -25,15 +25,11 @@ function makePage() {
   return page;
 }
 
-// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
-// chat tabs any more), which retires nothing.
+// Put chat *tabId* on screen (the Chats-panel pick retires nothing) and
+// check it got there.
 function clickTab(win, tabId) {
+  harness.clickTab(win, tabId);
   const api = win._testApi;
-  assert.ok(
-    api.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  api.switchToTab(tabId);
   assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
 }
 
@@ -52,7 +48,13 @@ function testPhasesReplaceOneLineAndClear() {
   const tabId = win._testApi.getActiveTabId();
   const O = win.document.getElementById('output');
   send(win, {type: 'status', running: true, tabId, startTs: Date.now()});
-  send(win, {type: 'prompt', text: 'fix the bug', tabId, taskId: '', early: true});
+  send(win, {
+    type: 'prompt',
+    text: 'fix the bug',
+    tabId,
+    taskId: '',
+    early: true,
+  });
 
   send(win, {type: 'launch_phase', text: 'Classifying task…', tabId});
   assert.strictEqual(phaseText(win), 'Classifying task…');
@@ -60,23 +62,41 @@ function testPhasesReplaceOneLineAndClear() {
     phaseLines(win)[0].querySelector('.status-spinner'),
     'the line carries the shared spinner ring',
   );
-  assert.strictEqual(O.lastElementChild, phaseLines(win)[0], 'the line is last');
+  assert.strictEqual(
+    O.lastElementChild,
+    phaseLines(win)[0],
+    'the line is last',
+  );
 
   send(win, {type: 'launch_phase', text: 'Preparing worktree…', tabId});
   assert.strictEqual(phaseText(win), 'Preparing worktree…');
-  assert.strictEqual(O.lastElementChild, phaseLines(win)[0], 'still the last child');
+  assert.strictEqual(
+    O.lastElementChild,
+    phaseLines(win)[0],
+    'still the last child',
+  );
 
   send(win, {type: 'launch_phase', text: '', tabId});
-  assert.strictEqual(phaseLines(win).length, 0, 'an empty text removes the line');
+  assert.strictEqual(
+    phaseLines(win).length,
+    0,
+    'an empty text removes the line',
+  );
 
   // A phase that arrives after the transcript has grown still sits last.
   send(win, {type: 'launch_phase', text: 'Classifying task…', tabId});
   send(win, {type: 'notice', text: 'heads up', tabId});
   send(win, {type: 'launch_phase', text: 'Preparing worktree…', tabId});
-  assert.strictEqual(O.lastElementChild, phaseLines(win)[0], 'moved after the notice');
+  assert.strictEqual(
+    O.lastElementChild,
+    phaseLines(win)[0],
+    'moved after the notice',
+  );
 
   win.close();
-  console.log('  ok - phases replace one line, keep it last, and clear on empty text');
+  console.log(
+    '  ok - phases replace one line, keep it last, and clear on empty text',
+  );
 }
 
 function testTaskEndRemovesAnUnclearedLine() {
@@ -87,7 +107,11 @@ function testTaskEndRemovesAnUnclearedLine() {
   assert.strictEqual(phaseText(win), 'Classifying task…');
   // The launch failed before the agent started (no clearing phase).
   send(win, {type: 'status', running: false, tabId});
-  assert.strictEqual(phaseLines(win).length, 0, 'the task end removes the line');
+  assert.strictEqual(
+    phaseLines(win).length,
+    0,
+    'the task end removes the line',
+  );
   win.close();
   console.log('  ok - a task ending removes an uncleared line');
 }
@@ -100,8 +124,16 @@ function testBackgroundTabPhaseStaysOffScreenUntilSwitched() {
   const otherTab = api.getActiveTabId();
   assert.notStrictEqual(otherTab, runningTab, 'a second tab is on screen');
 
-  send(win, {type: 'launch_phase', text: 'Preparing worktree…', tabId: runningTab});
-  assert.strictEqual(phaseLines(win).length, 0, 'the visible tab shows no foreign phase');
+  send(win, {
+    type: 'launch_phase',
+    text: 'Preparing worktree…',
+    tabId: runningTab,
+  });
+  assert.strictEqual(
+    phaseLines(win).length,
+    0,
+    'the visible tab shows no foreign phase',
+  );
 
   clickTab(win, runningTab);
   assert.strictEqual(api.getActiveTabId(), runningTab);
@@ -116,31 +148,55 @@ function testBackgroundTabPhaseStaysOffScreenUntilSwitched() {
   clickTab(win, otherTab);
   send(win, {type: 'launch_phase', text: '', tabId: runningTab});
   clickTab(win, runningTab);
-  assert.strictEqual(phaseLines(win).length, 0, 'cleared while in the background');
+  assert.strictEqual(
+    phaseLines(win).length,
+    0,
+    'cleared while in the background',
+  );
 
   // A task ending in the background removes its parked line too.
   clickTab(win, otherTab);
-  send(win, {type: 'launch_phase', text: 'Classifying task…', tabId: runningTab});
+  send(win, {
+    type: 'launch_phase',
+    text: 'Classifying task…',
+    tabId: runningTab,
+  });
   send(win, {type: 'status', running: false, tabId: runningTab});
   clickTab(win, runningTab);
-  assert.strictEqual(phaseLines(win).length, 0, 'removed by the background task end');
+  assert.strictEqual(
+    phaseLines(win).length,
+    0,
+    'removed by the background task end',
+  );
 
   win.close();
-  console.log('  ok - a background tab keeps its phase off screen until switched to');
+  console.log(
+    '  ok - a background tab keeps its phase off screen until switched to',
+  );
 }
 
 function testPhaseForUnknownTabIsIgnored() {
   const {win} = makePage();
   const tabId = win._testApi.getActiveTabId();
-  send(win, {type: 'launch_phase', text: 'Classifying task…', tabId: 'no-such-tab'});
+  send(win, {
+    type: 'launch_phase',
+    text: 'Classifying task…',
+    tabId: 'no-such-tab',
+  });
   assert.strictEqual(phaseLines(win).length, 0, 'an unknown tab draws nothing');
   // A closed tab's task ending must not clear the visible tab's line.
   send(win, {type: 'status', running: true, tabId, startTs: Date.now()});
   send(win, {type: 'launch_phase', text: 'Classifying task…', tabId});
   send(win, {type: 'status', running: false, tabId: 'no-such-tab'});
-  assert.strictEqual(phaseText(win), 'Classifying task…', 'a foreign task end changes nothing');
+  assert.strictEqual(
+    phaseText(win),
+    'Classifying task…',
+    'a foreign task end changes nothing',
+  );
   win.close();
-  console.log('  ok - events for an unknown tab neither draw nor clear anything');
+  console.log(
+    '  ok - events for an unknown tab neither draw nor clear anything',
+  );
 }
 
 function runTests() {

@@ -5,11 +5,14 @@
 //
 // End-to-end tests for the task-settings rows of the Task Info panel
 // (#meta-list in media/chat.html, painted by updateMetaTaskDetails in
-// media/main.js) — Date, Base model, Chat id, Task id and (when the
-// task has one) Parent task; there is no Parallel mode row — and for the
-// task panels of a shared page, which carry a settings block each:
+// media/main.js) — Machine, Date, Base model, Chat id, Task id and
+// (when the task has one) Parent task; there is no Parallel mode row —
+// and for the task panels of a saved page ("Save chat"), which carry
+// an info block each with EVERY row of the Task Info panel:
 //
 // * a live task's `task_settings` event paints the rows,
+// * the Machine row names the tab's bound machine (`tabMachine`),
+//   else this daemon's (`configData.machine`),
 // * a new submit clears the previous task's rows ('—') until the new
 //   task's settings arrive,
 // * session replays (`task_events`) repopulate the rows from the
@@ -28,65 +31,21 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  makePage: makeHarnessPage,
+  send,
+  clickTab,
+  stubRaf,
+  MEDIA,
+} = require('./simplify2_harness');
+const {test, report} = makeRunner();
 
 function makePage() {
-  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
-  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'https://localhost/',
+  return makeHarnessPage({
+    sourceUrl: 'taskinfo-main.js',
+    beforeScripts: stubRaf,
   });
-  const win = dom.window;
-  win.Element.prototype.scrollIntoView = function () {};
-  win.Element.prototype.scrollTo = function () {};
-  win.HTMLElement.prototype.scrollTo = function () {};
-  win.requestAnimationFrame = function (cb) {
-    cb();
-    return 0;
-  };
-  win.cancelAnimationFrame = function () {};
-  const posted = [];
-  win.acquireTransport = function () {
-    let state;
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
-      '\n//# sourceURL=taskinfo-main.js',
-  );
-  return {win, posted};
-}
-
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function tabIdOf(wv) {
@@ -104,21 +63,6 @@ function click(el) {
   );
 }
 
-// Bring a tab on screen the way the user does: a click on the group strip
-// when the tab is listed there, else the Chats-panel pick (chat tabs have
-// no row of their own any more).
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  else win._testApi.switchToTab(tabId);
-}
-
 const DASH = '\u2014';
 
 /** The Task Info panel's task-settings rows as {id: text}. */
@@ -126,6 +70,7 @@ function infoRows(win) {
   const doc = win.document;
   const val = id => doc.getElementById(id).textContent;
   return {
+    machine: val('meta-machine'),
     date: val('meta-date'),
     model: val('meta-model'),
     chatId: val('meta-chat-id'),
@@ -551,12 +496,248 @@ test('share export gives every task panel its own settings info', () => {
   ).map(el => el.textContent);
   assert.strictEqual(infos.length, 2, 'one info block per task panel');
   assert.ok(
-    infos[0].includes('old-model') && infos[0].includes('task task-a'),
+    infos[0].includes('Base model:old-model') &&
+      infos[0].includes('Task id:task-a'),
     'first section shows the OLD task settings: ' + infos[0],
   );
   assert.ok(
-    infos[1].includes('live-model') && infos[1].includes('task task-b'),
+    infos[1].includes('Base model:live-model') &&
+      infos[1].includes('Task id:task-b'),
     'second section shows the LIVE task settings: ' + infos[1],
+  );
+});
+
+/** The labelled rows of one saved-page info block as {label: value}. */
+function savedRows(infoEl) {
+  const out = {};
+  for (const line of infoEl.querySelectorAll('.task-panel-info-line')) {
+    const label = line.querySelector('.task-panel-info-label').textContent;
+    out[label.replace(/:$/, '')] = line.textContent.slice(label.length);
+  }
+  return out;
+}
+
+const PANEL_ROWS = [
+  'Tokens',
+  'Cost',
+  'Steps',
+  'Time',
+  'Machine',
+  'Workdir',
+  'Max budget',
+  'Date',
+  'Base model',
+  'Chat id',
+  'Task id',
+];
+
+test('a saved page lists every Task Info row for every task', () => {
+  const wv = makePage();
+  const win = wv.win;
+  const TAB = tabIdOf(wv);
+  const doc = win.document;
+  send(win, {type: 'configData', config: {}, machine: 'box-a', tabId: TAB});
+  send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
+  send(win, {type: 'setTaskText', text: 'live task', tabId: TAB});
+  send(win, {
+    type: 'task_settings',
+    settings: Object.assign({}, SETTINGS, {task_id: 'task-live'}),
+    tabId: TAB,
+    taskId: 'task-live',
+  });
+  send(win, {
+    type: 'usage_info',
+    tabId: TAB,
+    taskId: 'task-live',
+    total_tokens: 4321,
+    cost_usd: 0.42,
+    total_steps: 7,
+  });
+  send(win, {
+    type: 'system_output',
+    text: 'live output\n',
+    tabId: TAB,
+    taskId: 'task-live',
+  });
+  // The status bar figures the Task Info panel mirrors (through a
+  // MutationObserver, which fires after this synchronous test's
+  // checks) and the saved page must repeat.
+  const statusText = id => doc.getElementById(id).textContent;
+  assert.strictEqual(statusText('status-tokens'), 'Tokens: 4.32K');
+  assert.strictEqual(statusText('status-budget'), 'Cost: $0.42');
+  assert.strictEqual(statusText('status-steps'), 'Steps: 7');
+  assert.strictEqual(statusText('meta-machine'), 'box-a');
+  click(doc.getElementById('share-btn'));
+  const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+  // The status bar's spans are lent to a neighbouring task the reader
+  // scrolls onto: the saved page must report the tab's OWN figures.
+  doc.getElementById('status-tokens').textContent = 'Tokens: 999';
+  doc.getElementById('status-budget').textContent = 'Cost: $9.99';
+  doc.getElementById('status-steps').textContent = 'Steps: 99';
+  const started = Date.UTC(2026, 1, 3, 4, 5);
+  send(win, {
+    type: 'share_tasks',
+    tabId: req.tabId,
+    chatId: req.chatId,
+    truncated: false,
+    tasks: [
+      {
+        task: 'finished task',
+        task_id: 'task-done',
+        events: [
+          {
+            type: 'task_settings',
+            settings: Object.assign({}, SETTINGS, {
+              task_id: 'task-done',
+              sea: 'write_paper',
+              kind: 'command',
+            }),
+          },
+        ],
+        metrics: {
+          tokens: 1234567,
+          cost: 1.5,
+          steps: 12,
+          start_ts: started,
+          end_ts: started + 125000,
+        },
+        subagents: [
+          {
+            task: 'child task',
+            task_id: 'task-child',
+            parent_task_id: 'task-done',
+            events: [
+              {
+                type: 'task_settings',
+                settings: Object.assign({}, SETTINGS, {
+                  task_id: 'task-child',
+                  parent_task_id: 'task-done',
+                  is_subagent: true,
+                }),
+              },
+              // A running sub-agent's live recording: its newest
+              // totals are in this event, not yet in its row.
+              {
+                type: 'usage_info',
+                total_tokens: 10,
+                cost_usd: 0.001,
+                total_steps: 1,
+              },
+            ],
+            // Still running: zero row totals, no end time yet.
+            metrics: {tokens: 0, cost: 0, steps: 0, start_ts: started},
+          },
+        ],
+      },
+      {task: 'live task', task_id: 'task-live', events: []},
+      // A task whose reply carries a usage event but no row metrics.
+      {
+        task: 'usage only',
+        task_id: 'task-usage',
+        events: [
+          {type: 'usage_info', total_tokens: 500, cost: '$0.0500'},
+          {type: 'result', total_tokens: 900, cost_usd: 0.09},
+        ],
+        metrics: null,
+      },
+    ],
+  });
+  const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
+  const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
+  const infos = Array.from(
+    dom.window.document.querySelectorAll('.task-panel-info'),
+  );
+  assert.strictEqual(infos.length, 4, 'chat tasks, then the sub-agent');
+  const done = savedRows(infos[0]);
+  assert.deepStrictEqual(
+    Object.keys(done),
+    PANEL_ROWS.concat(['Agent']),
+    'the finished task lists the panel rows in the panel order',
+  );
+  assert.strictEqual(done.Tokens, '1.23M');
+  assert.strictEqual(done.Cost, '$1.50');
+  assert.strictEqual(done.Steps, '12');
+  assert.strictEqual(done.Time, 'Done (2m 5s)');
+  assert.strictEqual(done.Machine, 'box-a');
+  assert.strictEqual(done.Workdir, '/repo');
+  assert.strictEqual(done['Max budget'], '$5.00');
+  assert.strictEqual(done.Date, infoRows(win).date, 'same date text');
+  assert.strictEqual(done['Base model'], 'model-x');
+  assert.strictEqual(done['Chat id'], 'chat-abc');
+  assert.strictEqual(done['Task id'], 'task-done');
+  assert.ok(done.Agent.includes('write_paper'), done.Agent);
+
+  const live = savedRows(infos[1]);
+  assert.deepStrictEqual(Object.keys(live), PANEL_ROWS);
+  assert.strictEqual(live.Tokens, '4.32K', 'the live task: the status bar');
+  assert.strictEqual(live.Cost, '$0.42');
+  assert.strictEqual(live.Steps, '7');
+  assert.strictEqual(
+    live.Time,
+    statusText('status-text'),
+    'the live task: the Time row as the panel shows it',
+  );
+  assert.strictEqual(live['Task id'], 'task-live');
+
+  const usageOnly = savedRows(infos[2]);
+  assert.deepStrictEqual(Object.keys(usageOnly), PANEL_ROWS);
+  assert.strictEqual(usageOnly.Tokens, '900', 'the LAST usage event wins');
+  assert.strictEqual(usageOnly.Cost, '$0.09');
+  assert.strictEqual(usageOnly.Steps, '0', 'no step count in the event');
+  assert.strictEqual(usageOnly.Time, DASH, 'no row: no start or end');
+
+  const child = savedRows(infos[3]);
+  assert.deepStrictEqual(
+    Object.keys(child),
+    PANEL_ROWS.concat(['Parent task']),
+    'a sub-agent adds its Parent task row',
+  );
+  assert.strictEqual(child.Tokens, '10', "the live recording's totals");
+  assert.strictEqual(child.Cost, '$0.0010');
+  assert.strictEqual(child.Steps, '1');
+  assert.strictEqual(child.Time, 'Running', 'no end time: still running');
+  assert.strictEqual(child['Task id'], 'task-child (subagent)');
+  assert.strictEqual(child['Parent task'], 'task-done');
+});
+
+test('the Machine row names the bound machine, else this daemon', () => {
+  const wv = makePage();
+  const win = wv.win;
+  const TAB = tabIdOf(wv);
+  assert.strictEqual(infoRows(win).machine, DASH, 'unknown until configData');
+  send(win, {type: 'configData', config: {}, machine: 'box-a', tabId: TAB});
+  assert.strictEqual(infoRows(win).machine, 'box-a', "this daemon's machine");
+  send(win, {type: 'tabMachine', tabId: TAB, machine: 'remote-1'});
+  assert.strictEqual(infoRows(win).machine, 'remote-1', 'the bound machine');
+  send(win, {
+    type: 'machines',
+    machines: [
+      {name: 'box-a', local: true, status: 'reachable'},
+      {name: 'remote-1', label: 'Remote One', status: 'reachable'},
+    ],
+  });
+  assert.strictEqual(
+    infoRows(win).machine,
+    'Remote One',
+    'a machines reply relabels the row',
+  );
+  send(win, {
+    type: 'history',
+    sessions: [],
+    machineLabels: {'remote-1': 'Build Host'},
+  });
+  assert.strictEqual(
+    infoRows(win).machine,
+    'Build Host',
+    "a history reply's labels relabel the row too",
+  );
+  send(win, {type: 'tabMachine', tabId: TAB, machine: ''});
+  assert.strictEqual(infoRows(win).machine, 'box-a', 'unbound: this daemon');
+  send(win, {type: 'tabMachine', tabId: 'some-other-tab', machine: 'remote-1'});
+  assert.strictEqual(
+    infoRows(win).machine,
+    'box-a',
+    "another tab's binding leaves the active tab's row alone",
   );
 });
 
@@ -601,7 +782,7 @@ test('share markup: the info block follows the task text', () => {
   );
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
+report('taskPanelSettingsInfo');
 // The pages leave live timers behind (the running-task clock, the
 // button flash), so exit explicitly instead of draining them.
-process.exit(failures.length > 0 ? 1 : 0);
+process.exit(0);
