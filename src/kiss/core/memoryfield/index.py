@@ -158,13 +158,6 @@ def serialize_float32(vector: list[float]) -> bytes:
     return packed.tobytes()
 
 
-def deserialize_float32(blob: bytes) -> list[float]:
-    """Unpack a float32 BLOB produced by :func:`serialize_float32`."""
-    unpacked = array("f")
-    unpacked.frombytes(blob)
-    return unpacked.tolist()
-
-
 class ModelEmbedder:
     """Embedder backed by a KISS framework embedding model.
 
@@ -217,7 +210,6 @@ class ModelEmbedder:
             texts, embedding_model=self.model_name
         )
         return vectors
-
 
 
 # Query embeddings kept by each VectorIndex (an agent typically runs
@@ -672,9 +664,7 @@ class VectorIndex:
             for (filename, digest, raw, key, _), vector in zip(batch, vectors, strict=True):
                 path = self.memory.root / filename  # validated by page_path above
                 try:
-                    changed = (
-                        hashlib.sha256(read_bytes_waiting_for_writer(path)).digest() != digest
-                    )
+                    changed = hashlib.sha256(read_bytes_waiting_for_writer(path)).digest() != digest
                     mtime = path.stat().st_mtime
                 except FileNotFoundError:
                     changed, mtime = True, 0.0  # deleted mid-embed; skipped below
@@ -768,9 +758,7 @@ class VectorIndex:
                 if not applied:
                     logger.info(skipped_message, filename)
             conn.execute("UPDATE meta SET value = ? WHERE key = 'revision'", (str(revision),))
-        return SyncReport(
-            added=added, updated=updated, removed=removed, unchanged=report.unchanged
-        )
+        return SyncReport(added=added, updated=updated, removed=removed, unchanged=report.unchanged)
 
     def _rows(self) -> dict[int, _Rows]:
         """All index rows, decoded and grouped by embedding dimension.
@@ -810,6 +798,18 @@ class VectorIndex:
         }
         self._cache = (token, groups)
         return groups
+
+    def frontmatters(self) -> dict[str, dict[str, Any]]:
+        """Return the frontmatter of every indexed page, by page name, as of the last sync.
+
+        Read from the index rather than from the pages, so a caller that
+        has just synced need not open every page file a second time.
+        """
+        return {
+            name: json.loads(frontmatter)
+            for rows in self._rows().values()
+            for name, frontmatter in zip(rows.names, rows.frontmatter, strict=True)
+        }
 
     def search(self, query: str, k: int = 5, min_score: float = 0.0) -> list[SearchHit]:
         """Return the *k* pages most similar to *query*.
@@ -891,9 +891,9 @@ class VectorIndex:
         pairs: list[tuple[str, str, float]] = []
         for rows in self._rows().values():
             vectors = rows.vectors
+            floor = threshold - float32_dot_error(vectors.shape[1])
             for start in range(0, len(rows.names), _PAIR_BLOCK_ROWS):
                 block = vectors[start : start + _PAIR_BLOCK_ROWS] @ vectors.T
-                floor = threshold - float32_dot_error(vectors.shape[1])
                 for i, j in zip(*np.nonzero(block >= floor), strict=True):
                     if j <= start + i:
                         continue

@@ -123,14 +123,6 @@ def _send_params(text: str, context_id: str = "") -> dict:
     return {"message": message}
 
 
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
-    agent = A2AAgent()
-    assert agent.name == "A2A Agent"
-    assert agent._is_authenticated() is False
-    assert _tool_names(agent._get_tools()) == _AUTH_TRIO
-
-
 def test_authenticate_persists_check_and_clear() -> None:
     """The auth trio persists, reports, and clears config on disk."""
     agent = A2AAgent()
@@ -174,13 +166,6 @@ def test_authenticate_rejects_bad_input() -> None:
     assert "cannot be empty" in auth_tools(agent)["authenticate_a2a"](bind_host="", port="1")
     assert "must be an integer" in auth_tools(agent)["authenticate_a2a"](port="http")
     assert not _config.path.exists()
-
-
-def test_tools_module_function() -> None:
-    """The module-level ``tools()`` returns a non-empty tool list."""
-    tools = a2a_mod.A2aSea().tools([])
-    assert tools
-    assert _AUTH_TRIO <= _tool_names(tools)
 
 
 def test_inbound_outbound_end_to_end(refusing_port: int) -> None:

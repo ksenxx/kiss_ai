@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import threading
@@ -21,6 +20,7 @@ import yaml
 
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
 from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
+from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -130,27 +130,26 @@ def remote_and_clones(root: Path, *names: str) -> list[Path]:
     return clones
 
 
-def set_known_work_dirs(work_dir: str, recent: Sequence[str]) -> None:
-    """Write *work_dir* and *recent* (most recent first) as the ``work_dir`` and
-    ``recent_work_dirs`` keys of the session's ``config.json``; a test that calls this
-    requests :func:`restored_config` so the file goes back afterwards."""
-    config = kiss_home() / "config.json"
-    data = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
-    data["work_dir"] = work_dir
-    data["recent_work_dirs"] = [{"path": path, "ts": 1.0} for path in recent]
-    config.write_text(json.dumps(data), encoding="utf-8")
+def hermetic_git_env(env: pytest.MonkeyPatch) -> None:
+    """Export :data:`HERMETIC_GIT_WITH_IDENTITY` through *env* for the SEA (or daemon) under
+    test, which spawns git with the process environment; *env*'s undo restores it."""
+    for key, value in HERMETIC_GIT_WITH_IDENTITY.items():
+        env.setenv(key, value)
 
 
 @pytest.fixture
-def restored_config() -> Iterator[None]:
-    """Put the session's ``config.json`` back to what it was when the test ends."""
-    config = kiss_home() / "config.json"
-    before = config.read_bytes() if config.exists() else None
+def reset_registry() -> Iterator[None]:
+    """Reset the SEA registry before and after the test so a rescan is honest.
+
+    Also removes any ``SEAS.md`` the test wrote into ``$KISS_HOME`` so
+    it cannot shadow bundled commands for later tests.  A test that
+    points ``KISS_HOME`` elsewhere requests this after ``monkeypatch``
+    so the registry is empty again before the real home comes back.
+    """
+    sea_commands._reset_for_tests()
     yield
-    if before is None:
-        config.unlink(missing_ok=True)
-    else:
-        config.write_bytes(before)
+    sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 @pytest.fixture

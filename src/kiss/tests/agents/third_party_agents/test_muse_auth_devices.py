@@ -89,6 +89,7 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyChannelBackend
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import _config as ntfy_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    MuseApiHandler,
     auth_tools,
     loopback_policy,
     requires_muse_daemon,
@@ -96,7 +97,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     tools_by_name,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
     RecordingServer,
     serve_recording,
     serving,
@@ -108,22 +108,12 @@ _REAL_NTFY_TOKEN = "tk_real_ntfy_secret"
 _REAL_GOVEE_KEY = "govee-real-secret"
 
 
-class _DeviceApiHandler(RecordingHandler):
+class _DeviceApiHandler(MuseApiHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
-    server: Any
-
     def _serve(self) -> None:
-        body = self._read_raw()
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "headers": {k: v for k, v in self.headers.items()},
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
-        auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
+        self.record_full_request()
+        auth = self.authorization()
         path = self.path.split("?", 1)[0]
         if path in self.server.drop_after_recording:
             # Simulate an ambiguous failure: the request was received
@@ -136,18 +126,12 @@ class _DeviceApiHandler(RecordingHandler):
             # The vault is rotated (new generation) between the initial
             # request and the redirect hop the daemon is about to follow.
             self.server.rotate_before_redirect()
-            self.send_response(302)
-            self.send_header("Location", "/t-redirect-target")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.redirect(302, "/t-redirect-target")
             return
         if path.endswith(("/t302", "/t307")) and self.command == "POST":
             # Same-host redirects: 302 downgrades the POST to GET, 307
             # keeps the method and body.
-            self.send_response(302 if path.endswith("/t302") else 307)
-            self.send_header("Location", "/t-redirect-target")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.redirect(302 if path.endswith("/t302") else 307, "/t-redirect-target")
             return
         if self.command == "DELETE" or "/reactions/" in path:
             # Discord's delete_message / add_reaction contract: 204,

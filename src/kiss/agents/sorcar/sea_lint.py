@@ -196,40 +196,11 @@ def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path
     return sorted(scripts)
 
 
-def lint_targets(
-    paths: Iterable[Path] | None, registered: bool,
-) -> tuple[list[Path], dict[Path, str]]:
-    """Return the scripts ``sea lint`` checks for *paths*, and the ``script -> /command`` map.
-
-    Args:
-        paths: Scripts (or SEA folders) to check; ``None`` means
-            :func:`default_targets`.
-        registered: With ``paths=None``, also the user's registered
-            scripts.
-    """
-    commands = registered_commands()
-    if paths is None:
-        return default_targets(registered, commands), commands
-    return [_script_of(Path(p)) for p in paths], commands
-
-
-def lint_scripts(
-    scripts: Iterable[Path], commands: Mapping[Path, str], prose: bool,
+def lint_all(
+    paths: Iterable[Path] | None = None,
+    registered: bool = False,
+    fix: bool = False,
 ) -> list[Finding]:
-    """Lint *scripts* (each as the ``/command`` *commands* maps it to), then the prose when *prose*.
-
-    Returns:
-        The findings, in path order.
-    """
-    findings: list[Finding] = []
-    for script in scripts:
-        findings.extend(lint_sea(script, commands.get(script)))
-    if prose:
-        findings.extend(lint_prose())
-    return findings
-
-
-def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> list[Finding]:
     """Lint *paths*, or the default targets (then also the prose of :data:`PROSE_FILES`).
 
     Args:
@@ -237,12 +208,28 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
             :func:`default_targets` and the prose files.
         registered: With ``paths=None``, also check the user's
             registered scripts.
+        fix: Rewrite the fixable findings first (:func:`fix_sea`; each
+            rewrite is printed as ``fixed <path>:<line>: <note>``) and
+            report what is left.
 
     Returns:
         The findings, in path order.
     """
-    scripts, commands = lint_targets(paths, registered)
-    return lint_scripts(scripts, commands, prose=paths is None)
+    commands = registered_commands()
+    if paths is None:
+        scripts = default_targets(registered, commands)
+    else:
+        scripts = [_script_of(Path(p)) for p in paths]
+    if fix:
+        for script in scripts:
+            for line in fix_sea(script):
+                print(f"fixed {line}")
+    findings: list[Finding] = []
+    for script in scripts:
+        findings.extend(lint_sea(script, commands.get(script)))
+    if paths is None:
+        findings.extend(lint_prose())
+    return findings
 
 
 PROSE_FILES = (
@@ -376,6 +363,10 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
         # method checks ``/<name> check`` makes.
         check = check_sea(path, require_description=False)
         seas, merged = check.seas, check.settings
+        # The per-class dicts (the script's own ``settings`` over ``{}``
+        # and what its bases lay under it) are not in ``check``, which
+        # carries the merge a run gets: the ``settings`` methods run once
+        # more for the ``redundant-key`` comparison.
         declared = own_settings(seas[-1])
     except SeaError as exc:
         findings.append(Finding(path, "broken", str(exc)))
@@ -932,13 +923,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Execute ``sea lint`` with parsed *args* (:func:`add_arguments`); return the exit code."""
-    paths = [Path(p) for p in args.paths] or None
-    scripts, commands = lint_targets(paths, args.registered)
-    if args.fix:
-        for script in scripts:
-            for line in fix_sea(script):
-                print(f"fixed {line}")
-    findings = lint_scripts(scripts, commands, prose=paths is None)
+    findings = lint_all([Path(p) for p in args.paths] or None, args.registered, args.fix)
     for finding in findings:
         print(finding)
     print(f"sea lint: {len(findings)} finding(s)")

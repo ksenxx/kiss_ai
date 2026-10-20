@@ -44,10 +44,10 @@ import time
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from html.parser import HTMLParser
 from pathlib import Path
 
 from kiss.core.config import kiss_home
+from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
@@ -63,9 +63,6 @@ DEFAULT_DB_PATH = kiss_home() / "history.db"
 DEFAULT_PROBE_MODEL = "claude-fable-5-1"
 RECALL_KS = (1, 3, 5)
 
-_BLOCK_TAGS = frozenset(
-    {"p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "pre", "table"}
-)
 _FAILURE_PREFIXES = ("Task failed", "Task interrupted")
 _FAILURE_EXACT = frozenset(
     {
@@ -74,43 +71,6 @@ _FAILURE_EXACT = frozenset(
         "Task stopped by user",
     }
 )
-
-
-class _TextExtractor(HTMLParser):
-    """Collect the text of an HTML fragment, one line per block element."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        self.parts.append(data)
-
-
-def html_to_text(html: str) -> str:
-    """Convert an HTML fragment (a task result) to plain text.
-
-    Args:
-        html: HTML or plain text.
-
-    Returns:
-        Text with block elements separated by newlines and runs of blank
-        lines collapsed.
-    """
-    extractor = _TextExtractor()
-    extractor.feed(html)
-    extractor.close()
-    text = "".join(extractor.parts)
-    text = re.sub(r"[ \t]+\n", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 @dataclass(frozen=True)
@@ -179,7 +139,7 @@ def task_page_body(task: PastTask, max_bytes: int = MAX_PAGE_BYTES - 700) -> str
     """
     date = datetime.fromtimestamp(task.timestamp, UTC).strftime("%Y-%m-%d")
     request = task.task.strip()
-    result = html_to_text(task.result)
+    result = html_to_markdown(task.result)
     header = f"# Task ({date})\n\n"
     body = f"{header}{request}\n\n# Result\n\n{result}\n"
     data = body.encode("utf-8")
@@ -654,13 +614,14 @@ def main(argv: list[str] | None = None) -> int:
             for key, result in results.items()
         }
 
+    in_families = duplicate_family_count(families)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(
             {
                 "generated_at": datetime.now(UTC).isoformat(),
                 "corpus_pages": len(names),
-                "pages_in_duplicate_families": duplicate_family_count(families),
+                "pages_in_duplicate_families": in_families,
                 "embedding_model": args.embedding_model,
                 "probe_model": args.probe_model,
                 "results": {key: asdict(r) for key, r in results.items()},
@@ -676,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"\nCorpus: {len(names)} pages from {args.db} "
-        f"({duplicate_family_count(families)} pages belong to repeated task families); "
+        f"({in_families} pages belong to repeated task families); "
         f"{len(probes)} probes\n"
     )
     print(format_results_table(results, len(probes)))

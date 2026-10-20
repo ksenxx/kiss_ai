@@ -37,6 +37,7 @@ from typing import Any, TypeVar
 from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import _queue_chat_event
 from kiss.core import stop_signal
+from kiss.core.models.model import Attachment
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -500,13 +501,17 @@ def _unregister_bridge_state(agent: Any, key: str) -> None:
     agent_state.unregister(state.task_id, state)
 
 
-def _take_pending_messages(state: agent_state.AgentState) -> tuple[list[str], list[str]]:
-    """Under ``STATE_LOCK``: pop *state*'s queued prompts and its deferred prompt echoes."""
+def _take_pending_messages(
+    state: agent_state.AgentState,
+) -> tuple[list[str], list[Attachment], list[str]]:
+    """Under ``STATE_LOCK``: pop *state*'s queued prompts, their files and its deferred echoes."""
     queued = list(state.pending_user_messages)
     state.pending_user_messages.clear()
+    attachments = list(state.pending_user_attachments)
+    state.pending_user_attachments.clear()
     deferred = list(state.unattributed_prompt_echoes)
     state.unattributed_prompt_echoes.clear()
-    return queued, deferred
+    return queued, attachments, deferred
 
 
 class _BashState:
@@ -1020,8 +1025,8 @@ class JsonPrinter(Printer):
 
         charge_side_channel_usage(self, task_agent, task_id, budget, tokens, steps, epoch=epoch)
 
-    def drain_pending_user_messages(self) -> list[str]:
-        """Return and clear the current task's queued follow-up prompts.
+    def drain_pending_user_messages(self) -> tuple[list[str], list[Attachment]]:
+        """Return and clear the current task's queued follow-up prompts and their files.
 
         Duck-typed bridge called by the agent's pre-step hook.  Also
         emits a durable ``recordOnly`` prompt echo for every message
@@ -1029,13 +1034,16 @@ class JsonPrinter(Printer):
         queueing time, so the echo lands in the correct trajectory.
 
         Returns:
-            The queued user messages, oldest first.  Empty when the
-            calling thread has no task or nothing is queued.
+            The queued user messages, oldest first, and the files
+            attached to them.  Both empty when the calling thread has
+            no task or nothing is queued.
         """
         state = agent_state.get(self._task_key())
         if state is None:
-            return []
-        queued, deferred = locked_call(agent_state.STATE_LOCK, _take_pending_messages, state)
+            return [], []
+        queued, attachments, deferred = locked_call(
+            agent_state.STATE_LOCK, _take_pending_messages, state,
+        )
         for msg in deferred:
             try:
                 self.broadcast(
@@ -1056,7 +1064,7 @@ class JsonPrinter(Printer):
                 locked_call(
                     agent_state.STATE_LOCK, state.unattributed_prompt_echoes.append, msg,
                 )
-        return queued
+        return queued, attachments
 
     def has_pending_user_messages(self) -> bool:
         """True when the current task has undrained follow-up prompts.

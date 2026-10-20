@@ -80,7 +80,7 @@ def test_hidden_inside_model_config_is_no_settings_key(tmp_path: Path) -> None:
     folder = tmp_path / "seas"
     sea = _write_sea(folder, "shown", _HIDDEN_IN_MODEL_CONFIG)
     assert sea_settings.declares_hidden(sea) is False
-    assert sea_settings.declared_literal(sea, "hidden") is None
+    assert sea_settings.parsed_sea(sea).literals.get("hidden") is None
     _register(folder)
     assert "shown" in sea_commands.list_commands()
     assert sea_lint.lint_all([sea]) == []

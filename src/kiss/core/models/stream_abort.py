@@ -139,12 +139,21 @@ class StreamAbortWatchdog:
         return interval
 
     def _watch(self) -> None:
+        """Poll until an abort is claimed and carried out, or :meth:`stop` disarms.
+
+        A claimed abort is retried every poll while the stream has no
+        response yet: Gemini arms the watchdog before its lazy generator
+        issues the request, so a Stop pressed in that window would
+        otherwise be acted on once (with nothing to shut down) and then
+        forgotten, leaving the task to wait for the read timeout.
+        """
         poll = self._poll_interval()
+        claimed = False
         while not self._done.wait(poll):
-            if not self._claim_abort():
-                continue
-            self._abort()
-            return
+            if not claimed:
+                claimed = self._claim_abort()
+            if claimed and self._abort():
+                return
 
     def _claim_abort(self) -> bool:
         """Decide whether to abort, atomically with respect to :meth:`stop`.
@@ -173,8 +182,15 @@ class StreamAbortWatchdog:
                 return True
             return False
 
-    def _abort(self) -> None:
+    def _abort(self) -> bool:
         """Unblock the iterating thread.
+
+        Returns:
+            ``False`` when the stream knows its ``response`` but has none
+            yet (the request is still waiting for headers), so the caller
+            retries later; closing such a stream would only close a
+            generator that is executing on the task thread, which
+            raises and achieves nothing.  ``True`` once the abort ran.
 
         A successful ``shutdown(SHUT_RDWR)`` is the whole abort: it
         wakes a reader already blocked in ``poll()``/``recv()`` AND
@@ -190,12 +206,11 @@ class StreamAbortWatchdog:
         therefore only the fallback for transports whose socket the
         shutdown could not reach.
         """
-        if self._shutdown_socket():
-            return
-        try:
-            self._stream.close()
-        except Exception:
-            logger.debug("Exception caught", exc_info=True)
+        if hasattr(self._stream, "response") and self._stream.response is None:
+            return False
+        if not self._shutdown_socket():
+            _close_stream(self._stream)
+        return True
 
     def _shutdown_socket(self) -> bool:
         """Half-close the stream's TCP socket, ignoring any failure.

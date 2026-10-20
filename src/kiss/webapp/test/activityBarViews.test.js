@@ -25,8 +25,10 @@ const {
   click,
   stubRaf,
   fakeMatchMedia,
+  waitFor,
+  ofType,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, byId, showSection} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
@@ -53,25 +55,6 @@ const WD = '/ws/repo';
 /** Deliver the config reply that pins the workspace. */
 function pinWorkspace(win) {
   send(win, {type: 'configData', config: {work_dir: WD}});
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-/**
- * Bring a workspace section of the task-info panel (meta-explorer /
- * meta-scm) on screen: expand it if it is collapsed.  An expanded
- * section is already live (the workspace pin loads it).
- */
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 function rowsIn(win, sel) {
@@ -396,7 +379,10 @@ async function main() {
     send(win, {type: 'tasks_updated'});
     send(win, {type: 'tasks_updated'});
     assert.strictEqual(ofType(posted, 'gitStatus').length, nSt);
-    await sleep(600);
+    await waitFor(
+      () => ofType(posted, 'gitStatus').length > nSt,
+      'the debounced git re-read never came',
+    );
     assert.strictEqual(ofType(posted, 'gitStatus').length, nSt + 1);
     // The Explorer, on screen beside it, listed the root once at the
     // workspace pin; task news re-lists loaded folders only and that

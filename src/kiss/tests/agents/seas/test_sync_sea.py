@@ -17,6 +17,8 @@ merges and pushes.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -28,13 +30,13 @@ from kiss.agents.seas.sync.sync_sea import SyncSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.machines import Machine, save_machines
 from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
+from kiss.core.config import kiss_home
 from kiss.tests.agents.seas.conftest import (
-    HERMETIC_GIT_WITH_IDENTITY,
     commit,
     git,
+    hermetic_git_env,
     remote_and_clones,
     run_sea,
-    set_known_work_dirs,
 )
 from kiss.tests.agents.seas.sea_contract import (
     assert_no_removed_getters,
@@ -54,8 +56,30 @@ def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
     The test's own :func:`git` calls read the environment on every call,
     so both sides commit as ``t <t@t>`` with no user or system config.
     """
-    for key, value in HERMETIC_GIT_WITH_IDENTITY.items():
-        monkeypatch.setenv(key, value)
+    hermetic_git_env(monkeypatch)
+
+
+def set_known_work_dirs(work_dir: str, recent: Sequence[str]) -> None:
+    """Write *work_dir* and *recent* (most recent first) as the ``work_dir`` and
+    ``recent_work_dirs`` keys of the session's ``config.json``; a test that calls this
+    requests :func:`restored_config` so the file goes back afterwards."""
+    config = kiss_home() / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+    data["work_dir"] = work_dir
+    data["recent_work_dirs"] = [{"path": path, "ts": 1.0} for path in recent]
+    config.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.fixture
+def restored_config() -> Iterator[None]:
+    """Put the session's ``config.json`` back to what it was when the test ends."""
+    config = kiss_home() / "config.json"
+    before = config.read_bytes() if config.exists() else None
+    yield
+    if before is None:
+        config.unlink(missing_ok=True)
+    else:
+        config.write_bytes(before)
 
 
 def _commit(repo: Path, name: str, text: str) -> str:
@@ -113,8 +137,8 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "git merge --abort" in prompt
     # The sub-task sent to a machine names the repository by URL, never by this
     # machine's path (the checkout lives elsewhere there).
-    assert f"{sync_sea.THIS_MACHINE_ONLY}\"" in prompt
-    assert 'task="<ref> of <the remote\'s URL' in prompt
+    assert f'{sync_sea.THIS_MACHINE_ONLY}"' in prompt
+    assert "task=\"<ref> of <the remote's URL" in prompt
     assert "Pass no `options` and no `work_dir`" in prompt
     assert '"work_dir": "<the work' not in prompt
     assert sea.settings({"model": "m"}) == {
@@ -134,9 +158,11 @@ def test_sea_methods_follow_the_user_contract() -> None:
     profile = resolve_tool_profile("shell+edit+agents")
     assert profile is not None
     assert {"Bash", "Read", "Edit", "Write", "run_agent"} <= profile
+
     # The chained ``tools``: the worker drops the worktree tools, the
     # subclass adds ``git_sync``.
     def create_worktree() -> None: ...
+
     assert sea_commands.base_tools([sea], [print, create_worktree]) == [print, sync_sea.git_sync]
     assert_no_removed_getters(sync_sea)
 
@@ -396,8 +422,16 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
     _commit(seed, "a.txt", "main moved\n")
     git(seed, "push", "-q", "origin", "main")
     mine = tmp_path / "mine"
-    git(tmp_path, "clone", "-q", "--single-branch", "--branch", "feature",
-         str(tmp_path / "origin.git"), str(mine))
+    git(
+        tmp_path,
+        "clone",
+        "-q",
+        "--single-branch",
+        "--branch",
+        "feature",
+        str(tmp_path / "origin.git"),
+        str(mine),
+    )
     assert git(mine, "branch", "-r") == "origin/feature"
     report = sync(str(mine))
     assert "branch feature, syncing with origin/main (origin = " in report
@@ -441,7 +475,8 @@ def test_sync_warns_about_markers_in_a_file_with_a_non_ascii_name(tmp_path: Path
 
 
 def test_sync_reports_git_that_cannot_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no ``git`` on PATH the tool reports the failure instead of raising ``OSError``."""
     (mine,) = remote_and_clones(tmp_path, "mine")
@@ -496,7 +531,9 @@ def test_repo_key_identifies_a_repository_whatever_the_url_form() -> None:
 
 def test_public_url_drops_the_credentials_a_url_carries() -> None:
     """Reports and messages to machines show URLs without ``user:token@``."""
-    assert git_sync.public_url("https://oauth2:TOKEN@host/me/kiss.git") == "https://host/me/kiss.git"
+    assert (
+        git_sync.public_url("https://oauth2:TOKEN@host/me/kiss.git") == "https://host/me/kiss.git"
+    )
     assert git_sync.public_url("https://user@host/me/kiss") == "https://host/me/kiss"
     assert git_sync.public_url("https://github.com/me/kiss.git") == "https://github.com/me/kiss.git"
     assert git_sync.public_url("ssh://git@host:2222/r.git") == "ssh://host:2222/r.git"
@@ -506,7 +543,8 @@ def test_public_url_drops_the_credentials_a_url_carries() -> None:
 
 
 def test_known_work_dirs_lists_the_configured_folder_then_the_recent_ones(
-    tmp_path: Path, restored_config: None,
+    tmp_path: Path,
+    restored_config: None,
 ) -> None:
     """``config.json``'s ``work_dir`` first, the recent dirs next, no duplicates or blanks."""
     kiss, other = tmp_path / "kiss", tmp_path / "other"
@@ -532,7 +570,8 @@ def test_sync_with_a_url_syncs_the_work_dir_when_it_is_a_clone_of_it(tmp_path: P
 
 
 def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(
-    tmp_path: Path, restored_config: None,
+    tmp_path: Path,
+    restored_config: None,
 ) -> None:
     """The sub-task sent to a machine runs where its daemon runs; the clone may be elsewhere.
 
@@ -585,7 +624,8 @@ def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(
 
 
 def test_sync_names_the_discovered_checkout_when_its_merge_stops_on_conflicts(
-    tmp_path: Path, restored_config: None,
+    tmp_path: Path,
+    restored_config: None,
 ) -> None:
     """A conflict in a checkout found from the URL is reported with that checkout's path.
 

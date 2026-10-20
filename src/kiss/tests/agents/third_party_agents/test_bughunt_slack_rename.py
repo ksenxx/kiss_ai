@@ -54,31 +54,30 @@ class _SlackHandler(RecordingHandler):
 
     def _record_and_respond(self) -> None:
         body = self._read_raw().decode("utf-8", errors="replace")
-        parsed = urllib.parse.urlparse(self.path)
-        self.server.requests.append({"path": parsed.path, "query": parsed.query, "body": body})
+        path = self.record_request(body)["path"]
         port = self.server.server_address[1]
-        if parsed.path.endswith("/auth.test"):
+        if path.endswith("/auth.test"):
             payload: dict[str, Any] = {
                 "ok": True,
                 "user_id": "UBOT",
                 "user": "bot",
                 "team": "testteam",
             }
-        elif parsed.path.endswith("/conversations.list"):
+        elif path.endswith("/conversations.list"):
             payload = _CHANNELS_JSON
-        elif parsed.path.endswith("/files.getUploadURLExternal"):
+        elif path.endswith("/files.getUploadURLExternal"):
             payload = {
                 "ok": True,
                 "upload_url": f"http://127.0.0.1:{port}/upload/v1/F1",
                 "file_id": "F1",
             }
-        elif "/upload/v1/" in parsed.path:
+        elif "/upload/v1/" in path:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK - upload complete")
             return
-        elif parsed.path.endswith("/files.completeUploadExternal"):
+        elif path.endswith("/files.completeUploadExternal"):
             payload = {"ok": True, "files": [{"id": "F1", "title": "a.txt"}]}
         else:
             payload = {"ok": True}
@@ -87,15 +86,15 @@ class _SlackHandler(RecordingHandler):
     do_GET = do_POST = _record_and_respond  # noqa: N815
 
 
-def _all_sent_params(requests: list[dict[str, str]]) -> set[str]:
+def _all_sent_params(requests: list[dict[str, Any]]) -> set[str]:
     """Collect every parameter name sent in any query string or form body."""
     names: set[str] = set()
     for req in requests:
-        for raw in (req["query"], req["body"]):
-            if not raw or raw.startswith(("{", "OK")):
-                continue
+        names.update(req["query"])
+        body = req["body"]
+        if body and not body.startswith(("{", "OK")):
             try:
-                names.update(urllib.parse.parse_qs(raw).keys())
+                names.update(urllib.parse.parse_qs(body).keys())
             except ValueError:
                 continue
     return names

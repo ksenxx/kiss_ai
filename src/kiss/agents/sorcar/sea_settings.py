@@ -641,8 +641,11 @@ def declares_hidden(path: Path) -> bool:
     contract that ``hidden`` is a literal ``True`` in a dict inside the
     file's own ``settings`` method; a computed or inherited value is
     accepted by :func:`resolve_settings` but does not hide the SEA.
+    Only a constant value under a string-literal key in a settings dict
+    of that method counts (:func:`settings_dicts`: ``model_config``'s
+    contents are not settings).
     """
-    return declared_literal(path, "hidden") is True
+    return parsed_sea(path).literals.get("hidden") is True
 
 
 def declares_channel(path: Path) -> bool:
@@ -657,38 +660,15 @@ def declares_channel(path: Path) -> bool:
     base class of another file is still a channel when loaded
     (``isinstance``), but is not listed.
     """
-    return "ChannelSea" in declared_bases(path)
+    return "ChannelSea" in parsed_sea(path).bases
 
 
 SEA_BASES = ("BaseSea", "WorkerSea", "ChannelSea")
 """The base classes a SEA derives from, least to most specific.
 
 A class deriving from one of these alone registers as no model; one
-deriving from anything else may (:func:`declared_bases`).
+deriving from anything else may (:attr:`ParsedSea.bases`).
 """
-
-
-def declared_bases(path: Path) -> set[str]:
-    """Return the last name of every base of every class the SEA at *path* defines.
-
-    Parsed from the source, never executed (see :func:`declares_hidden`).
-    A base imported under an alias (``from ... import ChannelSea as C``)
-    counts under its imported name; a dotted base (``base_sea.BaseSea``)
-    under its last attribute; a computed base (``sea_class('picker')``)
-    under its source text.  Empty for an unreadable or unparsable file.
-    """
-    return parsed_sea(path).bases
-
-
-def declared_literal(path: Path, key: str) -> Any:
-    """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
-
-    Parsed from the source, never executed (see :func:`declares_hidden`);
-    only a constant value under a string-literal key in a settings dict
-    of the file's own ``settings`` method counts (:func:`settings_dicts`:
-    ``model_config``'s contents are not settings).
-    """
-    return parsed_sea(path).literals.get(key)
 
 
 @dataclass(frozen=True)
@@ -700,10 +680,14 @@ class ParsedSea:
             was read from; ``None`` when the file cannot be read (the
             rest is then empty).
         bases: The last name of every base of every class the file
-            defines (:func:`declared_bases`).
+            defines.  A base imported under an alias (``from ... import
+            ChannelSea as C``) counts under its imported name; a dotted
+            base (``base_sea.BaseSea``) under its last attribute; a
+            computed base (``sea_class('picker')``) under its source
+            text.  Empty for an unreadable or unparsable file.
         literals: ``{settings key: literal value}`` of the settings
-            dicts in the file's ``settings`` method
-            (:func:`declared_literal`).
+            dicts in the file's own ``settings`` method
+            (:func:`settings_dicts`).
         mentions_register_as_model: Whether the source text contains
             ``register_as_model`` (a superset of defining the method:
             what decides whether the model picker imports the file).

@@ -42,6 +42,7 @@ from kiss.agents.third_party_agents._device_auth import (
     LoopbackPkceSession,
     PkceProvider,
     TokenGrant,
+    _CallbackHandler,
     _loopback_step,
     consent_instructions,
 )
@@ -432,8 +433,11 @@ def test_pkce_expires_without_redirect(token_server: _TokenServer, service: str)
 
 
 def test_pkce_half_open_connection_does_not_pin_the_port(
-    token_server: _TokenServer, service: str
+    token_server: _TokenServer, service: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The handler's socket timeout is what frees the serving thread; 0.5 s
+    # proves the same thing as the production 5 s without the wait.
+    monkeypatch.setattr(_CallbackHandler, "timeout", 0.5)
     session = _start(service, token_server)
     port = _port(session)
     # A browser that opens the connection but never finishes its request:
@@ -442,16 +446,16 @@ def test_pkce_half_open_connection_does_not_pin_the_port(
     half_open = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         half_open.sendall(b"GET /callback HTTP/1.1\r\n")
-        # The handler's socket timeout closes the half-open connection
-        # (bounded by this socket's 10 s timeout) and the serving thread
-        # goes back to answering requests on the port it still owns.
+        # The handler's socket timeout closes the half-open connection and
+        # the serving thread goes back to answering requests on the port
+        # it still owns.
         assert half_open.recv(1) == b""
         assert session._server_thread.is_alive()
         assert LoopbackPkceSession._port_owner is session
         assert requests.get(f"http://127.0.0.1:{port}/nope", timeout=10).status_code == 404
         started = time.monotonic()
         session.cancel()  # joins the serving thread
-        assert time.monotonic() - started < 10
+        assert time.monotonic() - started < 5
         assert not session._server_thread.is_alive()
         assert LoopbackPkceSession._port_owner is None
         assert _can_bind(port)

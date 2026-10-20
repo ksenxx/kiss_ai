@@ -11,7 +11,10 @@ Bugs covered:
 - Tlon ``poke`` must follow the Urbit Eyre protocol: PUT to ``/~/channel/{uid}``
   with a JSON array of action objects, an incrementing message id, and the
   configured ship name (RuntimeError when the ship is not configured).
-- Tlon ``post_message`` memo author must be the configured ship, not ``"~"``.
+- Tlon ``post_message`` memo author must be the configured ship, not ``"~"``,
+  and it, ``list_third_party_agents`` and ``get_messages`` must address the
+  ``channels`` gall agent (poke app / scry path).
+- ``authenticate_tlon`` persists the ``rstrip("/")``-normalised ship URL.
 - phone_control ``poll_messages`` must only return SMS from the requested
   ``channel_id`` sender (empty channel_id returns all).
 
@@ -29,8 +32,9 @@ import pytest
 
 from kiss.agents.third_party_agents.phone.phone_sea import PhoneControlChannelBackend
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
-from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     EyreHandler,
     PhoneApiHandler,
@@ -50,8 +54,12 @@ def _channel_requests(server: RecordingServer) -> list[dict[str, Any]]:
     return [r for r in server.requests if r["path"].startswith("/~/channel")]
 
 
+def _scries(server: RecordingServer) -> list[str]:
+    return [r["path"] for r in server.requests if r["path"].startswith("/~/scry/")]
+
+
 class TestTlonPokeProtocol:
-    """Tlon poke must follow the Eyre channel protocol with the configured ship."""
+    """Tlon pokes and scries must follow Eyre and address the ``channels`` gall agent."""
 
     @pytest.fixture(autouse=True)
     def _connected(self, isolated_kiss_home: Path):
@@ -100,15 +108,45 @@ class TestTlonPokeProtocol:
         assert uid1 == uid2, f"pokes on one connection must reuse the channel uid: {uid1} {uid2}"
 
     def test_post_message_author_is_configured_ship(self) -> None:
-        """post_message memo author must be the configured ship, not '~'."""
+        """post_message pokes the 'channels' agent with the configured ship as memo author."""
         result = json.loads(self.backend.post_message("~zod/my-group", "chat", "hello"))
         assert result["ok"] is True
         pokes = _channel_requests(self.server)
         assert pokes, f"no poke request seen: {self.server.requests}"
         body = json.loads(pokes[-1]["body"])
         action = body[0] if isinstance(body, list) else body
+        assert action["app"] == "channels", f"poked wrong gall agent: {action}"
         memo = action["json"]["channel-action"]["post"]["action"]["add"]["memo"]
         assert memo["author"] == "~sampel-palnet", f"memo author wrong: {memo}"
+
+    def test_list_channels_scries_channels_agent(self) -> None:
+        """Group channel listing must scry the 'channels' gall agent."""
+        result = json.loads(self.backend.list_third_party_agents("~zod/my-group"))
+        scries = _scries(self.server)
+        assert any(p.startswith("/~/scry/channels/channels/~zod/my-group/light") for p in scries), (
+            f"expected scry of channels agent at /channels/..., saw {scries}"
+        )
+        assert not any("third_party_agents" in p for p in scries), scries
+        assert result["ok"] is True
+
+    def test_get_messages_scries_channels_agent(self) -> None:
+        """Message fetch must scry the 'channels' gall agent."""
+        result = json.loads(self.backend.get_messages("~zod/my-group", "chat", count=5))
+        scries = _scries(self.server)
+        expected = "/~/scry/channels/channel/~zod/my-group/chat/posts/"
+        assert any(p.startswith(expected) for p in scries), f"expected channels scry, saw {scries}"
+        assert not any("third_party_agents" in p for p in scries), scries
+        assert result["ok"] is True
+
+    def test_authenticate_tlon_persists_normalized_ship_url(self) -> None:
+        """authenticate_tlon must save the rstrip('/')-normalized ship_url."""
+        base = self.server.base_url
+        tools = auth_tools(TlonAgent())
+        result = json.loads(tools["authenticate_tlon"](ship_url=base + "/", code="code123"))
+        assert result["ok"] is True
+        cfg = _tlon_config.load()
+        assert cfg is not None
+        assert cfg["ship_url"] == base, f"persisted ship_url not normalized: {cfg['ship_url']!r}"
 
 
 class TestTlonPokeWithoutShip:

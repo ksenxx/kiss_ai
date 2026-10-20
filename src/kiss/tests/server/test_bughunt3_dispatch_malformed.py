@@ -48,15 +48,11 @@ class TestDispatchMalformed(unittest.TestCase):
             f"expected 2 unknown-command error events, got {self.events!r}"
         )
 
-    def test_delete_task_is_no_longer_a_command(self) -> None:
-        """The task-history delete button was removed; ``deleteTask``
-        must now be treated as an unknown command (error event), not
-        dispatched to a handler."""
-        self.server._handle_command({"type": "deleteTask", "taskId": "1"})
-        errors = [e for e in self.events if e.get("type") == "error"]
-        assert len(errors) == 1, (
-            f"deleteTask must be an unknown command, got {self.events!r}"
-        )
+    def test_delete_task_garbage_task_id_is_ignored(self) -> None:
+        """``deleteTask`` (the chats panel's delete) ignores a non-string id."""
+        self.server._handle_command({"type": "deleteTask", "taskId": 1})
+        self.server._handle_command({"type": "deleteChat", "chatId": None})
+        assert self.events == [], f"a malformed delete must be silent, got {self.events!r}"
 
     def test_set_favorite_garbage_task_id_does_not_raise(self) -> None:
         self.server._handle_command(

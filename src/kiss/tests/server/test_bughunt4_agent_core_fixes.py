@@ -387,21 +387,18 @@ class TestF11FlushWarningsRobustness(_TempDbTestBase):
 
     def test_warnings_survive_broken_printer(self) -> None:
         agent = ChatSorcarAgent("f11")
-        agent._set_warnings(
-            stash="stash pop failed; run 'git stash pop'",
-            merge="merge conflict; resolve manually",
-        )
+        agent.add_warning("stash pop failed; run 'git stash pop'")
+        agent.add_warning("merge conflict; resolve manually")
 
         broken = _BrokenBroadcastPrinter()
         agent._flush_warnings(broken)  # must not raise
-        assert broken.attempts == 2
+        assert broken.attempts == 1
 
         good = _CollectingPrinter()
         agent._flush_warnings(good)
         messages = [e["message"] for e in good.events if e["type"] == "warning"]
         assert messages == [
-            "stash pop failed; run 'git stash pop'",
-            "merge conflict; resolve manually",
+            "stash pop failed; run 'git stash pop'\nmerge conflict; resolve manually",
         ]
 
 

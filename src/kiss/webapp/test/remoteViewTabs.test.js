@@ -21,7 +21,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage, send, click, stubRaf} = require('./simplify2_harness');
+const {makePage, send, click, stubRaf, ofType} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
@@ -57,10 +57,6 @@ function withTabViews(win) {
   };
   win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m && m.type === type);
 }
 
 /** Structural equality across the jsdom realm (its arrays are not ours), key order aside. */

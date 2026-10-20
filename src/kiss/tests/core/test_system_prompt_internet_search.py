@@ -134,12 +134,14 @@ def test_confident_trivial_task_skips_internet_search(model_name: str) -> None:
             if attempt == attempts - 1:
                 raise
             continue
-        if not _internet_urls():
+        if not _internet_urls() and "391" in result:
             break
-        # A live model occasionally searches anyway.  A stray search on one
-        # or even two attempts is nondeterministic wandering (observed for
-        # gemini-3-flash-preview under full-suite parallel load); searching
-        # on every attempt is a genuine policy failure, caught below.
+        # A live model occasionally searches anyway, or gets the product
+        # wrong (gpt-5.4-mini has answered 393 and 287).  A stray search
+        # or slip on one or even two attempts is nondeterministic
+        # wandering (observed for gemini-3-flash-preview under full-suite
+        # parallel load); failing on every attempt is a genuine policy
+        # failure, caught below.
     assert not _internet_urls(), (
         f"{model_name} searched the Internet ({_internet_urls()}) for trivial "
         f"arithmetic; the confidence exception in SYSTEM.md was not honored."

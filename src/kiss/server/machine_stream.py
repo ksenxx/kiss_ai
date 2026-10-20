@@ -35,7 +35,11 @@ class MachineStream:
 
     Attributes:
         machine: The machine the stream talks to.
-        lock: Guards the subclass's bookkeeping and ``retired``.
+        lock: Guards the subclass's bookkeeping and ``retired``.  An
+            ``RLock``: the relay thread takes it per frame, so a
+            holder pauses relaying and can still route its own
+            commands meanwhile (a test's way of fixing the order of a
+            frame and a command).
         retired: Set (under ``lock``) once the owner took the stream
             out of service; frames still in flight are dropped.
     """
@@ -51,7 +55,7 @@ class MachineStream:
                 password.
         """
         self.machine = machine
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.retired = False
         self._owner = owner
         self._closed = False

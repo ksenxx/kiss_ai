@@ -38,18 +38,16 @@ from kiss.core.models.model import (
     Attachment,
     ThinkingCallback,
     TokenCallback,
-    _build_text_based_tools_prompt,
     _get_attr_or_key,
-    _parse_text_based_tool_calls,
     accepted_request_params,
     strip_system_cache_break,
 )
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleBase,
     OpenAICompatibleModel,
+    _conversation_with_tools_prompt,
     _decode_tool_call_arguments,
     _extract_deepseek_reasoning,
-    _merge_tools_prompt_into_content,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error, stop_or_stall_error
 
@@ -783,7 +781,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         Single source of truth for parameter shaping shared by both
         :meth:`_build_request_kwargs` (normal path) and
-        :meth:`_generate_with_text_based_tools` (DeepSeek fallback).
+        :meth:`_request_with_tools_prompt` (DeepSeek fallback).
 
         Translations applied:
 
@@ -1558,9 +1556,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         "Responses API returned identityless function_call without id/call_id/name"
                     )
                 idx = candidate_idx
-            slot = tool_calls.setdefault(
-                idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-            )
+            slot = tool_calls.setdefault(idx, _new_tool_slot())
             if final_tc.get("id"):
                 slot["id"] = final_tc["id"]
                 call_id_to_idx[final_tc["id"]] = idx
@@ -1942,48 +1938,36 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._rejected_response = None
         return function_calls, content, response
 
-    def _generate_with_text_based_tools(
-        self, function_map: dict[str, Callable[..., Any]]
-    ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Fallback for DeepSeek R1: parse tool calls from text output.
+    def _request_with_tools_prompt(self, tools_prompt: str) -> tuple[str, Any]:
+        """Send the input items with *tools_prompt* in the first message.
 
         Args:
-            function_map: Mapping of tool name → callable used to render
-                the tool-description prompt injected ahead of the user
-                message.
+            tools_prompt: The text-based tools prompt.
 
         Returns:
-            Same shape as :meth:`generate_and_process_with_tools`.
+            A tuple of (content, response).
         """
-        tools_prompt = _build_text_based_tools_prompt(function_map)
-
-        modified = list(self.conversation)
-        if modified:
-            first = modified[0]
-            if isinstance(first, dict) and first.get("role") == "user":
-                modified[0] = {
-                    "role": "user",
-                    "content": _merge_tools_prompt_into_content(
-                        first.get("content"), tools_prompt, "input_text"
-                    ),
-                }
-            else:
-                modified.insert(
-                    0,
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": tools_prompt}],
-                    },
-                )
-
+        items = _conversation_with_tools_prompt(
+            self.conversation,
+            tools_prompt,
+            "input_text",
+            {"role": "user", "content": [{"type": "input_text", "text": tools_prompt}]},
+        )
         self._ensure_no_pending_function_calls()
-        kwargs = self._shape_responses_kwargs(input_items=modified, tools=None)
-
+        kwargs = self._shape_responses_kwargs(input_items=items, tools=None)
         content, _tc, response = self._request_response(kwargs)
+        return content, response
 
-        _, content_clean = _extract_deepseek_reasoning(content)
-        function_calls = _parse_text_based_tool_calls(content_clean)
+    def _append_text_based_tool_turn(
+        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+    ) -> None:
+        """Append the cleaned assistant text and one ``function_call`` item per call.
 
+        Args:
+            content: The raw text response (reasoning included), unused.
+            content_clean: The response without the DeepSeek reasoning block.
+            function_calls: The parsed tool calls (may be empty).
+        """
         if content_clean.strip():
             self.conversation.append({"role": "assistant", "content": content_clean})
         for fc in function_calls:
@@ -1999,7 +1983,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             {"name": fc["name"], "call_id": fc["id"]} for fc in function_calls
         ]
         self._rejected_response = None
-        return function_calls, content, response
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]

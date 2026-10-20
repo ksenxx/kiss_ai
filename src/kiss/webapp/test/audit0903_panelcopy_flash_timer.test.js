@@ -22,7 +22,7 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const {sleep} = require('./simplify2_harness');
+const {sleep, click} = require('./simplify2_harness');
 
 // The 1500 ms revert timers are recorded instead of waited for: the
 // test fires them by hand, so no wall-clock sleep decides whether the
@@ -78,12 +78,6 @@ function isCheck(btn) {
   return !!btn.querySelector('svg polyline');
 }
 
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-}
-
 async function testStaleTimerDoesNotEndSecondFlash() {
   const {win, clipboardWrites, timers} = makePage();
   const panel = win.document.getElementById('panel');
@@ -103,7 +97,11 @@ async function testStaleTimerDoesNotEndSecondFlash() {
   click(win, btn);
   await sleep(0);
   assert.ok(isCheck(btn), 'second click must show the check icon');
-  assert.strictEqual(timers.length, 2, 'the second click arms its own revert timer');
+  assert.strictEqual(
+    timers.length,
+    2,
+    'the second click arms its own revert timer',
+  );
 
   // 1500 ms after the FIRST click: whatever the first click left armed
   // fires now, before the second click's timer is due.
@@ -191,7 +189,10 @@ async function testStaleClipboardResultIsDropped() {
         calls += 1;
         // The first write hangs until the test fails it; the second
         // succeeds at once.
-        if (calls === 1) return new Promise((_res, rej) => { rejectFirst = rej; });
+        if (calls === 1)
+          return new Promise((_res, rej) => {
+            rejectFirst = rej;
+          });
         return Promise.resolve();
       },
     },
@@ -208,14 +209,19 @@ async function testStaleClipboardResultIsDropped() {
   click(win, btn);
   await sleep(0);
   assert.strictEqual(calls, 2);
-  assert.ok(isCheck(btn) && btn.classList.contains('copied'), 'the second click flashed its check');
+  assert.ok(
+    isCheck(btn) && btn.classList.contains('copied'),
+    'the second click flashed its check',
+  );
 
   // The first click's write now fails (and its fallback too).
   rejectFirst(new Error('denied'));
   await sleep(0);
   await sleep(0);
   assert.ok(
-    isCheck(btn) && btn.classList.contains('copied') && !btn.classList.contains('copy-failed'),
+    isCheck(btn) &&
+      btn.classList.contains('copied') &&
+      !btn.classList.contains('copy-failed'),
     "a stale first-click failure must not overwrite the second click's check mark",
   );
   assert.strictEqual(btn.title, 'Copied');

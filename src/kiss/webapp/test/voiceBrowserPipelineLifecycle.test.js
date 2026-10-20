@@ -28,6 +28,7 @@
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {makePage: makeChatPage, stubRaf} = require('./simplify2_harness');
+const {micBtn} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
 const VOICE_CFG = {
@@ -148,10 +149,6 @@ function stubVoiceBrowser(win, options, log, mic) {
 
   win.__VOICE__ = Object.assign({}, VOICE_CFG);
   win.localStorage.setItem('kissVoiceEnabled', '0');
-}
-
-function micBtn(win) {
-  return win.document.getElementById('voice-btn');
 }
 
 function setPageVisibility(win, state) {

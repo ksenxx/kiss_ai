@@ -32,8 +32,10 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     _make_backend,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.recording_http import recording_server
 from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     CLIENT_ID,
+    SlackApiHandler,
     SlackApiServer,
     SlackOAuthState,
     sign_in,
@@ -50,18 +52,22 @@ def slack(
 
     The redirect listener runs on the test's own ephemeral port.
     """
-    oauth = SlackOAuthState()
-    server = SlackApiServer(oauth)
-    try:
-        monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-        monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
-        monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
-        yield oauth, server
-    finally:
-        # Also on a failing test: the consent session owns the redirect
-        # listener thread and port and would otherwise outlive the test.
-        ConsentSession.cancel_active("slack")
-        server.stop()
+    with recording_server(SlackApiHandler, SlackApiServer) as server:
+        try:
+            monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+            monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
+            monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
+            yield server.oauth, server
+        finally:
+            # Also on a failing test: the consent session owns the redirect
+            # listener thread and port and would otherwise outlive the test.
+            ConsentSession.cancel_active("slack")
+
+
+def _last_auth_test(server: SlackApiServer) -> tuple[str, str]:
+    """Return ``(path, Authorization)`` of the last request *server* recorded."""
+    last = server.requests[-1]
+    return last["path"], last["authorization"]
 
 
 def test_missing_client_id_is_reported(
@@ -116,7 +122,7 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     assert exchange["grant_type"] == "authorization_code"
     assert exchange["redirect_uri"] == _oauth_apps.LOOPBACK_REDIRECT_URI
     assert "client_secret" not in exchange
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-1")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-1")
     cfg = _load_config("default")
     assert cfg is not None
     assert cfg["access_token"] == "xoxp-access-1"
@@ -139,7 +145,7 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
         "refresh_token": "xoxe-1-refresh-2",
         "client_id": CLIENT_ID,
     }
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-3")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-3")
     cfg = _load_config("default")
     assert cfg is not None
     assert (cfg["access_token"], cfg["refresh_token"]) == ("xoxp-access-3", "xoxe-1-refresh-3")
@@ -147,13 +153,14 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     # Poll mode builds the same refreshing client from the file.
     backend = _make_backend("default")
     assert backend.connect()
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-4")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-4")
 
     # A revoked refresh token, then an unreachable Slack, surface as errors.
     oauth.refresh_token = "revoked"
     failed = json.loads(tools["check_slack_auth"]())
     assert failed["ok"] is False and "invalid_refresh_token" in failed["error"]
-    server.stop()
+    server.shutdown()
+    server.server_close()
     failed = json.loads(tools["check_slack_auth"]())
     assert failed["ok"] is False and "ConnectionError" in failed["error"]
 
@@ -188,7 +195,7 @@ def test_rejected_or_failed_sign_in_keeps_the_stored_token(
     cfg = _load_config("default")
     assert cfg is not None and cfg["access_token"] == "xoxp-access-1"
     assert json.loads(tools["check_slack_auth"]())["ok"] is True
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-1")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-1")
 
 
 def test_answer_without_user_token_is_refused(
@@ -224,9 +231,9 @@ def test_second_client_reuses_token_rotated_by_the_first(
     assert first.token == second.token == "xoxp-access-1"
 
     assert first.auth_test()["ok"] is True
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-2")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-2")
     assert second.auth_test()["ok"] is True
-    assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-2")
+    assert _last_auth_test(server) == ("/api/auth.test", "Bearer xoxp-access-2")
 
     refreshes = [f for f in oauth.forms if f.get("grant_type") == "refresh_token"]
     assert refreshes == [

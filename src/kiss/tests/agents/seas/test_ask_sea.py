@@ -36,7 +36,6 @@ real daemon-side loader and the real dispatch code:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +65,7 @@ _EXPECTED_ADD_TO_PROMPT = (
 )
 _EXPECTED_SYSTEM_PROMPT = AskSea().system_prompt("ASSEMBLED PROMPT")
 _EXPECTED_LITE = render_brand(ask_sea._SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
-_EXPECTED_PLAYBOOK = _EXPECTED_SYSTEM_PROMPT[len(_EXPECTED_LITE) + 2:]
+_EXPECTED_PLAYBOOK = _EXPECTED_SYSTEM_PROMPT[len(_EXPECTED_LITE) + 2 :]
 _EXPECTED_SUFFIX_START = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
     "at any point. You must answer quickly because the user is waiting.**"
@@ -87,23 +86,8 @@ _ASK_PATH = str(Path(ask_sea.__file__).resolve())
 _EMPTY_SEA = "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass Sea(BaseSea):\n    pass\n"
 """A SEA that defines nothing: the run is a plain session on the task text."""
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_registry() -> Iterator[None]:
-    """Reset the SEA registry between tests so refresh_registry is honest.
-
-    Also removes any ``SEAS.md`` a test wrote into the session-wide
-    ``$KISS_HOME`` so it cannot shadow bundled commands for later tests.
-    """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+# Every test starts and ends with an empty SEA registry (conftest ``reset_registry``).
+pytestmark = pytest.mark.usefixtures("reset_registry")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +220,9 @@ def test_slash_ask_resolves_to_the_question_and_the_bundled_sea() -> None:
     """
     sea_commands.refresh_registry()
     assert sea_commands.slash_command_task("/ask why did the last step fail?") == (
-        "why did the last step fail?", Path(_ASK_PATH))
+        "why did the last step fail?",
+        Path(_ASK_PATH),
+    )
     # The settings the daemon will apply to that very run.
     assert sea_commands.sea_settings(Path(_ASK_PATH)) == _EXPECTED_SETTINGS
 
@@ -322,7 +308,11 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     cmd: dict[str, Any] = {"seaPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_sea(cmd)
     assert overridden == {
-        "prompt", "toolProfile", "classifyTasks", "useWebTools", "useMemory",
+        "prompt",
+        "toolProfile",
+        "classifyTasks",
+        "useWebTools",
+        "useMemory",
     }
     assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
     assert cmd["toolProfile"] == "none"
@@ -331,8 +321,7 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     assert cmd["useMemory"] is False
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["task_context"]
     assert all(callable(tool) for tool in cmd["toolsHook"]([]))
-    for field in ("systemPrompt", "appendToSystemPrompt", "tools", "appendBasicTools",
-                  "toolsFile"):
+    for field in ("systemPrompt", "appendToSystemPrompt", "tools", "appendBasicTools", "toolsFile"):
         assert field not in cmd, field
     # The SEA overrides neither call hook: the staged ones are identities.
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
@@ -498,8 +487,11 @@ def _parent_with_task_id(task_id: str) -> ChatSorcarAgent:
 
 
 def _run_dispatch(
-    sea_path: str, options: RunOptions, parent_task_id: str,
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    sea_path: str,
+    options: RunOptions,
+    parent_task_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> dict[str, Any]:
     """Drive :func:`dispatch_result` through the real ``daemon_client.run``.
 
@@ -531,7 +523,8 @@ def _run_dispatch(
 
 
 def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``_dispatch`` MUST send the caller's id as ``parentTaskId`` and not rewrite text.
 
@@ -548,8 +541,11 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
             add_to_system_prompt="caller system text",
         )
         command = _run_dispatch(
-            _ASK_PATH, options, parent_task_id="task-abc-123",
-            monkeypatch=monkeypatch, tmp_path=tmp_path,
+            _ASK_PATH,
+            options,
+            parent_task_id="task-abc-123",
+            monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
         )
         assert command["appendToPrompt"] == text
         assert command["appendToSystemPrompt"] == "caller system text"
@@ -559,12 +555,16 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
 
 
 def test_dispatch_with_an_empty_parent_task_id_sends_an_empty_parent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A caller without a persisted row MUST dispatch a top-level task (empty parent)."""
     command = _run_dispatch(
-        _ASK_PATH, RunOptions(), parent_task_id="",
-        monkeypatch=monkeypatch, tmp_path=tmp_path,
+        _ASK_PATH,
+        RunOptions(),
+        parent_task_id="",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
     )
     assert command["parentTaskId"] == ""
     assert command["parentTabId"] == ""

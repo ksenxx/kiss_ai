@@ -13,7 +13,7 @@
 // Runs with: node test/audit1016b_history_rename.test.js
 
 const assert = require('assert');
-const {makePage: buildPage, send} = require('./simplify2_harness');
+const {makePage: buildPage, send, ofType} = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted} = buildPage({bodyClass: 'remote-chat'});
@@ -78,10 +78,6 @@ function pencilShown(win, chatId) {
   return !!p && win.getComputedStyle(p).display !== 'none';
 }
 
-function byType(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
 function chatTabs(win) {
   return win._testApi
     .openTabs()
@@ -106,25 +102,25 @@ function testDoubleClickOpensTheChatOnce() {
     makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
   ]);
   const welcomeTab = win._testApi.getActiveTabId();
-  const newChatsBefore = byType(posted, 'newChat').length;
+  const newChatsBefore = ofType(posted, 'newChat').length;
   const t = title(win, 'A');
   mouse(win, t, 'click', 1);
   mouse(win, t, 'click', 2);
   mouse(win, t, 'dblclick', 2);
   assert.strictEqual(
-    byType(posted, 'newChat').length - newChatsBefore,
+    ofType(posted, 'newChat').length - newChatsBefore,
     1,
     'one newChat frame for the gesture',
   );
   assert.strictEqual(
-    byType(posted, 'resumeSession').length,
+    ofType(posted, 'resumeSession').length,
     1,
     'the chat is resumed once',
   );
   // Leaving the idle welcome chat retires it (by design); the tab the
   // first click opened must not be retired by a second opening.
   assert.deepStrictEqual(
-    byType(posted, 'closeTab').map(m => m.tabId),
+    ofType(posted, 'closeTab').map(m => m.tabId),
     [welcomeTab],
     'only the idle welcome tab was closed',
   );
@@ -164,7 +160,7 @@ function testRemoteOnlyChatOffersNoRename() {
     'remote-only: the double-click opens no rename box',
   );
   assert.strictEqual(title(win, 'R').textContent, 'Remote');
-  assert.strictEqual(byType(posted, 'setChatSummary').length, 0);
+  assert.strictEqual(ofType(posted, 'setChatSummary').length, 0);
   // The mixed chat renames as a local one does.
   mouse(win, title(win, 'M'), 'dblclick', 2);
   const input = title(win, 'M').querySelector('input');
@@ -174,7 +170,7 @@ function testRemoteOnlyChatOffersNoRename() {
     new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
   );
   assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(byType(posted, 'setChatSummary'))),
+    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
     [{type: 'setChatSummary', chatId: 'M', summary: 'Mixed, renamed'}],
   );
   // A refresh that turns the chat remote-only takes the pencil away.

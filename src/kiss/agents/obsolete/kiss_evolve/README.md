@@ -171,7 +171,23 @@ KISSEvolve(
 evolve() -> CodeVariant
 ```
 
-Runs the evolutionary algorithm and returns the best code variant found.
+Runs the evolutionary algorithm and returns the best code variant found. With `num_islands > 1` (the default) it runs the island model; with `num_islands=1` it evolves a single population.
+
+#### `get_best_variant`
+
+```python
+get_best_variant() -> CodeVariant
+```
+
+Returns the highest-fitness variant in the current population (or across all islands). Before `evolve()` has run it returns a fresh `CodeVariant` holding `initial_code`.
+
+#### `get_population_stats`
+
+```python
+get_population_stats() -> dict[str, Any]
+```
+
+Returns `{"size", "avg_fitness", "best_fitness", "worst_fitness"}` for the current population (or all islands combined).
 
 ### `CodeVariant` Dataclass
 
@@ -188,6 +204,10 @@ class CodeVariant:
     evaluation_error: str | None = None
     offspring_count: int = 0
 ```
+
+### `SimpleRAG` Class
+
+`kiss.agents.obsolete.kiss_evolve` also exports `SimpleRAG` (from `simple_rag.py`), the in-memory embedding store used for novelty rejection. It is constructed as `SimpleRAG(model_name, metric="cosine", embedding_model_name=None)` and computes embeddings through the model's `get_embedding()` method.
 
 ## Configuration
 
@@ -226,7 +246,7 @@ optimizer = KISSEvolve(
 
 KISSEvolve supports three parent sampling methods:
 
-1. **Tournament Selection**: Randomly selects parents from top performers
+1. **Tournament Selection**: Draws 3 random variants (fewer if the population is smaller) and keeps the fittest, once per parent
 1. **Power-Law Sampling** (default): Uses rank-based power-law distribution (α parameter controls exploration vs exploitation)
 1. **Performance-Novelty Sampling**: Balances performance and novelty using a sigmoid function (λ parameter controls selection pressure)
 

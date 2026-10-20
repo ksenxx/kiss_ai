@@ -78,7 +78,9 @@ class TestBeginConflictedMerge:
             self.repo, branch, baseline or "",
         ) == MergeResult.CONFLICT
 
-        conflicted = GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline)
+        conflicted = GitWorktreeOps.begin_conflicted_merge(
+            self.repo, branch, baseline, "",
+        )
 
         assert conflicted == ["f.txt"]
         text = (self.repo / "f.txt").read_text()
@@ -96,7 +98,9 @@ class TestBeginConflictedMerge:
         branch, _ = _conflicting_branch(self.repo, with_baseline=False)
         assert GitWorktreeOps.squash_merge_branch(self.repo, branch) == MergeResult.CONFLICT
 
-        conflicted = GitWorktreeOps.begin_conflicted_merge(self.repo, branch, None)
+        conflicted = GitWorktreeOps.begin_conflicted_merge(
+            self.repo, branch, None, "",
+        )
 
         assert conflicted == ["f.txt"]
         assert "<<<<<<< " in (self.repo / "f.txt").read_text()
@@ -108,7 +112,7 @@ class TestBeginConflictedMerge:
         _run(self.repo, "commit", "-qm", "agent adds file")
         _run(self.repo, "checkout", "-q", "main")
 
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "task", None) == []
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "task", None, "") == []
         assert _git("diff", "--cached", "--name-only", cwd=self.repo).stdout.split() == [
             "new.txt",
         ]
@@ -117,11 +121,13 @@ class TestBeginConflictedMerge:
         before = GitWorktreeOps.status_porcelain(self.repo)
         head = _run(self.repo, "rev-parse", "HEAD").strip()
 
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", head) is None
+        assert GitWorktreeOps.begin_conflicted_merge(
+            self.repo, "no-such", head, before,
+        ) is None
         assert GitWorktreeOps.status_porcelain(self.repo) == before
 
     def test_unknown_branch_without_baseline_returns_none_and_restores(self) -> None:
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", None) is None
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", None, "") is None
         assert GitWorktreeOps.status_porcelain(self.repo) == ""
 
 
@@ -132,7 +138,7 @@ class TestFinishConflictedMerge:
         self.branch, self.baseline = _conflicting_branch(self.repo, with_baseline=True)
         self.head_before = _run(self.repo, "rev-parse", "HEAD").strip()
         self.conflicted = GitWorktreeOps.begin_conflicted_merge(
-            self.repo, self.branch, self.baseline,
+            self.repo, self.branch, self.baseline, "",
         )
         assert self.conflicted == ["f.txt"]
 
@@ -193,7 +199,7 @@ class TestFinishConflictedMerge:
         _run(self.repo, "commit", "-qm", "wider markers")
         head = _run(self.repo, "rev-parse", "HEAD").strip()
         assert GitWorktreeOps.begin_conflicted_merge(
-            self.repo, self.branch, self.baseline,
+            self.repo, self.branch, self.baseline, "",
         ) == ["f.txt"]
         assert "<<<<<<<<<<<< " in (self.repo / "f.txt").read_text()
         _run(self.repo, "add", "f.txt")
@@ -242,7 +248,7 @@ class TestAbortConflictedMerge:
     def test_restores_clean_tree_and_removes_new_untracked_files(self) -> None:
         branch, baseline = _conflicting_branch(self.repo, with_baseline=True)
         head = _run(self.repo, "rev-parse", "HEAD").strip()
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline)
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline, "")
         (self.repo / "scratch.txt").write_text("left behind by the resolver\n")
 
         GitWorktreeOps.abort_conflicted_merge(self.repo, "", head)

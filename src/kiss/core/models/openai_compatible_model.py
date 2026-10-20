@@ -8,6 +8,7 @@
 import json
 import logging
 import threading
+from abc import abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -447,6 +448,33 @@ def _merge_tools_prompt_into_content(
     return str(content) + "\n" + tools_prompt
 
 
+def _conversation_with_tools_prompt(
+    messages: list[Any], tools_prompt: str, part_type: str, leading: dict[str, Any]
+) -> list[Any]:
+    """Return *messages* with *tools_prompt* carried by its first message.
+
+    The prompt is merged into a leading user message; when the first
+    message is anything else, *leading* (the prompt in the transport's
+    own message shape) is inserted ahead of it.
+
+    Args:
+        messages: The conversation messages, left untouched.
+        tools_prompt: The text-based tools prompt.
+        part_type: The text part type of the API in use (see
+            :func:`_merge_tools_prompt_into_content`).
+        leading: The message to insert when there is no leading user
+            message to merge into.
+
+    Returns:
+        A new message list.
+    """
+    first = messages[0] if messages else None
+    if isinstance(first, dict) and first.get("role") == "user":
+        merged = _merge_tools_prompt_into_content(first.get("content"), tools_prompt, part_type)
+        return [{"role": "user", "content": merged}, *messages[1:]]
+    return [leading, *messages]
+
+
 def _decode_tool_call_arguments(args_json: str) -> Any:
     """Return the JSON-decoded tool-call *args_json*, or ``{}`` when it is not valid JSON."""
     try:
@@ -582,6 +610,7 @@ class OpenAICompatibleBase(Model):
             KISSError: If the embedding generation fails.
         """
         model_to_use = embedding_model or self.model_name
+        self._ensure_client()
         try:
             response = self.client.embeddings.create(model=model_to_use, input=text)
             return list(response.data[0].embedding)
@@ -608,6 +637,7 @@ class OpenAICompatibleBase(Model):
         if not texts:
             return []
         model_to_use = embedding_model or self.model_name
+        self._ensure_client()
         try:
             response = self.client.embeddings.create(model=model_to_use, input=texts)
             ordered = sorted(response.data, key=lambda item: item.index)
@@ -615,6 +645,46 @@ class OpenAICompatibleBase(Model):
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+
+    def _generate_with_text_based_tools(
+        self, function_map: dict[str, Callable[..., Any]]
+    ) -> tuple[list[dict[str, Any]], str, Any]:
+        """Generate one turn with text-based tool calling (the DeepSeek R1 fallback).
+
+        The tool descriptions are injected into the conversation's first
+        message and the model's text is parsed for tool-call blocks.  The
+        transport supplies the request (:meth:`_request_with_tools_prompt`)
+        and the conversation items it records for the turn
+        (:meth:`_append_text_based_tool_turn`).
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+
+        Returns:
+            A tuple of (function_calls, content, response) where function_calls is a list
+            of dictionaries containing parsed tool call information, content is the raw
+            text response, and response is the raw API response object.
+        """
+        tools_prompt = _build_text_based_tools_prompt(function_map)
+        content, response = self._request_with_tools_prompt(tools_prompt)
+        _, content_clean = _extract_deepseek_reasoning(content)
+        function_calls = _parse_text_based_tool_calls(content_clean)
+        self._append_text_based_tool_turn(content, content_clean, function_calls)
+        return function_calls, content, response
+
+    @abstractmethod
+    def _request_with_tools_prompt(self, tools_prompt: str) -> tuple[str, Any]:
+        """Send the conversation with *tools_prompt* in its first message.
+
+        Returns:
+            A tuple of (content, response).
+        """
+
+    @abstractmethod
+    def _append_text_based_tool_turn(
+        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+    ) -> None:
+        """Record a text-based tool turn in this transport's conversation shape."""
 
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
@@ -1860,15 +1930,14 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 base_url=self.base_url,
                 api_key=self.api_key,
                 model_config=delegate_config,
-                token_callback=self.token_callback,
-                thinking_callback=self.thinking_callback,
             )
             self._responses_delegate = delegate
         # The delegate is cached for its connection pool, so its
-        # callbacks have to be re-synced every turn: KISSAgent._reset
-        # rebinds THIS model's callbacks to the new run's printer without
-        # touching the delegate, which would otherwise keep streaming
-        # every token and thinking bracket into a finished task's printer.
+        # callbacks are synced every turn (the fresh one included):
+        # KISSAgent._reset rebinds THIS model's callbacks to the new
+        # run's printer without touching the delegate, which would
+        # otherwise keep streaming every token and thinking bracket into
+        # a finished task's printer.
         delegate.token_callback = self.token_callback
         delegate.thinking_callback = self.thinking_callback
         # The endpoint inputs have to be re-synced for the same reason:
@@ -1956,48 +2025,36 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         if self._responses_delegate is not None:
             self._responses_delegate.reset_conversation()
 
-    def _generate_with_text_based_tools(
-        self, function_map: dict[str, Callable[..., Any]]
-    ) -> tuple[list[dict[str, Any]], str, Any]:
-        """Generate with text-based tool calling for models without native function calling.
-
-        This method injects tool descriptions into the conversation and parses
-        tool calls from the model's text output.
+    def _request_with_tools_prompt(self, tools_prompt: str) -> tuple[str, Any]:
+        """Send the chat conversation with *tools_prompt* in its first message.
 
         Args:
-            function_map: Dictionary mapping function names to callable functions.
+            tools_prompt: The text-based tools prompt.
 
         Returns:
-            A tuple of (function_calls, content, response) where function_calls is a list
-            of dictionaries containing parsed tool call information, content is the raw
-            text response, and response is the raw API response object.
+            A tuple of (content, response).
         """
-        tools_prompt = _build_text_based_tools_prompt(function_map)
+        messages = _conversation_with_tools_prompt(
+            self._normalized_conversation_checked(),
+            tools_prompt,
+            "text",
+            {"role": "system", "content": tools_prompt},
+        )
+        return self._stream_text(self._build_chat_kwargs(messages))
 
-        modified_conversation = self._normalized_conversation_checked()
-        if modified_conversation[0]["role"] == "user":
-            modified_conversation[0] = {
-                "role": "user",
-                "content": _merge_tools_prompt_into_content(
-                    modified_conversation[0]["content"], tools_prompt
-                ),
-            }
-        else:
-            modified_conversation.insert(0, {"role": "system", "content": tools_prompt})
+    def _append_text_based_tool_turn(
+        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+    ) -> None:
+        """Append the assistant message, with ``tool_calls`` when calls were parsed.
 
-        kwargs = self._build_chat_kwargs(modified_conversation)
-
-        content, response = self._stream_text(kwargs)
-
-        _, content_clean = _extract_deepseek_reasoning(content)
-
-        function_calls = _parse_text_based_tool_calls(content_clean)
-
+        Args:
+            content: The raw text response (reasoning included).
+            content_clean: The response without the DeepSeek reasoning block.
+            function_calls: The parsed tool calls (may be empty).
+        """
         self.conversation.append({"role": "assistant", "content": content})
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
-
-        return function_calls, content, response
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

@@ -329,7 +329,9 @@ class ChatSorcarAgent(SorcarAgent):
         final_cost, final_tokens, final_steps = self.usage_snapshot()
         _race_delay()  # test hook: widens the snapshot-to-save window
         extra_payload["tokens"] = final_tokens
-        extra_payload["cost"] = round(final_cost, 6)
+        # Unrounded, like the live ``cost_usd`` and the late adds to the
+        # row: a parent row sums its children's exact spend.
+        extra_payload["cost"] = final_cost
         extra_payload["steps"] = final_steps
         # The run is over: stamp its end so sub-agents (which no server
         # runner finalises) get a duration too.
@@ -900,6 +902,7 @@ class ChatSorcarAgent(SorcarAgent):
                 prompt_suffix=prompt_suffix,
                 system_prompt_hook=system_prompt_hook,
                 tools_hook=tools_hook,
+                task_begun=True,
             )
             result_raw = result if isinstance(result, str) else ""
             result_summary = _extract_result_summary(result)

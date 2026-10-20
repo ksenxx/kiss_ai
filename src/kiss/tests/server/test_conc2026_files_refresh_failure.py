@@ -164,7 +164,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
 
     def _token_map(self) -> dict[str, object]:
         with self.server._state_lock:
-            return dict(self.server._files_request_map())
+            return dict(self.server._files_latest_request)
 
     def _wait(self, predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -514,7 +514,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         leave its ``_files_latest_request`` entry behind — and the
         empty ``conn_id`` shared by direct callers must survive."""
         with self.server._state_lock:
-            reqs = self.server._files_request_map()
+            reqs = self.server._files_latest_request
             reqs["conn-gone"] = object()
             reqs[""] = object()
         self.server.drop_connection_state("conn-gone")

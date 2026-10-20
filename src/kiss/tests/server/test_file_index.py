@@ -545,7 +545,7 @@ class TestServerWiring:
         reply = s.wait_populated()
         assert _texts(reply["files"]) == ["./sub/beta.py"]
         assert reply["prefix"] == "be" and reply["connId"] == "c1" and reply["tabId"] == "t1"
-        assert s.server._files_request_map() == {}
+        assert s.server._files_latest_request == {}
         s.stop()
 
     def test_cold_request_on_a_stopped_registry_releases_its_token(self, tmp_path: Path) -> None:
@@ -555,7 +555,7 @@ class TestServerWiring:
         s.server._file_index.stop()
         s.get_files("", str(root))
         assert [e["loading"] for e in s.files_events()] == [True]
-        assert s.server._files_request_map() == {}, "nobody will answer, so no token may linger"
+        assert s.server._files_latest_request == {}, "nobody will answer, so no token may linger"
 
     def test_warm_request_is_answered_synchronously(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
@@ -565,7 +565,7 @@ class TestServerWiring:
         s.get_files("", str(root))
         assert [e.get("loading") for e in s.files_events()] == [None]
         assert _texts(s.files_events()[0]["files"]) == ["./alpha.py", "./sub/", "./sub/beta.py"]
-        assert s.server._files_request_map() == {}
+        assert s.server._files_latest_request == {}
         s.stop()
 
     def test_empty_work_dir_falls_back_to_the_daemon_work_dir(self, tmp_path: Path) -> None:
@@ -614,7 +614,7 @@ class TestServerWiring:
         reply = s.wait_populated()
         assert _texts(reply["files"]) == ["./work.py", "~/proj/", "~/proj/a.py", "~/.gitignore"]
         assert set(s.server._file_index._indexes) == {str(home), str(home / "scratch")}
-        assert s.server._files_request_map() == {}
+        assert s.server._files_latest_request == {}
         s.stop()
 
     def test_superseded_cold_request_is_dropped(self, tmp_path: Path) -> None:
@@ -631,7 +631,7 @@ class TestServerWiring:
         time.sleep(0.2)
         assert len(s.populated()) == 1
         assert reply["prefix"] == "abd" and _texts(reply["files"]) == ["./abd.py"]
-        assert s.server._files_request_map() == {}
+        assert s.server._files_latest_request == {}
         s.stop()
 
     def test_superseded_second_round_is_abandoned(self, tmp_path: Path) -> None:
@@ -652,7 +652,7 @@ class TestServerWiring:
         assert len(s.populated()) == 1
         assert reply["prefix"] == "" and _texts(reply["files"]) == ["./.gitignore"]
         assert str(home / "scratch") not in s.server._file_index._indexes
-        assert s.server._files_request_map() == {}
+        assert s.server._files_latest_request == {}
         s.stop()
 
     def test_connections_have_independent_tokens(self, tmp_path: Path) -> None:

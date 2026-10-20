@@ -18,7 +18,7 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -76,20 +76,10 @@ _CALENDARS = {
 class _CalendarRequestHandler(RecordingHandler):
     """Emulates the Google Calendar v3 REST API and records requests."""
 
-    def _record(self, body: Any) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "body": body,
-            }
-        )
-
     def _handle(self) -> None:
         body = self._read_body()
-        self._record(body)
-        if self.headers.get("Authorization") != f"Bearer {_TOKEN}":
+        self.record_request(body)
+        if not self.bearer_ok(_TOKEN):
             self._reply(401, json.dumps({"error": {"code": 401, "message": "Unauthorized"}}))
             return
         parsed = urlparse(self.path)
@@ -161,7 +151,7 @@ def test_list_calendars(backend) -> None:
     ]
     req = _last(server)
     assert req["method"] == "GET"
-    assert urlparse(req["path"]).path == "/users/me/calendarList"
+    assert req["path"] == "/users/me/calendarList"
     assert req["authorization"] == f"Bearer {_TOKEN}"
 
 
@@ -171,9 +161,8 @@ def test_list_events_defaults(backend) -> None:
     result = json.loads(b.gcal_list_events())
     assert result["ok"] is True
     assert result["events"] == [_CONDENSED_EVENT]
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/calendars/primary/events"
-    query = parse_qs(parsed.query)
+    assert _last(server)["path"] == "/calendars/primary/events"
+    query = _last(server)["query"]
     assert query["singleEvents"] == ["true"]
     assert query["orderBy"] == ["startTime"]
     assert query["maxResults"] == ["20"]
@@ -195,9 +184,8 @@ def test_list_events_with_filters(backend) -> None:
         )
     )
     assert result["ok"] is True
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/calendars/team%40example.com/events"
-    query = parse_qs(parsed.query)
+    assert _last(server)["path"] == "/calendars/team%40example.com/events"
+    query = _last(server)["query"]
     assert query["timeMin"] == ["2025-06-01T00:00:00Z"]
     assert query["timeMax"] == ["2025-06-08T00:00:00Z"]
     assert query["q"] == ["standup"]
@@ -211,14 +199,14 @@ def test_list_events_pagination(backend) -> None:
     assert result["ok"] is True
     assert result["events"] == [_CONDENSED_EVENT]
     assert result["next_page_token"] == "tok-2"
-    query = parse_qs(urlparse(_last(server)["path"]).query)
+    query = _last(server)["query"]
     assert query["pageToken"] == ["tok-1"]
     # Without a page_token, none is forwarded and the last page (no
     # nextPageToken from the API) omits next_page_token from the result.
     result = json.loads(b.gcal_list_events())
     assert result["ok"] is True
     assert "next_page_token" not in result
-    assert "pageToken" not in parse_qs(urlparse(_last(server)["path"]).query)
+    assert "pageToken" not in _last(server)["query"]
 
 
 def test_get_event(backend) -> None:
@@ -229,7 +217,7 @@ def test_get_event(backend) -> None:
     assert result["event"] == _CONDENSED_EVENT
     req = _last(server)
     assert req["method"] == "GET"
-    assert urlparse(req["path"]).path == "/calendars/primary/events/ev1"
+    assert req["path"] == "/calendars/primary/events/ev1"
 
 
 def test_create_timed_event_with_all_fields(backend) -> None:
@@ -250,7 +238,7 @@ def test_create_timed_event_with_all_fields(backend) -> None:
     assert result["event"]["id"] == "new-ev"
     req = _last(server)
     assert req["method"] == "POST"
-    assert urlparse(req["path"]).path == "/calendars/primary/events"
+    assert req["path"] == "/calendars/primary/events"
     assert req["body"] == {
         "summary": "Design review",
         "start": {"dateTime": "2025-06-03T14:00:00", "timeZone": "America/Los_Angeles"},
@@ -281,7 +269,7 @@ def test_update_event_patches_only_supplied_fields(backend) -> None:
     assert result["event"]["id"] == "ev1"
     req = _last(server)
     assert req["method"] == "PATCH"
-    assert urlparse(req["path"]).path == "/calendars/primary/events/ev1"
+    assert req["path"] == "/calendars/primary/events/ev1"
     assert req["body"] == {"summary": "New title", "end": {"date": "2025-06-07"}}
 
 
@@ -312,7 +300,7 @@ def test_delete_event_handles_204(backend) -> None:
     assert result == {"ok": True}
     req = _last(server)
     assert req["method"] == "DELETE"
-    assert urlparse(req["path"]).path == "/calendars/primary/events/ev1"
+    assert req["path"] == "/calendars/primary/events/ev1"
     assert req["authorization"] == f"Bearer {_TOKEN}"
 
 
@@ -322,9 +310,8 @@ def test_quick_add(backend) -> None:
     result = json.loads(b.gcal_quick_add("Lunch with Ada Friday at noon"))
     assert result["ok"] is True
     assert result["event"]["summary"] == "Lunch with Ada Friday at noon"
-    parsed = urlparse(_last(server)["path"])
-    assert parsed.path == "/calendars/primary/events/quickAdd"
-    assert parse_qs(parsed.query)["text"] == ["Lunch with Ada Friday at noon"]
+    assert _last(server)["path"] == "/calendars/primary/events/quickAdd"
+    assert _last(server)["query"]["text"] == ["Lunch with Ada Friday at noon"]
 
 
 def test_path_unsafe_ids_rejected_before_any_request(backend) -> None:

@@ -15,7 +15,7 @@ message generator runs with no provider configured
 Covered findings:
 
 * F5 — ``_flush_warnings`` performed an unlocked check-then-clear on
-  ``_stash_pop_warning`` / ``_merge_conflict_warning``: two concurrent
+  ``_merge_conflict_warning``: two concurrent
   flushes could broadcast the same warning twice, and a warning written
   while a flush was broadcasting was wiped by the flush's ``= None``.
 * F6 — the commit toast id lived on ``self._commit_run_id``; a
@@ -190,7 +190,7 @@ class TestF5ConcurrentFlushBroadcastsOnce(_Base):
         )
         flusher.start()
         self.assertTrue(printer.in_broadcast.wait(timeout=5.0))
-        agent._set_warnings(merge="second warning")
+        agent.add_warning("second warning")
         flusher.join()
 
         agent._flush_warnings(printer)

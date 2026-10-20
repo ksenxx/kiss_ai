@@ -35,7 +35,6 @@ import pytest
 from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     recording_server,
 )
 
@@ -195,7 +194,6 @@ class TestSMSBackend(unittest.TestCase):
         the finite transport timeout stays as defense in depth.
         """
         import importlib
-        from typing import cast
         from urllib.parse import urlsplit, urlunsplit
 
         from kiss.agents.third_party_agents.sms.sms_sea import SMSChannelBackend
@@ -206,7 +204,7 @@ class TestSMSBackend(unittest.TestCase):
         class Handler(RecordingHandler):
             def do_GET(self) -> None:  # noqa: N802
                 """Answer every request with Twilio's 20003 auth error."""
-                cast(RecordingServer, self.server).requests.append({"path": self.path})
+                self.record_request(None)
                 body = json.dumps(
                     {
                         "code": 20003,

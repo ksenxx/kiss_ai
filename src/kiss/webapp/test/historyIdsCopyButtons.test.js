@@ -10,6 +10,9 @@ const {
   makePage: makeHarnessPage,
   send,
   loadMainCss,
+  click,
+  sendEmptyWorkDir,
+  rowsByTitle,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -118,36 +121,10 @@ const SESSIONS_FIXTURE = [
   }),
 ];
 
-function rowsByTitle(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
-}
-
 function loadHistory(ctx) {
   sendEmptyWorkDir(ctx.win);
   send(ctx.win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
   return rowsByTitle(ctx.win);
-}
-
-function click(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
 }
 
 function tabCount(win) {

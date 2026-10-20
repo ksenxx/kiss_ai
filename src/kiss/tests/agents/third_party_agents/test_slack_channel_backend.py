@@ -14,7 +14,6 @@ raises ``SlackApiError`` deterministically without network access.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -26,15 +25,11 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
     recording_server,
-    serve_recording,
 )
-from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
-
-
-@pytest.fixture(scope="module")
-def invalid_auth_server() -> Iterator[RecordingServer]:
-    """One loopback ``invalid_auth`` Slack API for the whole module."""
-    yield from serve_recording(InvalidAuthHandler)
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import (
+    InvalidAuthHandler,
+    slack_method,
+)
 
 
 def _send_json(handler: RecordingHandler, payload: dict[str, Any]) -> None:
@@ -86,7 +81,7 @@ class TestSlackChannelBackendMethods:
 
         class _InfoOkHandler(InvalidAuthHandler):
             def _respond(self) -> None:
-                method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                method = slack_method(self.path)
                 requests.append(method)
                 if method != "conversations.info":
                     super()._respond()
@@ -111,7 +106,7 @@ class TestSlackChannelBackendMethods:
 
         class _InfoFailsListOkHandler(InvalidAuthHandler):
             def _respond(self) -> None:
-                method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                method = slack_method(self.path)
                 requests.append(method)
                 if method == "conversations.info":
                     _send_json(self, {"ok": False, "error": "channel_not_found"})
@@ -144,9 +139,9 @@ class TestSlackChannelBackendMethods:
                 self.backend.find_channel(ident)
             # slack_sdk's urllib transport sends every Web API call as POST and
             # carries GET-style parameters in the query string.
-            assert self.server.requests == [
-                {"method": "POST", "path": "/conversations.info"},
-                {"method": "POST", "path": "/conversations.list"},
+            assert [(r["method"], r["path"]) for r in self.server.requests] == [
+                ("POST", "/conversations.info"),
+                ("POST", "/conversations.list"),
             ]
 
     def test_find_user_passes_user_id_through(self) -> None:

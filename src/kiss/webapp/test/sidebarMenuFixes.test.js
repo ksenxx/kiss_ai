@@ -39,6 +39,7 @@ const {
   ofType,
   all,
   makeRunner,
+  menuItem,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
@@ -98,12 +99,6 @@ const WD = '/ws/repo';
 
 function pinWorkspace(win) {
   send(win, {type: 'configData', config: {work_dir: WD}});
-}
-
-function menuItem(win, label) {
-  return all(win, '#sidebar-context-menu .tree-ctx-item').find(
-    el => el.querySelector('.tree-ctx-label').textContent === label,
-  );
 }
 
 /** Open the Explorer on WD and answer its root listing with *entries*. */

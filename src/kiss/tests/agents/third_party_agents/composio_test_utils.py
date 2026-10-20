@@ -21,24 +21,25 @@ import base64
 import json
 import os
 import threading
-from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, cast
-from urllib.parse import parse_qs, urlsplit
 
 import requests
 
 from kiss.agents.third_party_agents import _composio_google as composio_google
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, serving
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serving,
+)
 
 API_KEY = "test-composio-key"
 TOKEN = "composio-injected-token"
 API = "/api/v3.1"
 
 
-class FakeComposioServer(ThreadedHTTPServer):
+class FakeComposioServer(RecordingServer):
     """Composio API emulator with inspectable state.
 
     Attributes:
@@ -62,20 +63,18 @@ class FakeComposioServer(ThreadedHTTPServer):
         upstream_overrides: Origin -> replacement origin applied to proxied
             endpoints, so clients hard-wired to Google hosts (googleapiclient
             services) reach a local emulator instead.
-        status_polled: Per API key, set once that caller has polled a
-            connected-account status (the ``finish_connect`` using the key
-            has read its ``pending_id`` by then).  Concurrent callers are
-            told apart by the key ``_client()`` reads from
-            ``COMPOSIO_API_KEY`` when they start.
-        status_holds: Per API key, an Event a status GET waits for before
-            it is answered (503 if the wait expires): lets a test hold one
-            caller's poll until another caller has finished.
-        status_held: Per API key, set once such a poll is waiting.
+        status_polled: Per API key, the Event :meth:`expect_status_poll`
+            registered, set once that caller has polled a connected-account
+            status (the ``finish_connect`` using the key has read its
+            ``pending_id`` by then).  Concurrent callers are told apart by
+            the key ``_client()`` reads from ``COMPOSIO_API_KEY`` when
+            they start.
+        status_holds: Per API key, the ``(held, release)`` Events
+            :meth:`hold_status_polls` registered.
     """
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
-        self.requests: list[dict[str, Any]] = []
         self.api_keys: set[str] = {API_KEY}
         self.auth_configs: list[dict[str, Any]] = []
         self.accounts: dict[str, str] = {}
@@ -87,22 +86,35 @@ class FakeComposioServer(ThreadedHTTPServer):
         self.proxy_reply: dict[str, Any] | None = None
         self.downloads: list[tuple[str, bytes]] = []
         self.upstream_overrides: dict[str, str] = {}
-        self.status_polled: defaultdict[str, threading.Event] = defaultdict(threading.Event)
-        self.status_holds: dict[str, threading.Event] = {}
-        self.status_held: defaultdict[str, threading.Event] = defaultdict(threading.Event)
+        self.status_polled: dict[str, threading.Event] = {}
+        self.status_holds: dict[str, tuple[threading.Event, threading.Event]] = {}
         self._counter = 0
         self._lock = threading.Lock()
-
-    @property
-    def base_url(self) -> str:
-        """Return the server's base URL."""
-        return f"http://127.0.0.1:{self.server_address[1]}"
 
     def next_id(self, prefix: str) -> str:
         """Return a fresh object ID with *prefix* (unique across concurrent handler threads)."""
         with self._lock:
             self._counter += 1
             return f"{prefix}_{self._counter}"
+
+    def expect_status_poll(self, api_key: str) -> threading.Event:
+        """Return an Event set once a caller using *api_key* polls a connected-account status.
+
+        Call it before starting the caller's thread, so the Event exists
+        before any handler thread can look it up.
+        """
+        return self.status_polled.setdefault(api_key, threading.Event())
+
+    def hold_status_polls(self, api_key: str) -> tuple[threading.Event, threading.Event]:
+        """Make status GETs using *api_key* wait; return ``(held, release)`` Events.
+
+        ``held`` is set once such a poll is waiting; the poll is answered
+        when the test sets ``release`` (503 if 15 s pass first).  Lets a
+        test hold one caller's poll until another caller has finished.
+        """
+        held, release = threading.Event(), threading.Event()
+        self.status_holds[api_key] = (held, release)
+        return held, release
 
     def paths(self, method: str) -> list[str]:
         """Return the paths of every recorded request made with *method*."""
@@ -129,11 +141,7 @@ class _Handler(RecordingHandler):
         raw = self._read_raw()
         body: Any = json.loads(raw) if raw else None
         server = self.server
-        parts = urlsplit(self.path)
-        path = parts.path
-        server.requests.append(
-            {"method": self.command, "path": path, "query": parse_qs(parts.query), "body": body}
-        )
+        path = self.record_request(body)["path"]
         if path.startswith("/download/"):
             self._download(int(path.rsplit("/", 1)[1]))
             return
@@ -207,14 +215,17 @@ class _Handler(RecordingHandler):
         else:
             hold = server.status_holds.get(api_key)
             if hold is not None:
-                server.status_held[api_key].set()
-                if not hold.wait(timeout=15.0):
+                held, release = hold
+                held.set()
+                if not release.wait(timeout=15.0):
                     # An expired hold is a test failure, never a normal answer.
                     self._json(503, {"error": {"message": "status poll hold expired"}})
                     return
             queue = server.status_queue.get(account)
             status = queue.pop(0) if queue else server.accounts[account]
-            server.status_polled[api_key].set()
+            polled = server.status_polled.get(api_key)
+            if polled is not None:
+                polled.set()
             self._json(200, {"id": account, "status": status})
 
     def _proxy(self, body: dict[str, Any]) -> None:

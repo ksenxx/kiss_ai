@@ -21,22 +21,23 @@ import json
 import socket
 import threading
 import time
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.feishu.feishu_sea import FeishuChannelBackend
 from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
 from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
-from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, start_serving
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingHandler,
+    RecordingServer,
+    serving,
+)
 
 
 class _FakeIRCServer:
@@ -255,50 +256,49 @@ class _JSONResponder(RecordingHandler):
         self._reply(200, type(self).body.decode())
 
 
+def _zalo_backend(server: RecordingServer | None = None) -> ZaloChannelBackend:
+    """Return an authenticated Zalo backend, pointed at *server* when given."""
+    backend = ZaloChannelBackend(api_base=f"{server.base_url}/v2.0/oa" if server else "")
+    backend._access_token = "tok"
+    return backend
+
+
+@contextmanager
+def _zalo_api(body: bytes) -> Iterator[ZaloChannelBackend]:
+    """Serve *body* to every POST and yield a backend whose API base is that server."""
+    handler = type("Handler", (_JSONResponder,), {"body": body})
+    with serving(RecordingServer(("127.0.0.1", 0), handler)) as server:
+        yield _zalo_backend(server)
+
+
 class TestZaloBugs:
     """Zalo bugs (G) send errors swallowed and (I) poll ignores channel_id."""
 
-    def setup_method(self) -> None:
-        self._server: ThreadedHTTPServer | None = None
-        self._thread: threading.Thread | None = None
-        self.backend = ZaloChannelBackend()
-        self.backend._access_token = "tok"
-
-    def teardown_method(self) -> None:
-        self._server, self._thread = stop_http_server(self._server, self._thread)
-
-    def _start_server(self, body: bytes) -> None:
-        """Serve *body* to every POST and point the backend's API base at the server."""
-        handler = type("Handler", (_JSONResponder,), {"body": body})
-        self._server = ThreadedHTTPServer(("127.0.0.1", 0), handler)
-        self._thread = start_serving(self._server)
-        port = self._server.server_address[1]
-        self.backend = ZaloChannelBackend(api_base=f"http://127.0.0.1:{port}/v2.0/oa")
-        self.backend._access_token = "tok"
-
     def test_send_message_raises_on_api_error(self) -> None:
         """(G) send_message must raise when the Zalo API reports an error."""
-        self._start_server(b'{"error": 1, "message": "token expired"}')
-        with pytest.raises(RuntimeError, match="token expired"):
-            self.backend.send_message("U1", "hello")
+        with _zalo_api(b'{"error": 1, "message": "token expired"}') as backend:
+            with pytest.raises(RuntimeError, match="token expired"):
+                backend.send_message("U1", "hello")
 
     def test_send_message_success_does_not_raise(self) -> None:
         """(G) send_message succeeds silently when the API accepts the message."""
-        self._start_server(b'{"error": 0, "data": {"message_id": "m1"}}')
-        self.backend.send_message("U1", "hello")
+        with _zalo_api(b'{"error": 0, "data": {"message_id": "m1"}}') as backend:
+            backend.send_message("U1", "hello")
 
     def test_poll_messages_filters_by_channel_id(self) -> None:
         """(I) poll_messages must only return messages from the given user."""
-        self.backend._message_queue.put({"ts": "1", "user": "A", "text": "from A"})
-        self.backend._message_queue.put({"ts": "2", "user": "B", "text": "from B"})
-        messages, _ = self.backend.poll_messages("B", "")
+        backend = _zalo_backend()
+        backend._message_queue.put({"ts": "1", "user": "A", "text": "from A"})
+        backend._message_queue.put({"ts": "2", "user": "B", "text": "from B"})
+        messages, _ = backend.poll_messages("B", "")
         assert [m["user"] for m in messages] == ["B"]
 
     def test_poll_messages_empty_channel_returns_all(self) -> None:
         """(I) poll_messages with empty channel_id returns everything."""
-        self.backend._message_queue.put({"ts": "1", "user": "A", "text": "from A"})
-        self.backend._message_queue.put({"ts": "2", "user": "B", "text": "from B"})
-        messages, _ = self.backend.poll_messages("", "")
+        backend = _zalo_backend()
+        backend._message_queue.put({"ts": "1", "user": "A", "text": "from A"})
+        backend._message_queue.put({"ts": "2", "user": "B", "text": "from B"})
+        messages, _ = backend.poll_messages("", "")
         assert [m["user"] for m in messages] == ["A", "B"]
 
 

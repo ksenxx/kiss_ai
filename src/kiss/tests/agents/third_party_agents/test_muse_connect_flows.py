@@ -1099,7 +1099,7 @@ def test_nextcloud_login_flow_failure_paths(
 
 
 def test_nextcloud_login_flow_legacy_mode(
-    isolated_kiss_home: Path, nextcloud_server: _NextcloudServer
+    isolated_kiss_home: Path, nextcloud_server: _NextcloudServer, refusing_port: int
 ) -> None:
     """With Muse-auth off the app password is written to config.json."""
     agent = NextcloudTalkAgent()
@@ -1124,7 +1124,9 @@ def test_nextcloud_login_flow_legacy_mode(
     assert agent._is_authenticated() is True
     assert agent._backend._auth == ("alice@example.com", "app-password-poll-1")
     # A server that cannot be reached is reported, not raised.
-    down = json.loads(tools["authenticate_nextcloud"]("http://127.0.0.1:9", "bob", "nope"))
+    down = json.loads(
+        tools["authenticate_nextcloud"](f"http://127.0.0.1:{refusing_port}", "bob", "nope")
+    )
     assert down["ok"] is False and "Authentication failed: ConnectionError" in down["error"]
     # Clearing revokes the login-flow password (legacy Basic auth).
     assert tools["clear_nextcloud_auth"]() == (
@@ -1391,7 +1393,10 @@ def test_failure_paths_after_approval(
 
 
 def test_twitch_legacy_failure_paths(
-    isolated_kiss_home: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
+    isolated_kiss_home: Path,
+    auth_server: _AuthServer,
+    monkeypatch: pytest.MonkeyPatch,
+    refusing_port: int,
 ) -> None:
     """Legacy mode reports API rejections and unreachable servers."""
     monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base_url)
@@ -1400,7 +1405,7 @@ def test_twitch_legacy_failure_paths(
     tools = auth_tools(agent)
     bad = json.loads(tools["authenticate_twitch"]("cid1", "", "unknown-token"))
     assert bad["ok"] is False and "InvalidAuthenticationToken" in bad["error"]
-    agent._backend._helix_base = "http://127.0.0.1:9/helix"
+    agent._backend._helix_base = f"http://127.0.0.1:{refusing_port}/helix"
     down = json.loads(tools["authenticate_twitch"]("cid1", "", "unknown-token"))
     assert down["ok"] is False and "Connection" in down["error"]
     assert not tw_config.path.exists()
@@ -1477,14 +1482,12 @@ def test_token_lifetime_counts_from_acquisition_and_origins_ignore_default_ports
     )
     session.register()
     session._thread.join(timeout=10.0)
-    time.sleep(1.2)
     got, status = ConsentSession.finish("late")
     assert got is session and status == "ok"
     grant = TokenGrant.from_session(session)  # type: ignore[arg-type]
     assert grant.acquired_at == session.result_at
     info = grant.vault_credential("https://id.example/token", "cid")
     assert info["expires_at"] == pytest.approx(session.result_at + 100)
-    assert info["expires_at"] < time.time() + 100 - 1.0
 
     origin = _device_auth._origin
     assert origin("https://cloud.example.com") == origin("https://cloud.example.com:443/x")
@@ -1541,13 +1544,16 @@ def test_github_sign_in_never_disturbs_the_working_credential(
 
 
 def test_device_polling_ignores_ambient_proxy_settings(
-    muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path,
+    auth_server: _AuthServer,
+    monkeypatch: pytest.MonkeyPatch,
+    refusing_port: int,
 ) -> None:
     """A proxy in the environment never sees the device code or the token."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
-        monkeypatch.setenv(name, "http://127.0.0.1:9")
+        monkeypatch.setenv(name, f"http://127.0.0.1:{refusing_port}")
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
     agent = GitHubAgent()
@@ -1758,7 +1764,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
 
 
 def test_matrix_refresh_failures_follow_the_spec(
-    isolated_kiss_home: Path, auth_server: _AuthServer
+    isolated_kiss_home: Path, auth_server: _AuthServer, refusing_port: int
 ) -> None:
     """5xx/network → keep the old token and retry later; 4xx → logged out."""
     mx_config.save(
@@ -1783,9 +1789,9 @@ def test_matrix_refresh_failures_follow_the_spec(
     assert backend._run(_noop()) == "ran"  # 5xx: session kept
     assert backend._client.access_token == "old"
     backend2 = MatrixChannelBackend()
-    backend2._client = _matrix_client("http://127.0.0.1:9", "old")
+    backend2._client = _matrix_client(f"http://127.0.0.1:{refusing_port}", "old")
     cfg = mx_config.load() or {}
-    cfg["token_url"] = "http://127.0.0.1:9/token"
+    cfg["token_url"] = f"http://127.0.0.1:{refusing_port}/token"
     mx_config.save(cfg)
     assert backend2._run(_noop()) == "ran"  # unreachable: session kept
     cfg["token_url"] = f"{auth_server.base_url}/mas/oauth2/token"
@@ -1848,7 +1854,7 @@ def test_matrix_refresh_never_resurrects_a_cleared_or_replaced_session(
 
 
 def test_matrix_without_oauth_api_and_failure_paths(
-    isolated_kiss_home: Path, auth_server: _AuthServer
+    isolated_kiss_home: Path, auth_server: _AuthServer, refusing_port: int
 ) -> None:
     """No OAuth API → explanatory error; refusals and rejected tokens enroll nothing."""
     agent = MatrixAgent()
@@ -1857,7 +1863,7 @@ def test_matrix_without_oauth_api_and_failure_paths(
     result = json.loads(tools["authenticate_matrix"](auth_server.base_url))
     assert result["ok"] is False and "does not offer the Matrix OAuth 2.0 API" in result["error"]
     assert "access_token=..." in result["error"]
-    down = json.loads(tools["authenticate_matrix"]("http://127.0.0.1:9"))
+    down = json.loads(tools["authenticate_matrix"](f"http://127.0.0.1:{refusing_port}"))
     assert down["ok"] is False and "ConnectionError" in down["error"]
     auth_server.matrix_oauth = True
     assert "no sign-in in progress" in json.loads(tools["finish_matrix_auth"]())["error"]

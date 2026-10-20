@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from signal import SIGTERM
 from typing import IO, Any
 
 from kiss.agents.sorcar._concurrency import _race_delay, interruptible_locked_call
@@ -76,7 +77,8 @@ def _lock_across_processes(handle: IO[Any], timeout: float) -> None:
     except TimeoutError as exc:
         raise KISSError(
             f"{handle.name}: {exc}; another Sorcar process (a daemon or a CLI run)"
-            " is holding this repository's lock and not releasing it"
+            " is still using this repository (a merge or an orphan reclaim can"
+            " take several minutes); retry later"
         ) from None
 
 
@@ -139,15 +141,27 @@ def _held_reclaim_locks() -> dict[str, weakref.ref[_ReclaimLockToken]]:
     would self-deadlock on a fresh descriptor of the same file.
     Thread-local is sufficient: every production taker acquires
     ``repo_lock`` first, so nested takes for one repo always happen on
-    the thread that already owns the outer hold.  Values are weak
-    references to :class:`_ReclaimLockToken`; a dead reference means
-    the hold is over regardless of whether its withdrawal code ran.
+    the thread that already owns the outer hold.  Each hold is keyed
+    twice, by the resolved repo path and by the lock-file path.  Values
+    are weak references to :class:`_ReclaimLockToken`; a dead
+    reference means the hold is over regardless of whether its
+    withdrawal code ran.
     """
     held = getattr(_reclaim_lock_reentry, "held", None)
     if held is None:
         held = {}
         _reclaim_lock_reentry.held = held
     return held
+
+
+def _reclaim_lock_held(held: dict[str, weakref.ref[_ReclaimLockToken]], key: str) -> bool:
+    """Whether *held* records a live outer hold under *key*.
+
+    A live token means its handle is still open, so the kernel flock is
+    genuinely held by this thread's outer acquisition.
+    """
+    prior = held.get(key)
+    return prior is not None and prior() is not None
 
 
 @contextmanager
@@ -198,16 +212,22 @@ def _reclaim_process_lock(
     Raises:
         KISSError: When another process keeps the lock past *timeout*.
     """
+    # The outer hold is registered under the repo path as well as the
+    # lock path, so the nested takes of a setup (reclaim, sweep, create)
+    # re-enter without spawning ``git rev-parse``; the lock-path key
+    # still catches a nested take through another checkout of the same
+    # ``--git-common-dir``.
+    held = _held_reclaim_locks()
+    repo_key = str(repo.resolve())
+    if _reclaim_lock_held(held, repo_key):
+        yield
+        return
     git_common = _git_common_dir(repo)
     if git_common is None:  # pragma: no cover — not a git repo
         yield
         return
     lock_path = str(git_common / "kiss-reclaim.lock")
-    held = _held_reclaim_locks()
-    prior = held.get(lock_path)
-    if prior is not None and prior() is not None:
-        # A live token means its handle is still open, so the kernel
-        # flock is genuinely held by this thread's outer acquisition.
+    if _reclaim_lock_held(held, lock_path):
         yield
         return
     try:
@@ -225,10 +245,11 @@ def _reclaim_process_lock(
     token = _ReclaimLockToken(handle)
     try:
         _lock_across_processes(handle, timeout)
-        held[lock_path] = weakref.ref(token)
+        held[lock_path] = held[repo_key] = weakref.ref(token)
         yield
     finally:
         held.pop(lock_path, None)
+        held.pop(repo_key, None)
         try:
             unlock(handle)
         finally:
@@ -490,6 +511,14 @@ def _git(
     an argument) is likewise returned as a failed ``CompletedProcess``
     (returncode 1) instead of raising.
 
+    An exception raised while waiting (the runner's Stop delivers
+    ``KeyboardInterrupt`` to the task thread at any bytecode) stops git
+    and its whole process group before propagating: the caller's
+    rollback assumes git is finished, and a ``git commit`` left running
+    behind a slow hook would otherwise land minutes later, on top of
+    whatever the user has staged since.  ``SIGTERM`` first, so git
+    removes its lock files; ``SIGKILL`` when it lingers.
+
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
         cwd: Working directory for the git command (required).
@@ -540,6 +569,9 @@ def _git(
             or f"git {args[0] if args else ''} timed out"
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
+    except BaseException:
+        _terminate_git(proc)
+        raise
 
 
 def _kill_git(proc: subprocess.Popen[Any]) -> None:
@@ -548,6 +580,22 @@ def _kill_git(proc: subprocess.Popen[Any]) -> None:
         kill_process_group(proc.pid, SIGKILL)
     if proc.poll() is None:
         proc.kill()
+
+
+def _terminate_git(proc: subprocess.Popen[Any]) -> None:
+    """Stop *proc* and its process group and reap it, lock files cleaned up.
+
+    ``SIGTERM`` lets git remove its ``.lock`` files (and reaches a hook
+    and its children, which share the group); a group still alive five
+    seconds later is killed.
+    """
+    with contextlib.suppress(OSError):  # group already gone
+        kill_process_group(proc.pid, SIGTERM)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover - a hook ignoring SIGTERM
+        _kill_git(proc)
+        proc.wait()
 
 
 def _kill_git_on_timeout(
@@ -840,21 +888,36 @@ def strip_worktree_suffix(path: str) -> str:
         The parent-repo path string, or the unchanged input when the
         path is not inside a KISS worktree.
     """
-    if not path:
+    parts, i = _worktree_parts(path)
+    if i < 0:
         return path
-    norm = path.replace("\\", "/")
-    parts = norm.split("/")
-    for i, segment in enumerate(parts):
-        if (
-            segment == _WORKTREE_SUBDIR
-            and i + 1 < len(parts)
-            and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX)
-        ):
-            parent = "/".join(parts[:i])
-            if parent:
-                return parent
-            return "/" if norm.startswith("/") else "."
-    return path
+    parent = "/".join(parts[:i])
+    if parent:
+        return parent
+    return "/" if parts[0] == "" else "."
+
+
+def _worktree_parts(path: str) -> tuple[list[str], int]:
+    """Split *path* on either separator and locate its worktree segment.
+
+    The single scanner behind :func:`strip_worktree_suffix`,
+    :func:`inside_kiss_worktree` and :func:`kiss_worktree_root`, so
+    the three agree on every spelling (including ``\\``-separated
+    paths read back from storage written on Windows).
+
+    Args:
+        path: An absolute or relative filesystem path string.
+
+    Returns:
+        ``(parts, i)`` where ``parts[i]`` is the ``.kiss-worktrees``
+        segment followed by a ``kiss_wt-*`` slug, or ``i == -1`` when
+        *path* is not inside a KISS worktree.
+    """
+    parts = path.replace("\\", "/").split("/")
+    for i in range(len(parts) - 1):
+        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX):
+            return parts, i
+    return parts, -1
 
 
 def _unquote_git_path(path: str) -> str:
@@ -1128,7 +1191,12 @@ class GitWorktreeOps:
                 logger.warning("Failed to reattach worktree: %s", result.stderr.strip())
                 return False
             if not GitWorktreeOps.save_owner_pid(repo, branch):
-                _git("worktree", "remove", "--force", str(wt_dir), cwd=repo)
+                logger.warning(
+                    "Removing reattached worktree %s: its owner pid could "
+                    "not be recorded (the branch is kept)",
+                    wt_dir,
+                )
+                GitWorktreeOps.remove(repo, wt_dir)
                 return False
         return True
 
@@ -1310,33 +1378,38 @@ class GitWorktreeOps:
             reported as dirty so callers never destroy a worktree whose
             cleanliness could not actually be verified.
         """
-        status = _git("status", "--porcelain", cwd=wt_dir)
-        if status.returncode != 0:
-            logger.warning(
-                "git status failed in %s (rc=%s): %s; treating as dirty",
-                wt_dir, status.returncode, status.stderr.strip(),
-            )
-            return True
-        return bool(status.stdout.strip())
+        return bool(GitWorktreeOps.status_porcelain(wt_dir))
 
     @staticmethod
     def status_porcelain(wt_dir: Path) -> str:
-        """Return the raw ``git status --porcelain`` output.
+        """Return the ``git status --porcelain`` output, failing closed.
 
         Used by failure-path warnings (e.g.
         :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._finalize_worktree`)
         to embed the exact leftover files in the log so an operator
         can tell a real pre-commit-hook rejection apart from a race
         leftover or a corrupt index without having to ssh in and
-        run git themselves.
+        run git themselves, and by before/after comparisons that
+        decide whether a tree may be reset or cleaned.
 
         Args:
             wt_dir: Git working directory to inspect.
 
         Returns:
-            The stripped porcelain output (possibly empty).
+            The stripped porcelain output: empty exactly when git
+            reports a clean tree.  When ``git status`` fails (timeout,
+            corrupt index, bad config, ...) the result is a non-empty
+            line naming the failure, so every caller reads the tree
+            as dirty and unverifiable rather than clean.
         """
-        return _git("status", "--porcelain", cwd=wt_dir).stdout.strip()
+        status = _git("status", "--porcelain", cwd=wt_dir)
+        if status.returncode != 0:
+            logger.warning(
+                "git status failed in %s (rc=%s): %s; treating as dirty",
+                wt_dir, status.returncode, status.stderr.strip(),
+            )
+            return f"git status failed (rc={status.returncode}): {status.stderr.strip()}"
+        return status.stdout.strip()
 
     @staticmethod
     def has_staged_changes(wt_dir: Path) -> bool:
@@ -1426,7 +1499,7 @@ class GitWorktreeOps:
         return (False, result.stderr.strip())
 
     @staticmethod
-    def stash_if_dirty(repo: Path) -> bool:
+    def stash_if_dirty(repo: Path) -> bool | None:
         """Stash uncommitted changes if the working tree or index is dirty.
 
         Uses ``git stash push --include-untracked`` so both staged and
@@ -1437,11 +1510,12 @@ class GitWorktreeOps:
 
         Returns:
             True if a stash entry was created, False if the tree was
-            clean or nothing could be stashed.
+            clean, None if the tree is dirty but ``git stash push``
+            failed or created no entry (the tree is still dirty).
         """
         if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
-        before = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
+        before = GitWorktreeOps.stash_ref(repo)
         result = _git(
             "stash",
             "push",
@@ -1451,10 +1525,24 @@ class GitWorktreeOps:
             cwd=repo,
         )
         if result.returncode != 0:
-            return False
-        after = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
-        after_sha = after.stdout.strip()
-        return bool(after_sha) and after_sha != before.stdout.strip()
+            return None
+        after = GitWorktreeOps.stash_ref(repo)
+        return True if after and after != before else None
+
+    @staticmethod
+    def stash_ref(repo: Path) -> str:
+        """Return the SHA ``refs/stash`` points at, or ``""`` when there is no stash.
+
+        A caller that compares the value from before a
+        :meth:`stash_if_dirty` with the current one knows whether that
+        call created an entry even when it never returned (the
+        runner's Stop can interrupt it after ``git stash push``
+        completed).
+
+        Args:
+            repo: Git repo root path.
+        """
+        return _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo).stdout.strip()
 
     @staticmethod
     def stash_pop(repo: Path) -> bool:
@@ -1609,7 +1697,9 @@ class GitWorktreeOps:
         prompt and result appended when provided and not already
         present in that message.
 
-        On conflict, resets to a clean state with ``git reset --hard``.
+        On conflict, resets to a clean state with ``git reset --hard``;
+        likewise when interrupted between the apply and its commit
+        (see :meth:`squash_merge_from_baseline`).
 
         Args:
             repo: Git repo root path.
@@ -1622,17 +1712,29 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
         """
-        result = _git("merge", "--squash", branch, cwd=repo)
-        if result.returncode != 0:
-            logger.warning(
-                "squash merge failed: %s",
-                result.stderr.strip(),
+        before = GitWorktreeOps.status_porcelain(repo)
+        try:
+            result = _git("merge", "--squash", branch, cwd=repo)
+            if result.returncode != 0:
+                logger.warning(
+                    "squash merge failed: %s",
+                    result.stderr.strip(),
+                )
+                _git("reset", "--hard", "HEAD", cwd=repo)
+                return MergeResult.CONFLICT
+            return GitWorktreeOps._commit_staged_merge(
+                repo, branch, user_prompt=user_prompt, task_result=task_result,
             )
-            _git("reset", "--hard", "HEAD", cwd=repo)
-            return MergeResult.CONFLICT
-        return GitWorktreeOps._commit_staged_merge(
-            repo, branch, user_prompt=user_prompt, task_result=task_result,
-        )
+        except BaseException:
+            # A Stop landing after the squash applied but before its
+            # commit (``_git`` has stopped the git child by now) would
+            # leave the agent's changes staged on the user's branch with
+            # a ``SQUASH_MSG``; ``reset --hard`` undoes both.  After a
+            # completed commit the tree matches *before* and nothing
+            # is touched.
+            if GitWorktreeOps.status_porcelain(repo) != before:
+                _git("reset", "--hard", "HEAD", cwd=repo)
+            raise
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
@@ -2938,9 +3040,6 @@ class GitWorktreeOps:
         the agent's branch tip, and silently letting the branch win
         would destroy the user's intentional commits.
 
-        Falls back to :meth:`squash_merge_branch` when *baseline* is
-        ``None`` (legacy worktrees).
-
         Args:
             repo: Git repo root path.
             branch: The worktree branch to merge from.
@@ -2978,18 +3077,27 @@ class GitWorktreeOps:
             f"{baseline}..{branch}",
         ]
         before = GitWorktreeOps.status_porcelain(repo)
-        result = _git(*cherry_pick_args, cwd=repo)
-        if result.returncode != 0:
-            logger.warning(
-                "squash merge from baseline failed: %s",
-                result.stderr.strip(),
+        try:
+            result = _git(*cherry_pick_args, cwd=repo)
+            if result.returncode != 0:
+                logger.warning(
+                    "squash merge from baseline failed: %s",
+                    result.stderr.strip(),
+                )
+                GitWorktreeOps._abort_cherry_pick(repo, before)
+                return MergeResult.CONFLICT
+            return GitWorktreeOps._commit_staged_merge(
+                repo, branch, user_prompt=user_prompt, task_result=task_result,
             )
+        except BaseException:
+            # The runner's stop (``KeyboardInterrupt``) lands at the
+            # first bytecode after whichever git call is in flight; one
+            # landing after the pick but before its commit would leave
+            # the half-squash staged in the main index.  Undo it before
+            # propagating; after a completed commit the tree matches
+            # *before* again and this is a no-op.
             GitWorktreeOps._abort_cherry_pick(repo, before)
-            return MergeResult.CONFLICT
-
-        return GitWorktreeOps._commit_staged_merge(
-            repo, branch, user_prompt=user_prompt, task_result=task_result,
-        )
+            raise
 
     @staticmethod
     def merge_has_content_conflict(
@@ -3061,7 +3169,7 @@ class GitWorktreeOps:
 
     @staticmethod
     def begin_conflicted_merge(
-        repo: Path, branch: str, baseline: str | None,
+        repo: Path, branch: str, baseline: str | None, before: str,
     ) -> list[str] | None:
         """Apply *branch* onto HEAD, leaving conflicts in the tree to resolve.
 
@@ -3082,6 +3190,10 @@ class GitWorktreeOps:
             branch: The task branch to merge in.
             baseline: The worktree's baseline commit SHA, or ``None`` for
                 a legacy worktree.
+            before: :meth:`status_porcelain` of *repo* taken just before
+                the call (the caller needs it for its own
+                :meth:`abort_conflicted_merge`, so the walk is not
+                repeated here); restores the tree on failure.
 
         Returns:
             The repository-relative paths left unmerged (the resolver's
@@ -3089,7 +3201,6 @@ class GitWorktreeOps:
             and is staged; ``None`` when git failed for a reason other
             than conflicts, in which case the tree has been restored.
         """
-        before = GitWorktreeOps.status_porcelain(repo)
         if baseline:
             squashed = _git(
                 "commit-tree", f"{branch}^{{tree}}", "-p", baseline,
@@ -3811,8 +3922,7 @@ def inside_kiss_worktree(path: Path | str) -> bool:
     Returns:
         True when a worktree segment is part of the path.
     """
-    text = str(path)
-    return strip_worktree_suffix(text) != text
+    return _worktree_parts(str(path))[1] >= 0
 
 
 def kiss_worktree_root(path: Path | str) -> Path | None:
@@ -3825,11 +3935,10 @@ def kiss_worktree_root(path: Path | str) -> Path | None:
         The worktree directory, or ``None`` when *path* is not inside a
         KISS worktree.
     """
-    parts = Path(path).parts
-    for i in range(len(parts) - 1):
-        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX):
-            return Path(*parts[: i + 2])
-    return None
+    parts, i = _worktree_parts(str(path))
+    if i < 0:
+        return None
+    return Path("/".join(parts[: i + 2]))
 
 
 def _path_inside(path: Path, root: Path) -> Path | None:

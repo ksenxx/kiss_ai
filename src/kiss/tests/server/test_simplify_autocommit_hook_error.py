@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server.server import AgentServer
@@ -38,6 +39,7 @@ def _fixed_message(
     diff_text: str,
     user_prompt: str | None = None,
     task_result: str | None = None,
+    bill_to: Any = None,
 ) -> str:
     """Deterministic stand-in for the LLM commit-message generator."""
     return "test: hook rejection message"

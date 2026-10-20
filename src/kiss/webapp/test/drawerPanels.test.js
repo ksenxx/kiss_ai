@@ -17,7 +17,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage: makeSharedPage, send, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeSharedPage,
+  send,
+  MEDIA,
+  readyTabId,
+} = require('./simplify2_harness');
 const {inlineDesignTokens} = require('./designTokens');
 
 let persistedState;
@@ -112,12 +117,6 @@ function click(win, id, el) {
 
 function cs(win, id) {
   return win.getComputedStyle(win.document.getElementById(id));
-}
-
-function readyTabId(posted) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready, 'main.js must post a ready message');
-  return ready.tabId;
 }
 
 function showTaskPanel(win, posted) {

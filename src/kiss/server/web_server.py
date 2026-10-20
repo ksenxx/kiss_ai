@@ -137,6 +137,7 @@ from kiss.server.json_printer import (
     with_synthesized_events,
 )
 from kiss.server.server import AgentServer
+from kiss.server.signin import send_signin
 from kiss.server.speech import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
@@ -329,7 +330,7 @@ TRAJECTORY_TEMPLATE = (
     / "index.html"
 )
 
-TUNNEL_CHECK_INTERVAL = 15
+TUNNEL_CHECK_INTERVAL: float = 15
 TRUSTED_CLIENTS_POLL = 2.0
 """Seconds between the daemon's looks at the enrolled machine CAs' directory."""
 MACHINES_REGISTRY_POLL_SECONDS = 2.0
@@ -2570,10 +2571,7 @@ def _generate_self_signed_cert(
         cert_path: Where to write the PEM-encoded certificate.
         key_path: Where to write the PEM-encoded private key.
     """
-    ca_cert_path = cert_path.parent / tls_certs.CA_CERT_FILE
-    ca_key_path = cert_path.parent / tls_certs.CA_KEY_FILE
-    if not tls_certs._ca_pair_is_usable(ca_cert_path, ca_key_path):
-        tls_certs.generate_local_ca(ca_cert_path, ca_key_path)
+    ca_cert_path, ca_key_path = tls_certs.ensure_local_ca(cert_path.parent)
     tls_certs.issue_server_cert(cert_path, key_path, ca_cert_path, ca_key_path)
 
 
@@ -4991,6 +4989,7 @@ class RemoteAccessServer:
         # clients may use the daemon, never a remote password.
         self._local_only: bool = False
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._tunnel_check_task: asyncio.Task[None] | None = None
         self._tls_refresh_task: asyncio.Task[None] | None = None
         self._trusted_clients_task: asyncio.Task[None] | None = None
         # The enrolled machine-link CAs loaded into ``_ssl_context`` (PEM
@@ -5340,39 +5339,6 @@ class RemoteAccessServer:
             self._prune_auth_failures(other_ip, now)
         self._auth_failures.setdefault(ip, []).append(now)
 
-    async def _authenticate_ws(
-        self, websocket: ServerConnection,
-    ) -> sorcar_api.Auth | None:
-        """Authenticate a WebSocket client with the ``auth`` handshake.
-
-        Returns an :class:`~kiss.server.sorcar.Auth` of kind
-        ``"local"`` for a loopback peer that presented this daemon's
-        local token (see :attr:`local_token`), ``"loopback"`` for a
-        browser on this machine itself (a loopback peer with no
-        forwarded client IP, admitted without a password), ``"remote"``
-        for a client that supplied the configured ``remote_password``
-        (its ``link`` flag set when the peer declared itself a daemon
-        link), and ``None`` (with the socket closed) on failure.
-
-        When the configured ``remote_password`` is empty, only
-        loopback peers may connect at all (:meth:`_process_request`
-        refuses non-loopback peers with 403 before the upgrade, and
-        the handshake re-checks the peer address).  See also
-        :meth:`_setup_server` which refuses to advertise the public
-        cloudflared tunnel when no password is configured.
-
-        Transport wrapper: the handshake protocol itself (the
-        ``auth`` / ``auth_ok`` / ``auth_required`` / ``auth_locked``
-        exchange, the rate-limit refusal, and the
-        only-non-empty-guesses-count lockout rule) is part of the
-        server API and lives in
-        :meth:`kiss.server.sorcar.ServerApi.authenticate`, which
-        calls back into this server's :meth:`_client_ip` /
-        :meth:`_auth_lock_remaining` / :meth:`_record_auth_failure` /
-        :attr:`local_token` primitives.
-        """
-        return await self._server_api.authenticate(websocket)
-
     @property
     def local_token(self) -> str:
         """The per-start secret a loopback client presents to be local.
@@ -5418,7 +5384,7 @@ class RemoteAccessServer:
         Args:
             websocket: The WebSocket server connection.
         """
-        auth = await self._authenticate_ws(websocket)
+        auth = await self._server_api.authenticate(websocket)
         if auth is None:
             return
         is_local = auth.kind == "local" and not auth.link
@@ -5613,7 +5579,7 @@ class RemoteAccessServer:
                 stamping of ``connId`` is what guarantees the
                 per-tab autocomplete isolation invariant.
             is_local: Whether the connection authenticated with the
-                local token (see :meth:`_authenticate_ws`).
+                local token (see :meth:`kiss.server.sorcar.ServerApi.authenticate`).
         """
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
@@ -5624,22 +5590,39 @@ class RemoteAccessServer:
 
     def _bootstrap_events(self) -> list[dict[str, Any]]:
         """The events a ``ready`` answers with: ``tricksData``,
-        ``tipsData`` and, after an install that retired the VS Code
-        extension or that ran into problems, its ``notification``.
+        ``tipsData``, and after an install that retired the VS Code
+        extension or that ran into problems its ``notification``.
 
         Reads ``MY_INJECTION.md``, the bundled promptlets and tips, the
         opt-out marker, the ``.vscode-retired`` flag and the
-        ``.install-problems`` file, so callers run it off the event
-        loop.
+        ``.install-problems`` file, so callers run it off the event loop.
         """
         events: list[dict[str, Any]] = [
             {"type": "tricksData", **read_tricks_data()},
             {"type": "tipsData", **tips_data(_read_version())},
         ]
-        for notice in (vscode_retired_notice(self._loopback_url), install_problems_notice()):
-            if notice is not None:
-                events.append(notice)
+        for event in (vscode_retired_notice(self._loopback_url), install_problems_notice()):
+            if event is not None:
+                events.append(event)
         return events
+
+    async def _send_signin(self, conn_id: str) -> None:
+        """Send *conn_id* the ``signin`` event when the brand's hook says the user must sign in.
+
+        The tail of a ``ready``, run as a background task once the page
+        has its tabs back (:meth:`_handle_ready`): the hook is a process
+        of up to :data:`kiss.server.signin.STATUS_TIMEOUT` seconds, which
+        must neither hold up the tab restore and the transcript replay
+        nor the page's next command, and the window must come after the
+        ``focusInput`` that would otherwise take its focus.  The event is
+        queued from the thread, under the status lock (see
+        :func:`kiss.server.signin.send_signin`): a sign-in that succeeds
+        while the answer is on its way to this loop could otherwise have
+        its ``signinDone`` overtaken by a ``signin`` that reopens the window.
+        """
+        await asyncio.to_thread(
+            send_signin, partial(broadcast_to_conn, self._printer, conn_id=conn_id),
+        )
 
     async def _handle_server_reset(self, conn_id: str = "") -> None:
         """Restart the ``kiss-web`` daemon at the user's request.
@@ -7152,12 +7135,18 @@ class RemoteAccessServer:
         *endpoint* with the shape::
 
             {"type": "gitStatus", "workDir": <work dir>, "tabId": <echo>,
-             "token": <echo>, "repo": <abs repo root>, "branch": <name>,
+             "token": <echo>, "taskWorktree": <dir or "">,
+             "repo": <abs repo root>, "branch": <name>,
              "changes": [{"path", "absPath", "status", "group"}, ...]}
             {"type": "gitStatus", "workDir": ..., "tabId": ..., "token": ...,
              "error": <message>}                  # not a repo / git failed
 
-        See :func:`kiss.server.explorer.git_status` for the row fields.
+        ``taskWorktree`` is the worktree the tab's task runs in (the
+        directory recorded from its ``worktree_created``, see
+        :meth:`WebPrinter.worktree_dir_for_tab`), ``""`` when the tab
+        has none: the page's SOURCE CONTROL badge counts the changes
+        of that worktree alone.  See
+        :func:`kiss.server.explorer.git_status` for the row fields.
 
         Args:
             cmd: The parsed ``gitStatus`` command (optional ``workDir``,
@@ -7166,7 +7155,14 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import git_status
 
-        await self._git_reply(cmd, endpoint, "gitStatus", git_status)
+        tab_id = self._cmd_str(cmd, "tabId")
+        await self._git_reply(
+            cmd,
+            endpoint,
+            "gitStatus",
+            git_status,
+            taskWorktree=self._printer.worktree_dir_for_tab(tab_id) if tab_id else "",
+        )
 
     async def _handle_git_log(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7431,8 +7427,8 @@ class RemoteAccessServer:
         reply.update(await asyncio.to_thread(_run))
         await self._reply_direct(endpoint, reply, "fsAction")
 
-    def _tab_task_agent(self, tab_id: str) -> Any:
-        """Return the agent of the task *tab_id* is running or viewing.
+    def _tab_task_state(self, tab_id: str) -> Any:
+        """Return the agent state of the task *tab_id* is running or viewing.
 
         The tab that launched a task owns its agent state
         (:func:`agent_state.find_by_tab`); a tab that merely views the
@@ -7448,8 +7444,8 @@ class RemoteAccessServer:
             tab_id: The requesting client's tab id.
 
         Returns:
-            The task's live agent, or ``None`` when the tab is attached
-            to no task.
+            The task's :class:`~kiss.server.agent_state.AgentState`, or
+            ``None`` when the tab is attached to no task.
         """
         from kiss.server import agent_state
 
@@ -7463,8 +7459,8 @@ class RemoteAccessServer:
                 states.append(state)
         for state in states:
             if state.is_task_active:
-                return state.agent
-        return states[0].agent if states else None
+                return state
+        return states[0] if states else None
 
     async def _handle_get_task_update(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7474,7 +7470,7 @@ class RemoteAccessServer:
         Handles the ``getTaskUpdate`` command polled by ``media/main.js``
         for the info subpanel of the task-info panel: the subpanel shows
         the :mod:`~kiss.agents.seas.ask.ask_sea` agent's short answer
-        to what the task RUNNING in the tab (:meth:`_tab_task_agent`)
+        to what the task RUNNING in the tab (:meth:`_tab_task_state`)
         has done so far, never a file the task left on disk.
         :class:`TaskUpdateRunner` owns the updates: this poll makes it
         run the agent once the tab's task is
@@ -7511,7 +7507,6 @@ class RemoteAccessServer:
             endpoint: The requesting WSS connection.
         """
         from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
-        from kiss.server import agent_state
 
         tab_id = self._cmd_str(cmd, "tabId")
         known_sig = self._cmd_str(cmd, "knownSig")
@@ -7526,8 +7521,8 @@ class RemoteAccessServer:
             "sig": "",
             "content": "",
         }
-        agent = self._tab_task_agent(tab_id) if tab_id else None
-        state = agent_state.find_by_agent(agent) if agent is not None else None
+        state = self._tab_task_state(tab_id) if tab_id else None
+        agent = state.agent if state is not None else None
         task_id = _persisted_task_id(agent) if agent is not None else ""
         # The state is keyed by the persisted task id only once the run
         # has allocated its history row (``agent_task_allocated`` re-keys
@@ -8124,6 +8119,7 @@ class RemoteAccessServer:
             if rt_task:
                 resume["taskId"] = rt_task
             await self._run_cmd(resume)
+        self._server_api._spawn_reply(self._send_signin(conn_id))
 
     async def _open_path_only_prompt(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -8994,13 +8990,18 @@ class RemoteAccessServer:
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
-            if self.use_tunnel:
-                try:
-                    await self._check_and_restart_tunnel()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.debug("Watchdog tunnel check error", exc_info=True)
+            # Single-flight background task, like the TLS refresh
+            # below: a restart spawns cloudflared and waits up to 30 s
+            # for its URL (longer when the edge rate-limits), and run
+            # inline it held the tick, and the heartbeat ping at its
+            # end, past the 45 s after which every idle page drops its
+            # socket and reconnects.
+            if self.use_tunnel and (
+                self._tunnel_check_task is None or self._tunnel_check_task.done()
+            ):
+                self._tunnel_check_task = asyncio.create_task(
+                    self._check_and_restart_tunnel_logged(),
+                )
             try:
                 await asyncio.to_thread(self._watchdog_check_url_file)
             except asyncio.CancelledError:
@@ -9078,6 +9079,15 @@ class RemoteAccessServer:
                     logger.warning("Could not reload the enrolled machine CAs", exc_info=True)
             await asyncio.sleep(TRUSTED_CLIENTS_POLL)
             elapsed += TRUSTED_CLIENTS_POLL
+
+    async def _check_and_restart_tunnel_logged(self) -> None:
+        """Run :meth:`_check_and_restart_tunnel`, logging any failure (watchdog task body)."""
+        try:
+            await self._check_and_restart_tunnel()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Watchdog tunnel check error", exc_info=True)
 
     async def _refresh_tls_cert_logged(self) -> None:
         """Run :meth:`_refresh_tls_cert`, logging any failure (watchdog task body)."""
@@ -10034,9 +10044,10 @@ class RemoteAccessServer:
         3. Failsafe: if the loop still has not stopped after
            ``_SHUTDOWN_EXIT_FAILSAFE`` seconds — e.g. ``asyncio.run``'s
            cancellation phase is stuck on a task swallowing
-           ``CancelledError`` — force-exit so the supervisor respawns a
-           fresh daemon instead of leaving a zombie that ignores every
-           further SIGTERM.
+           ``CancelledError`` — run :meth:`_shutdown_children` from this
+           thread (``start()``'s ``finally`` never will) and force-exit
+           so the supervisor respawns a fresh daemon instead of leaving
+           a zombie that ignores every further SIGTERM.
         """
         # Detach the tunnel FIRST — before any slow cleanup (agent-task
         # joins, merge waits, MCP disconnects).  This spawns the stderr
@@ -10081,6 +10092,13 @@ class RemoteAccessServer:
             os.getpid(),
         )
         self._detach_tunnel()
+        # ``start()``'s ``finally`` will not run: hang up the terminal
+        # shells, close the streamed Browser tab and the remote tabs,
+        # and flush the tab registry from here (idempotent, bounded).
+        try:
+            self._shutdown_children()
+        except Exception:  # noqa: BLE001 — the exit must proceed regardless
+            logger.exception("Shutdown failsafe: stopping the daemon's children failed")
         logging.shutdown()
         os._exit(0)
 
@@ -10381,8 +10399,10 @@ class RemoteAccessServer:
         falls back to the default browser, then closed rather than
         killed by the driver at process exit), terminal-tab shells (hung
         up, killed when they ignore it), the streams of tabs running on
-        remote machines, and the SEA-registry watcher.  Every step is
-        idempotent: the SIGTERM thread runs the first three early.
+        remote machines, the brand's sign-in hook (SIGTERM, killed when
+        it ignores it: its kill thread would not survive the interpreter's
+        exit), and the SEA-registry watcher.  Every step is idempotent:
+        the SIGTERM thread runs the first three early.
         """
         self._stop_active_agent_tasks()
         self._await_active_merges()
@@ -10393,6 +10413,7 @@ class RemoteAccessServer:
         self._agent_server.terminals.shutdown()
         self._server_api.remote_tabs.close_all()
         self._server_api.remote_views.close_all()
+        self._server_api.signin.shutdown()
         self._stop_sea_command_watcher()
 
     async def start_async(self) -> None:
@@ -10476,6 +10497,8 @@ class RemoteAccessServer:
         async with self._lifecycle_lock:
             await _cancel_task(self._watchdog_task)
             self._watchdog_task = None
+            await _cancel_task(self._tunnel_check_task)
+            self._tunnel_check_task = None
             await _cancel_task(self._trusted_clients_task)
             self._trusted_clients_task = None
             await _cancel_task(self._tls_refresh_task)

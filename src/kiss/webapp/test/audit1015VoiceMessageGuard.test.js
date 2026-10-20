@@ -21,20 +21,7 @@ const {JSDOM} = require('jsdom');
 const VOICE_JS_PATH =
   process.env.KISS_VOICE_JS || path.join(__dirname, '..', 'media', 'voice.js');
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 function makeWindow() {
   const dom = new JSDOM(
@@ -95,7 +82,4 @@ test('events whose data has no string text are ignored', () => {
 // daemon's synthetic event.  The sourced MessageEvents above model what
 // a browser delivers for a cross-window postMessage.
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-if (failures.length > 0) {
-  process.exit(1);
-}
+report('audit1015VoiceMessageGuard');

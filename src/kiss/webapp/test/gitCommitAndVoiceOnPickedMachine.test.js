@@ -23,9 +23,15 @@ const {
   msgs,
   assertJsonEqual,
 } = require('./workdir_helpers');
+const {pickMachine} = require('./simplify2_harness');
 
 const MACHINES = [
-  {name: 'laptop', local: true, status: 'reachable', address: 'https://10.0.0.5:8787'},
+  {
+    name: 'laptop',
+    local: true,
+    status: 'reachable',
+    address: 'https://10.0.0.5:8787',
+  },
   {name: 'gpu-box', status: 'reachable', address: 'https://gpu:8787'},
 ];
 const BOX_DIRS = {
@@ -35,12 +41,6 @@ const BOX_DIRS = {
   recentWorkDirs: [{path: '/srv/proj', ts: Date.now() / 1000}],
   error: '',
 };
-
-function pickMachine(win, value) {
-  const select = byId(win, 'chat-machine');
-  select.value = value;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-}
 
 /** A page whose daemon knows its own folder and the machines, picked onto gpu-box. */
 function bootOnGpuBox() {
@@ -65,15 +65,27 @@ function testTheButtonCommitsTheMachinesFolder() {
   const {win, posted} = bootOnGpuBox();
   byId(win, 'autocommit-btn').click();
   assertJsonEqual(msgs(posted, 'autocommitAction'), [
-    {tabId: tabId(win), workDir: '/srv/proj', machine: 'gpu-box', type: 'autocommitAction'},
+    {
+      tabId: tabId(win),
+      workDir: '/srv/proj',
+      machine: 'gpu-box',
+      type: 'autocommitAction',
+    },
   ]);
-  assert.ok(byId(win, 'autocommit-btn').disabled, 'in flight until the outcome');
+  assert.ok(
+    byId(win, 'autocommit-btn').disabled,
+    'in flight until the outcome',
+  );
 
   // The outcome re-arms the button; back on this machine the next
   // commit is this daemon's folder, with no machine.
   send(win, {
-    type: 'autocommit_done', success: true, committed: true, manual: true,
-    message: 'gpu-box: Committed: x', tabId: tabId(win),
+    type: 'autocommit_done',
+    success: true,
+    committed: true,
+    manual: true,
+    message: 'gpu-box: Committed: x',
+    tabId: tabId(win),
   });
   assert.ok(!byId(win, 'autocommit-btn').disabled, 're-armed');
   pickMachine(win, '');
@@ -90,24 +102,38 @@ function testAMachineWhoseFolderIsUnknownCommitsItsOwn() {
   // not been reported yet: the machine commits its own configured one.
   send(win, {
     type: 'machines',
-    machines: [...MACHINES, {name: 'office', status: 'reachable', address: 'https://office:8787'}],
+    machines: [
+      ...MACHINES,
+      {name: 'office', status: 'reachable', address: 'https://office:8787'},
+    ],
     checkedAt: 2,
   });
   pickMachine(win, 'office');
   posted.length = 0;
   byId(win, 'autocommit-btn').click();
   assertJsonEqual(msgs(posted, 'autocommitAction'), [
-    {tabId: tabId(win), workDir: '', machine: 'office', type: 'autocommitAction'},
+    {
+      tabId: tabId(win),
+      workDir: '',
+      machine: 'office',
+      type: 'autocommitAction',
+    },
   ]);
 }
 
 function testTheVoiceTriggerSubmitsToTheMachine() {
   const {win, posted} = bootOnGpuBox();
   byId(win, 'task-input').value = 'Speaker #1 says that: run the tests';
-  win.dispatchEvent(new win.CustomEvent('kiss-voice-submit', {detail: {tabId: tabId(win)}}));
+  win.dispatchEvent(
+    new win.CustomEvent('kiss-voice-submit', {detail: {tabId: tabId(win)}}),
+  );
   const submits = msgs(posted, 'submit');
   assert.strictEqual(submits.length, 1, 'one submit');
-  assert.strictEqual(submits[0].machine, 'gpu-box', 'the dictated task goes to the machine');
+  assert.strictEqual(
+    submits[0].machine,
+    'gpu-box',
+    'the dictated task goes to the machine',
+  );
   assert.strictEqual(submits[0].prompt, 'Speaker #1 says that: run the tests');
   assert.ok(!('workDir' in submits[0]), "the machine's own folder: no workDir");
 
@@ -116,13 +142,26 @@ function testTheVoiceTriggerSubmitsToTheMachine() {
   posted.length = 0;
   byId(win, 'task-input').value = 'Speaker #1 says that: and here';
   win.dispatchEvent(new win.CustomEvent('kiss-voice-submit', {detail: {}}));
-  assert.strictEqual(msgs(posted, 'submit')[0].machine, '', 'back on this machine');
+  assert.strictEqual(
+    msgs(posted, 'submit')[0].machine,
+    '',
+    'back on this machine',
+  );
 }
 
 const tests = [
-  ['the button commits the picked machine\'s folder', testTheButtonCommitsTheMachinesFolder],
-  ['an unknown folder means the machine\'s own', testAMachineWhoseFolderIsUnknownCommitsItsOwn],
-  ['the voice trigger submits to the picked machine', testTheVoiceTriggerSubmitsToTheMachine],
+  [
+    "the button commits the picked machine's folder",
+    testTheButtonCommitsTheMachinesFolder,
+  ],
+  [
+    "an unknown folder means the machine's own",
+    testAMachineWhoseFolderIsUnknownCommitsItsOwn,
+  ],
+  [
+    'the voice trigger submits to the picked machine',
+    testTheVoiceTriggerSubmitsToTheMachine,
+  ],
 ];
 
 let failed = 0;

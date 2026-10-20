@@ -29,6 +29,7 @@ const {
   stubRaf,
   loadMainCss,
   captureTimers,
+  readyTabId,
 } = require('./simplify2_harness');
 
 const HOUR_MS = 3600 * 1000;
@@ -45,12 +46,6 @@ function makePage() {
     },
   });
   return {win, posted, timers};
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function flush() {
@@ -200,8 +195,9 @@ function testChatLastLaunchedLine() {
     byChat[g.dataset.chatId] = g;
   });
   // The label closes the header's action strip, after the "Show
-  // details" chevron and the rename pencil, where a task panel shows
-  // its age label.
+  // details" chevron, the rename pencil and the delete control (the
+  // trash button and its hidden Delete / Cancel strip), where a task
+  // panel shows its age label.
   const lineA = byChat['chat-a'].querySelector(
     ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
@@ -211,20 +207,17 @@ function testChatLastLaunchedLine() {
     null,
     'the label ends the action strip',
   );
-  assert.ok(
-    lineA.previousElementSibling.classList.contains('history-chat-rename'),
-    'the label follows the rename pencil',
-  );
-  assert.ok(
-    lineA.previousElementSibling.previousElementSibling.classList.contains(
-      'history-chat-collapse',
-    ),
-    'the rename pencil follows the Show details chevron',
-  );
-  assert.strictEqual(
-    lineA.previousElementSibling.className,
-    'sidebar-item-edit history-chat-rename',
-    'the rename pencil sits between the chevron and the label',
+  const strip = Array.from(lineA.parentNode.children).map(el => el.className);
+  assert.deepStrictEqual(
+    strip,
+    [
+      'sidebar-item-collapse history-chat-collapse',
+      'sidebar-item-edit history-chat-rename',
+      'sidebar-item-delete',
+      'sidebar-item-confirm',
+      'history-chat-launched',
+    ],
+    'chevron, rename pencil, delete control, then the label',
   );
   assert.strictEqual(
     byChat['chat-a'].querySelector(':scope > .history-chat-header')
@@ -429,7 +422,7 @@ function testRefreshSweepRepaintsBothLabels() {
 async function testThoughtsPanelCostLive() {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const output = win.document.getElementById('output');
   const now = Date.now();
   send(win, {type: 'clear', chat_id: 'chat-cost', tabId: TAB});
@@ -590,7 +583,7 @@ async function testThoughtsPanelCostLive() {
 async function testThoughtsPanelCostReplay() {
   const wv = makePage();
   const win = wv.win;
-  const TAB = tabIdOf(wv);
+  const TAB = readyTabId(wv.posted);
   const output = win.document.getElementById('output');
   const oldTs = new Date(2021, 2, 5, 14, 7).getTime();
   send(win, {

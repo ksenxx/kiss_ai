@@ -23,7 +23,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, pickMachine} = require('./simplify2_harness');
 const {byId, click} = require('./settings_helpers');
 
 const MACHINES = [
@@ -55,12 +55,6 @@ function typeInto(win, id, value) {
   const node = byId(win, id);
   node.value = value;
   node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
-
-function pickMachine(win, value) {
-  const sel = byId(win, 'chat-machine');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 /** The form's text boxes that could leak another machine's values. */

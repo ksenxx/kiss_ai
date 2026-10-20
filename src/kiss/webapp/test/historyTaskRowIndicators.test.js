@@ -9,7 +9,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {inlineDesignTokens} = require('./designTokens');
-const {makePage: makeHarnessPage, send, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeHarnessPage,
+  send,
+  MEDIA,
+  sendEmptyWorkDir,
+} = require('./simplify2_harness');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
@@ -58,14 +63,6 @@ function makeRow(overrides) {
     },
     overrides,
   );
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
 }
 
 function openBurgerMenu(win) {

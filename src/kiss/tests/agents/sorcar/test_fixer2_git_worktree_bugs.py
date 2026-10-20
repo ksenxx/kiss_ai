@@ -105,15 +105,15 @@ def _add_dirty_submodule(tmp_path: Path, repo: Path) -> None:
 
 
 class TestB9StashIfDirtyContract:
-    """B9: True only iff a stash entry was actually created."""
+    """B9: True only iff a stash entry was actually created; None when dirty but none was."""
 
-    def test_noop_stash_push_returns_false(self, tmp_path: Path) -> None:
+    def test_noop_stash_push_returns_none(self, tmp_path: Path) -> None:
         """Dirty submodule content: status is dirty but push saves nothing."""
         repo = _init_repo(tmp_path)
         _add_dirty_submodule(tmp_path, repo)
         assert GitWorktreeOps.has_uncommitted_changes(repo)
 
-        assert GitWorktreeOps.stash_if_dirty(repo) is False
+        assert GitWorktreeOps.stash_if_dirty(repo) is None
         assert _stash_count(repo) == 0
 
     def test_noop_stash_push_does_not_pop_user_stash(self, tmp_path: Path) -> None:

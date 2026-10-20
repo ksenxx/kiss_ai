@@ -8,7 +8,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage: makeSharedPage, send, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeSharedPage,
+  send,
+  MEDIA,
+  sendEmptyWorkDir,
+} = require('./simplify2_harness');
 const {inlineDesignTokens} = require('./designTokens');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
@@ -49,14 +54,6 @@ function openSidebar(win) {
   if (sidebar && !sidebar.classList.contains('open')) {
     sidebar.classList.add('open');
   }
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
 }
 
 function makeRow(overrides) {

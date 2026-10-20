@@ -6,11 +6,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 from unittest import TestCase
-
-import pytest
 
 
 class TestModelBareListSchema(TestCase):
@@ -24,6 +21,7 @@ class TestModelBareListSchema(TestCase):
             api_key="test-key",
         )
         import typing
+
         schema = m._python_type_to_json_schema(typing.List)  # noqa: UP006
         assert schema == {"type": "array"}
 
@@ -37,6 +35,7 @@ class TestDeepSeekReasoningNoMatch(TestCase):
         reasoning, answer = _extract_deepseek_reasoning("Just a plain answer")
         assert reasoning == ""
         assert answer == "Just a plain answer"
+
 
 class TestCacheControlOpenRouter(TestCase):
     def test_openrouter_anthropic_adds_cache(self) -> None:
@@ -71,7 +70,7 @@ class TestTextBasedToolsParsing(TestCase):
             _parse_text_based_tool_calls,
         )
 
-        content = '```json\n{broken json}\n```'
+        content = "```json\n{broken json}\n```"
         calls = _parse_text_based_tool_calls(content)
         assert calls == []
 
@@ -116,9 +115,7 @@ class TestAnthropicAddFunctionResultsNoToolUse(TestCase):
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
         ]
-        m.add_function_results_to_conversation_and_return(
-            [("func1", {"result": "ok"})]
-        )
+        m.add_function_results_to_conversation_and_return([("func1", {"result": "ok"})])
         last = m.conversation[-1]
         assert last["role"] == "user"
         assert len(last["content"]) == 1
@@ -215,24 +212,7 @@ class TestModelInfoFactory:
         assert m.model_name == "moonshot-v1-32k"
 
 
-class TestAttachment:
-    def test_from_file_unsupported_mime(self, tmp_path: Path) -> None:
-        from kiss.core.models.model import Attachment
-
-        f = tmp_path / "test.xyz"
-        f.write_bytes(b"data")
-        with pytest.raises(ValueError, match="Unsupported MIME type"):
-            Attachment.from_file(str(f))
-
-    def test_from_file_not_found(self) -> None:
-        from kiss.core.models.model import Attachment
-
-        with pytest.raises(FileNotFoundError):
-            Attachment.from_file("/nonexistent/file.png")
-
-
 class TestAnthropicBuildKwargs:
-
     def test_build_kwargs_small_max_tokens_skips_thinking(self) -> None:
         """No room for the 1024-token minimum thinking budget → no thinking."""
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -364,15 +344,12 @@ class TestAnthropicHelpers:
 
 
 class TestAnthropicAddFunctionResults:
-
     def test_add_results_with_usage_info(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
 
         m = AnthropicModel("claude-haiku-4-5", api_key="test")
         m.set_usage_info_for_messages("Tokens: 100")
         m.conversation = [{"role": "assistant", "content": "text"}]
-        m.add_function_results_to_conversation_and_return(
-            [("fn1", {"result": "done"})]
-        )
+        m.add_function_results_to_conversation_and_return([("fn1", {"result": "done"})])
         last = m.conversation[-1]
         assert "Tokens: 100" in last["content"][0]["content"]

@@ -26,14 +26,11 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness.js');
-
-function byType(posted, type) {
-  return posted.filter(m => m.type === type);
-}
+const {ofType} = require('./simplify2_harness');
 
 function testBootAnnouncesOneNewChat() {
   const {win, posted} = makePage();
-  const readies = byType(posted, 'ready');
+  const readies = ofType(posted, 'ready');
   assert.strictEqual(readies.length, 1, 'exactly one ready');
   assert.strictEqual(readies[0].tabId, win._testApi.getActiveTabId());
   assert.strictEqual(
@@ -91,7 +88,10 @@ function testReconcileAdoptsEveryRegistryTab() {
     tabs: [{tabId: boot, chatId: 'chat-1', title: 'Renamed chat', workDir: ''}],
   });
   assert.strictEqual(
-    win._testApi.openTabs().map(t => String(t.id)).join(','),
+    win._testApi
+      .openTabs()
+      .map(t => String(t.id))
+      .join(','),
     boot,
   );
   assert.strictEqual(win._testApi.getActiveTabId(), boot);
@@ -110,7 +110,7 @@ function testNewChatOpensAChatInPlace() {
     boot,
     '"+" on a used chat opens a new chat in this page',
   );
-  assert.ok(byType(posted, 'newChat').length >= 1, 'the daemon is told');
+  assert.ok(ofType(posted, 'newChat').length >= 1, 'the daemon is told');
   const active = win._testApi
     .openTabs()
     .find(t => t.id === win._testApi.getActiveTabId());
@@ -158,7 +158,7 @@ function testSubagentTabs() {
     2,
     'the chat surface adopts a parentless spawn',
   );
-  assert.ok(byType(posted, 'resumeSession').length >= 1);
+  assert.ok(ofType(posted, 'resumeSession').length >= 1);
   win.close();
 }
 

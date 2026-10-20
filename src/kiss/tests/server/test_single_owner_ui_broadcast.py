@@ -73,7 +73,7 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
         self.printer.subscribe_tab(TASK_ID, VIEWER_TAB)
         self._orig_gen = merge_flow_module.generate_commit_message_from_diff
         merge_flow_module.generate_commit_message_from_diff = (  # type: ignore[assignment]
-            lambda diff_text, user_prompt=None, task_result=None: (
+            lambda diff_text, user_prompt=None, task_result=None, bill_to=None: (
                 "chore: auto-commit test"
             )
         )

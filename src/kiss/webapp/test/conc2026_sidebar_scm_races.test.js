@@ -29,8 +29,14 @@ const {
   click,
   stubRaf,
   fakeMatchMedia,
+  ofType,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  makeRunner,
+  byId,
+  showSection,
+  rightClick,
+} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
@@ -69,36 +75,6 @@ const WD2 = '/ws/other';
 
 function pinWorkspace(win, wd) {
   send(win, {type: 'configData', config: {work_dir: wd || WD}});
-}
-
-function rightClick(win, el) {
-  el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
-}
-
-/**
- * Bring a workspace section of the task-info panel (meta-explorer /
- * meta-scm) on screen: expand it if it is collapsed.  An expanded
- * section is already live (the workspace pin loads it).
- */
-function showSection(win, id) {
-  const section = byId(win, id);
-  if (section.classList.contains('collapsed'))
-    click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 function rows(win, sel) {

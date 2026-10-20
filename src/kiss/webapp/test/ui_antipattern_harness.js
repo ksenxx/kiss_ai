@@ -59,13 +59,7 @@ function makePage(opts) {
   return {win, posted, created};
 }
 
-function send(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const {send, sleep, ofType} = harness;
 
 /** A pointer click (detail 1), as a mouse produces. */
 function click(win, el) {
@@ -110,10 +104,6 @@ function showSection(win, id) {
   const section = byId(win, id);
   if (section.classList.contains('collapsed'))
     click(win, section.querySelector('.meta-section-toggle'));
-}
-
-function ofType(posted, type) {
-  return posted.filter(m => m.type === type);
 }
 
 function all(win, sel) {
@@ -324,6 +314,7 @@ module.exports = {
   showSection,
   ofType,
   all,
+  menuItem,
   toast,
   toastButton,
   toastInput,

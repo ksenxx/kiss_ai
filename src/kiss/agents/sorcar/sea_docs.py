@@ -25,6 +25,7 @@ reports the blocks that are out of date and exits ``1``.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 from pathlib import Path, PurePath
@@ -197,28 +198,41 @@ TABLES = {
 """Block name -> renderer."""
 
 
-def render(text: str) -> str:
+def render(text: str, tables: dict[str, str] | None = None) -> str:
     """Return *text* with every ``sea-docs`` block regenerated.
+
+    Args:
+        text: A Markdown page.
+        tables: ``block name -> rendered table``, filled as blocks are
+            met; the pages of one :func:`run` share a dict so each
+            table is rendered once (``commands`` executes every bundled
+            SEA).  ``None`` renders this page on its own.
 
     Raises:
         KeyError: a block names an unknown table.
     """
-
-    def replace(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{TABLES[match.group(2)]()}\n{match.group(4)}"
-
-    return _BLOCK.sub(replace, text)
+    rendered = {} if tables is None else tables
+    return _BLOCK.sub(functools.partial(_replace_block, rendered), text)
 
 
-def update_file(path: Path, check: bool) -> bool:
+def _replace_block(tables: dict[str, str], match: re.Match[str]) -> str:
+    """Return the block *match* with its table from *tables*, rendered on first use."""
+    name = match.group(2)
+    if name not in tables:
+        tables[name] = TABLES[name]()
+    return f"{match.group(1)}{tables[name]}\n{match.group(4)}"
+
+
+def update_file(path: Path, check: bool, tables: dict[str, str] | None = None) -> bool:
     """Regenerate the blocks of *path*; return whether it was (or would be) changed.
 
     Args:
         path: A Markdown page with ``sea-docs`` blocks.
         check: ``True`` only compares, ``False`` writes the page.
+        tables: The rendered-table memo shared across pages (:func:`render`).
     """
     old = path.read_text(encoding="utf-8")
-    new = render(old)
+    new = render(old, tables)
     if new != old and not check:
         path.write_text(new, encoding="utf-8")
     return new != old
@@ -240,7 +254,8 @@ def run(args: argparse.Namespace) -> int:
         ``--check`` found stale blocks.
     """
     files = [Path(f) for f in args.files] or [REPO_ROOT / rel for rel in GENERATED_FILES]
-    stale = [path for path in files if path.exists() and update_file(path, args.check)]
+    tables: dict[str, str] = {}
+    stale = [path for path in files if path.exists() and update_file(path, args.check, tables)]
     for path in stale:
         print(("stale: " if args.check else "updated: ") + str(path))
     return 1 if stale and args.check else 0

@@ -445,8 +445,8 @@ class TabRegistry:
         claim stands down at its commit) and draw a clock observation
         that orders the claim's out-of-lock teardown against later
         publications (a replay stamped after the claim owns the tab —
-        the teardown stands down via
-        ``AgentServer._tab_reopened_since``).  Doing both in ONE
+        the teardown stands down via :meth:`reopened_since` in
+        ``AgentServer._drop_tab_state_locked``).  Doing both in ONE
         locked section closes the seam a two-call sequence would
         leave: a stamp landing between a separate retire and clock
         read would be neither retired nor newer than the observation,
@@ -564,7 +564,7 @@ class TabRegistry:
         One atomic registry observation combining
         :meth:`republished_since` (a publication stamped a newer
         generation) with row presence (a token-0 duplicate close's
-        observation gap — see ``AgentServer._tab_reopened_since``).
+        observation gap).
         Two separate calls would leave a seam: a rowless publication
         landing between them is neither newer than the split
         generation read nor visible as a row, so a stale cleanup could
@@ -664,8 +664,7 @@ class TabRegistry:
         and this read can stamp a generation ``<=`` the reading;
         :meth:`reopened_since` closes that gap by also answering
         ``True`` while the tab is PRESENT in the registry (presence
-        after an absent-close is always a later republication) — see
-        ``AgentServer._tab_reopened_since``.
+        after an absent-close is always a later republication).
 
         Returns:
             The current generation counter (``0`` on a registry that

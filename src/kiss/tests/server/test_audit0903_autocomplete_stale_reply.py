@@ -269,7 +269,7 @@ class TestAutocompleteStaleReply(TestCase):
             # old reply has provably already run (FIFO worker).
             self.assertTrue(
                 self._wait(
-                    lambda: _CONN not in self.server._files_request_map(),
+                    lambda: _CONN not in self.server._files_latest_request,
                     30.0,
                 ),
             )
@@ -302,5 +302,5 @@ class TestAutocompleteStaleReply(TestCase):
         # for idle connections.
         with self.server._state_lock:
             self.assertNotIn(
-                "conn-solo", self.server._files_request_map(),
+                "conn-solo", self.server._files_latest_request,
             )

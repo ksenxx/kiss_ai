@@ -90,6 +90,7 @@ def test_finalize_worktree_no_spurious_hook_warning(
             commit_dir: Path,
             user_prompt: str | None,
             task_result: str | None = None,
+            bill_to: object = None,
         ) -> str:
             """Drop a new file while the (simulated) LLM is in flight.
 
@@ -171,6 +172,7 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
             commit_dir: Path,
             user_prompt: str | None,
             task_result: str | None = None,
+            bill_to: object = None,
         ) -> str:
             return "test: agent work"
 

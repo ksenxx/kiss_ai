@@ -442,6 +442,7 @@ def _generate_commit_message(
     commit_dir: Path,
     user_prompt: str | None = None,
     task_result: str | None = None,
+    bill_to: RelentlessAgent | None = None,
 ) -> str:
     """Generate a commit message for staged changes using an LLM.
 
@@ -458,6 +459,8 @@ def _generate_commit_message(
             staged changes, or ``None`` when not available.
         task_result: The task's result summary, or ``None`` when
             not available.
+        bill_to: The agent the model call's spend is attributed to,
+            or ``None``.
 
     Returns:
         A commit message string.
@@ -467,7 +470,7 @@ def _generate_commit_message(
 
     diff_text = GitWorktreeOps.staged_diff(commit_dir)
     return generate_commit_message_from_diff(
-        diff_text, user_prompt=user_prompt, task_result=task_result,
+        diff_text, user_prompt=user_prompt, task_result=task_result, bill_to=bill_to,
     )
 
 
@@ -1033,7 +1036,9 @@ class SorcarAgent(RelentlessAgent):
         # moves the work directory mid-run, can re-point them.
         self._useful_tools: UsefulTools | None = None
         self._wts: dict[Path, GitWorktree] = {}
-        self._stash_pop_warning: str | None = None
+        # The warning pending for the user (a worktree kept for review,
+        # a stash that could not be restored, ...), flushed as one
+        # ``warning`` event by ``_flush_warnings``.
         self._merge_conflict_warning: str | None = None
         self._warning_lock: threading.RLock = threading.RLock()
         # Start of the current task block, stamped by the daemon's task
@@ -2067,6 +2072,7 @@ class SorcarAgent(RelentlessAgent):
         prompt_suffix: str = "",
         system_prompt_hook: Callable[[str], str] | None = None,
         tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = None,
+        task_begun: bool = False,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2207,6 +2213,10 @@ class SorcarAgent(RelentlessAgent):
                 toolset plus *tools* and *inherited_tools*, and its
                 return value is the run's toolset.  ``None`` (default)
                 changes nothing.
+            task_begun: True when the caller already ran
+                :meth:`_begin_task` for this task (``ChatSorcarAgent.run``
+                does, before it replaces the chat state the retirement's
+                commit message is generated from).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -2238,7 +2248,8 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
-        self._begin_task(printer)
+        if not task_begun:
+            self._begin_task(printer)
         # Resolved ONCE for the whole run (see _resolve_model_name):
         # the classifier, the memory-root gate and ``_reset`` all get
         # this string, so they cannot disagree about the model.
@@ -2395,11 +2406,10 @@ class SorcarAgent(RelentlessAgent):
         earlier run of this agent (committed to its own branch and kept
         for review, never merged: the new task starts in the caller's
         ``work_dir`` and ``create_worktree`` makes it a fresh worktree)
-        and flushes the warnings that left.  Called by :meth:`run`, and
-        before it by ``ChatSorcarAgent.run`` — ahead of the chat state
-        the retirement's commit message is generated from
-        (:meth:`_commit_context`) being replaced by the new task's; the
-        second call then finds nothing to do.
+        and flushes the warnings that left.  Called once per task: by
+        :meth:`run`, or by ``ChatSorcarAgent.run`` ahead of the chat
+        state the retirement's commit message is generated from
+        (:meth:`_commit_context`) being replaced by the new task's.
 
         Args:
             printer: The run's printer, or ``None`` to keep the current one.
@@ -2409,7 +2419,7 @@ class SorcarAgent(RelentlessAgent):
         self._unisolated_repos = set()
         self._worktree_finish_gate_used = False
         if self._wts:
-            self._retire_previous_worktree()
+            self._retire_after_task_saved()
         self._flush_warnings(printer)
 
     def _drain_pending_user_messages(self, model: Any) -> None:
@@ -2425,22 +2435,32 @@ class SorcarAgent(RelentlessAgent):
         wrapped as ``User says: <message>. Take the message into
         account and finish your task.`` so the model treats it as a
         mid-task steering instruction rather than a bare trajectory
-        line.  The bridge empties the queue on every drain so the same
-        queued message is never injected twice, and emits a durable
-        ``recordOnly`` echo for any message whose live echo could not
-        be attributed to a task id at queueing time.
+        line.  The files the user attached to those messages follow
+        as one more ``user`` message carrying them.  The bridge
+        empties the queue on every drain so the same queued message is
+        never injected twice, and emits a durable ``recordOnly`` echo
+        for any message whose live echo could not be attributed to a
+        task id at queueing time.
 
         Args:
             model: The live model whose conversation receives the
                 queued user messages.
         """
         drain = getattr(self.printer, "drain_pending_user_messages", None)
-        queued: list[str] = drain() if drain is not None else []
+        if drain is None:
+            return
+        queued, attachments = drain()
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
                 f"User says: {msg}. "
                 "Take the message into account and finish your task.",
+            )
+        if attachments:
+            model.add_message_to_conversation(
+                "user",
+                "[files the user attached to the message(s) above]",
+                attachments=attachments,
             )
 
     def _block_finish_when_user_message_pending(
@@ -2999,13 +3019,14 @@ class SorcarAgent(RelentlessAgent):
                 logger.warning("work_dir not inside repo, no worktree")
                 return None
             try:
-                GitWorktreeOps.prepare_repo(repo)
                 GitWorktreeOps.ensure_scratch_merge_driver(repo)
             except Exception:  # pragma: no cover — filesystem permission error
-                logger.warning("Failed to update git exclude", exc_info=True)
+                logger.warning("Failed to install scratch merge driver", exc_info=True)
             # Reclaim before sweep: reclaim may merge and delete orphan
             # branches, and sweep purges leftover config sections whose
-            # branches were just removed.
+            # branches were just removed.  The reclaim's locked body
+            # starts with ``prepare_repo`` (the ``.kiss-worktrees/``
+            # exclude and the untracked cache), so it is not repeated here.
             try:
                 GitWorktreeOps.reclaim_orphaned_worktrees(
                     repo, exclude_branches=self._live_worktree_branches(),
@@ -3107,7 +3128,7 @@ class SorcarAgent(RelentlessAgent):
         return auto_commit_changes(
             wt.wt_dir,
             user_prompt,
-            _generate_commit_message,
+            functools.partial(_generate_commit_message, bill_to=self),
             notify_fn=functools.partial(
                 self._broadcast_commit_notification, commit_run_id,
             ),
@@ -3210,9 +3231,11 @@ class SorcarAgent(RelentlessAgent):
             self._commit_worktree(wt)
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 GitWorktreeOps.commit_all(wt.wt_dir, "kiss: commit late-arriving changes")
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                # Fails closed: a ``git status`` that cannot run reads
+                # as a non-empty leftover, never as "all committed".
                 leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
-                return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
+                if leftover:
+                    return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
             # ``git add -A`` skips git-ignored task output; without
             # this rescue the removal below would destroy it.  Fails
             # closed: the worktree is preserved when a file could not
@@ -3298,7 +3321,8 @@ class SorcarAgent(RelentlessAgent):
         conflict_resolver: MergeConflictResolver | None,
     ) -> tuple[MergeResult, str, str]:
         """Body of :meth:`_do_merge`; the caller holds ``repo_lock(wt.repo_root)``."""
-        if wt.original_branch is None:
+        original_branch = wt.original_branch
+        if original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "", "")
         stash_warning = ""
         cleanup_warning = ""
@@ -3307,47 +3331,44 @@ class SorcarAgent(RelentlessAgent):
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to install scratch merge driver", exc_info=True)
-            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
-            if not did_stash and GitWorktreeOps.has_uncommitted_changes(wt.repo_root):
-                return (MergeResult.STASH_FAILED, "", "")
-            current = GitWorktreeOps.current_branch(wt.repo_root)
-            if current != wt.original_branch:
-                ok, err = GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
-                if not ok:
-                    logger.warning("Cannot checkout '%s': %s", wt.original_branch, err)
-                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+            stash_before = GitWorktreeOps.stash_ref(wt.repo_root)
+            did_stash: bool | None = False
+            try:
+                did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+                if did_stash is None:
+                    return (MergeResult.STASH_FAILED, "", "")
+                result = self._merge_stashed(wt, original_branch, conflict_resolver)
+            except BaseException:
+                # The runner's stop lands at the first bytecode after
+                # whichever git call is in flight (a slow pre-commit
+                # hook of the squash commit, say) or inside the
+                # resolver, which runs an agent for minutes.  Nothing
+                # below runs, so give the user's stashed edits back now.
+                # ``stash_if_dirty`` itself may have been interrupted
+                # after its ``git stash push``, before it could report
+                # True: ``refs/stash`` having moved then proves this
+                # merge owns an entry.
+                owns_stash = bool(did_stash) or (
+                    GitWorktreeOps.stash_ref(wt.repo_root) != stash_before
+                )
+                if owns_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                    self.add_warning(
+                        "Your uncommitted changes were stashed before "
+                        "the interrupted merge and could not be "
+                        "auto-restored. Run 'git stash pop' to "
+                        "recover them."
+                    )
+                raise
+            if did_stash:
+                if result == MergeResult.CHECKOUT_FAILED:
+                    if not GitWorktreeOps.stash_pop(wt.repo_root):
                         stash_warning = (
                             "Your uncommitted changes were stashed "
                             "before the failed checkout and could not "
                             "be auto-restored. Run 'git stash pop' to "
                             "recover them."
                         )
-                    return (MergeResult.CHECKOUT_FAILED, stash_warning, "")
-
-            user_prompt, task_result = self._commit_context()
-            result = GitWorktreeOps.squash_merge(
-                wt.repo_root, wt.branch, wt.baseline_commit,
-                user_prompt=user_prompt, task_result=task_result,
-            )
-            if result == MergeResult.CONFLICT and conflict_resolver is not None:
-                try:
-                    result = conflict_resolver(self, wt, user_prompt, task_result)
-                except BaseException:
-                    # The resolver runs an agent for minutes, so a user
-                    # stop lands here.  It restored the clean tree
-                    # before re-raising; give the user's stashed edits
-                    # back now, because nothing below runs.
-                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
-                        self._set_warnings(stash=(
-                            "Your uncommitted changes were stashed before "
-                            "the interrupted merge and could not be "
-                            "auto-restored. Run 'git stash pop' to "
-                            "recover them."
-                        ))
-                    raise
-                self._last_merge_resolved_by_agent = result == MergeResult.SUCCESS
-            if did_stash:
-                if result == MergeResult.SUCCESS:
+                elif result == MergeResult.SUCCESS:
                     if not GitWorktreeOps.stash_pop(wt.repo_root):
                         stash_warning = (
                             "Your uncommitted changes could not be "
@@ -3379,6 +3400,41 @@ class SorcarAgent(RelentlessAgent):
                 )
 
         return (result, stash_warning, cleanup_warning)
+
+    def _merge_stashed(
+        self,
+        wt: GitWorktree,
+        original_branch: str,
+        conflict_resolver: MergeConflictResolver | None,
+    ) -> MergeResult:
+        """Checkout, squash-merge and resolve for :meth:`_do_merge_locked`.
+
+        Runs with the main tree stashed clean; the caller pops the
+        stash afterwards, also when this raises.
+
+        Args:
+            wt: The worktree state to merge.
+            original_branch: ``wt.original_branch``, known to be set.
+            conflict_resolver: See :meth:`_do_merge`.
+
+        Returns:
+            The merge outcome; :attr:`MergeResult.CHECKOUT_FAILED` when
+            *original_branch* could not be checked out.
+        """
+        if GitWorktreeOps.current_branch(wt.repo_root) != original_branch:
+            ok, err = GitWorktreeOps.checkout(wt.repo_root, original_branch)
+            if not ok:
+                logger.warning("Cannot checkout '%s': %s", original_branch, err)
+                return MergeResult.CHECKOUT_FAILED
+        user_prompt, task_result = self._commit_context()
+        result = GitWorktreeOps.squash_merge(
+            wt.repo_root, wt.branch, wt.baseline_commit,
+            user_prompt=user_prompt, task_result=task_result,
+        )
+        if result == MergeResult.CONFLICT and conflict_resolver is not None:
+            result = conflict_resolver(self, wt, user_prompt, task_result)
+            self._last_merge_resolved_by_agent = result == MergeResult.SUCCESS
+        return result
 
     def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:
         """Merge every pending task branch into its original branch.
@@ -3646,8 +3702,10 @@ class SorcarAgent(RelentlessAgent):
         self._last_preserve_outcome = None
         if not self._wts:
             return False
-        # A stale warning from an earlier run must not hide this one's.
-        self._set_warnings(merge="")
+        # Undelivered warnings stay: ``add_warning`` appends, so an
+        # earlier one (the ``git stash pop`` instructions of an
+        # interrupted merge, say) cannot hide this retirement's notice,
+        # and dropping it would lose the user's only recovery hint.
         for wt in self.worktrees:
             self._preserve_one_for_review(wt)
         return True
@@ -3737,7 +3795,7 @@ class SorcarAgent(RelentlessAgent):
             caller must keep this agent reachable so a later disposal
             attempt can retry.
         """
-        self._retire_previous_worktree()
+        self._retire_after_task_saved()
         return not self._wts
 
     def new_chat(self) -> None:
@@ -3747,33 +3805,70 @@ class SorcarAgent(RelentlessAgent):
         now: if the user never runs another task on this agent, no later
         :meth:`run` would flush it.
         """
-        self._retire_previous_worktree()
+        self._retire_after_task_saved()
         self._flush_warnings(getattr(self, "printer", None))
+
+    def _retire_after_task_saved(self) -> None:
+        """Retire a pending worktree and charge its commit message to the last task.
+
+        Used where the previous task's row is already final (a new
+        task, a new chat, a tab disposal): the commit-message model call
+        the retirement makes lands on this agent's live counters
+        (``bill_to``), which no later save of that row reads, so the
+        spend is added to the row and its finished ancestors
+        (:func:`~kiss.agents.sorcar.persistence._add_late_task_usage`),
+        with a persisted ``usage_info`` carrying each row's new totals
+        so a replay shows them, also when the retirement is interrupted
+        after the call was billed.  A row that is still running is left
+        alone: its own final save reads the live counters.
+        """
+        budget_before, tokens_before, _steps = _agent_usage(self)
+        try:
+            self._retire_previous_worktree()
+        finally:
+            budget, tokens, _steps = _agent_usage(self)
+            self._charge_last_task(budget - budget_before, tokens - tokens_before)
+
+    def _charge_last_task(self, d_budget: float, d_tokens: int) -> None:
+        """Add spend made after the last task's row was saved to that row.
+
+        See :meth:`_retire_after_task_saved`.
+
+        Args:
+            d_budget: USD to add.
+            d_tokens: Tokens to add.
+        """
+        from kiss.agents.sorcar.persistence import _add_late_task_usage, _append_chat_event
+
+        task_id = str(getattr(self, "last_task_id", "") or "")
+        if not task_id or (d_budget <= 0 and d_tokens <= 0):
+            return
+        try:
+            updated, _running = _add_late_task_usage(task_id, d_tokens, d_budget, 0)
+        except Exception:
+            logger.warning("Could not add commit-message spend to task %s", task_id, exc_info=True)
+            return
+        for row_id, row_tokens, row_cost, row_steps in updated:
+            _append_chat_event({
+                "type": "usage_info",
+                "text": "",
+                "taskId": row_id,
+                "total_tokens": row_tokens,
+                "cost": f"${row_cost:.4f}",
+                "cost_usd": row_cost,
+                "total_steps": row_steps,
+                "ts": int(time.time() * 1000),
+            }, task_id=row_id)
+        printer: Any = getattr(self, "printer", None)
+        if updated and printer is not None and hasattr(printer, "broadcast"):
+            printer.broadcast({"type": "tasks_updated"})
 
     # ------------------------------------------------------------------
     # Warnings
     # ------------------------------------------------------------------
 
-    def _set_warnings(self, stash: str | None = None, merge: str | None = None) -> None:
-        """Set pending warning attribute(s) under ``_warning_lock``.
-
-        Args:
-            stash: New ``_stash_pop_warning`` value, or ``None`` to
-                leave it unchanged.
-            merge: New ``_merge_conflict_warning`` value, or ``None`` to
-                leave it unchanged.
-        """
-        locked_call(self._warning_lock, self._set_warnings_locked, stash, merge)
-
-    def _set_warnings_locked(self, stash: str | None, merge: str | None) -> None:
-        """Body of :meth:`_set_warnings`; the caller holds ``_warning_lock``."""
-        if stash is not None:
-            self._stash_pop_warning = stash
-        if merge is not None:
-            self._merge_conflict_warning = merge
-
     def add_warning(self, text: str, *, prepend: bool = False) -> None:
-        """Combine *text* with the pending merge warning atomically.
+        """Combine *text* with the pending warning atomically.
 
         Args:
             text: The warning to add.  Joined to the pending warning
@@ -3796,13 +3891,13 @@ class SorcarAgent(RelentlessAgent):
         self._merge_conflict_warning = combined
 
     def _flush_warnings(self, printer: Any) -> None:
-        """Broadcast and clear any pending stash/merge warnings.
+        """Broadcast and clear the pending warning.
 
-        The take-and-clear of both warning attributes happens
-        atomically under ``_warning_lock`` before any broadcast, so
-        two concurrent flushes never broadcast the same warning twice
-        and a warning set concurrently survives for the next flush.
-        A broadcast that fails puts the warning back.
+        The take-and-clear happens atomically under ``_warning_lock``
+        before the broadcast, so two concurrent flushes never
+        broadcast the same warning twice and a warning added
+        concurrently survives for the next flush.  A broadcast that
+        fails puts the warning back.
 
         Args:
             printer: An object with a ``broadcast(event)`` method, or
@@ -3810,38 +3905,20 @@ class SorcarAgent(RelentlessAgent):
         """
         if printer is None or not hasattr(printer, "broadcast"):
             return
-        stash_warning, merge_warning = locked_call(self._warning_lock, self._take_warnings)
-        if stash_warning:
-            try:
-                self._broadcast_to_watchers(
-                    printer, {"type": "warning", "message": stash_warning},
-                )
-            except Exception:
-                logger.debug("stash warning broadcast failed", exc_info=True)
-                locked_call(self._warning_lock, self._restore_stash_warning, stash_warning)
-        if merge_warning:
-            try:
-                self._broadcast_to_watchers(
-                    printer, {"type": "warning", "message": merge_warning},
-                )
-            except Exception:
-                logger.debug("merge warning broadcast failed", exc_info=True)
-                self.add_warning(merge_warning, prepend=True)
+        warning = locked_call(self._warning_lock, self._take_warning)
+        if not warning:
+            return
+        try:
+            self._broadcast_to_watchers(printer, {"type": "warning", "message": warning})
+        except Exception:
+            logger.debug("warning broadcast failed", exc_info=True)
+            self.add_warning(warning, prepend=True)
 
-    def _take_warnings(self) -> tuple[str | None, str | None]:
-        """Clear and return ``(stash, merge)`` warnings; the caller holds ``_warning_lock``."""
-        stash_warning = self._stash_pop_warning
-        self._stash_pop_warning = None
-        merge_warning = self._merge_conflict_warning
+    def _take_warning(self) -> str | None:
+        """Clear and return the pending warning; the caller holds ``_warning_lock``."""
+        warning = self._merge_conflict_warning
         self._merge_conflict_warning = None
-        return stash_warning, merge_warning
-
-    def _restore_stash_warning(self, stash_warning: str) -> None:
-        """Put *stash_warning* back before any newer one; caller holds ``_warning_lock``."""
-        current = self._stash_pop_warning
-        self._stash_pop_warning = (
-            f"{stash_warning}\n{current}" if current else stash_warning
-        )
+        return warning
 
     def _finish_run(self, unwinding: bool) -> None:
         """Release the run's resources, every step regardless of the others.

@@ -148,7 +148,7 @@ class TestBug25MergeBranchKeptOnNoneOriginal:
         )
         assert branch_name in result
         assert "original branch is unknown" in result
-        assert agent._stash_pop_warning is None
+        assert agent._merge_conflict_warning is None
         assert agent._wt is not None, "the branch stays pending"
 
 

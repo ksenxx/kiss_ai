@@ -498,6 +498,7 @@ def run_command(
     timeout: float | None = None,
     machine: str = "",
     sea_command: str = "",
+    attachments: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Encode a run's arguments as the ``run`` command :func:`run` sends the daemon.
 
@@ -519,6 +520,9 @@ def run_command(
         sea_command: The registered command whose SEA the executing
             daemon runs as its own copy (wire field ``seaCommand``,
             set only when non-empty).
+        attachments: The prompt's files, each ``{"mimeType", "data"}``
+            with base64 *data* (wire field ``attachments``, set only
+            when non-empty).
 
     Returns:
         The command dict.
@@ -559,6 +563,8 @@ def run_command(
         cmd["machine"] = machine
     if sea_command:
         cmd["seaCommand"] = sea_command
+    if attachments:
+        cmd["attachments"] = list(attachments)
     return cmd
 
 
@@ -598,6 +604,7 @@ def run(
     running: threading.Event | None = None,
     machine: str = "",
     sea_command: str = "",
+    attachments: list[dict[str, str]] | None = None,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
@@ -972,6 +979,9 @@ def run(
             *machine* names a SEA that machine has under its own
             paths; it replaces *sea_path*.  Empty (the default) sends
             *sea_path*.
+        attachments: Files sent with the prompt (an image or PDF the
+            user attached), each ``{"mimeType", "data"}`` with base64
+            *data* — the webapp's ``submit`` wire shape.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -1078,6 +1088,7 @@ def run(
             else record_timeout,
             machine=machine,
             sea_command=sea_command,
+            attachments=attachments,
         )
         try:
             local_endpoint.send(ws, json.dumps(cmd))

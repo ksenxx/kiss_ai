@@ -28,6 +28,7 @@ from kiss.agents.sorcar._concurrency import locked_call
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+    from kiss.core.models.model import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,10 @@ class AgentState:
         "user_answer_queue",
         "pending_ask_question",
         "pending_user_messages",
+        "pending_user_attachments",
         "unattributed_prompt_echoes",
         "queued_followup_tasks",
+        "queued_followup_files",
         "followup_queue_closed",
         "is_task_active",
         "is_merging",
@@ -123,6 +126,10 @@ class AgentState:
         # Read/written under the server's ``_state_lock``.
         self.pending_ask_question: str = ""
         self.pending_user_messages: list[str] = []
+        # The files attached to the queued steering messages, drained
+        # with them (under :data:`STATE_LOCK`) and shown to the model
+        # as one user message right after the texts.
+        self.pending_user_attachments: list[Attachment] = []
         self.unattributed_prompt_echoes: list[str] = []
         # Follow-up tasks the user queued mid-run by sending a
         # steering message wrapped in ``<task>...</task>`` tags.
@@ -132,6 +139,9 @@ class AgentState:
         # the current task finishes (drained by the task runner's
         # per-subtask loop).  Read/written under :data:`STATE_LOCK`.
         self.queued_followup_tasks: list[str] = []
+        # The files attached to each queued follow-up (index-aligned
+        # with ``queued_followup_tasks``): the task runs with them.
+        self.queued_followup_files: list[list[Attachment]] = []
         # Raised (under :data:`STATE_LOCK`) the moment the runner's
         # subtask loop decides no further drain of
         # ``queued_followup_tasks`` will happen — the final drain

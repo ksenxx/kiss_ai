@@ -88,11 +88,13 @@ def _daemon_pids(kiss_home: str) -> set[int]:
 def _watch_daemons(
     kiss_home: str, workers: list[subprocess.Popen[str]] | list[threading.Thread]
 ) -> set[int]:
-    """Record every daemon pid while ``workers`` run, and briefly after.
+    """Record every daemon pid while ``workers`` run.
 
     A losing daemon lives for at least an interpreter start, so a tight
-    ``/proc`` poll catches every spawned daemon.  Polling continues for
-    2 s past the workers' exit because a loser may still be starting.
+    ``/proc`` poll catches every spawned daemon.  ``ensure_daemon`` spawns
+    only under ``spawn.lock`` and waits for its daemon before returning,
+    so once every worker has finished no daemon can still be starting;
+    one last poll covers a spawn between the final two polls.
 
     Args:
         kiss_home: The ``KISS_HOME`` value that identifies this test's daemons.
@@ -111,11 +113,7 @@ def _watch_daemons(
         assert time.monotonic() < deadline, "ensure_daemon callers hung"
         seen |= _daemon_pids(kiss_home)
         time.sleep(0.002)
-    stop_at = time.monotonic() + 2.0
-    while time.monotonic() < stop_at:
-        seen |= _daemon_pids(kiss_home)
-        time.sleep(0.002)
-    return seen
+    return seen | _daemon_pids(kiss_home)
 
 
 def _finished(worker: subprocess.Popen[str] | threading.Thread) -> bool:

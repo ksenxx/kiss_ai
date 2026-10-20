@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from kiss.core.processes import pid_alive
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _SLEEPER = "import time; time.sleep(600)"
 
@@ -93,7 +93,10 @@ def test_process_leaked_by_a_test_is_gone_before_the_next_test(tmp_path: Path) -
         result.stdout
     )
     assert _SLEEPER in result.stdout
-    assert not pid_alive(_leaked_pid(tmp_path))
+    # test_b_check asserted this right after the reap; by now a Windows
+    # pid (recycled fast, and this run is one of many) may be a new process.
+    if not IS_WINDOWS:
+        assert not pid_alive(_leaked_pid(tmp_path))
 
 
 def test_process_that_exits_on_its_own_is_not_reported(tmp_path: Path) -> None:

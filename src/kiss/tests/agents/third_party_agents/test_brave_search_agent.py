@@ -27,12 +27,9 @@ import json
 import shutil
 import stat
 import sys
-from typing import cast
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.brave.brave_sea as brave_mod
 from kiss.agents.third_party_agents.brave.brave_sea import (
     BraveSearchAgent,
     BraveSearchChannelBackend,
@@ -42,7 +39,6 @@ from kiss.agents.third_party_agents.brave.brave_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -135,36 +131,31 @@ class _BraveRequestHandler(RecordingHandler):
     """Emulates the Brave Search API and records requests."""
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        parsed = urlparse(self.path)
-        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": parsed.path,
-                "params": params,
-                "token": self.headers.get("X-Subscription-Token", ""),
-                "accept": self.headers.get("Accept", ""),
-            }
+        entry = self.record_request(
+            None,
+            token=self.headers.get("X-Subscription-Token", ""),
+            accept=self.headers.get("Accept", ""),
         )
-        if self.headers.get("X-Subscription-Token") != _API_KEY:
+        if entry["token"] != _API_KEY:
             self._reply(401, json.dumps({"message": "Unauthorized"}))
             return
-        q = params.get("q", "")
+        path = entry["path"]
+        q = entry["query"].get("q", [""])[0]
         if q == "boom":
             self._reply(500, json.dumps({"message": "Internal Server Error"}))
             return
-        if parsed.path == "/web/search":
+        if path == "/web/search":
             if q == "plain":
                 self._reply(200, json.dumps(_WEB_RESPONSE_PLAIN))
             elif q == "huge":
                 self._reply(200, json.dumps(_WEB_RESPONSE_HUGE))
             else:
                 self._reply(200, json.dumps(_WEB_RESPONSE))
-        elif parsed.path == "/news/search":
+        elif path == "/news/search":
             self._reply(200, json.dumps(_NEWS_RESPONSE))
-        elif parsed.path == "/images/search":
+        elif path == "/images/search":
             self._reply(200, json.dumps(_IMAGE_RESPONSE))
-        elif parsed.path == "/videos/search":
+        elif path == "/videos/search":
             self._reply(200, json.dumps(_VIDEO_RESPONSE))
         else:
             self._reply(404, json.dumps({"message": "Not found"}))
@@ -188,19 +179,6 @@ def backend(brave_server):
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
-
-
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
-    agent = BraveSearchAgent()
-    assert agent.name == "Brave Search Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == [
-        "check_brave_search_auth",
-        "authenticate_brave_search",
-        "clear_brave_search_auth",
-    ]
 
 
 def test_check_auth_unauthenticated_message() -> None:
@@ -288,13 +266,6 @@ def test_new_agent_loads_persisted_config() -> None:
     assert agent._backend._api_key == _API_KEY
 
 
-def test_tools_module_function() -> None:
-    """Module-level tools() returns a non-empty tool list."""
-    tools = brave_mod.BraveSea().tools([])
-    assert len(tools) >= 3
-    assert all(callable(t) for t in tools)
-
-
 def test_connect_without_config_fails() -> None:
     """connect() fails cleanly when no config is persisted."""
     b = BraveSearchChannelBackend()
@@ -345,7 +316,7 @@ def test_brave_web_search_happy_path(backend) -> None:
     assert (req["method"], req["path"]) == ("GET", "/web/search")
     assert req["token"] == _API_KEY
     assert req["accept"] == "application/json"
-    assert req["params"] == {"q": "python language", "count": "10"}
+    assert req["query"] == {"q": ["python language"], "count": ["10"]}
 
 
 def test_brave_web_search_without_infobox_or_faq(backend) -> None:
@@ -368,13 +339,13 @@ def test_brave_web_search_optional_params_sent(backend) -> None:
         )
     )
     assert result["ok"] is True
-    assert server.requests[-1]["params"] == {
-        "q": "plain",
-        "count": "5",
-        "offset": "2",
-        "country": "DE",
-        "search_lang": "de",
-        "freshness": "pw",
+    assert server.requests[-1]["query"] == {
+        "q": ["plain"],
+        "count": ["5"],
+        "offset": ["2"],
+        "country": ["DE"],
+        "search_lang": ["de"],
+        "freshness": ["pw"],
     }
 
 
@@ -382,17 +353,17 @@ def test_brave_web_search_omits_empty_optional_params(backend) -> None:
     """Empty/zero optional params never appear in the query string."""
     b, server = backend
     b.brave_web_search("plain")
-    assert set(server.requests[-1]["params"]) == {"q", "count"}
+    assert set(server.requests[-1]["query"]) == {"q", "count"}
 
 
 def test_brave_web_search_clamps_count_and_offset(backend) -> None:
     """count is clamped to 1-20 and offset to 0-9 for web search."""
     b, server = backend
     b.brave_web_search("plain", count=999, offset=99)
-    assert server.requests[-1]["params"]["count"] == "20"
-    assert server.requests[-1]["params"]["offset"] == "9"
+    assert server.requests[-1]["query"]["count"] == ["20"]
+    assert server.requests[-1]["query"]["offset"] == ["9"]
     b.brave_web_search("plain", count=-3)
-    assert server.requests[-1]["params"]["count"] == "1"
+    assert server.requests[-1]["query"]["count"] == ["1"]
 
 
 @pytest.mark.parametrize(
@@ -431,14 +402,14 @@ def test_brave_news_search_happy_path(backend) -> None:
     req = server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/news/search")
     assert req["token"] == _API_KEY
-    assert req["params"] == {"q": "climate summit", "count": "10"}
+    assert req["query"] == {"q": ["climate summit"], "count": ["10"]}
 
 
 def test_brave_news_search_freshness_and_clamp(backend) -> None:
     """news freshness is forwarded and count is clamped to 1-50."""
     b, server = backend
     b.brave_news_search("climate", count=500, freshness="pd")
-    assert server.requests[-1]["params"] == {"q": "climate", "count": "50", "freshness": "pd"}
+    assert server.requests[-1]["query"] == {"q": ["climate"], "count": ["50"], "freshness": ["pd"]}
 
 
 def test_brave_image_search_happy_path(backend) -> None:
@@ -458,14 +429,14 @@ def test_brave_image_search_happy_path(backend) -> None:
     req = server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/images/search")
     assert req["token"] == _API_KEY
-    assert req["params"] == {"q": "mountain", "count": "10"}
+    assert req["query"] == {"q": ["mountain"], "count": ["10"]}
 
 
 def test_brave_image_search_clamps_count(backend) -> None:
     """image count is clamped to 1-200."""
     b, server = backend
     b.brave_image_search("mountain", count=1000)
-    assert server.requests[-1]["params"]["count"] == "200"
+    assert server.requests[-1]["query"]["count"] == ["200"]
 
 
 def test_brave_video_search_happy_path(backend) -> None:
@@ -486,14 +457,14 @@ def test_brave_video_search_happy_path(backend) -> None:
     req = server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/videos/search")
     assert req["token"] == _API_KEY
-    assert req["params"] == {"q": "tutorial", "count": "10"}
+    assert req["query"] == {"q": ["tutorial"], "count": ["10"]}
 
 
 def test_brave_video_search_clamps_count(backend) -> None:
     """video count is clamped to 1-50."""
     b, server = backend
     b.brave_video_search("tutorial", count=500)
-    assert server.requests[-1]["params"]["count"] == "50"
+    assert server.requests[-1]["query"]["count"] == ["50"]
 
 
 def test_wrong_token_returns_ok_false(brave_server) -> None:

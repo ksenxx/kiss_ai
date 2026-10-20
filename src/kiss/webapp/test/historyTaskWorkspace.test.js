@@ -6,7 +6,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  sendEmptyWorkDir,
+  rowsByTitle,
+} = require('./simplify2_harness');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
@@ -81,26 +86,6 @@ const SESSIONS_FIXTURE = [
   },
 ];
 
-function rowsByTitle(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
-}
-
-function sendEmptyWorkDir(win) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
-}
-
 function workspaceSpan(row) {
   return row.querySelector('.running-item-workspace');
 }
@@ -118,14 +103,8 @@ function testWorkspaceRendersAfterMetrics() {
   const rows = rowsByTitle(win);
   assert.ok(rows['task with unix workspace'], 'row A must render');
   assert.ok(rows['task with windows workspace'], 'row B must render');
-  assert.ok(
-    rows['task with empty workspace string'],
-    'row C must render',
-  );
-  assert.ok(
-    rows['task with missing workspace field'],
-    'row D must render',
-  );
+  assert.ok(rows['task with empty workspace string'], 'row C must render');
+  assert.ok(rows['task with missing workspace field'], 'row D must render');
 
   const a = rows['task with unix workspace'];
   const b = rows['task with windows workspace'];

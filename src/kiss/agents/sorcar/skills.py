@@ -358,7 +358,9 @@ def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
 
     Files are listed — never read — so the agent can load specific
     resources on demand with its file tools.  ``SKILL.md`` itself and
-    bookkeeping directories are excluded.
+    bookkeeping directories (:data:`_RESOURCE_SKIP_DIRS`, never entered:
+    a vendored ``node_modules`` is not walked to list at most
+    ``_MAX_RESOURCE_LISTING`` files) are excluded.
 
     Returns:
         ``(resources, truncated)`` where *truncated* is ``True`` only
@@ -366,21 +368,56 @@ def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
         ``_MAX_RESOURCE_LISTING`` cap.
     """
     resources: list[str] = []
-    truncated = False
+    return resources, _walk_resources(skill_dir, skill_dir, resources)
+
+
+def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
+    """Append the resource files under *directory* to *resources*; return whether the cap cut one.
+
+    Entries in name order, a subdirectory's files where its name sorts
+    (the order ``sorted(root.rglob("*"))`` gives), skipping every entry
+    named in :data:`_RESOURCE_SKIP_DIRS` (a worktree's ``.git`` is a
+    file), ``SKILL.md`` and symlinked directories; an unreadable
+    directory contributes nothing, and an entry that cannot be
+    examined (a looping symlink) is skipped so the rest still lists.
+    """
     try:
-        for path in sorted(skill_dir.rglob("*")):
-            if not path.is_file() or path.name == "SKILL.md":
-                continue
-            rel = path.relative_to(skill_dir)
-            if any(part in _RESOURCE_SKIP_DIRS for part in rel.parts):
-                continue
-            if len(resources) >= _MAX_RESOURCE_LISTING:
-                truncated = True
-                break
-            resources.append(rel.as_posix())  # skill docs name files with '/'
+        with os.scandir(directory) as entries:
+            found = sorted(entries, key=_entry_name)
     except OSError:
-        logger.debug("could not list resources in %s", skill_dir, exc_info=True)
-    return resources, truncated
+        logger.debug("could not list resources in %s", directory, exc_info=True)
+        return False
+    for entry in found:
+        if entry.name in _RESOURCE_SKIP_DIRS:
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            if _walk_resources(root, Path(entry.path), resources):
+                return True
+        elif entry.name != "SKILL.md" and _is_resource_file(entry):
+            if len(resources) >= _MAX_RESOURCE_LISTING:
+                return True
+            resources.append(Path(entry.path).relative_to(root).as_posix())  # docs use '/'
+    return False
+
+
+def _entry_name(entry: os.DirEntry[str]) -> str:
+    """Return the name of a directory entry (the sort key of :func:`_walk_resources`)."""
+    return entry.name
+
+
+def _is_resource_file(entry: os.DirEntry[str]) -> bool:
+    """Whether *entry* is a file (a symlink to one included); one that cannot be examined is not.
+
+    ``is_dir(follow_symlinks=False)`` never fails, but ``is_file()``
+    follows the link and a looping symlink (``loop -> loop``) raises
+    ``OSError`` (``ELOOP``) from the ``stat``; such an entry is no
+    resource and must not stop the listing.
+    """
+    try:
+        return entry.is_file()
+    except OSError:
+        logger.debug("could not examine resource %s", entry.path, exc_info=True)
+        return False
 
 
 def load_skill_content(skill: Skill) -> str:

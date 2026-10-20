@@ -14,11 +14,7 @@
 // into answer mode.
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
-
-function answering(win) {
-  return win.document.body.classList.contains('ask-answering');
-}
+const {makePage, send, stubRaf, answering} = require('./simplify2_harness');
 
 function testDuplicateAskPreservesTypedDraft() {
   const {win} = makePage({beforeScripts: stubRaf});

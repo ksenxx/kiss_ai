@@ -94,20 +94,7 @@ function submit(win, posted, text) {
   return sent[sent.length - 1];
 }
 
-let passed = 0;
-const failures = [];
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (e) {
-    failures.push({name, error: e});
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
+const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 // ---------------------------------------------------------------------------
 // The user's pick
@@ -411,5 +398,5 @@ test('a modelPick with no model is ignored', () => {
   win.close();
 });
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
-process.exit(failures.length > 0 ? 1 : 0);
+report('modelPickerAgentOverride');
+process.exit(0);

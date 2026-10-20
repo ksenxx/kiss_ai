@@ -366,11 +366,13 @@ def test_device_login_returns_the_url_and_code_and_leaves_the_cli_polling(
     """The banner's URL and code come back at once while the CLI (polling
     OpenAI in the real world) keeps running, reaped by a daemon thread
     when it exits; no API key is involved."""
-    fake_codex.configure(login_sleep=0.5)
+    # The CLI lingers well past what spawning and reading its banner
+    # take on a loaded machine (0.5 s was exceeded under the full suite).
+    fake_codex.configure(login_sleep=2.0)
     started = time.monotonic()
     prompt = codex_device_login()
     assert prompt == {"url": "https://auth.openai.com/codex/device", "code": "2YCJ-GJHWN"}
-    assert time.monotonic() - started < 0.5, "must return before the CLI exits"
+    assert time.monotonic() - started < 2.0, "must return before the CLI exits"
     reaper = [t for t in threading.enumerate() if t.name == "codex-device-login"]
     assert len(reaper) == 1 and reaper[0].daemon
     reaper[0].join(10)

@@ -52,6 +52,7 @@ const {
   stubRaf,
   fakeIntervals,
   fakeMatchMedia,
+  readyTabId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -72,12 +73,6 @@ function makePage(opts) {
     sourceUrl: 'metainfo-main.js',
   });
   return {win, posted, clock};
-}
-
-function tabIdOf(wv) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return ready.tabId;
 }
 
 function rowText(win, id) {
@@ -175,7 +170,7 @@ async function main() {
     () => {
       const wv = makePage();
       const win = wv.win;
-      const TAB = tabIdOf(wv);
+      const TAB = readyTabId(wv.posted);
       assert.ok(
         win.document.body.classList.contains('remote-desktop'),
         'desktop remote page must carry remote-desktop',
@@ -220,7 +215,7 @@ async function main() {
     () => {
       const wv = runningPage();
       const win = wv.win;
-      const TAB = tabIdOf(wv);
+      const TAB = readyTabId(wv.posted);
       assert.strictEqual(polls(wv).length, 1, 'a run start polls at once');
       wv.clock.tick(POLL_MS - 1);
       assert.strictEqual(polls(wv).length, 1, 'no poll before 5 s');
@@ -565,7 +560,7 @@ async function main() {
   await test('a zero max budget is a real value, not unknown', () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     send(win, {
       type: 'configData',
       config: {work_dir: '/cfg/dir', max_budget: 0},
@@ -592,7 +587,7 @@ async function main() {
   await test('a root work_dir falls back exactly like workDirForTab', () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     send(win, {
       type: 'configData',
       config: {work_dir: '/cfg/dir', max_budget: 42},
@@ -616,7 +611,7 @@ async function main() {
   await test('a configData repaint keeps the neighbour the panel is lent to', () => {
     const wv = makePage();
     const win = wv.win;
-    const TAB = tabIdOf(wv);
+    const TAB = readyTabId(wv.posted);
     win._testApi.hideWelcome();
     send(win, {
       type: 'configData',
@@ -758,7 +753,7 @@ async function main() {
     () => {
       const wv = runningPage();
       const win = wv.win;
-      const TAB1 = tabIdOf(wv);
+      const TAB1 = readyTabId(wv.posted);
       const poll1 = lastPoll(wv);
       const tok1 = poll1.token;
       assert.strictEqual(poll1.tabId, TAB1);
@@ -809,7 +804,7 @@ async function main() {
     () => {
       const wv = runningPage();
       const win = wv.win;
-      const TAB1 = tabIdOf(wv);
+      const TAB1 = readyTabId(wv.posted);
       const poll1 = lastPoll(wv);
       const tok1 = poll1.token;
       const content = contentEl(win);

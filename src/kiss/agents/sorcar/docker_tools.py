@@ -9,6 +9,8 @@ import secrets
 import shlex
 from collections.abc import Callable
 
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE
+
 #: Marker the Write script echoes only after the bytes really landed.
 #: Success must be proven positively: the bash function's *other* failure
 #: return — ``"Error: command timed out after Ns"`` — carries no
@@ -216,8 +218,11 @@ class DockerTools:
 
         The pieces land in a staging file beside the target that is
         published with the last one (:func:`_store_commands`).  A piece
-        that did not land, or a bash call that raised, leaves the
-        target as it was and removes the staging file.
+        that did not land leaves the target as it was and removes the
+        staging file.  When the piece was killed by a Stop, or a bash
+        call raised (the container or the task is going away), the
+        discard would end the same way and is skipped: the target is
+        still untouched and only the uniquely named staging file stays.
 
         Returns:
             None once the data is published, else the output of the
@@ -225,18 +230,15 @@ class DockerTools:
         """
         staging = shlex.quote(f"{file_path}.kiss-partial-{secrets.token_hex(8)}")
         commands = _store_commands(staging, shlex.quote(file_path), data)
-        published = False
-        try:
-            for index, command in enumerate(commands):
-                part = f" (part {index + 1}/{len(commands)})" if len(commands) > 1 else ""
-                result = self.bash(command, f"{description}{part}")
-                if _WRITE_OK not in result:
-                    return result
-            published = True
-            return None
-        finally:
-            if not published:
+        for index, command in enumerate(commands):
+            part = f" (part {index + 1}/{len(commands)})" if len(commands) > 1 else ""
+            result = self.bash(command, f"{description}{part}")
+            if _WRITE_OK in result:
+                continue
+            if STOPPED_MESSAGE not in result:
                 self.bash(f"rm -f {staging}", f"{description} (discard)")
+            return result
+        return None
 
     def Write(  # noqa: N802
         self,

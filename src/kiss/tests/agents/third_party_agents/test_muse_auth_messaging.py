@@ -87,11 +87,11 @@ from kiss.agents.third_party_agents.twitch.twitch_sea import _config as twitch_c
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import _config as zalo_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
+    MuseApiHandler,
     auth_tools,
     loopback_policy,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
     RecordingServer,
     serve_recording,
 )
@@ -105,48 +105,24 @@ _REAL_BB_PASSWORD = "bb-real-secret"
 _REAL_SYNO_TOKEN = "syno-real-secret"
 
 
-class _MessagingApiHandler(RecordingHandler):
+class _MessagingApiHandler(MuseApiHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
-    server: Any
-
     def _serve(self) -> None:
-        body = self._read_raw()
-        self.server.requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "headers": {k: v for k, v in self.headers.items()},
-                "body": body.decode("utf-8", errors="replace"),
-            }
-        )
+        self.record_full_request()
         path = self.path.split("?", 1)[0]
         if path == "/redirect-offsite":
             # Cross-origin redirect target configured by the test.
-            self.send_response(302)
-            self.send_header("Location", self.server.offsite_location)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self.redirect(302, self.server.offsite_location)
             return
-        if path == "/chain-middle":
-            # Same-origin second hop used to prove a foreign allowlisted
-            # origin cannot regain a query credential via A -> B -> B.
-            self.send_response(302)
-            self.send_header("Location", "/api/v1/server/info")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if path == "/redirect-onsite":
+        if path in ("/chain-middle", "/redirect-onsite"):
             # Same-origin redirect: the boundary must re-authorize the
-            # hop and re-inject the (query-kind) credential.
-            self.send_response(302)
-            self.send_header("Location", "/api/v1/server/info")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            # hop and re-inject the (query-kind) credential; as a second
+            # hop (A -> B -> B) it proves a foreign allowlisted origin
+            # cannot regain a query credential.
+            self.redirect(302, "/api/v1/server/info")
             return
-        auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
-        zalo_token = next((v for k, v in self.headers.items() if k.lower() == "access_token"), "")
-        credential = auth or zalo_token
+        credential = self.authorization() or self.headers.get("access_token", "")
         if credential.startswith("Basic "):
             credential = base64.b64decode(credential[6:]).decode("utf-8", errors="replace")
         status = 200
