@@ -60,6 +60,31 @@ if __name__ == "__main__":
     mcp.run()
 '''
 
+# Server used by test_object_and_array_params_parsed_from_json_strings.
+_TYPED_SERVER_SCRIPT = '''
+import json as _json
+from typing import Any
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("typedsrv")
+
+
+@mcp.tool()
+def echo_object(payload: dict[str, Any]) -> str:
+    """Return the sorted keys of payload as a JSON array."""
+    return _json.dumps(sorted(payload.keys()))
+
+
+@mcp.tool()
+def echo_array(items: list[Any]) -> str:
+    """Return the number of items in the list."""
+    return str(len(items))
+
+
+if __name__ == "__main__":
+    mcp.run()
+'''
+
 
 @pytest.fixture
 def isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -419,3 +444,48 @@ def test_agent_get_tools_includes_mcp_tools(
     names = {t.__name__ for t in agent._get_tools()}
     assert "testsrv_add" in names
     assert "testsrv_secret_word" in names
+
+
+def test_object_and_array_params_parsed_from_json_strings(
+    isolated_homes: Path, tmp_path: Path,
+) -> None:
+    """JSON strings for object/array params are coerced to Python types.
+
+    When the LLM passes an object or array parameter as a serialized JSON
+    string, ``make_mcp_tool_wrapper`` must parse it before forwarding to
+    the server.  Without the coercion, FastMCP's schema validator rejects
+    the call with "Expected object, received string" (the bug fixed in
+    ``make_mcp_tool_wrapper`` that prompted this test).
+
+    Both directions are verified:
+    - A JSON string is parsed and the server receives the native type.
+    - A native Python value passes through unchanged.
+    """
+    script = tmp_path / "typedsrv.py"
+    script.write_text(_TYPED_SERVER_SCRIPT, encoding="utf-8")
+    project = isolated_homes / "project"
+    save_mcp_server(
+        MCPServerConfig(
+            name="typedsrv",
+            transport="stdio",
+            command=sys.executable,
+            args=(str(script),),
+        ),
+        "user",
+        str(project),
+    )
+    tools = make_mcp_tools(str(project))
+    echo_obj = next(t for t in tools if t.__name__ == "typedsrv_echo_object")
+    echo_arr = next(t for t in tools if t.__name__ == "typedsrv_echo_array")
+
+    # Signature must reflect the schema types.
+    assert inspect.signature(echo_obj).parameters["payload"].annotation is dict
+    assert inspect.signature(echo_arr).parameters["items"].annotation is list
+
+    # JSON string input: wrapper parses it, server receives a real dict/list.
+    assert echo_obj(payload='{"z": 3, "a": 1}') == '["a", "z"]'
+    assert echo_arr(items="[10, 20, 30]") == "3"
+
+    # Native Python input: passes through unchanged.
+    assert echo_obj(payload={"b": 2, "a": 1}) == '["a", "b"]'
+    assert echo_arr(items=[1, 2]) == "2"
