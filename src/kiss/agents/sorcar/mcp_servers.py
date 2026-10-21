@@ -1394,14 +1394,14 @@ def make_mcp_tool_wrapper(
     required = set(required_raw) if isinstance(required_raw, list) else set()
 
     entries: list[tuple[bool, inspect.Parameter, str]] = []
-    param_map: dict[str, tuple[str, bool]] = {}
+    param_map: dict[str, tuple[str, bool, type]] = {}
     used_names: set[str] = set()
     for prop_name in props:
         prop = props[prop_name]
         ann = _json_schema_to_annotation(prop)
         is_required = prop_name in required
         py_name = _python_param_name(str(prop_name), used_names)
-        param_map[py_name] = (str(prop_name), is_required)
+        param_map[py_name] = (str(prop_name), is_required, ann)
         param = inspect.Parameter(
             py_name,
             kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -1421,9 +1421,14 @@ def make_mcp_tool_wrapper(
     def wrapper(**kwargs: Any) -> str:
         arguments: dict[str, Any] = {}
         for py_name, value in kwargs.items():
-            original, is_required = param_map.get(py_name, (py_name, True))
+            original, is_required, expected_type = param_map.get(py_name, (py_name, True, str))
             if value is None and not is_required:
                 continue
+            if isinstance(value, str) and expected_type in (dict, list):
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    pass
             arguments[original] = value
         return manager.call_tool(connection_key, tool_name, arguments)
 
