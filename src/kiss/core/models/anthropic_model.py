@@ -533,26 +533,26 @@ def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dic
         blocks.append({"type": "text", "text": tail})
     return blocks
 
-def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
-    """Tell whether the request *kwargs* would carry a prompt-cache breakpoint.
+def _cache_breakpoints(kwargs: dict[str, Any]) -> int:
+    """Count the prompt-cache breakpoints the request *kwargs* would carry.
 
     Looks at the request as it goes on the wire: the SDK merges
     ``extra_body`` over the outer keyword arguments, so a ``system`` (or
     any other field) supplied there replaces the outer one.  A breakpoint
-    is a top-level ``cache_control`` (automatic caching) or a
-    ``cache_control`` on a system block, a tool, or a content block of a
+    is a top-level ``cache_control`` (automatic caching, counted as one) or
+    a ``cache_control`` on a system block, a tool, or a content block of a
     message.
 
     Args:
         kwargs: The ``messages.create`` keyword arguments.
 
     Returns:
-        ``True`` when at least one breakpoint is present.
+        The number of breakpoints present.
     """
     extra_body = kwargs.get("extra_body")
     payload = {**kwargs, **extra_body} if isinstance(extra_body, dict) else kwargs
     if "cache_control" in payload:
-        return True
+        return 1
     system = payload.get("system")
     blocks: list[Any] = list(system) if isinstance(system, list) else []
     blocks.extend(payload.get("tools") or [])
@@ -560,13 +560,51 @@ def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
             blocks.extend(content)
-    return any(isinstance(block, dict) and "cache_control" in block for block in blocks)
+    return sum(1 for block in blocks if isinstance(block, dict) and "cache_control" in block)
 
 
 _BEDROCK_DEFAULT_REGION = "us-east-1"
 # Request fields of the Anthropic API that Bedrock's InvokeModel rejects:
 # automatic prompt caching and the priority service tier.
 _BEDROCK_UNSUPPORTED_FIELDS = ("cache_control", "service_tier")
+# Explicit breakpoints Bedrock accepts per request, and the block types the
+# API refuses to mark.
+_BEDROCK_MAX_BREAKPOINTS = 4
+_UNCACHEABLE_BLOCK_TYPES = ("thinking", "redacted_thinking")
+
+
+def _with_trailing_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return ``messages`` with an ephemeral cache breakpoint on the last block.
+
+    Bedrock rejects the top-level ``cache_control`` (automatic prompt
+    caching) and caches only up to explicit breakpoints, so without one on
+    the conversation every step re-bills the whole transcript at the full
+    input price.  A single breakpoint on the last content block is the
+    moving-breakpoint pattern: Bedrock looks back up to about 20 blocks for
+    the longest cached prefix, so each step reads the previous step's
+    prefix from cache and writes only the new tool results.
+
+    The last message and its last block are copied so the breakpoint never
+    lands in ``self.conversation``; otherwise it would accumulate past the
+    four breakpoints Bedrock allows (the caller checks that budget with
+    ``_cache_breakpoints`` on the request as sent, system blocks and tools
+    included).  A last block the caller already marked is kept as is, and a
+    thinking block, which the API refuses to mark, gets none (it is still
+    cached as part of the next request's prefix).
+    """
+    last = dict(messages[-1])
+    content = last.get("content")
+    if isinstance(content, str):
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": content}]
+    elif isinstance(content, list) and content:
+        blocks = [*content[:-1], dict(content[-1])]
+    else:
+        return messages
+    if blocks[-1].get("cache_control") or blocks[-1].get("type") in _UNCACHEABLE_BLOCK_TYPES:
+        return messages
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    last["content"] = blocks
+    return [*messages[:-1], last]
 
 
 def _bedrock_credentials() -> tuple[str, str, str, str]:
@@ -1078,10 +1116,11 @@ class AnthropicModel(Model):
         # Top-level ``cache_control`` (automatic prompt caching) and
         # ``service_tier`` (priority tier) exist only on the Anthropic
         # API: Bedrock's InvokeModel rejects unknown request fields, and
-        # caches through the explicit breakpoint ``_system_param`` sets.
-        # Both are removed wherever model_config may carry them: as a
-        # kwarg and inside ``extra_body``, which the SDK merges into the
-        # request JSON verbatim.
+        # caches through the explicit breakpoints ``_system_param`` and
+        # ``_with_trailing_cache_breakpoint`` set.  Both are removed
+        # wherever model_config may carry them: as a kwarg and inside
+        # ``extra_body``, which the SDK merges into the request JSON
+        # verbatim.
         if enable_cache and not self.bedrock:
             kwargs.setdefault("cache_control", {"type": "ephemeral"})
         if self.bedrock:
@@ -1094,6 +1133,8 @@ class AnthropicModel(Model):
                     for key, value in extra_body.items()
                     if key not in _BEDROCK_UNSUPPORTED_FIELDS
                 }
+            if enable_cache and _cache_breakpoints(kwargs) < _BEDROCK_MAX_BREAKPOINTS:
+                kwargs["messages"] = _with_trailing_cache_breakpoint(kwargs["messages"])
 
         return kwargs
 
@@ -1333,18 +1374,19 @@ class AnthropicModel(Model):
             The raw Anthropic message of the ping, for cost accounting, or
             ``None`` when there is nothing to keep warm: prompt caching is
             disabled for this model (``model_config["enable_cache"]``
-            false), or the request carries no cache breakpoint at all (on
-            Bedrock the only breakpoint is the one on the system prefix,
-            so a run without a system prompt caches nothing).  The check
-            covers the request as sent, including a ``system`` or
+            false), or the request carries no cache breakpoint at all.  The
+            check covers the request as sent, including a ``system`` or
             ``cache_control`` supplied through ``model_config["extra_body"]``.
+            On Bedrock the breakpoint ``_with_trailing_cache_breakpoint``
+            puts on the last conversation block is what the ping keeps
+            warm, so the ping goes out with or without a system prompt.
         """
         if not self.model_config.get("enable_cache", True):
             return None
         resolved = self._resolve_openai_tools_schema(function_map, tools_schema)
         tools = self._build_anthropic_tools_schema(resolved)
         kwargs = self._build_create_kwargs(tools=tools or None)
-        if not _has_cache_breakpoint(kwargs):
+        if not _cache_breakpoints(kwargs):
             return None
         pending = [
             block["id"]

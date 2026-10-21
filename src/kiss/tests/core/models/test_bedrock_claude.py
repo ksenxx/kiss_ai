@@ -17,6 +17,9 @@ doubles) and verify:
 * the wire request: model id in the URL path, bearer or SigV4 auth, the
   Anthropic-only ``service_tier`` and top-level ``cache_control`` fields
   dropped, the interleaved-thinking beta carried in the body;
+* prompt caching through explicit breakpoints: one on the system prefix
+  and one that moves with the last conversation block, so each step reads
+  the previous step's transcript from cache instead of re-billing it;
 * the client is reused across runs and rebuilt only when credentials change;
 * the direct Anthropic route is unchanged.
 
@@ -40,7 +43,7 @@ import pytest
 from kiss.agents.sorcar.sorcar_agent import _model_family
 from kiss.core import config as config_module
 from kiss.core.models import model_info
-from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.core.models.anthropic_model import KEEP_ALIVE_TEXT, AnthropicModel
 from kiss.core.user_config import API_KEY_ENV_VARS, get_current_api_keys
 from kiss.core.utils import config_to_dict
 from kiss.server.autocomplete import ranked_function_calling_models
@@ -691,10 +694,165 @@ def test_bearer_token_turn(monkeypatch) -> None:
     assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert body["output_config"] == {"effort": "high"}
     assert body["max_tokens"] == 65536
-    # The explicit cache breakpoint on the system prefix is Bedrock-supported and kept.
+    # The explicit cache breakpoints (system prefix, last conversation block)
+    # are Bedrock-supported and kept.
     assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert body["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert adapter.conversation[-1]["role"] == "assistant"
     assert adapter.conversation[-1]["content"][0]["text"] == "ok from bedrock"
+
+
+def _marked_blocks(messages: list[dict]) -> list[tuple[int, int]]:
+    """Return ``(message index, block index)`` of every block carrying a breakpoint."""
+    return [
+        (m, b)
+        for m, message in enumerate(messages)
+        for b, block in enumerate(message["content"])
+        if isinstance(block, dict) and "cache_control" in block
+    ]
+
+
+def test_cache_breakpoint_moves_with_the_last_conversation_block(monkeypatch) -> None:
+    """Every Bedrock request carries exactly one breakpoint, on its last block.
+
+    Bedrock rejects the top-level ``cache_control`` (automatic caching) and
+    caches only up to explicit breakpoints.  With the breakpoint on the
+    system prefix alone, each step of a tool loop re-billed the whole
+    transcript (every tool result so far) at the full input price.  The
+    breakpoint on the last block makes each request read the previous
+    step's prefix from cache; it moves with the conversation rather than
+    piling up, and it never lands in ``conversation`` itself.
+    """
+    _set_aws(monkeypatch)
+    with _bedrock_server() as server:
+        adapter = _run_turn(server, monkeypatch, model_config={"system_instruction": "Be terse."})
+        first = server.requests[-1]
+        assert _marked_blocks(first["messages"]) == [(0, 0)]
+        assert first["messages"][0]["content"][0]["text"] == "Say ok."
+        for step in range(1, 4):
+            adapter.add_function_results_to_conversation_and_return(
+                [
+                    ("read_log", {"result": f"log {step} a", "tool_use_id": f"toolu_{step}a"}),
+                    ("read_log", {"result": f"log {step} b", "tool_use_id": f"toolu_{step}b"}),
+                ]
+            )
+            adapter.generate()
+            body = server.requests[-1]
+            last = len(body["messages"]) - 1
+            assert last == 2 * step
+            # One breakpoint in the messages, on the last tool_result only;
+            # the earlier tool results from previous steps carry none.
+            assert _marked_blocks(body["messages"]) == [(last, 1)]
+            assert body["messages"][last]["content"][1]["tool_use_id"] == f"toolu_{step}b"
+            assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+            assert "cache_control" not in body
+    block_messages = [m for m in adapter.conversation if isinstance(m["content"], list)]
+    assert len(block_messages) == 7
+    assert _marked_blocks(block_messages) == []
+
+
+def test_cache_breakpoint_respects_the_four_breakpoint_budget(monkeypatch) -> None:
+    """Blocks already marked by the caller are kept and the budget is not exceeded.
+
+    Bedrock allows four breakpoints per request and ``_system_param`` uses
+    one.  A conversation whose blocks already carry three markers gets no
+    trailing one; with fewer, the trailing marker is added; a last block
+    that is itself marked is left as is.  The budget is counted on the
+    request as sent, so four marked system blocks supplied through
+    ``extra_body`` also leave the conversation unmarked.
+    """
+    _set_aws(monkeypatch)
+    marker = {"type": "ephemeral"}
+
+    def turn(server: ScriptedAnthropicServer, markers: list[bool], last_marked: bool) -> dict:
+        adapter = _run_turn(server, monkeypatch, model_config={"system_instruction": "Be terse."})
+        for i, marked in enumerate(markers):
+            block: dict = {"type": "text", "text": f"note {i}"}
+            if marked:
+                block["cache_control"] = marker
+            adapter.conversation.append({"role": "user", "content": [block]})
+            adapter.conversation.append({"role": "assistant", "content": f"ack {i}"})
+        final: dict = {"type": "text", "text": "last"}
+        if last_marked:
+            final["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+        adapter.conversation.append({"role": "user", "content": [final]})
+        adapter.generate()
+        return server.requests[-1]
+
+    with _bedrock_server() as server:
+        three = turn(server, [True, True, True], last_marked=False)
+        two = turn(server, [True, True, False], last_marked=False)
+        own = turn(server, [False], last_marked=True)
+    blocks = three["messages"]
+    assert len(_marked_blocks(blocks)) == 3
+    assert "cache_control" not in blocks[-1]["content"][-1]
+    assert len(_marked_blocks(two["messages"])) == 3
+    assert two["messages"][-1]["content"][-1]["cache_control"] == marker
+    assert len(_marked_blocks(own["messages"])) == 1
+    assert own["messages"][-1]["content"][-1]["cache_control"] == {
+        "type": "ephemeral",
+        "ttl": "1h",
+    }
+    rules = [{"type": "text", "text": f"rule {i}", "cache_control": marker} for i in range(4)]
+    with _bedrock_server() as server:
+        _run_turn(server, monkeypatch, model_config={"extra_body": {"system": rules}})
+        full = server.requests[-1]
+        _run_turn(server, monkeypatch, model_config={"extra_body": {"system": rules[:3]}})
+        spare = server.requests[-1]
+    assert full["system"] == rules
+    assert _marked_blocks(full["messages"]) == []
+    assert spare["system"] == rules[:3]
+    assert _marked_blocks(spare["messages"]) == [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "thinking", "thinking": "hm", "signature": "sig"},
+        {"type": "redacted_thinking", "data": "opaque"},
+    ],
+)
+def test_no_breakpoint_on_a_trailing_thinking_block(monkeypatch, block: dict) -> None:
+    """A thinking block cannot carry ``cache_control``, so it gets no marker.
+
+    The keep-warm ping is the one request built while the conversation
+    still ends with an assistant turn; when that turn is a bare thinking
+    block the trailing marker is skipped (the system breakpoint remains,
+    so the ping still goes out) rather than sent for the API to reject.
+    """
+    _set_aws(monkeypatch)
+    with _bedrock_server() as server:
+        adapter = _run_turn(server, monkeypatch, model_config={"system_instruction": "Be terse."})
+        adapter.conversation[-1] = {"role": "assistant", "content": [block]}
+        assert adapter.keep_prompt_cache_warm({}) is not None
+        ping = server.requests[-1]
+    assert ping["messages"][-2]["content"][-1]["type"] == block["type"]
+    assert _marked_blocks(ping["messages"]) == []
+    assert ping["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_no_message_breakpoint_when_caching_is_off_or_off_bedrock(monkeypatch) -> None:
+    """``enable_cache`` false sends no breakpoint; the direct route keeps automatic caching."""
+    _set_aws(monkeypatch)
+    with _bedrock_server() as server:
+        _run_turn(
+            server,
+            monkeypatch,
+            model_config={"system_instruction": "Be terse.", "enable_cache": False},
+        )
+        body = server.requests[-1]
+    assert "cache_control" not in body
+    assert body["system"] == "Be terse."
+    assert _marked_blocks(body["messages"]) == []
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+    with ScriptedAnthropicServer() as server:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
+        adapter = AnthropicModel("claude-opus-4-6", api_key="k")
+        adapter.initialize("Say ok.")
+        adapter.generate()
+        direct = server.requests[-1]
+    assert direct["cache_control"] == {"type": "ephemeral"}
+    assert _marked_blocks(direct["messages"]) == []
 
 
 def test_sigv4_turn_with_key_pair(monkeypatch) -> None:
@@ -748,11 +906,13 @@ def test_client_reused_until_credentials_change(monkeypatch) -> None:
 def test_keep_prompt_cache_warm_pings_bedrock(monkeypatch) -> None:
     """The keep-alive ping is sent on Bedrock only when a cache breakpoint exists.
 
-    Bedrock has no top-level ``cache_control``; its only breakpoint is the
-    one on the system prefix.  So the ping goes out with a system prompt,
-    and is skipped (no request at all) with caching off or without a
-    system prompt, where every ping would be a full-price request that
-    warms nothing.
+    Bedrock has no top-level ``cache_control``; its breakpoints are the one
+    on the system prefix and the one on the last conversation block.  The
+    ping goes out with or without a system prompt, with the conversation
+    breakpoint on the block before the appended keep-alive message (that
+    is the prefix the next real step reads back), and is skipped (no
+    request at all) with caching off, where it would be a full-price
+    request that warms nothing.
     """
     _set_aws(monkeypatch)
     with _bedrock_server() as server:
@@ -764,17 +924,23 @@ def test_keep_prompt_cache_warm_pings_bedrock(monkeypatch) -> None:
         assert "cache_control" not in ping
         assert ping["system"][0]["cache_control"] == {"type": "ephemeral"}
         assert ping["messages"][-1]["role"] == "user"
+        assert _marked_blocks(ping["messages"][:-1]) == [(len(ping["messages"]) - 2, 0)]
+        assert ping["messages"][-1]["content"] == KEEP_ALIVE_TEXT
         cold = AnthropicModel(
             _OPUS, api_key="t", bedrock=True, model_config={"enable_cache": False}
         )
         cold.initialize("hi")
         assert cold.keep_prompt_cache_warm({}) is None
+        assert len(server.requests) == before + 1
         no_system = AnthropicModel(
             _OPUS, api_key="t", bedrock=True, model_config={"enable_cache": True}
         )
         no_system.initialize("hi")
-        assert no_system.keep_prompt_cache_warm({}) is None
-        assert len(server.requests) == before + 1
+        assert no_system.keep_prompt_cache_warm({}) is not None
+        ping = server.requests[-1]
+        assert len(server.requests) == before + 2
+        assert "system" not in ping
+        assert _marked_blocks(ping["messages"]) == [(0, 0)]
 
 
 def test_keep_prompt_cache_warm_sees_a_breakpoint_supplied_through_extra_body(
@@ -786,8 +952,9 @@ def test_keep_prompt_cache_warm_sees_a_breakpoint_supplied_through_extra_body(
     fields, so ``extra_body["system"]`` with a ``cache_control`` block is a
     genuine breakpoint on the wire even though the outer ``system`` kwarg
     is absent.  Two adapters sending byte-identical bodies (one through
-    ``system_instruction``, one through ``extra_body``) must both ping;
-    an ``extra_body`` system without a breakpoint still must not.
+    ``system_instruction``, one through ``extra_body``) must both ping; an
+    ``extra_body`` system without a breakpoint pings too, on the strength
+    of the conversation breakpoint alone, with that plain system as sent.
     """
     _set_aws(monkeypatch)
     with _bedrock_server() as server:
@@ -806,8 +973,10 @@ def test_keep_prompt_cache_warm_sees_a_breakpoint_supplied_through_extra_body(
             _OPUS, api_key="t", bedrock=True, model_config={"extra_body": {"system": "Be terse."}}
         )
         plain.initialize("hi")
-        assert plain.keep_prompt_cache_warm({}) is None
-        assert len(server.requests) == before + 2
+        assert plain.keep_prompt_cache_warm({}) is not None
+        assert len(server.requests) == before + 3
+        assert server.requests[-1]["system"] == "Be terse."
+        assert _marked_blocks(server.requests[-1]["messages"]) == [(0, 0)]
 
 
 def test_concurrent_initialize_tolerates_empty_exported_bearer_token(monkeypatch) -> None:
