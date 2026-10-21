@@ -86,7 +86,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self,
         model_name: str,
         base_url: str,
-        api_key: str,
+        api_key: str | Callable[[], str],
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
@@ -96,7 +96,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Args:
             model_name: The model id (optionally prefixed by ``openrouter/``).
             base_url: API endpoint root, e.g. ``https://api.openai.com/v1``.
-            api_key: Bearer token for the endpoint.
+            api_key: Bearer token for the endpoint, or a zero-argument
+                callable returning one (re-resolved on every client
+                (re)build, for credentials that rotate).
             model_config: Optional model parameters.  Recognised keys
                 mirror v1: ``reasoning_effort``, ``system_instruction``,
                 ``extra_headers``, ``enable_cache``, plus any other key
@@ -183,6 +185,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ``(content, tool_calls, response)``.
         """
         self._reset_stream_indexes()
+        self._ensure_client()
         if self.token_callback is not None:
             kwargs["stream"] = True
             # Bounds the wait for the response headers, which the watchdog

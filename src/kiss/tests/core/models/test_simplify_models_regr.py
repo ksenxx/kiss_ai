@@ -138,6 +138,7 @@ def test_model_base_url_override_without_api_key_never_builds_keyless_client() -
     def endpoint_key(name: str, config: dict[str, Any]) -> str:
         m = model(name, model_config=config)
         assert isinstance(m, OpenAICompatibleModel)
+        assert isinstance(m.api_key, str)
         return m.api_key
 
     keys = config_module.DEFAULT_CONFIG

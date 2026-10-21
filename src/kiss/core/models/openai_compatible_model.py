@@ -138,6 +138,10 @@ def _provider_model_name(model_name: str) -> str:
     * An ``openrouter/`` routing prefix is removed (callers reach
       OpenRouter via the catalog key ``openrouter/<provider>/<id>`` but
       the OpenRouter API itself wants the bare ``<provider>/<id>``).
+    * A ``bedrock/`` routing prefix is removed (callers reach Amazon
+      Bedrock's OpenAI-compatible endpoint via ``bedrock/<id>`` but the
+      endpoint wants the bare inference-profile or model id, e.g.
+      ``us.moonshotai.kimi-k3`` or ``deepseek.v3.2``).
 
     Args:
         model_name: The catalog model name as passed in.
@@ -150,6 +154,8 @@ def _provider_model_name(model_name: str) -> str:
     base_name = _strip_thinking_alias(model_name)
     if base_name.startswith("openrouter/"):
         return base_name[len("openrouter/") :]
+    if base_name.startswith("bedrock/"):
+        return base_name[len("bedrock/") :]
     return base_name
 
 
@@ -519,7 +525,7 @@ class OpenAICompatibleBase(Model):
         self,
         model_name: str,
         base_url: str,
-        api_key: str,
+        api_key: str | Callable[[], str],
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
@@ -536,7 +542,9 @@ class OpenAICompatibleBase(Model):
         Args:
             model_name: The KISS catalog model name.
             base_url: The base URL for the API endpoint.
-            api_key: API key for authentication.
+            api_key: API key for authentication, or a zero-argument
+                callable returning one (re-resolved on every client
+                (re)build, for credentials that rotate).
             model_config: Optional model parameters.
             token_callback: Optional callback for each streamed text token.
             thinking_callback: Optional callback bracketing thinking blocks.
@@ -583,12 +591,16 @@ class OpenAICompatibleBase(Model):
         have actually changed.
         """
         extra_headers = self.model_config.get("extra_headers") or {}
-        inputs = (self.base_url, self.api_key, tuple(sorted(extra_headers.items())))
+        # A callable api_key is re-resolved here so a rotated credential
+        # (e.g. a Bedrock bearer token) changes the inputs and forces the
+        # rebuild below; a static key resolves to itself.
+        api_key = self.api_key() if callable(self.api_key) else self.api_key
+        inputs = (self.base_url, api_key, tuple(sorted(extra_headers.items())))
         if self.client is not None and inputs == self._client_inputs:
             return
         self.client = OpenAI(
             base_url=self.base_url,
-            api_key=self.api_key,
+            api_key=api_key,
             timeout=1800.0,
             max_retries=_MAX_RETRIES,
             default_headers=extra_headers,
@@ -861,7 +873,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         self,
         model_name: str,
         base_url: str,
-        api_key: str,
+        api_key: str | Callable[[], str],
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
@@ -871,7 +883,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Args:
             model_name: The name/identifier of the model to use.
             base_url: The base URL for the API endpoint (e.g., "http://localhost:11434/v1").
-            api_key: API key for authentication.
+            api_key: API key for authentication, or a zero-argument
+                callable returning one (re-resolved whenever the client is
+                (re)built, for credentials that rotate, e.g. Amazon
+                Bedrock's short-term bearer tokens).
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
@@ -1470,6 +1485,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             A tuple of (content, response).
         """
+        self._ensure_client()
         if self.token_callback is None:
             response = self.client.chat.completions.create(**kwargs)
             self._raise_for_failed_completion(response)
@@ -1722,6 +1738,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The API response (or stream iterator when ``stream=True``).
         """
+        self._ensure_client()
         unverified = (
             bool(kwargs.get("tools"))
             and "reasoning_effort" in kwargs

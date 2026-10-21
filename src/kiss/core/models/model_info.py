@@ -11,13 +11,14 @@ non-agentic tasks only).
 
 import contextlib
 import copy
+import functools
 import json
 import logging
 import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1143,7 +1144,7 @@ def _load_model_class(class_name: str, error_message: str) -> Any:
 def _openai_compatible(
     model_name: str,
     base_url: str,
-    api_key: str,
+    api_key: str | Callable[[], str],
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
     thinking_callback: ThinkingCallback | None = None,
@@ -1179,6 +1180,53 @@ def _openai_compatible(
         model_config=model_config,
         token_callback=token_callback,
         thinking_callback=thinking_callback,
+    )
+
+
+def _bedrock_openai_compatible(
+    model_name: str,
+    info: ModelInfo | None,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None,
+) -> Model:
+    """Build the OpenAI-compatible adapter for a non-Claude Bedrock model.
+
+    A ``bedrock/<id>`` name whose id is not a Claude id (Kimi, GLM, Grok,
+    OpenAI GPT, DeepSeek, MiniMax, Qwen, ...) is served by the
+    OpenAI-compatible Chat Completions / Responses endpoint
+    bedrock-runtime exposes per region.  The bearer token is
+    ``AWS_BEARER_TOKEN_BEDROCK`` when configured, else a callable that
+    re-signs one from the ambient AWS credentials on every client build,
+    so a token rotating under IRSA never goes stale.  Prompt caching is
+    automatic server-side on this endpoint; the response's
+    ``prompt_tokens_details.cached_tokens`` / ``cache_write_tokens``
+    feed the usual cached-token cost accounting.
+
+    Args:
+        model_name: The ``bedrock/``-prefixed model name.
+        info: The model's catalog entry, or None for an unknown model.
+        model_config: Optional model parameters, forwarded verbatim.
+        token_callback: Called with each streamed text token.
+        thinking_callback: Called when a thinking block starts/ends.
+
+    Returns:
+        The constructed model adapter.
+    """
+    region = _bedrock_region()
+    base_url = f"https://bedrock-runtime.{region}.amazonaws.com/openai/v1"
+    configured = config_module.DEFAULT_CONFIG.AWS_BEARER_TOKEN_BEDROCK
+    api_key: str | Callable[[], str] = configured or functools.partial(
+        _bedrock_bearer_token, region
+    )
+    return _openai_compatible(
+        model_name,
+        base_url,
+        api_key,
+        model_config,
+        token_callback,
+        thinking_callback,
+        use_responses_api=_wants_responses_api(info, model_config),
     )
 
 
@@ -1421,7 +1469,12 @@ def _openai_bare_name(name: str) -> str | None:
 
 
 BEDROCK_PREFIX = "bedrock/"
-"""Model-name prefix that routes a Claude model through Amazon Bedrock."""
+"""Model-name prefix that routes a model through Amazon Bedrock.
+
+A Claude id (``bedrock/us.anthropic.claude-...``) runs on the Anthropic
+adapter over ``AnthropicBedrock``; any other id (Kimi, GLM, Grok,
+OpenAI GPT, DeepSeek, ...) runs on the OpenAI-compatible adapter against
+bedrock-runtime's ``/openai/v1`` endpoint."""
 
 # Cross-region inference profile prefixes Bedrock puts before the vendor
 # id (``us.anthropic.claude-...``); ``anthropic.`` is the vendor segment.
@@ -1605,6 +1658,99 @@ def bedrock_price_factor(model_name: str) -> float:
         return 1.0
     generation = _claude_generation(_CLAUDE_DATE_SUFFIX_RE.sub("", split[1]))
     return _BEDROCK_GEO_PRICE_FACTOR if generation >= _BEDROCK_GEO_MIN_GENERATION else 1.0
+
+
+_BEDROCK_OPENAI_DEFAULT_REGION = "us-east-1"
+"""Region for the Bedrock OpenAI-compatible endpoint when none is configured."""
+
+_BEDROCK_TOKEN_DURATION = 43200  # AWS caps short-term Bedrock bearer tokens at 12h.
+_BEDROCK_TOKEN_CACHE_SECONDS = 2700  # re-sign well inside a 1h IRSA role session
+
+# ((access key, secret key, session token, region), signed-at, token)
+_bedrock_token_cache: tuple[tuple[str, str, str | None, str], float, str] | None = None
+_bedrock_token_lock = threading.Lock()
+
+
+def _bedrock_region() -> str:
+    """Return the region Bedrock requests are signed for and sent to.
+
+    ``DEFAULT_CONFIG.AWS_REGION`` (the settings panel, or the env var it
+    mirrors) wins; then boto3's session resolution
+    (``AWS_DEFAULT_REGION``, the selected profile); ``us-east-1`` when
+    neither names one.
+    """
+    if config_module.DEFAULT_CONFIG.AWS_REGION:
+        return config_module.DEFAULT_CONFIG.AWS_REGION
+    try:
+        import boto3  # type: ignore[import-untyped]
+    except ImportError:
+        return _BEDROCK_OPENAI_DEFAULT_REGION
+    return boto3.Session().region_name or _BEDROCK_OPENAI_DEFAULT_REGION
+
+
+def _bedrock_bearer_token(region: str) -> str:
+    """Return a short-term Bedrock bearer token from the ambient AWS credentials.
+
+    Replicates ``aws_bedrock_token_generator`` with plain botocore: a
+    SigV4 presign of the global ``bedrock.amazonaws.com``
+    ``CallWithBearerToken`` action, base64-encoded behind the
+    ``bedrock-api-key-`` prefix.  The caller's identity is inherited, so
+    Bedrock's per-principal cost attribution (CUR
+    ``line_item_iam_principal``) keeps working, IRSA sessions included.
+    The token expires with the sooner of 12h and the signing credentials'
+    own lifetime, so it is cached only briefly and re-signed whenever the
+    underlying credentials rotate (a new session token changes the cache
+    key).
+
+    Args:
+        region: The region the token is used in (the signature's region).
+
+    Returns:
+        The bearer token string.
+
+    Raises:
+        KISSError: When boto3 is not installed or no AWS credentials are
+            available.
+    """
+    import base64
+
+    try:
+        import boto3  # type: ignore[import-untyped]
+        from botocore.auth import SigV4QueryAuth
+        from botocore.awsrequest import AWSRequest
+    except ImportError as e:
+        raise KISSError(
+            "boto3 is required to sign Bedrock requests. Install boto3 "
+            "(it ships with the anthropic[bedrock] extra) or set "
+            "AWS_BEARER_TOKEN_BEDROCK."
+        ) from e
+    credentials = boto3.Session().get_credentials()
+    if credentials is None:
+        raise KISSError(
+            "No AWS credentials found for Bedrock. Set "
+            "AWS_BEARER_TOKEN_BEDROCK, AWS_ACCESS_KEY_ID/"
+            "AWS_SECRET_ACCESS_KEY, or a credential chain source (IRSA, "
+            "ECS, ~/.aws)."
+        )
+    frozen = credentials.get_frozen_credentials()
+    key = (frozen.access_key, frozen.secret_key, frozen.token, region)
+    global _bedrock_token_cache
+    with _bedrock_token_lock:
+        if _bedrock_token_cache is not None:
+            cached_key, cached_at, cached_token = _bedrock_token_cache
+            if cached_key == key and time.time() - cached_at < _BEDROCK_TOKEN_CACHE_SECONDS:
+                return cached_token
+        request = AWSRequest(
+            method="POST",
+            url="https://bedrock.amazonaws.com/",
+            headers={"host": "bedrock.amazonaws.com"},
+            params={"Action": "CallWithBearerToken"},
+        )
+        SigV4QueryAuth(frozen, "bedrock", region, expires=_BEDROCK_TOKEN_DURATION).add_auth(request)
+        presigned_url = str(request.url).replace("https://", "") + "&Version=1"
+        token = "bedrock-api-key-" + base64.b64encode(presigned_url.encode("utf-8")).decode("utf-8")
+        _bedrock_token_cache = (key, time.time(), token)
+        return token
 
 
 def _scaled_prices(info: ModelInfo, factor: float) -> ModelInfo:
@@ -1948,7 +2094,12 @@ def model(
             redundant provider prefix is stripped automatically.
             ``bedrock/<Bedrock model or inference-profile id>`` (e.g.
             ``bedrock/us.anthropic.claude-opus-4-6-v1:0``) runs the
-            Claude model through Amazon Bedrock.
+            Claude model through Amazon Bedrock; a non-Claude Bedrock id
+            (e.g. ``bedrock/us.moonshotai.kimi-k3``,
+            ``bedrock/deepseek.v3.2``) runs through bedrock-runtime's
+            OpenAI-compatible endpoint in the configured region, signed
+            with the ambient AWS credentials when no
+            ``AWS_BEARER_TOKEN_BEDROCK`` is set.
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an
             OpenAI-compatible adapter is built with that base_url and
@@ -2036,6 +2187,13 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
+        )
+    if model_name.startswith(BEDROCK_PREFIX) and bedrock_claude_name(model_name) is None:
+        # A non-Claude Bedrock id (Kimi, GLM, Grok, GPT, DeepSeek, ...)
+        # goes to bedrock-runtime's OpenAI-compatible endpoint; the
+        # Claude branch below stays on the Anthropic adapter.
+        return _bedrock_openai_compatible(
+            model_name, info, model_config, token_callback, thinking_callback
         )
     if model_name.startswith(("claude-", BEDROCK_PREFIX)):
         # ``bedrock/<id>`` is the same Claude adapter over the Anthropic
