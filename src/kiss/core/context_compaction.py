@@ -152,8 +152,7 @@ def make_stub(text: str, preview_chars: int = STUB_PREVIEW_CHARS) -> str:
     return (
         f"{STUB_PREFIX} {len(text):,} chars; the first {preview_chars} follow. "
         f"To see it again, Read the file or re-run a read-only command; do not "
-        f"repeat a command that has side effects.]\n"
-        + text[:preview_chars]
+        f"repeat a command that has side effects.]\n" + text[:preview_chars]
     )
 
 
@@ -162,7 +161,7 @@ def plan_compaction(
     keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
     min_chars: int = MIN_COMPACT_CHARS,
     protected_tools: frozenset[str] = PROTECTED_TOOLS,
-) -> list[tuple[dict[str, Any], str]]:
+) -> list[tuple[dict[str, Any], str, str]]:
     """Select the old, large tool outputs a compaction would stub, without editing.
 
     Args:
@@ -173,33 +172,32 @@ def plan_compaction(
         protected_tools: Tool names whose results are never compacted.
 
     Returns:
-        ``(holder, key)`` pairs such that ``holder[key]`` is a tool-result
-        text to replace; pass the list to :func:`apply_compaction`.
+        ``(holder, key, stub)`` triples such that ``holder[key]`` is a
+        tool-result text to replace with *stub*; pass the list to
+        :func:`apply_compaction`.
     """
     slots = _result_slots(conversation)
     candidates = slots[: max(0, len(slots) - keep_recent)]
     if not candidates:
         return []
     names = _names_by_call_id(conversation)
-    plan: list[tuple[dict[str, Any], str]] = []
+    plan: list[tuple[dict[str, Any], str, str]] = []
     for holder, key, call_id in candidates:
         text = holder[key]
         if len(text) <= min_chars or text.startswith(STUB_PREFIX):
             continue
         if names.get(call_id, "") in protected_tools:
             continue
-        plan.append((holder, key))
+        plan.append((holder, key, make_stub(text)))
     return plan
 
 
-def dropped_chars(plan: list[tuple[dict[str, Any], str]]) -> int:
+def dropped_chars(plan: list[tuple[dict[str, Any], str, str]]) -> int:
     """Return how many characters applying *plan* would remove from the conversation."""
-    return sum(len(holder[key]) - len(make_stub(holder[key])) for holder, key in plan)
+    return sum(len(holder[key]) - len(stub) for holder, key, stub in plan)
 
 
-def should_compact(
-    context_tokens: int, dropped_tokens: int, handoff_tokens: float | None
-) -> bool:
+def should_compact(context_tokens: int, dropped_tokens: int, handoff_tokens: float | None) -> bool:
     """Decide whether a planned compaction pays for the prompt-cache miss it causes.
 
     Args:
@@ -221,7 +219,7 @@ def should_compact(
     return True
 
 
-def apply_compaction(plan: list[tuple[dict[str, Any], str]]) -> int:
+def apply_compaction(plan: list[tuple[dict[str, Any], str, str]]) -> int:
     """Replace every planned tool output with its stub, in place.
 
     Args:
@@ -230,6 +228,6 @@ def apply_compaction(plan: list[tuple[dict[str, Any], str]]) -> int:
     Returns:
         The number of tool results that were replaced.
     """
-    for holder, key in plan:
-        holder[key] = make_stub(holder[key])
+    for holder, key, stub in plan:
+        holder[key] = stub
     return len(plan)

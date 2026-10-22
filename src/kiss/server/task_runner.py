@@ -757,27 +757,20 @@ def _zero_usage_counters(agent: Any) -> None:
     SEA failure on a reused agent), whose failure banner would
     otherwise carry the previous run's numbers.
 
-    A ``RelentlessAgent``-derived agent is reset through its
-    ``reset_usage()`` — ONE atomic ledger swap, so a server-thread
-    attribution racing this reset (an abandoned-subagent reclaim)
-    lands wholly before or wholly after it, never as a mixed state.
-    Zeroing the three counter properties one by one instead tears:
-    the racing attribution could land between two of the stores and
-    leave an impossible mix (e.g. zero budget with pre-reset tokens).
-    The per-attribute fallback serves plain agent-shaped objects
-    without the method, whose fields are plain attributes.
+    The agent is reset through its ``reset_usage()`` — ONE atomic
+    store (``RelentlessAgent``'s ledger swap, ``KISSAgent``'s usage
+    snapshot), so a server-thread attribution racing this reset (an
+    abandoned-subagent reclaim) lands wholly before or wholly after
+    it, never as a mixed state.  Zeroing the three counter properties
+    one by one instead tears: the racing attribution could land
+    between two of the stores and leave an impossible mix (e.g. zero
+    budget with pre-reset tokens).
 
     Args:
         agent: The agent about to run; attributes are set outright,
             so an agent that has not run yet is handled too.
     """
-    reset_usage = getattr(agent, "reset_usage", None)
-    if callable(reset_usage):
-        reset_usage()
-    else:
-        agent.total_tokens_used = 0
-        agent.budget_used = 0.0
-        agent.total_steps = 0
+    agent.reset_usage()
     agent.step_count = 0
 
 

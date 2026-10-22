@@ -1,25 +1,26 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **787 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **932 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
-The Anthropic entries also run on Amazon Bedrock: name the model `bedrock/<Bedrock model or inference-profile id>` (`bedrock/us.anthropic.claude-opus-4-6-v1:0`, `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`, with the same `-low`/`-medium`/`-high`/`-max` effort suffixes as the `claude-*` entries) and configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`. The catalog does not list Bedrock ids (they differ per model and region); a `bedrock/` name is priced and sized as the `claude-*` entry behind it, and adding it under Settings → Custom Models (name only, no endpoint) puts it in the model picker from the next daemon start.
+The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 111 |
 | Anthropic | 76 |
+| Amazon Bedrock (`bedrock/*`) | 144 |
 | Gemini | 21 |
 | Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 429 |
+| OpenRouter | 430 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **750** generation-capable models
-- **591** function-calling-capable models
+- **895** generation-capable models
+- **737** function-calling-capable models
 - **7** embedding models
 - **23** decision models
 
@@ -225,6 +226,156 @@ Full model list:
 </details>
 
 <details>
+<summary><strong>Amazon Bedrock (bedrock/*) (144)</strong></summary>
+
+- `bedrock/global.anthropic.claude-fable-5`
+- `bedrock/global.anthropic.claude-fable-5-1`
+- `bedrock/global.anthropic.claude-fable-5-1-high`
+- `bedrock/global.anthropic.claude-fable-5-1-low`
+- `bedrock/global.anthropic.claude-fable-5-1-max`
+- `bedrock/global.anthropic.claude-fable-5-1-medium`
+- `bedrock/global.anthropic.claude-fable-5-1-xhigh`
+- `bedrock/global.anthropic.claude-fable-5-high`
+- `bedrock/global.anthropic.claude-fable-5-low`
+- `bedrock/global.anthropic.claude-fable-5-max`
+- `bedrock/global.anthropic.claude-fable-5-medium`
+- `bedrock/global.anthropic.claude-fable-5-xhigh`
+- `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`
+- `bedrock/global.anthropic.claude-haiku-5-5`
+- `bedrock/global.anthropic.claude-haiku-5-5-high`
+- `bedrock/global.anthropic.claude-haiku-5-5-low`
+- `bedrock/global.anthropic.claude-haiku-5-5-max`
+- `bedrock/global.anthropic.claude-haiku-5-5-medium`
+- `bedrock/global.anthropic.claude-haiku-5-5-xhigh`
+- `bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0`
+- `bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0-high`
+- `bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0-low`
+- `bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0-medium`
+- `bedrock/global.anthropic.claude-opus-4-6-v1`
+- `bedrock/global.anthropic.claude-opus-4-6-v1-high`
+- `bedrock/global.anthropic.claude-opus-4-6-v1-low`
+- `bedrock/global.anthropic.claude-opus-4-6-v1-max`
+- `bedrock/global.anthropic.claude-opus-4-6-v1-medium`
+- `bedrock/global.anthropic.claude-opus-4-7`
+- `bedrock/global.anthropic.claude-opus-4-7-high`
+- `bedrock/global.anthropic.claude-opus-4-7-low`
+- `bedrock/global.anthropic.claude-opus-4-7-max`
+- `bedrock/global.anthropic.claude-opus-4-7-medium`
+- `bedrock/global.anthropic.claude-opus-4-7-xhigh`
+- `bedrock/global.anthropic.claude-opus-4-8`
+- `bedrock/global.anthropic.claude-opus-4-8-high`
+- `bedrock/global.anthropic.claude-opus-4-8-low`
+- `bedrock/global.anthropic.claude-opus-4-8-max`
+- `bedrock/global.anthropic.claude-opus-4-8-medium`
+- `bedrock/global.anthropic.claude-opus-4-8-xhigh`
+- `bedrock/global.anthropic.claude-opus-5`
+- `bedrock/global.anthropic.claude-opus-5-5`
+- `bedrock/global.anthropic.claude-opus-5-5-high`
+- `bedrock/global.anthropic.claude-opus-5-5-low`
+- `bedrock/global.anthropic.claude-opus-5-5-max`
+- `bedrock/global.anthropic.claude-opus-5-5-medium`
+- `bedrock/global.anthropic.claude-opus-5-5-xhigh`
+- `bedrock/global.anthropic.claude-opus-5-high`
+- `bedrock/global.anthropic.claude-opus-5-low`
+- `bedrock/global.anthropic.claude-opus-5-max`
+- `bedrock/global.anthropic.claude-opus-5-medium`
+- `bedrock/global.anthropic.claude-opus-5-xhigh`
+- `bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0`
+- `bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- `bedrock/global.anthropic.claude-sonnet-4-6`
+- `bedrock/global.anthropic.claude-sonnet-4-6-high`
+- `bedrock/global.anthropic.claude-sonnet-4-6-low`
+- `bedrock/global.anthropic.claude-sonnet-4-6-max`
+- `bedrock/global.anthropic.claude-sonnet-4-6-medium`
+- `bedrock/global.anthropic.claude-sonnet-5`
+- `bedrock/global.anthropic.claude-sonnet-5-5`
+- `bedrock/global.anthropic.claude-sonnet-5-5-high`
+- `bedrock/global.anthropic.claude-sonnet-5-5-low`
+- `bedrock/global.anthropic.claude-sonnet-5-5-max`
+- `bedrock/global.anthropic.claude-sonnet-5-5-medium`
+- `bedrock/global.anthropic.claude-sonnet-5-5-xhigh`
+- `bedrock/global.anthropic.claude-sonnet-5-high`
+- `bedrock/global.anthropic.claude-sonnet-5-low`
+- `bedrock/global.anthropic.claude-sonnet-5-max`
+- `bedrock/global.anthropic.claude-sonnet-5-medium`
+- `bedrock/global.anthropic.claude-sonnet-5-xhigh`
+- `bedrock/us.anthropic.claude-3-haiku-20240307-v1:0`
+- `bedrock/us.anthropic.claude-3-sonnet-20240229-v1:0`
+- `bedrock/us.anthropic.claude-fable-5`
+- `bedrock/us.anthropic.claude-fable-5-1`
+- `bedrock/us.anthropic.claude-fable-5-1-high`
+- `bedrock/us.anthropic.claude-fable-5-1-low`
+- `bedrock/us.anthropic.claude-fable-5-1-max`
+- `bedrock/us.anthropic.claude-fable-5-1-medium`
+- `bedrock/us.anthropic.claude-fable-5-1-xhigh`
+- `bedrock/us.anthropic.claude-fable-5-high`
+- `bedrock/us.anthropic.claude-fable-5-low`
+- `bedrock/us.anthropic.claude-fable-5-max`
+- `bedrock/us.anthropic.claude-fable-5-medium`
+- `bedrock/us.anthropic.claude-fable-5-xhigh`
+- `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`
+- `bedrock/us.anthropic.claude-haiku-5-5`
+- `bedrock/us.anthropic.claude-haiku-5-5-high`
+- `bedrock/us.anthropic.claude-haiku-5-5-low`
+- `bedrock/us.anthropic.claude-haiku-5-5-max`
+- `bedrock/us.anthropic.claude-haiku-5-5-medium`
+- `bedrock/us.anthropic.claude-haiku-5-5-xhigh`
+- `bedrock/us.anthropic.claude-opus-4-1-20250805-v1:0`
+- `bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0`
+- `bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0-high`
+- `bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0-low`
+- `bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0-medium`
+- `bedrock/us.anthropic.claude-opus-4-6-v1`
+- `bedrock/us.anthropic.claude-opus-4-6-v1-high`
+- `bedrock/us.anthropic.claude-opus-4-6-v1-low`
+- `bedrock/us.anthropic.claude-opus-4-6-v1-max`
+- `bedrock/us.anthropic.claude-opus-4-6-v1-medium`
+- `bedrock/us.anthropic.claude-opus-4-7`
+- `bedrock/us.anthropic.claude-opus-4-7-high`
+- `bedrock/us.anthropic.claude-opus-4-7-low`
+- `bedrock/us.anthropic.claude-opus-4-7-max`
+- `bedrock/us.anthropic.claude-opus-4-7-medium`
+- `bedrock/us.anthropic.claude-opus-4-7-xhigh`
+- `bedrock/us.anthropic.claude-opus-4-8`
+- `bedrock/us.anthropic.claude-opus-4-8-high`
+- `bedrock/us.anthropic.claude-opus-4-8-low`
+- `bedrock/us.anthropic.claude-opus-4-8-max`
+- `bedrock/us.anthropic.claude-opus-4-8-medium`
+- `bedrock/us.anthropic.claude-opus-4-8-xhigh`
+- `bedrock/us.anthropic.claude-opus-5`
+- `bedrock/us.anthropic.claude-opus-5-5`
+- `bedrock/us.anthropic.claude-opus-5-5-high`
+- `bedrock/us.anthropic.claude-opus-5-5-low`
+- `bedrock/us.anthropic.claude-opus-5-5-max`
+- `bedrock/us.anthropic.claude-opus-5-5-medium`
+- `bedrock/us.anthropic.claude-opus-5-5-xhigh`
+- `bedrock/us.anthropic.claude-opus-5-high`
+- `bedrock/us.anthropic.claude-opus-5-low`
+- `bedrock/us.anthropic.claude-opus-5-max`
+- `bedrock/us.anthropic.claude-opus-5-medium`
+- `bedrock/us.anthropic.claude-opus-5-xhigh`
+- `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- `bedrock/us.anthropic.claude-sonnet-4-6`
+- `bedrock/us.anthropic.claude-sonnet-4-6-high`
+- `bedrock/us.anthropic.claude-sonnet-4-6-low`
+- `bedrock/us.anthropic.claude-sonnet-4-6-max`
+- `bedrock/us.anthropic.claude-sonnet-4-6-medium`
+- `bedrock/us.anthropic.claude-sonnet-5`
+- `bedrock/us.anthropic.claude-sonnet-5-5`
+- `bedrock/us.anthropic.claude-sonnet-5-5-high`
+- `bedrock/us.anthropic.claude-sonnet-5-5-low`
+- `bedrock/us.anthropic.claude-sonnet-5-5-max`
+- `bedrock/us.anthropic.claude-sonnet-5-5-medium`
+- `bedrock/us.anthropic.claude-sonnet-5-5-xhigh`
+- `bedrock/us.anthropic.claude-sonnet-5-high`
+- `bedrock/us.anthropic.claude-sonnet-5-low`
+- `bedrock/us.anthropic.claude-sonnet-5-max`
+- `bedrock/us.anthropic.claude-sonnet-5-medium`
+- `bedrock/us.anthropic.claude-sonnet-5-xhigh`
+
+</details>
+
+<details>
 <summary><strong>Gemini (21)</strong></summary>
 
 - `gemini-2.5-flash`
@@ -393,7 +544,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (429)</strong></summary>
+<summary><strong>OpenRouter (430)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -490,6 +641,7 @@ Full model list:
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inception/mercury-2`
 - `openrouter/inception/mercury-2.5`
+- `openrouter/inception/mercury-3`
 - `openrouter/inception/mercury-decide`
 - `openrouter/inclusionai/ling-3.0-flash`
 - `openrouter/inclusionai/ling-3.0-flash-vl`

@@ -24,8 +24,12 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    iter_assistant_tool_calls,
     merge_system_texts,
+    parse_tool_arguments,
+    pop_max_tokens_and_stop,
     responses_items_to_chat_messages,
+    split_data_url,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error
 
@@ -142,31 +146,6 @@ class _AbortableStream:
         self._chunks.close()
 
 
-def _coerce_args_dict(args: Any) -> dict[str, Any]:
-    """Coerce a tool-call ``arguments`` value into a dict.
-
-    GeminiModel stores arguments as dicts, but a conversation handed off
-    from an OpenAI-schema model (e.g. via the Sorcar ``set_model`` tool)
-    stores them as JSON strings.  Unparseable values degrade to ``{}``.
-
-    Args:
-        args: The arguments value (dict, JSON string, or anything else).
-
-    Returns:
-        The arguments as a dict.
-    """
-    if isinstance(args, dict):
-        return args
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args) if args.strip() else {}
-        except json.JSONDecodeError:
-            logger.debug("Exception caught", exc_info=True)
-            parsed = {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
 def _is_thought(part: Any) -> bool:
     """Return whether *part* carries summarized reasoning rather than answer text.
 
@@ -199,13 +178,13 @@ def _data_url_to_part(url: str, default_mime: str) -> types.Part | None:
         The equivalent Gemini ``Part``, or ``None`` when *url* is not a
         decodable base64 data URL.
     """
-    if not (url.startswith("data:") and ";base64," in url):
+    split = split_data_url(url, default_mime)
+    if split is None:
         return None
-    header, _, payload = url.partition(",")
+    media_type, payload = split
     data = _decode_base64(payload)
     if data is None:
         return None
-    media_type = header[len("data:"):].split(";", 1)[0] or default_mime
     return types.Part.from_bytes(data=data, mime_type=media_type)
 
 
@@ -382,18 +361,10 @@ class GeminiModel(Model):
         """
         mapping: dict[str, str] = {}
         for msg in chat_messages:
-            if msg.get("role") != "assistant":
-                continue
-            for tc in msg.get("tool_calls") or []:
-                fn = tc.get("function") or {}
-                if tc.get("id"):
-                    mapping[tc["id"]] = fn.get("name", "unknown")
-            content = msg.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        if block.get("id"):
-                            mapping[block["id"]] = block.get("name", "unknown")
+            if msg.get("role") == "assistant":
+                for name, call_id in iter_assistant_tool_calls(msg):
+                    if call_id:
+                        mapping[call_id] = name or "unknown"
         return mapping
 
     def _function_call_part(self, name: str, args: dict[str, Any], call_id: Any) -> types.Part:
@@ -474,7 +445,7 @@ class GeminiModel(Model):
                 parts.append(
                     self._function_call_part(
                         block.get("name", "unknown"),
-                        _coerce_args_dict(block.get("input")),
+                        parse_tool_arguments(block.get("input")),
                         block.get("id"),
                     )
                 )
@@ -555,7 +526,7 @@ class GeminiModel(Model):
                     parts.append(
                         self._function_call_part(
                             fn.get("name"),
-                            _coerce_args_dict(fn.get("arguments")),
+                            parse_tool_arguments(fn.get("arguments")),
                             tc.get("id"),
                         )
                     )
@@ -670,15 +641,11 @@ class GeminiModel(Model):
             for key, value in self.model_config.items()
             if key not in FRAMEWORK_ONLY_CONFIG_KEYS
         }
-        max_output_tokens = params.pop("max_tokens", None)
-        max_completion_tokens = params.pop("max_completion_tokens", None)
-        if max_output_tokens is None:
-            max_output_tokens = max_completion_tokens
+        max_output_tokens, stop_sequences = pop_max_tokens_and_stop(params)
         if max_output_tokens is not None:
             params.setdefault("max_output_tokens", max_output_tokens)
-        stop = params.pop("stop", None)
-        if stop is not None:
-            params.setdefault("stop_sequences", stop)
+        if stop_sequences is not None:
+            params.setdefault("stop_sequences", stop_sequences)
         if params.get("thinking_config") is None:
             params["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
 
@@ -768,41 +735,6 @@ class GeminiModel(Model):
         self._rejected_response = None
         return parts, usage_chunk or last_chunk
 
-    def _generate_parts(
-        self, contents: list[types.Content], config: Any
-    ) -> tuple[list[Any], Any]:
-        """Run one turn and return its parts plus the response to bill it against.
-
-        Streams when a token callback is bound, and falls back to the
-        unary call when streaming is not wanted or the stream yielded no
-        chunk at all.
-
-        Args:
-            contents: The conversation in Gemini API format.
-            config: The generation config for this turn.
-
-        Returns:
-            The response parts and the raw response.
-        """
-        if self.token_callback is not None:
-            parts, response = self._stream_turn(contents, config)
-            if response is not None:
-                return parts, response
-        response = self.client.models.generate_content(
-            model=self.model_name, contents=contents, config=config
-        )
-        parts = self._parts_from_response(response)
-        if self.token_callback is not None:
-            # Billed already: a Stop raised from a callback below still
-            # charges this response (take_partial_usage_response).
-            self._rejected_response = response
-            try:
-                self._stream_parts(parts)
-            finally:
-                self._close_thinking_if_open()
-            self._rejected_response = None
-        return parts, response
-
     def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools.
 
@@ -811,7 +743,7 @@ class GeminiModel(Model):
         """
         chat_messages = self._chat_messages()
         contents = self._convert_conversation_to_gemini_contents(chat_messages)
-        parts, response = self._generate_parts(
+        parts, response = self._stream_turn(
             contents, self._build_config(chat_messages=chat_messages)
         )
         content, _ = self._parse_parts(parts)
@@ -850,7 +782,7 @@ class GeminiModel(Model):
         chat_messages = self._chat_messages()
         contents = self._convert_conversation_to_gemini_contents(chat_messages)
         config = self._build_config(tools=gemini_tools, chat_messages=chat_messages)
-        all_parts, response = self._generate_parts(contents, config)
+        all_parts, response = self._stream_turn(contents, config)
         content, function_calls = self._parse_parts(all_parts)
 
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}

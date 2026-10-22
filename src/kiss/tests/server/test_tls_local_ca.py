@@ -256,9 +256,9 @@ class TestTlsCerts(TestCase):
         # Expiring CA.
         subject = _load(self.ca).subject
         _write_cert_with_validity(self.ca, self.ca_key, subject, days=5, ca=True)
-        self.assertFalse(tls_certs._ca_pair_is_usable(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
-        self.assertTrue(tls_certs._ca_pair_is_usable(self.ca, self.ca_key))
+        self.assertIsNotNone(tls_certs._usable_ca(self.ca, self.ca_key))
 
         # CA key that is not an EC key at all.
         ed_key = ed25519.Ed25519PrivateKey.generate()
@@ -267,13 +267,13 @@ class TestTlsCerts(TestCase):
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
         ))
-        self.assertFalse(tls_certs._ca_pair_is_usable(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         _load(self.cert).verify_directly_issued_by(_load(self.ca))
 
         # Missing CA files, and a missing CA when checking the leaf.
         self.ca.unlink()
-        self.assertFalse(tls_certs._ca_pair_is_usable(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
         self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
 
     def test_server_cert_names_skips_junk_and_dedups(self) -> None:

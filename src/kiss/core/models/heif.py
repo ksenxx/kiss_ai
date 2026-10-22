@@ -35,8 +35,6 @@ HEIF_MIME_TYPES = frozenset(
     }
 )
 
-HEIF_SUFFIXES = frozenset({".heic", ".heif", ".hif"})
-
 # ISO base media file format major brands (bytes 8..12 of the file) used by
 # HEIF containers, including the burst and Live-Photo-still variants.
 _HEIF_BRANDS = frozenset(

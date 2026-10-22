@@ -43,10 +43,12 @@ _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # store, os.environ and DEFAULT_CONFIG within one process.  It also
 # serializes access to _api_keys_store_flock(), so a single process never
 # flocks the store sidecar through two descriptors at once (which would
-# self-deadlock — see that function).  Every holder calls only helpers
-# that take neither this lock nor the flock again (the ``_locked``
-# variants), so nothing nests today; it stays an RLock so a nested
-# acquisition of THIS lock can never be the thing that deadlocks.  The
+# self-deadlock — see that function).  Holders call the ``_locked``
+# helpers, which take neither this lock nor the flock again; the one
+# nesting (``record_recent_work_dir`` holds it and calls
+# ``save_config``, which takes it again) is why this is an RLock, so a
+# nested acquisition of THIS lock can never be the thing that
+# deadlocks.  The
 # writers a task thread reaches (``save_config`` behind the model
 # picker, ``save_api_key`` behind a tool) take it through
 # ``locked_call``: a Stop injection landing right after a plain
@@ -89,6 +91,7 @@ def __getattr__(name: str) -> Path:
     if name == "CONFIG_PATH":
         return _config_path()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 DEFAULTS: dict[str, Any] = {
     "max_budget": DEFAULT_MAX_BUDGET,
@@ -167,29 +170,31 @@ was written to every user's ``config.json`` and broadcast in every
 silently disagree with the real source of truth.
 """
 
-API_KEY_ENV_VARS: frozenset[str] = frozenset({
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_WORKSPACE_ID",
-    "TOGETHER_API_KEY",
-    "OPENROUTER_API_KEY",
-    "ZAI_API_KEY",
-    "MOONSHOT_API_KEY",
-    # Amazon Bedrock credentials (``bedrock/`` Claude models); AWS_REGION
-    # is not a secret but is stored and edited alongside them.
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
-    # Claude subscription token from ``claude setup-token`` (``cc/``
-    # models on a machine without a ``claude login``).
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    # Codex access token (``codex/`` models on a machine without a
-    # ``codex login``; ChatGPT Business/Enterprise workspaces).
-    "CODEX_ACCESS_TOKEN",
-})
+API_KEY_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_WORKSPACE_ID",
+        "TOGETHER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ZAI_API_KEY",
+        "MOONSHOT_API_KEY",
+        # Amazon Bedrock credentials (``bedrock/`` Claude models); AWS_REGION
+        # is not a secret but is stored and edited alongside them.
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        # Claude subscription token from ``claude setup-token`` (``cc/``
+        # models on a machine without a ``claude login``).
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        # Codex access token (``codex/`` models on a machine without a
+        # ``codex login``; ChatGPT Business/Enterprise workspaces).
+        "CODEX_ACCESS_TOKEN",
+    }
+)
 
 
 def get_current_api_keys() -> dict[str, str]:
@@ -246,35 +251,45 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(default, int | float):
             if isinstance(value, bool):
                 logger.debug(
-                    "Ignoring boolean config value %s=%r", key, value,
+                    "Ignoring boolean config value %s=%r",
+                    key,
+                    value,
                 )
                 result[key] = default
                 continue
-            if not isinstance(value, int | float):
-                try:
-                    value = float(value)
-                except (TypeError, ValueError):
-                    logger.debug(
-                        "Ignoring non-numeric config value %s=%r", key, value,
-                    )
-                    result[key] = default
-                    continue
-            if not math.isfinite(value):
+            # An int too large for a float (json.loads turns a 400-digit
+            # literal into one) raises OverflowError here, as
+            # ``math.isfinite`` would on it below.
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
                 logger.debug(
-                    "Ignoring non-finite config value %s=%r", key, value,
+                    "Ignoring non-numeric config value %s=%r",
+                    key,
+                    value,
+                )
+                result[key] = default
+                continue
+            if not math.isfinite(number):
+                logger.debug(
+                    "Ignoring non-finite config value %s=%r",
+                    key,
+                    value,
                 )
                 result[key] = default
             else:
-                result[key] = value
+                result[key] = value if isinstance(value, int | float) else number
         elif not isinstance(value, str):
             logger.debug(
-                "Ignoring non-string config value %s=%r", key, value,
+                "Ignoring non-string config value %s=%r",
+                key,
+                value,
             )
             result[key] = default
     return result
 
 
-def _read_stored_config(cfg_path: Path) -> dict[str, Any]:
+def _read_stored_config(cfg_path: Path, strict: bool = False) -> dict[str, Any]:
     """Return the JSON object stored in *cfg_path*, or ``{}`` if unusable.
 
     The single reader behind :func:`load_config` and :func:`save_config`,
@@ -283,14 +298,24 @@ def _read_stored_config(cfg_path: Path) -> dict[str, Any]:
     (``json.JSONDecodeError``) and invalid UTF-8 (``UnicodeDecodeError``)
     alike.  The file is user-editable, so both kinds of junk happen; a
     top-level value that is not a JSON object is ignored too.
+
+    With *strict*, an ``OSError`` other than a missing file (a
+    ``PermissionError`` on a chmod-000 file, an I/O error) propagates:
+    a writer that read ``{}`` for a file it could not read would
+    ``os.replace`` a file holding only its own keys over the user's
+    settings.  A missing file is still ``{}``; so is undecodable JSON,
+    which the writer replaces by contract.  Missing is judged by the
+    read's ``FileNotFoundError`` alone, never by an existence precheck:
+    ``Path.exists()`` answers ``False`` for a link into a directory the
+    process may not traverse, and that file is unreadable, not absent.
     """
-    if not cfg_path.exists():
-        return {}
     try:
         # Waits out a concurrent ``save_config`` replace on Windows, so
         # the reader does not fall back to an empty config mid-swap.
         stored = json.loads(read_bytes_waiting_for_writer(cfg_path).decode("utf-8"))
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
+        if strict and isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+            raise
         logger.debug("Failed to read config %s", cfg_path, exc_info=True)
         return {}
     return stored if isinstance(stored, dict) else {}
@@ -332,6 +357,9 @@ def save_config(data: dict[str, Any]) -> None:
     Raises:
         TimeoutError: another process held ``.config.lock`` for longer
             than :data:`_LOCK_TIMEOUT_S`; nothing was written.
+        OSError: ``config.json`` exists but could not be read (a
+            ``PermissionError``, say); nothing was written, since the
+            merge would have dropped every setting it holds.
     """
     locked_call(_config_lock, _save_config_locked, sanitize_config(data), False)
 
@@ -360,6 +388,9 @@ def setdefault_config(data: dict[str, Any]) -> dict[str, Any]:
     Raises:
         TimeoutError: another process held ``.config.lock`` for longer
             than :data:`_LOCK_TIMEOUT_S`; nothing was written.
+        OSError: ``config.json`` exists but could not be read (a
+            ``PermissionError``, say); nothing was written, since the
+            merge would have dropped every setting it holds.
     """
     return locked_call(_config_lock, _save_config_locked, sanitize_config(data), True)
 
@@ -370,11 +401,15 @@ def _save_config_locked(data: dict[str, Any], only_unset: bool) -> dict[str, Any
     With *only_unset*, an entry whose key already has a truthy stored
     value (as sanitized, i.e. as :func:`load_config` reads it) is
     skipped.  Returns the stored configuration after the write.
+
+    Raises:
+        OSError: ``config.json`` exists but could not be read; replacing
+            it would silently drop every setting it holds.
     """
     cfg_path = _config_path()
     with exclusive_file_lock(_config_dir() / ".config.lock", timeout=_LOCK_TIMEOUT_S):
-        existing = _read_stored_config(cfg_path)
-        readable = sanitize_config(existing)
+        existing = _read_stored_config(cfg_path, strict=True)
+        readable = sanitize_config(existing) if only_unset else {}
         for k, v in data.items():
             if k not in API_KEY_ENV_VARS and not (only_unset and readable.get(k)):
                 existing[k] = v
@@ -448,9 +483,7 @@ def record_recent_work_dir(path: str) -> None:
         return
     same = os.path.normpath(path)
     with _config_lock:
-        entries = [
-            e for e in recent_work_dirs() if os.path.normpath(e["path"]) != same
-        ]
+        entries = [e for e in recent_work_dirs() if os.path.normpath(e["path"]) != same]
         entries.insert(0, {"path": path, "ts": time.time()})
         save_config({"recent_work_dirs": entries[:MAX_RECENT_WORK_DIRS]})
 
@@ -826,12 +859,14 @@ def save_api_key(key_name: str, key_value: str) -> None:
     """
     if not _ENV_VAR_NAME_RE.fullmatch(key_name):
         logger.warning(
-            "Refusing to save API key with invalid name %r", key_name,
+            "Refusing to save API key with invalid name %r",
+            key_name,
         )
         return
     if "\n" in key_value or "\r" in key_value:
         logger.warning(
-            "Refusing to save API key %s with an embedded newline", key_name,
+            "Refusing to save API key %s with an embedded newline",
+            key_name,
         )
         return
     if "\x00" in key_value:
@@ -841,7 +876,8 @@ def save_api_key(key_name: str, key_value: str) -> None:
         # poisoned store.  The value arrives from an untrusted client
         # payload, so it is refused before anything is written.
         logger.warning(
-            "Refusing to save API key %s with an embedded NUL", key_name,
+            "Refusing to save API key %s with an embedded NUL",
+            key_name,
         )
         return
     locked_call(_config_lock, _save_api_key_locked, key_name, key_value, _get_user_shell())
@@ -887,7 +923,10 @@ own home's key store.
 
 
 def _update_rc_for_key(
-    rc: Path, shell: str, key_name: str, install_hook: bool,
+    rc: Path,
+    shell: str,
+    key_name: str,
+    install_hook: bool,
 ) -> None:
     """Scrub *key_name*'s RC assignment and (bash/zsh) ensure the hook.
 
@@ -921,9 +960,7 @@ def _update_rc_for_key(
     lines: list[str] = []
     if rc.exists():
         lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
-    kept = [
-        line for line in lines if not _rc_line_sets_key(line, shell, key_name)
-    ]
+    kept = [line for line in lines if not _rc_line_sets_key(line, shell, key_name)]
     changed = len(kept) != len(lines)
     if (
         install_hook
@@ -1234,8 +1271,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
     shell_path = _resolve_shell_path(shell)
     if shell_path is None:
         logger.warning(
-            "Cannot migrate RC API keys: %s binary not found on PATH "
-            "or fallback locations",
+            "Cannot migrate RC API keys: %s binary not found on PATH or fallback locations",
             shell,
         )
         return {}
@@ -1274,8 +1310,8 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
                 except OSError:
                     proc.kill()
                 logger.warning(
-                    "Shell RC took longer than %.0fs to source; "
-                    "skipping key migration from it", _MIGRATION_TIMEOUT_S,
+                    "Shell RC took longer than %.0fs to source; skipping key migration from it",
+                    _MIGRATION_TIMEOUT_S,
                 )
                 return {}
     except OSError:
@@ -1286,10 +1322,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
     for record in records:
         if "=" in record:
             k, _, v = record.partition("=")
-            if (
-                k in wanted and v
-                and "\n" not in v and "\r" not in v and "\x00" not in v
-            ):
+            if k in wanted and v and "\n" not in v and "\r" not in v and "\x00" not in v:
                 found[k] = v
     return found
 
@@ -1336,7 +1369,8 @@ def _migrate_legacy_rc_keys() -> None:
                 logger.warning("Failed to read %s", env_path, exc_info=True)
                 return
         present = {
-            m.group(1) for line in store_text.splitlines()
+            m.group(1)
+            for line in store_text.splitlines()
             if (m := _ENV_ASSIGNMENT_RE.match(line)) is not None
         }
         missing = set(API_KEY_ENV_VARS) - present
@@ -1353,9 +1387,8 @@ def _migrate_legacy_rc_keys() -> None:
             rc_texts.append(text)
             found.update(_scan_rc_text_for_keys(text, shell, missing))
         still_missing = missing - set(found)
-        sourcing = (
-            _RC_SOURCED_MARKER not in store_text
-            and any(name in text for text in rc_texts for name in still_missing)
+        sourcing = _RC_SOURCED_MARKER not in store_text and any(
+            name in text for text in rc_texts for name in still_missing
         )
         if sourcing:
             found.update(_source_rc_for_keys(still_missing))

@@ -4,7 +4,6 @@
 # add your name here
 """Console output formatting for KISS agents."""
 
-import sys
 import threading
 from typing import Any
 
@@ -15,6 +14,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from kiss.core.html_render import html_to_rich
+from kiss.core.locked import locked_call
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -63,12 +63,20 @@ class ConsolePrinter(Printer):
     is thread-local, the shared cursor position
     (``_mid_line``, a property of the one output stream) stays shared,
     and every public entry point holds ``_lock`` for its whole body so a
-    panel and its rules are emitted as one uninterrupted unit.
+    panel and its rules are emitted as one uninterrupted unit.  The lock
+    is taken through :func:`~kiss.core.locked.locked_call`: an agent
+    thread can receive the runner's injected ``KeyboardInterrupt`` right
+    after a ``with lock:``'s ``__enter__`` (CPython gh-74174), which
+    would leave ``_lock`` owned by a dead thread and hang every other
+    agent's next print.
+
+    Raw writes go to ``self._console.file``, which resolves to the
+    explicit *file* or, lazily, to the current ``sys.stdout`` (so a later
+    swap is honoured) and to Rich's null file when that is ``None``.
     """
 
     def __init__(self, file: Any = None) -> None:
         self._console = Console(highlight=False, file=file)
-        self._explicit_file: Any = file
         self._lock = threading.RLock()
         self._thread_state = _PrinterThreadState()
         self._mid_line = False
@@ -118,23 +126,14 @@ class ConsolePrinter(Printer):
     def _current_block_type(self, value: str) -> None:
         self._thread_state.block_type = value
 
-    @property
-    def _file(self) -> Any:
-        """Output stream — resolved lazily so a later ``sys.stdout`` swap is honoured.
-
-        Returns the explicit *file* passed to ``__init__`` when one
-        was provided, otherwise the current ``sys.stdout`` at access
-        time (matching the lazy resolution Rich's :class:`Console`
-        does for its own writes).
-        """
-        return self._explicit_file if self._explicit_file is not None else sys.stdout
-
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
-        with self._lock:
-            self._mid_line = False
-            self._bash_streamed = False
-            self._current_block_type = ""
+        locked_call(self._lock, self._reset_locked)
+
+    def _reset_locked(self) -> None:
+        self._mid_line = False
+        self._bash_streamed = False
+        self._current_block_type = ""
 
     def _apply_budget_offset(self, cost: Any) -> Any:
         """Add the accumulated budget offset to a ``$x.xxxx`` cost string.
@@ -178,8 +177,8 @@ class ConsolePrinter(Printer):
 
     def _flush_newline(self) -> None:
         if self._mid_line:
-            self._file.write("\n")
-            self._file.flush()
+            self._console.file.write("\n")
+            self._console.file.flush()
             self._mid_line = False
 
     def _stream_delta(self, text: str, **kwargs: Any) -> None:
@@ -202,8 +201,7 @@ class ConsolePrinter(Printer):
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
         """
-        with self._lock:
-            self._render(content, type, **kwargs)
+        locked_call(self._lock, self._render, content, type, **kwargs)
 
     def _render(self, content: Any, type: str, **kwargs: Any) -> None:
         """Render one event; the caller must hold ``_lock``."""
@@ -239,8 +237,8 @@ class ConsolePrinter(Printer):
             if not self._bash_streamed:
                 self._flush_newline()
                 self._console.rule("RESULT", style="green", align="center")
-            self._file.write(str(content))
-            self._file.flush()
+            self._console.file.write(str(content))
+            self._console.file.flush()
             self._mid_line = not str(content).endswith("\n")
             self._bash_streamed = True
             return
@@ -317,11 +315,13 @@ class ConsolePrinter(Printer):
         Args:
             token: The text token to display.
         """
-        with self._lock:
-            if self._current_block_type == "thinking":
-                self._stream_delta(token, style="dim cyan italic")
-            else:
-                self._stream_delta(token)
+        locked_call(self._lock, self._token_locked, token)
+
+    def _token_locked(self, token: str) -> None:
+        if self._current_block_type == "thinking":
+            self._stream_delta(token, style="dim cyan italic")
+        else:
+            self._stream_delta(token)
 
     def thinking_callback(self, is_start: bool) -> None:
         """Handle thinking-block boundary events.
@@ -332,15 +332,17 @@ class ConsolePrinter(Printer):
         Args:
             is_start: ``True`` when a thinking block starts, ``False`` when it ends.
         """
-        with self._lock:
-            self._flush_newline()
-            if is_start:
-                self._current_block_type = "thinking"
-                self._console.rule("Thinking", style="dim cyan", align="center")
-            else:
-                self._current_block_type = ""
-                self._console.rule(style="dim cyan")
-            self._console.print()
+        locked_call(self._lock, self._thinking_locked, is_start)
+
+    def _thinking_locked(self, is_start: bool) -> None:
+        self._flush_newline()
+        if is_start:
+            self._current_block_type = "thinking"
+            self._console.rule("Thinking", style="dim cyan", align="center")
+        else:
+            self._current_block_type = ""
+            self._console.rule(style="dim cyan")
+        self._console.print()
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -446,8 +448,8 @@ class ConsolePrinter(Printer):
                 )
             else:
                 for line in display.splitlines():
-                    self._file.write(line + "\n")
-                    self._file.flush()
+                    self._console.file.write(line + "\n")
+                    self._console.file.flush()
             self._console.rule(style=style)
         else:
             if is_error:

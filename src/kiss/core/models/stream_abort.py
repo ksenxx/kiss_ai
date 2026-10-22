@@ -24,7 +24,7 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from typing import Any
 
 from kiss.core import stop_signal
@@ -91,10 +91,7 @@ class StreamAbortWatchdog:
         self._stall_timeout = stall_timeout
         self._stop_event = stop_event
         self._last_event = time.monotonic()
-        # Reentrant for ``locked_call``: ``beat`` and ``stop`` run on the
-        # task thread, and ``stop`` is the stream's ``finally``, so a
-        # Stop injection leaking the lock through ``beat`` would hang
-        # the stopping task in its own cleanup.
+        # Guards the stop/abort handshake (``stop`` vs ``_claim_abort``).
         self._lock = threading.RLock()
         self._done = threading.Event()
         self.stalled = False
@@ -104,7 +101,14 @@ class StreamAbortWatchdog:
 
     def beat(self) -> None:
         """Record that an event arrived (resets the stall clock)."""
-        locked_call(self._lock, setattr, self, "_last_event", time.monotonic())
+        # Unlocked on purpose: this runs once per streamed token and a
+        # float store is atomic.  The single read of ``_last_event`` in
+        # ``_claim_abort`` is the stall decision's linearization point:
+        # a beat stored before that read defers the stall, and a beat
+        # stored after it changes nothing, because at the instant of the
+        # read the stream had already been silent for the full timeout,
+        # so the (irrevocable) stall verdict was correct when taken.
+        self._last_event = time.monotonic()
 
     def stop(self) -> None:
         """Disarm the watchdog and wait for its thread to finish.
@@ -356,7 +360,6 @@ def _close_stream(stream: Any) -> None:
 def stop_aware_events(
     stream: Any,
     stall_timeout: float | None = None,
-    on_abort: Callable[[], None] | None = None,
     name: str = "model-stream-abort-watchdog",
 ) -> Generator[Any]:
     """Yield *stream*'s events, aborting the request on a user stop.
@@ -373,9 +376,6 @@ def stop_aware_events(
         stream: The SDK stream object to iterate and, if needed, abort.
         stall_timeout: Seconds of event-level silence to tolerate, or
             ``None`` to leave the provider's own timeout policy alone.
-        on_abort: Called just before the stop is raised, so the caller
-            can close whatever the abandoned loop body left open (an
-            unterminated thinking block, typically).
         name: Watchdog thread name, for readable stack dumps.
 
     Yields:
@@ -419,8 +419,6 @@ def stop_aware_events(
     # accumulated and report it as a completion.
     error = _abort_error(watchdog, stop_event, stall_timeout)
     if error is not None:
-        if on_abort is not None:
-            on_abort()
         raise error from None
     if failure is not None:
         raise failure

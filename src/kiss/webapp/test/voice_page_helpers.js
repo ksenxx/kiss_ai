@@ -242,20 +242,11 @@ function fireWake(page) {
 }
 
 /**
- * Clear the awaitingFlush latch fireWake armed: the real worker answers
- * retrieveFinalResult with one result message that voice.js swallows.
- */
-function flushWake(page) {
-  lastRecognizer(page).handlers.result({result: {text: ''}});
-}
-
-/**
- * Say the wake word and replay the worker's flush: the round begins,
- * owned by the conversation on screen.
+ * Say the wake word: the round begins, owned by the conversation on
+ * screen.
  */
 function wake(page) {
   fireWake(page);
-  flushWake(page);
   assert.ok(
     micBtn(page.win).classList.contains('voice-triggered'),
     'the wake must have fired',
@@ -296,7 +287,6 @@ module.exports = {
   feed,
   lastProcessor,
   fireWake,
-  flushWake,
   wake,
   speak,
   fireTimer,

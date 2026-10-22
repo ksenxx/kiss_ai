@@ -41,6 +41,7 @@ def _model_info() -> dict[str, dict[str, object]]:
 _README_CATEGORY_LABELS = {
     "OpenAI": "OpenAI",
     "Anthropic": "Anthropic",
+    "Bedrock": "Amazon Bedrock (`bedrock/*`)",
     "Gemini": "Gemini",
     "Together": "Together AI",
     "Z.AI": "Z.AI",

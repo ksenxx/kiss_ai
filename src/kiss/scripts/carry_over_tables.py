@@ -16,14 +16,22 @@ menus offer what you actually use:
 * ``steer_inputs``   -- each message typed into a running task, and when
   last (autocomplete history).
 
+and two more that record what the user deleted (``deleted_tasks`` and
+``deleted_chats``, see ``sync_db.py``), which a sync moves but a
+replacement that skipped the sync -- the old database could not be
+merged from -- would lose.
+
 When a deploy has to replace a database wholesale instead of merging
-into it, those four tables would be replaced along with it -- the
-deployment's own tallies gone, in a step that is supposed to lose
-nothing.  This script puts them back from the file the replacement kept:
-rows only the old database had are inserted, and where both have the
-same row every numeric column is raised to the larger of the two values.
-Nothing is ever lowered or deleted, so running it twice changes nothing
-the second time.
+into it, those tables would be replaced along with it -- the
+deployment's own tallies and deletions gone, in a step that is supposed
+to lose nothing.  This script puts them back from the file the
+replacement kept: rows only the old database had are inserted, and
+where both have the same row every numeric column is raised to the
+larger of the two values.  The deletions carried over are then carried
+out on the new database, as a sync would: a task the old database had
+deleted does not come back in the new one.  Nothing else is ever
+lowered or deleted, so running it twice changes nothing the second
+time.
 
 Usage:
     python3 carry_over_tables.py OLD_DATABASE NEW_DATABASE
@@ -48,7 +56,17 @@ CARRIED_TABLES = {
     "file_usage": "path",
     "frequent_tasks": "task",
     "steer_inputs": "text",
+    "deleted_tasks": "id",
+    "deleted_chats": "chat_id",
 }
+# The deletion records, created in a new database from before they existed
+# (``persistence._init_tables`` declares them the same way).
+DELETED_DDL = (
+    'CREATE TABLE IF NOT EXISTS main."deleted_tasks"'
+    ' ("id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS main."deleted_chats"'
+    ' ("chat_id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)',
+)
 NUMERIC_TYPES = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
 
 
@@ -155,7 +173,60 @@ def carry_over_table(con: sqlite3.Connection, table: str, key: str) -> tuple[int
     return max(inserted, 0), max(raised, 0)
 
 
-def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
+def apply_deletions(con: sqlite3.Connection) -> int:
+    """Carry out the deletions a database records on the rows it holds.
+
+    A task in ``deleted_tasks`` loses its events and its row unless the
+    row is younger than the deletion (a reused id is a new task); a chat
+    in ``deleted_chats`` loses its ``chat_summaries`` row once none of
+    its tasks is left.  Nothing runs out of a database being replaced,
+    so no row is a running task's.
+
+    Args:
+        con: Connection to the new database, with its deletion records
+            carried over.
+
+    Returns:
+        The number of task rows deleted.
+    """
+    tables = {
+        str(row[0])
+        for row in con.execute("SELECT name FROM main.sqlite_master WHERE type = 'table'")
+    }
+    columns = {str(row[1]) for row in con.execute('PRAGMA main.table_info("task_history")')}
+    if "id" not in columns:
+        return 0
+    started = 'COALESCE(t."timestamp", 0)' if "timestamp" in columns else "0"
+    doomed = (
+        'SELECT t."id" FROM main."task_history" t JOIN main."deleted_tasks" d'
+        f' ON d."id" = t."id" WHERE d."deleted_ts" > {started}'
+    )
+    if "events" in tables:
+        con.execute(f'DELETE FROM main."events" WHERE "task_id" IN ({doomed})')
+    deleted = con.execute(f'DELETE FROM main."task_history" WHERE "id" IN ({doomed})').rowcount
+    if "chat_id" in columns and "chat_summaries" in tables:
+        summary_columns = {
+            str(row[1]) for row in con.execute('PRAGMA main.table_info("chat_summaries")')
+        }
+        # A chat started again after its deletion (a launch younger than
+        # the deletion) is a new chat with the old id and keeps its row.
+        launched = (
+            'COALESCE("chat_summaries"."last_launched", 0)'
+            if "last_launched" in summary_columns
+            else "0"
+        )
+        con.execute(
+            'DELETE FROM main."chat_summaries" WHERE EXISTS'
+            ' (SELECT 1 FROM main."deleted_chats" d'
+            ' WHERE d."chat_id" = "chat_summaries"."chat_id"'
+            f' AND d."deleted_ts" * 1000 > {launched})'
+            ' AND NOT EXISTS (SELECT 1 FROM main."task_history" t'
+            ' WHERE t."chat_id" = "chat_summaries"."chat_id")'
+        )
+    return max(deleted, 0)
+
+
+def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
     """Carry every unsynced table of one database into another.
 
     Args:
@@ -163,7 +234,8 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
         new_database: Database that replaced it; updated in place.
 
     Returns:
-        The total number of rows inserted and raised.  ``(0, 0)`` when
+        The total number of rows inserted and raised, and the number of
+        task rows the carried-over deletions removed.  ``(0, 0, 0)`` when
         there is no old database, or none that can be opened -- which is
         usually why it was replaced.
 
@@ -174,7 +246,7 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
     """
     old_path = os.path.expanduser(old_database)
     if not os.path.isfile(old_path):
-        return 0, 0
+        return 0, 0, 0
     # Reading a database that was left in WAL mode makes SQLite create the
     # shared-memory index beside it, even read-only.  It is machine-local and
     # regenerated on demand, and the file it appears beside is a backup nobody
@@ -184,7 +256,7 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
     # uri=True is what makes the read-only ATTACH below a URI rather than the
     # name of a file called "file:...": the flag belongs to the connection.
     con = sqlite3.connect(os.path.expanduser(new_database), timeout=60.0, uri=True)
-    inserted = raised = 0
+    inserted = raised = deleted = 0
     try:
         try:
             con.execute("ATTACH DATABASE ? AS old", (f"file:{old_path}?mode=ro",))
@@ -192,13 +264,16 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
             # Not a database, or not one this SQLite can read: that is why it
             # was replaced, and there is nothing in it to carry over.
             print(f"carry_over_tables: {old_database}: {exc}", file=sys.stderr)
-            return 0, 0
+            return 0, 0, 0
         try:
             with con:
+                for ddl in DELETED_DDL:
+                    con.execute(ddl)
                 for table, key in CARRIED_TABLES.items():
                     added, lifted = carry_over_table(con, table, key)
                     inserted += added
                     raised += lifted
+                deleted = apply_deletions(con)
         finally:
             con.execute("DETACH DATABASE old")
     finally:
@@ -206,32 +281,57 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int]:
         if not had_shm:
             with contextlib.suppress(OSError):
                 os.unlink(old_path + "-shm")
-    return inserted, raised
+    return inserted, raised, deleted
 
 
 def main(argv: list[str] | None = None) -> int:
     """Carry the unsynced tables over from the command line.
 
     Args:
-        argv: Arguments ``[old_database, new_database]``; defaults to
-            ``sys.argv[1:]``.
+        argv: Arguments ``[old_database, new_database]``, or
+            ``[--apply-deletions, database]`` to carry out the deletions
+            one database records on itself (prints how many task rows
+            went); defaults to ``sys.argv[1:]``.
 
     Returns:
         Process exit status: 0 on success, 1 when the carry-over failed,
         2 on a usage error.
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 2 and args[0] == "--apply-deletions":
+        # Only the last step, on a database that already holds its deletion
+        # records: a snapshot downloaded whole carries deletions the machine
+        # it came from had recorded but not carried out yet.
+        try:
+            con = sqlite3.connect(os.path.expanduser(args[1]), timeout=60.0)
+            try:
+                with con:
+                    for ddl in DELETED_DDL:
+                        con.execute(ddl)
+                    deleted = apply_deletions(con)
+            finally:
+                con.close()
+        except sqlite3.Error as exc:
+            print(f"carry_over_tables: {args[1]}: {exc}", file=sys.stderr)
+            return 1
+        print(deleted)
+        return 0
     if len(args) != 2:
         print(
-            "usage: carry_over_tables.py OLD_DATABASE NEW_DATABASE", file=sys.stderr
+            "usage: carry_over_tables.py OLD_DATABASE NEW_DATABASE"
+            " | --apply-deletions DATABASE",
+            file=sys.stderr,
         )
         return 2
     try:
-        inserted, raised = carry_over(args[0], args[1])
+        inserted, raised, deleted = carry_over(args[0], args[1])
     except sqlite3.Error as exc:
         print(f"carry_over_tables: {args[1]}: {exc}", file=sys.stderr)
         return 1
-    print(f"{inserted} row(s) restored, {raised} counter(s) raised")
+    print(
+        f"{inserted} row(s) restored, {raised} counter(s) raised"
+        + (f", {deleted} deleted task(s) removed" if deleted else "")
+    )
     return 0
 
 

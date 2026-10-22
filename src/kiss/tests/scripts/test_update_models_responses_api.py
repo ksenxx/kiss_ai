@@ -166,6 +166,7 @@ def test_main_test_existing_flips_the_flag_from_probe_verdict(
         "fetch_anthropic",
         "fetch_gemini",
         "fetch_openai",
+        "fetch_bedrock",
     ):
         monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
@@ -305,6 +306,7 @@ class TestInconclusiveVerdicts:
             "fetch_anthropic",
             "fetch_gemini",
             "fetch_openai",
+            "fetch_bedrock",
         ):
             monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
         monkeypatch.setattr(

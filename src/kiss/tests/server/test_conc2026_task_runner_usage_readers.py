@@ -96,9 +96,7 @@ def test_subtask_metrics_never_torn_under_banking_storm() -> None:
     def storm(worker: int) -> None:
         barrier.wait()
         for i in range(banks_per_thread):
-            agent._accumulate_usage(
-                _executor_with_spend(f"w{worker}-s{i}", 1.0, 100, 3)
-            )
+            agent._accumulate_usage(_executor_with_spend(f"w{worker}-s{i}", 1.0, 100, 3))
 
     bankers = [threading.Thread(target=storm, args=(w,)) for w in range(4)]
     for banker in bankers:
@@ -157,9 +155,7 @@ def test_subtask_metrics_reads_whole_snapshot_after_attribution() -> None:
     resume.set()
     reader.join(timeout=_WAIT)
     assert not reader.is_alive()
-    assert outcome["metrics"] == (300, 3.0, 3), (
-        f"torn terminal metrics: {outcome['metrics']}"
-    )
+    assert outcome["metrics"] == (300, 3.0, 3), f"torn terminal metrics: {outcome['metrics']}"
 
 
 def test_subtask_metrics_step_fallback_and_plain_agents() -> None:
@@ -229,12 +225,11 @@ def test_zero_usage_counters_then_attribution_lands_whole() -> None:
     assert agent.usage_snapshot() == (8.0, 800, 24)
 
 
-def test_zero_usage_counters_plain_agent_fallback() -> None:
-    """Plain agent-shaped objects are zeroed attribute by attribute."""
+def test_zero_usage_counters_plain_kiss_agent() -> None:
+    """A plain KISSAgent is zeroed through its own atomic ``reset_usage``."""
     plain = _executor_with_spend("plain", 2.0, 20, 5)
-    plain.total_steps = 4  # type: ignore[attr-defined]
+    plain.tool_calls_made = 3
     _zero_usage_counters(plain)
-    assert plain.budget_used == 0.0
-    assert plain.total_tokens_used == 0
-    assert plain.total_steps == 0  # type: ignore[attr-defined]
+    assert plain.usage_snapshot() == (0.0, 0, 0)
     assert plain.step_count == 0
+    assert plain.tool_calls_made == 0

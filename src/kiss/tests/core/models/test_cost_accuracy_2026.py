@@ -40,6 +40,7 @@ from kiss.core.models.model_info import (
     PACKAGE_MODEL_INFO_PATH,
     ModelInfo,
     _apply_cache_pricing,
+    _long_context_uplift,
     calculate_cost,
 )
 
@@ -627,27 +628,36 @@ class TestGptProLongContextTier:
             del MODEL_INFO[name]
 
 
-class TestGeminiProLatestLongContextTier:
-    """OpenRouter's rolling ``~google/gemini-pro-latest`` carries the same
-    200K override as gemini-3.1-pro (2x input, 2x cache read, 1.5x output
-    of the listed $2/$0.10/$10 since the 2026-10-15 catalog refresh,
-    https://openrouter.ai/api/v1/models), so the token-priced fallback must
-    apply it too."""
+class TestGeminiProLatestIsFlatPriced:
+    """OpenRouter's rolling ``~google/gemini-pro-latest`` tracks Gemini 4
+    Argon since the 2026-10-21 catalog refresh: $2/$0.10/$10 over the whole
+    1M window with no ``overrides`` in its listing
+    (https://openrouter.ai/api/v1/models), like direct ``gemini-4-argon``
+    (https://ai.google.dev/gemini-api/docs/pricing).  The token-priced
+    fallback must not reprice a long prompt at the old 2x/1.5x tier that
+    gemini-3.1-pro still carries."""
 
-    def test_uplift_above_200k(self):
-        name = "openrouter/~google/gemini-pro-latest"
+    @pytest.mark.parametrize("name", ["openrouter/~google/gemini-pro-latest", "gemini-4-argon"])
+    def test_no_uplift_above_200k(self, name: str):
         info = MODEL_INFO[name]
         listed = (info.input_price_per_1M, info.cache_read_price_per_1M, info.output_price_per_1M)
-        assert listed == (
+        assert listed == (2.0, 0.1, 10.0)
+        assert _long_context_uplift(name) is None
+        flat = (150_000 * 2.0 + 60_000 * 0.10 + 10_000 * 10.0) / 1e6
+        assert calculate_cost(name, 150_000, 10_000, 60_000) == pytest.approx(flat)
+
+    def test_gemini_3_1_pro_keeps_its_tier(self):
+        assert _long_context_uplift("openrouter/google/gemini-3.1-pro-preview") == (
+            200_000,
             2.0,
-            0.1,
-            10.0,
+            1.5,
         )
-        short = calculate_cost(name, 200_000, 10_000, 0)
-        assert short == pytest.approx((200_000 * 2.0 + 10_000 * 10.0) / 1e6)
-        long = calculate_cost(name, 150_000, 10_000, 60_000)
-        expected = (150_000 * 4.0 + 60_000 * 0.20 + 10_000 * 15.0) / 1e6
-        assert long == pytest.approx(expected)
+        assert _long_context_uplift("gemini-3.1-pro-preview") == (200_000, 2.0, 1.5)
+        assert _long_context_uplift("gemini-2.5-pro") == (200_000, 2.0, 1.5)
+
+    def test_per_image_priced_gemini_3_pro_image_has_no_tier(self):
+        assert _long_context_uplift("gemini-3-pro-image") is None
+        assert _long_context_uplift("openrouter/google/gemini-3-pro-image") is None
 
 
 class TestDirectOverrideWithReadPriceOnly:

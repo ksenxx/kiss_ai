@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trajectory analysis: "remove the VS Code extension" (Oct 14, 2026)</title>
+<style>
+  body { font-family: Georgia, "Times New Roman", serif; max-width: 1100px; margin: 2em auto; padding: 0 1.5em; color: #222; line-height: 1.5; }
+  h1 { font-size: 1.7em; border-bottom: 2px solid #1f4e79; padding-bottom: .3em; }
+  h2 { font-size: 1.3em; color: #1f4e79; margin-top: 2em; }
+  h3 { font-size: 1.05em; margin-top: 1.5em; }
+  table { border-collapse: collapse; width: 100%; font-size: .9em; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: .35em .6em; text-align: left; vertical-align: top; }
+  th { background: #eef3f8; }
+  td.num, th.num { text-align: right; }
+  figure { margin: 1.5em 0; }
+  figure img { width: 100%; border: 1px solid #ddd; }
+  figcaption { font-size: .85em; color: #555; margin-top: .4em; }
+  code { font-family: Menlo, Consolas, monospace; font-size: .9em; background: #f5f5f5; padding: 0 .2em; }
+  pre { background: #f5f5f5; padding: .8em; overflow-x: auto; font-size: .85em; }
+  .box { border-left: 4px solid #c0392b; background: #fdf3f1; padding: .6em 1em; margin: 1em 0; }
+  .note { border-left: 4px solid #2e86ab; background: #f0f7fb; padding: .6em 1em; margin: 1em 0; }
+  .small { font-size: .85em; color: #555; }
+</style>
+</head>
+<body>
+
+<h1>What 48 agents did in 4 hours 45 minutes: a trajectory analysis</h1>
+<p class="small">Source: the <a href="removing-vscode-extension.html">shared-chat export of the full trajectory</a> (23 MB HTML, title "can you completely get rid of …"). Parsed with a small stdlib HTML parser into 3,677 events across 48 task panels. Figures are in <code>reports/traj-analysis-figs/</code>; the parser and figure scripts are in <code>reports/traj-analysis-tools/</code> (run <code>parse_traj.py &lt;export.html&gt; tmp/traj/traj.json</code>, then <code>figures.py</code> and <code>interaction_graph.py</code> with <code>uv run --with matplotlib</code>).</p>
+
+<h2>1. The job and how it ended</h2>
+<p>On Oct 14, 2026 at 12:24 PM the user asked Sorcar, in one sentence, to remove the VS Code extension from the <code>kiss</code> repository and keep the remote web app working. The main agent (claude-fable-5-1, budget $5,000) finished at 5:09 PM. The merged result: <strong>1,297 files changed, +20,398 / −90,888 lines</strong>, 311/311 jsdom suites and 12,377 Python tests green, <code>uv run check --full</code> clean, then a second one-file commit for a bug the first merge had hidden.</p>
+<p>To get there the main agent spawned 11 worker sub-agents in three waves, those workers spawned 20 more, three read-only reviewers on a different model (gpt-6-astra) checked the work in between, and 16 tiny "what has this task done so far" agents polled progress every ten minutes or so. Counting everything, 48 agents made 3,312 tool calls and received about 7.0 million characters of tool output.</p>
+
+<figure>
+  <img src="traj-analysis-figs/interaction.svg" alt="Agent interaction graph">
+  <figcaption>Figure 1. Every agent in the trajectory and how they talked to each other. Time runs left to right. The main agent is the dark lane; each wave is a grey column. Solid blue edges are spawns (a written brief goes down, a result comes back the same way); dashed red edges are review findings that turned into later work; orange edges are framework events (the forced continuation and the post-merge discovery).</figcaption>
+</figure>
+
+<h2>2. Timeline</h2>
+<table>
+<tr><th>Local time</th><th>Who</th><th>What happened</th></tr>
+<tr><td>12:24–12:31</td><td>main</td><td>Pulled 6 memory pages about the extension, grepped for everything that referenced <code>src/kiss/agents/vscode</code>, read the installer and the HTML builder. First "thinking" step cost $0.27 (the memory recall).</td></tr>
+<tr><td>12:32–12:35</td><td>main ↔ user</td><td>Asked three layout questions (where to put the web files, whether to keep the Docker code-server image, what to do with the VSIX tooling). The user answered in under three minutes with ten words.</td></tr>
+<tr><td>12:35–12:50</td><td>main</td><td>Created the worktree, <code>git rm</code>'d the extension, <code>git mv</code>'d <code>media/</code> and the tests, ran a repo-wide <code>sed</code> for paths and <code>parents[N]</code> depths, deleted VSIX and Windows installer scripts.</td></tr>
+<tr><td>12:50–13:05</td><td>main</td><td>Baselines: jsdom 294/305, Python 201 failures (mostly path depth). Discovered that a chained <code>sed</code> had collapsed every <code>parents[5]</code>, <code>[4]</code>, <code>[3]</code> to <code>[2]</code>; restored those files from HEAD and redid the rewrite in one pass. Wrote briefs A–D and a common brief.</td></tr>
+<tr><td>13:05–14:01</td><td>wave 1</td><td>A (move shim and HTML into real files), B (web app <code>main.js</code>/<code>voice.js</code> cleanup; it spawned 7 test-fix groups), C (daemon: catalog, dispatch, local tabs, talk fan-out, speech module), D (installer, release, Docker; it spawned 2 Docker probes and needed a continuation). Main sat in <code>run_parallel</code> for 55 minutes.</td></tr>
+<tr><td>14:01–14:26</td><td>main</td><td>Re-ran everything, fixed cross-wave breakage (shared worktree), wrote briefs E and F.</td></tr>
+<tr><td>14:26–15:16</td><td>wave 2</td><td>E swept 135 Python test files (4 sub-sweeps); F fixed stale jsdom suites (6 groups).</td></tr>
+<tr><td>15:16–15:24</td><td>review</td><td>Three gpt-6-astra reviewers, each 28–29 calls in 5–6 minutes, found six demonstrated problems (section 4).</td></tr>
+<tr><td>15:24–15:28</td><td>main</td><td>Fixed four findings directly, wrote briefs G and H.</td></tr>
+<tr><td>15:28–16:34</td><td>wave 3</td><td>G restored the voice-round semantics with two reproducing tests (7 min). H restored 23 deleted test files (63 min) and spawned a verifier that mutation-tested the ports.</td></tr>
+<tr><td>16:34–16:55</td><td>main</td><td>Full verification: 24 parallel pytest chunks, all jsdom suites, lint. Started gathering numbers for the final report.</td></tr>
+<tr><td>16:55–16:57</td><td>framework</td><td>Context limit reached. A summarizer read <code>tmp/trajectory_0.json</code> and wrote a handoff; a fresh session resumed.</td></tr>
+<tr><td>16:57–17:09</td><td>main (continued)</td><td>Merged; re-ran the suites on the main checkout; found <code>bgTabStreamParity.test.js</code> failing (310/311); fixed and merged again; wrote memory pages.</td></tr>
+</table>
+
+<figure>
+  <img src="traj-analysis-figs/gantt.svg" alt="Gantt chart of all agents">
+  <figcaption>Figure 2. The same agents on a clock. Bar length is wall-clock time between an agent's first and last tool call; grey ticks are the status checks. Within every wave the main agent waited for the slowest child: 54 minutes for B in wave 1, 48 for E in wave 2, 63 for H in wave 3 while G had finished after 7.</figcaption>
+</figure>
+
+<h2>3. The numbers</h2>
+<table>
+<tr><th>Measure</th><th class="num">Value</th><th>Note</th></tr>
+<tr><td>Wall clock, main task</td><td class="num">285 min</td><td>12:24 PM → 5:09 PM</td></tr>
+<tr><td>Worker agent-minutes (all workers, all depths)</td><td class="num">735 min</td><td>2.6× the wall clock; depth-1 workers 324 min, depth-2 126 min, main 285 min</td></tr>
+<tr><td>Main agent time spent waiting</td><td class="num">≈244 min (86%)</td><td>178 min in <code>run_parallel</code>, 63 min in <code>bash_job</code> waits for test suites, 3 min waiting for the user</td></tr>
+<tr><td>Tool calls, all agents</td><td class="num">3,312</td><td>Bash 1,991 · Read 466 · Edit 392 · summary 192 · Write 66 · run_commands_parallel 59 · finish 51 · memory_* 43 · bash_job 19 · run_parallel 10</td></tr>
+<tr><td>Bash calls containing grep/rg</td><td class="num">1,343</td><td>two of every three shell commands were searches</td></tr>
+<tr><td>Python heredocs inside Bash</td><td class="num">339</td><td>285 of them rewrite a file; 123 apply more than two replacements at once</td></tr>
+<tr><td>Tool output received</td><td class="num">7.0 M chars</td><td>D 766k, H 676k, C 591k, main 426k, reviewers R1 410k, R2 422k, R3 118k</td></tr>
+<tr><td>Main agent tokens (cumulative, at 4:49 PM)</td><td class="num">37.7 M</td><td>199 steps, so ≈189k tokens per step; almost all of it is re-read context</td></tr>
+<tr><td>Sub-agent C tokens (at 1:47 PM)</td><td class="num">52.1 M</td><td>306 steps in 41 minutes, context 313k when sampled</td></tr>
+<tr><td>Main agent's own spend</td><td class="num">$30.49 + ≈$2</td><td>before and after the continuation; does not include children</td></tr>
+<tr><td>Visible per-call costs</td><td class="num">$30.73</td><td>only the 313 steps that produced prose carry a price in the export; the real total is far higher</td></tr>
+<tr><td>Budget caps given to direct children</td><td class="num">$3,500</td><td>4 × $350 (wave 1) + 7 × $300 (waves 2–3 and the reviewers), plus $1 for each status check; grandchildren drew on their parents' caps; actual spend per child is not in the export</td></tr>
+<tr><td>Files changed in the merge</td><td class="num">1,297</td><td>+20,398 / −90,888 lines</td></tr>
+<tr><td>Test outcome</td><td class="num">311/311 · 12,377/0</td><td>jsdom suites · Python passed/failed (66 skipped)</td></tr>
+</table>
+
+<p>A rough estimate of the total bill: three agents whose spend was sampled (main $30.5, C $28.2 at 1:47, B $17.4 at 1:53) ran at $0.09–0.15 per step. Applied to all 3,312 steps that gives something in the $300–450 range. Treat that as an order of magnitude, not a figure.</p>
+
+<figure>
+  <img src="traj-analysis-figs/spend.svg" alt="Main agent context and spend over time">
+  <figcaption>Figure 3. The main agent's context window and spend, reconstructed from the status-check agents' <code>task_context</code> snapshots. The flat segments are the waves: while children work, the parent's context and bill do not move. The jump from $9.47 to $21.70 across wave 1 is the cost of reading four children's results plus the cross-wave fixing.</figcaption>
+</figure>
+
+<figure>
+  <img src="traj-analysis-figs/tools.svg" alt="Tool call counts">
+  <figcaption>Figure 4. Tool mix. Three of every five calls were Bash; the Read and Edit tools together make up only a quarter.</figcaption>
+</figure>
+
+<h2>4. What went wrong, and who caught it</h2>
+<table>
+<tr><th>Problem</th><th>Introduced by</th><th>Caught by</th><th>Fixed by</th></tr>
+<tr><td>Chained <code>sed</code> rewrote <code>parents[5]</code>→<code>[4]</code>→<code>[3]</code>→<code>[2]</code> in one cascade, so every test looked for the repo root two levels too high.</td><td>main, 12:4x</td><td>main, from the 201-failure Python baseline</td><td>main, restoring the files from HEAD and redoing the rewrite in a single pass</td></tr>
+<tr><td>Native talk playback was removed as "extension-only", which also silenced headless Python CLI clients.</td><td>C</td><td>R1 (reproduced HEAD vs staged fan-out with a real headless client)</td><td>main: play natively for interested local peers</td></tr>
+<tr><td><code>*.tsbuildinfo</code> dropped from the worktree rescue exclusion, so generic TypeScript caches would be "rescued" into user repos.</td><td>C</td><td>R1</td><td>main</td></tr>
+<tr><td>Voice-round bookkeeping "simplified": cancelled credit consumed before live rounds, and a new <code>forgetSpeechRounds()</code> let a delayed reply from chat A be submitted into chat B.</td><td>B</td><td>R2 (two before/after harness runs)</td><td>G restored HEAD's order, added REV-1/REV-2 reproductions, and wrote down the remaining trade-off honestly</td></tr>
+<tr><td>Repo-wide path rename also rewrote a <em>historical</em> path in the bootstrap's legacy-VSIX recovery, breaking upgrades of old clones.</td><td>main (sed)</td><td>R3</td><td>main</td></tr>
+<tr><td><code>sorcar-docker</code> reused any image tagged <code>kiss-sorcar</code>, including the old code-server image, with the new port/volume mapping.</td><td>D</td><td>R3</td><td>main (generation-tagged image)</td></tr>
+<tr><td>About 20 test suites deleted although their subjects (attachments, report auto-open, toasts, two-client sync…) still exist.</td><td>main / E / F</td><td>R3, by loading deleted tests in memory against the new tree</td><td>H restored 16 jsdom + 7 Python files</td></tr>
+<tr><td>Two of the restored tests could not tell the real code from a mutant (vacuous assertions).</td><td>H</td><td>H.verify, by editing <code>main.js</code> line 6366 and re-running</td><td>H</td></tr>
+<tr><td><code>bgTabStreamParity.test.js</code> climbs five directories to find the repo; inside the worktree that lands on the parent checkout, so it passed by accident.</td><td>pre-existing + the move</td><td>main's continuation, running the suite on the real checkout after merging</td><td>main, second merge</td></tr>
+</table>
+
+<h2>5. Things you would not spot by reading the chat</h2>
+<p>These came out of the parsed data rather than the prose. Each one has the numbers behind it.</p>
+
+<h3>5.1 Rule-following decays as the context fills up</h3>
+<p>Every agent is told to call <code>summary</code> on every tenth step; the framework refuses the next call if it does not. 48 of the 49 tool errors in the whole trajectory are exactly that refusal (the 49th was a bad <code>max_line</code> argument to Read). Those are 48 wasted steps, and they are not spread evenly:</p>
+<ul>
+  <li>Sub-agent C missed 15 of its 32 checkpoints; 14 of the 15 misses came from step 120 onward.</li>
+  <li>Sub-agent H missed 10 of 36; 9 of them in the last third of its run.</li>
+  <li>The main agent missed 1 of its first 9 checkpoints and 4 of its last 9.</li>
+</ul>
+<p>Nothing about the rule changed; the only thing that changed was how much context sat between the instruction and the current step. The depth-2 sub-agents never called <code>summary</code> and were never refused, so they were evidently not given the tool at all.</p>
+<figure>
+  <img src="traj-analysis-figs/lapses.svg" alt="Where agents forgot the summary rule">
+  <figcaption>Figure 5. Each row is one long-running agent; grey ticks are the every-10-steps checkpoints, red dots are the ones the agent missed and had a call refused for.</figcaption>
+</figure>
+
+<h3>5.2 The agents rebuilt the Edit tool inside Bash</h3>
+<p>The framework's <code>Edit</code> tool requires a prior <code>Read</code> and does one replacement per step. The agents found a cheaper route: 339 Bash calls are Python heredocs, 285 of them rewrite a file, and 123 apply three or more replacements in one go. The idiom is always the same:</p>
+<pre>def rep(old, new, count=1):
+    global s
+    assert s.count(old) == count, (s.count(old), old[:60])
+    s = s.replace(old, new)</pre>
+<p>That is the Edit tool's uniqueness guarantee, re-implemented so that one step can carry ten edits and skip the read-before-edit gate. Sub-agent C made 81 such heredoc calls (80 of them writing files, many carrying several replacements) against 14 <code>Edit</code> calls and 13 <code>Read</code>s. The pressure that produced this is visible in the numbers of section 5.4: every step costs more as the context grows, so batching is rational. The short-lived sweep agents under E (one of them: 76 Reads, 79 Edits, no heredocs) followed the convention; the long-lived ones drifted away from it.</p>
+
+<h3>5.3 A false fact entered the system through a UI label</h3>
+<p>The status-check agents receive the chat history. In it, while the main task was still running, its result line read "Agent Failed Abruptly". Sub-agent D, after its own continuation, wrote into its handoff summary that "a previous attempt at the parent task had failed abruptly". Nothing had failed; the label is what the history shows for a task that has no result yet. The sentence then went into D's final report, which the main agent read. It did no harm here, but it is a clean example of a display artefact being laundered into an agent's stated belief.</p>
+
+<h3>5.4 Late steps cost twice what early steps cost, and the parent is idle for them</h3>
+<p>The only per-call prices in the export are on steps that produced prose. Comparing the first third of each run with the last third: main $0.09 → $0.19 per step, C $0.07 → $0.19, D $0.13 → $0.15. The main agent averaged 189k tokens per step and 37.7M tokens over 199 steps, nearly all of it re-read context. At the same time it was blocked for roughly 244 of its 285 minutes (178 in <code>run_parallel</code>, 63 waiting for test suites, 3 for the user). The expensive part of the agent was the part doing the least.</p>
+
+<h3>5.5 Running out of context found a bug that four hours of testing had missed</h3>
+<p>At 4:55:03 PM the main agent ran a shell command it described as "Gather numbers for the report". Thirteen seconds later a different voice appears in the same panel: "I'll start by reading the beginning of the trajectory file to understand the task". That is the framework's continuation summarizer, which read <code>tmp/trajectory_0.json</code> in chunks and wrote the handoff that the next session started from. The fresh session merged, then re-ran the suites on the main checkout instead of the worktree, and <code>bgTabStreamParity.test.js</code> failed. The test finds the repository root by climbing five directories; from <code>…/.kiss-worktrees/kiss_wt-…/src/kiss/webapp/test/</code> that lands on the parent checkout, so inside the worktree it had been testing the wrong tree and passing. Every verification for four and a half hours happened inside the worktree. An accident of context exhaustion produced the one check that was outside it.</p>
+
+<h3>5.6 The reviewers proved equivalence instead of reading diffs</h3>
+<p>The three gpt-6-astra reviewers used 28–29 tool calls each and took five to six minutes, yet R1 and R2 each pulled over 400k characters of tool output (R3 118k), because they wrote scripts rather than reading. R2 parsed the deleted inline <code>_WS_SHIM_JS</code> string and the new <code>transport.js</code> into normalized JavaScript ASTs and reported them identical "after accounting for declaration kinds, callback syntax, catch-variable naming and acquireVsCodeApi → acquireTransport". R1 did the same for 56 definitions in <code>speech.py</code> against the deleted <code>voice_wake.py</code> (three docstrings differ, nothing else). R3 loaded deleted tests in memory against the new tree with one identifier swapped and showed 23 of them still pass, which is how "deleted test with a living subject" became a demonstrated finding instead of an opinion. Each reviewer also ran HEAD and staged code side by side on the same input and printed both outputs, so every finding came with a two-line reproduction.</p>
+
+<h3>5.7 Mutation testing, done by hand, on freshly written tests</h3>
+<p>H's verifier did not run the 23 restored test files and stop at "pass". It edited <code>main.js</code> line 6366 to ignore the polled tab's running flag, re-ran <code>taskUpdatePolling.test.js</code>, and watched it still pass; then deleted the <code>promptOpened</code> message from <code>openFileMarkdownPreview.test.js</code> and watched that still pass. Both tests were restored, green, and vacuous. It then confirmed with <code>cmp</code> that <code>main.js</code> was byte-identical afterwards.</p>
+
+<h3>5.8 A global rename cannot tell "the path now" from "the path back then"</h3>
+<p>The repo-wide <code>sed</code> that moved <code>src/kiss/agents/vscode/…</code> to <code>src/kiss/webapp/…</code> also rewrote the string inside the bootstrap script's recovery code for <em>old</em> clones, where it names the VSIX path as it existed in old releases. The matching test fixture was rewritten the same way, so the tests passed while both were wrong. Only R3, which checked the staged script against <code>git show HEAD:scripts/install.sh</code> and re-ran the test with the historical path restored, saw it.</p>
+
+<h3>5.9 One file, three agents, opposite intentions</h3>
+<p><code>voice.js</code> was "simplified" by B (which introduced the P1/P2 regressions), diagnosed by R2, and restored by G, in one afternoon. B and G each wrote a memory page titled "voice.js after the VS Code extension removal"; G's replaced B's. The lesson the main agent recorded afterwards, in its own memory page: "Sub-agents given 'simplify X' will also 'fix' behaviour they consider buggy (here: voice round accounting). Tell them explicitly" which behaviours must not change.</p>
+
+<h3>5.10 The export itself has quirks worth knowing</h3>
+<ul>
+  <li>The <code>run_parallel</code> panels report 0 ms, and the wait is attributed to the previous tool call, so a 1 KB brief appears to have taken 55 minutes to write. The wave durations in this report come from that artefact.</li>
+  <li><code>run_parallel</code> results are cut at 3,021 characters, so the main agent's view of each wave is not recoverable from the export.</li>
+  <li>Per-call cost appears only on the 313 "thinking" panels (9.5% of steps). The agents act silently nine times out of ten.</li>
+  <li>The 16 status-check agents are the only time series of the main agent's state. Five of them targeted sub-agents (two for C, three for B), so someone was watching individual children, not just the parent.</li>
+</ul>
+
+<h2>6. What this suggests changing</h2>
+<ul>
+  <li><strong>Balance waves or let the parent proceed.</strong> Wave 3 held the parent 56 minutes after G finished. Splitting H's 23 files across two agents, or returning G's result early, would have cut the wall clock by close to an hour.</li>
+  <li><strong>Make the 10-step summary a framework action, not an instruction.</strong> 48 refused calls across 48 agents is 1.5% of all steps, and it gets worse exactly when steps are most expensive.</li>
+  <li><strong>Run the final suites from the main checkout before merging</strong>, or give tests a root-finding helper that does not climb a fixed number of directories. The worktree hid a failing test for the whole task.</li>
+  <li><strong>Either accept heredoc editing or make Edit batchable.</strong> The agents already behave as if Edit were multi-replacement; the gate it was meant to enforce (read before edit) is being bypassed in 285 calls.</li>
+  <li><strong>Do not show "Agent Failed Abruptly" for a task that is merely unfinished</strong> in histories that other agents read.</li>
+  <li><strong>Record child spend in the export.</strong> A $5,000-budget task whose true cost cannot be reconstructed from its own trace is a gap.</li>
+</ul>
+
+<h2>7. Method and limits</h2>
+<p>The export has no machine-readable form, so I wrote a 200-line stdlib HTML parser (<code>reports/traj-analysis-tools/parse_traj.py</code>) that turns each task panel into events: tool name, arguments, command text, result text, error flag, elapsed, timestamps, and the "thinking" panels with their prices. Timestamps are the export's local time (UTC−7). Durations are first-to-last tool call, so an agent's final model step is not counted. Costs are a floor: only steps with prose carry a price, and the <code>task_context</code> snapshots exclude children. Nothing here was taken from the agents' own claims without checking it against the event data, except the test counts and merge statistics, which come from command output quoted in the final summaries.</p>
+</body>
+</html>

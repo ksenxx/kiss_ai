@@ -382,7 +382,14 @@
     // that is busy or stalled is not hammered every few seconds by
     // every open browser, and the jitter keeps the browsers that one
     // outage disconnected together from reconnecting in one burst.
-    const base = Math.min(30000, 500 * Math.pow(2, _reconnectAttempt));
+    // The standalone app's popup window (kiss-app on macOS) is capped
+    // at 5-10 s instead: one window on loopback is no load, and the
+    // daemon takes the popup for closed while it is not connected
+    // (a start handed to the running browser opens a second window
+    // then; a windowless browser is quit), so it must be back soon
+    // after a daemon restart.
+    const cap = window.name === 'kiss-app-window' ? 5000 : 30000;
+    const base = Math.min(cap, 500 * Math.pow(2, _reconnectAttempt));
     const delay = base + Math.floor(Math.random() * base);
     _reconnectAttempt++;
     _reconnectTimer = setTimeout(() => {

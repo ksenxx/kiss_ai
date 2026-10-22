@@ -41,7 +41,11 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.anthropic_model import cache_creation_tokens
+from kiss.core.models.anthropic_model import (
+    PRICE_MODIFIER_FIELDS,
+    cache_creation_tokens,
+    price_modifier_factor,
+)
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
@@ -51,6 +55,7 @@ from kiss.core.models.model import (
     _iter_tool_calls_lists,
     environ_without,
 )
+from kiss.core.processes import run_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -141,16 +146,8 @@ def claude_auth_status(timeout: float = 20.0) -> dict[str, Any]:
         status["error"] = "Claude Code CLI ('claude') not found on PATH."
         return status
     status["installed"] = True
-    env = claude_subscription_env()
     try:
-        proc = subprocess.run(
-            [path, "auth", "status"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            stdin=subprocess.DEVNULL,
-        )
+        proc = run_process_group([path, "auth", "status"], timeout, env=claude_subscription_env())
     except (OSError, subprocess.SubprocessError) as e:
         status["error"] = f"`claude auth status` failed: {e}"
         return status
@@ -309,8 +306,14 @@ def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> No
 
     Numeric fields are summed when *add* is true and replaced otherwise;
     the nested ``cache_creation`` dict is merged field by field the same
-    way; non-numeric fields are ignored and fields *usage* omits keep
-    their value.  A finished message is summed into the running total.
+    way; the price modifiers the API reports (``speed``,
+    ``inference_geo``: :data:`~kiss.core.models.anthropic_model.PRICE_MODIFIER_FIELDS`)
+    are kept; should the messages of one total disagree (the CLI sends
+    every request of a turn with the same ``speed`` and the workspace's
+    inference geo, so in practice they do not) the priced value
+    (``"fast"``, ``"us"``) wins, so the one estimate made from the summed
+    counters never under-bills.  Other non-numeric fields are ignored and
+    fields *usage* omits keep their value.  A finished message is summed into the running total.
     A ``message_delta`` snapshot replaces: its counters are *cumulative*
     for the message (https://platform.claude.com/docs/en/build-with-claude/streaming
     #event-types), so each supersedes the previous one while fields a
@@ -327,6 +330,9 @@ def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> No
             target[key] = target.get(key, 0) + value if add else value
         elif key == "cache_creation" and isinstance(value, dict):
             _merge_usage(target.setdefault("cache_creation", {}), value, add)
+        elif key in PRICE_MODIFIER_FIELDS and isinstance(value, str):
+            if not add or key not in target or value == PRICE_MODIFIER_FIELDS[key]:
+                target[key] = value
 
 
 class ClaudeCodeModel(CLITextModel):
@@ -737,8 +743,12 @@ class ClaudeCodeModel(CLITextModel):
         ``api_billed`` (an API key paid, decided at launch), ``model``
         (the API model id the stream named, if any) and ``requests``
         (the API requests the CLI made in the turn, counted from
-        ``message_start``; at least 1).  A later settings change or
-        turn cannot reprice a response that carries these.
+        ``message_start``; at least 1).  The price modifiers the API
+        reported per message (``speed``, ``inference_geo``, folded into
+        the per-message total by :func:`_merge_usage`) are copied into a
+        ``usage`` that lacks them: the CLI's terminal ``result`` sums only
+        the counters.  A later settings change or turn cannot reprice a
+        response that carries these.
 
         Args:
             response: A response dict with the turn's ``usage``.
@@ -750,6 +760,12 @@ class ClaudeCodeModel(CLITextModel):
         if self._api_model:
             response["model"] = self._api_model
         response["requests"] = max(1, self._request_count)
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            self._close_open_message()
+            for field in PRICE_MODIFIER_FIELDS:
+                if field not in usage and field in self._partial_usage:
+                    usage[field] = self._partial_usage[field]
         return response
 
     def _note_api_model(self, event: dict[str, Any]) -> None:
@@ -791,7 +807,10 @@ class ClaudeCodeModel(CLITextModel):
         through :func:`calculate_cost` under the API model id the stream
         reported (falling back to the name after ``cc/``); the
         per-request long-context tier applies only to a single-request
-        turn (see ``single_request``).  A model id the catalog does not
+        turn (see ``single_request``), and the fast-mode and US-only
+        inference modifiers the usage reports scale the whole turn
+        (:func:`~kiss.core.models.anthropic_model.price_modifier_factor`).
+        A model id the catalog does not
         know (new snapshot) is billed at the CLI's own ``total_cost_usd``
         estimate when the result carries one; otherwise
         :func:`calculate_cost` raises.  So is a turn whose ``modelUsage``
@@ -824,7 +843,8 @@ class ClaudeCodeModel(CLITextModel):
         several = isinstance(model_usage, dict) and len(model_usage) > 1
         if (several or not is_known_model(model)) and isinstance(reported, int | float):
             return float(reported)
-        return calculate_cost(model, *counts, single_request=response.get("requests", 1) <= 1)
+        cost = calculate_cost(model, *counts, single_request=response.get("requests", 1) <= 1)
+        return cost * price_modifier_factor(response.get("usage") or {}, model)
 
     def _tool_call_text(self, content: str) -> str:
         """Parse the turn's thinking for ``tool_calls`` as well as its text.

@@ -14,9 +14,9 @@ highlighted style, list items get bullets, and links show their targets.
 
 from __future__ import annotations
 
-from html.parser import HTMLParser
-
 from rich.text import Text
+
+from kiss.core.html_to_markdown import SkippingHTMLParser
 
 _BLOCK_TAGS = {
     "p",
@@ -59,21 +59,15 @@ _STYLE_TAGS = {
     "summary": "bold",
 }
 
-# Only container tags: void elements (meta, link) get no end-tag event, so
-# counting them here would leave the parser skipping for the rest of the
-# document.  A <head> parent already hides them.
-_SKIP_TAGS = {"script", "style", "head", "title"}
 
-
-class _HtmlToRichParser(HTMLParser):
+class _HtmlToRichParser(SkippingHTMLParser):
     """Stream HTML into a styled :class:`rich.text.Text`."""
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.text = Text()
         self._style_stack: list[str] = []
         self._list_stack: list[int | None] = []
-        self._skip_depth = 0
         self._in_pre = 0
 
     def _newline(self, count: int = 1) -> None:
@@ -88,8 +82,7 @@ class _HtmlToRichParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Open styles (composed with enclosing styles), start blocks, and
         emit list bullets / numbering."""
-        if tag in _SKIP_TAGS:
-            self._skip_depth += 1
+        if self.skipped(tag, False):
             return
         if tag == "br":
             self.text.append("\n")
@@ -128,8 +121,7 @@ class _HtmlToRichParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         """Close styles and terminate blocks with newlines."""
-        if tag in _SKIP_TAGS:
-            self._skip_depth = max(self._skip_depth - 1, 0)
+        if self.skipped(tag, True):
             return
         if tag in _STYLE_TAGS and self._style_stack:
             self._style_stack.pop()
@@ -144,14 +136,14 @@ class _HtmlToRichParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         """Append text content, collapsing whitespace outside ``<pre>``."""
-        if self._skip_depth:
+        if self.skipping:
             return
         if not self._in_pre:
             if not data.strip():
                 return
             data = " ".join(data.split())
             plain = self.text.plain
-            if plain and not plain.endswith(("\n", " ", "• ", ". ", "] ")):
+            if plain and not plain.endswith(("\n", " ")):
                 data = " " + data
         style = self._style_stack[-1] if self._style_stack else None
         self.text.append(data, style=style)

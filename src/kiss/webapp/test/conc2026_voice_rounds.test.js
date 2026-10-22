@@ -66,7 +66,6 @@ const {
   feed,
   lastProcessor,
   fireWake,
-  flushWake,
   fireTimer,
 } = require('./voice_page_helpers');
 
@@ -181,7 +180,6 @@ async function main() {
       // Round B begins on tab B while A transcribes, then the user says
       // nothing for 5 s: the no-audio branch must retire round B itself.
       clickTab(win, second);
-      flushWake(page);
       fireWake(page);
       feed(proc, false, 20); // 5.12 s of silence, no speech ever started
       assert.strictEqual(

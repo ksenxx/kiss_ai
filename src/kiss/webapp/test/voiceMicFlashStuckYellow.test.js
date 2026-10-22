@@ -161,7 +161,6 @@ function speakRound(page) {
   page.clock.now += 10000; // clear the 2 s wake cooldown
   const rec = page.state.recognizers[page.state.recognizers.length - 1];
   rec.handlers.result({result: {text: 'abracadabra'}});
-  rec.handlers.result({result: {text: ''}}); // the retrieveFinalResult flush
   const proc = page.state.processors[page.state.processors.length - 1];
   for (let i = 0; i < 2; i++) proc.onaudioprocess(audioBlock(true));
   for (let i = 0; i < 8; i++) proc.onaudioprocess(audioBlock(false));

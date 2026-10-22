@@ -27,10 +27,6 @@
     return 0.8 * (1 - s / 100);
   }
 
-  function sensitivityWakePauseMs(s) {
-    return Math.max(100, 400 * (1 - s / 100));
-  }
-
   function storedSensitivity() {
     try {
       const v = parseInt(localStorage.getItem(SENSITIVITY_KEY), 10);
@@ -907,53 +903,32 @@
         if (typeof recognizer.setWords === 'function') {
           recognizer.setWords(true);
         }
-        let quietMs = 0;
-        let awaitingFlush = false;
-        function fireWake() {
-          if (!triggerWake()) return;
-          quietMs = 0;
-          beginCapture();
-          if (
-            recognizer &&
-            typeof recognizer.retrieveFinalResult === 'function'
-          ) {
-            awaitingFlush = true;
-            try {
-              recognizer.retrieveFinalResult();
-            } catch (_e) {
-              awaitingFlush = false;
-            }
-          }
-        }
+        // Only a FINAL result can wake.  Partial hypotheses are not
+        // trustworthy with a two-word grammar: Kaldi must label every
+        // sound as either "abracadabra" or [unk], and mid-utterance it
+        // routinely guesses "[unk] abracadabra" for ordinary speech
+        // ("abstract algebra", "the data is in the dashboard", "sorry,
+        // I could not hear you") before the final decode settles on
+        // plain "[unk]".  Waking on such a partial after a 100 ms
+        // pause, as this page once did, made the wake fire at random
+        // during conversation.  The final result lands about a second
+        // after the word ends, with a confidence per word.
         recognizer.on('result', message => {
           if (message && message.result) {
             debugLog('result', message.result.text);
-            if (awaitingFlush) {
-              awaitingFlush = false;
-              return;
-            }
             if (capture) return;
             if (
               (matchesWake(message.result.text) ||
                 wakeWithLeadingNoise(message.result.result)) &&
               wordsConfident(message.result.result)
             ) {
-              fireWake();
+              if (triggerWake()) beginCapture();
             }
           }
         });
         recognizer.on('partialresult', message => {
-          if (message && message.result) {
-            if (message.result.partial) {
-              debugLog('partial', message.result.partial);
-            }
-            if (capture) return;
-            if (
-              quietMs >= sensitivityWakePauseMs(sensitivity) &&
-              matchesWake(message.result.partial)
-            ) {
-              fireWake();
-            }
+          if (message && message.result && message.result.partial) {
+            debugLog('partial', message.result.partial);
           }
         });
         if (debugEnabled()) {
@@ -982,7 +957,6 @@
           const rms = Math.sqrt(sumSquares / samples.length);
           const blockMs =
             (samples.length / event.inputBuffer.sampleRate) * 1000;
-          quietMs = rms >= SPEECH_RMS_THRESHOLD ? 0 : quietMs + blockMs;
           if (debugEnabled()) {
             const now = Date.now();
             if (now - lastRmsAt > 2000) {

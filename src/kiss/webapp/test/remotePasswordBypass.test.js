@@ -2679,6 +2679,54 @@ async function run() {
     }
     bare.window.close();
   }
+  {
+    // The popup's reconnect backoff is capped at 5-10 s (the daemon
+    // takes it for closed while it is not connected); other pages back
+    // off to 30-60 s.  Every socket dies at once, so each close
+    // schedules the next, longer, attempt.
+    function reconnectDelays(name) {
+      const dom = buildDom();
+      const {window} = dom;
+      const sockets = [];
+      installFakeWebSocket(window, sockets, {connecting: true});
+      window.name = name;
+      const timers = [];
+      window.setTimeout = function (fn, ms) {
+        timers.push({fn, ms});
+        return timers.length;
+      };
+      window.clearTimeout = function () {};
+      evalShim(window, shimJs);
+      const delays = [];
+      for (let i = 0; i < 10; i++) {
+        sockets[sockets.length - 1].fireClose();
+        const reconnect = timers[timers.length - 1];
+        delays.push(reconnect.ms);
+        reconnect.fn();
+      }
+      window.close();
+      return delays;
+    }
+    try {
+      const popup = reconnectDelays('kiss-app-window');
+      const page = reconnectDelays('');
+      assert.ok(
+        popup.every(ms => ms <= 10000),
+        `the popup never waits longer than 10 s: ${popup}`,
+      );
+      assert.ok(
+        popup.slice(-3).every(ms => ms >= 5000),
+        `the popup's backoff settles at 5-10 s: ${popup}`,
+      );
+      assert.ok(
+        page.some(ms => ms > 10000),
+        `other pages back off beyond 10 s: ${page}`,
+      );
+      ok('the standalone app window reconnects within 10 s, other pages back off further');
+    } catch (err) {
+      fail('standalone app window reconnect cap broken', err);
+    }
+  }
 
   console.log('\nAll remotePasswordBypass tests passed.');
 }

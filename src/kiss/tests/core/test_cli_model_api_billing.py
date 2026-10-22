@@ -296,6 +296,143 @@ def test_cc_usage_recovered_from_a_failed_turn_is_priced_like_a_whole_turn(
     assert model.extract_cost_from_response("not a dict") is None
 
 
+def _modifier_turn(
+    first: dict[str, str], second: dict[str, str], result_usage: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Two API messages whose ``message_start`` usage carries *first* / *second*
+    modifiers, then the CLI's terminal ``result`` summing only the counters."""
+    return [
+        {"type": "system", "subtype": "init", "model": "claude-opus-5-5"},
+        {
+            "type": "message_start",
+            "message": {
+                "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 600, "output_tokens": 1, **first},
+            },
+        },
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 300},
+        },
+        {"type": "message_stop"},
+        {
+            "type": "message_start",
+            "message": {
+                "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 400, "output_tokens": 1, **second},
+            },
+        },
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 200},
+        },
+        {"type": "message_stop"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "word"}]}},
+        {"type": "result", "result": "word", "usage": result_usage},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "factor"),
+    [
+        ({"inference_geo": "us"}, {"inference_geo": "us"}, 1.1),
+        ({"speed": "fast"}, {"speed": "fast"}, 2.0),
+        ({"speed": "fast", "inference_geo": "us"}, {"speed": "fast", "inference_geo": "us"}, 2.2),
+        ({"speed": "standard", "inference_geo": "global"}, {}, 1.0),
+        # Messages disagree: the priced value wins, never the cheaper one.
+        ({"speed": "standard"}, {"speed": "fast"}, 2.0),
+        ({"inference_geo": "us"}, {"inference_geo": "global"}, 1.1),
+    ],
+)
+def test_cc_api_key_turn_is_scaled_by_the_speed_and_geo_the_messages_report(
+    fake_claude: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, str],
+    second: dict[str, str],
+    factor: float,
+) -> None:
+    """Fast mode (2x) and US-only inference (1.1x) are reported per API
+    message in ``usage``; the CLI's ``result`` sums only the counters, so
+    the modifiers seen in the stream must still price the whole turn
+    (https://platform.claude.com/docs/en/build-with-claude/fast-mode,
+    https://platform.claude.com/docs/en/manage-claude/data-residency)."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    fake_claude.write_text(json.dumps(_modifier_turn(first, second, _CLAUDE_USAGE)))
+    agent = _run_agent("cc/opus", tmp_path)
+    expected = calculate_cost("claude-opus-5-5", *_CLAUDE_COUNTS, single_request=False) * factor
+    assert agent.budget_used == pytest.approx(expected)
+
+
+def test_cc_result_usage_modifiers_outrank_the_stream(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``result`` whose usage already names the modifiers is priced from
+    them (a CLI that reports them itself is not second-guessed)."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    usage = {**_CLAUDE_USAGE, "speed": "standard", "inference_geo": "global"}
+    fake_claude.write_text(json.dumps(_modifier_turn({"speed": "fast"}, {}, usage)))
+    agent = _run_agent("cc/opus", tmp_path)
+    expected = calculate_cost("claude-opus-5-5", *_CLAUDE_COUNTS, single_request=False)
+    assert agent.budget_used == pytest.approx(expected)
+
+
+def test_cc_usage_recovered_from_a_failed_turn_keeps_its_modifiers(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The modifiers of a message cut short survive into the recovered usage."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    fake_claude.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "model": "claude-opus-5-5",
+                        "usage": {"input_tokens": 10, "speed": "fast", "inference_geo": "us"},
+                    },
+                },
+                {"type": "message_delta", "usage": {"input_tokens": 10, "output_tokens": 20}},
+                {"type": "exit", "code": 1},
+            ]
+        )
+    )
+    model = ClaudeCodeModel("cc/opus", {"work_dir": str(tmp_path), "timeout": 30})
+    model.conversation = [{"role": "user", "content": TASK}]
+    with pytest.raises(KISSError):
+        model.generate()
+    partial = model.take_partial_usage_response()
+    assert partial["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "speed": "fast",
+        "inference_geo": "us",
+    }
+    assert model.extract_cost_from_response(partial) == pytest.approx(
+        calculate_cost("claude-opus-5-5", 10, 20) * 2.2
+    )
+
+
+def test_cc_us_geo_on_a_pre_4_6_model_bills_standard(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Haiku 4.5 predates ``inference_geo``; the field cannot raise its price."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    turn = _modifier_turn({"inference_geo": "us"}, {"inference_geo": "us"}, _CLAUDE_USAGE)
+    for event in turn:
+        if event["type"] == "system":
+            event["model"] = "claude-haiku-4-5"
+        if event["type"] == "message_start":
+            event["message"]["model"] = "claude-haiku-4-5"
+    fake_claude.write_text(json.dumps(turn))
+    agent = _run_agent("cc/haiku", tmp_path)
+    assert agent.budget_used == pytest.approx(
+        calculate_cost("claude-haiku-4-5", *_CLAUDE_COUNTS, single_request=False)
+    )
+
+
 def test_cc_turn_billing_is_fixed_when_the_cli_is_launched(
     fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

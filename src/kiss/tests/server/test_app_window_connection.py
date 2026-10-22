@@ -12,10 +12,11 @@ browser without a window would answer that with an empty browser
 window).  Other clients do not count, and a reconnect that overlaps
 the old connection (a new one opens before the old one closes) never
 makes the daemon believe the window is gone.  On macOS the last
-connection closing also arms the quit check for the brand browser
-under HOME; this test runs under a temp HOME, where no browser bundle
-exists, so the check finds nothing to quit (and waits for it to run
-before HOME is restored).
+connection closing with the page gone (close code 1001) also arms the
+quit check for the brand browser under HOME, which the quit test here
+exercises with a stand-in browser under a temp HOME; a connection
+closing any other way (the daemon's keepalive timed out) does not arm
+it, as the page is still there.
 """
 
 from __future__ import annotations
@@ -25,7 +26,10 @@ import json
 import os
 import platform
 import shutil
+import signal
+import subprocess
 import tempfile
+import unittest
 import urllib.request
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
@@ -125,12 +129,49 @@ class TestAppWindowConnection(IsolatedAsyncioTestCase):
         self.assertIs(await self._open(), False)
         await self._close(other)
         self.assertIs(await self._open(), False)
-        # On macOS the last close armed the quit check for the brand bundle;
-        # nothing runs from the (absent) bundle under this HOME, so the
-        # check has nothing to do.  Wait for it to run before HOME goes.
-        if platform.system() == "Darwin":
-            self.assertIsNone(standalone_app.macos_bundle_pid(standalone_app.macos_bundle_path()))
-            await asyncio.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 0.5)
+
+    @unittest.skipUnless(platform.system() == "Darwin", "the daemon quits the browser on macOS")
+    async def test_the_popup_going_away_quits_the_windowless_browser(self) -> None:
+        """The page gone (close code 1001) quits a windowless browser; a drop does not.
+
+        The browser is a stand-in running from the brand bundle under
+        this test's HOME (it has no window, like a real one whose popup
+        closed).  The popup's connection closing with any other code
+        (the daemon's keepalive timed out) leaves it alone: the page is
+        still there, maybe minimized, and connects again.
+        """
+        bundle = standalone_app.macos_bundle_path()
+        exe = bundle / "Contents" / "MacOS" / "Chromium"
+        exe.parent.mkdir(parents=True)
+        # argv[0] is the executable's path, as for a real browser (ps
+        # shows it, which is how the daemon finds the browser's pid).
+        exe.write_text('#!/bin/bash\nexec -a "$0" sleep 300\n')
+        exe.chmod(0o755)
+        browser = subprocess.Popen([str(exe)])
+        try:
+            for _ in range(50):
+                if standalone_app.macos_bundle_pid(bundle) == browser.pid:
+                    break
+                await asyncio.sleep(0.1)
+            self.assertEqual(standalone_app.macos_bundle_pid(bundle), browser.pid)
+            popup = await self._connect("?appWindow=1")
+            self._sockets.remove(popup)
+            await popup.close(code=1000)
+            await asyncio.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 1)
+            self.assertIsNone(browser.poll(), "a dropped connection quits nothing")
+            self.assertIs(await self._open(), False)
+            popup = await self._connect("?appWindow=1")
+            self._sockets.remove(popup)
+            await popup.close(code=standalone_app.APP_WINDOW_GONE_CLOSE_CODE)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 5
+            while browser.poll() is None and loop.time() < deadline:
+                await asyncio.sleep(0.2)
+            self.assertEqual(browser.returncode, -signal.SIGTERM)
+        finally:
+            if browser.poll() is None:
+                browser.kill()
+            browser.wait()
 
     async def test_a_daemon_that_does_not_answer_gives_no_verdict(self) -> None:
         """kiss-app gets None (not False) from a URL that serves no JSON state."""
