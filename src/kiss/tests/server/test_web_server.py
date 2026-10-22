@@ -2192,7 +2192,10 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
-            await asyncio.sleep(0.3)
+            # A tick also sweeps the host's processes and windows (tens of
+            # milliseconds on macOS), so wait for the debounced change
+            # with a deadline rather than for a fixed time.
+            await asyncio.wait({task}, timeout=30)
             self.assertTrue(task.done(), "Watchdog should have returned after IP change")
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
@@ -3775,8 +3778,8 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
-            await asyncio.sleep(0.3)
-            self.assertTrue(task.done())
+            await asyncio.wait({task}, timeout=30)
+            self.assertTrue(task.done(), "Watchdog should have returned after IP change")
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
 

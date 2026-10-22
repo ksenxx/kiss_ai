@@ -16,14 +16,13 @@ Four defects, each reproduced end to end:
   Responses stream ended in ``response.failed`` / ``response.incomplete``
   lost the billed usage, and the Chat adapter's delegation wrapper only
   handed over a delegate's usage on ``Exception``.
-* A Stop raised from the token callback while Gemini's unary fallback
-  streamed its parts lost that response's usage.
+* A Stop raised from the token callback while a Gemini stream delivered
+  its usage-bearing chunk lost that response's usage.
 """
 
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Generator
 from typing import Any
 
@@ -178,47 +177,21 @@ def test_stop_in_a_delegated_responses_call_hands_over_its_usage() -> None:
     assert model.take_partial_usage_response() is None
 
 
-class _StreamsNothingFirst(gemini_sse_harness._Handler):
-    """Answers the first (streaming) request with no chunk at all.
-
-    The adapter then falls back to the unary call, which gets the
-    scripted chunks.
-    """
-
-    def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
-        """Serve the script, emptied for the first request only."""
-        scripted = self.script.chunks
-        if not self.script.requests:
-            self.script.chunks = []
-        try:
-            super().do_POST()
-        finally:
-            self.script.chunks = scripted
-
-
 @pytest.fixture
-def unary_endpoint() -> Generator[tuple[str, gemini_sse_harness.GeminiScript]]:
-    script = gemini_sse_harness.GeminiScript()
-    handler = type("_Handler", (_StreamsNothingFirst,), {"script": script})
-    server = gemini_sse_harness._DaemonServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", script
-    finally:
-        script.release.set()
-        server.shutdown()
-        server.server_close()
+def gemini_endpoint() -> Generator[tuple[str, gemini_sse_harness.GeminiScript]]:
+    yield from gemini_sse_harness.serve()
 
 
 def _stop_on_token(text: str) -> None:
     raise KeyboardInterrupt
 
 
-def test_stop_during_gemini_unary_fallback_keeps_its_usage(
+def test_stop_during_gemini_stream_keeps_its_usage(
     monkeypatch: pytest.MonkeyPatch,
-    unary_endpoint: tuple[str, gemini_sse_harness.GeminiScript],
+    gemini_endpoint: tuple[str, gemini_sse_harness.GeminiScript],
 ) -> None:
-    base_url, script = unary_endpoint
+    """A Stop from the token callback keeps the usage the stream already billed."""
+    base_url, script = gemini_endpoint
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     usage = {"promptTokenCount": 11, "candidatesTokenCount": 5, "totalTokenCount": 16}
     script.play([gemini_sse_harness.chunk([gemini_sse_harness.text_part("done")], usage=usage)])
@@ -226,7 +199,7 @@ def test_stop_during_gemini_unary_fallback_keeps_its_usage(
     model.initialize("hi")
     with pytest.raises(KeyboardInterrupt):
         model.generate()
-    assert len(script.requests) == 2, "the empty stream must fall back to the unary call"
+    assert len(script.requests) == 1, "Gemini always streams: one request, no unary retry"
     rejected = model.take_partial_usage_response()
     assert rejected is not None
     assert model.extract_input_output_token_counts_from_response(rejected)[:2] == (11, 5)

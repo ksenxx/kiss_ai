@@ -25,15 +25,12 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-import httpx
-from openai import APITimeoutError
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
-    FRAMEWORK_ONLY_CONFIG_KEYS,
     TOOL_RESULT_ATTACHMENT_NOTE,
     Attachment,
     ThinkingCallback,
@@ -46,10 +43,10 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleBase,
     OpenAICompatibleModel,
     _conversation_with_tools_prompt,
-    _decode_tool_call_arguments,
     _extract_deepseek_reasoning,
+    _function_call_entry,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error, stop_or_stall_error
+from kiss.core.models.stream_abort import stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +78,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     ``system`` message, ``input_text``/``input_image``/``input_file``
     content parts, ``function_call_output`` items for tool results).
     """
+
+    _TEXT_PART_TYPE = "input_text"
 
     def __init__(
         self,
@@ -132,17 +131,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._ensure_client()
         self.conversation = []
         self._reset_turn_state()
-        if attachments:
-            parts = self._attachments_to_content_parts(attachments)
-            parts.append({"type": "input_text", "text": prompt})
-            self.conversation.append({"role": "user", "content": parts})
-        else:
-            self.conversation.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                }
-            )
+        parts = self._attachments_to_content_parts(attachments) if attachments else []
+        parts.append(self._text_part(prompt))
+        self.conversation.append({"role": "user", "content": parts})
 
     def _reset_stream_indexes(self) -> None:
         """Forget the item ordering learned from the previous streamed turn."""
@@ -184,18 +175,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         self._reset_stream_indexes()
         if self.token_callback is not None:
-            kwargs["stream"] = True
-            # Bounds the wait for the response headers, which the watchdog
-            # inside ``_consume_stream`` cannot see (see
-            # ``stream_abort.CONNECT_TIMEOUT``); both clocks raise the same
-            # retryable stall error.
-            kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
-            try:
-                return self._consume_stream(self.client.responses.create(**kwargs))
-            except (httpx.TimeoutException, APITimeoutError) as err:
-                raise stop_or_stall_error(self._stream_stall_timeout) from err
+            return self._stream_request(self.client.responses.create, kwargs, self._consume_stream)
         response = self.client.responses.create(**kwargs)
-        self._rejected_response = response  # billed; see _consume_stream
+        # Billed already (see _consume_stream): a failed status, a parse
+        # error or the caller's tool-call validation raising from here on
+        # must leave the usage for the agent's partial-usage drain.
+        self._rejected_response = response
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
         return content, tool_calls, response
@@ -815,11 +800,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Raises:
             KISSError: When the conversation is empty after normalisation.
         """
-        kwargs = {
-            key: value
-            for key, value in self.model_config.items()
-            if key not in FRAMEWORK_ONLY_CONFIG_KEYS
-        }
+        kwargs = self._config_request_params()
         system_instruction = self.system_instruction_text()
         reasoning_effort = kwargs.pop("reasoning_effort", None)
 
@@ -883,14 +864,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = parallel_tool_calls
 
-        kwargs = self._keep_supported_request_params(
-            kwargs,
-            _RESPONSES_REQUEST_PARAMS,
-            "OpenAI Responses",
-        )
         self._sanitize_stream_options(kwargs)
-        self._apply_cache_control_for_openrouter_anthropic(kwargs)
-        return kwargs
+        return self._finish_request_kwargs(kwargs, _RESPONSES_REQUEST_PARAMS, "OpenAI Responses")
 
     def _validate_function_call_conversation(self, strict: bool = True) -> list[dict[str, str]]:
         """Return every ``function_call`` item that still lacks its ``function_call_output``.
@@ -1436,38 +1411,18 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             text_delta_seen,
                             allow_suffix=False,
                         )
-            elif etype in ("response.failed", "error"):
+            elif etype in ("response.failed", "error", "response.incomplete"):
                 resp = getattr(event, "response", None)
-                # Any usage the failed response carries was billed: stored
-                # before the thinking callback runs, which a Stop can
-                # interrupt.
+                # Any usage the failed or truncated response carries was
+                # billed: stored before the thinking callback runs, which
+                # a Stop can interrupt.
                 self._rejected_response = resp
                 self._close_thinking_if_open()
-                err = getattr(resp, "error", None) if resp is not None else None
-                if err is None:
-                    err = getattr(event, "error", None)
-                message = ""
-                if err is not None:
-                    message = str(getattr(err, "message", "") or "")
-                    if not message and isinstance(err, dict):
-                        message = str(err.get("message", "") or "")
+                # A bare ``error`` event carries the error itself.
+                detail = self._failure_detail(resp) or self._failure_detail(event)
+                ending = "incomplete" if etype == "response.incomplete" else f"with {etype}"
                 raise KISSError(
-                    f"Responses API stream ended with {etype}" + (f": {message}" if message else "")
-                )
-            elif etype == "response.incomplete":
-                resp = getattr(event, "response", None)
-                # The truncated response was billed: keep its usage before
-                # the thinking callback runs (a Stop can interrupt it).
-                self._rejected_response = resp
-                self._close_thinking_if_open()
-                details = getattr(resp, "incomplete_details", None) if resp is not None else None
-                reason = ""
-                if details is not None:
-                    reason = str(getattr(details, "reason", "") or "")
-                    if not reason and isinstance(details, dict):
-                        reason = str(details.get("reason", "") or "")
-                raise KISSError(
-                    "Responses API stream ended incomplete" + (f": {reason}" if reason else "")
+                    f"Responses API stream ended {ending}" + (f": {detail}" if detail else "")
                 )
             elif etype == "response.completed":
                 saw_completed = True
@@ -1607,24 +1562,36 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 :meth:`take_partial_usage_response`.
         """
         status = _get_attr_or_key(response, "status")
-        if status in ("failed", "incomplete"):
-            self._rejected_response = response
-        if status == "failed":
-            err = _get_attr_or_key(response, "error")
-            message = ""
-            if err is not None:
-                message = str(_get_attr_or_key(err, "message", "") or "")
-            raise KISSError(
-                "Responses API returned failed response" + (f": {message}" if message else "")
-            )
-        if status == "incomplete":
-            details = _get_attr_or_key(response, "incomplete_details")
-            reason = ""
-            if details is not None:
-                reason = str(_get_attr_or_key(details, "reason", "") or "")
-            raise KISSError(
-                "Responses API returned incomplete response" + (f": {reason}" if reason else "")
-            )
+        if status not in ("failed", "incomplete"):
+            return
+        self._rejected_response = response
+        detail = self._failure_detail(response)
+        raise KISSError(
+            f"Responses API returned {status} response" + (f": {detail}" if detail else "")
+        )
+
+    @staticmethod
+    def _failure_detail(carrier: Any) -> str:
+        """Return the error message or truncation reason *carrier* reports.
+
+        Args:
+            carrier: A response, a stream event, or ``None``; SDK object
+                or dict.  A failed response carries ``error.message``, a
+                truncated one ``incomplete_details.reason``, and the
+                stream's bare ``error`` event its ``message`` directly
+                (``error.message`` on some gateways).
+
+        Returns:
+            The message, else the reason, else ``""``.
+        """
+        err = _get_attr_or_key(carrier, "error")
+        details = _get_attr_or_key(carrier, "incomplete_details")
+        return str(
+            _get_attr_or_key(err, "message", "")
+            or _get_attr_or_key(details, "reason", "")
+            or _get_attr_or_key(carrier, "message", "")
+            or ""
+        )
 
     @classmethod
     def _response_has_message_text(cls, response: Any) -> bool:
@@ -1749,11 +1716,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if decoding fails).
         """
         return [
-            {
-                "id": tc.get("id", ""),
-                "name": tc.get("name", ""),
-                "arguments": _decode_tool_call_arguments(tc.get("arguments") or "{}"),
-            }
+            _function_call_entry(tc.get("id", ""), tc.get("name", ""), tc.get("arguments") or "{}")
             for tc in tool_calls
         ]
 
@@ -1950,8 +1913,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         items = _conversation_with_tools_prompt(
             self.conversation,
             tools_prompt,
-            "input_text",
-            {"role": "user", "content": [{"type": "input_text", "text": tools_prompt}]},
+            self._TEXT_PART_TYPE,
+            {"role": "user", "content": [self._text_part(tools_prompt)]},
         )
         self._ensure_no_pending_function_calls()
         kwargs = self._shape_responses_kwargs(input_items=items, tools=None)
@@ -2063,10 +2026,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ]
             for i in reversed(sentinel_indexes):
                 del self.conversation[i]
-            parts = self._attachments_to_content_parts(sentinel_attachments)
-            if parts:
-                parts.append({"type": "input_text", "text": TOOL_RESULT_ATTACHMENT_NOTE})
-                self.conversation.append({"role": "user", "content": parts})
+            message = self._user_message_with_attachments(
+                sentinel_attachments, TOOL_RESULT_ATTACHMENT_NOTE
+            )
+            if message is not None:
+                self.conversation.append(message)
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

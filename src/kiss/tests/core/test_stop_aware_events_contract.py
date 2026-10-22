@@ -34,7 +34,6 @@ from kiss.core.models.stream_abort import stop_aware_events
 from kiss.tests.core.models.test_stop_aware_events_contract import (  # noqa: F401
     _EVENTS,
     _failing_events,
-    _Recorder,
 )
 
 
@@ -54,22 +53,12 @@ class TestStopReportedAfterAQuietEnd:
         self, bound_stop_event: threading.Event
     ) -> None:
         """Setting the stop while iterating must not look like success."""
-        on_abort = _Recorder()
         seen: list[str] = []
         with pytest.raises(KeyboardInterrupt):
-            for event in stop_aware_events(iter(_EVENTS), on_abort=on_abort):
+            for event in stop_aware_events(iter(_EVENTS)):
                 seen.append(event)
                 bound_stop_event.set()
         assert seen == _EVENTS
-        assert on_abort.calls == 1
-
-    def test_stop_without_an_abort_hook(
-        self, bound_stop_event: threading.Event
-    ) -> None:
-        """The hook is optional; the stop must still be reported."""
-        with pytest.raises(KeyboardInterrupt):
-            for _event in stop_aware_events(iter(_EVENTS)):
-                bound_stop_event.set()
 
 
 class TestFailingStreams:

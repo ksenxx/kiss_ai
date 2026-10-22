@@ -6,7 +6,6 @@
 """Anthropic model implementation for Claude models."""
 
 import base64
-import json
 import logging
 import os
 from collections.abc import Callable
@@ -32,8 +31,12 @@ from kiss.core.models.model import (
     TokenCallback,
     _get_attr_or_key,
     accepted_request_params,
+    iter_assistant_tool_calls,
     merge_system_texts,
+    parse_tool_arguments,
+    pop_max_tokens_and_stop,
     responses_items_to_chat_messages,
+    split_data_url,
     split_system_cache_break,
     strip_system_cache_break,
     transcribe_audio,
@@ -137,12 +140,11 @@ KEEP_ALIVE_TIMEOUT_SECONDS = 30.0
 with retries off this bounds the wait for a ping in flight."""
 
 
-def _last_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
-    """Return the content blocks of the last assistant message in *messages*, or ``[]``."""
+def _last_assistant_tool_use_ids(messages: list[Any]) -> list[str]:
+    """Return the ``tool_use`` ids of the last assistant message in *messages*, or ``[]``."""
     for message in reversed(messages):
         if isinstance(message, dict) and message.get("role") == "assistant":
-            content = message.get("content")
-            return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+            return [call_id for _name, call_id in iter_assistant_tool_calls(message) if call_id]
     return []
 
 
@@ -331,25 +333,6 @@ def _supports_extended_thinking(profile: ClaudeProfile) -> bool:
     return family in _THINKING_FAMILIES and major >= 4
 
 
-def _parse_data_url(url: str) -> tuple[str, str] | None:
-    """Split a base64 data URL into its media type and base64 payload.
-
-    Args:
-        url: A URL that may be a ``data:<media_type>;base64,<data>`` URL.
-
-    Returns:
-        A ``(media_type, base64_data)`` tuple, or ``None`` when *url* is not
-        a base64 data URL.
-    """
-    if not url.startswith("data:"):
-        return None
-    header, _, data = url.partition(",")
-    if ";base64" not in header or not data:
-        return None
-    media_type = header[len("data:") :].split(";", 1)[0]
-    return media_type or "application/octet-stream", data
-
-
 def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | None:
     """Convert an OpenAI content part to the equivalent Anthropic block.
 
@@ -370,7 +353,7 @@ def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | No
     part_type = part.get("type")
     if part_type == "image_url":
         url = (part.get("image_url") or {}).get("url", "")
-        parsed = _parse_data_url(url)
+        parsed = split_data_url(url)
         if parsed is not None:
             media_type, data = parsed
             return {
@@ -383,7 +366,7 @@ def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | No
         return None
     if part_type == "file":
         file_data = (part.get("file") or {}).get("file_data", "")
-        parsed = _parse_data_url(file_data)
+        parsed = split_data_url(file_data)
         if parsed is not None:
             media_type, data = parsed
             return {
@@ -431,16 +414,7 @@ def _tool_calls_to_tool_use_blocks(tool_calls: list[Any]) -> list[dict[str, Any]
             call_id = getattr(tc, "id", "")
             name = getattr(fn, "name", "") if fn is not None else ""
             arguments = getattr(fn, "arguments", "") if fn is not None else ""
-        if isinstance(arguments, str):
-            try:
-                input_dict = json.loads(arguments) if arguments.strip() else {}
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                input_dict = {}
-        else:
-            input_dict = arguments or {}
-        if not isinstance(input_dict, dict):
-            input_dict = {}
+        input_dict = parse_tool_arguments(arguments)
         blocks.append({"type": "tool_use", "id": call_id, "name": name, "input": input_dict})
     return blocks
 
@@ -551,8 +525,19 @@ def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
     """
     extra_body = kwargs.get("extra_body")
     payload = {**kwargs, **extra_body} if isinstance(extra_body, dict) else kwargs
-    if "cache_control" in payload:
-        return True
+    return "cache_control" in payload or _count_cache_breakpoints(payload) > 0
+
+
+def _count_cache_breakpoints(payload: dict[str, Any]) -> int:
+    """Count the explicit ``cache_control`` markers in a request *payload*.
+
+    Args:
+        payload: The request fields (``system``, ``tools``, ``messages``).
+
+    Returns:
+        The number of system blocks, tools and message content blocks
+        that carry a ``cache_control`` marker.
+    """
     system = payload.get("system")
     blocks: list[Any] = list(system) if isinstance(system, list) else []
     blocks.extend(payload.get("tools") or [])
@@ -560,13 +545,123 @@ def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
             blocks.extend(content)
-    return any(isinstance(block, dict) and "cache_control" in block for block in blocks)
+    return sum(1 for block in blocks if isinstance(block, dict) and "cache_control" in block)
 
 
 _BEDROCK_DEFAULT_REGION = "us-east-1"
 # Request fields of the Anthropic API that Bedrock's InvokeModel rejects:
 # automatic prompt caching and the priority service tier.
 _BEDROCK_UNSUPPORTED_FIELDS = ("cache_control", "service_tier")
+# Content blocks the API does not let carry a ``cache_control`` marker.
+_UNCACHEABLE_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+# Explicit breakpoints a request may carry; one more is a 400.
+_MAX_CACHE_BREAKPOINTS = 4
+
+
+def _with_conversation_cache_breakpoint(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the request messages with a ``cache_control`` breakpoint on the last block.
+
+    Stands in for automatic prompt caching where the top-level
+    ``cache_control`` is rejected (Bedrock's InvokeModel): the marker goes
+    on the last cacheable block of the final message and moves forward
+    with every turn, so the API reads the earlier turns from cache (it
+    looks back about twenty blocks from a breakpoint for the longest
+    cached prefix) and writes only the new blocks.  Without it only
+    ``tools`` and the system prefix are cached and the whole conversation
+    is billed at the full input rate on every turn.  Thinking blocks
+    cannot carry the marker and are skipped; a final message that already
+    carries one, or a request already at the breakpoint limit, is sent
+    as is.  The final message and the marked block are copied, so the
+    conversation the messages were built from keeps no marker and the
+    next request re-sends the earlier turns byte for byte.
+
+    Args:
+        kwargs: The ``messages.create`` keyword arguments, with non-empty
+            normalized ``messages``.
+
+    Returns:
+        The messages to send, sharing every unmarked element with the input.
+    """
+    messages: list[dict[str, Any]] = kwargs["messages"]
+    last = messages[-1]
+    blocks = _content_as_block_list(last["content"])
+    if any("cache_control" in block for block in blocks):
+        return messages
+    if _count_cache_breakpoints(kwargs) >= _MAX_CACHE_BREAKPOINTS:
+        return messages
+    for index in range(len(blocks) - 1, -1, -1):
+        if blocks[index].get("type") not in _UNCACHEABLE_BLOCK_TYPES:
+            blocks[index] = {**blocks[index], "cache_control": {"type": "ephemeral"}}
+            return [*messages[:-1], {**last, "content": blocks}]
+    return messages
+
+# Price modifiers the Anthropic API reports in the response ``usage``, as
+# factors on the catalog's standard rates (they apply to every token
+# category, cache tiers included, and stack with each other):
+# https://platform.claude.com/docs/en/build-with-claude/fast-mode prices
+# ``speed: "fast"`` at twice the standard rate (Opus 5.5 $8/$40 on $4/$20,
+# Opus 5 and 4.8 $10/$50 on $5/$25) and reports the speed that served
+# the call in ``usage.speed``;
+# https://platform.claude.com/docs/en/manage-claude/data-residency prices
+# US-only inference (``usage.inference_geo`` ``"us"``, which a workspace
+# default can select without the request asking) at 1.1x on Claude 4.6
+# and later, the only models that accept the parameter.  Neither applies
+# on Bedrock, whose regional premium the catalog prices carry.
+_FAST_MODE_PRICE_FACTOR = 2.0
+_US_INFERENCE_GEO_PRICE_FACTOR = 1.1
+# The usage field of each modifier and the value that raises the price.
+PRICE_MODIFIER_FIELDS = {"speed": "fast", "inference_geo": "us"}
+
+
+def price_modifier_factor(usage: Any, model_name: str) -> float:
+    """Return the factor the speed and inference geo in *usage* apply to standard rates.
+
+    ``speed`` ``"fast"`` applies :data:`_FAST_MODE_PRICE_FACTOR`;
+    ``inference_geo`` ``"us"`` applies :data:`_US_INFERENCE_GEO_PRICE_FACTOR`
+    on Claude 4.6 and later (earlier models bill standard whatever the
+    field says).  The two stack.  The Claude Code CLI re-emits the API's
+    usage as JSON, so :mod:`kiss.core.models.claude_code_model` shares
+    this rule.
+
+    Args:
+        usage: The provider's usage record: an SDK object for the API
+            transport, a decoded JSON dict for the CLI transport.
+        model_name: The bare Anthropic model name the usage was billed
+            under (no provider prefix; thinking aliases are tolerated).
+
+    Returns:
+        ``1.0`` unless *usage* reports a priced modifier.
+    """
+    factor = 1.0
+    if _get_attr_or_key(usage, "speed") == PRICE_MODIFIER_FIELDS["speed"]:
+        factor *= _FAST_MODE_PRICE_FACTOR
+    if _get_attr_or_key(usage, "inference_geo") == PRICE_MODIFIER_FIELDS[
+        "inference_geo"
+    ] and _supports_inference_geo(model_name):
+        factor *= _US_INFERENCE_GEO_PRICE_FACTOR
+    return factor
+
+
+def _supports_inference_geo(model_name: str) -> bool:
+    """Return whether *model_name* is a Claude 4.6-or-later model.
+
+    Args:
+        model_name: The bare Anthropic model name (no provider prefix; a
+            thinking alias such as ``claude-opus-5-5-high`` is stripped).
+
+    Returns:
+        ``True`` for Claude 4.6 and every later version (``claude-opus-4-6``,
+        ``claude-sonnet-5``, ``claude-fable-5-1``, ...), ``False`` for
+        earlier versions and names outside the ``claude-<family>-<major>``
+        grammar.
+    """
+    from kiss.core.models.model_info import _strip_thinking_alias
+
+    parsed = _parse_claude_version(_strip_thinking_alias(model_name))
+    if parsed is None:
+        return False
+    _, major, minor = parsed
+    return major > 4 or (major == 4 and (minor or 0) >= 6)
 
 
 def _bedrock_credentials() -> tuple[str, str, str, str]:
@@ -721,7 +816,8 @@ class AnthropicModel(Model):
         # reuses the adapter and calls initialize() per run): rebuilding
         # it every time abandons a whole httpx connection pool to the
         # garbage collector for nothing.  It is rebuilt only when the
-        # inputs it was constructed from changed.
+        # inputs it was constructed from changed, and the replaced client
+        # is closed so its pool goes with it.
         timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
         workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
         inputs = (
@@ -730,6 +826,7 @@ class AnthropicModel(Model):
             else (self.api_key, workspace_id)
         )
         if self.client is None or inputs != self._client_inputs:
+            replaced = self.client
             if self.bedrock:
                 self.client = _bedrock_client(self.api_key, timeout)
             else:
@@ -743,6 +840,8 @@ class AnthropicModel(Model):
                     default_headers=default_headers,
                 )
             self._client_inputs = inputs
+            if replaced is not None:
+                replaced.close()
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks = _attachments_to_blocks(attachments)
@@ -1000,19 +1099,12 @@ class AnthropicModel(Model):
             self.model_config.get("system_instruction"), self.conversation
         )
 
-        max_tokens = kwargs.pop("max_tokens", None)
-        if max_tokens is None:
-            max_tokens = kwargs.pop("max_completion_tokens", None)
+        max_tokens, stop_sequences = pop_max_tokens_and_stop(kwargs)
         user_set_max_tokens = max_tokens is not None
         if max_tokens is None:
             max_tokens = 16384
-
-        if "stop" in kwargs and "stop_sequences" not in kwargs:
-            stop_val = kwargs.pop("stop")
-            if isinstance(stop_val, str):
-                kwargs["stop_sequences"] = [stop_val]
-            elif isinstance(stop_val, list):
-                kwargs["stop_sequences"] = stop_val
+        if stop_sequences is not None:
+            kwargs.setdefault("stop_sequences", stop_sequences)
 
         kwargs = self._keep_supported_request_params(
             kwargs,
@@ -1078,13 +1170,17 @@ class AnthropicModel(Model):
         # Top-level ``cache_control`` (automatic prompt caching) and
         # ``service_tier`` (priority tier) exist only on the Anthropic
         # API: Bedrock's InvokeModel rejects unknown request fields, and
-        # caches through the explicit breakpoint ``_system_param`` sets.
-        # Both are removed wherever model_config may carry them: as a
-        # kwarg and inside ``extra_body``, which the SDK merges into the
+        # caches through explicit breakpoints only: the one
+        # ``_system_param`` sets and the moving one on the conversation's
+        # last block, which stands in for automatic caching.  Both fields
+        # are removed wherever model_config may carry them: as a kwarg
+        # and inside ``extra_body``, which the SDK merges into the
         # request JSON verbatim.
         if enable_cache and not self.bedrock:
             kwargs.setdefault("cache_control", {"type": "ephemeral"})
         if self.bedrock:
+            if enable_cache:
+                kwargs["messages"] = _with_conversation_cache_breakpoint(kwargs)
             for field in _BEDROCK_UNSUPPORTED_FIELDS:
                 kwargs.pop(field, None)
             extra_body = kwargs.get("extra_body")
@@ -1346,11 +1442,7 @@ class AnthropicModel(Model):
         kwargs = self._build_create_kwargs(tools=tools or None)
         if not _has_cache_breakpoint(kwargs):
             return None
-        pending = [
-            block["id"]
-            for block in _last_assistant_blocks(kwargs["messages"])
-            if block.get("type") == "tool_use" and block.get("id")
-        ]
+        pending = _last_assistant_tool_use_ids(kwargs["messages"])
         if pending:
             content: str | list[dict[str, Any]] = [
                 {"type": "tool_result", "tool_use_id": call_id, "content": KEEP_ALIVE_TEXT}
@@ -1431,6 +1523,31 @@ class AnthropicModel(Model):
                 cache_write_1h,
             )
         return 0, 0, 0, 0, 0
+
+    def cost_multiplier_for_response(self, response: Any) -> float:
+        """Return the factor the speed and inference geo that served *response* apply.
+
+        The Anthropic API reports both in the response ``usage``:
+        ``speed`` is ``"fast"`` when fast mode served the call
+        (:data:`_FAST_MODE_PRICE_FACTOR`), and ``inference_geo`` is
+        ``"us"`` when inference was pinned to US infrastructure, by the
+        request or by the workspace default
+        (:data:`_US_INFERENCE_GEO_PRICE_FACTOR`, Claude 4.6 and later only;
+        earlier models bill standard whatever the field says).  The two
+        stack.  Bedrock responses carry neither modifier and its regional
+        premium is already in the catalog prices, so they bill at 1.0.
+
+        Args:
+            response: The final message (or the usage-bearing snapshot of
+                a turn that raised) returned by the SDK.
+
+        Returns:
+            The factor to apply to the standard-rate catalog estimate.
+        """
+        usage = getattr(response, "usage", None)
+        if usage is None or self.bedrock:
+            return 1.0
+        return price_modifier_factor(usage, self._api_model_name)
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.

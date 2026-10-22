@@ -381,7 +381,13 @@ def test_main_test_existing_drops_dec_when_probe_fails(
     target.write_text(json.dumps({JEV: jev_entry, JEV_PINNED: jev_entry}))
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
-    for fetcher in ("fetch_together", "fetch_anthropic", "fetch_gemini", "fetch_openai"):
+    for fetcher in (
+        "fetch_together",
+        "fetch_anthropic",
+        "fetch_gemini",
+        "fetch_openai",
+        "fetch_bedrock",
+    ):
         monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
     snapshot = {**jev_entry, "thinking": None, "alias_of": None, "use_responses_api": None}

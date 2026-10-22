@@ -160,12 +160,18 @@ class _Sandbox:
             return []
         return self.kiss_web_log.read_text(encoding="utf-8").splitlines()
 
-    def browser_calls(self) -> list[str]:
-        # xdg-open is launched detached (a desktop may keep it running for
-        # a while), so its log line can land just after bash has exited.
-        for _ in range(50):
-            if self.browser_log.exists():
-                break
+    def browser_calls(self, timeout: float = 5.0) -> list[str]:
+        """Return the URLs the browser stub was asked to open.
+
+        Waits up to *timeout* seconds for the stub's log to appear:
+        xdg-open is launched detached (a desktop may keep it running for
+        a while), so its log line can land just after bash has exited,
+        and seconds later on a loaded test host.  Callers that expect a
+        call pass a long *timeout*; the default bounds the wait for the
+        "nothing opened" checks.
+        """
+        deadline = time.monotonic() + timeout
+        while not self.browser_log.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
         if not self.browser_log.exists():
             return []
@@ -210,7 +216,7 @@ def test_local_linux_opens_loopback_url(tmp_path: Path) -> None:
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
     assert sb.kiss_web_calls() == []
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]
     assert f"Opening the webapp at {_LOOPBACK}" in proc.stdout
     assert _TUNNEL not in proc.stdout
 
@@ -224,7 +230,7 @@ def test_macos_uses_open(tmp_path: Path) -> None:
     proc = sb.run(os_name="Darwin")
     assert proc.returncode == 0, proc.stderr
     assert sb.kiss_web_calls() == []
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]
 
 
 def test_ssh_session_prints_tunnel_url_and_opens_no_browser(tmp_path: Path) -> None:
@@ -281,7 +287,7 @@ def test_waits_for_daemon_that_comes_up_late(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "Waiting for the kiss-web daemon" in proc.stdout
     assert sb.kiss_web_calls() == []
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]
 
 
 def test_missing_kiss_web_binary_times_out(tmp_path: Path) -> None:
@@ -306,7 +312,7 @@ def test_kiss_web_found_in_the_app_venv(tmp_path: Path) -> None:
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
     assert sb.kiss_web_calls() == []
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]
 
 
 def test_old_url_file_without_loopback_falls_back_to_127_0_0_1(tmp_path: Path) -> None:
@@ -317,7 +323,7 @@ def test_old_url_file_without_loopback_falls_back_to_127_0_0_1(tmp_path: Path) -
     sb.url_file.write_text(_url_json(local="http://localhost:9999"))
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
-    assert sb.browser_calls() == ["http://127.0.0.1:9999"]
+    assert sb.browser_calls(timeout=30) == ["http://127.0.0.1:9999"]
 
 
 def test_no_browser_opener_prints_url_for_the_user(tmp_path: Path) -> None:
@@ -393,7 +399,7 @@ def test_kiss_app_without_a_browser_falls_back_to_the_default_browser(tmp_path: 
     proc = sb.run(env={"DISPLAY": ":0"})
     assert proc.returncode == 0, proc.stderr
     assert sb.kiss_app_calls() == sb.expected_kiss_app_calls(revealed=False)
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]
     warning = "   WARNING: The standalone window did not open; using the browser instead."
     assert warning in proc.stdout
     assert f"Opening the webapp at {_LOOPBACK}" in proc.stdout
@@ -500,4 +506,4 @@ def test_failures_are_recorded_for_the_web_app_notification(tmp_path: Path) -> N
     assert problems.read_text(encoding="utf-8") == (
         "WARNING: The standalone window did not open; using the browser instead.\n"
     )
-    assert sb.browser_calls() == [_LOOPBACK]
+    assert sb.browser_calls(timeout=30) == [_LOOPBACK]

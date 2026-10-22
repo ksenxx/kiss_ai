@@ -346,11 +346,11 @@ enforced.
 | Behaviour | What deriving from `ChannelSea` does |
 |---|---|
 | worker | It is a `WorkerSea`, and the worker keys are locked, so no call may give it the classifier, the browser or memory (`resolve_settings`). |
-| scratch directory | It runs in the shared `<home>/channel_work` scratch directory unless its own `work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, so it never works in the caller's project (`resolve_settings`). |
+| scratch directory | It runs in the shared `<home>/channel_work` scratch directory unless its own `work_dir` says otherwise (`/cron` runs in `<home>/cron/work`); `work_dir` is locked, so it never works in the caller's project (`resolve_settings`). |
 | no inheritance | Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, budget share, container or prompt suffixes; the `inherit: true` option is refused (`agent_dispatch`). |
 | workspace | It holds its channel workspace — the `run_agent` option `workspace`, default `default`, the account its tools load credentials for — from before its `tools()` run until the run ends; `workspace` is refused for any other SEA (`sea_apply.channel_workspace`, `agent_dispatch`). |
 | preamble | The channel preamble is appended to its system prompt before its own `system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`). |
-| listed as a channel | A third-party SEA folder whose class derives from `ChannelSea` by that name is a channel agent: `run_agent(agent="<folder>")` finds it by name and the `channel` tool lists it (`agent_dispatch.available_channels`, `declares_channel`). |
+| listed as a channel | A third-party SEA folder whose class derives from `ChannelSea` by that name is a channel agent: `run_agent(agent="<folder>")` finds it by name and the `run_agent` tool's description lists it among the installed channels (`agent_dispatch.available_channels`, `declares_channel`). |
 <!-- /sea-docs -->
 
 The channel preamble (`sea_apply.CHANNEL_PREAMBLE`, "You are the
@@ -781,7 +781,10 @@ the terminal and browser commands without
 `connId`/`machine` and relaying the machine's `terminal*` and browser
 events back stamped `machine`.  A terminal's events go to the
 connection that opened it (a dropped connection's shell is hung up
-after the terminal grace period unless a reload claims it); a page's
+after the terminal grace period unless a reload claims it first; a
+reopen that arrives once the hang-up has started waits for that shell
+to be reaped and starts a fresh one, and the old shell's exit is not
+reported under the new page); a page's
 tab id is namespaced `browser__N@machine`, so a tab-addressed browser
 command finds its machine from the id, its frames go to the local
 connections whose last `browserViewport` for the tab was visible, and
@@ -1171,7 +1174,8 @@ The `run()` parameters without a `settings()` key (the allowlist is
   (the `shell` group plus `ask_user_question`, `talk`, `decide`,
   `summary`, `set_model`), `"bash"` (`Bash` only — the bundled `/sh`
   agent's choice), or a tool group: `"shell"` (`Bash`, `bash_job`,
-  `Read`, `run_commands_parallel`), `"edit"` (`Edit`, `Write`),
+  `Read`, `run_commands_parallel`), `"edit"` (`Edit`, `Write`,
+  `create_worktree`, `commit_and_merge`),
   `"browser"`, `"memory"`, `"agents"` (`run_agent`, `agent_job`,
   `run_parallel`, `number_of_cores`), `"mcp"` (the configured servers' tools and the
   sign-in pair), `"skills"`, `"user"` (`ask_user_question`, `talk`),
@@ -1364,13 +1368,15 @@ built-in KISS Sorcar toolset — `Bash` (with
 `background=True` for detached jobs), `bash_job` (wait for / tail /
 kill a background job), `run_commands_parallel` (several shell
 commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
+`create_worktree` and `commit_and_merge` (the last two not in a
+Docker run, whose file tools work inside the container),
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
 `agent_job`, `run_parallel` and `number_of_cores` (the last two only
 when the run's `is_parallel` is on, the user's parallel-mode toggle),
 browser tools (when `use_web_tools`), `decide` (when
-`OPENROUTER_API_KEY` is configured, the settings panel's "Use Jev
-(decisions model)" checkbox, persisted as `classify_with_decisions`,
-is on and the decisions model is in the catalog,
+`OPENROUTER_API_KEY` is configured, the `classify_with_decisions`
+key in `$KISS_HOME/config.json` is on (the default; it has no settings-panel toggle)
+and the decisions model is in the catalog,
 `decide_tool.decisions_tool_available`), the `memory_*` tools (when
 memory is enabled), and any configured skill and MCP-server tools —
 **plus** your extension tools.  A restricted tool profile (a reviewer
@@ -1453,9 +1459,17 @@ hooks run later, inside the agent (once at start, or per call): a
 failure there raises the same `SeaError` message, which ends the
 task as a failed result (`success == False`) after the overrides
 have been applied.  The wrapper around the message depends on the
-stage: `Task failed: SeaError: ...` is the setup stage's
-(`task_runner`), while a per-call hook failure is caught by the
-executor and reported as `SeaError: ...` in the result text.
+stage: the setup stage (`task_runner`) reports `Task failed:
+SeaError: ...`; a `system_prompt()` or `tools()` failure at agent
+start is reported as `Task failed: ...` with the bare message; and a
+per-call hook failure is an ordinary step error to the executor
+(`kiss_agent`): the step is retried unless the message reads as
+non-retryable (an API-key, `unauthorized`, `permission denied` or
+`is not available` phrase, which fails at once or switches to a
+fallback model), and three consecutive failures end the run with
+the failed result `KISSError: KISS Error: Agent ... failed with 3
+consecutive errors. Last error: llm_call_hook() of SEA '...' raised:
+...` (no `Task failed:` prefix: the agent itself reports it).
 
 
 ## Continuing chat sessions

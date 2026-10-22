@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -99,26 +100,38 @@ class GeminiScript:
         serving: Set once the server has written its scripted chunks, so
             a test can time a Stop against a stream that is genuinely
             quiet.
+        delay: Seconds the endpoint "generates" before each chunk: a
+            streamed response pauses that long before writing each chunk,
+            a unary one pauses ``delay * len(chunks)`` before its single
+            body, so both model the same total generation time.
         release: Set by the fixture teardown to free a silent handler.
         requests: The decoded JSON bodies the endpoint received.
+        paths: The request paths, in order, so a test can tell a
+            ``streamGenerateContent`` call from a ``generateContent`` one.
     """
 
     def __init__(self) -> None:
         self.chunks: list[dict[str, Any]] = []
         self.after = "close"
+        self.delay = 0.0
         self.serving = threading.Event()
         self.release = threading.Event()
         self.requests: list[dict[str, Any]] = []
+        self.paths: list[str] = []
 
-    def play(self, chunks: list[dict[str, Any]], after: str = "close") -> None:
+    def play(
+        self, chunks: list[dict[str, Any]], after: str = "close", delay: float = 0.0
+    ) -> None:
         """Script the next response.
 
         Args:
             chunks: Chunks to write before the trailing behaviour.
             after: ``"close"``, ``"silent"``, ``"cut"`` or ``"keepalive"``.
+            delay: Seconds of generation time per chunk (see ``delay``).
         """
         self.chunks = chunks
         self.after = after
+        self.delay = delay
         self.serving.clear()
 
 
@@ -132,6 +145,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
         self.script.requests.append(json.loads(raw))
+        self.script.paths.append(self.path)
         streaming = "streamGenerateContent" in self.path
         if not streaming:
             self._send_unary()
@@ -140,6 +154,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         for body in self.script.chunks:
+            time.sleep(self.script.delay)
             self.wfile.write(f"data: {json.dumps(body)}\r\n\r\n".encode())
             self.wfile.flush()
         self.script.serving.set()
@@ -172,6 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
                 merged["usageMetadata"] = body["usageMetadata"]
         merged["candidates"] = [{"content": {"role": "model", "parts": parts}}]
         payload = json.dumps(merged).encode()
+        time.sleep(self.script.delay * len(self.script.chunks))
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))

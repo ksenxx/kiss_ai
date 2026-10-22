@@ -24,7 +24,6 @@ from kiss.core.models.anthropic_model import (
     AnthropicModel,
     _claude_profile,
     _openai_part_to_anthropic_block,
-    _parse_data_url,
     _tool_calls_to_tool_use_blocks,
     _uses_adaptive_thinking,
     cache_creation_tokens,
@@ -42,7 +41,6 @@ from kiss.core.models.codex_model import (
 )
 from kiss.core.models.gemini_model import (
     GeminiModel,
-    _coerce_args_dict,
     _decode_base64,
     _media_block_to_part,
     _tool_result_response_dict,
@@ -50,6 +48,8 @@ from kiss.core.models.gemini_model import (
 from kiss.core.models.model import (
     Attachment,
     encode_binary_attachment,
+    parse_tool_arguments,
+    split_data_url,
 )
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
@@ -79,20 +79,22 @@ def make_anthropic() -> AnthropicModel:
 class TestAnthropicHelpers:
     """Module-level conversion helpers in anthropic_model."""
 
-    def test_parse_data_url_valid(self) -> None:
-        assert _parse_data_url(f"data:image/png;base64,{PNG_B64}") == ("image/png", PNG_B64)
+    def test_split_data_url_valid(self) -> None:
+        assert split_data_url(f"data:image/png;base64,{PNG_B64}") == ("image/png", PNG_B64)
 
-    def test_parse_data_url_no_media_type(self) -> None:
-        assert _parse_data_url(f"data:;base64,{PNG_B64}") == (
+    def test_split_data_url_no_media_type(self) -> None:
+        assert split_data_url(f"data:;base64,{PNG_B64}") == (
             "application/octet-stream",
             PNG_B64,
         )
+        assert split_data_url(f"data:;base64,{PNG_B64}", "image/png") == ("image/png", PNG_B64)
 
-    def test_parse_data_url_rejects_non_data(self) -> None:
-        assert _parse_data_url("https://example.com/x.png") is None
+    def test_split_data_url_rejects_non_data(self) -> None:
+        assert split_data_url("https://example.com/x.png") is None
 
-    def test_parse_data_url_rejects_non_base64(self) -> None:
-        assert _parse_data_url("data:text/plain,hello") is None
+    def test_split_data_url_rejects_non_base64(self) -> None:
+        assert split_data_url("data:text/plain,hello") is None
+        assert split_data_url("data:image/png;base64,") is None
 
     def test_openai_image_url_data_part(self) -> None:
         block = _openai_part_to_anthropic_block(
@@ -452,13 +454,13 @@ class TestAnthropicTokenCounts:
 
 
 class TestGeminiHelpers:
-    def test_coerce_args_dict(self) -> None:
-        assert _coerce_args_dict({"a": 1}) == {"a": 1}
-        assert _coerce_args_dict('{"a": 1}') == {"a": 1}
-        assert _coerce_args_dict("not json") == {}
-        assert _coerce_args_dict("[1]") == {}
-        assert _coerce_args_dict("  ") == {}
-        assert _coerce_args_dict(None) == {}
+    def test_parse_tool_arguments(self) -> None:
+        assert parse_tool_arguments({"a": 1}) == {"a": 1}
+        assert parse_tool_arguments('{"a": 1}') == {"a": 1}
+        assert parse_tool_arguments("not json") == {}
+        assert parse_tool_arguments("[1]") == {}
+        assert parse_tool_arguments("  ") == {}
+        assert parse_tool_arguments(None) == {}
 
     def test_decode_base64(self) -> None:
         assert _decode_base64(PNG_B64) == PNG_BYTES

@@ -31,7 +31,7 @@ import types as types_module
 import typing
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
@@ -48,7 +48,12 @@ from kiss.core.models.stream_abort import (
     stop_aware_events,
     stop_error,
 )
-from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.processes import (
+    _REAP_GRACE_SECONDS,
+    SIGKILL,
+    kill_process_group,
+    popen_process_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -353,13 +358,124 @@ def _tool_result_to_string(result_dict: dict[str, Any]) -> str:
     Chat-Completions, and Responses implementations.  Values unsupported by
     JSON fall back to ``str`` so attachment parsing always receives text.
     """
-    raw_result = result_dict.get("result", str(result_dict))
+    raw_result = result_dict["result"] if "result" in result_dict else str(result_dict)
     if isinstance(raw_result, str):
         return raw_result
     try:
         return json.dumps(raw_result, ensure_ascii=False)
     except TypeError:
         return str(raw_result)
+
+
+def parse_tool_arguments(arguments: Any) -> dict[str, Any]:
+    """Return a tool call's ``arguments`` as a dict.
+
+    Adapters store arguments as dicts, but a conversation handed off from
+    an OpenAI-schema model (e.g. via the Sorcar ``set_model`` tool) stores
+    them as JSON strings.  A blank string, unparseable JSON, JSON that is
+    not an object, or any other value degrades to ``{}``.
+
+    Args:
+        arguments: The arguments value (dict, JSON string, or anything else).
+
+    Returns:
+        The arguments as a dict.
+    """
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str) or not arguments.strip():
+        return {}
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        logger.debug("Exception caught", exc_info=True)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _chat_tool_call_entry(call_id: str, name: str, args_json: str) -> dict[str, Any]:
+    """Return the Chat Completions ``tool_calls`` entry for one call.
+
+    Args:
+        call_id: The provider's call id.
+        name: The tool name.
+        args_json: The model's argument string, stored verbatim so the
+            conversation replays exactly what the model wrote.
+    """
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": args_json}}
+
+
+def split_data_url(
+    url: str, default_mime: str = "application/octet-stream"
+) -> tuple[str, str] | None:
+    """Split a base64 ``data:`` URL into its media type and base64 payload.
+
+    Args:
+        url: A URL that may be a ``data:<media_type>;base64,<data>`` URL.
+        default_mime: The media type to report when the URL omits one.
+
+    Returns:
+        A ``(media_type, base64_data)`` tuple, or ``None`` when *url* is
+        not a base64 data URL with a non-empty payload.
+    """
+    if not url.startswith("data:"):
+        return None
+    header, _, data = url.partition(",")
+    if ";base64" not in header or not data:
+        return None
+    media_type = header[len("data:") :].split(";", 1)[0]
+    return media_type or default_mime, data
+
+
+def pop_max_tokens_and_stop(params: dict[str, Any]) -> tuple[Any, list[Any] | None]:
+    """Pop the OpenAI-style output-cap and stop aliases out of *params*.
+
+    ``max_tokens`` and ``max_completion_tokens`` name the same cap; both
+    are removed and the first one set wins.  ``stop`` is removed and
+    returned as a list (a bare string becomes a one-item list) so the
+    caller can store it under the provider's ``stop_sequences`` key.
+
+    Args:
+        params: Request parameters, mutated in place.
+
+    Returns:
+        ``(max_tokens, stop_sequences)``, each ``None`` when not set.
+    """
+    max_tokens = params.pop("max_tokens", None)
+    max_completion_tokens = params.pop("max_completion_tokens", None)
+    if max_tokens is None:
+        max_tokens = max_completion_tokens
+    stop = params.pop("stop", None)
+    if isinstance(stop, str):
+        stop = [stop]
+    elif not isinstance(stop, list):
+        stop = None
+    return max_tokens, stop
+
+
+def iter_assistant_tool_calls(message: dict[str, Any]) -> Iterator[tuple[str, str]]:
+    """Yield ``(function_name, tool_call_id)`` for every tool call in *message*.
+
+    Recognises both message shapes a conversation can carry — OpenAI
+    ``tool_calls`` entries and Anthropic ``tool_use`` content blocks — so
+    a conversation handed off between providers (e.g. via the Sorcar
+    ``set_model`` tool) is read the same way everywhere.  A missing name
+    or id yields ``""``.
+
+    Args:
+        message: One assistant message.
+
+    Yields:
+        ``(function_name, tool_call_id)`` per tool call, in message order.
+    """
+    for tc in message.get("tool_calls") or []:
+        if isinstance(tc, dict):
+            yield (tc.get("function") or {}).get("name", ""), tc.get("id", "")
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                yield block.get("name", ""), block.get("id", "")
 
 
 # The one canonical audio table: MIME type -> the short format string the
@@ -912,12 +1028,13 @@ class Model(ABC):
         holding its frame is released, and until then its daemon thread
         stays armed over a connection that never returns to the pool.
 
-        The bracket is closed here, not after the loop, because
-        ``stop_aware_events`` closes it only for a stop and a stall and
-        re-raises every other transport failure untouched, while
-        ``KISSAgent`` retries those in the SAME run without resetting the
-        printer — which would otherwise render the retry's answer as
-        reasoning.  A no-op when the turn ended outside a reasoning block.
+        The bracket is closed here, not after the loop, because the
+        ``finally`` is the one exit every outcome shares: a stop, a stall
+        and every transport failure all leave the ``with`` body through
+        it, and ``KISSAgent`` retries transport failures in the SAME run
+        without resetting the printer — which would otherwise render the
+        retry's answer as reasoning.  A no-op when the turn ended outside
+        a reasoning block.
 
         Args:
             stream: The SDK stream object to iterate and, if needed, abort.
@@ -926,12 +1043,7 @@ class Model(ABC):
         Yields:
             The events of *stream*.
         """
-        events = stop_aware_events(
-            stream,
-            stall_timeout=self._stream_stall_timeout,
-            on_abort=self._close_thinking_if_open,
-            name=name,
-        )
+        events = stop_aware_events(stream, stall_timeout=self._stream_stall_timeout, name=name)
         try:
             yield events
         finally:
@@ -1002,14 +1114,7 @@ class Model(ABC):
             "role": "assistant",
             "content": content,
             "tool_calls": [
-                {
-                    "id": fc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": fc["name"],
-                        "arguments": json.dumps(fc["arguments"]),
-                    },
-                }
+                _chat_tool_call_entry(fc["id"], fc["name"], json.dumps(fc["arguments"]))
                 for fc in function_calls
             ],
         }
@@ -1119,17 +1224,9 @@ class Model(ABC):
             if native and msg.get("role") is not None:
                 break
             if msg.get("role") == "assistant":
-                if msg.get("tool_calls"):
-                    return [(tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]]
-                content = msg.get("content")
-                if isinstance(content, list):
-                    ids = [
-                        (b.get("name", ""), b.get("id", ""))
-                        for b in content
-                        if b.get("type") == "tool_use"
-                    ]
-                    if ids:
-                        return ids
+                ids = list(iter_assistant_tool_calls(msg))
+                if ids:
+                    return ids
                 break
         return list(reversed(native))
 
@@ -1432,9 +1529,7 @@ class Model(ABC):
         Returns:
             dict[str, Any]: The tool schema in OpenAI format.
         """
-        sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or ""
-
+        description, doc, parameters = _tool_summary_and_params(func, func.__name__)
         param_descriptions = self._parse_docstring_params(doc)
 
         # Under ``from __future__ import annotations`` (PEP 563) the
@@ -1450,7 +1545,7 @@ class Model(ABC):
         properties: dict[str, Any] = {}
         required: list[str] = []
 
-        for param_name, param in sig.parameters.items():
+        for param_name, param in parameters.items():
             param_type = hints.get(param_name, param.annotation)
             param_schema = self._python_type_to_json_schema(param_type)
 
@@ -1461,8 +1556,6 @@ class Model(ABC):
 
             if param.default is inspect.Parameter.empty:
                 required.append(param_name)
-
-        description = doc.split("\n")[0] if doc else f"Function {func.__name__}"
 
         return {
             "type": "function",
@@ -1841,9 +1934,6 @@ class CLITextModel(Model):
         raise KISSError(f"{self._cli_model_name} does not support embeddings.")
 
 
-# Seconds a drained pipe or a signalled child is given to finish before
-# the supervisor gives up on it and moves on.
-_REAP_GRACE_SECONDS = 2.0
 # Longest wait for a child that already closed stdout to exit on its own.
 # Bounded by the run's own deadline, so a short timeout stays short.
 _EXIT_GRACE_SECONDS = 10.0
@@ -2814,6 +2904,40 @@ class _ToolCallFilteredStream:
         self._close_buf = ""
 
 
+def _tool_summary_and_params(
+    func: Callable[..., Any], name: str
+) -> tuple[str, str, Mapping[str, inspect.Parameter]]:
+    """Return the one-line summary, full docstring and parameters of a tool.
+
+    The summary is the first docstring line, or ``Function <name>`` when
+    *func* has no docstring; the docstring is ``""`` in that case.  This
+    is the single reader of a tool's signature and docstring, shared by
+    the OpenAI schema builder and the text-based tools prompt.
+
+    Args:
+        func: The tool function.
+        name: The name to use in the fallback summary.
+
+    Returns:
+        ``(summary, docstring, parameters)``.
+    """
+    doc = inspect.getdoc(func) or ""
+    summary = doc.split("\n")[0] if doc else f"Function {name}"
+    return summary, doc, inspect.signature(func).parameters
+
+
+def _annotation_name(annotation: Any) -> str:
+    """Return the name shown for a parameter annotation in the text tools prompt.
+
+    A class shows its ``__name__``; anything else (a ``list[str]`` alias,
+    or the verbatim string of a module under ``from __future__ import
+    annotations``) shows its ``str``; an unannotated parameter is ``any``.
+    """
+    if annotation is inspect.Parameter.empty:
+        return "any"
+    return getattr(annotation, "__name__", str(annotation))
+
+
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
     """Build a text-based tools description for models without native function calling.
 
@@ -2829,20 +2953,13 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
 
     tools_desc = []
     for func_name, func in function_map.items():
-        sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or f"Function {func_name}"
-
-        params = []
-        for param_name, param in sig.parameters.items():
-            param_type = param.annotation
-            type_name = getattr(param_type, "__name__", str(param_type))
-            if type_name == "_empty":
-                type_name = "any"
-            params.append(f"    - {param_name} ({type_name})")
-
+        summary, _doc, parameters = _tool_summary_and_params(func, func_name)
+        params = [
+            f"    - {param_name} ({_annotation_name(param.annotation)})"
+            for param_name, param in parameters.items()
+        ]
         params_str = "\n".join(params) if params else "    (no parameters)"
-        first_line = doc.split("\n")[0]
-        tools_desc.append(f"- **{func_name}**: {first_line}\n  Parameters:\n{params_str}")
+        tools_desc.append(f"- **{func_name}**: {summary}\n  Parameters:\n{params_str}")
 
     return f"""
 ## Available Tools

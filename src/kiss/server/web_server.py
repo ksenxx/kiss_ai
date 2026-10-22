@@ -5458,7 +5458,12 @@ class RemoteAccessServer:
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
             if app_window:
-                standalone_app.app_window_event("closing")
+                # The browser closes with "going away" when the page is
+                # gone (window closed, reload); any other code (our
+                # keepalive timed out, the connection broke) leaves
+                # the page there, connecting again.
+                gone = websocket.close_code == standalone_app.APP_WINDOW_GONE_CLOSE_CODE
+                standalone_app.app_window_event("closing" if gone else "dropped")
 
     def _stored_remote_password(self) -> str:
         """Return the ``remote_password`` of ``config.json`` as of now.
@@ -8987,6 +8992,12 @@ class RemoteAccessServer:
         5. **WebSocket ping** — send a ping to every connected client
            and close connections that fail to respond within
            :data:`_WS_PING_TIMEOUT` seconds.
+        6. **Windowless app** — on macOS, quit the standalone app's
+           browser that has run for several ticks with neither its
+           popup window connected nor a window on screen
+           (:func:`standalone_app.sweep_windowless_app`): the popup
+           closed while no daemon could see it, and a click on the
+           app's icon would open an empty browser window.
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
@@ -9035,6 +9046,15 @@ class RemoteAccessServer:
                 raise
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
+            try:
+                if await asyncio.to_thread(
+                    standalone_app.sweep_windowless_app, standalone_app.macos_bundle_path(),
+                ):
+                    logger.info("Quit the standalone app's browser: its window is closed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog app sweep error", exc_info=True)
 
     async def _reload_trusted_clients(self) -> None:
         """Load the newly enrolled machine-link CAs into the live SSL context.
