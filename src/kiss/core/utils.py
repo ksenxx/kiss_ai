@@ -5,6 +5,7 @@
 
 """Utility functions for the KISS core module."""
 
+import contextlib
 import functools
 import html as html_module
 import logging
@@ -115,15 +116,8 @@ def seed_file_atomically(path: Path, content: str) -> None:
         # PermissionError until it closes.  Wait that out; the seed is
         # already in place, so a staging name that outlives the budget
         # is left behind rather than reported as a failed seed.
-        deadline = time.monotonic() + SHARING_RETRY_SECONDS
-        while True:
-            try:
-                Path(staged).unlink(missing_ok=True)
-                break
-            except PermissionError:
-                if not _sharing_violation_may_clear(Path(staged), deadline):
-                    break
-                time.sleep(_SHARING_RETRY_INTERVAL)
+        with contextlib.suppress(PermissionError):
+            unlink_waiting_for_holders(Path(staged))
 
 
 def atomic_write_text(
@@ -587,6 +581,20 @@ _HTML_TAG_RE = re.compile(
 )
 
 
+def _looks_like_html(text: str, tag_at_start: bool) -> bool:
+    """Whether *text* is an HTML document or carries a known HTML tag.
+
+    A DOCTYPE at the start (modulo whitespace) always counts.  With
+    *tag_at_start* the tag must open the text; otherwise it may appear
+    anywhere.
+    """
+    stripped = text.lstrip()
+    if stripped[:9].lower() == "<!doctype":
+        return True
+    found = _HTML_TAG_RE.match(stripped) if tag_at_start else _HTML_TAG_RE.search(stripped)
+    return found is not None
+
+
 def _unescape_escaped_html(text: str) -> str | None:
     """Recover HTML from text whose tags were entity-escaped by mistake.
 
@@ -612,8 +620,7 @@ def _unescape_escaped_html(text: str) -> str | None:
         if unescaped == candidate:
             return None
         candidate = unescaped
-        stripped = candidate.lstrip()
-        if stripped[:9].lower() == "<!doctype" or _HTML_TAG_RE.match(stripped):
+        if _looks_like_html(candidate, tag_at_start=True):
             return candidate
     return None
 
@@ -639,7 +646,7 @@ def ensure_html(text: str) -> str:
         text = str(text)
     if not text:
         return text
-    if text.lstrip()[:9].lower() == "<!doctype" or _HTML_TAG_RE.search(text):
+    if _looks_like_html(text, tag_at_start=False):
         return text
     unescaped = _unescape_escaped_html(text)
     if unescaped is not None:

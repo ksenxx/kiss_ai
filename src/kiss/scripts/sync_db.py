@@ -6,10 +6,11 @@
 """One-way synchronization of ``history.db``-shaped SQLite databases.
 
 Copies rows of the task table (``task_history``) and the ``events``
-table from SOURCE into TARGET, then recomputes TARGET's per-chat
-summaries (``chat_summaries``) for the chats that received tasks.
-Nothing is ever written to SOURCE and no other table of TARGET is
-touched.
+table from SOURCE into TARGET, carries SOURCE's record of deleted tasks
+(``deleted_tasks``) over and applies it, then recomputes TARGET's
+per-chat summaries (``chat_summaries``) for the chats that received or
+lost tasks.  Nothing is ever written to SOURCE and no other table of
+TARGET is touched.
 
 Both SOURCE and TARGET are unix-style paths to a SQLite database file,
 optionally prefixed with ``user@host:`` when the database lives on a
@@ -24,12 +25,15 @@ database, so a database file is never copied across machines):
 
 1. ``_manifest`` runs on TARGET and emits a small gzipped JSON summary
    of what TARGET already has: every ``task_history.id`` it holds, each
-   with the highest ``events.seq`` TARGET has for that task.
+   with the highest ``events.seq`` TARGET has for that task, and the
+   ids of the tasks deleted there.
 2. ``_extract`` runs on SOURCE, reads that summary, and builds a
-   throw-away *delta* database holding only the rows TARGET is missing.
-   The delta is streamed back gzipped.
-3. ``_merge`` runs on TARGET, ``ATTACH``-es the delta and inserts the
-   new rows in a single transaction.
+   throw-away *delta* database holding only the rows TARGET is missing
+   -- none of a task TARGET deleted -- and the deletions TARGET has not
+   heard of.  The delta is streamed back gzipped.
+3. ``_merge`` runs on TARGET, ``ATTACH``-es the delta, inserts the new
+   rows, records the deletions and carries them out, in a single
+   transaction.
 
 Only the delta crosses the network, which keeps a repeated sync of a
 multi-gigabyte ``history.db`` down to seconds.  Rows are matched by their
@@ -38,9 +42,9 @@ stable natural keys -- ``task_history.id`` for tasks and
 rowid that means different things in different databases) is never
 copied, so syncing the same pair of databases twice is a no-op.
 
-The history tables are append-only, and the sync leans on that: a task
-row is never modified or deleted once written, and a task's events are
-only ever appended, each with the next ``seq``, so the highest ``seq``
+The history grows by appending, and the sync leans on that: a finished
+task's row is never modified, and a task's events are only ever
+appended, each with the next ``seq``, so the highest ``seq``
 TARGET holds says exactly which of SOURCE's events it lacks -- the ones
 above it, and nothing below.  Neither phase therefore reads the events
 table itself: the manifest finds each task's highest ``seq`` with one
@@ -69,10 +73,31 @@ column was just added and for the incoming rows when SOURCE did not
 carry it.  Only a column ``ADD COLUMN`` cannot express (a primary key,
 or ``NOT NULL`` without a default) is refused.
 
-Task ids are unique and a task row, once created, is never modified, so
-the sync never has to compare row contents: a task travels exactly when
+Task ids are unique and a finished task's row is never modified, so the
+sync never has to compare row contents: a task travels exactly when
 TARGET does not have its id, and a ``task_history`` row that exists on
-both sides is always left as TARGET recorded it.
+both sides is always left as TARGET recorded it.  A task that is still
+running is the one row that will change -- the web app writes it when
+the task starts and rewrites it when the task ends -- and the caller
+holds such rows back with ``--edit-delta`` (``scripts/sync-task-db.sh``
+does, both ways) until they are final.
+
+The one thing the history loses is a task the user deleted (a task, or
+a whole chat, from the web app's panels).  Such a row is gone from the
+database, and a sync that only adds rows would bring it back from the
+other machine on the next run.  So the web app records every deletion
+in ``deleted_tasks`` (the task's id and the moment; a deleted chat in
+``deleted_chats`` as well), and the sync treats those tables as part
+of the history: TARGET's deletions are in the manifest, so a task
+TARGET deleted never travels there again (and a ``--full`` sync, which
+ships every row, is filtered against them on arrival); SOURCE's
+deletions TARGET lacks travel in the delta, are recorded in TARGET's
+own tables and carried out there -- the task's row and events are
+deleted, as the web app would have, and a deleted chat's summary row
+goes once none of its tasks is left.  A deletion only ever removes a
+row older than itself, never a task still running, and a database
+from a release before the tables existed simply has no deletions to
+report and gains the tables when deletions reach it.
 
 ``chat_summaries`` is not history and is not synced as rows.  It is a
 cache with one row per chat -- a few-word summary of the chat's tasks and
@@ -108,7 +133,8 @@ Options:
                     standing for the delta's path (repeatable, in
                     order).  The delta holds the tables ``task_history``
                     and ``events`` with SOURCE's columns and only the
-                    rows about to travel, so a
+                    rows about to travel (and ``deleted_tasks``, the
+                    deletions about to travel), so a
                     command can rewrite or drop rows cheaply -- re-point
                     recorded work directories, hold back a task that is
                     still running -- without a copy of either database.
@@ -142,6 +168,30 @@ from typing import Any, BinaryIO
 TASK_TABLE = "task_history"
 EVENT_TABLE = "events"
 CHAT_TABLE = "chat_summaries"
+# The web app's record of the tasks and chats the user deleted
+# (``persistence._init_tables`` declares them the same way); created here on
+# a target from before they existed.
+DELETED_TABLE = "deleted_tasks"
+DELETED_CHATS_TABLE = "deleted_chats"
+DELETED_DDL = {
+    DELETED_TABLE: (
+        f'CREATE TABLE IF NOT EXISTS {{schema}}."{DELETED_TABLE}"'
+        ' ("id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)'
+    ),
+    DELETED_CHATS_TABLE: (
+        f'CREATE TABLE IF NOT EXISTS {{schema}}."{DELETED_CHATS_TABLE}"'
+        ' ("chat_id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)'
+    ),
+}
+DELETED_KEY = {DELETED_TABLE: "id", DELETED_CHATS_TABLE: "chat_id"}
+# The result the web app writes into a task's row when the task starts and
+# replaces when it ends (``persistence._add_task``): a row still carrying it
+# belongs to a task that is running, which no deletion may remove -- nor may
+# it remove a row without it whose task wrote an event this recently (the
+# heartbeat ``running_tasks.py`` goes by, for a row from before the
+# placeholder).
+UNFINISHED_RESULT = "Agent Failed Abruptly"
+RUNNING_WINDOW = 300.0
 # The web app's own code this script runs on the target: the chat-summary
 # module and the task-column module.  Both are stdlib-only; they are
 # shipped to a remote host with this script (see ``_remote_shell_command``)
@@ -488,14 +538,15 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
     """Emit the target's sync manifest as gzipped JSON.
 
     The manifest maps every task id the target holds to the highest
-    ``events.seq`` it has for that task (``null`` when it has none).
-    That is all the source needs under the append-only rule the history
-    follows: a task row is immutable once created, so an id the target
-    holds never has to travel again, and a task's events are only ever
-    appended with increasing ``seq``, so the source's events above that
-    number are exactly the ones the target lacks.  Each highest ``seq``
-    is one seek in the ``(task_id, seq)`` index, so the events table is
-    never scanned however many rows it holds.
+    ``events.seq`` it has for that task (``null`` when it has none), and
+    lists the ids of the tasks deleted on the target.  That is all the
+    source needs: a finished task's row is never modified, so an id the
+    target holds never has to travel again; a task's events are only
+    ever appended with increasing ``seq``, so the source's events above
+    that number are exactly the ones the target lacks; and a task the
+    target deleted must not come back.  Each highest ``seq`` is one seek
+    in the ``(task_id, seq)`` index, so the events table is never
+    scanned however many rows it holds.
 
     Args:
         path: Target database path.
@@ -520,9 +571,35 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
                 f' FROM main.{quote_name(TASK_TABLE)} t WHERE t."id" IS NOT NULL'
             )
         }
+        deleted = _deletions(conn, "main", DELETED_TABLE)
+        deleted_chats = _deletions(conn, "main", DELETED_CHATS_TABLE)
     finally:
         conn.close()
-    write_json_gz({"tasks": tasks}, out)
+    write_json_gz({"tasks": tasks, "deleted": deleted, "deleted_chats": deleted_chats}, out)
+
+
+def _deletions(conn: sqlite3.Connection, schema: str, table: str) -> dict[str, float]:
+    """Return ``{key: deleted_ts}`` for every deletion one tombstone table records.
+
+    Args:
+        conn: Connection with the database attached as *schema*.
+        schema: ``main``, ``src`` or ``delta``.
+        table: :data:`DELETED_TABLE` (keyed by task id) or
+            :data:`DELETED_CHATS_TABLE` (keyed by chat id).
+
+    Returns:
+        The deletions, empty for a database from before the table existed.
+    """
+    if not has_table(conn, schema, table):
+        return {}
+    key = quote_name(DELETED_KEY[table])
+    return {
+        str(deleted_id): float(deleted_ts or 0.0)
+        for deleted_id, deleted_ts in conn.execute(
+            f'SELECT {key}, "deleted_ts" FROM {quote_name(schema)}.{quote_name(table)}'
+            f" WHERE {key} IS NOT NULL"
+        )
+    }
 
 
 def has_table(conn: sqlite3.Connection, schema: str, table: str) -> bool:
@@ -572,8 +649,11 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
             _create_delta_tables(conn)
             conn.execute("BEGIN")
             _load_target_tasks(conn, manifest.get("tasks") or {})
+            _load_target_deletions(conn, manifest.get("deleted") or {})
             _extract_tasks(conn)
             _extract_events(conn)
+            _extract_deletions(conn, DELETED_TABLE, manifest.get("deleted") or {})
+            _extract_deletions(conn, DELETED_CHATS_TABLE, manifest.get("deleted_chats") or {})
             conn.execute("COMMIT")
             conn.execute("DETACH DATABASE src")
         finally:
@@ -601,6 +681,51 @@ def _create_delta_tables(conn: sqlite3.Connection) -> None:
         if not row or not row[0]:
             raise SyncError(f"table {table!r} is missing from the source database")
         conn.execute(row[0])
+    for ddl in DELETED_DDL.values():
+        conn.execute(ddl.format(schema="main"))
+
+
+def _load_target_deletions(conn: sqlite3.Connection, deleted: dict[str, Any]) -> None:
+    """Load the ids of the tasks deleted on the target into a temporary table.
+
+    Args:
+        conn: Connection to the delta database, inside its transaction.
+        deleted: Manifest entries ``{task_id: deleted_ts}``; empty for a
+            ``--full`` sync or a target from before deletions were recorded.
+    """
+    conn.execute('CREATE TEMP TABLE "_sync_deleted" (task_id TEXT PRIMARY KEY)')
+    conn.executemany(
+        'INSERT OR REPLACE INTO temp."_sync_deleted" VALUES (?)',
+        [(task_id,) for task_id in deleted],
+    )
+
+
+def _extract_deletions(conn: sqlite3.Connection, table: str, known: dict[str, Any]) -> None:
+    """Copy the deletions of one tombstone table the target has not heard of.
+
+    Args:
+        conn: Connection to the delta database with the source attached.
+        table: :data:`DELETED_TABLE` or :data:`DELETED_CHATS_TABLE`.
+        known: The target's deletions from that table, ``{key: deleted_ts}``.
+            A source from before deletions were recorded contributes none.
+    """
+    if not has_table(conn, "src", table):
+        return
+    key = quote_name(DELETED_KEY[table])
+    quoted = quote_name(table)
+    conn.execute('DROP TABLE IF EXISTS temp."_sync_known"')
+    conn.execute('CREATE TEMP TABLE "_sync_known" (deleted_id TEXT PRIMARY KEY)')
+    conn.executemany(
+        'INSERT OR REPLACE INTO temp."_sync_known" VALUES (?)',
+        [(deleted_id,) for deleted_id in known],
+    )
+    conn.execute(
+        f'INSERT INTO main.{quoted} ({key}, "deleted_ts")'
+        f' SELECT s.{key}, s."deleted_ts" FROM src.{quoted} s'
+        f' LEFT JOIN temp."_sync_known" x ON x.deleted_id = s.{key}'
+        f" WHERE s.{key} IS NOT NULL AND x.deleted_id IS NULL"
+    )
+    conn.execute('DROP TABLE temp."_sync_known"')
 
 
 def _load_target_tasks(conn: sqlite3.Connection, tasks: dict[str, Any]) -> None:
@@ -622,15 +747,17 @@ def _load_target_tasks(conn: sqlite3.Connection, tasks: dict[str, Any]) -> None:
 def _extract_tasks(conn: sqlite3.Connection) -> None:
     """Copy the task rows whose id the target does not have into the delta.
 
-    Task ids are unique and a task row is never modified after it is
-    created, so an id the target already holds identifies a row that is
-    already there in full and never has to travel.  A row with a NULL id
-    cannot be matched across databases and would be duplicated on every
-    run, so such rows are skipped.
+    Task ids are unique and a finished task's row is never modified, so
+    an id the target already holds identifies a row that is already
+    there in full and never has to travel; an id the target deleted
+    must not travel either.  A row with a NULL id cannot be matched
+    across databases and would be duplicated on every run, so such rows
+    are skipped.
 
     Args:
         conn: Connection to the delta database with the source attached
-            and the target's tasks loaded by :func:`_load_target_tasks`.
+            and the target's tasks and deletions loaded by
+            :func:`_load_target_tasks` and :func:`_load_target_deletions`.
     """
     columns = table_columns(conn, "src", TASK_TABLE)
     require_columns(columns, ("id",), f"{TASK_TABLE} in the source database")
@@ -640,7 +767,8 @@ def _extract_tasks(conn: sqlite3.Connection) -> None:
         f"INSERT INTO main.{table} ({names})"
         f" SELECT {', '.join('s.' + quote_name(c) for c in columns)} FROM src.{table} s"
         ' LEFT JOIN temp."_sync_have" w ON w.task_id = s."id"'
-        ' WHERE s."id" IS NOT NULL AND w.task_id IS NULL'
+        ' LEFT JOIN temp."_sync_deleted" x ON x.task_id = s."id"'
+        ' WHERE s."id" IS NOT NULL AND w.task_id IS NULL AND x.task_id IS NULL'
     )
 
 
@@ -649,7 +777,8 @@ def _extract_events(conn: sqlite3.Connection) -> None:
 
     Events are append-only with increasing ``seq``, so the target lacks
     exactly the events above the highest ``seq`` it reported for a task,
-    and every event of a task it reported no events for.  Both are found
+    and every event of a task it reported no events for -- unless it
+    deleted the task, whose events must not come back.  Both are found
     by seeking the source's ``(task_id, seq)`` index once per task; no
     event the target already has is ever read, nor is the events table
     scanned.  Events whose ``task_id`` has no ``task_history`` row are
@@ -673,8 +802,9 @@ def _extract_events(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"{insert} FROM src.{quote_name(TASK_TABLE)} t"
         ' LEFT JOIN temp."_sync_have" w ON w.task_id = t."id"'
+        ' LEFT JOIN temp."_sync_deleted" x ON x.task_id = t."id"'
         f' CROSS JOIN src.{table} s ON s."task_id" = t."id"'
-        ' WHERE w.high_seq IS NULL AND s."seq" IS NOT NULL'
+        ' WHERE w.high_seq IS NULL AND x.task_id IS NULL AND s."seq" IS NOT NULL'
     )
     conn.execute(
         f'{insert} FROM temp."_sync_have" w'
@@ -756,12 +886,14 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, A
             columns_added = {
                 table: add_missing_columns(conn, table) for table in (TASK_TABLE, EVENT_TABLE)
             }
+            deletions_recorded = _record_deletions(conn)
             tasks_inserted = _merge_tasks(conn)
             events_inserted = _merge_events(conn)
             columns_completed = _complete_tasks(
                 conn, columns_added[TASK_TABLE], tasks_inserted
             )
-            chats_refreshed = _merge_chats(conn)
+            tasks_deleted, emptied_chats = _apply_deletions(conn)
+            chats_refreshed = _merge_chats(conn, emptied_chats)
             conn.execute("COMMIT" if commit else "ROLLBACK")
         except BaseException as exc:
             conn.execute("ROLLBACK")
@@ -777,10 +909,121 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, A
     return {
         "tasks_inserted": tasks_inserted,
         "events_inserted": events_inserted,
+        "deletions_recorded": deletions_recorded,
+        "tasks_deleted": tasks_deleted,
         "chats_refreshed": chats_refreshed,
         "columns_added": columns_added,
         "columns_completed": columns_completed,
     }
+
+
+def _record_deletions(conn: sqlite3.Connection) -> int:
+    """Record the delta's deletions in the target's own tombstone tables.
+
+    The tables are created on a target from before they existed.  They
+    are recorded before any row is merged, so that the rows merged next
+    can be checked against every deletion the target knows of --
+    including a ``--full`` sync's, whose extract could not leave the
+    deleted rows out.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``.
+
+    Returns:
+        The number of deletions recorded (tasks and chats together).
+    """
+    recorded = 0
+    for table, ddl in DELETED_DDL.items():
+        conn.execute(ddl.format(schema="main"))
+        if not has_table(conn, "delta", table):
+            continue
+        key = quote_name(DELETED_KEY[table])
+        quoted = quote_name(table)
+        recorded += conn.execute(
+            f'INSERT INTO main.{quoted} ({key}, "deleted_ts")'
+            f' SELECT {key}, "deleted_ts" FROM delta.{quoted} WHERE {key} IS NOT NULL'
+            f" ON CONFLICT({key}) DO NOTHING"
+        ).rowcount
+    return recorded
+
+
+def _deleted_task_filter(alias: str, columns: set[str]) -> str:
+    """Return the SQL condition that a task row is one a deletion applies to.
+
+    A row is doomed by a tombstone with its id unless the row is younger
+    than the deletion (a reused id is a new task).
+
+    Args:
+        alias: Alias of the task row in the surrounding statement.
+        columns: The columns that row has; its ``timestamp``, where
+            there is one, dates it.
+
+    Returns:
+        A condition in terms of *alias* and ``main.deleted_tasks``.
+    """
+    started = f'COALESCE({alias}."timestamp", 0)' if "timestamp" in columns else "0"
+    return (
+        f"EXISTS (SELECT 1 FROM main.{quote_name(DELETED_TABLE)} d"
+        f' WHERE d."id" = {alias}."id" AND d."deleted_ts" > {started})'
+    )
+
+
+def _apply_deletions(conn: sqlite3.Connection) -> tuple[int, list[str]]:
+    """Carry out every deletion the target records on the rows it holds.
+
+    Every task whose id is in ``deleted_tasks`` -- whichever machine
+    deleted it, whenever the deletion arrived -- is deleted as the web
+    app would have deleted it: its events first, then its row.  Spared
+    are a row younger than its deletion (a reused id is a new task) and
+    the row of a task that is still running here -- one still carrying
+    the placeholder the web app writes at a task's start, or one without
+    it whose task wrote an event in the last :data:`RUNNING_WINDOW`
+    seconds (the heartbeat ``running_tasks.py`` goes by).  The web app
+    rewrites such a row when the task ends, and deleting it from under
+    the running agent would lose what it writes next; the deletion waits
+    for the next sync.
+
+    Args:
+        conn: Target connection, its rows and deletions already merged.
+
+    Returns:
+        The number of task rows deleted and the ids of the chats those
+        rows belonged to.
+    """
+    columns = set(table_columns(conn, "main", TASK_TABLE))
+    spared = []
+    if "result" in columns:
+        spared.append(f"COALESCE(t.\"result\", '') = '{UNFINISHED_RESULT}'")
+    if "timestamp" in set(table_columns(conn, "main", EVENT_TABLE)):
+        ended = 'COALESCE(t."end_ts", 0) <= 0' if "end_ts" in columns else "1"
+        spared.append(
+            f"({ended} AND EXISTS (SELECT 1 FROM main.{quote_name(EVENT_TABLE)} e"
+            f' WHERE e."task_id" = t."id" AND e."timestamp" > {time.time() - RUNNING_WINDOW!r}))'
+        )
+    chat = 't."chat_id"' if "chat_id" in columns else "''"
+    tasks = quote_name(TASK_TABLE)
+    conn.execute('DROP TABLE IF EXISTS temp."_sync_doomed"')
+    conn.execute(
+        f'CREATE TEMP TABLE "_sync_doomed" AS SELECT t."id" AS id, {chat} AS chat_id'
+        f" FROM main.{tasks} t WHERE {_deleted_task_filter('t', columns)}"
+        + ("".join(f" AND NOT {condition}" for condition in spared))
+    )
+    chats = [
+        str(row[0])
+        for row in conn.execute(
+            'SELECT DISTINCT chat_id FROM temp."_sync_doomed"'
+            " WHERE chat_id IS NOT NULL AND chat_id != ''"
+        )
+    ]
+    conn.execute(
+        f'DELETE FROM main.{quote_name(EVENT_TABLE)} WHERE "task_id" IN'
+        ' (SELECT id FROM temp."_sync_doomed")'
+    )
+    removed = conn.execute(
+        f'DELETE FROM main.{tasks} WHERE "id" IN (SELECT id FROM temp."_sync_doomed")'
+    ).rowcount
+    conn.execute('DROP TABLE temp."_sync_doomed"')
+    return removed, chats
 
 
 def _merge_tasks(conn: sqlite3.Connection) -> int:
@@ -803,9 +1046,12 @@ def _merge_tasks(conn: sqlite3.Connection) -> int:
     require_columns(columns, ("id",), f"{TASK_TABLE} in the target database")
     table = quote_name(TASK_TABLE)
     names = ", ".join(quote_name(c) for c in columns)
+    # A task the target deleted stays deleted: the extract leaves such rows
+    # out when it knows of the deletion, and a ``--full`` sync does not.
+    doomed = _deleted_task_filter("s", set(columns))
     sql = (
         f"INSERT INTO main.{table} ({names})"
-        f" SELECT {names} FROM delta.{table} WHERE \"id\" IS NOT NULL"
+        f' SELECT {names} FROM delta.{table} s WHERE "id" IS NOT NULL AND NOT {doomed}'
         ' ON CONFLICT("id") DO NOTHING'
     )
     return conn.execute(sql).rowcount
@@ -834,40 +1080,54 @@ def _merge_events(conn: sqlite3.Connection) -> int:
     )
     copied = [c for c in columns if c != rowid_alias_column(conn, "main", EVENT_TABLE)]
     table = quote_name(EVENT_TABLE)
+    # The events of a task the target deleted and does not hold stay out
+    # (their row was left out by _merge_tasks); a task the target still
+    # holds takes its new events, whatever becomes of it next.
     sql = (
         f"INSERT INTO main.{table}"
         f" ({', '.join(quote_name(c) for c in copied)})"
         f" SELECT {', '.join('d.' + quote_name(c) for c in copied)}"
         f" FROM delta.{table} d"
+        f' WHERE (EXISTS (SELECT 1 FROM main.{quote_name(TASK_TABLE)} t WHERE t."id" = d."task_id")'
+        f' OR NOT EXISTS (SELECT 1 FROM main.{quote_name(DELETED_TABLE)} x'
+        ' WHERE x."id" = d."task_id"))'
     )
     if _has_unique_event_key(conn):
-        sql += ' WHERE true ON CONFLICT("task_id", "seq") DO NOTHING'
+        sql += ' ON CONFLICT("task_id", "seq") DO NOTHING'
     else:
         sql += (
-            f" WHERE NOT EXISTS (SELECT 1 FROM main.{table} t"
+            f" AND NOT EXISTS (SELECT 1 FROM main.{table} t"
             ' WHERE t."task_id" = d."task_id" AND t."seq" = d."seq")'
         )
     return conn.execute(sql).rowcount
 
 
-def _merge_chats(conn: sqlite3.Connection) -> int:
-    """Recompute the target's summary row of every chat the delta brought tasks for.
+def _merge_chats(conn: sqlite3.Connection, emptied_chats: list[str]) -> int:
+    """Recompute the target's summary row of every chat whose tasks just changed.
 
     The delta's task rows name the chats whose ``task_history`` just
-    changed on the target (the few rows the target already had, skipped
-    by :func:`_merge_tasks`, cost one harmless recomputation).  Each such
-    chat's ``chat_summaries`` row is rebuilt from the target's merged
-    tasks by the web app's own code, so it is exactly what the app would
-    have written had those tasks finished here; chats that received
-    nothing keep their rows.  Sub-agent rows do not count: the summary is
-    computed from the chat's listable tasks only.  A target without the
-    table (or from before tasks carried a chat) gets no rows.
+    gained rows on the target (the few rows the target already had,
+    skipped by :func:`_merge_tasks`, cost one harmless recomputation),
+    and *emptied_chats* the chats that just lost rows to a deletion.
+    Each such chat's ``chat_summaries`` row is rebuilt from the target's
+    merged tasks by the web app's own code, so it is exactly what the
+    app would have written had those tasks finished here; chats whose
+    tasks did not change keep their rows.  A chat the user deleted (in
+    ``deleted_chats``) loses its row, as it did on the machine that
+    deleted it, once none of its tasks is left -- a chat that merely
+    lost a task keeps its row and, with it, the title the user gave it,
+    and so does a chat started again after its deletion.
+    Sub-agent rows do not count: the summary is computed from the chat's
+    listable tasks only.  A target without the table (or from before
+    tasks carried a chat) gets no rows.
 
     Args:
         conn: Target connection with the delta attached as ``delta``.
+        emptied_chats: Ids of the chats :func:`_apply_deletions` removed
+            tasks from.
 
     Returns:
-        The number of chat summary rows recomputed.
+        The number of chat summary rows recomputed or dropped.
     """
     if not has_table(conn, "main", CHAT_TABLE):
         return 0
@@ -888,6 +1148,7 @@ def _merge_chats(conn: sqlite3.Connection) -> int:
             ' AND ("parent_task_id" IS NULL OR "parent_task_id" = \'\')'
         )
     ]
+    chat_ids += [chat_id for chat_id in emptied_chats if chat_id not in chat_ids]
     # A target from before the columns existed gets them here, as the
     # daemon adds them when it opens the database.
     columns = _shipped_module("history_columns")
@@ -895,7 +1156,19 @@ def _merge_chats(conn: sqlite3.Connection) -> int:
     summaries = _shipped_module("chat_summary")
     for chat_id in chat_ids:
         summaries.upsert_chat_summary(conn, chat_id)
-    return len(chat_ids)
+    # A chat started again after its deletion (its row's newest launch, in
+    # milliseconds, is younger than the deletion) is a new chat with the
+    # old id, and keeps its row even once its tasks are gone again.
+    chats = quote_name(CHAT_TABLE)
+    dropped = conn.execute(
+        f"DELETE FROM main.{chats} WHERE EXISTS"
+        f' (SELECT 1 FROM main.{quote_name(DELETED_CHATS_TABLE)} d'
+        f' WHERE d."chat_id" = {chats}."chat_id"'
+        f' AND d."deleted_ts" * 1000 > COALESCE({chats}."last_launched", 0))'
+        f' AND NOT EXISTS (SELECT 1 FROM main.{quote_name(TASK_TABLE)} t'
+        f' WHERE t."chat_id" = {chats}."chat_id")'
+    ).rowcount
+    return len(chat_ids) + dropped
 
 
 def _complete_tasks(
@@ -1334,17 +1607,20 @@ def format_stats(source: Location, target: Location, stats: dict[str, Any]) -> s
         A single summary line.
     """
     chats = stats.get("chats_refreshed", 0)
+    deleted = stats.get("tasks_deleted", 0)
     if stats["dry_run"]:
         applied = (
             f"would add {stats['tasks_inserted']} task row(s)"
             f" and {stats['events_inserted']} event row(s)"
-            f" and refresh {chats} chat summary row(s)"
+            + (f", delete {deleted} task row(s)" if deleted else "")
+            + f" and refresh {chats} chat summary row(s)"
         )
     else:
         applied = (
             f"{stats['tasks_inserted']} task row(s) added,"
             f" {stats['events_inserted']} event row(s) added,"
-            f" {chats} chat summary row(s) refreshed"
+            + (f" {deleted} task row(s) deleted," if deleted else "")
+            + f" {chats} chat summary row(s) refreshed"
         )
     schema = [
         f"column(s) {', '.join(names)} {'would be ' if stats['dry_run'] else ''}added to {table}"

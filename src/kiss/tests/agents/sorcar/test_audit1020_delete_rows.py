@@ -131,6 +131,28 @@ class TestDeleteRows:
         assert _count("SELECT COUNT(*) FROM task_history WHERE id IN (?, ?)", parent, child) == 0
         assert _count("SELECT COUNT(*) FROM events WHERE task_id IN (?, ?)", parent, child) == 0
 
+    def test_every_deletion_is_recorded_for_the_sync(self) -> None:
+        """A deleted task would come back from the other machine without a record.
+
+        The task database is synced between machines by adding the rows
+        one lacks, so a deleted task, chat or sub-task leaves its id in
+        ``deleted_tasks`` with the moment it went, in the deleting
+        transaction; a chat deletion records each of the chat's tasks.
+        """
+        before = time.time()
+        parent, chat_id = th._add_task("parent")
+        child, _ = th._add_task("child", chat_id, extra={"subagent": {"parent_task_id": parent}})
+        other, other_chat = th._add_task("other")
+        th._save_task_result("finished", task_id=other)
+        assert _count("SELECT COUNT(*) FROM deleted_tasks") == 0
+
+        assert th._delete_task(parent) == 2
+        assert th._delete_chat(other_chat) == 1
+
+        rows = th._get_db().execute("SELECT id, deleted_ts FROM deleted_tasks").fetchall()
+        assert sorted(r[0] for r in rows) == sorted([parent, child, other])
+        assert all(before <= r[1] <= time.time() for r in rows)
+
     def test_shutdown_rewrite_refreshes_chat_context(self) -> None:
         task_id, chat_id = th._add_task("in flight")
         assert "Agent Failed Abruptly" in th._load_chat_context_text(chat_id)

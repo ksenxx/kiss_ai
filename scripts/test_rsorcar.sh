@@ -1,19 +1,16 @@
 #!/bin/bash
-# End-to-end test for the local install step at the end of ./rsorcar.
-# Run: bash scripts/test_rsorcar_local_install.sh
+# End-to-end test of ./rsorcar against a fake remote.
+# Run: bash scripts/test_rsorcar.sh
 #
 # Runs the real rsorcar against a fake remote: ssh/scp/curl are PATH stubs
-# that answer exactly what a healthy deploy would see (a reachable host, no
-# running task, a live tunnel URL), and the checkout-local helpers that do the
-# heavy lifting (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in the
-# checkout is a recorder, so the test observes the final step:
-#   * rsorcar runs install.sh on the LOCAL machine, non-interactively and
-#     without opening the webapp, after printing the deploy summary,
-#   * when started from a linked git worktree, it runs the MAIN repository's
-#     install.sh (a worktree is reclaimed after its task, and install.sh
-#     points the persistent launchers at its own directory),
-#   * and a failing local install fails the script without hiding the
-#     remote URL and password printed just before it.
+# that answer exactly what a healthy deploy would see (a reachable host, a
+# live tunnel URL), and the checkout-local helpers that do the heavy lifting
+# (sync-repo.sh, sync-task-db.sh) are no-ops.  install.sh in the checkout is
+# a recorder, so the test can see that a deploy changes the remote only:
+#   * rsorcar never runs install.sh on the LOCAL machine (it used to, as a
+#     last step; a deploy has nothing to install here), and ends with the
+#     deploy summary and "Done." -- from a linked git worktree too, where it
+#     deploys the MAIN repository (a worktree is reclaimed after its task).
 # Step 2 runs for real through the ssh stub.  By default
 # (SORCAR_SKIP_SSH_COPY=1) the key stays home: the test sees nothing arrive
 # in the remote ~/.ssh, the switch handed to sync-repo.sh (which forwards the
@@ -29,12 +26,11 @@
 # Step 1a runs for real too: the stub runs the scripts/install-remote-prereqs.sh
 # it is fed on ``bash -s`` (against this machine, which has every tool), and
 # the test checks that it runs before the git sync — a fresh image has no git
-# — and before the running-task probe and the ~/.ssh copy, and that a remote where the tools cannot be installed stops the deploy
+# — and before the ~/.ssh copy, and that a remote where the tools cannot be installed stops the deploy
 # there (FAKE_PREREQS_FAIL=1 makes the stub fail that one script).
 # Step 1c runs for real as well: the stub runs scripts/check-remote-disk-space.sh
 # fed on ``NEED_BYTES=... bash -s`` against this machine's disk, and the test
-# checks that it runs after the task probe and before the ~/.ssh copy and the
-# sync, that it removes a stale ~/.kiss/history.db.incoming on the remote, and
+# checks that it runs before the ~/.ssh copy and the sync, that it removes a stale ~/.kiss/history.db.incoming on the remote, and
 # that a remote without room stops the deploy there (SORCAR_DISK_HEADROOM_GB
 # set to more than any disk holds), while SORCAR_SKIP_DISK_CHECK=1 skips it.
 # Step 4 runs for real as far as the stubs allow: the ssh stub runs the key
@@ -55,6 +51,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
+# The deploy in $OUT ran to its end: rsorcar's last line.
+finished() { echo "$OUT" | grep -q "Done\.$"; }
 
 FAKE_URL="https://fake-tunnel.example"
 FAKE_PW="pw-for-test"
@@ -212,8 +210,6 @@ echo 'rows' > "$WORK/legacy/rhome/.kiss/sorcar.db"
 echo 'pages' > "$WORK/legacy/rhome/.kiss/sorcar.db-wal"
 OUT=$(run_rsorcar "$WORK/legacy" "$WORK/legacy/checkout/rsorcar") || fail "rsorcar failed:
 $OUT"
-echo "$OUT" | grep -q "Checking whether a task is running" || fail "the running-task probe did not run:
-$OUT"
 echo "$OUT" | grep -q "Renaming user@fakehost's ~/.kiss/sorcar.db to history.db" \
     || fail "the legacy database name on the remote was not renamed (or not reported):
 $OUT"
@@ -223,7 +219,7 @@ $OUT"
     || fail "the old name is not a symlink to history.db: $(ls -lA "$WORK/legacy/rhome/.kiss")"
 [[ ! -e "$WORK/legacy/rhome/.kiss/sorcar.db-wal" ]] \
     || fail "the legacy WAL is still on the remote: $(ls -A "$WORK/legacy/rhome/.kiss")"
-pass "a remote's ~/.kiss/sorcar.db (its pre-2026.10.2 name) is renamed to history.db after the running-task check"
+pass "a remote's ~/.kiss/sorcar.db (its pre-2026.10.2 name) is renamed to history.db"
 
 # --- Test 0b: a history.db left by a version of spring 2026 does not hide sorcar.db
 # The database was history.db until 2026-04-24, then sorcar.db, then history.db
@@ -261,17 +257,19 @@ STALE=("$WORK/stale/rhome/.kiss"/history.db.stale-*)
     || fail "the stale history.db was not kept intact: $(ls -A "$WORK/stale/rhome/.kiss")"
 pass "a stale history.db from spring 2026 on the remote is set aside and sorcar.db takes its name"
 
-# --- Test 1: the deploy ends by running install.sh locally -------------------
+# --- Test 1: a healthy deploy runs to its end and installs nothing here ------
 make_env "$WORK/ok"
 populate_checkout "$WORK/ok/checkout" 0 "$WORK/ok"
 OUT=$(run_rsorcar "$WORK/ok" "$WORK/ok/checkout/rsorcar") || fail "rsorcar failed:
 $OUT"
-[[ -f "$WORK/ok/install-marker.txt" ]] || fail "rsorcar never ran install.sh locally"
-grep -qx 'args=--non-interactive' "$WORK/ok/install-marker.txt" \
-    || fail "local install.sh not run with --non-interactive: $(cat "$WORK/ok/install-marker.txt")"
-grep -qx 'skip_launch=1' "$WORK/ok/install-marker.txt" \
-    || fail "local install.sh not run with KISS_SKIP_LAUNCH=1"
-pass "rsorcar runs install.sh locally, non-interactively, no webapp launch"
+finished || fail "rsorcar did not run to its end:
+$OUT"
+[[ ! -f "$WORK/ok/install-marker.txt" ]] \
+    || fail "rsorcar ran install.sh on the local machine: $(cat "$WORK/ok/install-marker.txt")"
+echo "$OUT" | grep -q "Checking whether a task is running" \
+    && fail "the deploy probed the remote for running tasks before syncing:
+$OUT"
+pass "rsorcar deploys without installing anything on the local machine"
 
 # Step 2, by default: the private key stays home, the agent is forwarded.
 RSSH="$WORK/ok/rhome/.ssh"
@@ -313,16 +311,20 @@ echo "$OUT" | grep -q "The tools the deploy needs are all installed" \
     || fail "the prerequisite check did not run (or did not report) on the remote:
 $OUT"
 PREREQ_LINE=$(echo "$OUT" | grep -n "Checking that git, curl, tar, python3 and ssh are installed" | cut -d: -f1 | head -1)
-TASK_LINE=$(echo "$OUT" | grep -n "Checking whether a task is running" | cut -d: -f1 | head -1)
 SSH_LINE=$(echo "$OUT" | grep -n "Leaving ~/.ssh/ here" | cut -d: -f1 | head -1)
 SYNC_LINE=$(echo "$OUT" | grep -n "through origin (branch" | cut -d: -f1 | head -1)
-[[ -n "$PREREQ_LINE" && -n "$TASK_LINE" && -n "$SSH_LINE" && -n "$SYNC_LINE" ]] \
-    || fail "a step is missing from the output (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
-# The running-task probe runs python3 on the remote and the ~/.ssh copy runs
-# tar there, so the install must come before both, not only before the sync.
-[[ "$PREREQ_LINE" -lt "$TASK_LINE" && "$PREREQ_LINE" -lt "$SSH_LINE" && "$PREREQ_LINE" -lt "$SYNC_LINE" ]] \
-    || fail "the prerequisite install does not run first on the remote (lines $PREREQ_LINE / $TASK_LINE / $SSH_LINE / $SYNC_LINE)"
-pass "git and the other tools are checked/installed first on the remote: before the task probe, the ssh copy and the git sync"
+[[ -n "$PREREQ_LINE" && -n "$SSH_LINE" && -n "$SYNC_LINE" ]] \
+    || fail "a step is missing from the output (lines $PREREQ_LINE / $SSH_LINE / $SYNC_LINE)"
+# The database-name probe runs python3 on the remote and the ~/.ssh copy runs
+# tar there, so the install must come before both, not only before the sync:
+# the prerequisite script is the first thing the ssh stub is fed.
+PREREQ_SSH=$(grep -n "bash -s" "$WORK/ok/ssh-args.txt" | cut -d: -f1 | head -1)
+PROBE_SSH=$(grep -n 'python3 - "$HOME/.kiss"' "$WORK/ok/ssh-args.txt" | cut -d: -f1 | head -1)
+[[ -n "$PREREQ_SSH" && -n "$PROBE_SSH" && "$PREREQ_SSH" -lt "$PROBE_SSH" ]] \
+    || fail "the prerequisite install does not run before the database probe (ssh calls $PREREQ_SSH / $PROBE_SSH)"
+[[ "$PREREQ_LINE" -lt "$SSH_LINE" && "$PREREQ_LINE" -lt "$SYNC_LINE" ]] \
+    || fail "the prerequisite install does not run first on the remote (lines $PREREQ_LINE / $SSH_LINE / $SYNC_LINE)"
+pass "git and the other tools are checked/installed first on the remote: before the database probe, the ssh copy and the git sync"
 
 grep -q "check-remote-disk-space.sh" "$WORK/ok/bash-s-stdin.txt" \
     || fail "scripts/check-remote-disk-space.sh was never fed to the remote's bash -s"
@@ -357,15 +359,12 @@ NOTES_SYNC_LINE=$(echo "$OUT" | grep -n "Syncing the autorouter's notes with use
 pass "the autorouter's notes are synced with the remote, after the memory and before the remote install"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
-STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)
-DONE_LINE=$(echo "$OUT" | grep -n "Done." | cut -d: -f1 | head -1)
+DONE_LINE=$(echo "$OUT" | grep -n "Done\.$" | cut -d: -f1 | head -1)
 [[ -n "$URL_LINE" ]] || fail "deploy summary (URL) missing from output"
 echo "$OUT" | grep -q "Password:.*$FAKE_PW" || fail "deploy summary (password) missing"
-[[ -n "$STEP_LINE" && "$URL_LINE" -lt "$STEP_LINE" ]] \
-    || fail "local install did not run after the deploy summary"
-[[ -n "$DONE_LINE" && "$STEP_LINE" -lt "$DONE_LINE" ]] \
-    || fail "local install did not run before rsorcar finished"
-pass "local install runs after the summary box and before Done."
+[[ -n "$DONE_LINE" && "$URL_LINE" -lt "$DONE_LINE" ]] \
+    || fail "rsorcar did not end right after the deploy summary"
+pass "the deploy summary is the last thing before Done."
 
 # --- Test 1b: SORCAR_SKIP_SSH_COPY=0 copies the ssh identity ------------------
 make_env "$WORK/sshcopy"
@@ -405,7 +404,7 @@ echo "$OUT" | grep -q "set SORCAR_SKIP_SSH_COPY=0 to copy ~/.ssh/" \
     || fail "the warning does not name the switch that copies the key instead:
 $OUT"
 [[ ! -e "$WORK/noagent/rhome/.ssh/id_test" ]] || fail "the key was copied although only a warning was due"
-[[ -f "$WORK/noagent/install-marker.txt" ]] || fail "the deploy did not finish without an ssh agent"
+finished || fail "the deploy did not finish without an ssh agent"
 pass "no ssh agent with a key here is a warning that names the switch, not a failed deploy"
 
 # --- Test 1d: once the GitHub token is on the keyless remote, git goes over https
@@ -448,7 +447,7 @@ echo "$OUT" | grep -q "pushes as ksenxx over ssh (this machine's key)" \
 $OUT"
 pass "a remote that got the key keeps git over ssh when the token arrives"
 
-# --- Test 2: from a linked worktree, the MAIN repo's install.sh runs ---------
+# --- Test 2: from a linked worktree, the MAIN repo is what gets deployed ------
 make_env "$WORK/wt"
 populate_checkout "$WORK/wt/main" 0 "$WORK/wt"
 git -C "$WORK/wt/main" init -q -b main
@@ -459,26 +458,14 @@ git -C "$WORK/wt/main" commit -q -m "initial"
 git -C "$WORK/wt/main" worktree add -q "$WORK/wt/linked" -b kiss/wt-test
 OUT=$(run_rsorcar "$WORK/wt" "$WORK/wt/linked/rsorcar") || fail "rsorcar failed from a worktree:
 $OUT"
-[[ -f "$WORK/wt/install-marker.txt" ]] || fail "worktree deploy never ran install.sh locally"
-grep -qx "self=$WORK/wt/main/install.sh" "$WORK/wt/install-marker.txt" \
-    || fail "install.sh did not run from the main repo: $(cat "$WORK/wt/install-marker.txt")"
-pass "from a linked worktree, the main repository's install.sh is run"
-
-# --- Test 3: a failing local install fails rsorcar, summary already shown ----
-make_env "$WORK/bad"
-populate_checkout "$WORK/bad/checkout" 1 "$WORK/bad"
-if OUT=$(run_rsorcar "$WORK/bad" "$WORK/bad/checkout/rsorcar"); then
-    fail "rsorcar succeeded although the local install.sh failed"
-fi
-[[ -f "$WORK/bad/install-marker.txt" ]] || fail "failing install.sh never ran"
-echo "$OUT" | grep -q "install.sh failed on the local machine" \
-    || fail "no clear error message for the failed local install:
+finished || fail "the deploy from a worktree did not run to its end:
 $OUT"
-echo "$OUT" | grep -q "URL:.*$FAKE_URL" \
-    || fail "the failed local install hid the remote URL"
-echo "$OUT" | grep -q "Password:.*$FAKE_PW" \
-    || fail "the failed local install hid the remote password"
-pass "a failing local install fails the deploy without hiding URL and password"
+echo "$OUT" | grep -q "deploying $WORK/wt/main -> user@fakehost" \
+    || fail "the deploy from a worktree did not deploy the main repository:
+$OUT"
+[[ ! -f "$WORK/wt/install-marker.txt" ]] \
+    || fail "the deploy from a worktree ran install.sh locally: $(cat "$WORK/wt/install-marker.txt")"
+pass "from a linked worktree, the main repository is deployed and nothing is installed here"
 
 # --- Test 4: a remote where git cannot be installed stops the deploy ---------
 # Before the sync, which is git from its first command, and before anything
@@ -493,7 +480,7 @@ echo "$OUT" | grep -q "Could not install the tools the deploy needs on user@fake
 $OUT"
 echo "$OUT" | grep -q "through origin (branch" \
     && fail "the git sync was attempted although git could not be installed"
-[[ ! -f "$WORK/nogit/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+finished && fail "the deploy went on although it had stopped"
 pass "a remote where git cannot be installed stops the deploy before the git sync"
 
 # --- Test 5: a remote without room stops the deploy ---------------------------
@@ -513,7 +500,7 @@ echo "$OUT" | grep -q "user@fakehost does not have room for the deploy" \
 $OUT"
 echo "$OUT" | grep -qE "Copying ~/.ssh/ to|Leaving ~/.ssh/ here" && fail "step 2 ran although the remote has no room"
 echo "$OUT" | grep -q "through origin (branch" && fail "the git sync was attempted although the remote has no room"
-[[ ! -f "$WORK/full/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+finished && fail "the deploy went on although it had stopped"
 pass "a remote without room for the deploy stops it before anything of size travels"
 
 # --- Test 6: SORCAR_SKIP_DISK_CHECK=1 deploys anyway ----------------------------
@@ -523,7 +510,7 @@ OUT=$(SORCAR_DISK_HEADROOM_GB=1000000 SORCAR_SKIP_DISK_CHECK=1 \
       run_rsorcar "$WORK/skip" "$WORK/skip/checkout/rsorcar") || fail "rsorcar failed with the room check skipped:
 $OUT"
 echo "$OUT" | grep -q "has room for the deploy" && fail "the room check ran although SORCAR_SKIP_DISK_CHECK=1"
-[[ -f "$WORK/skip/install-marker.txt" ]] || fail "the deploy did not finish with the room check skipped"
+finished || fail "the deploy did not finish with the room check skipped"
 pass "SORCAR_SKIP_DISK_CHECK=1 skips the room check"
 
 # --- Test 7: a headroom that is not a number is refused -------------------------
@@ -558,7 +545,7 @@ echo "$OUT" | grep -q "API keys installed (~/.kiss/api_keys.env, sourced from ~/
 $OUT"
 [[ "$(cat "$WORK/haskeys/rhome/.kiss/api_keys.env")" == "export REMOTE_API_KEY=r" ]] \
     || fail "the remote's key store was changed: $(cat "$WORK/haskeys/rhome/.kiss/api_keys.env")"
-[[ -f "$WORK/haskeys/install-marker.txt" ]] || fail "the deploy did not finish"
+finished || fail "the deploy did not finish"
 pass "a remote that already has API keys keeps them; this machine's are not copied"
 
 # --- Test 9: ... even when this machine has no keys at all ---------------------
@@ -571,7 +558,7 @@ OUT=$(run_rsorcar "$WORK/nolocal" "$WORK/nolocal/checkout/rsorcar") || fail "rso
 $OUT"
 echo "$OUT" | grep -q "already has API keys (1 found)" || fail "the remote's keys were not found:
 $OUT"
-[[ -f "$WORK/nolocal/install-marker.txt" ]] || fail "the deploy did not finish"
+finished || fail "the deploy did not finish"
 pass "a machine without keys can re-deploy to a remote that has them"
 
 # --- Test 10: a remote key store without any key does not count ------------------
@@ -611,7 +598,7 @@ fi
 echo "$OUT" | grep -q "No API keys found — neither a ~/\*rc file with keys nor" \
     || fail "no clear error when neither machine has keys:
 $OUT"
-[[ ! -f "$WORK/nokeys/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+finished && fail "the deploy went on although it had stopped"
 pass "no API keys on either machine stops the deploy"
 
 # --- Test 12: keys living only in the remote's shell rc count too -------------------
@@ -631,7 +618,7 @@ $OUT"
 echo "$OUT" | grep -q "Copying API keys" && fail "this machine's keys were copied over the remote's rc keys"
 grep -q 'api_keys\.env' "$WORK/rckeys/scp-args.txt" \
     && fail "api_keys.env was handed to scp although the remote has rc keys: $(cat "$WORK/rckeys/scp-args.txt")"
-[[ -f "$WORK/rckeys/install-marker.txt" ]] || fail "the deploy did not finish"
+finished || fail "the deploy did not finish"
 pass "keys that live only in the remote's shell rc are kept; this machine's are not copied"
 
 # --- Test 13: a key store the probe cannot read stops the deploy ------------------
@@ -653,7 +640,7 @@ $OUT"
     if [[ -e "$WORK/unreadable/scp-args.txt" ]] && grep -q 'api_keys\.env' "$WORK/unreadable/scp-args.txt"; then
         fail "api_keys.env was handed to scp although the remote's key store is unreadable"
     fi
-    [[ ! -f "$WORK/unreadable/install-marker.txt" ]] || fail "install.sh ran although the deploy had stopped"
+    finished && fail "the deploy went on although it had stopped"
     pass "a remote key store the probe cannot read stops the deploy"
 fi
 

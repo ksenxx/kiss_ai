@@ -19,6 +19,10 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
+# Subtrees whose tags and text are dropped whole.  Only container tags:
+# void elements (meta, link) get no end-tag event, so counting them here
+# would leave the parser skipping for the rest of the document.  A <head>
+# parent already hides them.
 _SKIP_TAGS = {"script", "style", "head", "title"}
 _PARAGRAPH_TAGS = {"p", "div", "section", "article", "details", "figure"}
 _HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
@@ -80,13 +84,47 @@ class _ListState:
         self.child_indent = indent
 
 
-class _HtmlToMarkdownParser(HTMLParser):
-    """Stream HTML into a Markdown string held in :attr:`text`."""
+class SkippingHTMLParser(HTMLParser):
+    """An :class:`HTMLParser` that drops ``<script>``, ``<style>``, ``<head>``
+    and ``<title>`` subtrees whole: tags and text alike.
+
+    A subclass starts ``handle_starttag`` / ``handle_endtag`` with
+    ``if self.skipped(tag, end): return`` and ``handle_data`` with
+    ``if self.skipping: return``.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.text = ""
         self._skip_depth = 0
+
+    @property
+    def skipping(self) -> bool:
+        """Whether the parser is inside a dropped subtree."""
+        return self._skip_depth > 0
+
+    def skipped(self, tag: str, end: bool) -> bool:
+        """Record *tag* (an end tag when *end*) and say whether it is dropped.
+
+        Args:
+            tag: The lower-cased tag name of the event.
+            end: ``True`` for an end tag, ``False`` for a start tag.
+
+        Returns:
+            ``True`` when the tag opens, closes or sits inside a dropped
+            subtree, so the subclass must ignore the event.
+        """
+        if tag in _SKIP_TAGS:
+            self._skip_depth = max(self._skip_depth - 1, 0) if end else self._skip_depth + 1
+            return True
+        return self._skip_depth > 0
+
+
+class _HtmlToMarkdownParser(SkippingHTMLParser):
+    """Stream HTML into a Markdown string held in :attr:`text`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text = ""
         self._code_depth = 0
         self._pre: list[str] | None = None
         self._lists: list[_ListState] = []
@@ -174,10 +212,7 @@ class _HtmlToMarkdownParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Open block/inline constructs and emit list markers."""
-        if tag in _SKIP_TAGS:
-            self._skip_depth += 1
-            return
-        if self._skip_depth:
+        if self.skipped(tag, False):
             return
         if self._pre is not None:
             if tag == "br":
@@ -254,10 +289,7 @@ class _HtmlToMarkdownParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         """Close block/inline constructs."""
-        if tag in _SKIP_TAGS:
-            self._skip_depth = max(self._skip_depth - 1, 0)
-            return
-        if self._skip_depth:
+        if self.skipped(tag, True):
             return
         if self._pre is not None:
             if tag == "pre":
@@ -373,7 +405,7 @@ class _HtmlToMarkdownParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         """Append text, escaping Markdown syntax and collapsing whitespace."""
-        if self._skip_depth or not data:
+        if self.skipping or not data:
             return
         if self._pre is not None:
             self._pre.append(data)

@@ -27,7 +27,6 @@ no mocks, patches, or fakes.
 
 from __future__ import annotations
 
-import ctypes
 import json
 import logging
 import shutil
@@ -45,6 +44,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _queue_chat_event,
 )
+from kiss.core.tool_interrupt import inject_async_exception
 
 
 class _DBSandbox:
@@ -106,11 +106,7 @@ class TestA1WriteLockInterruptLeak:
             assert lock._pending_writers == 1
             time.sleep(0.1)
             assert tw.ident is not None
-            set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
-            set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
-            set_async_exc.restype = ctypes.c_int
-            res = set_async_exc(tw.ident, ctypes.py_object(KeyboardInterrupt))
-            assert res == 1
+            assert inject_async_exception(tw.ident, KeyboardInterrupt) == 1
             release_reader.set()
             tw.join(15)
             tr.join(15)

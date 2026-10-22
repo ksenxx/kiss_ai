@@ -451,8 +451,14 @@ class TestResponsesModelResetsTurnState:
 class TestDelegateStateSurvivesReuse:
     """The delegate must stay usable across a reset of its owner."""
 
-    def test_owner_reset_clears_the_delegate_pending_calls(self) -> None:
-        """A reset owner must hand the delegate a clean slate."""
+    def test_owner_reset_leaves_the_delegate_usable(self) -> None:
+        """A reset owner's next delegated turn must not trip on the delegate's leftovers.
+
+        The delegate still holds the previous turn's pending function
+        calls after the owner's reset (the owner does not reset it: every
+        delegated turn starts from a clean delegate anyway), and the next
+        turn must go through on the same, kept delegate.
+        """
         with ScriptedOpenAIServer(_ToolTurnPolicy()) as server:
             model = _make_chat_model(server.base_url)
             model.generate_and_process_with_tools(
@@ -463,11 +469,12 @@ class TestDelegateStateSurvivesReuse:
             assert delegate._pending_function_calls
 
             model.reset_conversation()
-            assert delegate._pending_function_calls == []
+            assert delegate._pending_function_calls
 
             model.initialize("Fresh start.")
             _run_tool_turn(model)
             assert model._responses_delegate is delegate
+            assert delegate._pending_function_calls
 
 
 @pytest.mark.parametrize("streaming", [False, True])

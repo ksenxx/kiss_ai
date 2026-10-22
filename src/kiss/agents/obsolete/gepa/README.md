@@ -166,16 +166,16 @@ class GEPAProgress:
     generation: int              # Current generation number (0-indexed)
     max_generations: int         # Total number of generations
     phase: GEPAPhase             # Current optimization phase
-    candidate_id: int | None     # ID of current candidate (if applicable)
-    candidate_index: int | None  # Index in population (if applicable)
-    population_size: int         # Current population size
-    best_val_accuracy: float | None     # Best validation accuracy so far
-    current_val_accuracy: float | None  # Current candidate's validation accuracy
-    current_val_scores: dict[str, float]  # Full per-metric validation scores for current candidate
-    current_dev_scores: dict[str, float]  # Full per-metric dev scores for current candidate
-    pareto_frontier_size: int    # Size of Pareto frontier
-    num_candidates_evaluated: int  # Candidates evaluated this generation
-    message: str                 # Description of current activity
+    candidate_id: int | None = None     # ID of current candidate (if applicable)
+    candidate_index: int | None = None  # Index in population (if applicable)
+    population_size: int = 0            # Current population size
+    best_val_accuracy: float | None = None     # Best validation accuracy so far
+    current_val_accuracy: float | None = None  # Current candidate's validation accuracy
+    current_val_scores: dict[str, float] = field(default_factory=dict)  # Per-metric validation scores for current candidate
+    current_dev_scores: dict[str, float] = field(default_factory=dict)  # Per-metric dev scores for current candidate
+    pareto_frontier_size: int = 0       # Size of Pareto frontier
+    num_candidates_evaluated: int = 0   # Candidates evaluated this generation
+    message: str = ""                   # Description of current activity
 ```
 
 ### `PromptCandidate`

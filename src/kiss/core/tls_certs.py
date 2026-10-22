@@ -135,7 +135,9 @@ def _generate_key() -> ec.EllipticCurvePrivateKey:
     return ec.generate_private_key(ec.SECP256R1())
 
 
-def generate_local_ca(ca_cert_path: Path, ca_key_path: Path) -> None:
+def generate_local_ca(
+    ca_cert_path: Path, ca_key_path: Path,
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     """Generate the machine-local root CA (ECDSA P-256, 10 years).
 
     The Common Name embeds the hostname so a phone that trusts CAs from
@@ -148,6 +150,9 @@ def generate_local_ca(ca_cert_path: Path, ca_key_path: Path) -> None:
     Args:
         ca_cert_path: Where to write the PEM CA certificate (0644).
         ca_key_path: Where to write the PEM CA private key (0600).
+
+    Returns:
+        The generated CA certificate and private key, in that order.
     """
     key = _generate_key()
     host = _host_label() or "localhost"
@@ -190,6 +195,7 @@ def generate_local_ca(ca_cert_path: Path, ca_key_path: Path) -> None:
     )
     _write_private_key(ca_key_path, key)
     _write_certificate(ca_cert_path, cert)
+    return cert, key
 
 
 def server_cert_names(
@@ -250,50 +256,39 @@ def issue_server_cert(
         extra_ips: LAN IP addresses to include in the SAN.
     """
     dns_names, ips = server_cert_names(extra_ips)
+    _issue_server_leaf(
+        cert_path, key_path, _load_certificate(ca_cert_path), _load_private_key(ca_key_path),
+        dns_names, ips,
+    )
+
+
+def _issue_server_leaf(
+    cert_path: Path,
+    key_path: Path,
+    ca_cert: x509.Certificate,
+    ca_key: ec.EllipticCurvePrivateKey,
+    dns_names: list[str],
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+) -> None:
+    """Write the ``serverAuth`` certificate whose SAN lists *dns_names* and *ips*."""
     san = x509.SubjectAlternativeName(
         [x509.DNSName(n) for n in dns_names] + [x509.IPAddress(ip) for ip in ips],
     )
     _issue_leaf(
-        cert_path, key_path, ca_cert_path, ca_key_path, dns_names[0],
-        ExtendedKeyUsageOID.SERVER_AUTH, san,
-    )
-
-
-def issue_client_cert(
-    cert_path: Path, key_path: Path, ca_cert_path: Path, ca_key_path: Path,
-) -> None:
-    """Issue the client certificate this daemon presents to the machines it links to.
-
-    Same shape as the server certificate (ECDSA P-256, 820 days, signed
-    by the local CA) with the ``clientAuth`` extended key usage and no
-    SAN; its Common Name names this host.  A remote daemon admits it
-    once the local CA is in its :data:`TRUSTED_CLIENTS_DIR`.
-
-    Args:
-        cert_path: Where to write the PEM client certificate.
-        key_path: Where to write the PEM client private key (0600).
-        ca_cert_path: The CA certificate to chain to.
-        ca_key_path: The CA private key that signs the certificate.
-    """
-    host = _host_label() or "localhost"
-    _issue_leaf(
-        cert_path, key_path, ca_cert_path, ca_key_path,
-        f"{PRODUCT_NAME} machine link {host}"[:64], ExtendedKeyUsageOID.CLIENT_AUTH, None,
+        cert_path, key_path, ca_cert, ca_key, dns_names[0], ExtendedKeyUsageOID.SERVER_AUTH, san,
     )
 
 
 def _issue_leaf(
     cert_path: Path,
     key_path: Path,
-    ca_cert_path: Path,
-    ca_key_path: Path,
+    ca_cert: x509.Certificate,
+    ca_key: ec.EllipticCurvePrivateKey,
     common_name: str,
     extended_key_usage: x509.ObjectIdentifier,
     san: x509.SubjectAlternativeName | None,
 ) -> None:
     """Write an end-entity certificate and its key signed by the CA (key file first)."""
-    ca_cert = _load_certificate(ca_cert_path)
-    ca_key = _load_private_key(ca_key_path)
     key = _generate_key()
     subject = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, common_name),
@@ -348,16 +343,20 @@ def _expiring(cert: x509.Certificate) -> bool:
     return cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS)
 
 
-def _ca_pair_is_usable(ca_cert_path: Path, ca_key_path: Path) -> bool:
-    """Return True when the CA cert/key exist, match and are not expiring."""
+def _usable_ca(
+    ca_cert_path: Path, ca_key_path: Path,
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None:
+    """Return the CA pair when its files exist, parse, match and are not expiring."""
     if not ca_cert_path.is_file() or not ca_key_path.is_file():
-        return False
+        return None
     try:
         cert = _load_certificate(ca_cert_path)
         key = _load_private_key(ca_key_path)
     except Exception:
-        return False
-    return not _expiring(cert) and cert.public_key() == key.public_key()
+        return None
+    if _expiring(cert) or cert.public_key() != key.public_key():
+        return None
+    return cert, key
 
 
 def server_cert_is_current(
@@ -379,32 +378,48 @@ def server_cert_is_current(
         ca_cert_path: PEM CA certificate the server cert must chain to.
         required_ips: IP addresses (strings) that must be in the SAN.
     """
-    cert = _current_leaf(cert_path, key_path, ca_cert_path)
+    try:
+        ca_cert = _load_certificate(ca_cert_path)
+    except Exception:
+        return False
+    dns_names, ips = server_cert_names(required_ips)
+    return _server_cert_is_current(cert_path, key_path, ca_cert, dns_names, ips)
+
+
+def _server_cert_is_current(
+    cert_path: Path,
+    key_path: Path,
+    ca_cert: x509.Certificate,
+    dns_names: list[str],
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+) -> bool:
+    """:func:`server_cert_is_current` for a loaded CA and the names already computed."""
+    cert = _current_leaf(cert_path, key_path, ca_cert)
     if cert is None:
         return False
     try:
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     except x509.ExtensionNotFound:
         return False
-    dns_names, ips = server_cert_names(required_ips)
     have_dns = set(san.get_values_for_type(x509.DNSName))
     have_ips = set(san.get_values_for_type(x509.IPAddress))
     return set(dns_names) <= have_dns and set(ips) <= have_ips
 
 
-def _current_leaf(cert_path: Path, key_path: Path, ca_cert_path: Path) -> x509.Certificate | None:
+def _current_leaf(
+    cert_path: Path, key_path: Path, ca_cert: x509.Certificate,
+) -> x509.Certificate | None:
     """Return the certificate at *cert_path* when it needs no re-issue, else ``None``.
 
     Current means: it and its key exist and match, it is not expiring
-    within :data:`RENEWAL_THRESHOLD_DAYS` and the CA at *ca_cert_path*
-    signed it.
+    within :data:`RENEWAL_THRESHOLD_DAYS` and *ca_cert* signed it.
     """
     if not cert_path.is_file() or not key_path.is_file():
         return None
     try:
         cert = _load_certificate(cert_path)
         key = _load_private_key(key_path)
-        cert.verify_directly_issued_by(_load_certificate(ca_cert_path))
+        cert.verify_directly_issued_by(ca_cert)
     except Exception:
         return None
     if _expiring(cert) or cert.public_key() != key.public_key():
@@ -426,18 +441,25 @@ def ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:
     Returns:
         The CA certificate's and private key's paths, in that order.
     """
+    _ensure_ca(tls_dir)
+    return tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
+
+
+def _ensure_ca(tls_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+    """:func:`ensure_local_ca`, returning the loaded (or just generated) CA pair."""
     ca_cert_path, ca_key_path = tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
-    if not _ca_pair_is_usable(ca_cert_path, ca_key_path):
-        if ca_cert_path.exists():
-            logger.warning(
-                "Local CA in %s is expiring or unusable; generating a new "
-                "one — browsers that trusted the old CA must trust the new "
-                "one (kiss-web --trust-ca)", tls_dir,
-            )
-        else:
-            logger.info("Generating local TLS certificate authority in %s", tls_dir)
-        generate_local_ca(ca_cert_path, ca_key_path)
-    return ca_cert_path, ca_key_path
+    pair = _usable_ca(ca_cert_path, ca_key_path)
+    if pair is not None:
+        return pair
+    if ca_cert_path.exists():
+        logger.warning(
+            "Local CA in %s is expiring or unusable; generating a new "
+            "one — browsers that trusted the old CA must trust the new "
+            "one (kiss-web --trust-ca)", tls_dir,
+        )
+    else:
+        logger.info("Generating local TLS certificate authority in %s", tls_dir)
+    return generate_local_ca(ca_cert_path, ca_key_path)
 
 
 def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
@@ -454,11 +476,19 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
     Returns:
         ``(cert_path, key_path)`` of the client certificate to present.
     """
-    ca_cert_path, ca_key_path = ensure_local_ca(tls_dir)
+    ca_cert, ca_key = _ensure_ca(tls_dir)
     cert_path, key_path = tls_dir / CLIENT_CERT_FILE, tls_dir / CLIENT_KEY_FILE
-    if _current_leaf(cert_path, key_path, ca_cert_path) is None:
+    if _current_leaf(cert_path, key_path, ca_cert) is None:
         logger.info("Issuing the machine-link client certificate in %s", tls_dir)
-        issue_client_cert(cert_path, key_path, ca_cert_path, ca_key_path)
+        # Same shape as the server certificate, with the clientAuth
+        # extended key usage and no SAN; its Common Name names this host.
+        # A remote daemon admits it once the local CA is in its
+        # TRUSTED_CLIENTS_DIR.
+        host = _host_label() or "localhost"
+        _issue_leaf(
+            cert_path, key_path, ca_cert, ca_key,
+            f"{PRODUCT_NAME} machine link {host}"[:64], ExtendedKeyUsageOID.CLIENT_AUTH, None,
+        )
     return cert_path, key_path
 
 
@@ -541,16 +571,17 @@ def ensure_local_tls_pair(
     Returns:
         ``(cert_path, key_path)`` of the server certificate to load.
     """
-    ca_cert_path, ca_key_path = ensure_local_ca(tls_dir)
+    ca_cert, ca_key = _ensure_ca(tls_dir)
     cert_path = tls_dir / SERVER_CERT_FILE
     key_path = tls_dir / SERVER_KEY_FILE
     lan_ips = list(lan_ips)
-    if not server_cert_is_current(cert_path, key_path, ca_cert_path, lan_ips):
+    dns_names, ips = server_cert_names(lan_ips)
+    if not _server_cert_is_current(cert_path, key_path, ca_cert, dns_names, ips):
         logger.info(
             "Issuing TLS server certificate in %s for LAN IPs %s",
             tls_dir, sorted(lan_ips),
         )
-        issue_server_cert(cert_path, key_path, ca_cert_path, ca_key_path, lan_ips)
+        _issue_server_leaf(cert_path, key_path, ca_cert, ca_key, dns_names, ips)
     return cert_path, key_path
 
 

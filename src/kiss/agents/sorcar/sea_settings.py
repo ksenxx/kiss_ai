@@ -309,7 +309,7 @@ CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
      "the classifier, the browser or memory (`resolve_settings`)."),
     ("scratch directory",
      "It runs in the shared `<home>/channel_work` scratch directory unless its own "
-     "`work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, "
+     "`work_dir` says otherwise (`/cron` runs in `<home>/cron/work`); `work_dir` is locked, "
      "so it never works in the caller's project (`resolve_settings`)."),
     ("no inheritance",
      "Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, "
@@ -325,8 +325,9 @@ CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
      "`system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`)."),
     ("listed as a channel",
      "A third-party SEA folder whose class derives from `ChannelSea` by that name is a "
-     "channel agent: `run_agent(agent=\"<folder>\")` finds it by name and the `channel` "
-     "tool lists it (`agent_dispatch.available_channels`, `declares_channel`)."),
+     "channel agent: `run_agent(agent=\"<folder>\")` finds it by name and the `run_agent` "
+     "tool's description lists it among the installed channels "
+     "(`agent_dispatch.available_channels`, `declares_channel`)."),
 )
 """Every behaviour deriving from ``ChannelSea`` adds, as ``(name, what it does and where it
 is enforced)``.

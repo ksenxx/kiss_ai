@@ -75,18 +75,25 @@ class ToolCallInterrupted(BaseException):
     """
 
 
-ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-    ctypes.c_ulong,
-    ctypes.py_object,
-]
+# Private handle on PyThreadState_SetAsyncExc.  ``pythonapi[...]`` builds a
+# fresh function object; ``pythonapi.PyThreadState_SetAsyncExc`` would hand
+# back the one cached on the shared PyDLL, whose ``argtypes`` any other
+# module may set.  This handle's ``argtypes`` stay unset on purpose: the
+# arguments are wrapped explicitly, and the rollback's ``None`` must reach C
+# as NULL (``argtypes = [..., py_object]`` marshals it as a pointer to
+# ``Py_None``, which SETS a pending ``SystemError`` instead of clearing).
+_SET_ASYNC_EXC = ctypes.pythonapi["PyThreadState_SetAsyncExc"]
 
 
 def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
     """Raise *exc_type* asynchronously in thread *tid*.
 
-    Wraps ``PyThreadState_SetAsyncExc``.  When the call reports the
-    exception was set in more than one thread state (``rc > 1``), the
-    injection is undone as CPython's documentation requires.
+    Wraps ``PyThreadState_SetAsyncExc`` through a private handle, so
+    ``argtypes`` set on ``ctypes.pythonapi``'s shared handle elsewhere in
+    the process cannot change how the arguments are marshalled.  When
+    the call reports the exception was set in more than one thread state
+    (``rc > 1``), the injection is undone as CPython's documentation
+    requires.
 
     Args:
         tid: The target thread's ``ident``.
@@ -97,14 +104,9 @@ def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
         longer names a live thread, ``1`` on success (values above 1
         have already been rolled back here).
     """
-    rc = int(
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(exc_type),
-        )
-    )
+    rc = int(_SET_ASYNC_EXC(ctypes.c_ulong(tid), ctypes.py_object(exc_type)))
     if rc > 1:  # pragma: no cover — rare: exception set in multiple states
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
+        _SET_ASYNC_EXC(ctypes.c_ulong(tid), None)
     return rc
 
 

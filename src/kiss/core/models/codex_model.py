@@ -61,7 +61,7 @@ from kiss.core.models.model import (
     environ_without,
     parse_binary_attachments,
 )
-from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.processes import kill_process_tree, popen_process_group, run_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ def _served_call_text(call: ServedCall) -> str:
     """
     arguments = ", ".join(f"{key}={value!r}" for key, value in call.arguments.items())
     return f"```python\n{call.name}({arguments})\n```"
+
 
 # ``codex exec`` flags that turn the coding agent into a bare model: the
 # user's ``config.toml`` (MCP servers, hooks, providers) is not loaded
@@ -200,6 +201,7 @@ def codex_api_key_login() -> bool:
         return bool(mode == "apikey")
     return bool(auth.get("OPENAI_API_KEY"))
 
+
 # Stderr lines of ``codex login status`` -> the panel's ``authMethod``.
 _LOGIN_STATUS_METHODS: tuple[tuple[str, str], ...] = (
     ("Logged in using ChatGPT", "chatgpt"),
@@ -232,8 +234,21 @@ def codex_cli_env() -> dict[str, str]:
     """
     from kiss.core.config import DEFAULT_CONFIG
 
-    env = environ_without(_API_KEY_ENV_VARS if DEFAULT_CONFIG.codex_use_subscription else ())
-    if DEFAULT_CONFIG.codex_use_subscription:
+    return _codex_cli_env_for(bool(DEFAULT_CONFIG.codex_use_subscription))
+
+
+def _codex_cli_env_for(use_subscription: bool) -> dict[str, str]:
+    """:func:`codex_cli_env` for one reading of the subscription switch.
+
+    The caller reads the switch exactly once: a settings save on the
+    server thread can flip it at any time, and an environment built from
+    both states would keep the key variables and add the token (the CLI
+    then bills the key).
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    env = environ_without(_API_KEY_ENV_VARS if use_subscription else ())
+    if use_subscription:
         if DEFAULT_CONFIG.CODEX_ACCESS_TOKEN:
             env["CODEX_ACCESS_TOKEN"] = DEFAULT_CONFIG.CODEX_ACCESS_TOKEN
     elif not env.get("CODEX_API_KEY"):
@@ -277,18 +292,14 @@ def codex_auth_status(timeout: float = 30.0) -> dict[str, Any]:
         return status
     status["installed"] = True
     try:
-        proc = _start_codex(path, "login", "status")
+        proc = run_process_group([path, "login", "status"], timeout, env=codex_cli_env())
+    except subprocess.TimeoutExpired:
+        status["error"] = f"`codex login status` timed out after {timeout:g}s"
+        return status
     except OSError as e:
         status["error"] = f"`codex login status` failed: {e}"
         return status
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill(proc)
-        proc.communicate()  # reap the child and close its pipes
-        status["error"] = f"`codex login status` timed out after {timeout:g}s"
-        return status
-    detail = (stderr.strip() or stdout.strip())[:300]
+    detail = (proc.stderr.strip() or proc.stdout.strip())[:300]
     status["detail"] = detail
     for prefix, method in _LOGIN_STATUS_METHODS:
         if detail.startswith(prefix):
@@ -297,8 +308,7 @@ def codex_auth_status(timeout: float = 30.0) -> dict[str, Any]:
             return status
     if not detail.startswith("Not logged in"):
         status["error"] = (
-            f"`codex login status` (exit {proc.returncode}) answered: "
-            f"{detail or '(nothing)'}"
+            f"`codex login status` (exit {proc.returncode}) answered: {detail or '(nothing)'}"
         )
     return status
 
@@ -346,7 +356,7 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
             if proc.poll() is None:
                 if not fresh:
                     return dict(prompt)
-                _kill(proc)
+                kill_process_tree(proc)
             _device_login = None
         path = find_codex_executable()
         if path is None:
@@ -377,7 +387,7 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
             timer.cancel()
             timer.join()
         if expired.is_set() or "url" not in prompt or "code" not in prompt:
-            _kill(proc)
+            kill_process_tree(proc)
             _, stderr = proc.communicate()
             within = f" within {timeout:g}s" if expired.is_set() else ""
             return {
@@ -396,7 +406,7 @@ def _start_codex(path: str, *args: str) -> "subprocess.Popen[str]":
 
     The child leads its own process group: the npm ``codex`` command is a
     Node wrapper around the native binary, so killing the wrapper alone
-    would leave the binary (and the pipes) alive — see :func:`_kill`.
+    would leave the binary (and the pipes) alive — see :func:`kill_process_tree`.
     """
     return popen_process_group(
         [path, *args],
@@ -410,18 +420,10 @@ def _start_codex(path: str, *args: str) -> "subprocess.Popen[str]":
     )
 
 
-def _kill(proc: "subprocess.Popen[str]") -> None:
-    """Kill *proc* and every process in its group (the wrapped binary too)."""
-    try:
-        kill_process_group(proc.pid, SIGKILL)
-    except OSError:  # the group is already gone, or Windows could not end it
-        proc.kill()
-
-
 def _kill_expired(proc: "subprocess.Popen[str]", expired: threading.Event) -> None:
     """Timer callback: record that the login wait expired, then kill the CLI."""
     expired.set()
-    _kill(proc)
+    kill_process_tree(proc)
 
 
 def _finish_device_login(proc: "subprocess.Popen[str]") -> None:
@@ -429,12 +431,11 @@ def _finish_device_login(proc: "subprocess.Popen[str]") -> None:
     global _device_login
     _, stderr = proc.communicate()
     if proc.returncode != 0:
-        logger.warning(
-            "codex login --device-auth exited %s: %s", proc.returncode, stderr.strip()
-        )
+        logger.warning("codex login --device-auth exited %s: %s", proc.returncode, stderr.strip())
     with _device_login_lock:
         if _device_login is not None and _device_login[1] is proc:
             _device_login = None
+
 
 _UI_CANDIDATE_PATHS: tuple[str, ...] = (
     "/Applications/Codex.app/Contents/Resources/codex",
@@ -550,15 +551,16 @@ class CodexModel(CLITextModel):
             thinking_callback=thinking_callback,
         )
         self._cli_model = (
-            model_name[len("codex/"):] if model_name.startswith("codex/") else model_name
+            model_name[len("codex/") :] if model_name.startswith("codex/") else model_name
         )
         # The MCP bridge serving the agent's tools, set for the duration
         # of a ``native_tools_exposed`` block.
         self._tool_bridge: ToolBridge | None = None
-        # Whether an API key pays for the current turn, decided when the
-        # CLI is launched (_cli_env), and whether
-        # extract_cost_from_response has logged that this API-billed
-        # model has no catalog price.
+        # The current turn's child environment and whether an API key
+        # pays for it, both decided at the top of generate
+        # (_prepare_turn_env), and whether extract_cost_from_response
+        # has logged that this API-billed model has no catalog price.
+        self._turn_env: dict[str, str] = {}
         self._api_billed = False
         self._warned_unpriced = False
 
@@ -636,11 +638,21 @@ class CodexModel(CLITextModel):
             bridge: The bridge whose answered calls are taken.
         """
         for call in bridge.take_served():
-            self.conversation.append({"role": "assistant", "content": ""})
-            self._replace_last_assistant_with_tool_calls(
-                _served_call_text(call),
-                [{"id": f"call_{uuid.uuid4().hex[:8]}", "name": call.name,
-                  "arguments": call.arguments}],
+            self.conversation.append(
+                {
+                    "role": "assistant",
+                    "content": _served_call_text(call),
+                    "tool_calls": [
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(call.arguments),
+                            },
+                        }
+                    ],
+                }
             )
             self.add_function_results_to_conversation_and_return(
                 [(call.name, {"result": call.result})]
@@ -676,20 +688,8 @@ class CodexModel(CLITextModel):
         return args
 
     def _cli_env(self) -> dict[str, str] | None:
-        """The CLI's environment: :func:`codex_cli_env`.
-
-        Called once per launch, so this is where the turn's billing is
-        decided for good: a ``CODEX_API_KEY`` in the child environment
-        makes the turn API spend, whatever the switch says afterwards.
-        So does a key saved by ``codex login --with-api-key``
-        (:func:`codex_api_key_login`) when the child has neither a key
-        variable nor a ``CODEX_ACCESS_TOKEN``, which the CLI reads first.
-        """
-        env = codex_cli_env()
-        self._api_billed = bool(env.get("CODEX_API_KEY")) or (
-            not env.get("CODEX_ACCESS_TOKEN") and codex_api_key_login()
-        )
-        return env
+        """The CLI's environment: the one :meth:`_prepare_turn_env` built."""
+        return self._turn_env
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Codex CLI.
@@ -715,7 +715,7 @@ class CodexModel(CLITextModel):
                 deadline.  Retryable, unlike ``KISSError``.
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
-        self._refuse_api_key_login()
+        self._turn_env = self._prepare_turn_env()
         prompt = self._build_prompt()
         preamble = CODEX_INSTRUCTIONS_PREAMBLE
         if self._tool_bridge is not None:
@@ -727,9 +727,7 @@ class CodexModel(CLITextModel):
             args = self._build_cli_args(instructions_file)
             with self._cli_turn(args, "Codex CLI") as proc:
                 proc.send_prompt(prompt)
-                content, result_json, error_message = self._parse_stream_events(
-                    proc.lines()
-                )
+                content, result_json, error_message = self._parse_stream_events(proc.lines())
                 if error_message is not None:
                     stderr = proc.stderr_text().strip()
                     raise self._with_subscription_hint(
@@ -747,26 +745,40 @@ class CodexModel(CLITextModel):
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
-    @staticmethod
-    def _refuse_api_key_login() -> None:
-        """Raise when the subscription switch is on but the CLI holds an API-key login.
+    def _prepare_turn_env(self) -> dict[str, str]:
+        """Build the turn's child environment and decide its billing, once per turn.
 
-        ``codex exec`` would bill that key per token although the panel
-        promises subscription billing.  :func:`codex_api_key_login` reads
-        the CLI's ``auth.json``, so a stored ``codex login --with-api-key``
-        is the only way to hit this.  A configured ``CODEX_ACCESS_TOKEN``
-        is read by the CLI before the file, so it makes the saved key
-        moot; a missing login is left to the turn itself, whose failure
-        carries :data:`SUBSCRIPTION_HINT`.
+        One reading of the subscription switch shapes both the
+        environment (:func:`codex_cli_env`) and the verdict, so a settings
+        flip during the call cannot make them disagree.  The billing is
+        decided here for good: a ``CODEX_API_KEY`` in the child
+        environment makes the turn API spend, whatever the switch says
+        afterwards.  So does a key saved by ``codex login --with-api-key``
+        (:func:`codex_api_key_login`) when the child has neither a key
+        variable nor a ``CODEX_ACCESS_TOKEN``, which the CLI reads first.
+
+        Returns:
+            The child environment.
+
+        Raises:
+            KISSError: When the switch is on but the turn would bill a
+                saved API key: ``codex exec`` would spend it per token
+                although the panel promises subscription billing.  A
+                stored ``codex login --with-api-key`` is the only way to
+                hit this; a configured ``CODEX_ACCESS_TOKEN`` makes the
+                saved key moot, and a missing login is left to the turn
+                itself, whose failure carries :data:`SUBSCRIPTION_HINT`.
         """
         from kiss.core.config import DEFAULT_CONFIG
 
-        if (
-            DEFAULT_CONFIG.codex_use_subscription
-            and not DEFAULT_CONFIG.CODEX_ACCESS_TOKEN
-            and codex_api_key_login()
-        ):
+        use_subscription = bool(DEFAULT_CONFIG.codex_use_subscription)
+        env = _codex_cli_env_for(use_subscription)
+        self._api_billed = bool(env.get("CODEX_API_KEY")) or (
+            not env.get("CODEX_ACCESS_TOKEN") and codex_api_key_login()
+        )
+        if use_subscription and self._api_billed:
             raise KISSError(f"{API_KEY_LOGIN_ERROR}\n{SUBSCRIPTION_HINT}")
+        return env
 
     @staticmethod
     def _with_subscription_hint(error: KISSError) -> KISSError:
@@ -777,9 +789,7 @@ class CodexModel(CLITextModel):
             return error
         return KISSError(f"{error}\n{SUBSCRIPTION_HINT}")
 
-    def _parse_stream_events(
-        self, lines: Iterable[str]
-    ) -> tuple[str, dict[str, Any], str | None]:
+    def _parse_stream_events(self, lines: Iterable[str]) -> tuple[str, dict[str, Any], str | None]:
         """Parse the JSONL event stream from ``codex exec --json``.
 
         Recognised events:
