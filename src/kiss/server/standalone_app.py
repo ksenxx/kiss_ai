@@ -75,12 +75,20 @@ reopen sent to a browser without windows (a click on its icon, that
 marks its WebSocket connection to the daemon (``/ws?appWindow=1``,
 :data:`APP_WINDOW_WS_QUERY`), the daemon counts those connections
 (:func:`app_window_event`) and quits the browser whose last one
-closed and that has no window left (:func:`quit_closed_app`): the next
-click starts the app afresh.  ``kiss-app`` asks the daemon whether the
-popup is connected (:data:`APP_WINDOW_API`, :func:`ask_app_window_open`)
-before it trusts a reopen, and hands its command line to a running
-browser without a window instead (Chromium's process singleton opens
-the ``--app`` page in the running instance, which opens a new popup).
+closed with its page and that has no window left
+(:func:`quit_closed_app`): the next click starts the app afresh.  A
+browser whose popup closed while the daemon was down (a restart) is
+caught by the daemon's periodic sweep (:func:`sweep_windowless_app`).
+``kiss-app`` asks the daemon whether the popup is connected
+(:data:`APP_WINDOW_API`, :func:`app_window_closed`) before it trusts a
+reopen, and hands its command line to a running browser without a
+window instead (Chromium's process singleton opens the ``--app`` page
+in the running instance, which opens a new popup; the page opens none
+when the daemon tells it the popup is connected after all).
+
+``kiss-app`` starts the browser only once the daemon answers
+(:func:`wait_for_daemon`): the URL file outlives a reboot, and a
+browser started before the daemon serves shows an error page.
 """
 
 from __future__ import annotations
@@ -99,6 +107,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -172,12 +181,36 @@ def read_loopback_url(url_file: Path) -> str | None:
     return None
 
 
-def wait_for_loopback_url(url_file: Path, timeout: float) -> str | None:
-    """Poll *url_file* for up to *timeout* seconds; return the loopback URL or None."""
+def daemon_answers(url: str, timeout: float = 2.0) -> bool:
+    """Whether an HTTP server answers at *url* (with any status: a 404 is an answer too)."""
+    try:
+        with urllib.request.urlopen(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def wait_for_daemon(url_file: Path, url: str | None, timeout: float) -> str | None:
+    """Wait up to *timeout* seconds for the daemon to answer; return its URL, or None.
+
+    The URL is *url*, else the loopback URL of *url_file*
+    (``remote-url.json``), which is polled for while it is missing.  A
+    URL alone is not enough to start the browser: the file survives a
+    reboot, and a browser started before the daemon serves shows an
+    error page in place of the app.  So the daemon is asked
+    (:func:`daemon_answers`) until it answers or the time is up.  The
+    URL is returned either way once it is known (the browser then
+    shows what is wrong, and reloads by itself once the daemon is up);
+    None only when no URL turned up in time.
+    """
     deadline = time.monotonic() + timeout
     while True:
-        url = read_loopback_url(url_file)
-        if url or time.monotonic() >= deadline:
+        url = url or read_loopback_url(url_file)
+        if url and daemon_answers(url):
+            return url
+        if time.monotonic() >= deadline:
             return url
         time.sleep(0.5)
 
@@ -639,9 +672,13 @@ def macos_bundle_processes(bundle: Path) -> list[tuple[int, str]]:
     Every executable of the clone sits under ``Contents/``: the browser
     itself under ``Contents/MacOS/``, its helpers under
     ``Contents/Frameworks/``.  A running one names that directory in
-    its command line.
+    its command line.  ``-ww`` keeps the whole command line: without it
+    procps ``ps`` cuts each line at 80 columns when its output is piped
+    and ``TERM`` is unset, which drops a long bundle path.
     """
-    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    listing = subprocess.run(
+        ["ps", "-ww", "-axo", "pid=,command="], capture_output=True, text=True
+    )
     prefix = f"{bundle / 'Contents'}/"
     processes = []
     for line in listing.stdout.splitlines():
@@ -707,10 +744,19 @@ APP_WINDOW_WS_QUERY = "appWindow=1"
 """The query of the popup's WebSocket URL (``/ws?appWindow=1``), which marks it as the popup."""
 
 APP_WINDOW_QUIT_GRACE_SECS = 2.0
-"""How long after the popup's connection closed the daemon waits before quitting the browser."""
+"""How long after the popup's page went away the daemon waits before quitting the browser."""
+
+APP_WINDOW_GONE_CLOSE_CODE = 1001
+"""The WebSocket close code (going away) Chromium sends when the popup's page is gone."""
+
+APP_WINDOW_SWEEP_STRIKES = 3
+"""How many sweeps in a row must find the browser without popup and window before it is quit."""
 
 _app_windows = 0
 """How many WebSocket connections of the daemon come from the popup (0: no popup, or none yet)."""
+
+_windowless: tuple[int | None, int] = (None, 0)
+"""The browser pid the last sweep found without popup and window, and how many sweeps in a row."""
 
 
 def app_window_state() -> dict[str, bool]:
@@ -719,22 +765,29 @@ def app_window_state() -> dict[str, bool]:
 
 
 def app_window_event(event: str) -> bool:
-    """Count the popup's *event*, ``open`` or ``closing``; return whether it was one of them.
+    """Count the popup's *event*; return whether it was one of the known ones.
 
-    The events are the popup's WebSocket connections opening and
-    closing (the page closing, reloading, or reconnecting).  The
-    ``closing`` that leaves none arranges :func:`quit_closed_app` for
-    the brand bundle (:func:`macos_bundle_path`, as of now) after
+    The events are the popup's WebSocket connections: ``open`` when one
+    opens, ``closing`` when one closes because its page went away (the
+    window closed, or reloaded: the browser's close code was
+    :data:`APP_WINDOW_GONE_CLOSE_CODE`), ``dropped`` when one closes
+    any other way (the daemon's keepalive timed out, say) while the
+    page lives on and will connect again.  The ``closing`` that leaves
+    none arranges :func:`quit_closed_app` for the brand bundle
+    (:func:`macos_bundle_path`, as of now) after
     :data:`APP_WINDOW_QUIT_GRACE_SECS`, by when a reload has connected
-    again.  Only macOS needs it: elsewhere Chromium quits by itself
-    when its last window closes.
+    again; a ``dropped`` one does not, as the page is still there (the
+    window may be minimized, which the quit check cannot tell from
+    closed), and leaves the browser to :func:`sweep_windowless_app`.
+    Only macOS needs either: elsewhere Chromium quits by itself when
+    its last window closes.
     """
     global _app_windows
     if event == "open":
         _app_windows += 1
-    elif event == "closing":
+    elif event in ("closing", "dropped"):
         _app_windows -= 1
-        if _app_windows == 0 and platform.system() == "Darwin":
+        if event == "closing" and _app_windows == 0 and platform.system() == "Darwin":
             timer = threading.Timer(
                 APP_WINDOW_QUIT_GRACE_SECS, quit_closed_app, args=(macos_bundle_path(),)
             )
@@ -746,24 +799,65 @@ def app_window_event(event: str) -> bool:
     return True
 
 
+def windowless_app_pid(bundle: Path) -> int | None:
+    """Return the pid of the browser from *bundle* that has neither popup nor window, or None.
+
+    None when the popup is connected, when no browser runs from the
+    bundle, when the browser has a window on screen (a page the popup
+    moved to; the popup itself, between connections) or when the
+    window server cannot be asked.
+    """
+    if _app_windows > 0:
+        return None
+    pid = macos_bundle_pid(bundle)
+    if pid is None or macos_windows_on_screen(pid) != 0:
+        return None
+    if _app_windows > 0:
+        # The popup connected while the processes and windows were listed.
+        return None
+    return pid
+
+
 def quit_closed_app(bundle: Path) -> bool:
     """Quit the browser running from *bundle* (the brand bundle) if its app window closed.
 
-    Nothing happens, and False is returned, when the popup is connected
-    (again: a reload), when no browser runs from the bundle, or when
-    the browser still has a window on screen (a page the popup moved
-    to) or the window server cannot be asked.  Otherwise the browser
-    gets SIGTERM, which Chromium answers with a regular quit, and True
-    is returned.
+    Nothing happens, and False is returned, unless the browser has
+    neither popup nor window (:func:`windowless_app_pid`).  Otherwise
+    the browser gets SIGTERM, which Chromium answers with a regular
+    quit, and True is returned.
     """
-    if _app_windows > 0:
+    pid = windowless_app_pid(bundle)
+    if pid is None:
         return False
-    pid = macos_bundle_pid(bundle)
-    if pid is None or macos_windows_on_screen(pid) != 0:
+    os.kill(pid, signal.SIGTERM)
+    return True
+
+
+def sweep_windowless_app(bundle: Path) -> bool:
+    """Quit the browser from *bundle* found without popup and window by several sweeps in a row.
+
+    The daemon's watchdog calls this every few seconds on macOS.  It
+    catches the browser whose popup closed while the daemon was down
+    or restarting (nobody armed :func:`quit_closed_app` then), which a
+    click on the icon would otherwise answer with an empty browser
+    window.  A browser is quit only after :data:`APP_WINDOW_SWEEP_STRIKES`
+    sweeps of the same pid found it so, which spans the longest the
+    popup takes to connect again after a daemon restart: a minimized
+    popup between connections is off screen like a closed one.  True
+    when the browser was quit.
+    """
+    global _windowless
+    if platform.system() != "Darwin":
         return False
-    if _app_windows > 0:
-        # The popup connected while the processes and windows were listed.
+    pid = windowless_app_pid(bundle)
+    if pid is None:
+        _windowless = (None, 0)
         return False
+    strikes = _windowless[1] + 1 if pid == _windowless[0] else 1
+    if strikes < APP_WINDOW_SWEEP_STRIKES:
+        _windowless = (pid, strikes)
+        return False
+    _windowless = (None, 0)
     os.kill(pid, signal.SIGTERM)
     return True
 
@@ -777,6 +871,38 @@ def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
         return bool(state["open"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+APP_WINDOW_SETTLE_SECS = 12.0
+"""How long kiss-app gives a popup the daemon reports as not connected to connect."""
+
+
+def app_window_closed(url: str, bundle: Path, settle: float = APP_WINDOW_SETTLE_SECS) -> bool:
+    """Whether the browser running from *bundle* has no popup window, so a reopen would open none.
+
+    The daemon at *url* knows (:func:`ask_app_window_open`): the popup
+    is open while it is connected.  Not connected is most often the
+    popup between connections (the daemon just restarted, and the
+    popup connects again within seconds, minimized or not; the app is
+    still starting and the popup not open yet), not a closed one, so
+    the daemon is asked again for up to *settle* seconds.  Still not
+    connected afterwards, or the daemon not answering at all, a window
+    on screen is taken for the popup, and none for it closed (a
+    minimized one, which the window server cannot tell from a closed
+    one, is connected by then whenever the daemon runs).
+    """
+    deadline = time.monotonic() + settle
+    while True:
+        open_ = ask_app_window_open(url)
+        if open_:
+            return False
+        pid = macos_bundle_pid(bundle)
+        if pid is None:
+            return True
+        if open_ is None or time.monotonic() >= deadline:
+            windows = macos_windows_on_screen(pid)
+            return windows == 0 or (windows is None and open_ is False)
+        time.sleep(0.5)
 
 
 def clone_macos_browser(contents: Path, browser: Path, identifier: str) -> Path | None:
@@ -1077,7 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=120.0,
         metavar="SECS",
-        help="how long to wait for the daemon's URL file (default 120)",
+        help="how long to wait for the daemon's URL file and for the daemon to answer "
+        "(default 120)",
     )
     parser.add_argument("--foreground", action="store_true", help="run the window in this process")
     parser.add_argument(
@@ -1121,11 +1248,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Showing {path.name} in {path.parent}")
         return 0
 
-    url = args.url or wait_for_loopback_url(kiss_home() / "remote-url.json", args.wait)
+    url_file = kiss_home() / "remote-url.json"
+    # --print-command only shows the command: it does not wait for the daemon.
+    if args.print_command:
+        url = args.url or read_loopback_url(url_file)
+    else:
+        url = wait_for_daemon(url_file, args.url, args.wait)
     if not url:
         print(
-            f"{BRAND['product_name']} is not running: no URL in {kiss_home() / 'remote-url.json'}"
-            f" after {args.wait:g}s.",
+            f"{BRAND['product_name']} is not running: no URL in {url_file} after {args.wait:g}s.",
             file=sys.stderr,
         )
         return 1
@@ -1143,11 +1274,7 @@ def main(argv: list[str] | None = None) -> int:
     # One process listing serves both the bundle rewrite and the
     # already-open check below.
     running = macos and macos_bundle_in_use(macos_bundle_path())
-    # A running browser whose window the daemon saw close gets the
-    # command line instead of a reopen, which would open an empty
-    # browser window (see the module doc); the daemon not answering
-    # (None) leaves the reopen, as before.
-    window_closed = running and ask_app_window_open(url) is False
+    daemon_url = url
     if macos:
         browser = macos_launch_browser(browser, in_use=running)
         url = app_window_url(url)
@@ -1157,7 +1284,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_command:
         print(" ".join(command))
         return 0
-    if running and not window_closed and macos_activate_running(macos_bundle_path(), in_use=True):
+    # A running browser without its popup window gets the command line
+    # instead of a reopen, which would open an empty browser window
+    # (see the module doc).
+    if (
+        running
+        and not app_window_closed(daemon_url, macos_bundle_path())
+        and macos_activate_running(macos_bundle_path(), in_use=True)
+    ):
         print(f"{BRAND['product_name']} is already open; its window was brought to the front.")
         return 0
     log = kiss_home() / "kiss-app.log"

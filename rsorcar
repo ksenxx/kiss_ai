@@ -20,15 +20,12 @@
 #      creates.  It is the first thing done on the remote because every later
 #      step needs one of the five (1b runs python3, 2 runs tar).  A host that
 #      already has every tool is left alone.
-#   1b. Check that no task is running there: this deploy restarts the remote
-#      web app, which would kill one mid-step.  A task that IS running is
-#      waited for -- up to SORCAR_LIVE_TASK_WAIT seconds (15 minutes), polling
-#      every few seconds -- because most of the tasks a deploy runs into are
-#      short: an hourly cron job, the sub-agents it dispatches, a quick
-#      question in the web app.  Only a task still running when the wait is
-#      over stops the deploy (SORCAR_FORCE_RESTART=1 says go ahead anyway).
-#      The same wait happens again on the remote right before the web app is
-#      restarted in step 6, for a task that started while the deploy ran.
+#   1b. Find the remote's task database (~/.kiss/sorcar.db on a remote older
+#      than version 2026.10.2) and give it its current name, history.db, so
+#      the sync of step 4b and the web app find it.  A task running on the
+#      remote does not stop the deploy: every sync below works beside the
+#      running web app, and only the restart of step 6 is skipped while a
+#      task is in flight.
 #   1c. Check that the remote has room under $HOME for the deploy: this
 #      machine's task database (step 4b ships it whole the first time) plus
 #      SORCAR_DISK_HEADROOM_GB (3) for the checkout, its Python environment
@@ -108,7 +105,10 @@
 #      rows into the receiving database in place via
 #      src/kiss/scripts/sync_db.py — no row is ever deleted, both web apps keep
 #      running, and a task that ran on only one of the two machines ends up on
-#      both.  The two machines may be on different releases: a column one
+#      both.  A task still in flight on either machine stays where it is for
+#      now: its row is rewritten when it finishes, and a copy taken before
+#      that would never be (the merge only adds rows); the next sync brings
+#      it over, finished.  The two machines may be on different releases: a column one
 #      database has and the other lacks is added to the receiving database
 #      the way the web app adds it when it opens an older database.  Only a
 #      remote without a usable database (first deploy) — or a merge that
@@ -143,7 +143,11 @@
 #      Python environment, the sorcar CLI, Playwright, cloudflared).
 #   6. Build the Python environment with ``uv sync`` and start ``kiss-web`` as
 #      a systemd *user* service with lingering enabled, so the web app keeps
-#      running after you log out and comes back after a reboot.
+#      running after you log out and comes back after a reboot.  A web app
+#      that is running a task is not restarted (the restart would kill the
+#      task mid-step): it keeps serving the release it was started with, and
+#      the next deploy -- or ``systemctl --user restart kiss-web`` -- puts the
+#      new one live.  SORCAR_FORCE_RESTART=1 restarts it anyway.
 #   7. Publish it worldwide: a remote password is required (kiss-web only opens
 #      a Cloudflare tunnel when one is set), ``cloudflared`` is installed when
 #      missing, and the resulting public https URL is verified from this
@@ -176,13 +180,8 @@
 #      ~/.kiss/ first.  A machine with no GitHub credentials is a warning, not
 #      a failed deploy.
 #   9. Verify the public URL from this machine, print the summary and open
-#      the browser.
-#  10. Run install.sh on the *local* machine too (non-interactive, no editor
-#      launch), so this machine's own install is as fresh as the one it just
-#      deployed.  It runs from the main repository, not from a worktree this
-#      script may have been started in: install.sh points the persistent
-#      launchers (~/.local/bin/rsorcar, sorcar-docker) at its own directory,
-#      and a worktree is reclaimed after its task.
+#      the browser.  Nothing is installed on this machine: a deploy changes
+#      the remote only.
 #
 # Environment overrides:
 #   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
@@ -207,12 +206,10 @@
 #   SORCAR_SKIP_DISK_CHECK  set to 1 to deploy without checking the room
 #   SORCAR_LIVE_TASK_WINDOW  how recent a task's newest event has to be, in
 #                       seconds, for the task to count as running on the
-#                       remote (default: 300; 0 turns the check off)
-#   SORCAR_LIVE_TASK_WAIT  how long to wait, in seconds, for the tasks running
-#                       on the remote to finish before giving up (default:
-#                       900; 0 gives up at once)
-#   SORCAR_FORCE_RESTART  set to 1 to deploy even while a task is running on
-#                       the remote (the restart of the web app kills it)
+#                       remote (default: 300; 0 turns the check off and the
+#                       web app is restarted regardless)
+#   SORCAR_FORCE_RESTART  set to 1 to restart the remote web app even while
+#                       a task is running on it (the restart kills the task)
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -307,7 +304,7 @@ info "SSH OK — deploying $MAIN_REPO -> $TARGET:$REMOTE_DIR"
 # Google Compute Engine, for one) has no git.  install.sh would install it,
 # but install.sh runs out of the checkout that step 3 creates — so the host's
 # package manager is asked first.  First of everything on the remote, in
-# fact: the running-task check below runs python3 there and the ~/.ssh copy
+# fact: the database-name probe below runs python3 there and the ~/.ssh copy
 # runs tar, so a host missing one of those could not get it installed later.
 # scripts/install-remote-prereqs.sh travels on standard input like
 # install-api-keys.sh does: the checkout is not on the remote yet.  It
@@ -321,113 +318,37 @@ ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-remote-prereqs.sh" \
     || die "Could not install the tools the deploy needs on $TARGET (see above)."
 
 # ---------------------------------------------------------------------------
-# 1b. Do not deploy on top of a task that is still running there
+# 1b. The remote's task database, under its current name
 #
-# A deploy rebuilds the Python environment under the running web app and then
-# restarts it (step 7c), which kills whatever it is doing: the agent stops
-# mid-step and the steps it had left are gone.  So this is checked before
-# anything else on the remote is touched — and by asking the remote's own
-# history, because a running task writes events continuously.  The thousands
-# of rows an old database holds with no end time and no recent event are not
-# running tasks; see src/kiss/scripts/running_tasks.py.
+# A task running on the remote does not stop the deploy.  Every sync below
+# (the repository, the task database, the memory, the notes) works beside
+# the running web app and leaves what a running task is writing alone --
+# see scripts/sync-task-db.sh -- and the one thing that would hurt a running
+# task, the restart of the web app, is skipped in step 7c while a task is
+# in flight (SORCAR_FORCE_RESTART=1 restarts anyway).  A deploy used to probe
+# the remote here and wait for its tasks; the thousands of rows an old
+# database holds with no end time are not running tasks, which is what
+# src/kiss/scripts/running_tasks.py tells apart for the restart decision.
 #
-# A task that is running is waited for rather than refused outright.  The
-# tasks a deploy runs into are mostly short -- an hourly cron job and the
-# sub-agents it dispatches take a minute or two -- and a deploy that gives up
-# the moment it sees one fails at random, at whatever minute the cron fires;
-# the one that had already done the sync, the install and the environment
-# build failed on the very last step.  The wait is bounded
-# (SORCAR_LIVE_TASK_WAIT, 15 minutes by default; 0 gives up at once, which is
-# what this check did before), and a task still running at the end of it
-# stops the deploy as before.
+# The database was ~/.kiss/sorcar.db before version 2026.10.2: a remote still
+# running that version holds it under the old name, so it is renamed here,
+# so that the sync below (step 4b) and the web app this deploy starts find
+# the remote's history where they look for it.  The old name stays as a
+# symlink to the new one: the web app still running the old version keeps
+# writing to the same file until step 7c restarts it, instead of recreating
+# an empty sorcar.db.  A remote from the spring of 2026 holds a history.db
+# from before the database was first renamed TO sorcar.db as well; the
+# helper tells that leftover apart by its schema and sets it aside (see
+# src/kiss/scripts/legacy_task_db.py).
 # ---------------------------------------------------------------------------
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 [[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \
     || die "SORCAR_LIVE_TASK_WINDOW must be a number of seconds, got '$LIVE_TASK_WINDOW'."
-LIVE_TASK_WAIT="${SORCAR_LIVE_TASK_WAIT:-900}"
-[[ "$LIVE_TASK_WAIT" =~ ^[0-9]+$ ]] \
-    || die "SORCAR_LIVE_TASK_WAIT must be a number of seconds, got '$LIVE_TASK_WAIT'."
-LIVE_TASK_WAIT=$((10#$LIVE_TASK_WAIT))   # "08" is eight, not octal
-# Seconds between two looks; SORCAR_LIVE_TASK_POLL is for the tests.
-LIVE_TASK_POLL="${SORCAR_LIVE_TASK_POLL:-15}"
-[[ "$LIVE_TASK_POLL" =~ ^0*[1-9][0-9]*$ ]] \
-    || die "SORCAR_LIVE_TASK_POLL must be a number of seconds, got '$LIVE_TASK_POLL'."
-LIVE_TASK_POLL=$((10#$LIVE_TASK_POLL))
-# The database was ~/.kiss/sorcar.db before version 2026.10.2: a remote still
-# running that version holds it under the old name, so that is the file asked
-# -- and renamed once the check has passed, so that the sync below (step 4b)
-# and the web app this deploy starts find the remote's history where they
-# look for it.  The old name stays as a symlink to the new one: the web app
-# still running the old version keeps writing to the same file until step 7c
-# restarts it, instead of recreating an empty sorcar.db.  A remote from the
-# spring of 2026 holds a history.db from before the database was first
-# renamed TO sorcar.db as well; the helper tells that leftover apart by its
-# schema and sets it aside (see src/kiss/scripts/legacy_task_db.py).
 LEGACY_TASK_DB="$SCRIPT_DIR/src/kiss/scripts/legacy_task_db.py"
 REMOTE_DB="$(ssh "$TARGET" 'python3 - "$HOME/.kiss"' < "$LEGACY_TASK_DB")" \
     || die "Could not look for the task database on $TARGET."
 [[ "$REMOTE_DB" == history.db || "$REMOTE_DB" == sorcar.db ]] \
     || die "Could not look for the task database on $TARGET (answer: '$REMOTE_DB')."
-if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
-    step "Checking whether a task is running on $TARGET ..."
-    WAIT_STARTED=$SECONDS   # the wait is measured, probes included
-    WAITED=0
-    NEXT_REPORT=60
-    while :; do
-        RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/$REMOTE_DB\" \
-            $(shquote "$LIVE_TASK_WINDOW")" \
-            < "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" 2>/dev/null || echo unknown)"
-        RUNNING_COUNT="$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')"
-        case "$RUNNING_COUNT" in
-            0)
-                if (( WAITED > 0 )); then
-                    info "The task(s) on $TARGET finished after ${WAITED}s; nothing is running there now."
-                else
-                    info "No task is running on $TARGET."
-                fi
-                break
-                ;;
-            ""|*[!0-9]*)
-                # Not an answer.  Reading "I could not look" as "nothing is
-                # running" is how a deploy kills the task it was told to look for.
-                die "Could not tell whether a task is running on $TARGET (answer:" \
-                    "'${RUNNING_COUNT:-none}'). Fix the connection, or the database" \
-                    "there, or set SORCAR_FORCE_RESTART=1 to deploy anyway."
-                ;;
-        esac
-        # A task is running.  Say which, then wait for it -- its end sets its
-        # end time, so the next poll no longer counts it -- as long as the
-        # wait allows.  The list is printed again only when it changes.
-        LISTED="$(printf '%s\n' "$RUNNING" | tail -n +2 | awk '{print $1}' | sort | tr '\n' ' ')"
-        if [[ "${LISTED_BEFORE:-}" != "$LISTED" ]]; then
-            printf '%s\n' "$RUNNING" | tail -n +2 \
-                | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/'
-            LISTED_BEFORE="$LISTED"
-        fi
-        if (( WAITED >= LIVE_TASK_WAIT )); then
-            if (( LIVE_TASK_WAIT > 0 )); then
-                die "$RUNNING_COUNT task(s) are still running on $TARGET after waiting" \
-                    "${WAITED}s, and this deploy would restart the web app and kill" \
-                    "them. Wait for them to finish (SORCAR_LIVE_TASK_WAIT=<seconds>" \
-                    "waits longer), or set SORCAR_FORCE_RESTART=1 to deploy anyway."
-            fi
-            die "$RUNNING_COUNT task(s) are still running on $TARGET, and this deploy" \
-                "would restart the web app and kill them. Wait for them to finish," \
-                "or set SORCAR_FORCE_RESTART=1 to deploy anyway."
-        fi
-        if (( WAITED == 0 )); then
-            info "Waiting up to ${LIVE_TASK_WAIT}s for the task(s) on $TARGET to finish" \
-                 "(SORCAR_LIVE_TASK_WAIT=0 gives up at once) ..."
-        elif (( WAITED >= NEXT_REPORT )); then
-            info "Still waiting (${WAITED}s of ${LIVE_TASK_WAIT}s): $RUNNING_COUNT task(s) running on $TARGET."
-            NEXT_REPORT=$((WAITED + 60))
-        fi
-        NAP=$((LIVE_TASK_WAIT - WAITED))
-        (( NAP > LIVE_TASK_POLL )) && NAP=$LIVE_TASK_POLL
-        sleep "$NAP"
-        WAITED=$((SECONDS - WAIT_STARTED))
-    done
-fi
 if [[ "$REMOTE_DB" == sorcar.db ]]; then
     step "Renaming $TARGET's ~/.kiss/sorcar.db to history.db, its name since version 2026.10.2 ..."
     ssh "$TARGET" 'python3 - "$HOME/.kiss" adopt' < "$LEGACY_TASK_DB" | sed 's/^/         /' \
@@ -784,7 +705,6 @@ step "Installing KISS Sorcar on $TARGET (this takes a few minutes) ..."
 ssh "$TARGET" "REMOTE_DIR=$(shquote "$REMOTE_DIR") WEB_PORT=$(shquote "$WEB_PORT") \
     PASSWORD=$(shquote "$PASSWORD") LOCAL_NTFY_TOPIC=$(shquote "$LOCAL_NTFY_TOPIC") \
     LIVE_TASK_WINDOW=$(shquote "$LIVE_TASK_WINDOW") \
-    LIVE_TASK_WAIT=$(shquote "$LIVE_TASK_WAIT") LIVE_TASK_POLL=$(shquote "$LIVE_TASK_POLL") \
     FORCE_RESTART=$(shquote "${SORCAR_FORCE_RESTART:-}") \
     bash -s" <<'REMOTE'
 set -euo pipefail
@@ -921,7 +841,7 @@ UNIT
 loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
 systemctl --user daemon-reload
 systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
-# Retire the previous tunnel before restarting: kiss-web adopts a cloudflared
+# The restart.  The previous tunnel is retired first: kiss-web adopts a cloudflared
 # it finds in ~/.kiss/cloudflared.pid and republishes its URL, and that URL
 # stops resolving (HTTP 530) once the old tunnel dies with its owner.
 #
@@ -932,76 +852,63 @@ systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
 # something else, and killing every "cloudflared tunnel" it owns — which is
 # what a bare pattern does — takes that down too.
 #
-# A task may have started in the minutes this deploy has been running; the
-# restart below would end it mid-step.  It is waited for, as in step 1b:
-# an hourly cron job that fired while the environment was being built is
-# over in a minute or two, and a deploy that had done all its work and gave
-# up here for that was the common failure.
-if [ "${FORCE_RESTART:-}" != "1" ] && [ "${LIVE_TASK_WINDOW:-300}" != "0" ]; then
-    WAIT_STARTED=$SECONDS   # the wait is measured, probes included
-    WAITED=0
-    NEXT_REPORT=60
-    while :; do
-        # The braces keep a failing probe from ending the pipeline (and, under
-        # ``set -e``, this script) before its answer has been read.
-        RUNNING=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/history.db" \
-                        "${LIVE_TASK_WINDOW:-300}" || true; } )
-        LIVE=$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')
-        [ "$LIVE" = "0" ] && break
-        case "$LIVE" in
-            ''|*[!0-9]*)
-                # Not an answer; waiting will not make it one.
-                echo "ERROR: could not tell whether a task is running on this host" \
-                     "(answer: '${LIVE:-none}'); restarting the web app would kill" \
-                     "one. Fix the database there, or deploy with" \
-                     "SORCAR_FORCE_RESTART=1." >&2
-                exit 1
-                ;;
-        esac
-        if [ "$WAITED" -ge "${LIVE_TASK_WAIT:-900}" ]; then
-            printf '%s\n' "$RUNNING" | tail -n +2 \
-                | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/' >&2
-            STILL=""
-            [ "$WAITED" -gt 0 ] && STILL=", and still after waiting ${WAITED}s"
-            echo "ERROR: '$LIVE' task(s) are running on this host now (none were when" \
-                 "the deploy started$STILL); restarting the web app would kill them." \
-                 "Deploy again when they are done (SORCAR_LIVE_TASK_WAIT=<seconds>" \
-                 "waits longer), or with SORCAR_FORCE_RESTART=1." >&2
-            exit 1
-        fi
-        if [ "$WAITED" -eq 0 ]; then
+# A task may be running on this host -- one that was running when the deploy
+# started, or one that started in the minutes the environment was being
+# built -- and the restart below would end it mid-step.  Such a web app is
+# left as it is: it keeps serving the release it was started with (the
+# repository, database, memory and notes are all synced already), and the
+# next deploy -- or ``systemctl --user restart kiss-web`` -- puts the new one
+# live.  A deploy used to wait here, and fail when the wait ran out; the
+# user said a deploy need not restart the web app at all when a task is in
+# flight.  A web app that is not running has no task in flight, whatever
+# the database says about events of the last few minutes, so it is started.
+# A probe that gives no answer is read as "a task may be running": reading
+# "I could not look" as "nothing is running" is how a deploy kills the task
+# it was told to look for.
+RESTART=1
+if [ "${FORCE_RESTART:-}" != "1" ] && [ "${LIVE_TASK_WINDOW:-300}" != "0" ] \
+   && systemctl --user is-active --quiet kiss-web.service; then
+    # The braces keep a failing probe from ending the pipeline (and, under
+    # ``set -e``, this script) before its answer has been read.
+    RUNNING=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/history.db" \
+                    "${LIVE_TASK_WINDOW:-300}" || true; } )
+    LIVE=$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')
+    case "$LIVE" in
+        0) ;;
+        ''|*[!0-9]*)
+            rinfo "WARNING: could not tell whether a task is running on this host" \
+                  "(answer: '${LIVE:-none}'); kiss-web is left running the previous" \
+                  "release. Fix the database here, or deploy with SORCAR_FORCE_RESTART=1."
+            RESTART=0
+            ;;
+        *)
             printf '%s\n' "$RUNNING" | tail -n +2 \
                 | sed 's/^\([^ ]*\) \([0-9]*\)$/         task \1 (last event \2s ago)/'
-            rinfo "'$LIVE' task(s) started on this host while the deploy ran; waiting" \
-                  "up to ${LIVE_TASK_WAIT:-900}s for them to finish before restarting kiss-web ..."
-        elif [ "$WAITED" -ge "$NEXT_REPORT" ]; then
-            rinfo "Still waiting (${WAITED}s of ${LIVE_TASK_WAIT:-900}s): '$LIVE' task(s) running."
-            NEXT_REPORT=$((WAITED + 60))
-        fi
-        NAP=$((${LIVE_TASK_WAIT:-900} - WAITED))
-        [ "$NAP" -gt "${LIVE_TASK_POLL:-15}" ] && NAP=${LIVE_TASK_POLL:-15}
-        sleep "$NAP"
-        WAITED=$((SECONDS - WAIT_STARTED))
-    done
-    if [ "$WAITED" -gt 0 ]; then
-        rinfo "The task(s) finished after ${WAITED}s; restarting kiss-web now."
-    fi
+            rinfo "'$LIVE' task(s) are running on this host; kiss-web is left running" \
+                  "the previous release so they finish. The next deploy, or" \
+                  "'systemctl --user restart kiss-web', puts this one live" \
+                  "(SORCAR_FORCE_RESTART=1 restarts now and kills them)."
+            RESTART=0
+            ;;
+    esac
 fi
-systemctl --user stop kiss-web.service >/dev/null 2>&1 || true
-OLD_TUNNEL="$(python3 -c 'import json, sys
+if [ "$RESTART" = "1" ]; then
+    systemctl --user stop kiss-web.service >/dev/null 2>&1 || true
+    OLD_TUNNEL="$(python3 -c 'import json, sys
 try:
     pid = int(json.load(open(sys.argv[1]))["pid"])
 except Exception:
     pass
 else:
     print(pid if pid > 1 else "")' "$HOME/.kiss/cloudflared.pid" 2>/dev/null || true)"
-if [ -n "$OLD_TUNNEL" ] \
-   && [ "$(ps -o comm= -p "$OLD_TUNNEL" 2>/dev/null | xargs -r basename)" = cloudflared ]; then
-    kill "$OLD_TUNNEL" >/dev/null 2>&1 || true
+    if [ -n "$OLD_TUNNEL" ] \
+       && [ "$(ps -o comm= -p "$OLD_TUNNEL" 2>/dev/null | xargs -r basename)" = cloudflared ]; then
+        kill "$OLD_TUNNEL" >/dev/null 2>&1 || true
+    fi
+    pkill -f "cloudflared.*--url .*:$WEB_PORT" >/dev/null 2>&1 || true
+    rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
+    systemctl --user restart kiss-web.service
 fi
-pkill -f "cloudflared.*--url .*:$WEB_PORT" >/dev/null 2>&1 || true
-rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
-systemctl --user restart kiss-web.service
 
 # --- 7d. Wait for the local endpoint, then for the public URL --------------
 # scripts/wait-for-public-url.sh (shipped into ~/.kiss in step 4, so that
@@ -1109,21 +1016,4 @@ if [[ "${SORCAR_NO_BROWSER:-}" != "1" ]]; then
     esac
 fi
 
-# ---------------------------------------------------------------------------
-# 10. Run install.sh on the local machine too, so this machine's own install
-#     (app, daemon, launchers) is as fresh as the one just deployed.
-#     After the summary box above, so a failing local install can never hide
-#     the remote URL and password the deploy produced.  It runs from
-#     $MAIN_REPO, never from a worktree this script may sit in: install.sh
-#     rewrites the persistent launchers to point at its own directory, and a
-#     worktree is reclaimed after its task — a launcher pointing there would
-#     dangle.  --non-interactive: no [Y/n] prompts under ``set -e``;
-#     KISS_SKIP_LAUNCH: the deploy must not pop open an editor here.
-# ---------------------------------------------------------------------------
-step "Running install.sh on the local machine ..."
-[[ -f "$MAIN_REPO/install.sh" ]] \
-    || die "No install.sh in $MAIN_REPO — cannot install locally (the remote deploy above succeeded)."
-KISS_SKIP_LAUNCH=1 bash "$MAIN_REPO/install.sh" --non-interactive \
-    || die "install.sh failed on the local machine (the remote deploy above succeeded)."
-info "Local install completed."
 info "Done."

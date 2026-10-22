@@ -1607,6 +1607,25 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             snapshot TEXT PRIMARY KEY,
             timestamp REAL NOT NULL DEFAULT 0
         );
+        -- The id of every task the user deleted (_delete_task_rows), with
+        -- the moment of the deletion.  The task database is synced between
+        -- machines by adding the rows one of them lacks
+        -- (kiss.scripts.sync_db), and without this record a task deleted
+        -- here would come back from the other machine on the next sync;
+        -- with it the deletion travels instead.  Rows are never pruned:
+        -- a tombstone is a few dozen bytes.
+        CREATE TABLE IF NOT EXISTS deleted_tasks (
+            id TEXT PRIMARY KEY,
+            deleted_ts REAL NOT NULL
+        );
+        -- The same for a deleted chat: its tasks are in deleted_tasks, and
+        -- this says that its chat_summaries row (the title the user gave
+        -- it, among other things) went too -- deleting a task on its own
+        -- keeps the chat's row, so the task tombstones alone cannot tell.
+        CREATE TABLE IF NOT EXISTS deleted_chats (
+            chat_id TEXT PRIMARY KEY,
+            deleted_ts REAL NOT NULL
+        );
     """)
     # Columns first: an index over a column this version added to an
     # existing table can only be created once the column is there.
@@ -3707,7 +3726,11 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
     """Under the write lock: drop *task_ids* and their events in one transaction.
 
     When *chat_id* is set, the chat's ``chat_summaries`` row goes in
-    the same transaction.
+    the same transaction.  Each deleted id is recorded in
+    ``deleted_tasks`` in that transaction too (and the chat in
+    ``deleted_chats``), so that the deletion travels to the other
+    machines the database is synced with instead of the task coming
+    back from them.
 
     Returns:
         The number of ``task_history`` rows removed.
@@ -3719,8 +3742,17 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
             db.execute(f"DELETE FROM events WHERE task_id IN ({marks})", task_ids)
             cursor = db.execute(f"DELETE FROM task_history WHERE id IN ({marks})", task_ids)
             removed = cursor.rowcount or 0
+            now = time.time()
+            db.executemany(
+                "INSERT OR REPLACE INTO deleted_tasks (id, deleted_ts) VALUES (?, ?)",
+                [(task_id, now) for task_id in task_ids],
+            )
         if chat_id:
             db.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+            db.execute(
+                "INSERT OR REPLACE INTO deleted_chats (chat_id, deleted_ts) VALUES (?, ?)",
+                (chat_id, time.time()),
+            )
     locked_call(_caches_lock, _drop_event_caches, set(task_ids))
     return removed
 

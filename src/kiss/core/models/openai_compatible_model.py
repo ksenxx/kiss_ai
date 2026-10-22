@@ -10,7 +10,8 @@ import logging
 import threading
 from abc import abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 import httpx
@@ -32,9 +33,11 @@ from kiss.core.models.model import (
     TokenCallback,
     _audio_mime_to_format,
     _build_text_based_tools_prompt,
+    _chat_tool_call_entry,
     _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
+    parse_tool_arguments,
     responses_items_to_chat_messages,
 )
 from kiss.core.models.stream_abort import (
@@ -44,6 +47,8 @@ from kiss.core.models.stream_abort import (
 )
 
 logger = logging.getLogger(__name__)
+
+_StreamResult = TypeVar("_StreamResult")
 
 # The request parameters a Chat Completions call accepts, taken from the
 # SDK's own signature (keyword-only, no **kwargs).
@@ -61,6 +66,14 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+
+# Per-request timeout for embeddings calls.  The client's own timeout is
+# the 1800 s a long generation may legitimately need, but an embeddings
+# request answers in seconds, so a provider that accepts the connection
+# and never responds must not park the calling task thread for half an
+# hour.  ``model_config["timeout"]`` (the same key the chat and Responses
+# requests already forward to the SDK) overrides it.
+EMBEDDINGS_TIMEOUT = 60.0
 
 # OpenAI processing tiers as a factor on the Standard rate the catalog
 # holds (https://developers.openai.com/api/docs/pricing, tier switcher).
@@ -417,11 +430,7 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
+        return _text_of_parts(content)
     return "" if content is None else str(content)
 
 
@@ -475,13 +484,33 @@ def _conversation_with_tools_prompt(
     return [leading, *messages]
 
 
-def _decode_tool_call_arguments(args_json: str) -> Any:
-    """Return the JSON-decoded tool-call *args_json*, or ``{}`` when it is not valid JSON."""
-    try:
-        return json.loads(args_json)
-    except json.JSONDecodeError:
-        logger.debug("Failed to decode tool-call args", exc_info=True)
-        return {}
+def _function_call_entry(call_id: str, name: str, args_json: str) -> dict[str, Any]:
+    """Return the ``{"id", "name", "arguments"}`` call entry handed to the agent loop.
+
+    Args:
+        call_id: The provider's call id.
+        name: The tool name.
+        args_json: The model's argument string; decoded here (``{}`` when
+            it is not a JSON object).
+    """
+    return {"id": call_id, "name": name, "arguments": parse_tool_arguments(args_json)}
+
+
+def _text_of_parts(parts: list[Any]) -> str:
+    """Join the ``text`` of the ``text``-typed parts of a Chat Completions content array.
+
+    Args:
+        parts: Content parts (dicts with a ``type``); anything that is not
+            a ``text`` part dict is skipped.
+
+    Returns:
+        The concatenated text.
+    """
+    return "".join(
+        str(part.get("text", "") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
 
 
 def _accumulate_tool_call_deltas(
@@ -595,6 +624,130 @@ class OpenAICompatibleBase(Model):
         )
         self._client_inputs = inputs
 
+    def _stream_request(
+        self,
+        create: Callable[..., Any],
+        kwargs: dict[str, Any],
+        consume: Callable[[Any], _StreamResult],
+    ) -> _StreamResult:
+        """Open a streamed request under the stall clocks and hand it to *consume*.
+
+        Two clocks bound the wait for a silent provider: the SDK's
+        connect/read timeout (``stream_stall_timeout`` between bytes,
+        ``stream_abort.CONNECT_TIMEOUT`` to connect) and, once the headers
+        arrive, the abort watchdog the transport's *consume* runs the
+        events under.  Both raise the same retryable stall error (or the
+        Stop error when the user stopped meanwhile).
+
+        Args:
+            create: The SDK call that opens the stream
+                (``client.chat.completions.create`` or
+                ``client.responses.create``).
+            kwargs: The request kwargs; ``stream`` and ``timeout`` are set
+                here.
+            consume: Called with the open stream; its result is returned.
+
+        Returns:
+            Whatever *consume* returns.
+        """
+        kwargs["stream"] = True
+        kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
+        try:
+            return consume(create(**kwargs))
+        except (httpx.TimeoutException, APITimeoutError) as err:
+            raise stop_or_stall_error(self._stream_stall_timeout) from err
+
+    def _config_request_params(self) -> dict[str, Any]:
+        """Return the ``model_config`` entries that may be request parameters.
+
+        Framework-only keys (:data:`FRAMEWORK_ONLY_CONFIG_KEYS`) are left
+        out; the transport reshapes what it must and then keeps the subset
+        its SDK call accepts via :meth:`_finish_request_kwargs`.
+
+        Returns:
+            A fresh dict of the forwardable config entries.
+        """
+        return {k: v for k, v in self.model_config.items() if k not in FRAMEWORK_ONLY_CONFIG_KEYS}
+
+    def _finish_request_kwargs(
+        self, kwargs: dict[str, Any], supported: frozenset[str], label: str
+    ) -> dict[str, Any]:
+        """Drop the parameters the SDK call rejects and add the cache marker.
+
+        Args:
+            kwargs: The assembled request kwargs.
+            supported: The parameter names the SDK call accepts.
+            label: The transport name used in the unsupported-key warning.
+
+        Returns:
+            The kwargs to send.
+        """
+        kwargs = self._keep_supported_request_params(kwargs, supported, label)
+        self._apply_cache_control_for_openrouter_anthropic(kwargs)
+        return kwargs
+
+    # The content-part type carrying plain text in this transport's
+    # messages: ``text`` for Chat Completions, ``input_text`` for Responses.
+    _TEXT_PART_TYPE = "text"
+
+    @classmethod
+    def _text_part(cls, text: str) -> dict[str, str]:
+        """Return *text* as this transport's text content part."""
+        return {"type": cls._TEXT_PART_TYPE, "text": text}
+
+    @classmethod
+    def _user_message_with_attachments(
+        cls, attachments: list[Attachment], text: str
+    ) -> dict[str, Any] | None:
+        """Build a user message carrying *attachments* followed by *text*.
+
+        Args:
+            attachments: The attachments to convert (unsupported formats
+                are dropped with a warning).
+            text: The note appended after the attachment parts.
+
+        Returns:
+            The user message, or ``None`` when no attachment survived the
+            conversion so there is nothing to send.
+        """
+        parts = cls._attachments_to_content_parts(attachments)
+        if not parts:
+            return None
+        parts.append(cls._text_part(text))
+        return {"role": "user", "content": parts}
+
+    def _create_embeddings(
+        self, model_to_use: str, text_or_texts: str | list[str]
+    ) -> list[list[float]]:
+        """Send one embeddings request bounded by :data:`EMBEDDINGS_TIMEOUT`.
+
+        Args:
+            model_to_use: The embeddings model name.
+            text_or_texts: One text or the batch to embed.
+
+        Returns:
+            The embedding vectors in input order.
+
+        Raises:
+            KISSError: If the request fails, times out, or returns a
+                malformed response (a ``null`` embedding, a missing index,
+                a vector count that does not match the input).
+        """
+        self._ensure_client()
+        timeout = self.model_config.get("timeout", EMBEDDINGS_TIMEOUT)
+        try:
+            response = self.client.embeddings.create(
+                model=model_to_use, input=text_or_texts, timeout=timeout
+            )
+            ordered = sorted(response.data, key=lambda item: item.index)
+            expected = 1 if isinstance(text_or_texts, str) else len(text_or_texts)
+            if len(ordered) != expected:
+                raise ValueError(f"expected {expected} embeddings, got {len(ordered)}")
+            return [list(item.embedding) for item in ordered]
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generate an embedding vector for the given text.
 
@@ -609,14 +762,7 @@ class OpenAICompatibleBase(Model):
         Raises:
             KISSError: If the embedding generation fails.
         """
-        model_to_use = embedding_model or self.model_name
-        self._ensure_client()
-        try:
-            response = self.client.embeddings.create(model=model_to_use, input=text)
-            return list(response.data[0].embedding)
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+        return self._create_embeddings(embedding_model or self.model_name, text)[0]
 
     def get_embeddings(
         self, texts: list[str], embedding_model: str | None = None
@@ -636,15 +782,7 @@ class OpenAICompatibleBase(Model):
         """
         if not texts:
             return []
-        model_to_use = embedding_model or self.model_name
-        self._ensure_client()
-        try:
-            response = self.client.embeddings.create(model=model_to_use, input=texts)
-            ordered = sorted(response.data, key=lambda item: item.index)
-            return [list(item.embedding) for item in ordered]
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+        return self._create_embeddings(embedding_model or self.model_name, texts)
 
     def _generate_with_text_based_tools(
         self, function_map: dict[str, Callable[..., Any]]
@@ -904,7 +1042,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             parts = self._attachments_to_content_parts(attachments)
-            parts.append({"type": "text", "text": prompt})
+            parts.append(self._text_part(prompt))
             content = parts
         self.conversation.append({"role": "user", "content": content})
 
@@ -963,11 +1101,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Args:
             attachments: The attachments lifted out of the tool results.
         """
-        parts = self._attachments_to_content_parts(attachments)
-        if not parts:
-            return
-        parts.append({"type": "text", "text": TOOL_RESULT_ATTACHMENT_NOTE})
-        self.conversation.append({"role": "user", "content": parts})
+        message = self._user_message_with_attachments(attachments, TOOL_RESULT_ATTACHMENT_NOTE)
+        if message is not None:
+            self.conversation.append(message)
 
     @classmethod
     def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
@@ -1107,7 +1243,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         rest = [b for b in blocks if b.get("type") not in ("tool_result", "tool_use")]
 
         if tool_uses:
-            text = "".join(b.get("text", "") for b in rest if b.get("type") == "text")
+            text = _text_of_parts(rest)
             tool_calls = list(msg_copy.get("tool_calls") or [])
             for b in tool_uses:
                 tool_calls.append(
@@ -1157,19 +1293,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             A tuple of (function_calls, raw_tool_calls) for conversation storage.
         """
-        function_calls: list[dict[str, Any]] = []
-        raw_tool_calls: list[dict[str, Any]] = []
-        for call_id, name, args_json in entries:
-            function_calls.append(
-                {"id": call_id, "name": name, "arguments": _decode_tool_call_arguments(args_json)}
-            )
-            raw_tool_calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args_json},
-                }
-            )
+        function_calls = [_function_call_entry(*entry) for entry in entries]
+        raw_tool_calls = [_chat_tool_call_entry(*entry) for entry in entries]
         return function_calls, raw_tool_calls
 
     @staticmethod
@@ -1257,15 +1382,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The error message, or ``""`` when the response carries none.
         """
-        err = (
-            response.get("error")
-            if isinstance(response, dict)
-            else getattr(response, "error", None)
-        )
+        err = _get_attr_or_key(response, "error")
         if err is None:
             return ""
-        message = err.get("message") if isinstance(err, dict) else getattr(err, "message", None)
-        return str(message or err)
+        return str(_get_attr_or_key(err, "message") or err)
 
     def _raise_for_finish_reason(self, finish_reason: str | None, response: Any) -> None:
         """Reject a truncated completion instead of using its partial output.
@@ -1332,18 +1452,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         differ only in whether the request goes through the adaptive
         ``reasoning_effort`` probe.
 
-        Two clocks bound the wait for a silent provider.  After the
-        response headers arrive, ``stop_aware_events`` (instead of a bare
-        ``for chunk in ...``) aborts the socket on Stop or after
-        ``stream_stall_timeout`` seconds without an event; otherwise the
-        thread would sit in ``recv()`` for the client's full 1800s
-        timeout because the stop flag is only read when the agent emits
-        something and an injected ``KeyboardInterrupt`` cannot reach a
-        thread inside C code (``reports/stop_button_delay_2026-08-05.html``).
-        Before the headers arrive no watchdog exists yet, so the request
-        carries a per-request ``httpx.Timeout`` of the same stall timeout
-        (``CONNECT_TIMEOUT`` to connect); either clock firing is reported
-        as the same retryable stall error.
+        The request is opened by the base :meth:`_stream_request`, whose
+        per-request ``httpx.Timeout`` covers the wait for the headers;
+        after they arrive :meth:`_consume_chat_stream` reads the chunks
+        under the abort watchdog.
 
         Args:
             kwargs: Fully built request arguments; ``stream`` and
@@ -1355,98 +1467,16 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             ``(content, tool_call_accumulator, response, finish_reason)``.
         """
-        kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
-        kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
-        content = ""
-        tool_calls_accum: dict[int, dict[str, str]] = {}
-        response = None
-        last_chunk = None
-        finish_reason: str | None = None
-        watchdog_name = (
-            "openai-tools-stream-abort-watchdog" if adaptive else "openai-stream-abort-watchdog"
+        if adaptive:
+            create: Callable[..., Any] = self._create_chat_completion_adaptive
+            watchdog_name = "openai-tools-stream-abort-watchdog"
+        else:
+            create = self.client.chat.completions.create
+            watchdog_name = "openai-stream-abort-watchdog"
+        content, tool_calls_accum, response, last_chunk, finish_reason = self._stream_request(
+            create, kwargs, partial(self._consume_chat_stream, watchdog_name=watchdog_name)
         )
-        try:
-            stream = (
-                self._create_chat_completion_adaptive(kwargs)
-                if adaptive
-                else self.client.chat.completions.create(**kwargs)
-            )
-            # The transport handler sits inside the watched block so that
-            # the generator and the thinking bracket are closed only after
-            # it ran: an error raised by that cleanup is not a transport
-            # failure.
-            with self._watched_events(stream, watchdog_name) as events:
-                try:
-                    for chunk in events:
-                        last_chunk = chunk
-                        if chunk.usage is not None:
-                            # Billed already: kept for
-                            # take_partial_usage_response if the stream
-                            # fails before it ends.  Recorded before the
-                            # callbacks below run, since a provider may put
-                            # the usage on a chunk that also carries content
-                            # and a callback may raise (Stop) on it.
-                            response = self._rejected_response = chunk
-                        delta = None
-                        if chunk.choices:
-                            choice = chunk.choices[0]
-                            if getattr(choice, "finish_reason", None):
-                                finish_reason = choice.finish_reason
-                            delta = choice.delta
-                        if delta:
-                            reasoning = _delta_reasoning_text(delta)
-                            if reasoning:
-                                self._open_thinking_if_closed()
-                                self._invoke_token_callback(reasoning)
-                            if delta.content:
-                                self._close_thinking_if_open()
-                                content += delta.content
-                                self._invoke_token_callback(delta.content)
-                            if delta.tool_calls:
-                                self._close_thinking_if_open()
-                                _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
-                        if finish_reason is not None and response is not None:
-                            # The answer and its billing are both complete;
-                            # only ``[DONE]`` can follow.  Waiting for it let
-                            # a connection that went silent here trip the
-                            # stall watchdog, and the retry billed the
-                            # finished turn again.  Leaving the loop closes
-                            # the stream (the watched generator's cleanup),
-                            # as v2 does on ``response.completed``.
-                            break
-                except (httpx.HTTPError, APIConnectionError) as err:
-                    # A transport failure AFTER ``finish_reason`` arrived
-                    # lost only the stream's tail (the usage chunk /
-                    # ``[DONE]``); the answer itself — text and tool-call
-                    # arguments — is complete.  Raising here would make the
-                    # agent loop re-send the whole conversation and the
-                    # provider regenerate (and bill) the same answer, which
-                    # the user sees as a repeated request and response.  A
-                    # failure BEFORE ``finish_reason`` means real content
-                    # was lost, so it still propagates for the agent-level
-                    # retry.  Timeouts are subclasses of these and belong to
-                    # the outer handler.  Stops (``KeyboardInterrupt``) and
-                    # stalls (``TimeoutError``) raised by
-                    # ``stop_aware_events`` are not transport errors and are
-                    # never swallowed.
-                    if finish_reason is None or isinstance(
-                        err, httpx.TimeoutException | APITimeoutError
-                    ):
-                        raise
-                    logger.warning(
-                        "Stream connection lost after finish_reason=%r; keeping "
-                        "the complete response instead of retrying: %s",
-                        finish_reason,
-                        err,
-                    )
-        except (httpx.TimeoutException, APITimeoutError) as err:
-            # The per-request clock fired (no headers, or no bytes between
-            # events) before the watchdog did.  A Stop pressed while the
-            # headers were still pending has no watchdog to act on it, so
-            # ask the thread's stop signal before calling this a stall: a
-            # stall is retried, a stop must not be.
-            raise stop_or_stall_error(self._stream_stall_timeout) from err
         # Leaving the loop early skips the post-loop stop check inside
         # ``stop_aware_events`` (closing the generator runs only its
         # cleanup), so a Stop pressed during the stream is honoured here;
@@ -1458,6 +1488,103 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
+
+    def _consume_chat_stream(
+        self, stream: Any, watchdog_name: str
+    ) -> tuple[str, dict[int, dict[str, str]], Any, Any, str | None]:
+        """Read one open chat-completion stream, driving the token/thinking callbacks.
+
+        ``stop_aware_events`` (instead of a bare ``for chunk in ...``)
+        aborts the socket on Stop or after ``stream_stall_timeout``
+        seconds without an event; otherwise the thread would sit in
+        ``recv()`` for the client's full 1800s timeout because the stop
+        flag is only read when the agent emits something and an injected
+        ``KeyboardInterrupt`` cannot reach a thread inside C code
+        (``reports/stop_button_delay_2026-08-05.html``).
+
+        Args:
+            stream: The SDK's chunk iterator.
+            watchdog_name: Thread name of the abort watchdog.
+
+        Returns:
+            ``(content, tool_call_accumulator, usage_chunk, last_chunk,
+            finish_reason)``; ``usage_chunk`` is ``None`` when no chunk
+            carried usage.
+        """
+        content = ""
+        tool_calls_accum: dict[int, dict[str, str]] = {}
+        response = None
+        last_chunk = None
+        finish_reason: str | None = None
+        # The transport handler sits inside the watched block so that
+        # the generator and the thinking bracket are closed only after
+        # it ran: an error raised by that cleanup is not a transport
+        # failure.
+        with self._watched_events(stream, watchdog_name) as events:
+            try:
+                for chunk in events:
+                    last_chunk = chunk
+                    if chunk.usage is not None:
+                        # Billed already: kept for
+                        # take_partial_usage_response if the stream
+                        # fails before it ends.  Recorded before the
+                        # callbacks below run, since a provider may put
+                        # the usage on a chunk that also carries content
+                        # and a callback may raise (Stop) on it.
+                        response = self._rejected_response = chunk
+                    delta = None
+                    if chunk.choices:
+                        choice = chunk.choices[0]
+                        if getattr(choice, "finish_reason", None):
+                            finish_reason = choice.finish_reason
+                        delta = choice.delta
+                    if delta:
+                        reasoning = _delta_reasoning_text(delta)
+                        if reasoning:
+                            self._open_thinking_if_closed()
+                            self._invoke_token_callback(reasoning)
+                        if delta.content:
+                            self._close_thinking_if_open()
+                            content += delta.content
+                            self._invoke_token_callback(delta.content)
+                        if delta.tool_calls:
+                            self._close_thinking_if_open()
+                            _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
+                    if finish_reason is not None and response is not None:
+                        # The answer and its billing are both complete;
+                        # only ``[DONE]`` can follow.  Waiting for it let
+                        # a connection that went silent here trip the
+                        # stall watchdog, and the retry billed the
+                        # finished turn again.  Leaving the loop closes
+                        # the stream (the watched generator's cleanup),
+                        # as v2 does on ``response.completed``.
+                        break
+            except (httpx.HTTPError, APIConnectionError) as err:
+                # A transport failure AFTER ``finish_reason`` arrived
+                # lost only the stream's tail (the usage chunk /
+                # ``[DONE]``); the answer itself — text and tool-call
+                # arguments — is complete.  Raising here would make the
+                # agent loop re-send the whole conversation and the
+                # provider regenerate (and bill) the same answer, which
+                # the user sees as a repeated request and response.  A
+                # failure BEFORE ``finish_reason`` means real content
+                # was lost, so it still propagates for the agent-level
+                # retry.  Timeouts are subclasses of these and belong to
+                # ``_stream_request``.  Stops (``KeyboardInterrupt``) and
+                # stalls (``TimeoutError``) raised by
+                # ``stop_aware_events`` are not transport errors and are
+                # never swallowed.
+                if finish_reason is None or isinstance(
+                    err, httpx.TimeoutException | APITimeoutError
+                ):
+                    raise
+                logger.warning(
+                    "Stream connection lost after finish_reason=%r; keeping "
+                    "the complete response instead of retrying: %s",
+                    finish_reason,
+                    err,
+                )
+        return content, tool_calls_accum, response, last_chunk, finish_reason
 
     def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
         """Stream a chat completion, invoking the token callback for each text delta.
@@ -1494,18 +1621,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The kwargs dict for ``client.chat.completions.create(...)``.
         """
-        kwargs = self._keep_supported_request_params(
-            {
-                key: value
-                for key, value in self.model_config.items()
-                if key not in FRAMEWORK_ONLY_CONFIG_KEYS
-            },
-            _CHAT_REQUEST_PARAMS,
-            "OpenAI Chat Completions",
-        )
+        kwargs = self._config_request_params()
         kwargs.update({"model": self._api_model_name, "messages": messages})
-        self._apply_cache_control_for_openrouter_anthropic(kwargs)
-        return kwargs
+        return self._finish_request_kwargs(kwargs, _CHAT_REQUEST_PARAMS, "OpenAI Chat Completions")
 
     def _normalized_conversation_checked(self) -> list[dict[str, Any]]:
         """Normalize the conversation for the API, raising when nothing remains.
@@ -1590,19 +1708,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         kwargs = self._build_chat_kwargs(self._normalized_conversation_checked())
         kwargs["tools"] = tools or None
 
-        if (
-            tools
-            and "reasoning_effort" in kwargs
-            and self._tools_reasoning_effort_capability() is False
-        ):
-            dropped = kwargs.pop("reasoning_effort")
-            logger.debug(
-                "Dropping reasoning_effort=%r because tools are attached and "
-                "endpoint %s is known to reject the combination.",
-                dropped,
-                self.base_url,
-            )
-
         if self.token_callback is not None:
             (
                 content,
@@ -1613,7 +1718,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             self._raise_for_finish_reason(finish_reason, response)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
-            response = self._create_chat_completion_adaptive(kwargs)
+            response = self._create_chat_completion_adaptive(**kwargs)
             self._raise_for_failed_completion(response)
             message = response.choices[0].message
             content = message.content or ""
@@ -1703,7 +1808,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             return declared
         return _tool_effort_verdict(self._effort_verdict_key)
 
-    def _create_chat_completion_adaptive(self, kwargs: dict[str, Any]) -> Any:
+    def _create_chat_completion_adaptive(self, **kwargs: Any) -> Any:
         """Create a chat completion, learning the effort capability if unknown.
 
         For endpoints whose ``tools`` + ``reasoning_effort`` capability is
@@ -1711,22 +1816,33 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         the request is sent optimistically with the effort attached. If the
         endpoint rejects it with a 400 that mentions ``reasoning_effort``,
         the verdict is cached as False and the request is retried once
-        without the effort; on success the verdict is cached as True. Known
-        endpoints and requests without tools or effort pass straight
-        through.
+        without the effort; on success the verdict is cached as True.  An
+        endpoint already known to reject the combination gets the request
+        without the effort straight away; other known endpoints and
+        requests without tools or effort pass straight through.
 
         Args:
-            kwargs: Fully-built Chat Completions request arguments; mutated
-                (``reasoning_effort`` removed) when the endpoint rejects it.
+            kwargs: Fully-built Chat Completions request arguments
+                (``reasoning_effort`` is left out of the request when the
+                endpoint rejects it).
 
         Returns:
             The API response (or stream iterator when ``stream=True``).
         """
-        unverified = (
-            bool(kwargs.get("tools"))
-            and "reasoning_effort" in kwargs
-            and self._tools_reasoning_effort_capability() is None
+        capability = (
+            self._tools_reasoning_effort_capability()
+            if kwargs.get("tools") and "reasoning_effort" in kwargs
+            else True
         )
+        if capability is False:
+            dropped = kwargs.pop("reasoning_effort")
+            logger.debug(
+                "Dropping reasoning_effort=%r because tools are attached and "
+                "endpoint %s is known to reject the combination.",
+                dropped,
+                self.base_url,
+            )
+        unverified = capability is None
         try:
             response = self.client.chat.completions.create(**kwargs)
         except BadRequestError as e:
@@ -1857,11 +1973,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ]
         if role == "assistant":
             if isinstance(content, list):
-                text = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
+                text = _text_of_parts(content)
             else:
                 text = content if isinstance(content, str) else ""
             if text.strip():
@@ -1945,13 +2057,16 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # ``extra_headers``) can be reconfigured between turns (the very
         # change that rebuilds this model's own client), and a delegate
         # frozen at construction time would keep sending tool turns to
-        # the OLD endpoint with the OLD credentials.  _ensure_client
-        # compares exactly these inputs, so mirroring them makes the
-        # delegate rebuild its client precisely when they changed.
+        # the OLD endpoint with the OLD credentials.  The delegate sends
+        # through this model's own SDK client (same endpoint, credentials
+        # and headers, one connection pool), rebuilt here exactly when
+        # those inputs changed.
         delegate.base_url = self.base_url
         delegate.api_key = self.api_key
         delegate.model_config = delegate_config
-        delegate._ensure_client()
+        self._ensure_client()
+        delegate.client = self.client
+        delegate._client_inputs = self._client_inputs
         delegate.reset_conversation()
         input_items = self._chat_conversation_to_responses_input()
         delegate.conversation = list(input_items)
@@ -1973,15 +2088,22 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # (message / reasoning / function_call items); only its
         # add_function_results, never called here, appends anything else.
         new_items = list(delegate.conversation[len(input_items) :])
+        # The ``tool_calls`` entries carry the model's own argument string
+        # (the ``function_call`` item's ``arguments``), not a re-encoding
+        # of the decoded dict: key order, number formatting and whitespace
+        # replay exactly as written, and a string the decoder rejected
+        # is not silently replaced by ``{}``.
+        args_json_by_call_id = {
+            item["call_id"]: item["arguments"]
+            for item in new_items
+            if item.get("type") == "function_call" and isinstance(item.get("arguments"), str)
+        }
         raw_tool_calls = [
-            {
-                "id": fc["id"],
-                "type": "function",
-                "function": {
-                    "name": fc["name"],
-                    "arguments": json.dumps(fc["arguments"]),
-                },
-            }
+            _chat_tool_call_entry(
+                fc["id"],
+                fc["name"],
+                args_json_by_call_id.get(fc["id"], json.dumps(fc["arguments"])),
+            )
             for fc in function_calls
         ]
         for fc in function_calls:
@@ -2011,19 +2133,16 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             del self._delegate_raw_items[call_id]
 
     def reset_conversation(self) -> None:
-        """Reset the conversation and every cache derived from it.
+        """Reset the conversation and the raw Responses items cached for it.
 
         The base implementation clears only the conversation, but this
-        transport also caches raw Responses items per call_id and owns a
-        Responses delegate with its own per-turn state.  Both are dead
-        weight once the conversation they describe is gone, and the
-        delegate's leftover pending function calls would reject the very
-        next generation on the fresh, empty conversation.
+        transport also caches raw Responses items per call_id, dead
+        weight once the conversation they describe is gone.  The
+        Responses delegate needs no reset here: every delegated turn
+        resets it before use (:meth:`_generate_with_tools_via_responses`).
         """
         super().reset_conversation()
         self._delegate_raw_items.clear()
-        if self._responses_delegate is not None:
-            self._responses_delegate.reset_conversation()
 
     def _request_with_tools_prompt(self, tools_prompt: str) -> tuple[str, Any]:
         """Send the chat conversation with *tools_prompt* in its first message.

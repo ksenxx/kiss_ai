@@ -36,16 +36,16 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kiss.core.default_browser import browser_commands_from_env
 from kiss.core.locked import locked, locked_call
 
 logger = logging.getLogger(__name__)
@@ -79,11 +79,16 @@ class _Opening:
         surface: :data:`BROWSER_TAB` or :data:`DEFAULT_BROWSER`.
         settled: ``True`` once the launch succeeded; a failed launch is
             removed from :data:`_recent` instead.
+        owner: The thread that claimed the launch: only it settles or
+            releases the claim, so a claim that replaced this one (the
+            launch outlived :data:`_REOPEN_AFTER`, or the thread's own
+            launch failed and a waiter took over) is left to its owner.
     """
 
     opened_at: float
     surface: str
     settled: bool = False
+    owner: int = field(default_factory=threading.get_ident)
 
 
 _recent: dict[str, _Opening] = {}
@@ -160,17 +165,19 @@ def _claim_locked(url: str, surface: str, once: bool, deadline: float) -> str | 
 
 @locked(_lock)
 def _settle(url: str) -> None:
-    """Mark the claimed launch of *url* as succeeded and wake waiting callers."""
+    """Mark this thread's claimed launch of *url* as succeeded and wake waiting callers."""
     opening = _recent.get(url)
-    if opening is not None:
+    if opening is not None and opening.owner == threading.get_ident():
         opening.settled = True
     _lock.notify_all()
 
 
 @locked(_lock)
 def _release(url: str) -> None:
-    """Forget a claim whose launch failed, so the next attempt opens again."""
-    _recent.pop(url, None)
+    """Forget this thread's claim whose launch failed, so the next attempt opens again."""
+    opening = _recent.get(url)
+    if opening is not None and opening.owner == threading.get_ident():
+        del _recent[url]
     _lock.notify_all()
 
 
@@ -224,19 +231,10 @@ def _launch_commands(url: str) -> list[list[str]]:
     Returns:
         The candidate command lines; empty when ``$BROWSER`` is malformed.
     """
-    custom = os.environ.get("BROWSER", "")
-    if not custom.strip():
+    if not os.environ.get("BROWSER", "").strip():
         return [["open", url]] if sys.platform == "darwin" else [["xdg-open", url]]
     commands = []
-    for entry in custom.split(os.pathsep):
-        if not entry.strip():
-            continue
-        try:
-            # Non-POSIX splitting keeps Windows path backslashes; it also
-            # keeps the quotes around a quoted path, hence the strip.
-            argv = [arg.strip('"') for arg in shlex.split(entry, posix=os.name != "nt")]
-        except ValueError:
-            continue
+    for argv in browser_commands_from_env():
         if any("%s" in arg for arg in argv):
             commands.append([arg.replace("%s", url) for arg in argv])
         else:
@@ -331,23 +329,42 @@ def open_in_default_browser(url: str, *, once: bool = True) -> bool:
         right away.  The caller must still show the URL to the user in
         both cases.
     """
-    if not _allowed(url) or is_headless_environment():
-        return False
-    if _claim(url, DEFAULT_BROWSER, once) is not None:
+    return _open_default(url, once) != NOT_OPENED
+
+
+def _launch_default(url: str) -> bool:
+    """Start the ``$BROWSER`` or platform opener for *url*; whether one looks successful."""
+    if sys.platform == "win32" and not os.environ.get("BROWSER", "").strip():  # pragma: no cover
+        # Windows has no opener executable; the shell association is
+        # only reachable through os.startfile (not testable on Linux).
+        try:
+            os.startfile(url)  # type: ignore[attr-defined]
+        except OSError:
+            return False
         return True
+    return any(_launch(command) for command in _launch_commands(url))
+
+
+def _open_default(url: str, once: bool) -> str:
+    """Open *url* in the default browser and return the surface it ended up on.
+
+    The surface is :data:`DEFAULT_BROWSER` after this launch, or
+    whichever surface another caller's recent or in-flight launch of
+    the same page used (see :func:`_claim`), or :data:`NOT_OPENED`.  A
+    headless process launches nothing, but it still joins another
+    caller's launch first: when this caller's own Browser-tab launch
+    failed and a waiter took the retry over (see :func:`open_for_user`),
+    that retry is where the page is, not "nowhere".
+    """
+    if not _allowed(url):
+        return NOT_OPENED
+    recent = _claim(url, DEFAULT_BROWSER, once)
+    if recent is not None:
+        return recent
     opened = False
-    windows_shell = sys.platform == "win32" and not os.environ.get("BROWSER", "").strip()
     try:
-        if windows_shell:  # pragma: no cover
-            # Windows has no opener executable; the shell association is
-            # only reachable through os.startfile (not testable on Linux).
-            try:
-                os.startfile(url)  # type: ignore[attr-defined]
-                opened = True
-            except OSError:
-                opened = False
-        else:
-            opened = any(_launch(command) for command in _launch_commands(url))
+        if not is_headless_environment():
+            opened = _launch_default(url)
     finally:
         # Settle or release even when interrupted, so no waiter hangs on
         # a claim that will never be resolved.
@@ -355,7 +372,7 @@ def open_in_default_browser(url: str, *, once: bool = True) -> bool:
             _settle(url)
         else:
             _release(url)
-    return opened
+    return DEFAULT_BROWSER if opened else NOT_OPENED
 
 
 def open_for_user(url: str) -> str:
@@ -376,7 +393,11 @@ def open_for_user(url: str) -> str:
         :data:`BROWSER_TAB` when the page is (or was very recently)
         opened in the streamed Browser tab, :data:`DEFAULT_BROWSER` when
         it is open in the user's default browser, :data:`NOT_OPENED`
-        (empty string) when neither could be done.
+        (empty string) when neither could be done.  A launch of the
+        same page by another caller is shared, and the surface reported
+        is the one that launch used: a caller whose Browser tab launch
+        failed, and whose waiter then retried it successfully, reports
+        :data:`BROWSER_TAB`, not the default browser it fell back to.
     """
     if not _allowed(url):
         return NOT_OPENED
@@ -397,7 +418,7 @@ def open_for_user(url: str) -> str:
                 _release(url)
         if opened:
             return BROWSER_TAB
-    return DEFAULT_BROWSER if open_in_default_browser(url) else NOT_OPENED
+    return _open_default(url, True)
 
 
 def browser_handoff_note(url: str, opened_in: str) -> str:

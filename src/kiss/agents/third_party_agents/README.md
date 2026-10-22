@@ -167,8 +167,9 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
   a not-yet-configured agent can walk you through authentication *in chat* — you never
   have to hand-edit `config.json` first.
-- Backends whose platform has an inbound message stream also implement
-  `_make_backend()`, which enables **gateway mode** (the channel itself becomes a
+- A `<name>_sea.py` module whose platform has an inbound message stream also
+  defines a module-level `_make_backend()` factory returning its backend, which
+  enables **gateway mode** (the channel itself becomes a
   prompt surface) and **scheduled delivery** (a cron job's result lands in the
   channel). API-only services (GitHub, Notion, the Google Workspace agents, ...) are
   outbound-only: they can be acted on, but cannot carry prompts in or receive

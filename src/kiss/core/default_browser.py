@@ -114,20 +114,23 @@ def family_name(path_or_name: str) -> str | None:
 def default_browser_executable() -> str | None:
     """Return the executable of the machine's default web browser.
 
-    Honours ``$BROWSER`` first (a command line; its first word is the
-    executable), then asks the platform: ``xdg-settings`` / ``xdg-mime``
-    on Linux, ``NSWorkspace`` on macOS and the ``UrlAssociations``
-    registry key on Windows.
+    Honours ``$BROWSER`` first (see :func:`browser_commands_from_env`:
+    the first command whose executable exists, the one a hand-off would
+    launch), then asks the platform: ``xdg-settings`` / ``xdg-mime`` on
+    Linux, ``NSWorkspace`` on macOS and the ``UrlAssociations`` registry
+    key on Windows.
 
     Returns:
         An absolute executable path, or ``None`` when no default browser
         could be determined.
     """
-    env_browser = os.environ.get("BROWSER", "").strip()
-    if env_browser:
-        words = _split_words(env_browser, posix=not sys.platform.startswith("win"))
-        if words:
-            return _which(words[0])
+    commands = browser_commands_from_env()
+    if commands:
+        for command in commands:
+            exe = _executable_of(command)
+            if exe:
+                return exe
+        return None
     if sys.platform == "darwin":
         return _mac_default_executable()
     if sys.platform.startswith("win"):
@@ -156,19 +159,51 @@ def resolve_browser() -> ResolvedBrowser:
         name = family_name(default)
         if name:
             return ResolvedBrowser(name, default, True)
-        default_name = Path(default).stem or default
         note = (
-            f"The default browser ({default_name}) has no DevTools protocol "
-            "and cannot be streamed."
+            f"The default browser ({Path(default).stem or default}) has no "
+            "DevTools protocol and cannot be streamed."
         )
     else:
-        default_name = ""
         note = "No default browser is configured on this machine."
     installed = _first_installed_candidate()
     if installed:
         name = family_name(installed) or Path(installed).name
         return ResolvedBrowser(name, installed, False, note)
     return ResolvedBrowser("Chromium (bundled)", None, False, note)
+
+
+def browser_commands_from_env() -> list[list[str]]:
+    """Return the browser command lines ``$BROWSER`` names, in order.
+
+    The variable follows the :mod:`webbrowser` convention: one or more
+    command lines separated by ``os.pathsep`` (``BROWSER=firefox:chromium``),
+    each tried in turn by a hand-off (see
+    :func:`kiss.core.browser_handoff.open_in_default_browser`); the
+    browser tab's probe takes the first one that is installed.  A
+    malformed entry (unbalanced quote) is dropped.
+
+    Returns:
+        The split command lines; empty when ``$BROWSER`` is unset or
+        names nothing usable.
+    """
+    commands = []
+    for entry in os.environ.get("BROWSER", "").split(os.pathsep):
+        # Non-POSIX splitting keeps Windows path backslashes; it also
+        # keeps the quotes around a quoted path, hence the strip.
+        words = [word.strip('"') for word in _split_words(entry, posix=os.name != "nt")]
+        if words:
+            commands.append(words)
+    return commands
+
+
+def _executable_of(command: list[str]) -> str | None:
+    """Resolve the executable a command line runs, skipping an ``env FOO=bar``
+    wrapper and ``%U``-style placeholders; ``None`` when it is not installed."""
+    for word in command:
+        if word == "env" or "=" in word or word.startswith("%"):
+            continue
+        return _which(word)
+    return None
 
 
 def _split_words(command_line: str, *, posix: bool = True) -> list[str]:
@@ -233,11 +268,7 @@ def _desktop_exec(desktop_file: Path) -> str | None:
         return None
     for line in lines:
         if line.startswith("Exec="):
-            # Skip wrappers such as "env FOO=bar chromium %U".
-            for word in _split_words(line[len("Exec=") :]):
-                if word == "env" or "=" in word or word.startswith("%"):
-                    continue
-                return _which(word)
+            return _executable_of(_split_words(line[len("Exec=") :]))
     return None
 
 

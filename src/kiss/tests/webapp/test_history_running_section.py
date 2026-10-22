@@ -253,7 +253,9 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 for selector in ("#hf-running", "#hf-completed", "#hf-errors"):
                     page.locator(f"label:has({selector})").click()
                     expect(page.locator(selector)).to_be_checked()
-                assert _shape(page)[0] == "Running"
+                # The list re-renders after the checkbox state changes, so
+                # wait for the Running label instead of snapshotting at once.
+                expect(page.locator("#history-list > :visible").first).to_have_text("Running")
 
                 # Natural task-runner completion must update the already-open
                 # history, without reload, manual refresh or injected UI messages.

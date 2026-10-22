@@ -22946,7 +22946,7 @@
         title: 'Swipe to see the other panels',
         message:
           'Swipe left or right across the middle of the screen to move ' +
-          'between the chats, the chat, the open file and the task info.',
+          'between the chat history, the chat, the open files, and the task info.',
         dontShowAgain: true,
         onDontShowAgain: dismissSwipeHint,
       });

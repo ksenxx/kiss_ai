@@ -19,7 +19,8 @@
 #
 #   1. remote -> here.  src/kiss/scripts/sync_db.py asks the remote what this
 #      machine lacks, builds a small delta of just those rows on the remote,
-#      brings it here, re-points the work directories recorded in it at
+#      brings it here, holds back the tasks still in flight on the remote,
+#      re-points the work directories recorded in it at
 #      *this* checkout, and merges it into ~/.kiss/history.db in place.  Only
 #      the delta crosses the network, neither database is copied or scanned
 #      (the history is append-only, and sync_db.py seeks straight to the rows
@@ -29,16 +30,21 @@
 #      takes a consistent snapshot (``VACUUM INTO``), which is downloaded in
 #      full instead, verified, and put in place.
 #   2. here -> remote.  The mirror image: a delta of this machine's rows,
-#      minus the tasks still running here, its work directories re-pointed at
-#      the deployment, merged into the remote's database in place.
+#      minus the tasks still in flight here, its work directories re-pointed
+#      at the deployment, merged into the remote's database in place.
 #
 # Nothing is lost, by construction:
 #
 #   * sync_db.py only ever inserts rows of the history.  Task ids are unique
-#     and a task row is immutable once created, so a task travels exactly
-#     when the other machine does not have its id; a row both machines have
-#     is left alone, no row is ever deleted or updated, and no table other
-#     than ``task_history``, ``events`` and ``chat_summaries`` is touched.
+#     and a task row is final once its task has ended, so a finished task
+#     travels exactly when the other machine does not have its id; a row
+#     both machines have is left alone, no row is ever deleted or updated,
+#     and no table other than ``task_history``, ``events`` and
+#     ``chat_summaries`` is touched.  A task still in flight is the one row
+#     that will change -- the web app rewrites it when the task ends -- so
+#     neither pass sends one (see src/kiss/scripts/running_tasks.py); it
+#     travels on the next sync, finished.  A pass whose in-flight tasks
+#     could not be told moves nothing.
 #     The one write to existing rows is the web app's own schema migration:
 #     the two machines may be on different releases, so a column one
 #     database lacks is added to it with the other's declaration (as the web
@@ -171,8 +177,7 @@ SNAPSHOT="$TMP_DIR/history.db"
 # needs (see "What is done to the rows before they travel" below).
 PREPARE_DELTA="$TMP_DIR/prepare-delta.sh"
 OMIT_LIVE_TASKS="$TMP_DIR/omit-live-tasks.py"
-LIVE_TASK_IDS="$TMP_DIR/live-task-ids"
-export RELOCATE OMIT_LIVE_TASKS
+export RELOCATE OMIT_LIVE_TASKS RUNNING_TASKS LIVE_TASK_WINDOW
 
 # One exit path for everything that has to be undone, armed before any of it
 # happens: an ssh connection can drop after the remote has already acted.
@@ -197,10 +202,6 @@ REMOTE_FINGERPRINT_AT_PULL=""
 # Set by anything that did not do what it set out to do.  Such a run has not
 # synced the two machines, and must not report that it has.
 INCOMPLETE=0
-# $LIVE_TASK_IDS (declared below) lists the ids that were live on this machine
-# before any remote rows were merged here.  After the pull, row contents alone
-# cannot say which machine a live task came from, and a genuinely remote task
-# must survive a forced replacement.
 
 # Report a step that failed without giving up on the rest of the sync: the
 # other direction, or the other machine, may still have work that can travel.
@@ -289,24 +290,6 @@ con.execute("VACUUM INTO ?", (sys.argv[2],))
 con.close()' "$DB" "$SNAPSHOT"
 }
 
-# A deployment can itself be a task in this machine's database.  Sending that
-# unfinished row to the server makes the final restart guard mistake it for a
-# task that began *there* during the deploy, so the deploy refuses to restart
-# itself.  Capture local identity before the pull: afterwards a genuinely
-# remote live row has been merged here too and must not be filtered back out.
-capture_live_local_tasks() {
-    local answer count
-    [[ -f "$DB" && -f "$RUNNING_TASKS" ]] || return 0
-    answer="$(python3 "$RUNNING_TASKS" "$DB" "$LIVE_TASK_WINDOW" 2>/dev/null || true)"
-    count="$(printf '%s\n' "$answer" | head -1 | tr -d '[:space:]')"
-    [[ "$count" =~ ^[0-9]+$ ]] || {
-        warn "Could not identify live local tasks before syncing; continuing."
-        return 0
-    }
-    ((count > 0)) || return 0
-    printf '%s\n' "$answer" | tail -n +2 | sed 's/ [^ ]*$//' > "$LIVE_TASK_IDS"
-}
-
 # ---------------------------------------------------------------------------
 # What is done to the rows before they travel
 #
@@ -316,10 +299,21 @@ capture_live_local_tasks() {
 # helper on the whole snapshot it uploads.  Two things happen to the file,
 # never to a live database:
 #
-#   * Live local tasks are held back (sending only): their rows are deleted
-#     from the file.  Completed tasks, stale interrupted tasks and live tasks
-#     pulled from the remote still travel; deferred local work travels on the
-#     next sync after it finishes.
+#   * The tasks in flight on the sending machine are held back: their rows
+#     (and events) are deleted from the file.  A task's row is written when
+#     the task starts and rewritten when it ends, and the merge only ever
+#     adds rows, so a copy taken in between would stay unfinished on the
+#     other machine for good (a deployment can itself be a task here, and
+#     the remote runs its cron jobs while a deploy syncs it).  Which rows
+#     those are is read off the file itself -- src/kiss/scripts/running_tasks.py
+#     sees a task that still carries the web app's placeholder result or
+#     whose events in the file are younger than SORCAR_LIVE_TASK_WINDOW --
+#     so a task that started after this run began is held back too, not
+#     only those a probe saw earlier.  Completed tasks travel, and so do
+#     interrupted ones once the web app has written their end; a task held
+#     back travels on the next sync after it finishes.  A file the probe
+#     cannot read stops the direction: the only other reading, "nothing is
+#     in flight", is the one that sends an unfinished row.
 #   * Work directories recorded under the sending checkout are re-pointed at
 #     the receiving one, so the History panel there shows the tasks instead
 #     of filtering them out.  A failure here stops the direction it belongs
@@ -332,19 +326,29 @@ capture_live_local_tasks() {
 # command of its own.
 # ---------------------------------------------------------------------------
 cat > "$OMIT_LIVE_TASKS" <<'PY'
-"""Delete the tasks whose ids arrive on stdin, with their events; print how many."""
+"""Delete the tasks running_tasks.py lists on stdin, with their events; print how many.
+
+The first line of stdin is running_tasks.py's count (``unknown`` when it
+could not read the file: that is an error here), the rest ``<id> <age>``.
+"""
 import sqlite3
 import sys
 
-task_ids = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
+lines = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
+if not lines or not lines[0].isdigit():
+    raise SystemExit(f"omit-live-tasks: running_tasks.py gave no answer: {lines[:1]}")
+task_ids = [line.rsplit(" ", 1)[0] for line in lines[1:]]
+if not task_ids:
+    print(0)
+    raise SystemExit(0)
 con = sqlite3.connect(sys.argv[1], timeout=60)
 try:
-    con.execute("CREATE TEMP TABLE live_local_tasks(id TEXT PRIMARY KEY)")
-    con.executemany("INSERT INTO live_local_tasks(id) VALUES (?)",
+    con.execute("CREATE TEMP TABLE unfinished_tasks(id TEXT PRIMARY KEY)")
+    con.executemany("INSERT INTO unfinished_tasks(id) VALUES (?)",
                     ((task_id,) for task_id in task_ids))
-    con.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM live_local_tasks)")
+    con.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM unfinished_tasks)")
     removed = con.execute(
-        "DELETE FROM task_history WHERE id IN (SELECT id FROM live_local_tasks)").rowcount
+        "DELETE FROM task_history WHERE id IN (SELECT id FROM unfinished_tasks)").rowcount
     con.commit()
     print(removed)
 finally:
@@ -353,18 +357,21 @@ PY
 
 cat > "$PREPARE_DELTA" <<'SH'
 #!/bin/bash
-# Usage: prepare-delta.sh FILE FROM_DIR TO_DIR [LIVE_TASK_IDS_FILE]
+# Usage: prepare-delta.sh FILE FROM_DIR TO_DIR
 # Shape the rows about to travel, in the file that carries them (see
 # "What is done to the rows before they travel" in sync-task-db.sh).
 set -euo pipefail
-file="$1" from_dir="$2" to_dir="$3" live_ids="${4:-}"
+file="$1" from_dir="$2" to_dir="$3"
 info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
-if [[ -n "$live_ids" && -s "$live_ids" ]]; then
-    removed="$(python3 "$OMIT_LIVE_TASKS" "$file" < "$live_ids")"
-    (( removed == 0 )) \
-        || info "Deferred $removed live local task(s); they will sync after they finish."
+if ! removed="$(python3 "$RUNNING_TASKS" "$file" "$LIVE_TASK_WINDOW" --unfinished \
+                    | python3 "$OMIT_LIVE_TASKS" "$file")"; then
+    warn "Could not tell which of the rows about to travel belong to tasks still" \
+         "in flight — nothing was sent."
+    exit 1
 fi
+(( removed == 0 )) \
+    || info "Held back $removed task(s) still in flight; they sync once they finish."
 [[ -n "$from_dir" && -n "$to_dir" ]] || exit 0
 if ! moved="$(python3 "$RELOCATE" "$file" "$from_dir" "$to_dir")"; then
     warn "Could not re-point the recorded work directories from $from_dir to $to_dir" \
@@ -378,9 +385,9 @@ SH
 # quoted for the shell sync_db.py hands the command to, with sync_db.py's
 # ``{}`` standing for the delta.
 prepare_delta_command() {
-    local from_dir="$1" to_dir="$2" live_ids="${3:-}"
-    printf 'bash %s {} %s %s %s' "$(shquote "$PREPARE_DELTA")" \
-        "$(shquote "$from_dir")" "$(shquote "$to_dir")" "$(shquote "$live_ids")"
+    local from_dir="$1" to_dir="$2"
+    printf 'bash %s {} %s %s' "$(shquote "$PREPARE_DELTA")" \
+        "$(shquote "$from_dir")" "$(shquote "$to_dir")"
 }
 
 # Nothing travels between two checkouts' paths without the script that
@@ -419,9 +426,11 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])' "$1"
 # Pass 1: bring back what ran on the remote
 #
 # sync_db.py reads the remote's live database at one instant and brings back
-# only the rows this machine lacks; the work directories in that delta are
-# re-pointed here before it is merged.  sync_db.py matches tasks by their
-# unique, immutable id, so a repeated sync moves nothing.
+# only the rows this machine lacks; the tasks still in flight there are held
+# back and the work directories in that delta are re-pointed here before it
+# is merged.  sync_db.py matches tasks by their unique id, so a repeated sync
+# moves nothing -- except a deletion made on either machine since, which it
+# carries out on the other (see src/kiss/scripts/sync_db.py).
 # ---------------------------------------------------------------------------
 pull_from_remote() {
     if [[ ! -f "$DB" ]]; then
@@ -453,12 +462,13 @@ pull_from_remote() {
 # Pass 1, first time on this machine: no database to merge into, so take the
 # remote's database whole.  The remote snapshots it (``VACUUM INTO``, so a
 # running web app there is not disturbed), re-points the work directories in
-# the snapshot at this checkout, and the snapshot is downloaded, verified, and
-# put in place.  A database that appeared meanwhile (a web app starting up as
-# this ran) is merged into rather than replaced.
+# the snapshot at this checkout, and the snapshot is downloaded, verified,
+# relieved of the tasks still in flight on the remote, and put in place.  A
+# database that appeared meanwhile (a web app starting up as this ran) is
+# merged into rather than replaced.
 # ---------------------------------------------------------------------------
 download_remote_db() {
-    local expected got incoming="$TMP_DIR/incoming.db"
+    local expected got held applied incoming="$TMP_DIR/incoming.db"
     step "Snapshotting the task database on $TARGET ..."
     REMOTE_SNAPSHOT_MADE=1
     if ! expected="$(ssh "$TARGET" 'python3 -' < "$TMP_DIR/remote-snapshot.py")" \
@@ -491,6 +501,27 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])' "$incomin
         incomplete "Only $got of $expected task(s) arrived — the download was discarded."
         return 0
     fi
+    # The snapshot was taken an instant ago: a task's events in it younger
+    # than the window are a task running there now.
+    if ! held="$(python3 "$RUNNING_TASKS" "$incoming" "$LIVE_TASK_WINDOW" --unfinished \
+                    | python3 "$OMIT_LIVE_TASKS" "$incoming")"; then
+        incomplete "Could not tell which tasks are in flight on $TARGET" \
+                   "— the download was discarded."
+        return 0
+    fi
+    got=$((got - held))
+    (( held == 0 )) \
+        || info "Held back $held task(s) still in flight on $TARGET; they sync once they finish."
+    # A deletion the remote recorded but had not carried out yet (the task
+    # was running there when it arrived) is carried out here now, not on
+    # some later sync.
+    if [[ ! -f "$CARRY_OVER" ]] \
+            || ! applied="$(python3 "$CARRY_OVER" --apply-deletions "$incoming")"; then
+        incomplete "Could not carry out the deletions recorded on $TARGET" \
+                   "— the download was discarded."
+        return 0
+    fi
+    got=$((got - applied))
     mkdir -p "$KISS_DIR" && chmod 700 "$KISS_DIR"
     if [[ ! -f "$DB" ]]; then
         mv "$incoming" "$DB"
@@ -524,7 +555,7 @@ push_to_remote() {
     elif [[ "$REMOTE_DB_STATE" == "ok" ]]; then
         step "Merging this machine's tasks into $TARGET:~/.kiss/history.db ..."
         if python3 "$SYNC_DB" "$DB" "$TARGET:~/.kiss/history.db" \
-                --edit-delta "$(prepare_delta_command "$LOCAL_DIR" "$REMOTE_DIR" "$LIVE_TASK_IDS")"; then
+                --edit-delta "$(prepare_delta_command "$LOCAL_DIR" "$REMOTE_DIR")"; then
             info "Task database synced on $TARGET."
             return 0
         fi
@@ -540,15 +571,15 @@ push_to_remote() {
 }
 
 # The whole database as the fallback uploads it: a consistent copy of the live
-# one, shaped by the same helper as a delta (live local tasks held back, work
-# directories re-pointed at the deployment).  Leaves the number of tasks it
+# one, shaped by the same helper as a delta (the tasks in flight here held
+# back, work directories re-pointed at the deployment).  Leaves the number of tasks it
 # holds, which the upload verifies on arrival, in SNAPSHOT_TASKS.
 SNAPSHOT_TASKS=""
 snapshot_outgoing_db() {
     step "Snapshotting $DB ..."
     snapshot_local_db \
         || die "Could not snapshot $DB (no space in $TMP_DIR, or a stuck writer?)."
-    if ! bash "$PREPARE_DELTA" "$SNAPSHOT" "$LOCAL_DIR" "$REMOTE_DIR" "$LIVE_TASK_IDS"; then
+    if ! bash "$PREPARE_DELTA" "$SNAPSHOT" "$LOCAL_DIR" "$REMOTE_DIR"; then
         incomplete "The snapshot of $DB could not be prepared for $TARGET — nothing was sent."
         return 1
     fi
@@ -710,6 +741,21 @@ upload_whole_db() {
     if [[ "$REMOTE_DB_STATE" == "ok" ]] && ! remote_unchanged_since_pull; then
         return 0
     fi
+    # The tasks that were in flight there stayed behind in pass 1 (their rows
+    # were still going to change).  With the web app stopped they change no
+    # more, and the file about to replace them has to carry them, or the
+    # forced replacement would be the one thing that loses a task's history.
+    if [[ "$REMOTE_DB_STATE" == "ok" ]]; then
+        step "Bringing the tasks that were in flight on $TARGET into the upload ..."
+        if [[ ! -f "$SYNC_DB" ]] \
+                || ! python3 "$SYNC_DB" "$TARGET:~/.kiss/history.db" "$SNAPSHOT"; then
+            incomplete "Could not bring the tasks that were in flight on $TARGET into" \
+                       "the upload — its database was left as it is."
+            return 0
+        fi
+        tasks="$(count_tasks "$SNAPSHOT" 2>/dev/null || true)"
+        [[ "$tasks" =~ ^[0-9]+$ ]] || die "The snapshot of $DB is no longer a readable database."
+    fi
 
     # gzip shrinks the database ~4x, so the upload takes a quarter as long.
     step "Uploading $tasks tasks to $TARGET ..."
@@ -857,10 +903,6 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])
 con.close()
 PY
 
-# Preserve which live rows belonged to this machine before pull_from_remote
-# makes the two histories indistinguishable.
-capture_live_local_tasks
-
 case "$REMOTE_DB_STATE" in
     ok) pull_from_remote ;;
     unknown)
@@ -897,4 +939,4 @@ if (( INCOMPLETE )); then
     die "The task databases here and on $TARGET are not in sync yet" \
         "(see the warnings above)."
 fi
-info "The task databases here and on $TARGET hold the same tasks."
+info "The task databases here and on $TARGET hold the same finished tasks."

@@ -16,6 +16,14 @@
   page), else this window's own.  Should the popup be blocked, this
   window shows the webapp itself.  ?title= names this window while it
   is on screen.
+
+  The page first asks the daemon whether the popup is connected
+  already (/api/app-window) and, if so, only closes itself: it is then
+  a second start handed to the running browser (a kiss-app that ran
+  while the popup was between connections, or this page reloading by
+  itself after the daemon was down when it was opened), and a second
+  popup would be a duplicate window.  A daemon that does not answer
+  the question is taken for one without a popup.
 -->
 <html>
 <head>
@@ -29,22 +37,36 @@
       var url = params.get('url');
       document.title = params.get('title') || '';
       if (!url) return;
-      var bounds = null;
-      try {
-        bounds = JSON.parse(localStorage.getItem('kissAppWindowBounds'));
-      } catch (e) {
-        bounds = null;
+
+      function openPopup() {
+        var bounds = null;
+        try {
+          bounds = JSON.parse(localStorage.getItem('kissAppWindowBounds'));
+        } catch (e) {
+          bounds = null;
+        }
+        if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) {
+          bounds = {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
+        }
+        var features = 'popup,left=' + bounds.left + ',top=' + bounds.top +
+          ',width=' + bounds.width + ',height=' + bounds.height;
+        if (window.open(url, 'kiss-app-window', features)) {
+          window.close();
+        } else {
+          location.replace(url);
+        }
       }
-      if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) {
-        bounds = {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
-      }
-      var features = 'popup,left=' + bounds.left + ',top=' + bounds.top +
-        ',width=' + bounds.width + ',height=' + bounds.height;
-      if (window.open(url, 'kiss-app-window', features)) {
-        window.close();
-      } else {
-        location.replace(url);
-      }
+
+      fetch('/api/app-window', {cache: 'no-store'})
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .catch(function () { return null; })
+        .then(function (state) {
+          if (state && state.open) {
+            window.close();
+          } else {
+            openPopup();
+          }
+        });
     })();
   </script>
 </head>

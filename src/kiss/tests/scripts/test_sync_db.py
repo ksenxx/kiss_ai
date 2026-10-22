@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1367,5 +1368,166 @@ def test_edit_delta_sees_the_source_columns_and_a_quoted_path(tmp_path: Path) ->
 
     assert done.returncode == 0, done.stderr
     assert done.stdout.count(str(temp)) == 1, done.stdout
-    assert "['events', 'sqlite_sequence', 'task_history']" in done.stdout
+    assert (
+        "['deleted_chats', 'deleted_tasks', 'events', 'sqlite_sequence', 'task_history']"
+        in done.stdout
+    )
     assert event_keys(target) == [("a", 1)]
+
+
+def _tombstone(conn: sqlite3.Connection, table: str, key: str, deleted_ts: float) -> None:
+    """Record one deletion as the web app does, creating the table if needed.
+
+    Args:
+        conn: Open connection.
+        table: ``deleted_tasks`` or ``deleted_chats``.
+        key: The task id or chat id deleted.
+        deleted_ts: When, as an epoch timestamp.
+    """
+    column = "id" if table == "deleted_tasks" else "chat_id"
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ({column} TEXT PRIMARY KEY,"
+        " deleted_ts REAL NOT NULL)"
+    )
+    conn.execute(f"INSERT OR REPLACE INTO {table} VALUES (?, ?)", (key, deleted_ts))
+
+
+def test_a_deletion_travels_and_the_deleted_task_never_comes_back(tmp_path: Path) -> None:
+    """The target's deletion keeps the task out; the source's deletion is carried out."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "kept", events=1)
+    add_task(src, "gone-there", events=2)  # the target deleted it
+    add_task(src, "gone-here-too", events=1)  # the source deleted it
+    _tombstone(src, "deleted_tasks", "gone-here-too", 2000.0)
+    src.execute("DELETE FROM task_history WHERE id = 'gone-here-too'")
+    src.execute("DELETE FROM events WHERE task_id = 'gone-here-too'")
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "gone-here-too", events=1)
+    _tombstone(dst, "deleted_tasks", "gone-there", 2000.0)
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "1 task row(s) deleted" in done.stdout
+    assert task_ids(target) == ["kept"]
+    assert event_keys(target) == [("kept", 1)]
+    assert rows(target, "SELECT id FROM deleted_tasks ORDER BY id") == [
+        ("gone-here-too",), ("gone-there",)
+    ]
+    # A second run has nothing left to do.
+    again = sync(str(source), str(target))
+    assert "0 task row(s) added, 0 event row(s) added, 0 chat" in again.stdout
+    assert task_ids(target) == ["kept"]
+
+
+def test_a_full_sync_does_not_resurrect_a_deleted_task(tmp_path: Path) -> None:
+    """``--full`` ships every row; the target's deletions still keep them out."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "stale", events=2, result="Agent Failed Abruptly", timestamp=1.0)
+    add_task(src, "fine", events=1)
+    src.close()
+    dst = make_db(target)
+    _tombstone(dst, "deleted_tasks", "stale", 2.0)
+    dst.close()
+
+    done = sync(str(source), str(target), "--full")
+
+    assert done.returncode == 0, done.stderr
+    assert task_ids(target) == ["fine"]
+    assert event_keys(target) == [("fine", 1)]
+
+
+def test_a_deletion_spares_a_task_still_running_on_the_target(tmp_path: Path) -> None:
+    """A row the web app will rewrite is not deleted from under the agent.
+
+    Both a row still carrying the placeholder result and a row without
+    it whose task wrote an event moments ago are running tasks; the
+    deletion is recorded and waits for a sync after they end.  A row
+    younger than its deletion is a new task with a reused id.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    for task_id in ("started", "busy", "reused", "old"):
+        _tombstone(src, "deleted_tasks", task_id, 5000.0)
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "started", result="Agent Failed Abruptly", events=1)
+    add_task(dst, "busy", result="", end_ts=0, events=1)
+    dst.execute("UPDATE events SET timestamp = ? WHERE task_id = 'busy'", (time.time(),))
+    add_task(dst, "reused", timestamp=6000.0, events=1)
+    add_task(dst, "old", end_ts=1500, events=1)
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert task_ids(target) == ["busy", "reused", "started"]
+    assert ("old", 1) not in event_keys(target)
+    assert len(rows(target, "SELECT id FROM deleted_tasks")) == 4
+
+    # Once they have ended, the recorded deletions are carried out.
+    dst = sqlite3.connect(target, isolation_level=None)
+    dst.execute("UPDATE task_history SET result = 'done', end_ts = 7000")
+    dst.execute("UPDATE events SET timestamp = 1.0")
+    dst.close()
+    assert sync(str(source), str(target)).returncode == 0
+    assert task_ids(target) == ["reused"]
+
+
+def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
+    tmp_path: Path,
+) -> None:
+    """Only a chat deletion drops the chat's row: a task deletion keeps its title."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    _tombstone(src, "deleted_tasks", "t1", 5000.0)
+    _tombstone(src, "deleted_tasks", "c1", 5000.0)
+    _tombstone(src, "deleted_chats", "chat-gone", 5000.0)
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "t1", chat_id="chat-kept", events=1)
+    add_task(dst, "c1", chat_id="chat-gone", events=1)
+    dst.execute(
+        "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT,"
+        " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '')"
+    )
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title')")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '')")
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert task_ids(target) == []
+    assert rows(target, "SELECT chat_id, user_summary FROM chat_summaries") == [
+        ("chat-kept", "My title")
+    ]
+
+
+def test_a_chat_started_again_after_its_deletion_keeps_its_row(tmp_path: Path) -> None:
+    """An old chat tombstone does not reach a chat that lives again under the same id."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    _tombstone(src, "deleted_chats", "again", 1000.0)
+    _tombstone(src, "deleted_chats", "stale", 1000.0)
+    src.close()
+    dst = make_db(target)
+    dst.execute(
+        "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT,"
+        " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '')"
+    )
+    # Launched after the deletion (milliseconds), its tasks since deleted one by one.
+    dst.execute("INSERT INTO chat_summaries VALUES ('again', 's', 5000000, 0, 'New life')")
+    dst.execute("INSERT INTO chat_summaries VALUES ('stale', 's', 500000, 0, '')")
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert rows(target, "SELECT chat_id, user_summary FROM chat_summaries") == [
+        ("again", "New life")
+    ]

@@ -254,6 +254,18 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     }
 
 
+MY_MODELS_LOCK_TIMEOUT = 30.0
+"""Longest wait for another process's ``.MY_MODELS.json.kiss.lock``.
+
+The cross-process ``flock`` blocks in C; a holder wedged in a debugger
+or on a stalled filesystem would otherwise pin the asyncio executor
+thread running ``saveMyModel`` / ``deleteMyModel`` for good, and every
+later edit queued on :data:`_MY_MODELS_EDIT_LOCK` behind it.  A
+legitimate holder rewrites a small JSON file in milliseconds, so a wait
+past this bound is a wedged holder: the ``TimeoutError`` is the edit's
+error.
+"""
+
 _MY_MODELS_EDIT_LOCK = threading.Lock()
 """Serializes read-modify-write edits of ``~/.kiss/MY_MODELS.json``.
 
@@ -281,9 +293,14 @@ def _my_models_flock() -> Iterator[None]:
     technique as ``user_config._api_keys_store_flock``.
 
     Callers must already hold :data:`_MY_MODELS_EDIT_LOCK`.
+
+    Raises:
+        TimeoutError: another process held the sidecar for longer than
+            :data:`MY_MODELS_LOCK_TIMEOUT`.
     """
     path = USER_MY_MODELS_PATH
-    with exclusive_file_lock(path.with_name("." + path.name + ".kiss.lock")):
+    lock_path = path.with_name("." + path.name + ".kiss.lock")
+    with exclusive_file_lock(lock_path, timeout=MY_MODELS_LOCK_TIMEOUT):
         yield
 
 
@@ -426,7 +443,9 @@ def save_custom_model(
             duplicate it under the trimmed name.
 
     Returns:
-        An error message when the request is unusable, else ``None``.
+        An error message when the request is unusable (including a
+        sidecar lock another process still held after
+        :data:`MY_MODELS_LOCK_TIMEOUT`), else ``None``.
 
     Raises:
         OSError: When the registry file cannot be written.
@@ -441,36 +460,42 @@ def save_custom_model(
         # a (crafted) originalName must not be able to move or destroy
         # them through the rename path.
         return "Original model name must not start with '_'"
-    with _MY_MODELS_EDIT_LOCK, _my_models_flock():
-        raw = _read_my_models_file()
-        if raw is None:
-            return _MY_MODELS_CORRUPT_ERROR
-        if original_name not in raw:
-            # The edited entry vanished (deleted by another window):
-            # fall through to plain add semantics.
-            original_name = ""
-        if original_name != name and name in raw:
+    try:
+        with _MY_MODELS_EDIT_LOCK, _my_models_flock():
+            raw = _read_my_models_file()
+            if raw is None:
+                return _MY_MODELS_CORRUPT_ERROR
+            if original_name not in raw:
+                # The edited entry vanished (deleted by another window):
+                # fall through to plain add semantics.
+                original_name = ""
+            if original_name != name and name in raw:
+                if original_name:
+                    return f"A custom model named '{name}' already exists"
+                return (
+                    f"A custom model named '{name}' already exists; "
+                    "use its Edit button to change it"
+                )
+            entry: dict[str, Any] | None = None
             if original_name:
-                return f"A custom model named '{name}' already exists"
-            return f"A custom model named '{name}' already exists; use its Edit button to change it"
-        entry: dict[str, Any] | None = None
-        if original_name:
-            moved = raw.pop(original_name)
-            if isinstance(moved, dict):
-                entry = moved
-        if entry is None:
-            entry = _seed_new_custom_entry(name)
-        for key, value in (
-            ("endpoint", endpoint.strip()),
-            ("api_key", api_key.strip()),
-            ("headers", headers.strip()),
-        ):
-            if value:
-                entry[key] = value
-            else:
-                entry.pop(key, None)
-        raw[name] = entry
-        _write_my_models_file(raw)
+                moved = raw.pop(original_name)
+                if isinstance(moved, dict):
+                    entry = moved
+            if entry is None:
+                entry = _seed_new_custom_entry(name)
+            for key, value in (
+                ("endpoint", endpoint.strip()),
+                ("api_key", api_key.strip()),
+                ("headers", headers.strip()),
+            ):
+                if value:
+                    entry[key] = value
+                else:
+                    entry.pop(key, None)
+            raw[name] = entry
+            _write_my_models_file(raw)
+    except TimeoutError as e:
+        return str(e)
     return None
 
 
@@ -486,21 +511,26 @@ def delete_custom_model(name: str) -> str | None:
         name: The model name (the JSON key) to remove.
 
     Returns:
-        An error message when the request is unusable, else ``None``.
+        An error message when the request is unusable (including a
+        sidecar lock another process still held after
+        :data:`MY_MODELS_LOCK_TIMEOUT`), else ``None``.
 
     Raises:
         OSError: When the registry file cannot be written.
     """
     if name.startswith("_"):
         return "Custom model name must not start with '_'"
-    with _MY_MODELS_EDIT_LOCK, _my_models_flock():
-        raw = _read_my_models_file()
-        if raw is None:
-            return _MY_MODELS_CORRUPT_ERROR
-        if name not in raw:
-            return None
-        del raw[name]
-        _write_my_models_file(raw)
+    try:
+        with _MY_MODELS_EDIT_LOCK, _my_models_flock():
+            raw = _read_my_models_file()
+            if raw is None:
+                return _MY_MODELS_CORRUPT_ERROR
+            if name not in raw:
+                return None
+            del raw[name]
+            _write_my_models_file(raw)
+    except TimeoutError as e:
+        return str(e)
     return None
 
 
@@ -763,15 +793,20 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
     """
     raw = _read_model_info_json(catalog_path)
     user_entries = _read_my_models()
+    built: dict[str, ModelInfo] = {}
     for name in list(user_entries):
         try:
-            _build_model_info_entry(user_entries[name])
+            built[name] = _build_model_info_entry(user_entries[name])
         except (KeyError, TypeError, ValueError, AttributeError):
             logger.warning("Ignoring malformed MY_MODELS.json entry %r", name, exc_info=True)
             del user_entries[name]
     raw.update(user_entries)
+    # Mutates only non-user aliases, so the user entries built above stay current.
     _sync_alias_transport_flags(raw, set(user_entries))
-    return {name: _build_model_info_entry(entry) for name, entry in raw.items()}
+    return {
+        name: built[name] if name in built else _build_model_info_entry(entry)
+        for name, entry in raw.items()
+    }
 
 
 _OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
@@ -1423,23 +1458,34 @@ def _openai_bare_name(name: str) -> str | None:
 BEDROCK_PREFIX = "bedrock/"
 """Model-name prefix that routes a Claude model through Amazon Bedrock."""
 
-# Cross-region inference profile prefixes Bedrock puts before the vendor
-# id (``us.anthropic.claude-...``); ``anthropic.`` is the vendor segment.
-_BEDROCK_ID_PREFIXES = ("global.", "us.", "eu.", "apac.", "jp.", "au.", "anthropic.")
+# The vendor segment of a Bedrock Claude id; a cross-region inference
+# profile prefix (``global.``, ``us.``, ``eu.``, ``apac.``, ``jp.``,
+# ``au.``, ...) may precede it.
+_BEDROCK_VENDOR_SEGMENT = "anthropic."
 # Bedrock version suffixes: ``-v1:0`` (dated ids) or ``-v1`` (undated ids).
 _BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(?::\d+)?$")
 # The ``-<date>`` snapshot segment of a dated Claude id.
 _CLAUDE_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 
 
+def _bedrock_profile_id(bedrock_id: str) -> str:
+    """Return the model or inference-profile id of *bedrock_id*.
+
+    Bedrock accepts the id itself or its ARN
+    (``arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-6-v1``);
+    the id is the ARN's last path segment.
+    """
+    return bedrock_id.rsplit("/", 1)[-1]
+
+
 def _split_bedrock_name(model_name: str) -> tuple[str, str, str] | None:
     """Split ``bedrock/<id>[-<level>]`` into ``(<id>, <claude name>, <level>)``.
 
     The optional effort alias suffix (``-high``, ``-xhigh``, ...) comes
-    off the id; the cross-region prefix, the ``anthropic.`` vendor segment
-    and the ``-v<n>[:<m>]`` version come off the Claude name, so
-    ``bedrock/us.anthropic.claude-opus-4-6-v1:0-high`` gives
-    ``("us.anthropic.claude-opus-4-6-v1:0", "claude-opus-4-6", "-high")``.
+    off the id; the ARN envelope, the cross-region prefix, the
+    ``anthropic.`` vendor segment and the ``-v<n>[:<m>]`` version come off
+    the Claude name, so ``bedrock/us.anthropic.claude-opus-4-6-v1:0-high``
+    gives ``("us.anthropic.claude-opus-4-6-v1:0", "claude-opus-4-6", "-high")``.
     Returns None when the name is not a Bedrock name or its id is not a
     Claude id.
     """
@@ -1451,13 +1497,11 @@ def _split_bedrock_name(model_name: str) -> tuple[str, str, str] | None:
         if bedrock_id.endswith(suffix):
             bedrock_id, level = bedrock_id[: -len(suffix)], suffix
             break
-    claude = bedrock_id
-    for prefix in _BEDROCK_ID_PREFIXES:
-        if claude.startswith(prefix):
-            claude = claude[len(prefix) :]
-    claude = _BEDROCK_VERSION_SUFFIX_RE.sub("", claude)
-    if not claude.startswith("claude-"):
+    profile_id = _bedrock_profile_id(bedrock_id)
+    vendor = profile_id.find(_BEDROCK_VENDOR_SEGMENT + "claude-")
+    if vendor < 0:
         return None
+    claude = _BEDROCK_VERSION_SUFFIX_RE.sub("", profile_id[vendor + len(_BEDROCK_VENDOR_SEGMENT) :])
     return bedrock_id, claude, level
 
 
@@ -1506,7 +1550,8 @@ def bedrock_catalog_name(model_name: str) -> str | None:
     undated name, which lists Claude models the direct catalog has
     dropped (Opus 4.1 exists only as ``openrouter/anthropic/claude-opus-4.1``,
     so ``bedrock/anthropic.claude-opus-4-1-20250805-v1:0`` is priced by
-    that entry).
+    that entry); otherwise a ``bedrock/`` entry of another profile of the
+    same model that holds the base rate (see :func:`_bedrock_sibling_key`).
 
     Args:
         model_name: Any model name.
@@ -1522,12 +1567,40 @@ def bedrock_catalog_name(model_name: str) -> str | None:
     key = _claude_catalog_key(claude, level)
     if key is not None:
         return key
-    twin = openrouter_twin(_CLAUDE_DATE_SUFFIX_RE.sub("", claude) + level)
+    undated = _CLAUDE_DATE_SUFFIX_RE.sub("", claude) + level
+    twin = openrouter_twin(undated)
     # An effort suffix resolves only to an entry that carries it (as for
     # ``claude-*`` keys): a bare twin would silently drop the level.
-    if twin is None or not twin.endswith(level):
-        return None
-    return twin
+    if twin is not None and twin.endswith(level):
+        return twin
+    return _bedrock_sibling_key(undated)
+
+
+def _bedrock_sibling_key(undated: str) -> str | None:
+    """Return a ``bedrock/`` catalog key holding the base prices of *undated*.
+
+    The catalog may list a Claude model only under a Bedrock profile
+    (Sonnet 4 only as ``bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0``,
+    Claude 3 Haiku only as ``bedrock/us.anthropic.claude-3-haiku-20240307-v1:0``).
+    Another profile of that model (its in-region id, say) is priced by
+    such an entry when the entry carries the base rate, i.e. its own
+    premium factor is 1.0 (a ``global.`` profile, or any profile of a
+    model older than Claude 4.5): the caller then applies the premium of
+    the profile actually used exactly once.
+
+    Args:
+        undated: The undated ``claude-*`` name plus effort suffix.
+
+    Returns:
+        The sibling's catalog key, or None when there is none.
+    """
+    for key in MODEL_INFO:
+        if not key.startswith(BEDROCK_PREFIX) or bedrock_price_factor(key) != 1.0:
+            continue
+        split = _split_bedrock_name(key)
+        if split is not None and _CLAUDE_DATE_SUFFIX_RE.sub("", split[1]) + split[2] == undated:
+            return key
+    return None
 
 
 def bedrock_model_id(model_name: str) -> str:
@@ -1601,7 +1674,7 @@ def bedrock_price_factor(model_name: str) -> float:
         The multiplier to apply to every per-1M price of the catalog entry.
     """
     split = _split_bedrock_name(model_name)
-    if split is None or split[0].startswith("global."):
+    if split is None or _bedrock_profile_id(split[0]).startswith("global."):
         return 1.0
     generation = _claude_generation(_CLAUDE_DATE_SUFFIX_RE.sub("", split[1]))
     return _BEDROCK_GEO_PRICE_FACTOR if generation >= _BEDROCK_GEO_MIN_GENERATION else 1.0
@@ -1625,6 +1698,16 @@ def _scaled_prices(info: ModelInfo, factor: float) -> ModelInfo:
     return scaled
 
 
+def _derived_price(inp: float, multiplier: float) -> float:
+    """Return ``inp * multiplier`` as a clean per-1M price.
+
+    Rounded to nine decimals, as :func:`_scaled_prices` rounds, so a
+    derived rate reads as the published figure (Bedrock's US Sonnet 5.5
+    cache read is $0.11, not 0.11000000000000001).
+    """
+    return round(inp * multiplier, 9)
+
+
 def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float | None] | None:
     """Return the published ``(read, write_5m, write_1h)`` cache prices for *name*.
 
@@ -1643,11 +1726,12 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         for families, multiplier in _ANTHROPIC_CACHE_READ_MULTIPLIERS:
             if claude.startswith(families):
                 read_mult = multiplier
-        return inp * read_mult, inp * 1.25, inp * 2.0
+        return _derived_price(inp, read_mult), _derived_price(inp, 1.25), _derived_price(inp, 2.0)
     bare = _openai_bare_name(name)
     if bare is not None:
         write_mult = 1.25 if _openai_charges_cache_writes(bare) else 0.0
-        return inp * _openai_cache_read_multiplier(bare), inp * write_mult, None
+        read_mult = _openai_cache_read_multiplier(bare)
+        return _derived_price(inp, read_mult), _derived_price(inp, write_mult), None
     if name.startswith("gemini-") or (
         name.startswith(_GOOGLE_OPENROUTER_PREFIXES)
         and name.rsplit("/", 1)[-1].startswith("gemini-")
@@ -1656,14 +1740,14 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         # (e.g. google/gemini-3.1-pro-preview: $2.00 input, $0.20 cache read).
         # Only Gemini: Google's open-weight Gemma models on OpenRouter are
         # served by third parties that publish no cache discount.
-        return inp * 0.1, 0.0, None
+        return _derived_price(inp, 0.1), 0.0, None
     if name.startswith(("kimi-", "moonshot-")):
         # Moonshot bills a 5-minute cache write at the uncached input rate
         # (kimi-k3: $3.00 input, $3.00 write, $0.30 read); it is reported in
         # ``prompt_tokens_details.cache_write_tokens`` and excluded from the
         # uncached remainder, so a 0.0 write price would give those tokens
         # away: https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api
-        return inp * 0.25, inp, None
+        return _derived_price(inp, 0.25), inp, None
     return None
 
 
@@ -2147,28 +2231,40 @@ def _output_price(model_name: str) -> float:
     return MODEL_INFO[model_name].output_price_per_1M
 
 
-def registered_bedrock_model(cheapest: bool) -> str | None:
-    """Return the registered ``bedrock/`` model to use by default, if any.
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
+_ANTHROPIC_FAST_MODEL = "claude-sonnet-5-5"
 
-    The catalog lists no Bedrock ids (they differ per model and region),
-    so the candidates are the ``bedrock/<id>`` entries the user added
-    under Settings → Custom Models.  Ranked by output price: the most
-    expensive is the strongest (the default model), the cheapest the
-    fast model.
+
+def registered_bedrock_model(cheapest: bool) -> str | None:
+    """Return the ``bedrock/`` model to use by default, if any.
+
+    The candidates are the catalog's ``bedrock/<id>`` entries: the ids
+    the model updater listed in its AWS region plus any the user added
+    under Settings → Custom Models.  Preferred is a Bedrock id of the
+    Anthropic default model (:data:`_ANTHROPIC_DEFAULT_MODEL`) or, for
+    the fast model, of :data:`_ANTHROPIC_FAST_MODEL`, the cheapest of its
+    ids first (the ``global.`` profile, billed at the first-party rate; a
+    geographic one costs 10% more).  Without such an id the entries are
+    ranked by output price: the most expensive is the strongest (the
+    default model), the cheapest the fast model.
 
     Args:
-        cheapest: Pick the lowest-priced entry instead of the highest.
+        cheapest: Pick the fast model instead of the default model.
 
     Returns:
         The model name, or None when no ``bedrock/`` model is registered.
     """
-    names = [
+    names = sorted(
         name
         for name, info in MODEL_INFO.items()
         if name.startswith(BEDROCK_PREFIX) and info.is_generation_supported
-    ]
+    )
     if not names:
         return None
+    twin = _ANTHROPIC_FAST_MODEL if cheapest else _ANTHROPIC_DEFAULT_MODEL
+    twins = [name for name in names if bedrock_catalog_name(name) == twin]
+    if twins:
+        return min(twins, key=_output_price)
     return min(names, key=_output_price) if cheapest else max(names, key=_output_price)
 
 
@@ -2211,14 +2307,15 @@ def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
     Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Bedrock
-    (the cheapest registered ``bedrock/`` model) → Claude Code CLI.
+    (the Bedrock id of the Anthropic fast model, see
+    :func:`registered_bedrock_model`) → Claude Code CLI.
 
     Returns:
         A fast model name for the first available provider.
     """
     return _model_for_first_configured_provider(
         {
-            "Anthropic": "claude-sonnet-5-5",
+            "Anthropic": _ANTHROPIC_FAST_MODEL,
             "OpenAI": "gpt-6-luna",
             "Gemini": "gemini-3.5-flash-lite",
             "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
@@ -2234,12 +2331,13 @@ def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
     Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
-    Bedrock (the strongest registered ``bedrock/`` model) > Claude Code CLI.
+    Bedrock (the Bedrock id of the Anthropic default model, see
+    :func:`registered_bedrock_model`) > Claude Code CLI.
     Falls back to ``"No model"`` if no keys are set.
     """
     return _model_for_first_configured_provider(
         {
-            "Anthropic": "claude-opus-5-5",
+            "Anthropic": _ANTHROPIC_DEFAULT_MODEL,
             "OpenAI": "gpt-6.1-sol-medium",
             "Gemini": "gemini-3.8-flash",
             "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
@@ -2268,9 +2366,14 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
     2x/1.5x, including gpt-5.5-pro and gpt-5.4-pro $30/$180 ->
     $60/$270; gpt-5.4-mini/nano have no long-context tier) and https://ai.google.dev/gemini-api/docs/pricing
-    (gemini-3-pro $2/$12 -> $4/$18, gemini-2.5-pro $1.25/$10 ->
-    $2.50/$15; OpenRouter's rolling ``~google/gemini-pro-latest`` lists
-    the same 200K override, $2/$12 -> $4/$18).  The rolling
+    (gemini-3.1-pro-preview $2/$12/$0.20 -> $4/$18/$0.40 over 200K
+    prompt tokens, gemini-2.5-pro $1.25/$10 -> $2.50/$15; OpenRouter
+    publishes the same ``min_prompt_tokens: 200000`` overrides).  Gemini 4
+    Argon prices its whole 1M window flat ($2/$10/$0.10), and so does
+    OpenRouter's rolling ``~google/gemini-pro-latest`` now that it tracks
+    Argon (no ``overrides`` in its listing), so neither carries an
+    uplift; nor do the per-image-priced ``gemini-3-pro-image`` models,
+    whose context cannot reach the threshold.  The rolling
     :data:`_OPENAI_ROLLING_LATEST` aliases track
     those same GPT-5.6/GPT-6 snapshots and inherit the uplift;
     ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
@@ -2315,7 +2418,7 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare:
         return 272_000, 2.0, 1.5
-    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro", "gemini-pro-latest")):
+    if bare.startswith(("gemini-3.1-pro", "gemini-2.5-pro")):
         return 200_000, 2.0, 1.5
     return None
 

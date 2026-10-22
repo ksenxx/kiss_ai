@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
@@ -48,6 +49,9 @@ from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 from kiss.tests.server.conftest import find_free_port
+
+_WATCHDOG_TIMEOUT = 30.0
+"""Upper bound on one watchdog run: ~10 ticks of a few process listings each, even under load."""
 
 
 class _IpSequence:
@@ -128,19 +132,35 @@ class _IpWatchdogTestBase(IsolatedAsyncioTestCase):
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
-    async def _run_watchdog_briefly(self, seconds: float = 0.3) -> bool:
-        """Run the watchdog for ``seconds`` and report whether it restarted.
+    async def _run_watchdog_briefly(self, seq: _IpSequence, ticks: int | None = None) -> bool:
+        """Run the watchdog for *ticks* polls of *seq*; report whether it restarted.
 
-        Returns ``True`` iff the watchdog returned from its main
-        ``while True:`` loop within the time window — which only
-        happens when the IP-change branch confirms a real change and
-        calls ``self._ws_server.close(); return``.  Returns ``False``
-        when the watchdog was still ticking at the deadline (it is
-        then cancelled here so test teardown is clean).  Any other
-        exception raised by the coroutine is propagated.
+        *ticks* defaults to the scripted prefix of *seq* plus
+        :data:`~kiss.server.web_server._IP_CHANGE_DEBOUNCE_TICKS`
+        steady-state polls, enough for any candidate the prefix leaves
+        pending to be confirmed or dropped.  Returns ``True`` iff the
+        watchdog returned from its main ``while True:`` loop — which
+        only happens when the IP-change
+        branch confirms a real change and calls
+        ``self._ws_server.close(); return``.  Returns ``False`` when the
+        watchdog was still ticking after polling ``_get_local_ips``
+        *ticks* times (it is then cancelled here so test teardown is
+        clean).  Any other exception raised by the coroutine is
+        propagated.
+
+        Counting ticks rather than waiting a fixed time: a tick also
+        lists the host's processes and windows (the macOS app sweep),
+        which costs tens of milliseconds each and more under load, so
+        a wall-clock window either cuts the debounce short or runs
+        vacuously few ticks.  :data:`_WATCHDOG_TIMEOUT` bounds a
+        watchdog that stops polling.
         """
+        if ticks is None:
+            ticks = len(seq.values) + ws_mod._IP_CHANGE_DEBOUNCE_TICKS
         task = asyncio.create_task(self.server._watchdog())
-        await asyncio.sleep(seconds)
+        deadline = time.monotonic() + _WATCHDOG_TIMEOUT
+        while not task.done() and seq.calls < ticks and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         if task.done():
             exc = task.exception()
             if exc is not None:
@@ -151,6 +171,9 @@ class _IpWatchdogTestBase(IsolatedAsyncioTestCase):
             await task
         except asyncio.CancelledError:
             pass
+        self.assertGreaterEqual(
+            seq.calls, ticks, f"watchdog polled only {seq.calls} times in {_WATCHDOG_TIMEOUT}s"
+        )
         return False
 
 
@@ -171,7 +194,7 @@ class TestSpuriousRestartFromTransientEmpty(_IpWatchdogTestBase):
         ])
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(seq)
 
         diag = (
             f"seq.calls={seq.calls}, "
@@ -207,7 +230,7 @@ class TestSpuriousRestartFromSingleDivergentTick(_IpWatchdogTestBase):
         ])
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(seq)
 
         self.assertFalse(
             restarted,
@@ -229,7 +252,7 @@ class TestSustainedIpChangeStillRestarts(_IpWatchdogTestBase):
         seq = _IpSequence([new_ips, new_ips, new_ips, new_ips, new_ips])
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(seq)
 
         self.assertTrue(
             restarted,
@@ -250,7 +273,7 @@ class TestTunnelModeDoesNotRestart(_IpWatchdogTestBase):
         seq = _IpSequence([new_ips, new_ips, new_ips, new_ips, new_ips])
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(seq)
 
         self.assertFalse(
             restarted,
@@ -278,7 +301,7 @@ class TestEmptyBaselineRecoversWithoutRestart(_IpWatchdogTestBase):
         seq = _IpSequence([real_ips, real_ips, real_ips, real_ips, real_ips])
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(seq)
 
         self.assertFalse(
             restarted,
@@ -307,7 +330,9 @@ class TestFlappingSetsNeverConfirm(_IpWatchdogTestBase):
         seq = _IpSequence([cand_a, cand_b], cycle=True)
         ws_mod._get_local_ips = seq  # type: ignore[assignment]
 
-        restarted = await self._run_watchdog_briefly()
+        restarted = await self._run_watchdog_briefly(
+            seq, ticks=3 * ws_mod._IP_CHANGE_DEBOUNCE_TICKS
+        )
 
         self.assertFalse(
             restarted,

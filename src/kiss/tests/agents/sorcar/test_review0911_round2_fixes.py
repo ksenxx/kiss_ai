@@ -34,7 +34,6 @@ Nothing is mocked or patched.
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import random
@@ -52,6 +51,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.conftest import posix_only
 
 # ---------------------------------------------------------------------------
@@ -59,22 +59,6 @@ from kiss.tests.conftest import posix_only
 # ---------------------------------------------------------------------------
 
 _ACQUIRE_TIMEOUT_S = 5.0
-
-_set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
-_set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
-
-
-def _inject_keyboard_interrupt(tid: int) -> int:
-    """Queue a real KeyboardInterrupt in thread *tid*.
-
-    Same call ``server.task_runner.inject_keyboard_interrupt`` makes to
-    stop a task; duplicated here so a sorcar test does not import the
-    server layer.
-    """
-    rc = int(_set_async_exc(ctypes.c_ulong(tid), ctypes.py_object(KeyboardInterrupt)))
-    if rc > 1:  # pragma: no cover — rare: exception set in multiple states
-        _set_async_exc(ctypes.c_ulong(tid), None)
-    return rc
 
 
 def _lock_usable(lock: persistence._RWLock) -> bool:
@@ -99,7 +83,8 @@ def _lock_usable(lock: persistence._RWLock) -> bool:
 
 
 def _inject_between_c_acquire_and_next_bytecode(
-    lock: persistence._RWLock, acquire_name: str,
+    lock: persistence._RWLock,
+    acquire_name: str,
 ) -> threading.Thread:
     """Deliver a real injected stop in the exact call/store window.
 
@@ -148,7 +133,7 @@ def _inject_between_c_acquire_and_next_bytecode(
             assert time.monotonic() < deadline, "victim never reached acquire"
             time.sleep(0.005)
         time.sleep(0.2)  # let it enter the blocking C acquire
-        assert _inject_keyboard_interrupt(thread.ident or -1) == 1
+        assert inject_async_exception(thread.ident or -1, KeyboardInterrupt) == 1
     finally:
         mutex.release()
     return thread
@@ -238,10 +223,7 @@ class TestRWLockRealAsyncInjection:
                     errors.append(exc)
                     return
 
-        threads = [
-            threading.Thread(target=worker, args=(i,), daemon=True)
-            for i in (0, 1)
-        ]
+        threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in (0, 1)]
         sys.unraisablehook = tolerant_hook
         threading.excepthook = tolerant_thread_hook
         try:
@@ -254,14 +236,13 @@ class TestRWLockRealAsyncInjection:
                 time.sleep(rng.uniform(0.0, 0.003))
                 target = threads[injections % 2]
                 if target.is_alive() and target.ident is not None:
-                    _inject_keyboard_interrupt(target.ident)
+                    inject_async_exception(target.ident, KeyboardInterrupt)
                     injections += 1
             stop.set()
             for thread in threads:
                 thread.join(timeout=15.0)
                 assert not thread.is_alive(), (
-                    f"worker wedged after {injections} injections and "
-                    f"{sum(counts)} acquisitions"
+                    f"worker wedged after {injections} injections and {sum(counts)} acquisitions"
                 )
         finally:
             sys.unraisablehook = saved_hook
@@ -313,12 +294,14 @@ def journal_home() -> Iterator[Path]:
 def _journal(task_id: str, text: str, timestamp: float) -> None:
     """Append one event for *task_id* to the live journal sidecar."""
     persistence._journal_failed_events(
-        [(
-            task_id,
-            json.dumps({"type": "text", "text": text}),
-            timestamp,
-            str(persistence._DB_PATH),
-        )],
+        [
+            (
+                task_id,
+                json.dumps({"type": "text", "text": text}),
+                timestamp,
+                str(persistence._DB_PATH),
+            )
+        ],
         1,
     )
 
@@ -366,7 +349,8 @@ class TestJournalOrderAcrossFailedReplays:
 
     @posix_only("replacing a SQLite file another connection holds open")
     def test_failed_replay_then_later_appends_keep_chronology(
-        self, journal_home: Path,
+        self,
+        journal_home: Path,
     ) -> None:
         """The review's reproduction: snapshot A (oldest rows) fails
         replay while snapshot B (middle rows) stays claimed; later rows
@@ -403,7 +387,8 @@ class TestJournalOrderAcrossFailedReplays:
         )
 
     def test_equal_mtime_snapshots_replay_in_claim_order(
-        self, journal_home: Path,
+        self,
+        journal_home: Path,
     ) -> None:
         """Eight snapshots whose mtimes all TIE (coarse-resolution or
         network filesystems) must still replay in the order they were
@@ -424,12 +409,12 @@ class TestJournalOrderAcrossFailedReplays:
         persistence._replay_failed_events()
 
         assert _event_texts(task_id) == texts, (
-            "equal-mtime snapshots replayed in random pathname order "
-            "instead of claim order"
+            "equal-mtime snapshots replayed in random pathname order instead of claim order"
         )
 
     def test_claim_keys_stay_monotonic_past_a_clock_step(
-        self, journal_home: Path,
+        self,
+        journal_home: Path,
     ) -> None:
         """A snapshot claimed under a wall clock that then stepped
         BACKWARDS carries a claim key in the future; later claims must
@@ -444,12 +429,15 @@ class TestJournalOrderAcrossFailedReplays:
             f"{sidecar.name}.consumed-{future_key:020d}-77-abcd",
         )
         older.write_text(
-            json.dumps({
-                "task_id": task_id,
-                "event_json": json.dumps({"type": "text", "text": "first"}),
-                "timestamp": 1.0,
-                "origin_db_path": str(persistence._DB_PATH),
-            }) + "\n",
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "event_json": json.dumps({"type": "text", "text": "first"}),
+                    "timestamp": 1.0,
+                    "origin_db_path": str(persistence._DB_PATH),
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
         _journal(task_id, "second", 2.0)
@@ -472,20 +460,25 @@ def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "init", "-b", "main", str(path)],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     for key, val in (("user.email", "t@t.com"), ("user.name", "T")):
         subprocess.run(
             ["git", "-C", str(path), "config", key, val],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         )
     (path / "f.txt").write_text("f0\n")
     subprocess.run(
-        ["git", "-C", str(path), "add", "."], capture_output=True, check=True,
+        ["git", "-C", str(path), "add", "."],
+        capture_output=True,
+        check=True,
     )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "initial"],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     return path
 
@@ -494,7 +487,9 @@ def _reclaim_lock_path(repo: Path) -> Path:
     """Return the repo's ``kiss-reclaim.lock`` path."""
     common = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     common_dir = Path(common)
     if not common_dir.is_absolute():
@@ -540,10 +535,16 @@ class TestSetupWorktreeHoldsCrossProcessLock:
                 release = Path(tmp) / "release"
                 holder = subprocess.Popen(
                     [
-                        sys.executable, "-c", _FLOCK_HOLDER_SCRIPT,
-                        str(_reclaim_lock_path(repo)), str(held), str(release),
+                        sys.executable,
+                        "-c",
+                        _FLOCK_HOLDER_SCRIPT,
+                        str(_reclaim_lock_path(repo)),
+                        str(held),
+                        str(release),
                     ],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
                 )
                 try:
                     deadline = time.monotonic() + 30

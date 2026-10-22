@@ -24,6 +24,7 @@ from kiss.core.locked import locked_call
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
 
+
 def _env_flag(name: str, default: bool) -> bool:
     """Read a boolean toggle from the environment.
 
@@ -92,9 +93,7 @@ def _generate_artifact_dir() -> str:
     Returns:
         The absolute path to the newly created artifact directory.
     """
-    artifact_subdir_name = (
-        f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
-    )
+    artifact_subdir_name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
     artifact_path = _artifact_root() / "jobs" / artifact_subdir_name
     artifact_path.mkdir(parents=True, exist_ok=True)
     return str(artifact_path)
@@ -157,9 +156,12 @@ def adopt_legacy_file(
     Windows: SQLite there names the WAL after the path it was given, so
     a link would have the two versions write two WALs over one database
     file; the old version is restarted anyway, so nothing is left behind.
-    Concurrent adopters serialise on a lock file next to *path* (taken
-    whenever a file under the legacy name exists, the symlink included),
-    and the one that arrives second finds nothing left to do.
+    Concurrent adopters serialise on a lock file next to *path*, and the
+    one that arrives second finds nothing left to do.  The lock is
+    skipped only once the adoption is visibly done -- the legacy name is
+    a symlink to *path* itself -- so the lookups every task start makes
+    cost no lock cycle; a legacy name that is missing, or a dangling
+    link, is no legacy file at all and takes no lock either.
 
     A name that comes back into use can find its new location already
     taken by a file an even older version left there.  When both names
@@ -186,11 +188,20 @@ def adopt_legacy_file(
     legacy = path.with_name(legacy_name)
     if not legacy.exists():
         return
+    try:
+        # The state a finished adoption leaves behind for the life of
+        # the install: nothing to do, so no lock cycle for every task
+        # start or prompt build that looks the file up.
+        if legacy.is_symlink() and legacy.samefile(path):
+            return
+    except OSError:  # pragma: no cover — *path* vanished meanwhile; decide under the lock
+        pass
     # Everything else is decided under the lock: a file another adopter
     # is moving aside right now looks unreadable, and reading that as
     # "nothing to do" would open (and create) *path* while it is absent.
     with exclusive_file_lock(
-        path.with_name(path.name + ".rename.lock"), timeout=ADOPTION_LOCK_TIMEOUT,
+        path.with_name(path.name + ".rename.lock"),
+        timeout=ADOPTION_LOCK_TIMEOUT,
     ):
         if not _adoption_pending(path, legacy, stale):
             return

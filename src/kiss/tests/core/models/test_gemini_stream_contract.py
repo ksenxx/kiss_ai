@@ -164,11 +164,11 @@ class TestThoughtTextNeverReachesContent:
 
         assert plain_content == tooled_content == _ANSWER
 
-    def test_unstreamed_path_excludes_thought_text(
+    def test_no_callback_path_excludes_thought_text(
         self, monkeypatch: pytest.MonkeyPatch,
         gemini_endpoint: tuple[str, GeminiScript],
     ) -> None:
-        """Without a token callback the SDK's unary call is used."""
+        """Without a token callback the turn is still streamed and filtered."""
         base_url, script = gemini_endpoint
         script.play(_thought_then_answer_then_call())
         model = _make_model(monkeypatch, base_url)
@@ -178,6 +178,8 @@ class TestThoughtTextNeverReachesContent:
         )
 
         assert content == _ANSWER
+        assert len(script.paths) == 1
+        assert "streamGenerateContent" in script.paths[0]
 
 
 class TestUsageComesFromTheChunkThatCarriesIt:
@@ -215,11 +217,11 @@ class TestUsageComesFromTheChunkThatCarriesIt:
             100, 57, 20, 0,
         )
 
-    def test_empty_stream_falls_back_to_a_unary_call(
+    def test_empty_stream_is_an_empty_turn(
         self, monkeypatch: pytest.MonkeyPatch,
         gemini_endpoint: tuple[str, GeminiScript],
     ) -> None:
-        """A stream yielding nothing must still produce a usable turn."""
+        """A stream yielding nothing is a usable, free turn: no second request."""
         base_url, script = gemini_endpoint
         script.play([])
         tokens: list[str] = []
@@ -231,6 +233,7 @@ class TestUsageComesFromTheChunkThatCarriesIt:
         assert model.extract_input_output_token_counts_from_response(response) == (
             0, 0, 0, 0,
         )
+        assert len(script.paths) == 1
 
 
 class TestThinkingBracketIsBalanced:

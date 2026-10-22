@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from kiss.core.models.model import parse_binary_attachments
+
 _logger = logging.getLogger(__name__)
 
 
@@ -93,8 +95,6 @@ def truncate_result(content: str) -> str:
         str: The original string if short enough, otherwise the first and last
             halves joined by a truncation marker.
     """
-    from kiss.core.models.model import parse_binary_attachments
-
     content, _ = parse_binary_attachments(content)
     if len(content) <= MAX_RESULT_LEN:
         return content

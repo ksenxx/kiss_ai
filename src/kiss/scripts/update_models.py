@@ -18,6 +18,17 @@ support: every tested model is live-probed through ``/v1/responses`` (see
 question each, and written with ``"dec": true`` (``gen``/``fc``/``emb``
 false).
 
+Amazon Bedrock is onboarded from the configured region's listing (see
+``fetch_bedrock``): every Claude id Bedrock serves there — the
+``ON_DEMAND`` foundation ids and the system-defined cross-region
+inference profiles — becomes a ``bedrock/<id>`` entry copied from its
+``claude-*`` twin (context, capabilities, effort aliases) with the prices
+scaled by the Bedrock regional premium; an id the region stops listing is
+retired.  Bedrock credentials (``AWS_BEARER_TOKEN_BEDROCK``, an access
+key pair, or boto3's default chain) and ``AWS_REGION`` select the listing;
+without them the Bedrock step is skipped and the existing ``bedrock/``
+entries are kept.
+
 By default the script writes the source-of-truth
 ``src/kiss/core/models/MODEL_INFO.json`` in the repo.  The ``--model-info``
 option points it at a different catalog file instead — most importantly the
@@ -55,6 +66,7 @@ import re
 import ssl
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
@@ -462,6 +474,113 @@ def fetch_openai(verbose: bool = False) -> dict[str, dict]:
     return models
 
 
+def _bedrock_control_plane_client() -> Any | None:
+    """Return a boto3 ``bedrock`` (control-plane) client, or None without credentials.
+
+    The listing APIs (``ListFoundationModels``, ``ListInferenceProfiles``)
+    accept the same credentials as the model adapter: a Bedrock API key
+    (bearer token, valid for every Amazon Bedrock and Bedrock Runtime
+    action), an access key pair, or boto3's default chain (web-identity
+    token, container credentials, a shared profile, an instance role).
+    boto3 reads the bearer token only from ``AWS_BEARER_TOKEN_BEDROCK`` in
+    the environment, so a token held in the settings key store is exported
+    there first.  The region is the one the adapter calls (``AWS_REGION``,
+    default ``us-east-1``), so the listing is what that region can serve.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+    from kiss.core.models.anthropic_model import _bedrock_credentials
+    from kiss.core.models.model_info import _ambient_aws_credentials_configured
+
+    access_key, secret_key, session_token, region = _bedrock_credentials()
+    bearer_token = DEFAULT_CONFIG.AWS_BEARER_TOKEN_BEDROCK
+    if bearer_token:
+        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bearer_token
+        access_key = secret_key = session_token = ""
+    elif not (access_key and secret_key) and not _ambient_aws_credentials_configured():
+        return None
+    import boto3  # type: ignore[import-untyped]
+
+    return boto3.client(
+        "bedrock",
+        region_name=region,
+        aws_access_key_id=access_key or None,
+        aws_secret_access_key=secret_key or None,
+        aws_session_token=session_token or None,
+    )
+
+
+def fetch_bedrock(verbose: bool = False) -> dict[str, dict]:
+    """Fetch the Claude ids the configured Bedrock region serves (ids only).
+
+    Two listings make up the result, both keyed ``bedrock/<id>`` so a key
+    is the catalog name the ``model()`` factory routes to Bedrock:
+
+    * ``ListFoundationModels`` filtered to the Anthropic provider, keeping
+      the ids callable directly (``ON_DEMAND`` inference) — most Claude
+      models are ``INFERENCE_PROFILE``-only today and are skipped here;
+    * ``ListInferenceProfiles`` (system-defined cross-region profiles such
+      as ``us.anthropic.claude-opus-4-6-v1`` or
+      ``global.anthropic.claude-haiku-4-5-20251001-v1:0``), keeping the
+      ``ACTIVE`` ones whose underlying model is a Claude.
+
+    Only Claude ids are listed: KISS runs ``bedrock/`` names through the
+    Anthropic SDK's Bedrock client, which serves no other vendor.  Each
+    value carries ``source`` (``"bedrock"``) and ``claude`` (the Claude
+    name behind the id, see :func:`bedrock_claude_name`).
+
+    Without SigV4 credentials, without ``boto3``, or when Bedrock refuses
+    the call (no ``bedrock:ListFoundationModels`` permission, an unknown
+    region), the listing is skipped with a warning and ``{}`` is returned,
+    which :func:`find_deprecated_models` treats as "nothing known": no
+    ``bedrock/`` entry is retired on the strength of a failed listing.
+    """
+    from kiss.core.models.model_info import bedrock_claude_name
+
+    try:
+        client = _bedrock_control_plane_client()
+        if client is None:
+            print("  WARNING: no AWS access key pair or credential source, skipping Bedrock")
+            return {}
+        if verbose:  # pragma: no branch
+            print(f"  Fetching Bedrock models ({client.meta.region_name})...")
+        foundation = client.list_foundation_models(byProvider="Anthropic")["modelSummaries"]
+        profiles: list[dict] = []
+        page: dict[str, Any] = {"typeEquals": "SYSTEM_DEFINED", "maxResults": 1000}
+        while True:
+            response = client.list_inference_profiles(**page)
+            profiles.extend(response.get("inferenceProfileSummaries", []))
+            if not response.get("nextToken"):
+                break
+            page["nextToken"] = response["nextToken"]
+    except ImportError:
+        print("  WARNING: boto3 not installed, skipping Bedrock")
+        return {}
+    except Exception as exc:  # botocore raises per-call exception classes
+        print(f"  WARNING: Bedrock listing failed ({exc}), skipping Bedrock")
+        return {}
+
+    models: dict[str, dict] = {}
+    for summary in foundation:
+        if summary.get("modelLifecycle", {}).get("status", "ACTIVE") != "ACTIVE":
+            continue
+        if "ON_DEMAND" not in summary.get("inferenceTypesSupported", []):
+            continue
+        name = f"bedrock/{summary['modelId']}"
+        claude = bedrock_claude_name(name)
+        if claude:
+            models[name] = {"source": "bedrock", "claude": claude}
+    for profile in profiles:
+        if profile.get("status", "ACTIVE") != "ACTIVE":
+            continue
+        name = f"bedrock/{profile['inferenceProfileId']}"
+        claude = bedrock_claude_name(name)
+        if claude:
+            models[name] = {"source": "bedrock", "claude": claude}
+    if verbose:  # pragma: no branch
+        print(f"    Found {len(models)} Claude ids")
+    return models
+
+
 def get_current_model_info() -> dict[str, dict]:
     """Return the loaded catalog as plain dicts keyed like MODEL_INFO.json.
 
@@ -860,7 +979,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
       (``high``/``max``).
     * Direct ``claude-*`` models use the Anthropic ``output_config.effort``
       ladder from :func:`_anthropic_effort_scale` (up to
-      ``low``/``medium``/``high``/``xhigh``/``max``).
+      ``low``/``medium``/``high``/``xhigh``/``max``); a ``bedrock/`` id
+      uses the ladder of the Claude model behind it.
     * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
       (``low``/``medium``/``high``/``xhigh``) — including Together's
       OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
@@ -886,6 +1006,10 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _GLM_5_2_EFFORT_LEVELS
     if model_name.startswith("claude-"):
         return _anthropic_effort_scale(model_name)
+    if model_name.startswith("bedrock/"):
+        from kiss.core.models.model_info import bedrock_claude_name
+
+        return _anthropic_effort_scale(bedrock_claude_name(model_name) or model_name)
     return _THINKING_LEVELS
 
 
@@ -1176,6 +1300,7 @@ def find_deprecated_models(
     gemini: dict[str, dict],
     openai: dict[str, dict],
     codex_slugs: set[str] | None = None,
+    bedrock: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Identify models in current MODEL_INFO that are deprecated upstream.
 
@@ -1184,6 +1309,9 @@ def find_deprecated_models(
       provider or an OpenAI ``-pro`` model such as ``openrouter/openai/o3-pro``.
     - It's a codex/ model whose slug is not in the Codex CLI's official
       models.json (except ``codex/default`` which is always kept).
+    - It's a bedrock/ model not in the (non-empty) Bedrock listing of the
+      configured region (:func:`fetch_bedrock`); a skipped or failed
+      listing retires nothing.
     - It's a cc/ (Claude Code CLI) model whose ``claude-*`` slug is gone from
       the Anthropic models API, using the same dated-snapshot/alias rules as
       direct ``claude-*`` entries. The short aliases (``cc/haiku``,
@@ -1216,6 +1344,10 @@ def find_deprecated_models(
             elif codex_slugs and name != "codex/default":
                 if slug not in codex_slugs:
                     deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
+            continue
+        if name.startswith("bedrock/"):
+            if bedrock and name not in bedrock:
+                deprecated.append({"name": name, "reason": "not listed by Bedrock in this region"})
             continue
         if name.startswith("cc/"):
             slug = name.removeprefix("cc/")
@@ -1494,6 +1626,161 @@ def _add_claude_code_candidates(
         )
 
 
+def _bedrock_twin_key(claude: str, names: Iterable[str]) -> str | None:
+    """Return the key in ``names`` naming the Claude model behind a Bedrock id.
+
+    The dated name is preferred, else the undated one, as
+    :func:`model_info.bedrock_catalog_name` resolves at runtime.
+    """
+    candidates = set(names)
+    for key in dict.fromkeys((claude, _strip_date_suffix(claude))):
+        if key in candidates:
+            return key
+    return None
+
+
+def _bedrock_twin_entry(
+    claude: str, current: dict[str, dict], openrouter: dict[str, dict]
+) -> dict | None:
+    """Return the entry whose context and prices a Bedrock id mirrors.
+
+    The direct ``claude-*`` catalog entry when there is one, otherwise the
+    OpenRouter listing's twin (:func:`_lookup_openrouter_pricing`); None
+    when neither knows the model.
+    """
+    key = _bedrock_twin_key(claude, current)
+    if key is not None:
+        return current[key]
+    return _lookup_openrouter_pricing(claude, "anthropic", openrouter)
+
+
+def _add_bedrock_candidates(
+    bedrock: dict[str, dict],
+    current: dict[str, dict],
+    openrouter: dict[str, dict],
+    updates: list[dict],
+    new_models: list[dict],
+) -> None:
+    """Mirror every Bedrock Claude id as a ``bedrock/<id>`` catalog entry.
+
+    A ``bedrock/`` name runs the same Claude model as its ``claude-*``
+    entry through Amazon Bedrock, so the entry is a copy of that twin:
+    context length, ``fc`` / ``emb`` / ``gen`` flags, and the per-1M prices
+    scaled by :func:`model_info.bedrock_price_factor` (Bedrock bills a
+    geographic or in-region profile of a Claude 4.5-or-later model 10%
+    above the ``global.`` rate the ``claude-*`` entry holds).  The effort
+    level is not set here: :func:`_sync_bedrock_thinking` copies it from
+    the twin once this run's probes and retests have settled it.
+
+    An id whose Claude model is in neither the catalog nor the OpenRouter
+    listing is added with the Anthropic default context and
+    ``needs_pricing`` set, like any other unpriced vendor model.  An
+    existing ``bedrock/`` entry whose mirrored fields drifted from its
+    twin (a price change upstream) gets an update.
+
+    Args:
+        bedrock: :func:`fetch_bedrock`'s result.
+        current: The current catalog (``bedrock/`` entries included).
+        openrouter: :func:`fetch_openrouter`'s result, for twin-less ids.
+        updates: Receives ``{"name", "changes", "source"}`` records.
+        new_models: Receives the candidate dicts for new ids.
+    """
+    from kiss.core.models.model_info import bedrock_price_factor
+
+    for name, fetched in sorted(bedrock.items()):
+        twin = _bedrock_twin_entry(fetched["claude"], current, openrouter)
+        factor = bedrock_price_factor(name)
+        if twin is None:
+            mirrored: dict[str, Any] = {
+                "context_length": 200000,
+                "input_price_per_1M": 0.0,
+                "output_price_per_1M": 0.0,
+                "fc": True,
+                "emb": False,
+                "gen": True,
+            }
+        else:
+            mirrored = {
+                "context_length": _cap_context_length(twin["context_length"]),
+                "input_price_per_1M": round(twin["input_price_per_1M"] * factor, 6),
+                "output_price_per_1M": round(twin["output_price_per_1M"] * factor, 6),
+                "fc": twin.get("fc", True),
+                "emb": twin.get("emb", False),
+                "gen": twin.get("gen", True),
+            }
+        cur = current.get(name)
+        if cur is not None:
+            if twin is not None:
+                changed = {f: v for f, v in mirrored.items() if cur.get(f) != v}
+                if changed:
+                    updates.append({"name": name, "changes": changed, "source": "bedrock"})
+            continue
+        new_models.append(
+            {
+                "name": name,
+                **mirrored,
+                "source": "bedrock",
+                "claude": fetched["claude"],
+                "needs_pricing": mirrored["input_price_per_1M"] == 0,
+                "thinking": None,
+            }
+        )
+
+
+def _sync_bedrock_thinking(
+    bedrock: dict[str, dict],
+    current: dict[str, dict],
+    updates: list[dict],
+    new_models: list[dict],
+) -> None:
+    """Give every listed ``bedrock/`` entry the effort level of its ``claude-*`` twin.
+
+    The twin's level is the latest this run knows: a twin discovered in
+    the same run carries its probed level in ``new_models`` (None until
+    probed), a retested twin its new level in ``updates``, any other twin
+    the maximum recorded on disk (base entry plus generated aliases, see
+    :func:`_stored_max_thinking_level`).  :func:`compute_changes` calls
+    this once from the catalog alone and ``main`` again after the probes
+    and retests; the second pass overwrites the first's levels.  A
+    new Bedrock candidate takes that level; an existing entry whose
+    recorded maximum differs gets a ``thinking`` update, which
+    :func:`apply_updates_to_file` turns into the matching ``-low`` …
+    ``-max`` siblings on the Anthropic ladder.  Bedrock ids are never
+    probed themselves: the level is a property of the Claude model.
+
+    Args:
+        bedrock: :func:`fetch_bedrock`'s result.
+        current: The current catalog (``bedrock/`` entries included).
+        updates: This run's update records; extended in place.
+        new_models: This run's candidates (probed); mutated in place.
+    """
+    from kiss.core.models.model_info import bedrock_claude_name
+
+    new_by_name = {nm["name"]: nm for nm in new_models}
+    update_by_name = {upd["name"]: upd for upd in updates}
+    for name in sorted(bedrock):
+        claude = bedrock_claude_name(name) or ""
+        if (key := _bedrock_twin_key(claude, new_by_name)) is not None:
+            level = new_by_name[key].get("thinking")
+        elif (key := _bedrock_twin_key(claude, current)) is not None:
+            upd = update_by_name.get(key)
+            if upd is not None and "thinking" in upd["changes"]:
+                level = upd["changes"]["thinking"]
+            else:
+                level = _stored_max_thinking_level(current, key, current[key])
+        else:
+            level = None
+        if name in new_by_name:
+            new_by_name[name]["thinking"] = level
+        elif name in current and level != _stored_max_thinking_level(current, name, current[name]):
+            upd = update_by_name.get(name)
+            if upd is None:
+                upd = {"name": name, "changes": {}, "source": "bedrock"}
+                updates.append(upd)
+                update_by_name[name] = upd
+            upd["changes"]["thinking"] = level
+
+
 def _lookup_openrouter_pricing(
     model_name: str,
     source: str,
@@ -1559,10 +1846,14 @@ def compute_changes(
     anthropic: dict[str, dict],
     openai: dict[str, dict],
     codex_slugs: set[str] | None = None,
+    bedrock: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Compare fetched data with current MODEL_INFO.
 
-    Returns (updates, new_models) where each is a list of dicts with model info.
+    Returns (updates, new_models) where each is a list of dicts with model
+    info.  ``bedrock`` (:func:`fetch_bedrock`'s listing) adds one
+    ``bedrock/<id>`` mirror of the ``claude-*`` entry per Claude id, see
+    :func:`_add_bedrock_candidates`.
     """
     updates: list[dict] = []
     new_models: list[dict] = []
@@ -1720,15 +2011,22 @@ def compute_changes(
     if anthropic:
         _add_claude_code_candidates(anthropic, current, openrouter, new_models)
 
+    if bedrock:
+        _add_bedrock_candidates(bedrock, current, openrouter, updates, new_models)
+        # Levels known from the catalog now (so a thinking-only drift counts
+        # as a change); main() re-syncs after the probes and retests.
+        _sync_bedrock_thinking(bedrock, current, updates, new_models)
+
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
     update_by_name = {upd["name"]: upd for upd in updates}
     for name, cur in current.items():
         if name.startswith("openrouter/"):  # pragma: no branch
             continue
-        if name.startswith(("cc/", "codex/")):
+        if name.startswith(_MIRROR_PREFIXES):
             # Subscription-billed CLI backends: pricing stays $0/0 forever,
-            # even though their slugs have priced OpenRouter twins.
+            # even though their slugs have priced OpenRouter twins.  A
+            # bedrock/ entry is repriced from its claude-* twin above.
             continue
         has_pricing = cur["input_price_per_1M"] > 0
         has_context = cur["context_length"] > 0
@@ -2232,6 +2530,7 @@ def apply_updates_to_file(
 _PROVIDER_LABEL_TO_README_CATEGORY: dict[str, str] = {
     "OpenAI": "OpenAI",
     "Anthropic": "Anthropic",
+    "Bedrock": "Amazon Bedrock (`bedrock/*`)",
     "Gemini": "Gemini",
     "Together": "Together AI",
     "Z.AI": "Z.AI",
@@ -2268,6 +2567,7 @@ def _readme_provider_category(model_name: str) -> str:
 _README_CATEGORIES: tuple[str, ...] = (
     "OpenAI",
     "Anthropic",
+    "Amazon Bedrock (`bedrock/*`)",
     "Gemini",
     "Together AI",
     "Z.AI",
@@ -2438,9 +2738,11 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
     Each candidate's ``gen`` / ``emb`` / ``fc`` / ``dec`` / ``thinking`` /
     ``use_responses_api`` flags are filled from
     :func:`test_model_capabilities`; a candidate flagged ``is_decisions``
-    gets the decisions probe.  Subscription CLI candidates (``codex/``,
-    ``cc/``) are not probed.  Candidates that are neither generators nor
-    embedders nor decisions models are dropped.
+    gets the decisions probe.  Mirror candidates (:data:`_MIRROR_PREFIXES`)
+    are not probed: the subscription CLIs run on the user's plan and a
+    ``bedrock/`` id runs the Claude model its entry was copied from.
+    Candidates that are neither generators nor embedders nor decisions
+    models are dropped.
 
     Args:
         new_models: Candidate dicts from :func:`compute_changes`; mutated
@@ -2451,7 +2753,7 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
         The candidates that passed (or were exempt from) probing.
     """
     for nm in new_models:
-        if nm["name"].startswith(("codex/", "cc/")):
+        if nm["name"].startswith(_MIRROR_PREFIXES):
             continue
         caps = test_model_capabilities(
             nm["name"], verbose=verbose, decisions=nm.get("is_decisions", False)
@@ -2469,6 +2771,12 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
     return [nm for nm in new_models if not nm.get("_skip")]
 
 
+_MIRROR_PREFIXES: tuple[str, ...] = ("codex/", "cc/", "bedrock/")
+"""Catalog namespaces whose candidates copy another entry's capabilities
+instead of being live-probed: the Codex and Claude Code CLIs, and Bedrock
+ids mirrored from their ``claude-*`` entry."""
+
+
 def _assume_untested_capabilities(new_models: list[dict]) -> None:
     """Fill capability flags for ``--skip-test`` from the vendor listing alone.
 
@@ -2476,13 +2784,16 @@ def _assume_untested_capabilities(new_models: list[dict]) -> None:
     one marked ``is_decisions`` a decisions model, everything else a
     function-calling generator.  ``thinking`` stays unknown and the v2
     transport flag stays off: both are only ever written after a live
-    probe.
+    probe.  Mirror candidates (:data:`_MIRROR_PREFIXES`) already carry the
+    flags of the entry they copy and are left alone.
 
     Args:
         new_models: Candidate dicts from :func:`compute_changes`; mutated
             in place.
     """
     for nm in new_models:
+        if nm["name"].startswith(_MIRROR_PREFIXES):
+            continue
         nm["dec"] = nm.get("is_decisions", False)
         nm["emb"] = nm.get("is_embedding", False)
         nm["gen"] = not nm["emb"] and not nm["dec"]
@@ -2568,6 +2879,7 @@ def main() -> None:
     anthropic_models = fetch_anthropic(verbose=args.verbose)
     openai_models = fetch_openai(verbose=args.verbose)
     codex_slugs = fetch_codex_supported_slugs(verbose=args.verbose)
+    bedrock_models = fetch_bedrock(verbose=args.verbose)
 
     print("\n[3/6] Detecting deprecated models...")
     deprecated = find_deprecated_models(
@@ -2577,6 +2889,7 @@ def main() -> None:
         gemini_models,
         openai_models,
         codex_slugs=codex_slugs,
+        bedrock=bedrock_models,
     )
     if deprecated:  # pragma: no branch
         print(f"\n  Deprecated models in MODEL_INFO ({len(deprecated)}):")
@@ -2594,6 +2907,7 @@ def main() -> None:
         anthropic_models,
         openai_models,
         codex_slugs=codex_slugs,
+        bedrock=bedrock_models,
     )
 
     if updates:  # pragma: no branch
@@ -2651,6 +2965,10 @@ def main() -> None:
         for name, cur in current.items():  # pragma: no branch
             if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of") or name in deprecated_names:
                 continue
+            if name.startswith("bedrock/"):
+                # A mirror of its claude-* twin: the twin's retest reaches
+                # it through _sync_bedrock_thinking below.
+                continue
             caps = test_model_capabilities(
                 name, verbose=args.verbose, decisions=cur.get("dec", False)
             )
@@ -2689,6 +3007,9 @@ def main() -> None:
             if dec_changed:
                 existing["changes"]["dec"] = bool(caps.get("dec"))
                 print(f"    {name}: dec changed {bool(cur.get('dec'))} -> {bool(caps.get('dec'))}")
+
+    if bedrock_models:
+        _sync_bedrock_thinking(bedrock_models, current, updates, new_models)
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)

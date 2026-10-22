@@ -457,6 +457,42 @@ class RunningTasksTest(unittest.TestCase):
         self.assertEqual(done.returncode, 2)
         done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), "soon")
         self.assertEqual(done.returncode, 2)
+        done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), "300", "1", "--unfinished")
+        self.assertEqual(done.returncode, 2)
+
+    def test_unfinished_means_started_or_still_writing(self) -> None:
+        """The sync asks a wider question than the restart: which rows will change?
+
+        A row still carrying the placeholder the web app writes at a
+        task's start is not final, however old its newest event -- an
+        agent can sit in a ten-minute tool call without writing one --
+        and neither is a row without the placeholder whose task is
+        writing events now (written by a version before the placeholder).
+        A finished row, and the row of a crash the web app has already
+        rewritten, are final.
+        """
+        self._make([("STARTED_QUIET", 0, 900.0), ("STARTED_MUTE", 0, None),
+                    ("BUSY", 0, 2.0), ("CRASH_REWRITTEN", 0, 90000.0),
+                    ("FINISHED", int(time.time()), 1.0)])
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE task_history SET result = 'done'")
+        con.execute(
+            "UPDATE task_history SET result = 'Agent Failed Abruptly'"
+            " WHERE id IN ('STARTED_QUIET', 'STARTED_MUTE')")
+        con.commit()
+        con.close()
+
+        count, output = self._count("300", "--unfinished")
+        self.assertEqual(count, 3)
+        age = {line.split()[0]: int(line.split()[1]) for line in output.splitlines()[1:]}
+        self.assertEqual(sorted(age), ["BUSY", "STARTED_MUTE", "STARTED_QUIET"])
+        # A row without events is as old as itself.
+        self.assertLess(age["STARTED_MUTE"], 60)
+        self.assertGreaterEqual(age["STARTED_QUIET"], 899)
+        # The restart's question is unchanged: only the heartbeat counts.
+        self.assertEqual(self._count("300")[0], 1)
+        # No heartbeat window at all still holds back the rows that will change.
+        self.assertEqual(self._count("0", "--unfinished")[0], 2)
 
 
 class FingerprintTest(unittest.TestCase):
@@ -729,6 +765,55 @@ class CarryOverTablesTest(unittest.TestCase):
         self.assertEqual(first, {"claude-opus-5": 1})
         self.assertEqual(self._models(self.new), first)
 
+    def test_the_deletions_of_the_replaced_database_are_kept_and_carried_out(self) -> None:
+        """A task deleted on the server does not come back with the replacement.
+
+        The old database recorded the deletion (``deleted_tasks``) but
+        could not be merged from, so the sync never carried the deletion
+        here; the replacement would otherwise bring the task back from
+        this machine's copy.  The record comes over with the other
+        unsynced tables, and is carried out on the new database.
+        """
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.execute("INSERT INTO deleted_tasks VALUES ('T', 2000.0)")
+        con.execute("INSERT INTO deleted_chats VALUES ('C', 2000.0)")
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.new)
+        tasks = (("T", "C", 1000.0), ("NEW", "C", 3000.0), ("K", "", 1.0))
+        for task_id, chat_id, timestamp in tasks:
+            con.execute(
+                "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, ?, ?, ?)",
+                (task_id, timestamp, f"task {task_id}", chat_id))
+            con.execute(
+                "INSERT INTO events(task_id, seq, event_json, timestamp)"
+                " VALUES (?, 0, '{}', ?)", (task_id, timestamp))
+        con.execute("INSERT INTO chat_summaries(chat_id, summary) VALUES ('C', 's')")
+        con.commit()
+        con.close()
+
+        done = self._carry()
+
+        self.assertIn("1 deleted task(s) removed", done.stdout)
+        con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
+        try:
+            self.assertEqual(
+                [r[0] for r in con.execute("SELECT id FROM task_history ORDER BY id")],
+                ["K", "NEW"])
+            self.assertEqual(
+                [r[0] for r in con.execute("SELECT task_id FROM events ORDER BY task_id")],
+                ["K", "NEW"])
+            self.assertEqual(con.execute("SELECT id FROM deleted_tasks").fetchall(), [("T",)])
+            # The chat is still in use (NEW is younger than the deletion): its row stays.
+            self.assertEqual(con.execute("SELECT chat_id FROM chat_summaries").fetchall(),
+                             [("C",)])
+        finally:
+            con.close()
+        # A second run changes nothing.
+        self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
     def test_a_carry_over_that_fails_says_so(self) -> None:
         """Reporting success would leave the counters only in the backup."""
         self._make(self.old, {"claude-opus-5": 40})
@@ -995,8 +1080,9 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.assertIn("running on", result.stdout)
         self.assertEqual(self._backups(), [])
         self.assertEqual(self._tasks(self.remote_db), ["LIVE", "R1"])
-        # Pass 1 still did its job: the server's tasks are here.
-        self.assertEqual(self._tasks(self.local_db), ["L1", "LIVE", "R1"])
+        # Pass 1 still did its job: the server's finished tasks are here; the
+        # running one stays there until it ends (its row is still changing).
+        self.assertEqual(self._tasks(self.local_db), ["L1", "R1"])
 
     def _tree_without(self, helper: str) -> Path:
         """Copy the script and its helpers, leaving one of them out.
@@ -1048,7 +1134,13 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.assertEqual(self._tasks(self.local_db), ["L1", "R1"])
 
     def test_the_replacement_can_be_forced_when_the_task_can_wait(self) -> None:
-        """The refusal is a default, not a wall."""
+        """The refusal is a default, not a wall.
+
+        The running task's row stayed behind in pass 1 (it was still
+        changing); the forced replacement kills the task, but must not
+        lose its history: once the web app is stopped the row is brought
+        into the upload, so the replaced database still holds it.
+        """
         self._make_db(self.local_db, ["L1"])
         self._make_db(self.remote_db, ["R1"], work_dir=_SERVER, running="LIVE")
         self.remote_db.chmod(0o444)
@@ -1056,8 +1148,48 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         result = self._sync(SORCAR_FORCE_RESTART="1")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Bringing the tasks that were in flight", result.stdout)
         self.assertEqual(len(self._backups()), 1)
         self.assertEqual(self._tasks(self.remote_db), ["L1", "LIVE", "R1"])
+        self.assertEqual(self._tasks(self.local_db), ["L1", "R1"])
+
+    def test_a_forced_replacement_that_cannot_carry_the_running_task_is_refused(
+        self,
+    ) -> None:
+        """Without sync_db.py the running task's row cannot be brought into the upload.
+
+        A first sync downloads the server's database without its running
+        task, so the pull counts as complete; the forced replacement would
+        then bury that task's only row.  It is refused instead.
+        """
+        self._make_db(self.remote_db, ["R1"], work_dir=_SERVER, running="LIVE")
+        self.remote_db.chmod(0o444)
+        script = self._tree_without("sync_db.py")
+
+        result = _run("bash", str(script), "user@example.com", _LAPTOP, _SERVER,
+                      env={**self.env, "SORCAR_FORCE_RESTART": "1"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("left as it is", result.stdout)
+        self.assertEqual(self._backups(), [])
+        self.assertEqual(self._tasks(self.remote_db), ["LIVE", "R1"])
+        self.assertEqual(self._tasks(self.local_db), ["R1"])
+
+    def test_a_first_download_carries_out_the_deletions_the_server_had_put_off(
+        self,
+    ) -> None:
+        """A task deleted while it ran there is gone here, not shown until the next sync."""
+        self._make_db(self.remote_db, ["KEEP", "T"], work_dir=_SERVER)
+        con = sqlite3.connect(self.remote_db)
+        con.execute("INSERT INTO deleted_tasks VALUES ('T', ?)", (time.time() + 1,))
+        con.commit()
+        con.close()
+
+        result = self._sync()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._tasks(self.local_db), ["KEEP"])
+        self.assertEqual(self._tasks(self.remote_db), ["KEEP"])
 
 
 if __name__ == "__main__":

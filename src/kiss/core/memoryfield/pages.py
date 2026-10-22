@@ -323,7 +323,7 @@ class MemoryDir:
                 :data:`MUTATION_LOCK_TIMEOUT`; nothing is written.
         """
         path = self.page_path(name)
-        tombstone = self._tombstone_dir() / path.stem
+        tombstone = self.tombstone_path(name)
         incoming, body = split_frontmatter(body)
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
@@ -425,7 +425,7 @@ class MemoryDir:
                 :data:`MUTATION_LOCK_TIMEOUT`; the page is then kept.
         """
         path = self.page_path(name)
-        tombstone = self._tombstone_dir() / path.stem
+        tombstone = self.tombstone_path(name)
         with self._mutation_lock():
             if not path.is_file():
                 raise FileNotFoundError(f"Page {path.name} does not exist.")

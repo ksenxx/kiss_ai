@@ -561,7 +561,10 @@ class SyncTaskDbPushTest(unittest.TestCase):
             th._db_conn = None
             th._close_db()
             for i in range(25):
-                th._add_task(f"local task {i}", "", {"model": "m"})
+                task_id, _ = th._add_task(f"local task {i}", "", {"model": "m"})
+                # A task that has only started is held back; these have ended.
+                th._save_task_result(f"done {i}", task_id=task_id)
+            th._close_db()
 
             self.assertEqual(self._push().returncode, 0)
 

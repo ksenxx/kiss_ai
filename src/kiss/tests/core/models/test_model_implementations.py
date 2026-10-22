@@ -236,6 +236,9 @@ class TestModelInfo:
             "Gemini": "GEMINI_API_KEY",
             "Claude Code CLI": None,
             "Codex CLI": None,
+            # Bedrock signs with AWS credentials (bearer token, key pair
+            # or boto3's chain), not a single provider API key.
+            "Bedrock": None,
             "Unknown": None,
         }
         seen = set()
@@ -332,8 +335,11 @@ class TestCachePricing:
     def test_openrouter_provider_cache_pricing(self):
         """openrouter.ai/api/v1/models ``pricing.input_cache_read`` / ``input_cache_write``
         (2026-09) are stored verbatim in the catalog for every gateway model."""
-        g = MODEL_INFO["openrouter/google/gemini-2.5-pro"]
-        assert g.cache_read_price_per_1M == pytest.approx(0.125)
+        # The 2026-10-20 refresh dropped openrouter/google/gemini-2.5-pro
+        # from the bundled catalog; gemini-3.1-pro-preview is the current
+        # Google gateway entry with a published 0.1x cache read ($0.20 on $2).
+        g = MODEL_INFO["openrouter/google/gemini-3.1-pro-preview"]
+        assert g.cache_read_price_per_1M == pytest.approx(0.20)
         assert g.cache_read_price_per_1M == pytest.approx(g.input_price_per_1M * 0.1)
         assert MODEL_INFO["openrouter/openai/gpt-5.5"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-5.5"].input_price_per_1M * 0.1

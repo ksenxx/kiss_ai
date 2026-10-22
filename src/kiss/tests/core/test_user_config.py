@@ -36,7 +36,7 @@ from kiss.core.user_config import (
     save_api_key,
     save_config,
 )
-from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, posix_only
+from kiss.tests.conftest import AMBIENT_AWS_ENV_VARS, HOT_READER_PAUSE, IS_WINDOWS, posix_only
 
 
 @pytest.fixture(autouse=True)
@@ -1344,8 +1344,15 @@ class TestReviewRegressions:
 
 
 # Environment snapshot taken when pytest imports this module (before any
-# of its tests run): the leak guard below compares against it.
-_ENV_AT_IMPORT = {k: os.environ.get(k) for k in API_KEY_ENV_VARS}
+# of its tests run): the leak guard below compares against it.  The
+# ambient AWS credential variables are left out: the autouse
+# ``no_ambient_aws_credentials`` fixture in ``conftest.py`` hides them
+# for the duration of every test by design, so on a machine where the
+# developer has exported real keys they differ from the import-time
+# value inside the guard itself without any test having leaked.
+_ENV_AT_IMPORT = {
+    k: os.environ.get(k) for k in API_KEY_ENV_VARS if k not in AMBIENT_AWS_ENV_VARS
+}
 
 
 class TestNoApiKeyEnvLeak:
@@ -1368,9 +1375,9 @@ class TestNoApiKeyEnvLeak:
 
     def test_env_restored_after_all_prior_tests(self) -> None:
         leaked = {
-            k: (os.environ.get(k), _ENV_AT_IMPORT[k])
-            for k in sorted(API_KEY_ENV_VARS)
-            if os.environ.get(k) != _ENV_AT_IMPORT[k]
+            k: (os.environ.get(k), at_import)
+            for k, at_import in sorted(_ENV_AT_IMPORT.items())
+            if os.environ.get(k) != at_import
         }
         assert not leaked, (
             "API-key env vars changed by earlier tests in this file were "

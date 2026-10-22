@@ -130,6 +130,39 @@ def _backups(kiss_dir: Path) -> list[Path]:
     )
 
 
+def _finish_tasks(path: Path) -> None:
+    """Give every task of a database the row of a finished task.
+
+    ``th._add_task`` writes the row of a task that has just started, with
+    the placeholder result the sync holds back; this is what the web app
+    writes when the task ends.
+    """
+    con = sqlite3.connect(path)
+    con.execute(
+        "UPDATE task_history SET result = 'done', end_ts = ?", (time.time(),)
+    )
+    con.commit()
+    con.close()
+
+
+def _delete_task(path: Path, task_id: str, chat_id: str = "") -> None:
+    """Delete a task from a database as the web app's History panel does."""
+    con = sqlite3.connect(path)
+    try:
+        th._delete_task_rows(con, [task_id], chat_id)
+    finally:
+        con.close()
+
+
+def _deleted(path: Path) -> list[str]:
+    """Return the ids of the tasks a database records as deleted, sorted."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return sorted(str(r[0]) for r in con.execute("SELECT id FROM deleted_tasks"))
+    finally:
+        con.close()
+
+
 def _steps(path: Path, task_id: str) -> int:
     """Return the step count recorded for *task_id*."""
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -241,7 +274,7 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sorted(_tasks(self.remote_db)), ["DONE", "REMOTE"])
         self.assertEqual(sorted(_tasks(self.local_db)), ["DONE", "LIVE", "REMOTE"])
-        self.assertIn("live local task", result.stdout)
+        self.assertIn("Held back 1 task(s) still in flight", result.stdout)
 
     def test_the_remotes_tasks_arrive_pointing_at_this_checkout(self) -> None:
         """Imported tasks must point at a directory that exists here.
@@ -723,6 +756,9 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
             th._close_db()
             th._add_task("laptop task", "", {"work_dir": _LAPTOP})
             th._close_db()
+            # A task that has only started is held back; these have ended.
+            _finish_tasks(self.remote_db)
+            _finish_tasks(self.local_db)
 
             self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
 
@@ -771,6 +807,167 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         expected = [("shared", "Write the introduction of the paper", 300500)]
         self.assertEqual(_chat_summaries(self.local_db), expected)
         self.assertEqual(_chat_summaries(self.remote_db), expected)
+
+    def test_a_task_deleted_here_is_deleted_there_and_stays_deleted(self) -> None:
+        """A deletion travels; the deleted task does not come back.
+
+        The user deletes a task from this machine's History panel after a
+        sync has put it on both machines.  The next sync must carry the
+        deletion to the server instead of bringing the task back from it,
+        and a third sync must not resurrect it either.
+        """
+        _make_db(self.local_db, ["L1", "GONE"], events=2)
+        _make_db(self.remote_db, ["R1"])
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["GONE", "L1", "R1"])
+
+        _delete_task(self.local_db, "GONE")
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R1"])
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 task row(s) deleted", result.stdout)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R1"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "R1"])
+        self.assertEqual(_deleted(self.remote_db), ["GONE"])
+        con = sqlite3.connect(f"file:{self.remote_db}?mode=ro", uri=True)
+        self.assertEqual(
+            con.execute("SELECT count(*) FROM events WHERE task_id = 'GONE'").fetchone()[0], 0
+        )
+        con.close()
+
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R1"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "R1"])
+
+    def test_a_chat_deleted_there_disappears_here_summary_and_all(self) -> None:
+        """A chat deleted on the server loses its tasks and its summary row here."""
+        _make_db(self.local_db, ["L1"], chat_id="keep")
+        _make_db(self.remote_db, ["R1", "R2"], chat_id="doomed")
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R1", "R2"])
+        # The sync summarised the chat it brought here; "keep" gained no
+        # task here, so it has the row the web app would give it: none yet.
+        self.assertEqual([c for c, _, _ in _chat_summaries(self.local_db)], ["doomed"])
+        self.assertEqual([c for c, _, _ in _chat_summaries(self.remote_db)], ["keep"])
+
+        for task_id in ("R1", "R2"):
+            _delete_task(self.remote_db, task_id, chat_id="doomed")
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1"])
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])
+        self.assertEqual(_chat_summaries(self.local_db), [])
+        self.assertEqual([c for c, _, _ in _chat_summaries(self.remote_db)], ["keep"])
+        self.assertEqual(_deleted(self.local_db), ["R1", "R2"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1"])
+
+    def test_deleting_one_task_of_a_chat_keeps_the_chats_title_there(self) -> None:
+        """A task deletion is not a chat deletion: the renamed chat keeps its row."""
+        _make_db(self.local_db, ["L1", "L2"], chat_id="paper")
+        _make_db(self.remote_db, [], chat_id="paper")
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        con = sqlite3.connect(self.remote_db)
+        con.execute("UPDATE chat_summaries SET user_summary = 'My paper' WHERE chat_id = 'paper'")
+        con.commit()
+        con.close()
+
+        _delete_task(self.local_db, "L2")
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1"])
+        con = sqlite3.connect(f"file:{self.remote_db}?mode=ro", uri=True)
+        self.assertEqual(
+            con.execute("SELECT chat_id, user_summary FROM chat_summaries").fetchall(),
+            [("paper", "My paper")],
+        )
+        con.close()
+
+        # Deleting the chat itself (its last task with it) takes the row too.
+        _delete_task(self.local_db, "L1", chat_id="paper")
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(_tasks(self.remote_db), {})
+        self.assertEqual(_chat_summaries(self.remote_db), [])
+
+    def test_a_deletion_never_removes_a_task_still_running(self) -> None:
+        """A deletion of a task that is running on the other machine waits.
+
+        Before tasks in flight were held back, an unfinished row could
+        travel; if the user then deletes it where it arrived, the machine
+        running it must keep its row until the task has ended -- deleting
+        it under the running agent would lose what the agent writes next.
+        The deletion is recorded there all the same and carried out by a
+        later sync, once the row is final.
+        """
+        _make_db(self.local_db, ["L1"])
+        _make_db(self.remote_db, ["RUNNING"])
+        con = sqlite3.connect(self.remote_db)
+        con.execute("UPDATE task_history SET result = 'Agent Failed Abruptly', timestamp = 1.0")
+        con.commit()
+        con.close()
+        # The row had travelled here earlier (held back today, but not then).
+        _make_db(self.local_db, ["RUNNING"])
+        _delete_task(self.local_db, "RUNNING")
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "RUNNING"])
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])
+        self.assertEqual(_deleted(self.remote_db), ["RUNNING"])
+
+        _finish_tasks(self.remote_db)
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1"])
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])
+
+    def test_a_task_in_flight_on_the_server_stays_there_until_it_ends(self) -> None:
+        """The server's running task is not copied here with its unfinished row.
+
+        The merge only adds rows, so a row copied while its task runs
+        would stay unfinished here for good.  A task that has started
+        (the web app's placeholder result), or is writing events now, is
+        held back; it comes over, finished, on the next sync.
+        """
+        _make_db(self.local_db, ["L1"])
+        _make_db(self.remote_db, ["R_DONE", "R_STARTED", "R_BUSY"], events=1)
+        con = sqlite3.connect(self.remote_db)
+        con.execute(
+            "UPDATE task_history SET result = 'Agent Failed Abruptly' WHERE id = 'R_STARTED'"
+        )
+        con.execute("UPDATE events SET timestamp = ? WHERE task_id = 'R_BUSY'", (time.time(),))
+        con.commit()
+        con.close()
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Held back 2 task(s) still in flight", result.stdout)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R_DONE"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "R_BUSY", "R_DONE", "R_STARTED"])
+
+        _finish_tasks(self.remote_db)
+        con = sqlite3.connect(self.remote_db)
+        con.execute("UPDATE events SET timestamp = 1.0")
+        con.commit()
+        con.close()
+        self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1", "R_BUSY", "R_DONE", "R_STARTED"])
+
+    def test_a_first_download_leaves_the_servers_running_task_behind(self) -> None:
+        """No database here yet: the server's copy arrives without its running task."""
+        _make_db(self.remote_db, ["R_DONE", "R_STARTED"], work_dir=_SERVER)
+        con = sqlite3.connect(self.remote_db)
+        con.execute(
+            "UPDATE task_history SET result = 'Agent Failed Abruptly' WHERE id = 'R_STARTED'"
+        )
+        con.commit()
+        con.close()
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Held back 1 task(s) still in flight", result.stdout)
+        self.assertEqual(_tasks(self.local_db), {"R_DONE": _LAPTOP})
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["R_DONE", "R_STARTED"])
 
 
 class RelocateWorkDirTest(unittest.TestCase):

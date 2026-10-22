@@ -34,11 +34,18 @@ from kiss.core.kiss_error import (
     ModelRefusalError,
 )
 from kiss.core.models.model import Attachment, strip_system_cache_break
-from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
+from kiss.core.models.model_info import (
+    calculate_cost,
+    declared_fallback,
+    get_fallback_model,
+    get_max_context_length,
+    model,
+)
 from kiss.core.prompt_cache_keepalive import PromptCacheKeepAlive, is_long_running_call
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
     ToolCallInterrupted,
+    drain_pending_interrupt,
     end_tool_call,
     new_tool_call,
     register_tool_call,
@@ -144,7 +151,9 @@ def _call_repr(function_call: dict[str, Any]) -> str:
 
 
 def unknown_argument_hint(
-    sig: inspect.Signature | None, args: dict[str, Any], tool: Any = None,
+    sig: inspect.Signature | None,
+    args: dict[str, Any],
+    tool: Any = None,
 ) -> str:
     """Return a hint for the arguments of a tool call that its signature does not take.
 
@@ -221,7 +230,8 @@ class KISSAgent(Base):
 
     @budget_used.setter
     def budget_used(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: float,
+        self,
+        value: float,
     ) -> None:
         # Publishing a whole replacement record keeps the triple
         # coherent for concurrent readers; single-field writers are
@@ -235,11 +245,10 @@ class KISSAgent(Base):
 
     @total_tokens_used.setter
     def total_tokens_used(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: int,
+        self,
+        value: int,
     ) -> None:
-        self._usage_totals = self._usage_totals._replace(
-            total_tokens_used=int(value)
-        )
+        self._usage_totals = self._usage_totals._replace(total_tokens_used=int(value))
 
     @property
     def step_count(self) -> int:
@@ -248,7 +257,8 @@ class KISSAgent(Base):
 
     @step_count.setter
     def step_count(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: int,
+        self,
+        value: int,
     ) -> None:
         self._usage_totals = self._usage_totals._replace(step_count=int(value))
 
@@ -266,16 +276,25 @@ class KISSAgent(Base):
         totals = self._usage_totals
         return (totals.budget_used, totals.total_tokens_used, totals.step_count)
 
+    def reset_usage(self) -> None:
+        """Zero this agent's usage counters before a run.
+
+        The ``(budget_used, total_tokens_used, step_count)`` triple is
+        replaced with ONE store, so a concurrent :meth:`usage_snapshot`
+        reads either the previous totals or all zeros, never a mix.
+        Called by :meth:`_reset` and by the task runner before a run
+        (``task_runner._zero_usage_counters``).
+        """
+        self._usage_totals = _ZERO_USAGE
+        self.tool_calls_made = 0
+
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
-        self.llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None
+        self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.context_tokens_used = 0
-        self.last_cache_read_tokens = 0
         self.last_call_usage: dict[str, int | float] | None = None
         """Tokens and USD cost of the latest model call
         (``input_tokens``, ``output_tokens``, ``cache_read``,
@@ -332,16 +351,12 @@ class KISSAgent(Base):
         self.function_map: dict[str, Callable[..., Any]] = {}
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
-        self.step_count = 0
-        self.tool_calls_made = 0
-        self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.reset_usage()
         self.context_tokens_used = 0
-        self.last_cache_read_tokens = 0
         self.last_call_usage = None
         self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         self._llm_hook_conversation_index = 0
-        self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
         # ``run_start_timestamp`` is the real wall clock: the saved record
         # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
         # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
@@ -430,9 +445,7 @@ class KISSAgent(Base):
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
         print_prompts: bool = True,
-        llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None,
+        llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
     ) -> str:
         """
@@ -514,9 +527,7 @@ class KISSAgent(Base):
                 )
             self._setup_tools(tools)
             if system_prompt and self.printer and self.print_prompts:
-                self.printer.print(
-                    strip_system_cache_break(system_prompt), type="system_prompt"
-                )
+                self.printer.print(strip_system_cache_break(system_prompt), type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
             if not self.is_agentic:
@@ -559,24 +570,14 @@ class KISSAgent(Base):
         start_timestamp = int(time.time())
         self.step_count += 1
 
-        call_started = time.time()
-        self.last_call_usage = None
         try:
-            response_text, response = self.model.generate()
+            response_text, _response = self._billed_model_call(self.model.generate)
         except Exception as e:
-            # A timed-out whole-task run must not erase its known spend.
-            self._bill_partial_usage()
-            self._print_llm_call(call_started)
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
                 ) from e
             raise
-        except BaseException:
-            self._bill_stopped_call(call_started)
-            raise
-        self._update_tokens_and_budget_from_response(response)
-        self._print_llm_call(call_started)
         usage_info_str = self._get_usage_info_string()
         self._add_message(
             "model", response_text + "\n```text\n" + usage_info_str + "\n```\n", start_timestamp
@@ -605,9 +606,7 @@ class KISSAgent(Base):
         self._print_result(response_text)
         return response_text
 
-    def _try_switch_to_fallback(
-        self, reason: str = "a non-retryable error"
-    ) -> str | None:
+    def _try_switch_to_fallback(self, reason: str = "a non-retryable error") -> str | None:
         """Swap ``self.model`` to the registered fallback model, if any.
 
         Consulted by :meth:`_run_agentic_loop` after a recoverable
@@ -642,7 +641,6 @@ class KISSAgent(Base):
             fallback is available, the fallback equals the current
             model, or the one-shot guard has already been consumed.
         """
-        from kiss.core.models.model_info import declared_fallback, get_fallback_model
         if self._fallback_used:
             return None
         new_name = get_fallback_model(self.model_name)
@@ -672,8 +670,7 @@ class KISSAgent(Base):
         self._fallback_used = True
         if self.printer:
             self.printer.print(
-                f"Model {old_name} returned {reason}; "
-                f"switching to fallback model: {new_name}",
+                f"Model {old_name} returned {reason}; switching to fallback model: {new_name}",
                 type="system_prompt",
             )
         return new_name
@@ -714,9 +711,7 @@ class KISSAgent(Base):
                         f"Agent {self.name} exceeded the model's context window: {e}"
                     ) from e
                 if not _is_retryable_error(e):
-                    new_name = self._try_switch_to_fallback(
-                        reason="a non-retryable error"
-                    )
+                    new_name = self._try_switch_to_fallback(reason="a non-retryable error")
                     if new_name is None:
                         raise KISSError(f"Non-retryable error from model: {e}") from e
                     consecutive_errors = 0
@@ -756,36 +751,22 @@ class KISSAgent(Base):
         self._maybe_compact_conversation()
         if self.llm_call_hook is not None:
             hook_start = self._llm_hook_conversation_index
-            modified_messages = self.llm_call_hook(
-                list(self.model.conversation[hook_start:])
-            )
+            modified_messages = self.llm_call_hook(list(self.model.conversation[hook_start:]))
             self.model.conversation[hook_start:] = list(modified_messages)
         # Advance the boundary BEFORE the call so a raising call (retryable
         # provider error, refusal, fallback swap) never re-presents
         # already-hooked messages to the hook on the next attempt ...
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
-        call_started = time.time()
-        self.last_call_usage = None
         self._native_tool_calls = 0
         self._native_tool_error = None
         try:
-            with self._native_tools_exposed():
-                function_calls, response_text, response = (
-                    self.model.generate_and_process_with_tools(
-                        self.function_map, tools_schema=self._cached_tools_schema
-                    )
-                )
+            function_calls, response_text, _response = self._billed_model_call(
+                self._generate_with_tools
+            )
         except Exception:
-            # A truncated, incomplete or refused response raises but was
-            # still billed; the retry/fallback loop must not drop it.
-            self._bill_partial_usage()
-            self._print_llm_call(call_started)
             if self._native_tool_error is not None:
                 raise self._native_tool_error
-            raise
-        except BaseException:
-            self._bill_stopped_call(call_started)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call —
@@ -795,8 +776,6 @@ class KISSAgent(Base):
             self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
-        self._update_tokens_and_budget_from_response(response)
-        self._print_llm_call(call_started)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
         if self.printer:
@@ -807,7 +786,7 @@ class KISSAgent(Base):
                 cost=f"${self.budget_used:.4f}",
                 cost_usd=self.budget_used,
                 total_steps=self.step_count,
-                cache_read=self.last_cache_read_tokens,
+                cache_read=(self.last_call_usage or {}).get("cache_read", 0),
                 model=self.model.model_name,
             )
 
@@ -908,8 +887,7 @@ class KISSAgent(Base):
 
         if finish_result is not None:
             logger.info(
-                "finish() called: agent=%s step=%d budget=$%.4f "
-                "tokens=%d result=%r",
+                "finish() called: agent=%s step=%d budget=$%.4f tokens=%d result=%r",
                 self.name,
                 self.step_count,
                 self.budget_used,
@@ -959,9 +937,7 @@ class KISSAgent(Base):
         with self.model.native_tools_exposed(schema, execute):
             yield
 
-    def _guarded_execute_tool(
-        self, function_call: dict[str, Any]
-    ) -> tuple[str, str, str | None]:
+    def _guarded_execute_tool(self, function_call: dict[str, Any]) -> tuple[str, str, str | None]:
         """Execute one tool call the way the agent loop does: hook, guard, then tool.
 
         The :attr:`tool_call_hook` is called before EVERY tool call (its
@@ -1046,9 +1022,7 @@ class KISSAgent(Base):
             raise
         return name, response
 
-    def _execute_tool_keeping_cache_warm(
-        self, function_call: dict[str, Any]
-    ) -> tuple[str, str]:
+    def _execute_tool_keeping_cache_warm(self, function_call: dict[str, Any]) -> tuple[str, str]:
         """Run a tool call that may outlive the prompt cache, pinging the cache meanwhile.
 
         Every ping is a billed request; its cost is added to the budget
@@ -1192,9 +1166,7 @@ class KISSAgent(Base):
         if "summary_in_html" in params:
             summary = explanation + (f" Last status from the model: {text}" if text else "")
             assert finish_fn is not None
-            return str(
-                finish_fn(success=success, is_continue=is_continue, summary_in_html=summary)
-            )
+            return str(finish_fn(success=success, is_continue=is_continue, summary_in_html=summary))
         if "result" in params:
             assert finish_fn is not None
             return str(finish_fn(result=text or explanation))
@@ -1245,6 +1217,7 @@ class KISSAgent(Base):
 
         is_error = False
         interrupted = False
+        delivered = False
         # The call is registered — inside the try — so the UI's
         # per-panel Stop button can interrupt it (kiss.core.tool_interrupt):
         # the interrupt lands as ToolCallInterrupted, raised by the tool
@@ -1272,6 +1245,7 @@ class KISSAgent(Base):
                 is_error = True
             end_tool_call(token)
         except ToolCallInterrupted as exc:
+            delivered = True
             if isinstance(exc.__context__, KeyboardInterrupt | BudgetExceededError):
                 # The interrupt landed while a task Stop or a budget
                 # overrun was already unwinding through the tool: that
@@ -1287,7 +1261,19 @@ class KISSAgent(Base):
             # pending injection a landing spot: from here on the
             # watchdog never injects into the unwinding below.
             token.closing = True
-            unregister_tool_call(token)
+            try:
+                # Waits out an injection in progress, so ``injected`` is
+                # final; an injection that happened before the store
+                # (a task Stop or budget overrun raised by the tool
+                # while the watchdog fired) is pending on this thread
+                # and lands here or in the drain, not later up the stack.
+                unregister_tool_call(token)
+                if token.injected and not delivered:
+                    drain_pending_interrupt()
+            except ToolCallInterrupted:
+                # The Stop / budget error already unwinding wins; the
+                # landing may have pre-empted the registry pop.
+                unregister_tool_call(token)
 
         if self.printer:
             self.printer.print(
@@ -1343,6 +1329,55 @@ class KISSAgent(Base):
                 )
                 raise KISSError(error_msg)
             self.function_map[tool.__name__] = tool
+
+    def _generate_with_tools(self) -> tuple[list[dict[str, Any]], str, Any]:
+        """One tool-calling model turn with the native tools exposed.
+
+        Returns:
+            ``(function_calls, response_text, response)`` as
+            ``Model.generate_and_process_with_tools`` returns them.
+        """
+        with self._native_tools_exposed():
+            turn: tuple[list[dict[str, Any]], str, Any] = (
+                self.model.generate_and_process_with_tools(
+                    self.function_map, tools_schema=self._cached_tools_schema
+                )
+            )
+            return turn
+
+    def _billed_model_call[T: tuple[Any, ...]](self, call: Callable[[], T]) -> T:
+        """Run one model request and account its usage whatever happens.
+
+        *call* returns a tuple whose LAST element is the provider's raw
+        response (``Model.generate`` and
+        ``Model.generate_and_process_with_tools`` both do); on return it
+        is billed and its ``llm_call`` event emitted.  A call that
+        raises is billed for what the provider charged anyway: a
+        truncated, incomplete or refused response, or a timed-out
+        whole-task run, raises an ``Exception`` after the partial usage
+        is billed and the event emitted; a Stop (``KeyboardInterrupt``)
+        does the same without letting an accounting failure replace it.
+
+        Args:
+            call: The zero-argument model request.
+
+        Returns:
+            Whatever *call* returned.
+        """
+        started = time.time()
+        self.last_call_usage = None
+        try:
+            result = call()
+        except Exception:
+            self._bill_partial_usage()
+            self._print_llm_call(started)
+            raise
+        except BaseException:
+            self._bill_stopped_call(started)
+            raise
+        self._update_tokens_and_budget_from_response(result[-1])
+        self._print_llm_call(started)
+        return result
 
     def _bill_partial_usage(self) -> None:
         """Account the usage of a generation call that raised, if any.
@@ -1413,7 +1448,6 @@ class KISSAgent(Base):
             )
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
-            self.last_cache_read_tokens = cache_read
             # A provider that states what it charged for the call
             # (OpenRouter's ``usage.cost``) is authoritative: the catalog
             # rate is only an estimate of the routed upstream's price.
@@ -1435,8 +1469,9 @@ class KISSAgent(Base):
                     num_image_output_tokens=image_output,
                 )
                 # The catalog holds Standard-tier rates; a provider that
-                # served a differently priced tier (OpenAI Flex/Fast) says
-                # so in the response.
+                # served a differently priced tier (OpenAI Flex/Fast,
+                # Anthropic fast mode or US-only inference) says so in
+                # the response.
                 tier_multiplier = getattr(self.model, "cost_multiplier_for_response", None)
                 factor = tier_multiplier(response) if callable(tier_multiplier) else 1.0
                 if isinstance(factor, int | float):
@@ -1463,9 +1498,7 @@ class KISSAgent(Base):
             raise
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
-            logger.error(
-                "Error updating tokens and budget from response: %s", e, exc_info=True
-            )
+            logger.error("Error updating tokens and budget from response: %s", e, exc_info=True)
 
     def _print_llm_call(self, started: float) -> None:
         """Emit an ``llm_call`` event for the model call that just returned.

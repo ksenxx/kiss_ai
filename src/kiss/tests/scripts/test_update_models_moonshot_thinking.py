@@ -510,6 +510,7 @@ def test_main_discovers_new_kimi_and_writes_moonshot_aliases(
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
+    monkeypatch.setattr(mod, "fetch_bedrock", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
     monkeypatch.setattr(mod, "get_current_model_info", lambda: {})
 
@@ -558,6 +559,7 @@ def test_main_test_existing_promotes_stored_max_from_sibling(
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
+    monkeypatch.setattr(mod, "fetch_bedrock", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
     monkeypatch.setattr(mod, "get_current_model_info", lambda: dict(initial))
     calls: list[str] = []

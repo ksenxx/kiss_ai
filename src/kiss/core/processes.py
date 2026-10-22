@@ -14,6 +14,7 @@ project goes through this module.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -77,6 +78,7 @@ def find_bash() -> str | None:
         if os.path.exists(candidate):
             return candidate
     return None  # pragma: no cover — Windows without Git bash
+
 
 # ``signal.SIGKILL`` does not exist on Windows.  Callers that want an
 # unconditional kill pass this; :func:`kill_process_group` ignores the
@@ -174,8 +176,11 @@ def _windows_job_active_processes(job: int) -> int:  # pragma: no cover — Wind
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     info = _Accounting()
     ok = kernel32.QueryInformationJobObject(
-        ctypes.c_void_p(job), _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
-        ctypes.byref(info), ctypes.sizeof(info), None,
+        ctypes.c_void_p(job),
+        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        None,
     )
     return int(info.ActiveProcesses) if ok else 0
 
@@ -206,8 +211,7 @@ def _windows_record_job(kernel32: Any, pid: int, job: int) -> None:  # pragma: n
     # leader may exit and leave grandchildren behind that a later
     # :func:`kill_process_group` must still be able to terminate.
     stale = [
-        (p, h) for p, h in list(_WINDOWS_JOBS.items())
-        if _windows_job_active_processes(h) == 0
+        (p, h) for p, h in list(_WINDOWS_JOBS.items()) if _windows_job_active_processes(h) == 0
     ]
     for stale_pid, handle in stale:
         if _WINDOWS_JOBS.pop(stale_pid, None) is not None:
@@ -288,7 +292,9 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
         try:
             result = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, check=False, timeout=15,
+                capture_output=True,
+                check=False,
+                timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise OSError(f"taskkill failed for pid {pid}: {exc}") from exc
@@ -301,6 +307,80 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
             )
         return
     os.killpg(pid, sig)
+
+
+def kill_process_tree(proc: subprocess.Popen[Any]) -> None:
+    """Kill *proc* and every process in its group, falling back to *proc* alone.
+
+    ``SIGKILL`` to the group :func:`popen_process_group` gave the child
+    (its Job Object on Windows), so a launcher's grandchild (the native
+    binary behind an npm wrapper, the CLI behind a ``.cmd`` shim) dies
+    with it instead of living on with the pipes.  When the group is
+    already gone, or Windows could not end it, the child itself is
+    killed.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+    """
+    try:
+        kill_process_group(proc.pid, SIGKILL)
+    except OSError:
+        proc.kill()
+
+
+# Seconds a killed child is given to exit before the caller stops waiting
+# for it.
+_REAP_GRACE_SECONDS = 2.0
+
+
+def run_process_group(
+    args: list[str], timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run *args* to completion in its own process group, bounded by *timeout*.
+
+    Like ``subprocess.run(args, capture_output=True, text=True,
+    timeout=timeout)`` with stdin closed, but a child that outlives
+    *timeout* is killed with its whole group (:func:`kill_process_tree`)
+    rather than alone, and so is a child whose wait any other exception
+    cuts short (a Stop landing as ``KeyboardInterrupt`` or an injected
+    exception), which ``subprocess.run`` would leave running.  The reap
+    after the kill waits for the child itself, at most
+    :data:`_REAP_GRACE_SECONDS`, never for its pipes: a grandchild that
+    outlived the kill in its own session (or on Windows without
+    ``taskkill``) is left behind instead of parking the caller until it
+    exits.
+
+    Args:
+        args: The command line.
+        timeout: Seconds the child may run.
+        env: The child environment, or ``None`` to inherit.
+
+    Returns:
+        The completed process with its decoded output.
+
+    Raises:
+        OSError: When the command could not be started.
+        subprocess.TimeoutExpired: When the child did not exit within
+            *timeout*; it and its group have been killed and reaped.
+    """
+    proc = popen_process_group(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        kill_process_tree(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_REAP_GRACE_SECONDS)
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 def _windows_terminate_job(pid: int) -> bool:  # pragma: no cover — Windows-only branch

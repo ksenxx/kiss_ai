@@ -28,7 +28,6 @@ worker thread, real KI injection.
 
 from __future__ import annotations
 
-import ctypes
 import shutil
 import tempfile
 import threading
@@ -38,13 +37,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-
-ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-    ctypes.c_ulong,
-    ctypes.py_object,
-]
 
 
 class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
@@ -127,19 +122,14 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
             "seaPath": str(script),
         }
         self.server._cmd_run(dict(cmd))
-        assert self.in_setup_region.wait(timeout=30), (
-            "worker never reached the run-setup region"
-        )
+        assert self.in_setup_region.wait(timeout=30), "worker never reached the run-setup region"
         state = agent_state.find_by_tab(tab_id)
         assert state is not None and state.task_thread is not None
         worker = state.task_thread
         tid = worker.ident
         assert tid is not None
         # What _stop_task's watchdog does after its 1s join.
-        rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid),
-            ctypes.py_object(KeyboardInterrupt),
-        )
+        rc = inject_async_exception(tid, KeyboardInterrupt)
         assert rc == 1, f"KI injection modified {rc} thread states"
         worker.join(timeout=30)
         assert not worker.is_alive(), "worker thread did not unwind"
@@ -162,11 +152,7 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
             f"the tab, got {len(end_events)}"
         )
         # The interrupted setup must surface as a stopped-task result.
-        results = [
-            e
-            for e in self._events_of_type("result")
-            if e.get("tabId") == tab_id
-        ]
+        results = [e for e in self._events_of_type("result") if e.get("tabId") == tab_id]
         assert len(results) == 1 and results[0].get("success") is False
 
         # A follow-up submit on the same tab must START (not queue):
