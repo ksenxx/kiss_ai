@@ -553,7 +553,7 @@ class TestGeminiConversion:
             },
             {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assert [c.role for c in contents] == ["user", "model", "user"]
         model_parts = contents[1].parts
         assert model_parts is not None
@@ -576,7 +576,7 @@ class TestGeminiConversion:
                 "attachments": [Attachment(data=PNG_BYTES, mime_type="image/png")],
             }
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         parts = contents[0].parts
         assert parts is not None
         assert parts[0].inline_data is not None
@@ -601,7 +601,7 @@ class TestGeminiConversion:
                 ],
             },
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         model_parts = contents[0].parts
         assert model_parts is not None
         assert [p.text for p in model_parts if p.text] == ["visible"]
@@ -647,7 +647,7 @@ class TestGeminiConversion:
             {"role": "system", "content": "cfg"},
             {"role": "user", "content": "hi"},
         ]
-        assert m._resolve_system_instruction() == "cfg\n\nsys1\n\nsys2"
+        assert m._resolve_system_instruction(m._chat_messages()) == "cfg\n\nsys1\n\nsys2"
 
     def test_build_config(self) -> None:
         m = GeminiModel(
@@ -656,7 +656,7 @@ class TestGeminiConversion:
             model_config={"max_tokens": 100, "temperature": 0.5, "top_p": 0.9},
         )
         m.conversation = [{"role": "user", "content": "hi"}]
-        config = m._build_config()
+        config = m._build_config(m._chat_messages())
         assert config.max_output_tokens == 100
         assert config.temperature == 0.5
         assert config.top_p == 0.9
@@ -823,6 +823,21 @@ class TestClaudeCodeModel:
             {"cache_creation": {"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 9},
              "cache_creation_input_tokens": 14},
         ) == (5, 9)
+        # The excess follows a split that shows only one TTL: a request's
+        # breakpoints share it (KISS sends the five-minute default).
+        assert cache_creation_tokens(
+            {"cache_creation": {"ephemeral_5m_input_tokens": 200, "ephemeral_1h_input_tokens": 0},
+             "cache_creation_input_tokens": 1000},
+        ) == (1000, 0)
+        assert cache_creation_tokens(
+            {"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 200},
+             "cache_creation_input_tokens": 1000},
+        ) == (0, 1000)
+        # A mixed split leaves the excess's TTL unknown: the 1h rate.
+        assert cache_creation_tokens(
+            {"cache_creation": {"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 9},
+             "cache_creation_input_tokens": 20},
+        ) == (5, 15)
 
     def test_find_consecutive_tool_calls_end(self) -> None:
         one = '{"tool_calls": [{"name": "Bash", "arguments": {}}]}'

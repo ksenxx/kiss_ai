@@ -286,3 +286,99 @@ class Sea(BaseSea):
         rows = _history_rows()
         assert [r["task"] for r in rows] == [raw_prompt], rows
         assert rows[0]["parent_task_id"] in ("", None), rows
+
+    def _seed_counting_sea(self, name: str, prompt_method: str) -> Path:
+        """Register ``/<name>`` as a SEA that appends a line to a counter file each
+        time its file is executed; return the counter file."""
+        counter = Path(self.tmpdir) / f"{name}-executions.txt"
+        _seed_seas_md(
+            Path(self.tmpdir) / "user-seas", name,
+            f"""
+from pathlib import Path
+from kiss.agents.seas.base.base_sea import BaseSea
+
+with Path({str(counter)!r}).open("a") as fh:
+    fh.write("executed\\n")
+
+class Sea(BaseSea):
+{prompt_method}
+""",
+        )
+        return counter
+
+    def test_bare_command_with_a_default_task_executes_the_sea_file_once(self) -> None:
+        """A bare ``/xxx`` whose ``prompt()`` supplies the task runs that task,
+        and the SEA file is executed once, not once to probe for the default
+        and again to load the run's layers."""
+        counter = self._seed_counting_sea(
+            "counted",
+            "    def prompt(self, task):\n"
+            "        return task + 'Summarize the day.'\n",
+        )
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        result = sorcar.run(
+            "/counted", work_dir=self.repo,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert result.success is True, result
+        assert len(runs) == 1, runs
+        assert runs[0]["prompt"] == "# Task\nSummarize the day.", runs[0]["prompt"]
+        assert counter.read_text().count("executed") == 1, counter.read_text()
+
+    def test_bare_command_without_a_default_task_is_a_plain_prompt(self) -> None:
+        """A bare ``/xxx`` whose SEA passes the empty task through runs as an
+        ordinary prompt (the SEA is not applied), its file executed once."""
+        counter = self._seed_counting_sea(
+            "plain",
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\\\n\\\\nPLAIN-PROTOCOL'\n",
+        )
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        result = sorcar.run(
+            "/plain", work_dir=self.repo,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert result.success is True, result
+        assert len(runs) == 1, runs
+        assert runs[0]["prompt"] == "# Task\n/plain", runs[0]["prompt"]
+        assert "PLAIN-PROTOCOL" not in runs[0]["system_prompt"]
+        assert counter.read_text().count("executed") == 1, counter.read_text()
+
+    def test_bare_command_fallback_keeps_the_picker_sea_loaded_once(self) -> None:
+        """Under a model-picker SEA, a bare ``/xxx`` without a default task runs
+        as a plain prompt through the picker, whose file is executed once for
+        the run: the fallback reuses the layers already loaded instead of
+        loading the picker again."""
+        picker_counter = self._seed_counting_sea(
+            "picker",
+            "    def register_as_model(self):\n"
+            "        return True\n\n"
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\\\n\\\\nPICKER-PROTOCOL'\n",
+        )
+        plain_counter = self._seed_counting_sea(
+            "plain",
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\\\n\\\\nPLAIN-PROTOCOL'\n",
+        )
+        # The picker verdict (``register_as_model``) executes the file
+        # once, cached by file stamp; the run must add exactly one more.
+        assert sea_commands.model_sea("picker") is not None
+        executed_before = picker_counter.read_text().count("executed")
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        result = sorcar.run(
+            "/plain", model="picker", work_dir=self.repo,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert result.success is True, result
+        assert len(runs) == 1, runs
+        assert runs[0]["prompt"] == "# Task\n/plain", runs[0]["prompt"]
+        assert "PLAIN-PROTOCOL" not in runs[0]["system_prompt"]
+        assert "PICKER-PROTOCOL" in runs[0]["system_prompt"]
+        assert plain_counter.read_text().count("executed") == 1, plain_counter.read_text()
+        assert picker_counter.read_text().count("executed") == executed_before + 1, (
+            picker_counter.read_text()
+        )

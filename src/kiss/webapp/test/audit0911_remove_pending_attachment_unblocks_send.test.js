@@ -103,33 +103,9 @@ async function checkRemovingPendingAttachmentUnblocksSend({win, posted, decodes}
     -1,
     'the composer was reset after the released send',
   );
-
-  // 5. Guard the preserved policy: a FAILED conversion of a still-present
-  //    attachment must still block the submit.  A new send waits on a
-  //    fresh HEIC whose decode is rejected while its chip stays in place.
-  const heic2 = new win.File([new Uint8Array([4, 5, 6])], 'IMG_0003.HEIC', {
-    type: 'image/heic',
-  });
-  paste(win, heic2);
-  typeAndEnter(win, 'prompt with a broken photo');
-  await settle(() => decodes.length >= 2);
-  assert.strictEqual(decodes.length, 2, 'the new HEIC reached the decoder');
-  assert.strictEqual(
-    submits(posted).length,
-    1,
-    'the new send waits on the converting attachment',
-  );
-  await failDecode(decodes, 1, 'undecodable HEIC');
-  assert.strictEqual(
-    submits(posted).length,
-    1,
-    'a still-present attachment that failed must keep blocking the submit',
-  );
-  assert.match(
-    chips.textContent,
-    /undecodable HEIC/,
-    'the failure is explained to the user',
-  );
+  // A FAILED conversion of a still-present attachment blocking the submit
+  // is pinned by audit0911_attachment_added_mid_send.test.js (step 4) and
+  // audit0902_fix_attachment_latch_per_tab.test.js.
 
   console.log('audit0911_remove_pending_attachment_unblocks_send: OK');
 }

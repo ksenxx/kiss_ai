@@ -2,25 +2,21 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Real-container regression: the NON-streaming docker Bash timeout kill.
+"""Real-container regression: a timed-out docker ``Bash`` kills its command.
 
-The streaming path of :meth:`DockerManager.Bash` has always killed a
-timed-out command inside the container (token-tagged exec +
-``_kill_exec``), and its docstring calls the alternative out as a bug:
-"Without this the hung command keeps running (and holding the stream
-open) for the rest of the container's life."  The non-streaming path —
-used whenever no ``stream_callback`` is installed — had the exact same
-flaw: on timeout it returned the error but left the command running in
-the container forever.
+:meth:`DockerManager.Bash` once left a timed-out command running in the
+container forever when no ``stream_callback`` was installed (only the
+streaming variant killed it).  There is a single exec engine now, so
+these tests pin the plain (no callback) call; the exec-startup latency
+cases live in ``test_audit1015_sorcar_tools_docker_stream_start_bounded``
+and cover both forms of the call.
 
 These tests drive a real container through the real docker daemon; no
 mocks, patches or doubles.
 """
 
-import threading
 import time
 import unittest
-from typing import Any, cast
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
@@ -56,7 +52,7 @@ _COUNT_SLEEP_53 = _count_processes_script("sle", "ep 53")
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestNonStreamingTimeoutKillsCommand(unittest.TestCase):
-    """A timed-out non-streaming command must die inside the container."""
+    """A timed-out command run without a stream callback dies in the container."""
 
     env: DockerManager
 
@@ -86,85 +82,6 @@ class TestNonStreamingTimeoutKillsCommand(unittest.TestCase):
         result = self.env.Bash("echo boom >&2; exit 3", "fail")
         self.assertIn("boom", result)
         self.assertIn("[exit code: 3]", result)
-
-    def _wait_until_no_process(self, needle_head: str, needle_tail: str) -> None:
-        """Poll the container until no process matches the needle."""
-        script = _count_processes_script(needle_head, needle_tail)
-        deadline = time.monotonic() + 20
-        count = ""
-        while time.monotonic() < deadline:
-            count = self.env.Bash(script, "count leftover processes")
-            count = count.strip().splitlines()[-1]
-            if count == "0":
-                return
-            time.sleep(0.5)
-        self.fail(f"command still running in the container ({count} processes)")
-
-    def test_timeout_while_exec_create_is_delayed_never_runs_command(self) -> None:
-        """A command whose creation the daemon delays past the deadline never runs.
-
-        The single kill scan of the old implementation ran before the
-        delayed exec existed, so the command started — and ran forever —
-        *after* Bash had already returned the timeout error.  Now the
-        worker refuses to start a cancelled exec at all.  The delay is a
-        thin latency shim in front of the real ``exec_create``; the
-        exec, container and daemon are all real.
-        """
-        api = cast(Any, self.env.client.api)
-        real_exec_create = api.exec_create
-        first_call = threading.Event()
-
-        def delayed_exec_create(*args: Any, **kwargs: Any) -> Any:
-            if not first_call.is_set():  # delay only the command under test
-                first_call.set()
-                time.sleep(3)
-            return real_exec_create(*args, **kwargs)
-
-        api.exec_create = delayed_exec_create
-        try:
-            start = time.monotonic()
-            result = self.env.Bash("sleep 61", "hang", timeout_seconds=1)
-            elapsed = time.monotonic() - start
-        finally:
-            del api.exec_create
-        self.assertLess(elapsed, 3)
-        self.assertIn("timed out", result)
-        # Wait out the shim so the worker's exec_create has returned and
-        # the cancelled worker has had every chance to (wrongly) start.
-        time.sleep(3)
-        self._wait_until_no_process("sle", "ep 61")
-
-    def test_timeout_while_exec_start_is_delayed_still_kills_command(self) -> None:
-        """A command whose start the daemon delays past the deadline is killed.
-
-        Here the worker has already committed to ``exec_start`` when the
-        deadline expires, so the process starts *after* Bash returned;
-        the reaper must kill it once it exists.  The delay is a thin
-        latency shim in front of the real ``exec_start``.
-        """
-        api = cast(Any, self.env.client.api)
-        real_exec_start = api.exec_start
-        first_call = threading.Event()
-
-        def delayed_exec_start(*args: Any, **kwargs: Any) -> Any:
-            if not first_call.is_set():  # delay only the command under test
-                first_call.set()
-                time.sleep(3)
-            return real_exec_start(*args, **kwargs)
-
-        api.exec_start = delayed_exec_start
-        try:
-            start = time.monotonic()
-            result = self.env.Bash("sleep 67", "hang", timeout_seconds=1)
-            elapsed = time.monotonic() - start
-        finally:
-            del api.exec_start
-        self.assertLess(elapsed, 3)
-        self.assertIn("timed out", result)
-        # Wait out the shim: only now does the container-side process
-        # actually start, well after Bash returned.
-        time.sleep(3.5)
-        self._wait_until_no_process("sle", "ep 67")
 
 
 if __name__ == "__main__":

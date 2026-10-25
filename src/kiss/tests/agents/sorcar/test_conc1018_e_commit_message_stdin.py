@@ -5,7 +5,7 @@
 """A commit message longer than one execve argument allows must still commit.
 
 Linux caps a single ``argv`` string at ``MAX_ARG_STRLEN`` (128 KiB).
-``commit_message._with_trailers`` appends the full user prompt and the
+``git_worktree._ensure_task_metadata`` appends the full user prompt and the
 full task result to the merge commit message with no size cap, so a
 pasted log is enough to exceed it.  ``git commit -m <message>`` then
 fails in ``Popen`` with ``OSError(E2BIG)`` before git starts — and on

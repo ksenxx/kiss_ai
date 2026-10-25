@@ -170,12 +170,10 @@ def brave_server():
 @pytest.fixture()
 def backend(brave_server):
     """A backend pointed at the emulated server with the valid token."""
-    server = brave_server
-    base_url = server.base_url
     b = BraveSearchChannelBackend()
-    b._base_url = base_url
+    b._base_url = brave_server.base_url
     b._api_key = _API_KEY
-    return b, server
+    return b
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
@@ -289,10 +287,9 @@ def test_clamp_bounds() -> None:
     assert _clamp(10, 1, 20) == 10
 
 
-def test_brave_web_search_happy_path(backend) -> None:
+def test_brave_web_search_happy_path(backend, brave_server) -> None:
     """brave_web_search hits /web/search with the token and condenses results."""
-    b, server = backend
-    result = json.loads(b.brave_web_search("python language"))
+    result = json.loads(backend.brave_web_search("python language"))
     assert result["ok"] is True
     assert result["results"] == [
         {
@@ -312,7 +309,7 @@ def test_brave_web_search_happy_path(backend) -> None:
     assert result["faq"] == [
         {"question": "What is Python?", "answer": "A language", "url": "https://faq.example"}
     ]
-    req = server.requests[-1]
+    req = brave_server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/web/search")
     assert req["token"] == _API_KEY
     assert req["accept"] == "application/json"
@@ -321,8 +318,7 @@ def test_brave_web_search_happy_path(backend) -> None:
 
 def test_brave_web_search_without_infobox_or_faq(backend) -> None:
     """A response with no infobox/faq yields no infobox/faq keys."""
-    b, _ = backend
-    result = json.loads(b.brave_web_search("plain"))
+    result = json.loads(backend.brave_web_search("plain"))
     assert result["ok"] is True
     assert result["results"][0]["url"] == "https://plain.example"
     assert result["results"][0]["age"] == ""  # missing field condensed to ""
@@ -330,16 +326,15 @@ def test_brave_web_search_without_infobox_or_faq(backend) -> None:
     assert "faq" not in result
 
 
-def test_brave_web_search_optional_params_sent(backend) -> None:
+def test_brave_web_search_optional_params_sent(backend, brave_server) -> None:
     """Non-empty optional params are all forwarded as query params."""
-    b, server = backend
     result = json.loads(
-        b.brave_web_search(
+        backend.brave_web_search(
             "plain", count=5, offset=2, country="DE", search_lang="de", freshness="pw"
         )
     )
     assert result["ok"] is True
-    assert server.requests[-1]["query"] == {
+    assert brave_server.requests[-1]["query"] == {
         "q": ["plain"],
         "count": ["5"],
         "offset": ["2"],
@@ -349,46 +344,35 @@ def test_brave_web_search_optional_params_sent(backend) -> None:
     }
 
 
-def test_brave_web_search_omits_empty_optional_params(backend) -> None:
-    """Empty/zero optional params never appear in the query string."""
-    b, server = backend
-    b.brave_web_search("plain")
-    assert set(server.requests[-1]["query"]) == {"q", "count"}
-
-
-def test_brave_web_search_clamps_count_and_offset(backend) -> None:
+def test_brave_web_search_clamps_count_and_offset(backend, brave_server) -> None:
     """count is clamped to 1-20 and offset to 0-9 for web search."""
-    b, server = backend
-    b.brave_web_search("plain", count=999, offset=99)
-    assert server.requests[-1]["query"]["count"] == ["20"]
-    assert server.requests[-1]["query"]["offset"] == ["9"]
-    b.brave_web_search("plain", count=-3)
-    assert server.requests[-1]["query"]["count"] == ["1"]
+    backend.brave_web_search("plain", count=999, offset=99)
+    assert brave_server.requests[-1]["query"]["count"] == ["20"]
+    assert brave_server.requests[-1]["query"]["offset"] == ["9"]
+    backend.brave_web_search("plain", count=-3)
+    assert brave_server.requests[-1]["query"]["count"] == ["1"]
 
 
 @pytest.mark.parametrize(
     "tool", ["brave_web_search", "brave_news_search", "brave_image_search", "brave_video_search"]
 )
-def test_empty_query_makes_no_request(backend, tool: str) -> None:
+def test_empty_query_makes_no_request(backend, brave_server, tool: str) -> None:
     """An empty or blank query yields ok:false without any HTTP request."""
-    b, server = backend
-    assert json.loads(getattr(b, tool)("")) == {"ok": False, "error": "query cannot be empty"}
-    assert json.loads(getattr(b, tool)("   "))["ok"] is False
-    assert server.requests == []
+    assert json.loads(getattr(backend, tool)("")) == {"ok": False, "error": "query cannot be empty"}
+    assert json.loads(getattr(backend, tool)("   "))["ok"] is False
+    assert brave_server.requests == []
 
 
 def test_brave_web_search_output_truncated(backend) -> None:
     """List-heavy responses are truncated to the 8000-char output cap."""
-    b, _ = backend
-    raw = b.brave_web_search("huge")
+    raw = backend.brave_web_search("huge")
     assert len(raw) == 8000
     assert raw.startswith('{"ok": true')
 
 
-def test_brave_news_search_happy_path(backend) -> None:
+def test_brave_news_search_happy_path(backend, brave_server) -> None:
     """brave_news_search hits /news/search and condenses results with source."""
-    b, server = backend
-    result = json.loads(b.brave_news_search("climate summit"))
+    result = json.loads(backend.brave_news_search("climate summit"))
     assert result["ok"] is True
     assert result["results"] == [
         {
@@ -399,23 +383,25 @@ def test_brave_news_search_happy_path(backend) -> None:
             "source": "reuters.com",
         }
     ]
-    req = server.requests[-1]
+    req = brave_server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/news/search")
     assert req["token"] == _API_KEY
     assert req["query"] == {"q": ["climate summit"], "count": ["10"]}
 
 
-def test_brave_news_search_freshness_and_clamp(backend) -> None:
+def test_brave_news_search_freshness_and_clamp(backend, brave_server) -> None:
     """news freshness is forwarded and count is clamped to 1-50."""
-    b, server = backend
-    b.brave_news_search("climate", count=500, freshness="pd")
-    assert server.requests[-1]["query"] == {"q": ["climate"], "count": ["50"], "freshness": ["pd"]}
+    backend.brave_news_search("climate", count=500, freshness="pd")
+    assert brave_server.requests[-1]["query"] == {
+        "q": ["climate"],
+        "count": ["50"],
+        "freshness": ["pd"],
+    }
 
 
-def test_brave_image_search_happy_path(backend) -> None:
+def test_brave_image_search_happy_path(backend, brave_server) -> None:
     """brave_image_search hits /images/search and condenses image results."""
-    b, server = backend
-    result = json.loads(b.brave_image_search("mountain"))
+    result = json.loads(backend.brave_image_search("mountain"))
     assert result["ok"] is True
     assert result["results"] == [
         {
@@ -426,23 +412,21 @@ def test_brave_image_search_happy_path(backend) -> None:
             "source": "example.com",
         }
     ]
-    req = server.requests[-1]
+    req = brave_server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/images/search")
     assert req["token"] == _API_KEY
     assert req["query"] == {"q": ["mountain"], "count": ["10"]}
 
 
-def test_brave_image_search_clamps_count(backend) -> None:
+def test_brave_image_search_clamps_count(backend, brave_server) -> None:
     """image count is clamped to 1-200."""
-    b, server = backend
-    b.brave_image_search("mountain", count=1000)
-    assert server.requests[-1]["query"]["count"] == ["200"]
+    backend.brave_image_search("mountain", count=1000)
+    assert brave_server.requests[-1]["query"]["count"] == ["200"]
 
 
-def test_brave_video_search_happy_path(backend) -> None:
+def test_brave_video_search_happy_path(backend, brave_server) -> None:
     """brave_video_search hits /videos/search and condenses video results."""
-    b, server = backend
-    result = json.loads(b.brave_video_search("tutorial"))
+    result = json.loads(backend.brave_video_search("tutorial"))
     assert result["ok"] is True
     assert result["results"] == [
         {
@@ -454,17 +438,16 @@ def test_brave_video_search_happy_path(backend) -> None:
             "creator": "Prof X",
         }
     ]
-    req = server.requests[-1]
+    req = brave_server.requests[-1]
     assert (req["method"], req["path"]) == ("GET", "/videos/search")
     assert req["token"] == _API_KEY
     assert req["query"] == {"q": ["tutorial"], "count": ["10"]}
 
 
-def test_brave_video_search_clamps_count(backend) -> None:
+def test_brave_video_search_clamps_count(backend, brave_server) -> None:
     """video count is clamped to 1-50."""
-    b, server = backend
-    b.brave_video_search("tutorial", count=500)
-    assert server.requests[-1]["query"]["count"] == ["50"]
+    backend.brave_video_search("tutorial", count=500)
+    assert brave_server.requests[-1]["query"]["count"] == ["50"]
 
 
 def test_wrong_token_returns_ok_false(brave_server) -> None:
@@ -486,12 +469,11 @@ def test_wrong_token_returns_ok_false(brave_server) -> None:
 
 def test_server_error_returns_ok_false(backend) -> None:
     """A 500 from the server yields ok:false JSON from every tool, not an exception."""
-    b, _ = backend
     for call in (
-        lambda: b.brave_web_search("boom"),
-        lambda: b.brave_news_search("boom"),
-        lambda: b.brave_image_search("boom"),
-        lambda: b.brave_video_search("boom"),
+        lambda: backend.brave_web_search("boom"),
+        lambda: backend.brave_news_search("boom"),
+        lambda: backend.brave_image_search("boom"),
+        lambda: backend.brave_video_search("boom"),
     ):
         result = json.loads(call())
         assert result["ok"] is False

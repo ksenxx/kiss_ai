@@ -45,7 +45,13 @@ from kiss.tests.agents.seas.conftest import (
     run_sea,
     seed_repo,
 )
-from kiss.tests.agents.seas.sea_contract import system_message, tool_names, tool_results
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_result_text,
+    tool_results,
+)
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import is_root, posix_only
 
@@ -176,18 +182,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert resolve_settings(declared) == declared
     assert "system_prompt" not in resolve_settings(declared)
     # The class is the contract: the module keeps no getter of the old shape.
-    for legacy in (
-        "settings",
-        "system_prompt",
-        "add_to_system_prompt",
-        "append_to_system_prompt",
-        "add_to_tools",
-        "tools",
-        "tool_profile",
-        "model",
-        "prompt",
-    ):
-        assert not hasattr(sea, legacy), legacy
+    assert_no_removed_getters(sea)
     built_in = [_prompt_of]
     assert rsi7d.tools(built_in)[:1] == built_in
     names = [t.__name__ for t in rsi7d.tools([])]
@@ -220,9 +215,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     ]
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
-    assert sea_commands.get_command("rsi7d") == _SEA_PATH
     assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
-    assert sea_commands.slash_command_task("/rsi7d all") == ("all", _SEA_PATH)
     assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(declared)
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
     assert run.prompt == "all" and run.settings == resolve_settings(declared)
@@ -943,12 +936,7 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
 
 def _tool_results(agentic: list[Any]) -> list[str]:
     """Return the last tool result the model saw before each request after the first."""
-    return [
-        tool_results(request)[-1].split(
-            "\n\nSteps: "
-        )[0]
-        for request in agentic[1:]
-    ]
+    return [tool_result_text(tool_results(request)[-1]) for request in agentic[1:]]
 
 
 def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(

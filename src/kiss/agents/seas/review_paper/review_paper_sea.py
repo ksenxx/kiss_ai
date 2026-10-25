@@ -179,8 +179,9 @@ not in the task's working directory. Use model names literally; never invent one
        Contextualization relative to prior work: N/10. ...
        (then one line per score the venue's form asks for)
 
-6. Count with `wc -w`. Run the `check_review` tool with the word limit and fix everything
-   it flags. Before step 7 the review must be at most 95% of L (950 for L = 1000), not
+6. Run the `check_review` tool with the word limit (it reports the word count; `wc -w`
+   is not needed) and fix everything it flags. Before step 7 the review must be at most
+   95% of L (950 for L = 1000), not
    L - 1: step 7 adds words. If over, cut whole sentences or bullets in one `Edit` pass;
    do not rewrite the whole file repeatedly.
 7. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
@@ -196,7 +197,7 @@ not in the task's working directory. Use model names literally; never invent one
    editing. With no second model, check on your own model and report that. Never finish
    unsuccessfully because `run_agent` or `run_parallel` is missing. Apply every confirmed
    finding (one `Write` when more than three sentences change, else back-to-back `Edit`
-   calls), then `wc -w`, then `check_review`. Plan three `check_review` calls per run
+   calls), then `check_review`. Plan three `check_review` calls per run
    (after the draft, the trim, and the fixes); rerun one only after a failure, until it
    passes.
 8. Reread as a human would; remove every sentence that reads machine-written. Git add

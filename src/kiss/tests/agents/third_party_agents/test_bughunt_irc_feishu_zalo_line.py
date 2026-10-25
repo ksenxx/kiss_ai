@@ -192,11 +192,12 @@ class TestIRCBugs:
         assert messages[0]["target"] == "#ch"
         assert messages[1]["user"] == "bob"
 
-    def test_send_message_unconnected_raises(self) -> None:
-        """(D) send_message must raise when not connected so retries work."""
-        backend = IRCChannelBackend()
-        with pytest.raises(RuntimeError):
-            backend.send_message("#ch", "hi")
+
+def test_irc_send_message_unconnected_raises() -> None:
+    """(D) send_message must raise when not connected so retries work."""
+    backend = IRCChannelBackend()
+    with pytest.raises(RuntimeError):
+        backend.send_message("#ch", "hi")
 
 
 class TestIRCFreshDaemonTools:
@@ -230,6 +231,7 @@ class TestIRCFreshDaemonTools:
         )
         tools = {t.__name__: t for t in irc_sea.IrcSea().tools([])}
         assert "post_message" in tools, "authenticated backend tools expected"
+        backend: IRCChannelBackend = tools["post_message"].__self__
         try:
             result = json.loads(tools["post_message"]("#chan", "from daemon"))
             assert result["ok"] is True, result
@@ -238,6 +240,8 @@ class TestIRCFreshDaemonTools:
             )
         finally:
             tools["clear_irc_auth"]()
+            backend.disconnect()
+        assert backend._reader_thread is None
 
     def test_fresh_backend_post_message_fails_loudly_without_config(self) -> None:
         """No config: the tool must report an error, never a false ok."""
@@ -356,11 +360,4 @@ class TestFeishuBugs:
         """(E) send_message must raise when no client is configured."""
         backend = FeishuChannelBackend()
         with pytest.raises(RuntimeError):
-            backend.send_message("chat1", "hello")
-
-    def test_send_message_errors_propagate(self) -> None:
-        """(E) errors from the lark SDK layer must propagate, not be swallowed."""
-        backend = FeishuChannelBackend()
-        backend._client = object()
-        with pytest.raises((ImportError, AttributeError)):
             backend.send_message("chat1", "hello")

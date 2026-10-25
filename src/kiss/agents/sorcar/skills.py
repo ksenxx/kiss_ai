@@ -52,7 +52,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 
-from kiss.agents.sorcar.persistence import _default_kiss_dir
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ def agents_user_skills_dir() -> Path:
 
 def user_skills_dir() -> Path:
     """Return the native user skills directory (``$KISS_HOME/skills``)."""
-    return _default_kiss_dir() / "skills"
+    return kiss_home() / "skills"
 
 
 def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
@@ -353,26 +353,16 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     return "\n".join(lines)
 
 
-def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
-    """List the skill's bundled resource files (relative paths, capped).
+def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
+    """Append the resource files under *directory* to *resources*; return whether the cap cut one.
 
     Files are listed — never read — so the agent can load specific
     resources on demand with its file tools.  ``SKILL.md`` itself and
     bookkeeping directories (:data:`_RESOURCE_SKIP_DIRS`, never entered:
     a vendored ``node_modules`` is not walked to list at most
-    ``_MAX_RESOURCE_LISTING`` files) are excluded.
-
-    Returns:
-        ``(resources, truncated)`` where *truncated* is ``True`` only
-        when at least one further resource file exists beyond the
-        ``_MAX_RESOURCE_LISTING`` cap.
-    """
-    resources: list[str] = []
-    return resources, _walk_resources(skill_dir, skill_dir, resources)
-
-
-def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
-    """Append the resource files under *directory* to *resources*; return whether the cap cut one.
+    ``_MAX_RESOURCE_LISTING`` files) are excluded.  The result is
+    ``True`` only when at least one further resource file exists
+    beyond the ``_MAX_RESOURCE_LISTING`` cap.
 
     Entries in name order, a subdirectory's files where its name sorts
     (the order ``sorted(root.rglob("*"))`` gives), skipping every entry
@@ -446,7 +436,8 @@ def load_skill_content(skill: Skill) -> str:
     parts.append(
         "Relative paths in this skill are relative to the skill directory."
     )
-    resources, truncated = _list_resources(skill_dir)
+    resources: list[str] = []
+    truncated = _walk_resources(skill_dir, skill_dir, resources)
     if resources:
         parts.append("<skill_resources>")
         parts.extend(f"<file>{r}</file>" for r in resources)

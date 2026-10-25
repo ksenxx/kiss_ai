@@ -20,7 +20,8 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send} = harness;
+const {send, snapshotEntry, click: clickEl} = harness;
+const {tabEl} = require('./subagent_tab_helpers');
 
 // Loads the real chat page (chat.html + panelCopy.js + api.js +
 // main.js) into JSDOM and records every scrollIntoView call made on a
@@ -41,22 +42,11 @@ function makePage() {
 }
 
 function entry(tabId, title, workDir) {
-  return {
-    tabId: tabId,
-    chatId: 'chat-' + tabId,
-    title: title || tabId,
-    workDir: workDir || '',
-  };
+  return snapshotEntry(tabId, title || tabId, 'chat-' + tabId, workDir);
 }
 
-// The tab's entry on the group strip (only the group on screen is
-// rendered there), else null.
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-  );
-}
-
+// The id of the active entry on the group strip, else null (a lone chat
+// has no strip).
 function activeTabId(win) {
   const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
@@ -64,10 +54,6 @@ function activeTabId(win) {
 
 function stripShown(win) {
   return win.document.getElementById('tab-bar').style.display !== 'none';
-}
-
-function clickEl(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 // Opens sub-agent tab *id* under t1 (the daemon's announcement of a

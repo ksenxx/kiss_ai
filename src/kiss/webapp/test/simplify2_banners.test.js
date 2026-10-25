@@ -5,13 +5,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 function run() {
   const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const activeId = ready.tabId;
+  const activeId = readyTabId(posted);
   const O = win.document.getElementById('output');
 
   send(win, {type: 'error', text: 'boom <b>&</b>'});

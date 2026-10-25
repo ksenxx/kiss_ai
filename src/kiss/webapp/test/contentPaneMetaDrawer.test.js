@@ -35,16 +35,17 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
 const {
   makePage: makeHarnessPage,
   send,
   click,
   byId,
   fakeMatchMedia,
+  loadMainCss,
   MEDIA,
   ofType,
 } = require('./simplify2_harness');
+const {inlineDesignTokens, installTokenisedCss} = require('./designTokens');
 
 /**
  * A fresh page.  `storage` is the localStorage contents of the page
@@ -153,7 +154,7 @@ test('a press in the pane hides the panel; the drawer and the pane closing bring
   press(win, byId(win, 'content-tab-bar'));
   assert.ok(!hasClass(win, 'meta-hidden'));
 
-  const fileTab = openChatAndFile(win);
+  openChatAndFile(win);
   assert.ok(
     hasClass(win, 'meta-hidden'),
     'the file opened: the panel slid off',
@@ -191,7 +192,6 @@ test('a press in the pane hides the panel; the drawer and the pane closing bring
   assert.ok(!hasClass(win, 'content-pane-open'));
   assert.ok(!hasClass(win, 'meta-hidden'), 'docked: never hidden');
   assert.ok(!panel.hasAttribute('inert'));
-  assert.strictEqual(fileTab.id !== undefined, true);
   win.close();
 });
 
@@ -231,7 +231,7 @@ test('leaving the desktop layout drops the hidden state', () => {
   win.close();
 });
 
-test('the workspace views catch up on task news once the panel is back', async () => {
+test('the workspace views catch up on task news once the panel is back', () => {
   const {win, posted} = makePage();
   send(win, {type: 'configData', config: {work_dir: '/ws'}});
   const listed = ofType(posted, 'listDir').length;
@@ -249,8 +249,17 @@ test('the workspace views catch up on task news once the panel is back', async (
   press(win, byId(win, 'content-tab-area'));
   assert.ok(hasClass(win, 'meta-hidden'));
   const before = ofType(posted, 'listDir').length;
+  // Any timer the page arms on the news is run by hand, so no
+  // wall-clock wait decides whether a deferred reload would have shown.
+  const armed = [];
+  const realSetTimeout = win.setTimeout;
+  win.setTimeout = function (cb, ms, ...args) {
+    armed.push(() => cb(...args));
+    return 0;
+  };
   send(win, {type: 'tasks_updated'});
-  await new Promise(r => setTimeout(r, 700));
+  win.setTimeout = realSetTimeout;
+  while (armed.length) armed.shift()();
   assert.strictEqual(
     ofType(posted, 'listDir').length,
     before,
@@ -495,118 +504,6 @@ test('replaying a finished task leaves no header pulsing', () => {
   assert.ok(O.querySelector('.tc'), 'the call replayed');
   assert.strictEqual(O.querySelectorAll('.panel-active').length, 0);
   win.close();
-});
-
-test('the stylesheets carry the layout, the pulse and the machine strip', () => {
-  const remote = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
-  );
-  const main = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  function rule(css, selector) {
-    const src = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Anchored at a line start, so `#x` does not match `body.y #x`.
-    const re = new RegExp(
-      String.raw`(?:^|\n)\s*` + src + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`,
-      'g',
-    );
-    // Every rule with exactly this selector, joined (a media query
-    // may restate one).
-    const bodies = [];
-    let m;
-    while ((m = re.exec(css)) !== null) bodies.push(m[1]);
-    assert.ok(bodies.length > 0, 'CSS rule missing: ' + selector);
-    return bodies.join('\n');
-  }
-  // No content tab: one chat column, clear of the docked panel.
-  const app = rule(remote, 'body.remote-chat.remote-desktop #app');
-  assert.ok(/grid-template-columns:\s*minmax\(0, 1fr\);/.test(app));
-  assert.ok(/margin-right:\s*var\(--meta-w/.test(app));
-  // A content tab: the split grid runs under the panel.
-  const split = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-open #app',
-  );
-  assert.ok(/margin-right:\s*0;/.test(split));
-  assert.ok(/'machine\s+handle ctabs'/.test(split));
-  const hiddenPane = rule(
-    remote,
-    'body.remote-chat.remote-desktop:not(.content-pane-open) #pane-resizer',
-  );
-  assert.ok(/display:\s*none/.test(hiddenPane));
-  // The slide and the drawer.
-  const panel = rule(remote, 'body.remote-chat.remote-desktop #meta-panel');
-  assert.ok(/position:\s*fixed/.test(panel));
-  assert.ok(/transition:\s*transform/.test(panel));
-  const slid = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-panel',
-  );
-  assert.ok(/transform:\s*translateX\(100%\)/.test(slid));
-  const drawer = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-open #meta-drawer',
-  );
-  assert.ok(/position:\s*fixed/.test(drawer) && /right:\s*0/.test(drawer));
-  assert.ok(
-    /opacity:\s*0/.test(drawer) && /transition:\s*opacity/.test(drawer),
-  );
-  assert.ok(
-    /visibility:\s*hidden/.test(drawer),
-    'out of the tab order while faded',
-  );
-  const drawerShown = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-drawer',
-  );
-  assert.ok(
-    /opacity:\s*1/.test(drawerShown) &&
-      /visibility:\s*visible/.test(drawerShown),
-  );
-  // The panel's close button doubles as its "hide" over the pane.
-  const closeShown = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-open #meta-close',
-  );
-  assert.ok(/display:\s*block/.test(closeShown));
-  assert.ok(/display:\s*none/.test(rule(main, '#meta-drawer')));
-  // The pane's hide button sits at the right end of its tab row; the
-  // show tab exists only on the desktop remote page with the pane
-  // folded, on the chat's right edge against the docked panel.
-  const hide = rule(remote, 'body.remote-chat #content-pane-hide');
-  assert.ok(
-    /display:\s*inline-flex/.test(hide) && /flex-shrink:\s*0/.test(hide),
-  );
-  assert.ok(/display:\s*none/.test(rule(main, '#content-pane-show')));
-  const show = rule(
-    remote,
-    'body.remote-chat.remote-desktop.content-pane-folded #content-pane-show',
-  );
-  assert.ok(/position:\s*fixed/.test(show));
-  assert.ok(/right:\s*var\(--meta-w, var\(--meta-panel-w\)\)/.test(show));
-  // The chat header strip ("machine: directory"): centred, bold,
-  // green; the machine drop-down is gone while empty.
-  const header = rule(main, '#chat-header');
-  assert.ok(/justify-content:\s*center/.test(header));
-  assert.ok(/font-weight:\s*700/.test(header));
-  assert.ok(/color:\s*var\(--green\)/.test(header));
-  const machine = rule(main, '#chat-machine');
-  assert.ok(/text-align:\s*center/.test(machine));
-  assert.ok(/display:\s*none/.test(rule(main, '#chat-machine:empty')));
-  // The pulse: an active panel's header text, tool call and Thoughts
-  // alike, breathes; it holds still under prefers-reduced-motion.
-  const pulse = rule(main, '.panel-active > .tc-h');
-  assert.ok(/animation:\s*panel-pulse/.test(pulse));
-  assert.ok(/animation:\s*none/.test(pulse));
-  assert.ok(
-    /\.panel-active > \.llm-panel-hdr\s*\{/.test(main),
-    'Thoughts pulse too',
-  );
-  assert.ok(/@keyframes panel-pulse/.test(main));
-  assert.ok(!/wave-ch|tc-running/.test(main), 'the wave is gone');
-  // The activity bar is gone from the markup.
-  const html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  assert.ok(!/id="activity-bar"/.test(html));
-  assert.ok(/id="meta-explorer"/.test(html) && /id="meta-scm"/.test(html));
 });
 
 /**
@@ -934,6 +831,7 @@ test('the hide button folds the pane away; the show tab or the next open unfolds
   fireChange(false);
   assert.ok(!hasClass(win, 'content-pane-folded'));
   assert.ok(!hasClass(win, 'content-pane-open'));
+  win.close();
 });
 
 /**
@@ -1108,6 +1006,143 @@ test('without localStorage the fold still works for the page instance', () => {
   assert.ok(hasClass(win, 'content-pane-open'));
   assert.ok(!hasClass(win, 'content-pane-folded'));
   win.close();
+});
+
+/**
+ * The joined bodies of every rule in `css` whose selector is exactly
+ * `selector` (anchored at a line start, so `#x` does not match
+ * `body.y #x`; a media query may restate one).
+ */
+function cssRule(css, selector) {
+  const src = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    String.raw`(?:^|\n)\s*` + src + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`,
+    'g',
+  );
+  const bodies = [];
+  let m;
+  while ((m = re.exec(css)) !== null) bodies.push(m[1]);
+  assert.ok(bodies.length > 0, 'CSS rule missing: ' + selector);
+  return bodies.join('\n');
+}
+
+function computedOf(win, id) {
+  return win.getComputedStyle(byId(win, id));
+}
+
+test('the stylesheets carry the layout, the pulse and the machine strip', () => {
+  // The base rules (main.css, and remote-codex.css outside its width
+  // media queries) are checked as computed styles on the page; jsdom
+  // applies no `@media (width >= 900px)` block, so the desktop layout
+  // and the panel's slide are checked against the stylesheet text.
+  const {win} = makePage();
+  loadMainCss(win);
+  installTokenisedCss(win, 'remote-codex.css');
+  // The drawer and the show tab exist only on the desktop remote page.
+  assert.strictEqual(computedOf(win, 'meta-drawer').display, 'none');
+  assert.strictEqual(computedOf(win, 'content-pane-show').display, 'none');
+  // The pane's hide button sits at the right end of its tab row.
+  const hide = computedOf(win, 'content-pane-hide');
+  assert.strictEqual(hide.display, 'inline-flex');
+  assert.strictEqual(hide.flexShrink, '0');
+  // The chat header strip ("machine: directory"): centred, bold, green.
+  const header = computedOf(win, 'chat-header');
+  assert.strictEqual(header.justifyContent, 'center');
+  assert.strictEqual(header.fontWeight, '700');
+  assert.strictEqual(header.color, 'var(--green)');
+  assert.strictEqual(computedOf(win, 'chat-machine').textAlign, 'center');
+  // The pulse: an active panel's header text, tool call and Thoughts
+  // alike, breathes.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'sleep 1', ts: 1000});
+  const active = byId(win, 'output').querySelector('.tc.panel-active');
+  assert.ok(active, 'the call is active until its result');
+  assert.ok(
+    /^panel-pulse\b/.test(win.getComputedStyle(active.querySelector('.tc-h')).animation),
+    'the tool-call header pulses',
+  );
+  const thoughts = win.document.createElement('div');
+  thoughts.className = 'panel-active';
+  thoughts.innerHTML = '<div class="llm-panel-hdr">Thoughts</div>';
+  win.document.body.appendChild(thoughts);
+  assert.ok(
+    /^panel-pulse\b/.test(win.getComputedStyle(thoughts.firstChild).animation),
+    'the Thoughts header pulses too',
+  );
+  win.close();
+
+  const remote = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
+  );
+  const main = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  // No content tab: one chat column, clear of the docked panel.
+  const app = cssRule(remote, 'body.remote-chat.remote-desktop #app');
+  assert.ok(/grid-template-columns:\s*minmax\(0, 1fr\);/.test(app));
+  assert.ok(/margin-right:\s*var\(--meta-w/.test(app));
+  // A content tab: the split grid runs under the panel.
+  const split = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-open #app',
+  );
+  assert.ok(/margin-right:\s*0;/.test(split));
+  assert.ok(/'machine\s+handle ctabs'/.test(split));
+  const hiddenPane = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop:not(.content-pane-open) #pane-resizer',
+  );
+  assert.ok(/display:\s*none/.test(hiddenPane));
+  // The slide and the drawer.
+  const panel = cssRule(remote, 'body.remote-chat.remote-desktop #meta-panel');
+  assert.ok(/position:\s*fixed/.test(panel));
+  assert.ok(/transition:\s*transform/.test(panel));
+  const slid = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-panel',
+  );
+  assert.ok(/transform:\s*translateX\(100%\)/.test(slid));
+  const drawer = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-open #meta-drawer',
+  );
+  assert.ok(/position:\s*fixed/.test(drawer) && /right:\s*0/.test(drawer));
+  assert.ok(
+    /opacity:\s*0/.test(drawer) && /transition:\s*opacity/.test(drawer),
+  );
+  assert.ok(
+    /visibility:\s*hidden/.test(drawer),
+    'out of the tab order while faded',
+  );
+  const drawerShown = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-drawer',
+  );
+  assert.ok(
+    /opacity:\s*1/.test(drawerShown) &&
+      /visibility:\s*visible/.test(drawerShown),
+  );
+  // The panel's close button doubles as its "hide" over the pane.
+  const closeShown = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-open #meta-close',
+  );
+  assert.ok(/display:\s*block/.test(closeShown));
+  // The show tab exists only on the desktop remote page with the pane
+  // folded, on the chat's right edge against the docked panel.
+  const show = cssRule(
+    remote,
+    'body.remote-chat.remote-desktop.content-pane-folded #content-pane-show',
+  );
+  assert.ok(/position:\s*fixed/.test(show));
+  assert.ok(/right:\s*var\(--meta-w, var\(--meta-panel-w\)\)/.test(show));
+  // The machine drop-down is gone while empty; the pulse holds still
+  // under prefers-reduced-motion.
+  assert.ok(/display:\s*none/.test(cssRule(main, '#chat-machine:empty')));
+  assert.ok(/animation:\s*none/.test(cssRule(main, '.panel-active > .tc-h')));
+  assert.ok(/@keyframes panel-pulse/.test(main));
+  assert.ok(!/wave-ch|tc-running/.test(main), 'the wave is gone');
+  // The activity bar is gone from the markup.
+  const html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  assert.ok(!/id="activity-bar"/.test(html));
+  assert.ok(/id="meta-explorer"/.test(html) && /id="meta-scm"/.test(html));
 });
 
 async function main() {

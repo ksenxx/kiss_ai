@@ -15,11 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import (
-    TASK_RESULT_HEADING,
-    USER_PROMPT_HEADING,
-    result_to_commit_text,
-)
+from kiss.agents.sorcar.git_worktree import _ensure_task_metadata
 from kiss.core.models.model_info import get_fast_model
 
 logger = logging.getLogger(__name__)
@@ -92,7 +88,7 @@ def generate_commit_message_from_diff(
     subject = FALLBACK_SUBJECT
     if diff_text:
         subject = _commit_message_from_llm(diff_text, user_prompt, subject, bill_to)
-    return _with_trailers(subject, user_prompt, task_result)
+    return _ensure_task_metadata(subject, user_prompt, task_result)
 
 
 def fallback_commit_message(
@@ -112,19 +108,7 @@ def fallback_commit_message(
     Returns:
         The fallback commit message.
     """
-    return _with_trailers(FALLBACK_SUBJECT, user_prompt, task_result)
-
-
-def _with_trailers(
-    subject: str, user_prompt: str | None, task_result: str | None,
-) -> str:
-    """Append the non-empty *user_prompt* and *task_result* trailers to *subject*."""
-    msg = subject
-    if user_prompt:
-        msg = _append_user_prompt(msg, user_prompt)
-    if task_result:
-        msg = _append_task_result(msg, task_result)
-    return msg
+    return _ensure_task_metadata(FALLBACK_SUBJECT, user_prompt, task_result)
 
 
 def _commit_message_from_llm(
@@ -181,44 +165,3 @@ def _commit_message_from_llm(
                 bill_to, generator.budget_used, generator.total_tokens_used, 0,
             )
 
-
-def _append_user_prompt(message: str, user_prompt: str) -> str:
-    """Append the user's task prompt to a commit message body.
-
-    Trims whitespace from *user_prompt* and appends it under a
-    ``User prompt:`` heading separated by a blank line.  If the
-    prompt is empty after trimming, *message* is returned unchanged.
-
-    Args:
-        message: The base commit message (subject + optional body).
-        user_prompt: The user's original task prompt string.
-
-    Returns:
-        The combined commit message with the user prompt appended.
-    """
-    trimmed = user_prompt.strip()
-    if not trimmed:
-        return message
-    return f"{message.rstrip()}{USER_PROMPT_HEADING}{trimmed}"
-
-
-def _append_task_result(message: str, task_result: str) -> str:
-    """Append the task's result summary to a commit message body.
-
-    Converts an HTML *task_result* to Markdown
-    (:func:`~kiss.agents.sorcar.git_worktree.result_to_commit_text`),
-    trims whitespace and appends it under a ``Result:`` heading
-    separated by a blank line.  If the result is empty after
-    trimming, *message* is returned unchanged.
-
-    Args:
-        message: The base commit message (subject + optional body).
-        task_result: The task's result summary string.
-
-    Returns:
-        The combined commit message with the task result appended.
-    """
-    trimmed = result_to_commit_text(task_result)
-    if not trimmed:
-        return message
-    return f"{message.rstrip()}{TASK_RESULT_HEADING}{trimmed}"

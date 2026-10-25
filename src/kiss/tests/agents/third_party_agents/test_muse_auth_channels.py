@@ -44,6 +44,7 @@ import gzip
 import json
 import socket
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -620,36 +621,43 @@ def _start_fake_daemon(
     return thread, stopped
 
 
-def _stop_listener(thread: threading.Thread) -> None:
-    """Make a fake listener still blocked in ``accept()`` exit and join it.
+@contextlib.contextmanager
+def _stopping_listener(
+    thread: threading.Thread, stopped: threading.Event | None = None
+) -> Iterator[None]:
+    """Run the body, then make a fake listener still blocked in ``accept()`` exit and join it.
 
     Closing a listening socket from another thread does not wake
     ``accept()``; a throw-away connection does.  The listener's loop then
-    sees it has been stopped (or fails to read a frame) and unlinks its
-    socket path, so a test that fails half-way leaves nothing behind.
+    sees it has been stopped (*stopped* is set first) or fails to read a
+    frame, and unlinks its socket path, so a body that fails half-way
+    leaves nothing behind.  The listener-exited check runs only when the
+    body passed, so a failure in the body is reported as is.
     """
-    if thread.is_alive():
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
-                wake.connect(str(socket_path()))
-        except OSError:
-            pass
-    thread.join(timeout=10.0)
+    try:
+        yield
+    finally:
+        if stopped is not None:
+            stopped.set()
+        if thread.is_alive():
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                    wake.connect(str(socket_path()))
+            except OSError:
+                pass
+        thread.join(timeout=10.0)
     assert not thread.is_alive(), "fake daemon listener did not exit"
 
 
 def _assert_relic_replaced(muse_client: Any) -> None:
     """Start a relic, let ensure_daemon replace it and check the new daemon answers."""
     relic, stopped = _start_fake_daemon(_RELIC_STATUS, honors_stop=True)
-    try:
+    with _stopping_listener(relic, stopped):
         assert muse_client._daemon_protocol() == 1
         muse_client.ensure_daemon()
         relic.join(timeout=10.0)
         assert stopped.is_set() and not relic.is_alive()
         assert muse_client._checked({"op": "status"})["protocol"] == PROTOCOL_VERSION
-    finally:
-        stopped.set()
-        _stop_listener(relic)
 
 
 @requires_muse_daemon
@@ -661,7 +669,7 @@ def test_relic_listener_survives_a_client_that_hangs_up(isolated_kiss_home: Path
     ``ensure_daemon`` polled a dead listener for its whole deadline.
     """
     relic, stopped = _start_fake_daemon(_RELIC_STATUS, honors_stop=True)
-    try:
+    with _stopping_listener(relic, stopped):
         # The client closes (inner ``with``) while the relic is still paused
         # before its acknowledgement, so the ack hits a dead peer.
         with (
@@ -674,9 +682,6 @@ def test_relic_listener_survives_a_client_that_hangs_up(isolated_kiss_home: Path
         relic.join(timeout=5.0)
         assert stopped.is_set() and not relic.is_alive()
         assert not socket_path().exists()
-    finally:
-        stopped.set()
-        _stop_listener(relic)
 
 
 def _sending_stop_ack(frame_locals: dict[str, Any]) -> bool:
@@ -694,13 +699,10 @@ def test_teardown_muse_env_fails_on_a_daemon_that_does_not_exit(isolated_kiss_ho
     lingering, stopped = _start_fake_daemon(
         {"ok": True, "protocol": PROTOCOL_VERSION}, honors_stop=False
     )
-    try:
+    with _stopping_listener(lingering, stopped):
         with pytest.raises(AssertionError, match="socket still present after 1.0s"):
             teardown_muse_env(timeout=1.0)
         assert lingering.is_alive() and socket_path().exists()
-    finally:
-        stopped.set()
-        _stop_listener(lingering)
     teardown_muse_env()
 
 
@@ -738,7 +740,7 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
                     try:
                         recv_frame(conn)
                     except Exception:
-                        return  # woken by _stop_listener after a failed assert
+                        return  # woken by _stopping_listener after a failed assert
                     send_frame(conn, reply)
         finally:
             server.close()
@@ -746,11 +748,9 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
 
     thread = threading.Thread(target=serve_garbage, daemon=True)
     thread.start()
-    try:
+    with _stopping_listener(thread):
         assert muse_client._daemon_protocol() == 0  # error reply
         assert muse_client._daemon_protocol() == 0  # non-integer protocol
-    finally:
-        _stop_listener(thread)
     assert muse_client._daemon_protocol() is None  # nothing listening
 
 
@@ -943,10 +943,7 @@ def test_cli_import_slack_and_token_services(muse_env: Path, capsys: pytest.Capt
     assert vault_has_credentials("firecrawl")
 
     # brave_search: header-kind import; a blank key is refused.
-    brave_config.save({"api_key": " "})
-    (muse_auth_dir().parent / "third_party_agents" / "brave_search" / "config.json").write_text(
-        json.dumps({"api_key": ""})
-    )
+    brave_config.save({"api_key": ""})
     assert muse_cli.main(["import", "brave_search"]) == 1
     brave_config.save({"api_key": _REAL_BRAVE_KEY})
     assert muse_cli.main(["import", "brave_search"]) == 0

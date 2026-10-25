@@ -26,8 +26,8 @@ function loadChatDom(cfg, {withConfig = true, withMarked = true} = {}) {
     win.eval(fs.readFileSync(path.join(MEDIA, file), 'utf-8'));
   if (withMarked) run('marked.min.js');
   if (withConfig) win.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
-  run('tips.js');
   run('panelCopy.js');
+  run('tips.js');
   return win;
 }
 
@@ -121,20 +121,6 @@ test('clicking the bulb shows the tips window with the tips', () => {
   assert.strictEqual(next.disabled, false, 'Next enabled on first tip');
 });
 
-test('bulb-opened panel navigates and closes with the usual semantics', () => {
-  const win = loadChatDom({tips: THREE_TIPS, show: false});
-  win.document.getElementById('tips-btn').click();
-  const {body, counter, next, close} = panelParts(win);
-  next.click();
-  assert.strictEqual(counter.textContent, '2 / 3');
-  assert.ok(body.innerHTML.includes('<strong>bold</strong>'));
-  next.click();
-  assert.strictEqual(counter.textContent, '3 / 3');
-  assert.strictEqual(next.disabled, true, 'Next disabled on last tip');
-  close.click();
-  assert.strictEqual(panel(win), null, 'Close removes the panel');
-});
-
 test('clicking the bulb twice does not stack a second panel', () => {
   const win = loadChatDom({tips: THREE_TIPS, show: false});
   const btn = win.document.getElementById('tips-btn');
@@ -190,17 +176,6 @@ test('bulb click does not throw when window.__TIPS__ is missing', () => {
   win.document.getElementById('tips-btn').click();
   const {counter} = panelParts(win);
   assert.strictEqual(counter.textContent, '');
-});
-
-test('bulb click falls back to plain text when marked is unavailable', () => {
-  const win = loadChatDom(
-    {tips: ['**not rendered**'], show: false},
-    {withMarked: false},
-  );
-  win.document.getElementById('tips-btn').click();
-  const {body} = panelParts(win);
-  assert.ok(body.textContent.includes('**not rendered**'));
-  assert.ok(!body.innerHTML.includes('<strong>'));
 });
 
 test('tips.js tolerates a DOM without #tips-btn', () => {

@@ -15,7 +15,18 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {makePage: makeChatPage, send, readyTabId} = require('./simplify2_harness');
+// Content tabs on the group strip (#tab-list).  The strip lists them on
+// the file screen only: a report opened in the background (sub-agent
+// done) is in the tab registry (registryContentTabs) but not here.
+const {
+  writeSuccess,
+  writeReport,
+  stripContentTabEls: contentTabs,
+  contentTabs: registryContentTabs,
+  reportFrames,
+  visibleSrcdoc: activeSrcdoc,
+} = require('./subagent_tab_helpers');
 
 function brokenMarked(win) {
   win.marked = {
@@ -35,74 +46,10 @@ function makePage(opts) {
   });
 }
 
-// Production tool_result events (json_printer.py _emit_tool_result) carry
-// tool_name, is_error and — for tools whose input has a file_path — path;
-// a successful Write's content is "Successfully wrote N characters to P".
-function writeSuccess(filePath, content) {
-  return (
-    'Successfully wrote ' +
-    String(content || '').length +
-    ' characters to ' +
-    filePath
-  );
-}
-
-function writeReport(win, filePath, content, extra) {
-  send(
-    win,
-    Object.assign(
-      {type: 'tool_call', name: 'Write', path: filePath, content: content},
-      extra || {},
-    ),
-  );
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'tool_result',
-        content: writeSuccess(filePath, content),
-        is_error: false,
-        tool_name: 'Write',
-        path: filePath,
-      },
-      extra || {},
-    ),
-  );
-}
-
 // The daemon emits task_done when the task finishes; only then may
 // stashed report tabs open.
 function finishTask(win, extra) {
   send(win, Object.assign({type: 'task_done', success: true}, extra || {}));
-}
-
-// Content tabs on the group strip (#tab-list).  The strip lists them
-// on the file screen only: a report opened in the background (sub-agent
-// done) is in the tab registry (registryContentTabs) but not here.
-function contentTabs(win) {
-  return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.content-tab'),
-  );
-}
-
-function registryContentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
-}
-
-function reportFrames(win) {
-  return Array.from(
-    win.document.querySelectorAll(
-      '#content-tab-area .content-tab-view iframe.content-html-frame',
-    ),
-  );
-}
-
-function activeSrcdoc(win) {
-  const frames = reportFrames(win).filter(
-    f => f.closest('.content-tab-view').style.display !== 'none',
-  );
-  assert.strictEqual(frames.length, 1, 'expected exactly one visible frame');
-  return frames[0].getAttribute('srcdoc') || '';
 }
 
 function assertNoReportTab(win, label) {
@@ -403,29 +350,8 @@ function testPathlessWriteSuccessOpens() {
   console.log('  ok - a path-less canonical Write success still opens');
 }
 
-function testTaskFailureStillOpensReport() {
-  // A task that ends in task_error / task_interrupted / task_stopped
-  // still FINISHED: a report it successfully wrote is a real artifact
-  // and must open at that terminal event (parity with the pre-delay
-  // behavior, where the report was already visible before the failure).
-  ['task_error', 'task_interrupted', 'task_stopped'].forEach(terminal => {
-    const {win} = makePage({withMarked: true});
-    writeReport(win, 'reports/salvaged.md', '# salvaged');
-    assertNoReportTab(win, terminal + ' before the terminal event');
-    send(win, {type: terminal});
-    assertReportTabActive(win, terminal);
-    // A stray later task_done must not duplicate the opened report.
-    const before = contentTabs(win).length;
-    finishTask(win);
-    assert.strictEqual(
-      contentTabs(win).length,
-      before,
-      terminal + ': a later task_done must not reopen the report',
-    );
-    win.close();
-  });
-  console.log('  ok - error/interrupted/stopped tasks still open the report');
-}
+// task_error / task_interrupted / task_stopped opening the report is
+// pinned by subagentReportNoTabSwitch.testTerminalErrorEventsStillSwitchToTheReport.
 
 function testCloseTabDiscardsQueuedReport() {
   // Closing a chat tab means the user no longer cares about that
@@ -577,6 +503,51 @@ function testReplayDoesNotOpen() {
   console.log('  ok - replayed history does not auto-open report tabs');
 }
 
+// The replay-only report suppression must not survive into the live
+// stream the replay's tail state becomes: a report the task writes
+// AFTER its transcript was replayed opens like any live report, while
+// a report inside the replayed transcript still opens nothing.
+function testReplayDoesNotSuppressLiveReports() {
+  const {win} = makePage();
+  const tabId = win._testApi.getActiveTabId();
+  const t0 = Date.now() - 30000;
+  const oldDoc = '<!DOCTYPE html><html><body>old</body></html>';
+  send(win, {type: 'status', running: true, tabId, startTs: t0});
+  send(win, {
+    type: 'task_events',
+    tabId,
+    chat_id: 'chat-report',
+    task: 'reporting task',
+    task_id: '92',
+    events: [
+      {type: 'prompt', text: 'write reports', ts: t0},
+      {
+        type: 'tool_call',
+        name: 'Write',
+        path: 'reports/old.html',
+        content: oldDoc,
+        ts: t0 + 1000,
+      },
+      {
+        type: 'tool_result',
+        content: writeSuccess('reports/old.html', oldDoc),
+        is_error: false,
+        tool_name: 'Write',
+        path: 'reports/old.html',
+        ts: t0 + 2000,
+      },
+    ],
+  });
+  assertNoReportTab(win, 'a replayed report inside a running task');
+  writeReport(win, 'reports/live.html', '<html><body>live</body></html>', {
+    tabId,
+  });
+  finishTask(win, {tabId});
+  assertReportTabActive(win, 'the live report written after the replay');
+  win.close();
+  console.log('  ok - a replay does not suppress the live reports after it');
+}
+
 function testRegenerationReusesSameTab() {
   const {win} = makePage({withMarked: true});
   writeReport(win, 'reports/summary.md', '# v1');
@@ -672,69 +643,9 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
   console.log('  ok - background-tab report opens at its own task_done');
 }
 
-// A sub-agent finishing is not the user's task finishing: the parent
-// task keeps running, so the report it wrote must become reachable in
-// the tab registry without pulling the user onto it - not even when the
-// user was standing on the sub-agent tab that is now being closed.
-// The strip lists content tabs on the file screen only, so the
-// background report is looked up in the registry and opened from there.
-function testSubagentDoneOpensReportInTheBackground() {
-  const {win} = makePage({withMarked: true});
-  const parentId = win._testApi.getActiveTabId();
-  send(win, {type: 'status', running: true, tabId: parentId});
-  const subTabId = 'sub-1';
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-  });
-  // The user stands on the sub-agent's tab (on the strip of its parent).
-  const subEl = win.document.querySelector(
-    '#tab-list .chat-tab.subagent-tab[data-tab-id="' + subTabId + '"]',
-  );
-  assert.ok(subEl, 'the sub-agent has a strip entry');
-  subEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(win._testApi.getActiveTabId(), subTabId);
-  writeReport(win, 'reports/sub.md', '# from subagent', {tabId: subTabId});
-  assertNoReportTab(win, 'subagent report before subagentDone');
-  assert.strictEqual(registryContentTabs(win).length, 0);
-  send(win, {type: 'subagentDone', tab_id: subTabId});
-
-  const found = registryContentTabs(win);
-  assert.strictEqual(
-    found.length,
-    1,
-    'subagent report: the report must open as a content tab',
-  );
-  assert.ok(
-    found[0].title.indexOf('sub.md') >= 0,
-    'subagent report: the content tab is titled after the file',
-  );
-  assert.notStrictEqual(
-    win._testApi.getActiveTabId(),
-    found[0].id,
-    'subagent report: the parent task is still running, so the report ' +
-      'must stay in the background',
-  );
-  const out = win.document.getElementById('output');
-  assert.notStrictEqual(
-    out.style.display,
-    'none',
-    'subagent report: the chat surface must stay on screen',
-  );
-
-  win._testApi.switchToTab(found[0].id);
-  assertReportTabActive(win, 'subagent report once opened');
-  assert.ok(
-    /<h1[^>]*>from subagent<\/h1>/.test(activeSrcdoc(win)),
-    'the subagent report must render once the user opens it',
-  );
-  win.close();
-  console.log('  ok - subagent report opens in the background on done');
-}
+// A sub-agent finishing is not the user's task finishing: its report
+// opening in the background at subagentDone is pinned by
+// subagentReportNoTabSwitch.testSubagentReportDoesNotStealFocus.
 
 // The daemon addresses one sub-agent's tab by several ids over its life
 // (the live fan-out id, and the deterministic "<parentTab>__sub_<taskId>"
@@ -744,9 +655,7 @@ function testSubagentDoneOpensReportInTheBackground() {
 // stashed per tab id and would otherwise be stranded under the old one.
 function testRetaggedSubagentKeepsItsPendingReport() {
   const {win, posted} = makePage({withMarked: true});
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
-  const parentId = ready.tabId;
+  const parentId = readyTabId(posted);
 
   send(win, {type: 'status', running: true, tabId: parentId});
   send(win, {
@@ -849,7 +758,6 @@ function main() {
   testWriteFailureStringsDoNotOpen();
   testMismatchedResultDoesNotOpen();
   testPathlessWriteSuccessOpens();
-  testTaskFailureStillOpensReport();
   testCloseTabDiscardsQueuedReport();
   testClearDiscardsQueuedReport();
   testTraversalPathsDoNotOpen();
@@ -857,10 +765,10 @@ function main() {
   testNonWriteToolsDoNotOpen();
   testInterveningToolCallClearsStash();
   testReplayDoesNotOpen();
+  testReplayDoesNotSuppressLiveReports();
   testRegenerationReusesSameTab();
   testReportsSegmentVariants();
   testBackgroundTabReportOpensAtItsTaskDone();
-  testSubagentDoneOpensReportInTheBackground();
   testRetaggedSubagentKeepsItsPendingReport();
   testSwitchBackToChatRestoresOutput();
   console.log('reportAutoOpen.test.js: all tests passed');

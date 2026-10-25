@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 from pathlib import Path
 from typing import Any
 
@@ -65,20 +64,43 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import govee
-from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
+from kiss.agents.third_party_agents._channel_agent_utils import channel_override_config
+from kiss.agents.third_party_agents.discord.discord_sea import (
+    DiscordAgent,
+    DiscordChannelBackend,
+    _make_backend,
+)
 from kiss.agents.third_party_agents.discord.discord_sea import _config as discord_config
+from kiss.agents.third_party_agents.discord.discord_sea import _scrub_config_token as discord_scrub
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
+    FirecrawlAgent,
+    FirecrawlChannelBackend,
+)
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
+    HomeAssistantAgent,
     HomeAssistantChannelBackend,
+    _read_base_url,
 )
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
     _config as ha_config,
 )
+from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
+    _scrub_config_token as ha_scrub,
+)
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     builtin_hosts,
+    canonical_host,
+    canonical_host_entry,
+    host_port_entry,
     muse_auth_dir,
+    url_origin_entry,
+    valid_hostname,
+    valid_http_url,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
+    MuseAuthError,
     MuseBoundarySession,
     clear_credentials,
     grant,
@@ -86,13 +108,16 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyChannelBackend
+from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon, _invalid_hosts_reason
+from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
+from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent, NtfyChannelBackend
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import _config as ntfy_config
+from kiss.agents.third_party_agents.ntfy.ntfy_sea import _scrub_config_token as ntfy_scrub
+from kiss.server.web_server import _get_local_ips
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     MuseApiHandler,
     auth_tools,
     loopback_policy,
-    requires_muse_daemon,
     teardown_muse_env,
     tools_by_name,
 )
@@ -209,21 +234,9 @@ def api_server() -> Any:
 
 
 def _local_ip() -> str:
-    """Return this machine's primary non-loopback IPv4 address.
-
-    Returns:
-        The address, or ``""`` when the machine has none (offline box).
-    """
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # connect() on UDP sends no packets; it only picks a route.
-        probe.connect(("8.8.8.8", 80))
-        ip = str(probe.getsockname()[0])
-    except OSError:
-        return ""
-    finally:
-        probe.close()
-    return "" if ip.startswith("127.") else ip
+    """Return a non-loopback IPv4 address of this machine (``""`` on an offline box)."""
+    ips = sorted(_get_local_ips())
+    return ips[0] if ips else ""
 
 
 @pytest.fixture()
@@ -320,7 +333,6 @@ def test_discord_vault_first_and_make_backend(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Vault-first connects survive config removal; poll mode is vault-aware."""
-    from kiss.agents.third_party_agents.discord.discord_sea import _make_backend
 
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     # Token-only config: the scrub deletes the whole file.
@@ -351,7 +363,6 @@ def test_discord_authenticate_rotation_rollback_clear(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """authenticate_discord enrolls, validates, rolls back, and rotates."""
-    from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
 
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     agent = DiscordAgent()
@@ -454,7 +465,6 @@ def test_homeassistant_authenticate_and_clear_tools(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """authenticate_homeassistant re-enrolls rotated tokens; clear wipes."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
 
     base_url = api_server.base_url
     agent = HomeAssistantAgent()
@@ -541,7 +551,6 @@ def test_ntfy_tokenless_stays_legacy_and_rotation(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """Tokenless ntfy has no credential to protect and skips the boundary."""
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     server_url = api_server.base_url
     agent = NtfyAgent()
@@ -679,8 +688,6 @@ def test_cli_import_devices(
 
     # Firecrawl cloud-only import (no base_url) must still enroll the
     # cloud origin, or the migrated key cannot reach api.firecrawl.dev.
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     firecrawl_config.save({"api_key": "fc-cloud-key"})
     assert muse_cli.main(["import", "firecrawl"]) == 0
@@ -725,14 +732,6 @@ def test_cli_import_devices(
 
 def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> None:
     """The metadata readers and scrubbers never crash on odd files."""
-    from kiss.agents.third_party_agents.discord.discord_sea import (
-        _scrub_config_token as discord_scrub,
-    )
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import _read_base_url
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
-        _scrub_config_token as ha_scrub,
-    )
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import _scrub_config_token as ntfy_scrub
 
     # Absent files: every helper is a no-op.
     discord_scrub()
@@ -787,8 +786,6 @@ def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> N
 
     # Poll-mode startup resolves model/budget overrides from a scrubbed
     # config through the same tolerant reader.
-    from kiss.agents.third_party_agents._channel_agent_utils import channel_override_config
-    from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
 
     overrides = {"application_id": "app9", "channel_model_name": "model-x"}
     discord_config.path.write_text(json.dumps(overrides))
@@ -801,7 +798,6 @@ def test_discord_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off, Discord keeps its plaintext-config behavior."""
-    from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent, _make_backend
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
@@ -844,7 +840,6 @@ def test_homeassistant_no_credential_and_bad_host(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """Vault-less connects fail cleanly; malformed hosts fail enrollment."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
 
     base_url = api_server.base_url
     # A base_url without any token (config or vault) cannot connect.
@@ -866,11 +861,7 @@ def test_homeassistant_no_credential_and_bad_host(
 
 def test_ntfy_enrollment_host_helpers_and_bad_host(muse_env: Path) -> None:
     """Host helpers skip the public server; bad hosts surface cleanly."""
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
-        NtfyAgent,
-        _extra_hosts,
-        _insecure_extra_hosts,
-    )
+    from kiss.agents.third_party_agents.ntfy.ntfy_sea import _extra_hosts, _insecure_extra_hosts
 
     # An ntfy token is origin-bound: exactly the configured server's
     # origin (host AND port) is enrolled (there is no built-in
@@ -901,7 +892,6 @@ def test_vault_direct_reads(muse_env: Path) -> None:
     the daemon, then read back by a fresh vault instance pointed at the
     same ``KISS_HOME``.
     """
-    from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 
     store_credentials("govee", {"kind": "header", "header": "Govee-API-Key", "token": "gk"}, [])
     vault = CredentialVault()
@@ -917,7 +907,6 @@ def test_vault_direct_reads(muse_env: Path) -> None:
 
 def test_store_rejects_invalid_insecure_hosts(muse_env: Path) -> None:
     """The daemon validates insecure enrollment hosts like regular ones."""
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
     with pytest.raises(MuseAuthError, match="invalid enrollment host"):
         store_credentials(
@@ -931,8 +920,6 @@ def test_store_rejects_invalid_insecure_hosts(muse_env: Path) -> None:
 
 def test_failed_enrollment_is_transactional(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A rejected enrollment leaves the old credential and config intact."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     base_url = api_server.base_url
     ha_agent = HomeAssistantAgent()
@@ -962,9 +949,8 @@ def test_failed_enrollment_is_transactional(muse_env: Path, api_server: _DeviceA
     assert api_server.header("Authorization") == "Bearer tk-good"
 
 
-@requires_muse_daemon
 def test_boundary_ignores_ambient_proxy_env(
-    isolated_kiss_home: Path,
+    muse_env: Path,
     api_server: _DeviceApiServer,
     refusing_port: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -972,11 +958,11 @@ def test_boundary_ignores_ambient_proxy_env(
     """The daemon must not route credentialed requests via HTTP(S)_PROXY.
 
     The proxy variables point at a port that refuses every connection
-    and are set BEFORE the daemon spawns (it inherits this process's
-    environment), so a ``trust_env`` regression would fail the request
-    instead of reaching the API host directly.
+    and are set BEFORE the daemon spawns (``muse_env`` only writes the
+    policy; the daemon starts lazily on the first client call below and
+    inherits this process's environment), so a ``trust_env`` regression
+    would fail the request instead of reaching the API host directly.
     """
-    monkeypatch.setenv("KISS_MUSE_AUTH", "1")
     for var in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(var, raising=False)
     for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
@@ -984,22 +970,16 @@ def test_boundary_ignores_ambient_proxy_env(
     server_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     backend = NtfyChannelBackend()
-    try:
-        assert backend.connect() and backend._muse
-        polled = json.loads(backend.poll_topic())
-        assert polled["ok"] is True
-        assert api_server.header("Authorization") == f"Bearer {_REAL_NTFY_TOKEN}"
-    finally:
-        # Not muse_env: stop the daemon even when an assert above fails,
-        # or the detached subprocess outlives the test session.
-        teardown_muse_env()
+    assert backend.connect() and backend._muse
+    polled = json.loads(backend.poll_topic())
+    assert polled["ok"] is True
+    assert api_server.header("Authorization") == f"Bearer {_REAL_NTFY_TOKEN}"
 
 
 def test_rotation_invalidates_old_surrogates(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Replacing a credential kills surrogates minted for the old one."""
-    from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
 
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     discord_config.save({"bot_token": "tok-old"})
@@ -1073,7 +1053,6 @@ def test_ntfy_private_token_never_reaches_public_server(
 
 def test_store_rejects_malformed_credential_values(muse_env: Path) -> None:
     """Control characters or stray whitespace never enter the vault."""
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
     for bad in (" leading-space", "trail ", "new\nline", "tab\tchar", ""):
         with pytest.raises(MuseAuthError, match="invalid credential token value"):
@@ -1152,25 +1131,41 @@ def test_ntfy_credential_is_port_origin_bound(muse_env: Path, api_server: _Devic
     assert json.loads(backend3.poll_topic())["ok"] is True
 
 
+@pytest.mark.parametrize(
+    ("service", "credential", "rotated"),
+    [
+        (
+            "ntfy",
+            {"kind": "bearer", "token": _REAL_NTFY_TOKEN},
+            {"kind": "bearer", "token": "rotated-token"},
+        ),
+        (
+            "discord",
+            {"kind": "header", "header": "Authorization", "token": "Bot tok-old"},
+            {"kind": "header", "header": "Authorization", "token": "Bot tok-new"},
+        ),
+    ],
+    ids=["bearer", "header"],
+)
 def test_rotation_mid_request_aborts_redirect_hop(
-    muse_env: Path, api_server: _DeviceApiServer
+    muse_env: Path,
+    api_server: _DeviceApiServer,
+    service: str,
+    credential: dict[str, str],
+    rotated: dict[str, str],
 ) -> None:
-    """A credential replaced between hops aborts the in-flight request."""
+    """A credential (bearer or header kind) replaced between hops aborts the request."""
     server_url = api_server.base_url
-    store_credentials(
-        "ntfy", {"kind": "bearer", "token": _REAL_NTFY_TOKEN}, [], hosts=("127.0.0.1",)
-    )
-    handle = mint_surrogate("ntfy")
+    store_credentials(service, credential, [], hosts=("127.0.0.1",))
+    handle = mint_surrogate(service)
     assert handle is not None
-    session = MuseBoundarySession("ntfy")
+    session = MuseBoundarySession(service)
 
     def rotate() -> None:
-        store_credentials(
-            "ntfy", {"kind": "bearer", "token": "rotated-token"}, [], hosts=("127.0.0.1",)
-        )
+        store_credentials(service, rotated, [], hosts=("127.0.0.1",))
 
     api_server.rotate_before_redirect = rotate
-    grant("ntfy", "write", "session")
+    grant(service, "write", "session")
     resp = session.post(
         f"{server_url}/t-rotate",
         headers={"Authorization": f"Bearer {handle.token}"},
@@ -1182,50 +1177,10 @@ def test_rotation_mid_request_aborts_redirect_hop(
     assert resp.status_code == 403
     assert "changed mid-request" in resp.text
     assert not [r for r in api_server.requests if r["path"] == "/t-redirect-target"]
-    api_server.rotate_before_redirect = None
-
-
-def test_rotation_mid_request_aborts_header_kind_hop(
-    muse_env: Path, api_server: _DeviceApiServer
-) -> None:
-    """A header-kind credential replaced between hops also aborts."""
-    server_url = api_server.base_url
-    store_credentials(
-        "discord",
-        {"kind": "header", "header": "Authorization", "token": "Bot tok-old"},
-        [],
-        hosts=("127.0.0.1",),
-    )
-    handle = mint_surrogate("discord")
-    assert handle is not None
-    session = MuseBoundarySession("discord")
-
-    def rotate() -> None:
-        store_credentials(
-            "discord",
-            {"kind": "header", "header": "Authorization", "token": "Bot tok-new"},
-            [],
-            hosts=("127.0.0.1",),
-        )
-
-    api_server.rotate_before_redirect = rotate
-    grant("discord", "write", "session")
-    resp = session.post(
-        f"{server_url}/t-rotate",
-        headers={"Authorization": f"Bearer {handle.token}"},
-        data=b"payload",
-    )
-    assert resp.status_code == 403
-    assert "changed mid-request" in resp.text
-    assert not [r for r in api_server.requests if r["path"] == "/t-redirect-target"]
-    api_server.rotate_before_redirect = None
 
 
 def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     """A non-numeric or out-of-range port is refused before any state change."""
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlAgent
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     ha_tools = auth_tools(HomeAssistantAgent())
     assert "valid port" in ha_tools["authenticate_homeassistant"](
@@ -1239,7 +1194,6 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
 
     # Firecrawl rejects the bad port BEFORE writing any plaintext key or
     # clearing a prior vault entry (no destructive partial migration).
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
 
     store_credentials("firecrawl", {"kind": "bearer", "token": "fc-old"}, [])
     fc_tools = auth_tools(FirecrawlAgent())
@@ -1272,10 +1226,6 @@ def test_govee_legacy_mode_unchanged(
 
 def test_fqdn_policy_and_enrollment_entries_match(muse_env: Path) -> None:
     """Trailing-dot FQDNs match whether they come via policy or enrollment."""
-    from kiss.agents.third_party_agents.muse_auth.daemon import (
-        MuseAuthDaemon,
-        _invalid_hosts_reason,
-    )
 
     # A port-pinned FQDN enrollment host validates and canonicalizes.
     assert _invalid_hosts_reason(["localhost.:8123"]) == ""
@@ -1301,7 +1251,6 @@ def test_govee_daemon_reply_loss_not_replayed(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A lost daemon reply after egress is surfaced, not replayed as a write."""
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
     monkeypatch.setattr(govee, "API", f"{api_server.base_url}/router/api/v1")
     monkeypatch.setattr(govee, "_MUSE_SESSION", None)
@@ -1325,7 +1274,6 @@ def test_ntfy_wiring_failure_hides_backend_tools(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A failed Muse wiring hides the backend tools (no tokenless egress)."""
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     base_url = api_server.base_url
     ntfy_config.save({"topic": "t1", "server": base_url, "token": "bad\ntoken"})
@@ -1347,9 +1295,6 @@ def test_ntfy_wiring_failure_hides_backend_tools(
 
 def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path) -> None:
     """URL validation rejects userinfo and accepts IPv4-mapped IPv6 end to end."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
-    from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
-    from kiss.agents.third_party_agents.muse_auth.daemon import _invalid_hosts_reason
 
     # Userinfo is refused before any state change: no password reaches
     # config.json and nothing is enrolled.
@@ -1368,8 +1313,6 @@ def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path)
     # A zone/scoped link-local IPv6 URL is consistent across layers: the
     # validator, the generated enrollment origin, and the daemon parser
     # all accept it, and the request-side origin matches the enrollment.
-    from kiss.agents.third_party_agents.muse_auth._common import url_origin_entry
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     # ZoneIDs with RFC-6874 unreserved chars (-, _, ~) are accepted too.
     for scoped in (
@@ -1397,7 +1340,6 @@ def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path)
 def test_firecrawl_is_origin_bound(muse_env: Path) -> None:
     """A self-hosted Firecrawl key is never authorized for the cloud API."""
     from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _extra_hosts
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     # No built-in host: the credential is bound only to its one origin.
     assert builtin_hosts("firecrawl") == ()
@@ -1445,10 +1387,6 @@ def test_ntfy_explicit_tokenless_overrides_stale_vault(
 
 def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path) -> None:
     """Leading-zero and FQDN port-pinned entries match the request origin."""
-    from kiss.agents.third_party_agents.muse_auth.daemon import (
-        MuseAuthDaemon,
-        _invalid_hosts_reason,
-    )
 
     assert _invalid_hosts_reason(["h:00080"]) == ""
     store_credentials(
@@ -1471,13 +1409,6 @@ def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path) -> None:
 
 def test_ipv6_origin_helpers(muse_env: Path) -> None:
     """Origin helpers bracket IPv6 literals and validate host:port entries."""
-    from kiss.agents.third_party_agents.muse_auth._common import (
-        host_port_entry,
-        url_origin_entry,
-        valid_hostname,
-        valid_http_url,
-    )
-    from kiss.agents.third_party_agents.muse_auth.daemon import _invalid_hosts_reason
 
     assert host_port_entry("::1", 8080) == "[::1]:8080"
     assert host_port_entry("127.0.0.1", 80) == "127.0.0.1:80"
@@ -1502,7 +1433,6 @@ def test_ipv6_origin_helpers(muse_env: Path) -> None:
     )
     handle = mint_surrogate("homeassistant")
     assert handle is not None
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     daemon = MuseAuthDaemon()
     assert daemon.sentinel.origin_allowed("homeassistant", "http://[::1]:8123/api/states")
@@ -1513,7 +1443,6 @@ def test_authenticate_accepts_terminal_dot_host(
     muse_env: Path, api_server: _DeviceApiServer
 ) -> None:
     """A fully-qualified hostname with a trailing dot is canonicalized."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
 
     # 127.0.0.1. is the loopback address written fully-qualified; it
     # must be accepted (canonicalized to 127.0.0.1), not rejected.
@@ -1529,9 +1458,6 @@ def test_wiring_failure_leaves_agents_constructible(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A daemon-rejected config token fails closed but keeps tools alive."""
-    from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     base_url = api_server.base_url
     monkeypatch.setenv("DISCORD_API_BASE", f"{base_url}/api/v10")
@@ -1580,8 +1506,6 @@ def test_wiring_failure_leaves_agents_constructible(
 
 def test_authenticate_rejects_malformed_urls(muse_env: Path) -> None:
     """Base URLs without an http(s) scheme or hostname are refused early."""
-    from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
-    from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
 
     ha_tools = auth_tools(HomeAssistantAgent())
     result = ha_tools["authenticate_homeassistant"]("homeassistant.local:8123", "tok")
@@ -1598,7 +1522,6 @@ def test_govee_boundary_transport_failure_raises(
     muse_env: Path, refusing_port: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A persistent transport failure surfaces after the single retry."""
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
     monkeypatch.setattr(govee, "API", f"http://127.0.0.1:{refusing_port}/router/api/v1")
     monkeypatch.setattr(govee, "_MUSE_SESSION", None)
@@ -1618,7 +1541,6 @@ def test_network_failure_error_is_redacted(muse_env: Path, refusing_port: int) -
     handle = mint_surrogate("homeassistant")
     assert handle is not None
     session = MuseBoundarySession("homeassistant")
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
     with pytest.raises(MuseAuthError, match="network boundary request failed") as info:
         session.get(
@@ -1658,13 +1580,6 @@ def test_multiple_trailing_dot_hosts_rejected(
     must strip exactly one dot so the malformed spelling cannot collapse
     into a valid name and reach urllib3 (where it fails unparseably).
     """
-    from kiss.agents.third_party_agents.muse_auth._common import (
-        canonical_host,
-        canonical_host_entry,
-        valid_hostname,
-        valid_http_url,
-    )
-    from kiss.agents.third_party_agents.muse_auth.daemon import _invalid_hosts_reason
 
     assert canonical_host("Example.COM.") == "example.com"
     assert canonical_host("example.com..") == "example.com."
@@ -1697,8 +1612,6 @@ def test_cli_import_url_requirements(muse_env: Path, capsys: pytest.CaptureFixtu
     falsy JSON values (false, 0, []) are malformed configs, not "use
     the default".
     """
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
-    from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     # ntfy with a null server: import succeeds and enrolls ntfy.sh:443,
     # the same origin the connector loader defaults to.
@@ -1747,8 +1660,6 @@ def test_connect_rejects_malformed_legacy_urls(muse_env: Path) -> None:
     scope Sentinel can never match, and must not scrub the plaintext
     copy: the backend fails closed with an actionable message instead.
     """
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlChannelBackend
-    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
 
     ha_config.path.parent.mkdir(parents=True, exist_ok=True)
     ha_config.path.write_text(

@@ -19,31 +19,9 @@ function persistedEvents(warningMsg) {
   ];
 }
 
-function testReplayRendersPersistedWarning() {
-  const {win} = makePage({beforeScripts: stubRaf});
-
-  const msg =
-    'Failed to restore your uncommitted changes: `git stash pop` ' +
-    'conflicted. Your changes are preserved in the git stash.';
-  send(win, {
-    type: 'task_events',
-    task: 'fix the bug',
-    events: persistedEvents(msg),
-  });
-
-  const output = win.document.getElementById('output');
-  const text = output ? output.textContent : '';
-  assert.ok(
-    text.includes('git stash pop'),
-    'BUG: a PERSISTED warning event was silently dropped on chat ' +
-      'reopen (replayEventsInto/handleOutputEvent has no warning ' +
-      'case) — the user never learns their uncommitted changes are ' +
-      'stuck in the stash',
-  );
-  win.close();
-  console.log('  ok - persisted warning renders on chat reopen (replay)');
-}
-
+// A persisted warning event must survive a chat reopen (task_events replay
+// through replayEventsInto → handleOutputEvent) and render exactly as the
+// live banner does.
 function testReplayWarningMatchesLiveRendering() {
   const liveView = makePage({beforeScripts: stubRaf});
   send(liveView.win, {
@@ -82,40 +60,9 @@ function testReplayWarningMatchesLiveRendering() {
   console.log('  ok - replayed warning renders identically to live');
 }
 
-function testProcessEventRendersWarning() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  const api = win._testApi;
-  assert.ok(
-    api && typeof api.processEvent === 'function',
-    '_testApi.processEvent must be exposed by main.js',
-  );
-
-  api.processEvent({type: 'text_delta', text: 'thinking...'});
-  api.processEvent({
-    type: 'warning',
-    message: 'replayed stash warning XYZZY',
-  });
-
-  const output = win.document.getElementById('output');
-  const text = output ? output.textContent : '';
-  assert.ok(
-    text.includes('replayed stash warning XYZZY'),
-    'BUG: a persisted warning event is dropped when replayed ' +
-      '(processOutputEvent → handleOutputEvent has no warning case)',
-  );
-  win.close();
-  console.log('  ok - replaying a persisted warning renders it');
-}
-
-function runTests() {
-  testReplayRendersPersistedWarning();
-  testReplayWarningMatchesLiveRendering();
-  testProcessEventRendersWarning();
-}
-
 try {
-  runTests();
-  console.log('\n3 passed, 0 failed');
+  testReplayWarningMatchesLiveRendering();
+  console.log('\n1 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

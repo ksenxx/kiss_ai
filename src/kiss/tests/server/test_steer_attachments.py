@@ -7,11 +7,12 @@
 
 ``appendUserMessage`` carries ``attachments`` (the submit wire shape:
 base64 ``data`` + ``mimeType``).  The handler decodes them onto the
-owner state's ``pending_user_attachments``; the pre-step drain injects
-the texts as ``User says: ...`` messages and then ONE ``user`` message
-carrying the files, which the model adapters render as image / file
-content parts.  Files queued after the agent's last step ride along
-with the leftover prompts the runner re-submits as the tab's next run.
+owner state's ``pending_user_attachments`` (one list per message); the
+pre-step drain injects the texts as ``User says: ...`` messages and
+then ONE ``user`` message carrying all the files, which the model
+adapters render as image / file content parts.  Files queued after the
+agent's last step ride along with the leftover prompts the runner
+re-submits as the tab's next run, each message with its own.
 
 Real ``AgentServer``, ``JsonPrinter``, ``SorcarAgent`` and
 ``AnthropicModel`` (no request is made); no mocks.
@@ -83,9 +84,9 @@ class TestQueueAndDrain:
             "attachments": [_wire(PDF, "application/pdf", "spec.pdf")],
         })
         assert st.pending_user_messages == ["use this screenshot", "and this", "plus the spec"]
-        assert [(a.mime_type, a.data) for a in st.pending_user_attachments] == [
-            ("image/png", PNG), ("application/pdf", PDF),
-        ]
+        assert [
+            [(a.mime_type, a.data) for a in files] for files in st.pending_user_attachments
+        ] == [[("image/png", PNG)], [], [("application/pdf", PDF)]]
 
         model = AnthropicModel("claude-steer-test", api_key="test-key")
         model.initialize("the task")
@@ -187,9 +188,9 @@ class TestQueueAndDrain:
         finally:
             st.task_thread = None
         assert st.pending_user_messages == ["while you are at it"]
-        assert [(a.mime_type, a.data) for a in st.pending_user_attachments] == [
-            ("image/png", PNG),
-        ]
+        assert [
+            [(a.mime_type, a.data) for a in files] for files in st.pending_user_attachments
+        ] == [[("image/png", PNG)]]
 
     def test_malformed_attachment_entries_are_skipped(self) -> None:
         server, _events = _server()
@@ -202,11 +203,15 @@ class TestQueueAndDrain:
                 _wire(PDF, "application/pdf", "x"),
             ],
         })
-        assert [a.mime_type for a in st.pending_user_attachments] == ["application/pdf"]
+        assert [[a.mime_type for a in files] for files in st.pending_user_attachments] == [
+            ["application/pdf"],
+        ]
         server._cmd_append_user_message({
             "tabId": "tab-bad", "prompt": "not a list", "attachments": "nope",
         })
-        assert len(st.pending_user_attachments) == 1
+        assert [[a.mime_type for a in files] for files in st.pending_user_attachments] == [
+            ["application/pdf"], [],
+        ]
 
     def test_daemon_client_puts_attachments_on_the_wire_only_when_given(self) -> None:
         from kiss.agents.sorcar import daemon_client

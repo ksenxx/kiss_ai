@@ -23,7 +23,17 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
+const {makePage: makeChatPage, send} = require('./simplify2_harness.js');
+
+// Every page built, closed together at the end so no timer of theirs
+// keeps the process alive.
+const windows = [];
+
+function makePage() {
+  const page = makeChatPage();
+  windows.push(page.win);
+  return page;
+}
 
 function keydown(win, inp, key) {
   inp.dispatchEvent(
@@ -330,4 +340,8 @@ function main() {
   console.log('  ok - SEA slash-command autocomplete');
 }
 
-main();
+try {
+  main();
+} finally {
+  windows.forEach(w => w.close());
+}

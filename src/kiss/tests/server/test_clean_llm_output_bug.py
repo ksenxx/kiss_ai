@@ -18,45 +18,15 @@ closing quote, ``strip('"')`` cannot reach the opening/closing quote pair,
 so the result keeps a stray quote and newline (``feat: add widget"\n``).
 That stray quote then leaks into committed git messages.
 
-These tests assert the documented contract: surrounding whitespace and
-quotes are both removed regardless of order.
+The strip contract itself (surrounding whitespace and paired quotes are
+both removed regardless of order) is pinned by
+``test_bughunt9_config_helpers_assets.py::TestCleanLlmOutputPairedQuotesOnly``;
+this file keeps the autocomplete clipper's side of the fix.
 """
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.commit_message import clean_llm_output
 from kiss.server.helpers import clip_autocomplete_suggestion
-
-
-class TestCleanLlmOutput:
-    """``clean_llm_output`` must honour its documented strip contract."""
-
-    def test_quoted_with_trailing_newline(self) -> None:
-        """Quotes must be removed even when whitespace surrounds them."""
-        assert clean_llm_output('"fix the bug"\n') == "fix the bug"
-
-    def test_quoted_with_surrounding_spaces(self) -> None:
-        assert clean_llm_output('  "hello"  ') == "hello"
-
-    def test_single_quoted_with_trailing_newline(self) -> None:
-        assert clean_llm_output("'msg'\n") == "msg"
-
-    def test_plain_trailing_newline_stripped(self) -> None:
-        assert clean_llm_output("plain\n") == "plain"
-
-    def test_plain_surrounding_whitespace_stripped(self) -> None:
-        assert clean_llm_output("  spaced  ") == "spaced"
-
-    def test_unquoted_unchanged(self) -> None:
-        assert clean_llm_output("feat: add widget") == "feat: add widget"
-
-    def test_inner_quotes_preserved(self) -> None:
-        """Only *surrounding* quotes are stripped, not interior ones."""
-        assert clean_llm_output('say "hi" now') == 'say "hi" now'
-
-    def test_empty_and_whitespace_only(self) -> None:
-        assert clean_llm_output("") == ""
-        assert clean_llm_output("   \n  ") == ""
 
 
 class TestClipAutocompleteUnaffected:

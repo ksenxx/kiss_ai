@@ -122,6 +122,32 @@ def test_finish_connects_and_calls_on_connected(composio) -> None:
     }
 
 
+def test_check_reports_an_account_composio_marks_expired(composio) -> None:
+    """A locally recorded account that Composio says is EXPIRED is not "connected"."""
+    calls: list[str] = []
+    tools = _tools(calls)
+    started = json.loads(tools["authenticate_google_calendar"]())
+    account = started["verification_uri"].rsplit("/", 1)[1]
+    composio.accounts[account] = "ACTIVE"
+    assert json.loads(tools["finish_google_calendar_auth"]())["ok"] is True
+    assert composio_google.connection_status(_SERVICE) == "ACTIVE"
+    composio.accounts[account] = "EXPIRED"
+    assert composio_google.connection_status(_SERVICE) == "EXPIRED"
+    answer = tools["check_google_calendar_auth"]()
+    assert answer.startswith("The Google Calendar connection is EXPIRED, not ACTIVE")
+    assert "authenticate_google_calendar()" in answer
+
+
+def test_connection_status_without_an_account_or_without_composio(
+    composio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No recorded account gives ``""``; an unreachable Composio gives UNKNOWN."""
+    assert composio_google.connection_status(_SERVICE) == ""
+    connect(composio, _SERVICE)
+    monkeypatch.setenv("COMPOSIO_BASE_URL", "http://127.0.0.1:9")
+    assert composio_google.connection_status(_SERVICE) == composio_google.STATUS_UNKNOWN
+
+
 def test_finish_pending_and_failed_do_not_call_on_connected(
     composio, monkeypatch: pytest.MonkeyPatch
 ) -> None:

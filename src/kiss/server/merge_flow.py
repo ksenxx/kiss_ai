@@ -82,29 +82,26 @@ def _unquoted_name_lines(output: str) -> list[str]:
     return [_unquote_git_path(line) for line in output.split("\n") if line]
 
 
-def _porcelain_paths(output: str, *, rename_both_sides: bool = False) -> list[str]:
+def _porcelain_paths(output: str) -> list[str]:
     """Parse ``git status --porcelain`` output into unquoted file paths.
 
     A thin wrapper over the shared
     :func:`kiss.agents.sorcar.git_worktree._porcelain_entries` parser
     (also backing ``GitWorktreeOps.copy_dirty_state``) so the porcelain
     parsers cannot drift apart.  Rename/copy entries (``R  old -> new``)
-    are split on the `` -> `` boundary instead of being emitted as one
-    bogus ``"old -> new"`` path.
+    are split on the `` -> `` boundary and BOTH sides are listed
+    (mirroring a ``diff --no-renames`` listing) instead of one bogus
+    ``"old -> new"`` path.
 
     Args:
         output: Raw stdout from a ``git status --porcelain`` command.
-        rename_both_sides: When True, emit BOTH the old and the new
-            side of a rename/copy entry (mirroring a
-            ``diff --no-renames`` listing); when False, emit only the
-            new side.
 
     Returns:
         De-duplicated list of relative file paths in output order.
     """
     files: list[str] = []
     for _code, old_name, new_name in _porcelain_entries(output):
-        for path in ((old_name,) if rename_both_sides else ()) + (new_name,):
+        for path in (old_name, new_name):
             if path and path not in files:
                 files.append(path)
     return files
@@ -633,13 +630,18 @@ class _MergeFlowMixin:
             return mb.stdout.strip()
         return None
 
-    def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
+    def _get_worktree_changed_files(self, tab_id: str) -> list[str]:
         """List files changed in the tab's pending worktrees vs their original branches.
 
         Files of the worktree the task's work dir is in are relative to
         that worktree; files of any other repository's worktree are
         prefixed with that repository's root, so the list is
         unambiguous for a task that touched several repositories.
+
+        Test probe only: production (:meth:`_present_pending_worktree`)
+        calls :meth:`_list_pending` and :func:`_flatten_changed` on the
+        state it already holds; the tests under ``src/kiss/tests/server``
+        reach :meth:`_changed_files_of` through this method by tab id.
 
         Args:
             tab_id: The tab whose worktrees to check.
@@ -693,7 +695,7 @@ class _MergeFlowMixin:
                 # this worktree so committed work is never mistaken for
                 # a clean worktree.
                 status = _git("status", "--porcelain", cwd=str(wt.wt_dir))
-                files = _porcelain_paths(status.stdout, rename_both_sides=True)
+                files = _porcelain_paths(status.stdout)
                 unique = _git(
                     "log", "--pretty=format:", "--name-only", "--no-renames",
                     "HEAD", "--not", f"--exclude={wt.branch}", "--branches",

@@ -42,6 +42,7 @@ const {
   makePage: makeChatPage,
   stubRaf,
   sleep,
+  waitFor,
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -70,6 +71,62 @@ function fakeModel() {
   return {KaldiRecognizer: FakeRecognizer, terminate() {}};
 }
 
+// voice.js bounds every model load with setTimeout(MODEL_LOAD_TIMEOUT_MS).
+// The tests fire that timer by hand (page.fireLoadTimeout) instead of
+// sleeping past a real one, so the "still loading" and "timed out"
+// assertions cannot race the wall clock when run-all.js runs suites
+// concurrently.  Any other delay (the fake worker's boot error, the
+// pipeline's own timers) keeps the real setTimeout.
+const LOAD_TIMEOUT_MS = 60;
+
+/**
+ * A Worker stand-in for jsdom (which has none): records postMessage
+ * traffic and terminate() calls and lets the test play the worker's side
+ * of the vosk protocol.  With `bootError` set, every instance raises the
+ * standard asynchronous `error` event shortly after construction without
+ * ever posting a load message (a script/WASM that fails to boot).
+ */
+function fakeWorkerClass(workers, bootError) {
+  return class FakeWorker {
+    constructor(url) {
+      this.url = url;
+      this.listeners = new Map();
+      this.posted = [];
+      this.terminated = false;
+      workers.push(this);
+      if (bootError) setTimeout(() => this.emitError({message: bootError}), 5);
+    }
+    addEventListener(type, cb) {
+      const list = this.listeners.get(type) || [];
+      list.push(cb);
+      this.listeners.set(type, list);
+    }
+    removeEventListener(type, cb) {
+      const list = this.listeners.get(type) || [];
+      const i = list.indexOf(cb);
+      if (i >= 0) list.splice(i, 1);
+    }
+    postMessage(msg) {
+      this.posted.push(msg);
+    }
+    terminate() {
+      this.terminated = true;
+    }
+    /** Play the worker: deliver `data` to the page-side Model. */
+    emit(data) {
+      for (const cb of (this.listeners.get('message') || []).slice())
+        cb({data});
+    }
+    /** Boot failure: the standard asynchronous Worker `error` event. */
+    emitError(err) {
+      for (const cb of (this.listeners.get('error') || []).slice()) cb(err);
+    }
+    errorListenerCount() {
+      return (this.listeners.get('error') || []).length;
+    }
+  };
+}
+
 /**
  * A browser-mode page whose window.Vosk.createModel returns promises the
  * test settles (or never settles) by hand, counting every call.
@@ -79,9 +136,10 @@ function makePage(opts) {
   const mic = {calls: []};
   const vosk = {createModelCalls: 0, settlers: []};
   const bootWorkers = [];
+  const loadTimers = [];
   const {win, posted} = makeChatPage({
     beforeScripts: win =>
-      installVoiceStubs(win, options, mic, vosk, bootWorkers),
+      installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers),
     extraScripts: ['voice.js'],
   });
   // voice.js only reads window.Vosk lazily (loadVosk at mic click), so
@@ -89,11 +147,34 @@ function makePage(opts) {
   if (options.realVosk) {
     win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
   }
-  return {win, posted, mic, vosk, bootWorkers};
+  /** Fire every armed, uncleared model-load timeout, as the clock would. */
+  function fireLoadTimeout() {
+    const due = loadTimers.splice(0);
+    assert.ok(due.length > 0, 'a model-load timeout must be armed');
+    for (const t of due) t.cb();
+  }
+  return {win, posted, mic, vosk, bootWorkers, fireLoadTimeout};
 }
 
-function installVoiceStubs(win, options, mic, vosk, bootWorkers) {
+function captureLoadTimeouts(win, loadTimers) {
+  const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
+  win.setTimeout = function (cb, ms, ...args) {
+    if (ms !== LOAD_TIMEOUT_MS) return realSetTimeout.call(win, cb, ms, ...args);
+    const timer = {cb};
+    loadTimers.push(timer);
+    return timer;
+  };
+  win.clearTimeout = function (id) {
+    const i = loadTimers.indexOf(id);
+    if (i >= 0) loadTimers.splice(i, 1);
+    else realClearTimeout.call(win, id);
+  };
+}
+
+function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
   stubRaf(win);
+  captureLoadTimeouts(win, loadTimers);
   win.Audio = function (src) {
     return {src, play: () => Promise.resolve()};
   };
@@ -118,40 +199,9 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers) {
 
   if (options.realVosk) {
     // Integrated mode: the REAL vendored vosk.js is loaded below and
-    // window.Vosk comes from it.  jsdom has no Web Workers, so this
-    // fake stands in: it constructs fine, then its script fails to
-    // boot and it raises the standard asynchronous `error` event
-    // without ever posting a load message (the leak the boot-error
-    // path exists for).
-    win.Worker = class BootFailingWorker {
-      constructor(url) {
-        this.url = url;
-        this.listeners = new Map();
-        this.posted = [];
-        this.terminated = false;
-        bootWorkers.push(this);
-        setTimeout(() => {
-          for (const cb of (this.listeners.get('error') || []).slice())
-            cb({message: 'worker boot failed'});
-        }, 5);
-      }
-      addEventListener(type, cb) {
-        const list = this.listeners.get(type) || [];
-        list.push(cb);
-        this.listeners.set(type, list);
-      }
-      removeEventListener(type, cb) {
-        const list = this.listeners.get(type) || [];
-        const i = list.indexOf(cb);
-        if (i >= 0) list.splice(i, 1);
-      }
-      postMessage(msg) {
-        this.posted.push(msg);
-      }
-      terminate() {
-        this.terminated = true;
-      }
-    };
+    // window.Vosk comes from it; its Workers fail to boot (the leak the
+    // boot-error path exists for).
+    win.Worker = fakeWorkerClass(bootWorkers, 'worker boot failed');
     if (typeof win.URL.createObjectURL !== 'function') {
       win.URL.createObjectURL = () => 'blob:fake-vosk-worker';
     }
@@ -203,43 +253,7 @@ function makeVoskWindow() {
   });
   const win = dom.window;
   const workers = [];
-  win.Worker = class FakeWorker {
-    constructor(url) {
-      this.url = url;
-      this.listeners = new Map();
-      this.posted = [];
-      this.terminated = false;
-      workers.push(this);
-    }
-    addEventListener(type, cb) {
-      const list = this.listeners.get(type) || [];
-      list.push(cb);
-      this.listeners.set(type, list);
-    }
-    removeEventListener(type, cb) {
-      const list = this.listeners.get(type) || [];
-      const i = list.indexOf(cb);
-      if (i >= 0) list.splice(i, 1);
-    }
-    postMessage(msg) {
-      this.posted.push(msg);
-    }
-    terminate() {
-      this.terminated = true;
-    }
-    /** Play the worker: deliver `data` to the page-side Model. */
-    emit(data) {
-      for (const cb of (this.listeners.get('message') || []).slice())
-        cb({data});
-    }
-    /** Boot failure: the standard asynchronous Worker `error` event. */
-    emitError(err) {
-      for (const cb of (this.listeners.get('error') || []).slice()) cb(err);
-    }
-    errorListenerCount() {
-      return (this.listeners.get('error') || []).length;
-    }
-  };
+  win.Worker = fakeWorkerClass(workers, null);
   if (typeof win.URL.createObjectURL !== 'function') {
     win.URL.createObjectURL = () => 'blob:fake-worker-url';
   }
@@ -262,8 +276,8 @@ async function main() {
     'CAND-4: a model load that never settles times out into the error ' +
       'state instead of wedging voice on loading forever',
     async () => {
-      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-      const {win, vosk} = page;
+      const page = makePage({cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS}});
+      const {win, vosk, fireLoadTimeout} = page;
       micBtn(win).click(); // browser mode: pipeline starts directly
       await sleep(20);
       assert.strictEqual(vosk.createModelCalls, 1);
@@ -272,7 +286,8 @@ async function main() {
         `must be loading while the model loads: ${micBtn(win).className}`,
       );
       // The worker never posts 'load': createModel never settles.
-      await sleep(150);
+      fireLoadTimeout();
+      await sleep(20);
       const btn = micBtn(win);
       assert.ok(
         btn.classList.contains('voice-error'),
@@ -292,10 +307,12 @@ async function main() {
       'it waits for the download already in flight instead of starting a ' +
       'second one',
     async () => {
-      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-      const {win, mic, vosk} = page;
+      const page = makePage({cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS}});
+      const {win, mic, vosk, fireLoadTimeout} = page;
       micBtn(win).click();
-      await sleep(150); // load timed out; the error turned the mic off
+      await sleep(20);
+      fireLoadTimeout(); // load timed out; the error turned the mic off
+      await sleep(20);
       assert.ok(micBtn(win).classList.contains('voice-error'));
       micBtn(win).click(); // the user tries again
       await sleep(20);
@@ -325,10 +342,12 @@ async function main() {
     'CAND-4: a model that arrives after its timeout is kept for the next ' +
       'enable, which uses it without another download',
     async () => {
-      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-      const {win, mic, vosk} = page;
+      const page = makePage({cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS}});
+      const {win, mic, vosk, fireLoadTimeout} = page;
       micBtn(win).click();
-      await sleep(150); // timed out
+      await sleep(20);
+      fireLoadTimeout();
+      await sleep(20);
       assert.ok(micBtn(win).classList.contains('voice-error'));
       vosk.settlers[0].resolve(fakeModel());
       await sleep(20);
@@ -353,10 +372,12 @@ async function main() {
     'CAND-4: a shared load that fails after the timeout is forgotten, so ' +
       'the next enable starts a fresh one',
     async () => {
-      const page = makePage({cfg: {modelLoadTimeoutMs: 60}});
-      const {win, vosk} = page;
+      const page = makePage({cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS}});
+      const {win, vosk, fireLoadTimeout} = page;
       micBtn(win).click();
-      await sleep(150); // timed out
+      await sleep(20);
+      fireLoadTimeout();
+      await sleep(20);
       vosk.settlers[0].reject(new Error('model download failed'));
       await sleep(20);
       assert.ok(
@@ -600,15 +621,14 @@ async function main() {
       });
       const {win, bootWorkers} = page;
       micBtn(win).click();
-      await sleep(150);
+      await waitFor(
+        () => micBtn(win).classList.contains('voice-error'),
+        'the mic button must recover to the error state',
+      );
       assert.strictEqual(
         bootWorkers.length,
         1,
         'the first model attempt created one Worker',
-      );
-      assert.ok(
-        micBtn(win).classList.contains('voice-error'),
-        'the mic button recovers to the error state: ' + micBtn(win).className,
       );
       assert.strictEqual(
         bootWorkers[0].terminated,
@@ -617,11 +637,9 @@ async function main() {
       );
       // Retry: a fresh Worker is created and reclaimed in turn.
       micBtn(win).click();
-      await sleep(150);
-      assert.strictEqual(
-        bootWorkers.length,
-        2,
-        'the retry created a second Worker',
+      await waitFor(
+        () => bootWorkers.length === 2 && bootWorkers[1].terminated,
+        'the retry must create a second Worker and reclaim it',
       );
       const leaked = bootWorkers.filter(w => !w.terminated);
       assert.strictEqual(

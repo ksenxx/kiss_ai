@@ -235,9 +235,12 @@ every table number comes from a macro or a script. Nothing spills into the margi
    what it says about the topic.
 3. Write the paper.
 4. Build with the `build_paper` tool: zero errors, zero undefined references or
-   citations, no overfull box over 10 pt. Render pages to PNG (`pdftoppm -png -r 60`)
-   and look at them. Fix spilling tables, badly split prompt boxes, orphan headings, and
-   `??`.
+   citations, no overfull box over 10 pt. Its report is the layout gate: the page count,
+   the last-page fill and the page of every float; `wc -w`, `pdfinfo` and page images
+   are not needed to know them. Render to PNG (`pdftoppm -png -r 60 -f N -l N`) only
+   the pages the report makes you doubt (a float far from its reference, a last page
+   under 30% full, a table wider than the text) and look at those; fix spilling tables,
+   badly split prompt boxes, orphan headings, and `??`.
 5. Run the `check_paper` tool; fix everything it flags.
 6. Independent review: run the reviewer model read-only. Ask it to check, with line
    numbers, (a) every number against the raw results and code, (b) every citation
@@ -746,6 +749,53 @@ def _summarize_log(log: str) -> tuple[list[str], list[str], list[str], str]:
     return errors, undefined, overfull, pages.group(1) if pages else "?"
 
 
+_FLOAT_LABEL = re.compile(
+    r"\\newlabel\{((?:fig|tab|figure|table|alg|lst)[^}]*)\}\{\{([^{}]*)\}\{(\d+)\}"
+)
+"""A ``\\newlabel{fig:x}{{1}{3}...}`` line of the ``.aux``: label, number, page."""
+
+
+def float_pages(aux_path: Path) -> list[str]:
+    """Return ``label: number N on page P`` for every figure, table, algorithm or listing label.
+
+    Args:
+        aux_path: The ``.aux`` file of the built paper.
+    """
+    try:
+        aux = aux_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [
+        f"{label}: number {number} on page {page}"
+        for label, number, page in _FLOAT_LABEL.findall(aux)
+    ]
+
+
+def last_page_fill(pdf_path: Path) -> str:
+    """Return how full the last page is, as ``N%`` of the fullest page's text lines.
+
+    ``"?"`` when pdftotext is not installed.
+
+    Args:
+        pdf_path: The built PDF.
+    """
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext or not pdf_path.is_file():
+        return "?"
+    try:
+        text = subprocess.run(
+            [pdftotext, "-layout", str(pdf_path), "-"], capture_output=True, text=True,
+            errors="replace", timeout=120, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+    pages = [p for p in text.split("\f") if p.strip()]
+    if not pages:
+        return "?"
+    counts = [sum(1 for line in page.splitlines() if line.strip()) for page in pages]
+    return f"{100 * counts[-1] // max(counts)}%"
+
+
 def build_paper(tex_path: str, tex_bin: str = "") -> str:
     """Build a LaTeX paper (pdflatex, bibtex, pdflatex, pdflatex) and summarize the log.
 
@@ -757,8 +807,11 @@ def build_paper(tex_path: str, tex_bin: str = "") -> str:
     Returns:
         The exit status of each pass, then the errors, the undefined references
         and citations, and the overfull boxes over 10 pt with their line
-        ranges, each marked ``PASS`` or ``FAIL``; then the page count and the
-        PDF and log paths.
+        ranges, each marked ``PASS`` or ``FAIL``; then the page count, how
+        full the last page is, the page of every figure, table, algorithm
+        and listing label, and the PDF and log paths.  These numbers are
+        the layout gate: rendering pages to images is only for the few
+        pages this report makes you doubt.
     """
     path = Path(tex_path).expanduser().resolve()
     if not path.is_file():
@@ -780,6 +833,8 @@ def build_paper(tex_path: str, tex_bin: str = "") -> str:
     report += _section("overfull boxes over 10pt", overfull, 0)
     pdf = cwd / f"{stem}.pdf"
     report.append(f"pages: {pages}")
+    report.append(f"last page fill: {last_page_fill(pdf)}")
+    report += _section("floats (label: number on page)", float_pages(cwd / f"{stem}.aux"), -1)
     report.append(f"pdf: {pdf}" if pdf.is_file() else "pdf: not written FAIL")
     report.append(f"log: {cwd / f'{stem}.log'}")
     return "\n".join(report)

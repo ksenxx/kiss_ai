@@ -30,7 +30,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
     KissWebChatAgent,
     run_agent_via_kiss_web,
 )
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.agents.third_party_agents.recording_daemon import serve_recording_daemon
 
 
 def _wire_work_dir(run_kwargs: dict[str, Any]) -> str:
@@ -40,17 +40,11 @@ def _wire_work_dir(run_kwargs: dict[str, Any]) -> str:
     ``run_agent_via_kiss_web`` → ``sorcar.run``) and returns the
     ``workDir`` the daemon received on the wire.
     """
-    daemon = RecordingDaemon()
-    saved_override = _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE
-    _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = str(daemon.endpoint_file)
-    try:
+    with serve_recording_daemon(_kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE") as daemon:
         prompt = run_kwargs.pop("prompt_template")
         run_agent_via_kiss_web(KissWebChatAgent("probe"), prompt, **run_kwargs)
         assert len(daemon.run_commands) == 1
         return str(daemon.run_commands[0]["workDir"])
-    finally:
-        _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = saved_override
-        daemon.close()
 
 
 def test_launch_work_dir_prefers_kiss_workdir(
@@ -103,25 +97,15 @@ def test_run_forwards_launch_cwd_to_daemon(
     assert _wire_work_dir(run_kwargs) == expected
 
 
-def test_arg_parser_default_work_dir_uses_kiss_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The ``--work_dir`` argparse default resolves to ``KISS_WORKDIR``."""
-    launch = tmp_path / "launch"
-    launch.mkdir()
-    monkeypatch.setenv("KISS_WORKDIR", str(launch))
-    args = _build_arg_parser().parse_args([])
-    assert args.work_dir == str(launch.resolve())
-
-
 def test_build_run_kwargs_work_dir_uses_kiss_workdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``_build_run_kwargs`` threads the launch dir into ``run`` kwargs."""
+    """The ``--work_dir`` default resolves to ``KISS_WORKDIR`` and reaches the ``run`` kwargs."""
     launch = tmp_path / "project"
     launch.mkdir()
     monkeypatch.setenv("KISS_WORKDIR", str(launch))
     args = _build_arg_parser().parse_args(["-t", "noop"])
+    assert args.work_dir == str(launch.resolve())
     assert _build_run_kwargs(args)["work_dir"] == str(launch.resolve())
 
 

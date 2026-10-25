@@ -300,6 +300,43 @@ class TestB2StashPopFallback:
         assert (repo / "u.txt").read_text() == "in-the-way\n"
         assert _stash_count(repo) == 1, "stash must be retained on failure"
 
+    def test_no_second_apply_when_the_status_check_fails(self, tmp_path: Path) -> None:
+        """Review round 1, item 3: an unverifiable tree never gets the plain pop.
+
+        The fallback is allowed only when two status snapshots prove
+        the failed ``--index`` attempt left the tree untouched.  Here
+        ``git status --porcelain`` itself fails (a bad
+        ``status.showUntrackedFiles`` in the repo config) both times,
+        so nothing is proven: the two identical failure reports must
+        not count as "unchanged".  The stash is one the plain pop
+        WOULD apply (the ``--index`` patch misses its context, the
+        three-way merge of the tree does not), so a second pop is
+        observable as the stash entry disappearing.
+        """
+        repo = _init_repo(tmp_path)
+        (repo / "f.txt").write_text("".join(f"{n}\n" for n in range(1, 21)))
+        _git(repo, "add", "f.txt")
+        _git(repo, "commit", "-m", "twenty lines")
+        lines = (repo / "f.txt").read_text().splitlines(keepends=True)
+        lines[0] = "ONE\n"
+        (repo / "f.txt").write_text("".join(lines))
+        _git(repo, "add", "f.txt")
+        _git(repo, "stash", "push", "-m", "kiss-stash")
+        lines[0] = "1\n"
+        lines[3] = "FOUR\n"
+        (repo / "f.txt").write_text("".join(lines))
+        _git(repo, "add", "f.txt")
+        _git(repo, "commit", "-m", "line four")
+        _git(repo, "config", "status.showUntrackedFiles", "bogus")
+        assert _git(repo, "status", "--porcelain", check=False).returncode != 0
+        assert _git(repo, "stash", "pop", "--index", check=False).returncode != 0
+        assert _stash_count(repo) == 1
+
+        assert GitWorktreeOps.stash_pop(repo) is False
+
+        assert _stash_count(repo) == 1, "the plain pop ran without proof the tree was untouched"
+        assert (repo / "f.txt").read_text() == "".join(lines)
+
     def test_pop_preserves_index_on_clean_pop(self, tmp_path: Path) -> None:
         """Regression: the happy path still restores staged state."""
         repo = _init_repo(tmp_path)

@@ -22,7 +22,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from kiss.core.locked import locked, locked_call
 
@@ -54,7 +54,10 @@ def interruptible_locked_call[T](
     ``try`` (CPython gh-74174, see :func:`locked_call`): an interrupt
     landing right after a successful slice still reaches the
     ``finally``, and one landing after a failed slice makes ``release``
-    raise ``RuntimeError``, which is swallowed.
+    raise ``RuntimeError``, which is swallowed.  A re-entrant take (the
+    thread already owns the lock) skips the slice loop and runs ``fn``
+    directly: an interrupt landing before its acquire would otherwise
+    make the ``finally`` release the outer hold.
 
     Args:
         lock: The shared reentrant lock.
@@ -65,6 +68,10 @@ def interruptible_locked_call[T](
     Returns:
         ``fn``'s return value.
     """
+    if cast(Any, lock)._is_owned():
+        # Re-entrant take: the outer frame owns the release; an
+        # interrupt landing before an inner acquire must not drop it.
+        return fn(*args, **kwargs)
     try:
         while not lock.acquire(timeout=ACQUIRE_SLICE_SECONDS):
             pass

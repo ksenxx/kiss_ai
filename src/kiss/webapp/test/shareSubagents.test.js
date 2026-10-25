@@ -22,18 +22,16 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const {
   makePage: makeChatPage,
   send,
   stubRaf,
-  MEDIA,
   readyTabId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {click, shareWithTasks, makeSharePage} = require('./share_helpers');
 
 const {test, report} = makeRunner();
 
@@ -42,15 +40,6 @@ function makePage() {
     beforeScripts: stubRaf,
     sourceUrl: 'sharesub-main.js',
   });
-}
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
 }
 
 /**
@@ -74,45 +63,6 @@ function runFanoutTask(wv, chatId, taskId, taskDescs) {
     ts: now,
   });
   return TAB;
-}
-
-/**
- * Click the share button, answer the page's shareChatTasks request
- * with *tasks*, and return the resulting shareChat command.
- */
-function shareWithTasks(wv, tasks) {
-  const win = wv.win;
-  click(win.document.getElementById('share-btn'));
-  const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
-  assert.ok(req, 'clicking share must ask the daemon for the chat tasks');
-  send(win, {
-    type: 'share_tasks',
-    tabId: req.tabId,
-    chatId: req.chatId,
-    tasks: tasks || [],
-    truncated: false,
-  });
-  return wv.posted.filter(m => m.type === 'shareChat').pop();
-}
-
-/**
- * Load share.js into a fresh page whose <body> is *bodyHtml* — the
- * document shape _build_share_page (web_server.py) writes.
- */
-function makeSharePage(bodyHtml) {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body><div id="app">' +
-      bodyHtml +
-      '</div></body></html>',
-    {runScripts: 'dangerously', pretendToBeVisual: true},
-  );
-  const win = dom.window;
-  win.scrollTo = function () {};
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8') +
-      '\n//# sourceURL=sharesub-share.js',
-  );
-  return win;
 }
 
 const SUB_EVENTS_ONE = [

@@ -116,10 +116,6 @@ function submits(posted) {
   return posted.filter(m => m.type === 'submit');
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 /**
  * Let the page's FileReader + awaited chain run.  With `until`, first
  * wait (up to 3 s) for that outcome -- on a busy host the FileReader
@@ -135,10 +131,10 @@ function sleep(ms) {
 async function settle(until) {
   if (until) {
     const deadline = Date.now() + 3000;
-    while (!until() && Date.now() < deadline) await sleep(10);
+    while (!until() && Date.now() < deadline) await harness.sleep(10);
     if (!until()) throw new Error('settle: condition not met within 3 s');
   }
-  await sleep(50);
+  await harness.sleep(50);
 }
 
 /**

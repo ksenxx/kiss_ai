@@ -35,7 +35,7 @@
 'use strict';
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, readyTabId} = require('./simplify2_harness');
 const {makeWebappClient} = require('./transport_page_helpers');
 const {
   runParallelPanel,
@@ -58,10 +58,7 @@ const {
 function bootFanOut(n, declared) {
   const client = makeWebappClient();
   const {win} = client;
-  const posted = client.drain();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the client must post ready with a tabId');
-  const parentId = ready.tabId;
+  const parentId = readyTabId(client.drain());
 
   send(win, {
     type: 'status',

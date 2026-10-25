@@ -28,8 +28,6 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import (
     ALLOW,
-    SUMMARY_DUE_REFUSAL,
-    SUMMARY_EVERY_STEPS,
     BaseSea,
     Verdict,
     refuse,
@@ -221,40 +219,26 @@ def summary(description: str) -> str:
     return description
 
 
-def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
-    """At a 10th step every tool but ``summary`` and ``finish`` waits for a summary.
+def test_stock_base_never_refuses_and_counts_steps_per_run() -> None:
+    """The root layer allows every call at every step; ``tools`` restarts its step count.
 
-    ``finish`` is exempt at every step: a one-step run (or the agent's
-    implicit-finish probe) must be able to end without a summary first.
+    The ten-step progress recap is the executor's (``kiss.core.step_recap``),
+    so a 10th step is a step like any other for the hooks.
     """
     sea = BaseSea()
     sea.tools([summary, house_tool])
-    assert sea.has_summary_tool
-    due = SUMMARY_DUE_REFUSAL.format(step=10, every=SUMMARY_EVERY_STEPS, name="Bash")
-    # Nothing ran yet: both the probe and a real finish pass.
     assert base_tool_call_hook([sea], "finish", {}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
-    for _ in range(9):
+    for step in range(1, 21):
         sea.llm_call_hook([])
+        assert sea.step == step
         assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
-    sea.llm_call_hook([])
-    assert sea.step == 10 and sea.summary_due
-    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == refuse(due)
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {}) == ALLOW
+        assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
     assert base_tool_call_hook([sea], "summary", {"description": "- ran ls"}) == ALLOW
-    assert not sea.summary_due
-    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {"success": True, "is_continue": True}) == ALLOW
-    # A toolset without ``summary`` (tool_profile "none", a SEA that
-    # drops it) is under no rule at all; ``tools`` restarts the count.
     sea.tools([house_tool])
-    assert not sea.has_summary_tool and sea.step == 0
+    assert sea.step == 0
     for _ in range(10):
         sea.llm_call_hook([])
     assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
 
 
 def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:

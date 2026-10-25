@@ -57,7 +57,7 @@
 // exercised for real.
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, twoTabs, clickTab} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
   makeVoicePage,
@@ -70,28 +70,6 @@ const {
 } = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
-
-function twoTabs(win) {
-  const api = win._testApi;
-  assert.ok(api, '_testApi must be exposed by main.js');
-  const first = api.getActiveTabId();
-  api.createNewTab();
-  const second = api.getActiveTabId();
-  assert.ok(second && second !== first, 'a fresh second tab must be active');
-  return {api, first, second};
-}
-
-// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
-// chat tabs any more), which retires nothing.
-function clickTab(win, tabId) {
-  const api = win._testApi;
-  assert.ok(
-    api.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  api.switchToTab(tabId);
-  assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
-}
 
 function submits(posted) {
   return posted.filter(m => m.type === 'submit');

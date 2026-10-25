@@ -11,20 +11,12 @@ const {
   send,
   rowsByTitle,
 } = require('./simplify2_harness');
+const {freezeClockAndStyle} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function freezeDate(win) {
-  const RealDate = win.Date;
-  const FakeDate = function (...args) {
-    if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
-    return new RealDate(...args);
-  };
-  FakeDate.prototype = RealDate.prototype;
-  FakeDate.now = () => FROZEN_NOW_MS;
-  FakeDate.parse = RealDate.parse;
-  FakeDate.UTC = RealDate.UTC;
-  win.Date = FakeDate;
+  freezeClockAndStyle(win, FROZEN_NOW_MS);
 }
 
 function makePage() {
@@ -164,6 +156,11 @@ function testDurationAppearsAfterCost() {
     `row C metrics must read "$1.23 • 01:02:05 …"; got: ${c}`,
   );
   assert.match(
+    c.slice(c.indexOf('01:02:05') + '01:02:05'.length),
+    / • /,
+    `date suffix " • <localised>" must follow the duration; got: ${c}`,
+  );
+  assert.match(
     d,
     /\$0\.00 • 00:01:05\b/,
     `row D (running) metrics must read "$0.00 • 00:01:05 …" using ` +
@@ -176,41 +173,8 @@ function testDurationAppearsAfterCost() {
   );
 
   win.close();
-  console.log('  ok - duration shown in hh:mm:ss after cost');
+  console.log('  ok - duration shown in hh:mm:ss between cost and date');
 }
 
-function testDurationBeforeDateSuffix() {
-  const {win} = makePage();
-  send(win, {
-    type: 'configData',
-    config: {work_dir: ''},
-    apiKeys: {},
-  });
-
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
-
-  const rows = rowsByTitle(win);
-  const c = metricsText(rows['long hour task']);
-
-  const costIdx = c.indexOf('$1.23');
-  const durIdx = c.indexOf('01:02:05');
-  assert.ok(costIdx >= 0, `cost must appear; got: ${c}`);
-  assert.ok(durIdx > costIdx, `duration must follow cost; got: ${c}`);
-
-  const tail = c.slice(durIdx + '01:02:05'.length);
-  assert.ok(
-    / • /.test(tail),
-    `date suffix " • <localised>" must follow duration; got tail: ${tail}`,
-  );
-
-  win.close();
-  console.log('  ok - duration sits between cost and date suffix');
-}
-
-function main() {
-  testDurationAppearsAfterCost();
-  testDurationBeforeDateSuffix();
-  console.log('historyTaskDuration.test.js: all assertions passed.');
-}
-
-main();
+testDurationAppearsAfterCost();
+console.log('historyTaskDuration.test.js: all assertions passed.');

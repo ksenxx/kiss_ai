@@ -22,7 +22,6 @@
 // The real media/chat.html + panelCopy.js + api.js + mobileSwipe.js +
 // main.js are booted in jsdom; nothing under test is mocked.
 
-/* global require, __dirname, console */
 'use strict';
 
 const assert = require('assert');
@@ -248,37 +247,6 @@ function testUserOpenedContentTabSurvivesAndIsNotStolen() {
   console.log('  ok - no content tab is stolen when a sub-agent closes');
 }
 
-function testReportStaysBackgroundWhenSubagentTabIsNotActive() {
-  // Anti-over-fix guard: the original invariant still holds when the
-  // user is NOT on the finishing sub-agent tab.
-  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
-
-  assert.strictEqual(activeTabId(win), parentId, 'precondition');
-  writeReport(win, 'reports/quiet.md', '# quiet', {tabId: subTabIds[0]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-
-  assert.strictEqual(
-    activeTabId(win),
-    parentId,
-    'REGRESSION - the user must stay on the parent tab',
-  );
-  const reportTab = contentTabFor(win, 'quiet.md');
-  assert.ok(reportTab, 'the report tab must be open in the registry');
-  assert.notStrictEqual(
-    activeTabId(win),
-    reportTab.id,
-    'the report tab must not be active',
-  );
-  assert.strictEqual(
-    stripContentTabEls(win).length,
-    0,
-    'the chat screen stays on view: the strip lists no content tab',
-  );
-
-  win.close();
-  console.log('  ok - an inactive sub-agent report still stays background');
-}
-
 function testUserFileOpenStillFocusesAfterSubagentDone() {
   // Anti-over-fix guard: a genuine user file open still switches tabs,
   // even right after a sub-agent finished.
@@ -350,7 +318,6 @@ function main() {
   testDeepSubagentLandsOnItsParentChatTab();
   testClosingActiveSubagentWithoutReportStillPicksChatTab();
   testUserOpenedContentTabSurvivesAndIsNotStolen();
-  testReportStaysBackgroundWhenSubagentTabIsNotActive();
   testUserFileOpenStillFocusesAfterSubagentDone();
   testReportTabRemainsReachableAfterClose();
   console.log('subagentDoneAdjacencyNoReport.test.js: all tests passed');

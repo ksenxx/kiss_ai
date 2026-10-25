@@ -51,6 +51,7 @@ from kiss.agents.sorcar.history_columns import (
 from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.models.model_info import _strip_provider_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -274,24 +275,6 @@ class _RWLock:
             return True
         gen = gen_ref()
         return gen is not None and gen.gi_frame is not None
-
-    @property
-    def _readers(self) -> int:
-        """Number of live acquisitions currently holding read access."""
-        with self._cond:
-            return sum(1 for ref in self._reader_refs if self._token_active(ref))
-
-    @property
-    def _pending_writers(self) -> int:
-        """Number of live writers waiting to acquire the lock."""
-        with self._cond:
-            return sum(1 for ref in self._pending_refs if self._token_active(ref))
-
-    @property
-    def _writer(self) -> bool:
-        """Whether a live writer currently holds exclusive access."""
-        with self._cond:
-            return self._writer_alive()
 
     def _writer_alive(self) -> bool:
         """Return True when a live writer token holds exclusive access."""
@@ -1163,11 +1146,18 @@ def _close_db() -> None:
     """
     global _db_conn
     _stop_event_writer()
-    locked_call(_init_tables_lock, _bump_db_generation)
     _close_cached_thread_conn()
-    with _init_tables_lock:
-        _prune_dead_thread_conns()
+    locked_call(_init_tables_lock, _retire_other_threads_conns)
     _db_conn = None
+
+
+def _retire_other_threads_conns() -> None:
+    """Bump the generation and close dead threads' connections.
+
+    Caller holds ``_init_tables_lock``.
+    """
+    _bump_db_generation()
+    _prune_dead_thread_conns()
 
 
 def _close_thread_db() -> None:
@@ -1543,7 +1533,12 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- 1 when the cron scheduler launched the task (a prompt,
             -- slash-command or in-chat job) or a sub-task of such a
             -- run; the CHATS list hides these unless its Cron chip is on.
-            is_cron INTEGER DEFAULT 0
+            is_cron INTEGER DEFAULT 0,
+            -- JSON {model: [cost, tokens]} of the task's own LLM calls
+            -- (its llm_call events), written with the final cost, so the
+            -- Spend panel files a set_model switch under the model that
+            -- ran; '' = not recorded (legacy row).
+            model_costs TEXT DEFAULT ''
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did, the launch instant (epoch ms) of its latest task and
@@ -1653,11 +1648,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     the atomicity itself, as in :func:`_repair_and_create_index`.
 
     The transaction is opened only when a column is absent.  This runs
-    for every connection a thread opens, from inside the caller's
-    ``_rw_lock.read_lock()``, and ``BEGIN IMMEDIATE`` waits out SQLite's
-    ``busy_timeout`` behind any other process's write transaction; a
-    reader must not pay that (nor hold its read token for it) when
-    there is nothing to migrate.  The checks run again inside the
+    for every connection a thread opens (every reader and writer calls
+    ``_get_db()`` before taking ``_rw_lock``, so no token is held for
+    it), and ``BEGIN IMMEDIATE`` waits out SQLite's ``busy_timeout``
+    behind any other process's write transaction; a reader must not
+    pay that when there is nothing to migrate.  The checks run again inside the
     transaction, so a peer that migrated in between adds nothing twice.
 
     Args:
@@ -1938,8 +1933,7 @@ def _get_db() -> sqlite3.Connection:
     tl_path: str | None = getattr(tl, "path", None)
     current_path = str(_DB_PATH)
     current_id = _db_file_identity(current_path)
-    if current_id is not _FILE_ID_UNKNOWN:
-        _maybe_reset_caches(current_path, current_id)
+    _maybe_reset_caches(current_path, current_id)
     attached = _attached_shm.get(current_path)
     if attached is not None and _sidecars_orphaned(current_path, current_id, attached):
         _recover_orphaned_sidecars(current_path, attached)
@@ -2391,8 +2385,8 @@ def _load_history(
         query_params = (f"%{escaped}%",)
     work_dir_sql = "AND work_dir = ? " if work_dir else ""
     work_dir_params: tuple[str, ...] = (work_dir,) if work_dir else ()
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         effective_limit = limit if limit > 0 else -1
         tag_sql, tag_params = _tag_filter_sql(tag)
         order_sql, order_params = _history_order_sql(running_task_ids)
@@ -2439,8 +2433,8 @@ def _chat_first_tasks(chat_ids: list[str]) -> dict[str, str]:
     ids = sorted({c for c in chat_ids if c})
     if not ids:
         return {}
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         placeholders = ",".join("?" * len(ids))
         # _HISTORY_NOT_SUBAGENT is unqualified, so it binds to t2
         # inside the subquery (innermost scope) and to t outside.
@@ -2470,8 +2464,8 @@ def _history_date_range() -> tuple[float | None, float | None]:
         ``(min_ts, max_ts)`` in epoch seconds, or ``(None, None)``
         when no listable rows exist.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         row = db.execute(
             f"SELECT MIN({_HISTORY_DONE_SQL}) AS mn, MAX({_HISTORY_DONE_SQL}) AS mx "
             f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT}"
@@ -2482,8 +2476,8 @@ def _history_date_range() -> tuple[float | None, float | None]:
 
 
 def _split_tree_spend(
-    root: sqlite3.Row,
-    children: dict[str, list[sqlite3.Row]],
+    root: dict[str, Any],
+    children: dict[str, list[dict[str, Any]]],
     field: str,
 ) -> dict[str, float]:
     """Split a top-level task's *field* (``cost`` or ``tokens``) by model.
@@ -2491,14 +2485,16 @@ def _split_tree_spend(
     A task's persisted total already includes the spend of the
     sub-agents folded into it, which may run on other models.  Each
     task on the tree is credited with its own share, its total minus
-    its sub-agents' totals, under its own model, so the shares add up
-    to the top-level task's total exactly.  When a task's sub-agents
-    add up to more than the task itself (spend that was never folded
-    into it, e.g. rows written before a fold was added), they are
-    scaled down to fit and the task's own share is 0.
+    its sub-agents' totals, split by :func:`_split_own_share` among the
+    models its own calls ran on, so the shares add up to the top-level
+    task's total exactly.  When a task's sub-agents add up to more than
+    the task itself (spend that was never folded into it, e.g. rows
+    written before a fold was added), they are scaled down to fit and
+    the task's own share is 0.
 
     Args:
-        root: The top-level ``task_history`` row (``id``, ``m``, *field*).
+        root: The top-level ``task_history`` row (``id``, ``m``, ``mc``,
+            *field*).
         children: Sub-agent rows keyed by their ``parent_task_id``.
         field: The column to split, ``"cost"`` or ``"tokens"``.
 
@@ -2519,10 +2515,47 @@ def _split_tree_spend(
         kid_scale = scale
         if kids_total > total:
             kid_scale = scale * total / kids_total
-        own = max(total - kids_total, 0.0) * scale
-        shares[row["m"]] = shares.get(row["m"], 0.0) + own
+        own = _split_own_share(row, max(total - kids_total, 0.0), field)
+        for model, amount in own.items():
+            shares[model] = shares.get(model, 0.0) + amount * scale
         stack.extend((k, kid_scale) for k in kids)
     return shares
+
+
+def _split_own_share(row: dict[str, Any], own: float, field: str) -> dict[str, float]:
+    """Split a task's *own* spend among the models its own calls ran on.
+
+    The row's ``mc`` (``model_costs``) records the cost and tokens of
+    the task's own LLM calls per model (see :func:`_own_model_costs`).
+    Each model is credited with what its calls spent; spend no call
+    accounts for (a ``decide`` call, a late side-channel charge) stays
+    with the row's model.  Should the calls add up to more than *own*,
+    they are scaled down to fit.  A row with no record (a legacy row)
+    credits everything to its model.
+
+    Args:
+        row: The ``task_history`` row (``m``, ``mc``).
+        own: The task's own share of *field*, sub-agents excluded.
+        field: ``"cost"`` or ``"tokens"``.
+
+    Returns:
+        Model name to its part of *own*; the parts add up to *own*.
+    """
+    try:
+        recorded = json.loads(row["mc"] or "{}")
+    except (TypeError, ValueError):
+        recorded = {}
+    index = 0 if field == "cost" else 1
+    calls: dict[str, float] = {}
+    if isinstance(recorded, dict):
+        for model, sums in recorded.items():
+            if isinstance(sums, list) and len(sums) == 2:
+                calls[model] = max(_safe_float(sums[index]), 0.0)
+    called = sum(calls.values())
+    fit = min(own / called, 1.0) if called > 0 else 0.0
+    split = {model: amount * fit for model, amount in calls.items()}
+    split[row["m"]] = split.get(row["m"], 0.0) + own - called * fit
+    return split
 
 
 def _round_shares(shares: dict[str, float], total: int) -> dict[str, int]:
@@ -2562,16 +2595,20 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
         "tokens": int, "tasks": int}`` dicts in ascending date order;
         a day's models in descending cost order.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT id, COALESCE(parent_task_id, '') AS p, "
             "date(timestamp, 'unixepoch', 'localtime') AS d, "
             "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
-            "COALESCE(cost, 0) AS cost, COALESCE(tokens, 0) AS tokens "
+            "COALESCE(cost, 0) AS cost, COALESCE(tokens, 0) AS tokens, "
+            "COALESCE(model_costs, '') AS mc "
             "FROM task_history"
         ).fetchall()
-    children: dict[str, list[sqlite3.Row]] = {}
+    # A launch name such as "anthropic/claude-sonnet-4-6" is served (and
+    # its llm_call events named) as "claude-sonnet-4-6": file both alike.
+    rows = [dict(row, m=_strip_provider_prefix(row["m"])) for row in rows]
+    children: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         if row["p"]:
             children.setdefault(row["p"], []).append(row)
@@ -2622,8 +2659,8 @@ def user_tasks_since(since: float) -> list[dict[str, object]]:
         "result"}`` dicts, newest first; ``success`` is ``None`` for a
         task that never finished (stopped, or still running).
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT task, work_dir, timestamp, model, sea, success, result "
             "FROM task_history WHERE timestamp >= ? AND parent_task_id = '' "
@@ -2662,8 +2699,8 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     """
     if not query or limit <= 0:
         return []
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
         pattern = escaped + "*"
         rows = db.execute(
@@ -2693,8 +2730,8 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
         limit: Maximum number of texts returned (the most recent ones);
             defaults to :data:`_MAX_INPUT_HISTORY`.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT task FROM ("
             + _INPUT_TEXTS_SELECT
@@ -2730,8 +2767,8 @@ def _load_slash_command_usage() -> dict[str, tuple[int, float]]:
     Returns:
         ``{command_name: (run_count, last_run_timestamp)}``.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT task, timestamp FROM ("
             + _INPUT_TEXTS_SELECT
@@ -2784,11 +2821,13 @@ def _evict_for_new_key(
     """Make room in a capped table for an upsert of *key*.
 
     No-op when *key* already has a row (the upsert only refreshes it)
-    or the table is under *cap*; otherwise deletes the first row in
-    *evict_order*.  Runs inside the caller's ``BEGIN IMMEDIATE``
-    transaction: as separate autocommit statements, two PROCESSES
-    could both observe "cap not reached" and both insert, pushing the
-    table permanently over the cap.
+    or the table is under *cap*; otherwise deletes the first rows in
+    *evict_order* until the insert will leave exactly *cap* rows — a
+    table an older daemon let grow past the cap shrinks back to it
+    too.  Runs inside the caller's ``BEGIN IMMEDIATE`` transaction: as
+    separate autocommit statements, two PROCESSES could both observe
+    "cap not reached" and both insert, pushing the table permanently
+    over the cap.
 
     Args:
         db: The connection holding the write transaction.
@@ -2796,7 +2835,7 @@ def _evict_for_new_key(
         key_col: The table's unique text column.
         key: The value about to be upserted.
         cap: Maximum number of rows the table may hold.
-        evict_order: ``ORDER BY`` clause selecting the row to evict first.
+        evict_order: ``ORDER BY`` clause selecting the rows to evict first.
     """
     existing = db.execute(
         f"SELECT 1 FROM {table} WHERE {key_col} = ?", (key,),
@@ -2807,8 +2846,9 @@ def _evict_for_new_key(
     _race_delay()
     if row[0] >= cap:
         db.execute(
-            f"DELETE FROM {table} WHERE {key_col} = "
-            f"(SELECT {key_col} FROM {table} ORDER BY {evict_order} LIMIT 1)"
+            f"DELETE FROM {table} WHERE {key_col} IN "
+            f"(SELECT {key_col} FROM {table} ORDER BY {evict_order} LIMIT ?)",
+            (row[0] - cap + 1,),
         )
 
 
@@ -3593,6 +3633,8 @@ def _save_task_extra(
             except Exception:
                 val = default
             pairs.append((f"{col} = ?", val))
+        if "cost" in extra:
+            pairs.append(("model_costs = ?", _own_model_costs(db, resolved)))
         if not pairs:
             return
         sets = [s for s, _ in pairs]
@@ -3603,6 +3645,42 @@ def _save_task_extra(
         )
         if _safe_int(extra.get("endTs"), 0) > 0:
             _finalize_task_metadata(db, resolved)
+
+
+def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
+    """Sum the task's own ``llm_call`` events per model, as JSON.
+
+    Every billed LLM call of a task persists one ``llm_call`` event under
+    the task's own id (a sub-agent's calls sit under the sub-agent's id),
+    carrying the model that served it, its USD cost and its token
+    counts.  The Spend panel splits a task's own spend by this record, so
+    a task that switched models with ``set_model`` is not filed entirely
+    under the model it was launched with.
+
+    Args:
+        db: The connection (inside the caller's transaction).
+        task_id: The ``task_history`` row id.
+
+    Returns:
+        ``{"model": [cost, tokens], ...}`` as JSON, or ``""`` when the
+        task has no ``llm_call`` event.
+    """
+    rows = db.execute(
+        "SELECT json_extract(event_json, '$.model') AS m, "
+        "SUM(json_extract(event_json, '$.cost')) AS c, "
+        "SUM(COALESCE(json_extract(event_json, '$.input_tokens'), 0)"
+        " + COALESCE(json_extract(event_json, '$.output_tokens'), 0)"
+        " + COALESCE(json_extract(event_json, '$.cache_read'), 0)"
+        " + COALESCE(json_extract(event_json, '$.cache_write'), 0)) AS t "
+        "FROM events WHERE task_id = ? AND event_json LIKE '%\"llm_call\"%' "
+        "AND json_extract(event_json, '$.type') = 'llm_call' GROUP BY m",
+        (task_id,),
+    ).fetchall()
+    if not rows:
+        return ""
+    return json.dumps(
+        {str(r[0] or "unknown"): [float(r[1] or 0.0), int(r[2] or 0)] for r in rows}
+    )
 
 
 def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
@@ -3652,8 +3730,8 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
     ids = sorted({c for c in chat_ids if c})
     if not ids:
         return {}
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         placeholders = ",".join("?" * len(ids))
         rows = db.execute(
             "SELECT chat_id, summary, last_launched, last_finished, user_summary "
@@ -3765,8 +3843,9 @@ def _task_tree(task_id: str) -> list[str]:
     """
     if not task_id:
         return []
+    db = _get_db()
     with _rw_lock.read_lock():
-        return _task_tree_ids(_get_db(), [task_id])
+        return _task_tree_ids(db, [task_id])
 
 
 def _chat_task_tree(chat_id: str) -> list[str]:
@@ -3777,8 +3856,9 @@ def _chat_task_tree(chat_id: str) -> list[str]:
     """
     if not chat_id:
         return []
+    db = _get_db()
     with _rw_lock.read_lock():
-        return _chat_tree_ids(_get_db(), chat_id)
+        return _chat_tree_ids(db, chat_id)
 
 
 def _delete_task(task_id: str) -> int:
@@ -3846,8 +3926,13 @@ def _maybe_reset_caches(
     by an on-disk replacement of the SAME pathname (*file_id* — the
     file's ``(st_dev, st_ino)`` — changes): the cached sequence
     counters and has-events marks were seeded from the previous
-    database and are meaningless for the new one.
+    database and are meaningless for the new one.  A *file_id* of
+    :data:`_FILE_ID_UNKNOWN` (a transient ``stat`` failure) proves
+    nothing and leaves the caches alone, exactly as :func:`_get_db`
+    leaves its connection alone.
     """
+    if file_id is _FILE_ID_UNKNOWN:
+        return
     key = (current_path, file_id)
     if _caches_db_key == key:
         return
@@ -4002,10 +4087,10 @@ def _journal_final_result(
     The append is serialised against concurrent appends and the
     sweep-time prune in other processes by
     :func:`_journal_file_lock`; a record that could not take the lock
-    in time is spilled to its own file (see
-    :data:`_FINAL_RESULTS_SPILL_SUFFIX`).  Failures are logged and
-    swallowed: the journal is a safety net, and the primary database
-    write has already succeeded when this runs.
+    in time is spilled to its own file (see :data:`_SPILL_SUFFIX`).
+    Failures are logged and swallowed: the journal is a safety net,
+    and the primary database write has already succeeded when this
+    runs.
 
     Args:
         task_id: History row id whose result was just saved.
@@ -4025,7 +4110,7 @@ def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
     try:
         with _journal_file_lock(sidecar) as locked:
             if not locked:
-                _spill_final_result(sidecar, line)
+                _spill_journal_lines(sidecar, [line + "\n"])
                 return
             # A process killed mid-append can leave a torn last
             # record with no trailing newline; appending directly
@@ -4047,27 +4132,36 @@ def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
         )
 
 
-#: Suffix of a final-result record journalled while a peer process
-#: kept the journal lock past :data:`_JOURNAL_LOCK_TIMEOUT_S`.  The
-#: record must not be appended to the sidecar itself without the lock:
-#: the holder may be the prune, which replaces the sidecar's inode, so
-#: an append landing in the old inode would be erased with it.  The
-#: record goes to its own ``<sidecar>.spill-<pid>-<uuid>`` file —
-#: written under a private name and renamed into place, so no reader
-#: ever sees a partial record — which :func:`_load_final_results`
-#: reads alongside the sidecar and the next locked prune folds back
-#: into it.
-_FINAL_RESULTS_SPILL_SUFFIX = ".spill-"
+#: Suffix of a journal record written while a peer process kept the
+#: journal lock past its timeout (:data:`_JOURNAL_LOCK_TIMEOUT_S` for a
+#: final result, :data:`_JOURNAL_APPEND_TIMEOUT_S` for a failed-events
+#: batch).  The record must not be appended to the sidecar itself
+#: without the lock: the holder may be the prune, which replaces the
+#: final-results sidecar's inode, or a replayer renaming or unlinking
+#: the failed-events sidecar, and a record landing in the old inode
+#: would be erased with it.  Nor may a failed-events batch be
+#: published as a claimed snapshot: a claim key taken now sorts BEFORE
+#: the key the live sidecar gets when it is claimed later, which would
+#: replay the spilled rows ahead of the rows already waiting there.
+#: So the record goes to its own ``<sidecar>.spill-<time ns>-<pid>-
+#: <uuid>`` file — written under a private name and renamed into
+#: place, so no reader ever sees a partial record — which
+#: :func:`_load_final_results` reads alongside its sidecar and the next
+#: locked prune folds back into it, and which the next holder of the
+#: failed-events lock claims right behind the live sidecar
+#: (:func:`_claim_journal_rows`).
+_SPILL_SUFFIX = ".spill-"
 
 
-def _final_results_spills(sidecar: str) -> list[str]:
-    """Return the spill files of *sidecar* (see :data:`_FINAL_RESULTS_SPILL_SUFFIX`).
+def _journal_spills(sidecar: str) -> list[str]:
+    """Return the spill files of *sidecar*, oldest first (see :data:`_SPILL_SUFFIX`).
 
     Args:
-        sidecar: Path returned by :func:`_final_results_path`.
+        sidecar: Path returned by :func:`_final_results_path` or
+            :func:`_failed_events_path`.
     """
     directory = os.path.dirname(sidecar) or "."
-    prefix = os.path.basename(sidecar) + _FINAL_RESULTS_SPILL_SUFFIX
+    prefix = os.path.basename(sidecar) + _SPILL_SUFFIX
     try:
         names = os.listdir(directory)
     except OSError:  # pragma: no cover — unreadable journal directory
@@ -4075,13 +4169,27 @@ def _final_results_spills(sidecar: str) -> list[str]:
     return sorted(os.path.join(directory, name) for name in names if name.startswith(prefix))
 
 
-def _spill_final_result(sidecar: str, line: str) -> None:
-    """Write *line* to a fresh spill file of *sidecar* (see :data:`_FINAL_RESULTS_SPILL_SUFFIX`)."""
+def _spill_journal_lines(sidecar: str, lines: list[str]) -> str:
+    """Write *lines* to a fresh spill file of *sidecar*, bypassing its lock.
+
+    The file is renamed into place complete, so a claim never moves a
+    half-written one, and its zero-padded ``time_ns`` orders this
+    process's successive spills.
+
+    Args:
+        sidecar: The live sidecar the records belong to.
+        lines: The journal records, each newline-terminated.
+
+    Returns:
+        The spill path.
+    """
     unique = f"{os.getpid()}-{uuid.uuid4().hex}"
     writing = f"{sidecar}.writing-{unique}"
     with open(writing, "w", encoding="utf-8") as stream:
-        stream.write(line + "\n")
-    os.replace(writing, f"{sidecar}{_FINAL_RESULTS_SPILL_SUFFIX}{unique}")
+        stream.writelines(lines)
+    spill = f"{sidecar}{_SPILL_SUFFIX}{time.time_ns():020d}-{unique}"
+    os.replace(writing, spill)
+    return spill
 
 
 def _journal_lines(path: str) -> Iterator[str]:
@@ -4110,7 +4218,7 @@ def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
     """
     results: dict[str, dict[str, object]] = {}
     journalled_at: dict[str, float] = {}
-    for path in (sidecar, *_final_results_spills(sidecar)):
+    for path in (sidecar, *_journal_spills(sidecar)):
         for raw in _journal_lines(path):
             try:
                 entry = json.loads(raw)
@@ -4154,7 +4262,7 @@ def _prune_final_results_journal(sidecar: str) -> None:
                 # concurrent append; the next sweep prunes instead.
                 if not locked:
                     return
-                spills = _final_results_spills(sidecar)
+                spills = _journal_spills(sidecar)
                 if not spills and not os.path.exists(sidecar):
                     return
                 kept: list[tuple[float, str]] = []
@@ -4205,6 +4313,13 @@ _CLAIM_KEY_WIDTH = 20
 #: replays), so a peer wedged under it must cost them a bounded time,
 #: not the peer's lifetime.
 _JOURNAL_LOCK_TIMEOUT_S = 5.0
+
+#: Longest wait of the event-writer thread for the journal lock before
+#: a failed batch is spilled instead of appended
+#: (:func:`_journal_failed_events`).  Longer than the task-thread wait
+#: because an append out of place costs ordering, and long enough to
+#: outlast a healthy replayer's single database write attempt.
+_JOURNAL_APPEND_TIMEOUT_S = _JOURNAL_LOCK_TIMEOUT_S * 6
 
 
 @contextmanager
@@ -4282,12 +4397,18 @@ def _journal_failed_events(
     The append is serialised against every other process's append and
     replay by :func:`_journal_file_lock`, so a batch can never be
     written into a file another process is in the middle of consuming.
-    It waits for that lock without bound: the rows must reach the live
-    sidecar, and in order — a batch written anywhere else could be
-    replayed before rows this process appended earlier, and seqs are
-    assigned in replay order.  This runs on the event-writer thread,
-    and the holder is a replayer whose hold ends with its database
-    write attempt.
+    It waits for that lock up to :data:`_JOURNAL_APPEND_TIMEOUT_S`:
+    this runs on the event-writer thread, which every
+    ``_flush_chat_events`` (so every final-result save on a task
+    thread) waits for, and a peer wedged under the lock must not stall
+    those for its lifetime.  A holder that is a healthy replayer lets
+    go within its one database write attempt (SQLite's busy timeout),
+    which the wait covers; past it the rows go to a private spill file
+    (:func:`_spill_journal_lines`) that the next locked append or
+    replay claims as a snapshot behind the live sidecar
+    (:func:`_claim_journal_rows`), so they stay durable and in order.
+    An append that finds such spills claims them first, so its own
+    rows land in a fresh sidecar that sorts after them.
     """
     by_origin: dict[str, list[tuple[str, str, float, str]]] = {}
     for row in batch:
@@ -4295,21 +4416,29 @@ def _journal_failed_events(
     with _journal_lock:
         for origin, rows in by_origin.items():
             sidecar = _failed_events_path(origin)
+            lines = [
+                json.dumps({
+                    "task_id": task_id,
+                    "event_json": event_json,
+                    "timestamp": timestamp,
+                    "origin_db_path": origin_path,
+                }) + "\n"
+                for task_id, event_json, timestamp, origin_path in rows
+            ]
             try:
-                with _journal_file_lock(sidecar, timeout=None), open(
-                    sidecar, "a", encoding="utf-8",
-                ) as stream:
-                    for task_id, event_json, timestamp, origin_path in rows:
-                        stream.write(json.dumps({
-                            "task_id": task_id,
-                            "event_json": event_json,
-                            "timestamp": timestamp,
-                            "origin_db_path": origin_path,
-                        }) + "\n")
+                with _journal_file_lock(sidecar, timeout=_JOURNAL_APPEND_TIMEOUT_S) as locked:
+                    if locked:
+                        if _journal_spills(sidecar):
+                            _claim_journal_rows(sidecar)
+                        with open(sidecar, "a", encoding="utf-8") as stream:
+                            stream.writelines(lines)
+                        target = sidecar
+                    else:
+                        target = _spill_journal_lines(sidecar, lines)
                 logger.error(
                     "%d chat events could not be written after %d attempts; "
                     "journalled in %s for replay",
-                    len(rows), attempts, sidecar, exc_info=True,
+                    len(rows), attempts, target, exc_info=True,
                 )
             except OSError:
                 logger.error(
@@ -4377,7 +4506,7 @@ def _replay_journal_files(path: str) -> None:
 
 
 def _journal_has_pending_rows(path: str) -> bool:
-    """Return True when a journal or an unfinished snapshot exists.
+    """Return True when a journal, a spill or an unfinished snapshot exists.
 
     Args:
         path: The live sidecar path for the active database.
@@ -4385,9 +4514,10 @@ def _journal_has_pending_rows(path: str) -> bool:
     if os.path.exists(path):
         return True
     directory = os.path.dirname(path) or "."
-    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
+    base = os.path.basename(path)
+    prefixes = (base + _JOURNAL_CONSUMED_SUFFIX, base + _SPILL_SUFFIX)
     try:
-        return any(name.startswith(prefix) for name in os.listdir(directory))
+        return any(name.startswith(prefixes) for name in os.listdir(directory))
     except OSError:  # pragma: no cover — unreadable journal directory
         return False
 
@@ -4421,15 +4551,7 @@ def _claim_journal_snapshots(path: str) -> list[str]:
     """
     directory = os.path.dirname(path) or "."
     prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
-    if os.path.exists(path):
-        claimed = os.path.join(directory, (
-            f"{prefix}{_next_claim_key(directory, prefix):020d}"
-            f"-{os.getpid()}-{uuid.uuid4().hex}"
-        ))
-        try:
-            os.replace(path, claimed)
-        except OSError:  # pragma: no cover — unrenamable journal
-            logger.warning("could not claim journal %s", path, exc_info=True)
+    _claim_journal_rows(path)
     try:
         names = os.listdir(directory)
     except OSError:  # pragma: no cover — unreadable journal directory
@@ -4442,6 +4564,28 @@ def _claim_journal_snapshots(path: str) -> list[str]:
         ),
         key=lambda snapshot: _snapshot_order_key(snapshot, prefix),
     )
+
+
+def _claim_journal_rows(path: str) -> None:
+    """Rename the live sidecar at *path*, then its spill files, into claimed snapshots.
+
+    The spills (:func:`_spill_journal_lines`) were written while a peer
+    held the lock, after every row then in the live sidecar, so they
+    get the claim keys right behind it, oldest spill first; rows this
+    process appends to the fresh sidecar afterwards sort after them
+    all.  Caller holds :func:`_journal_file_lock`.
+
+    Args:
+        path: The live sidecar path for the active database.
+    """
+    directory = os.path.dirname(path) or "."
+    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
+    pending = [path] if os.path.exists(path) else []
+    for source in pending + _journal_spills(path):
+        try:
+            os.replace(source, _new_snapshot_path(directory, prefix))
+        except OSError:  # pragma: no cover — unrenamable journal
+            logger.warning("could not claim journal %s", source, exc_info=True)
 
 
 def _parse_claim_key(name: str, prefix: str) -> int | None:
@@ -4460,6 +4604,14 @@ def _parse_claim_key(name: str, prefix: str) -> int | None:
     if len(head) == _CLAIM_KEY_WIDTH and head.isdigit():
         return int(head)
     return None
+
+
+def _new_snapshot_path(directory: str, prefix: str) -> str:
+    """Return a fresh ``<prefix><claim key>-<pid>-<uuid>`` snapshot path in *directory*."""
+    return os.path.join(directory, (
+        f"{prefix}{_next_claim_key(directory, prefix):020d}"
+        f"-{os.getpid()}-{uuid.uuid4().hex}"
+    ))
 
 
 def _next_claim_key(directory: str, prefix: str) -> int:
@@ -4658,20 +4810,17 @@ def _write_event_batch_retrying(
     ``_flush_chat_events`` — so this only drops the caches.
     """
     try:
-        _write_event_batch_locked(db, batch, task_ids, replay_marker)
-    except sqlite3.IntegrityError:
-        # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
-        # seq)``: another PROCESS (journal replay from a CLI run,
-        # a second daemon) inserted seqs this process's
-        # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
-        # from the database and retry ONCE; a second refusal is a
-        # real error and propagates like any other failure.
-        _drop_event_caches(task_ids)
         try:
             _write_event_batch_locked(db, batch, task_ids, replay_marker)
-        except BaseException:
+        except sqlite3.IntegrityError:
+            # ``idx_ev_task_seq`` refused a duplicate ``(task_id,
+            # seq)``: another PROCESS (journal replay from a CLI run,
+            # a second daemon) inserted seqs this process's
+            # ``_next_seq_cache`` never saw.  Re-read ``MAX(seq)``
+            # from the database and retry ONCE; a second refusal is a
+            # real error and propagates like any other failure.
             _drop_event_caches(task_ids)
-            raise
+            _write_event_batch_locked(db, batch, task_ids, replay_marker)
     except BaseException:
         _drop_event_caches(task_ids)
         raise
@@ -4919,10 +5068,7 @@ def _stop_event_writer() -> None:
         t, stop = locked_call(_event_writer_lock, _writer_and_stop)
         if t is not None:
             stop.set()
-            try:
-                _event_queue.put_nowait(None)
-            except queue.Full:  # pragma: no cover — unbounded queue
-                pass
+            _event_queue.put_nowait(None)  # unbounded queue: never raises queue.Full
             t.join(timeout=5)
             if t.is_alive():
                 logger.warning(
@@ -4997,8 +5143,8 @@ def _append_chat_event(
     """
     if origin_db_path is not None and origin_db_path != _current_db_path():
         return
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         resolved = _resolve_task_id(db, task_id, task)
     if resolved is None:
         return
@@ -5033,8 +5179,8 @@ def _task_has_transcript_events(task_id: str) -> bool:
         ``task_settings`` event.
     """
     _flush_chat_events(task_id)
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT event_json FROM events WHERE task_id = ? "
             "ORDER BY seq ASC LIMIT 3",
@@ -5059,27 +5205,40 @@ def _fetch_events_for_task_id(
 ) -> list[dict[str, object]]:
     """Load and decode the event rows for *task_id* in seq order.
 
-    Each surviving event dict has its ``_timestamp`` field injected
-    from the matching ``events.timestamp`` column.  Rows whose
-    ``event_json`` fails to decode are silently dropped (logged at
-    DEBUG level).  Callers must hold ``_rw_lock.read_lock()`` (or
-    ``write_lock()``) when invoking this helper.
+    :func:`_select_event_rows` followed by :func:`_decode_event_rows`;
+    callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``)
+    when invoking this helper.  The transcript loaders of this module
+    call the two halves themselves so that only the SELECT runs under
+    the lock: the lock is writer-preferring, so a decode held under it
+    would stall every write in the process for its duration.
 
     Args:
         db: Active database connection.
         task_id: Primary key of the ``task_history`` row.
 
-    Rows longer than :data:`MAX_EVENT_ROW_CHARS` (tool output recorded
-    before the per-call cap, up to 100 MB each) are never transferred
-    to Python: SQLite returns only their ``type`` and the first
-    :data:`MAX_EVENT_TEXT_CHARS` characters of their ``text``, and the
-    row is replaced by a clipped event (or a ``system_output`` note
-    naming the event type and size when it carried no ``text``).
-
     Returns:
         List of event dicts with ``_timestamp`` injected.
     """
-    event_rows = db.execute(
+    return _decode_event_rows(_select_event_rows(db, task_id))
+
+
+def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
+    """Return the raw event rows of *task_id* in seq order, oversized rows clipped.
+
+    Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``).
+    Rows longer than :data:`MAX_EVENT_ROW_CHARS` (tool output recorded
+    before the per-call cap, up to 100 MB each) are never transferred
+    to Python: SQLite returns only their ``type`` and the first
+    :data:`MAX_EVENT_TEXT_CHARS` characters of their ``text``, and
+    :func:`_decode_event_rows` replaces the row by a clipped event (or
+    a ``system_output`` note naming the event type and size when it
+    carried no ``text``).
+
+    Args:
+        db: Active database connection.
+        task_id: Primary key of the ``task_history`` row.
+    """
+    return db.execute(
         "SELECT timestamp, length(event_json) AS size, "
         "CASE WHEN length(event_json) <= ? THEN event_json END AS event_json, "
         "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
@@ -5100,6 +5259,22 @@ def _fetch_events_for_task_id(
             task_id,
         ),
     ).fetchall()
+
+
+def _decode_event_rows(event_rows: list[sqlite3.Row]) -> list[dict[str, object]]:
+    """Decode the rows of :func:`_select_event_rows`; needs no lock.
+
+    Each surviving event dict has its ``_timestamp`` field injected
+    from the matching ``events.timestamp`` column.  Rows whose
+    ``event_json`` fails to decode are silently dropped (logged at
+    DEBUG level).
+
+    Args:
+        event_rows: The rows, already fetched.
+
+    Returns:
+        List of event dicts with ``_timestamp`` injected.
+    """
     events: list[dict[str, object]] = []
     for r in event_rows:
         if r["event_json"] is None:
@@ -5166,39 +5341,47 @@ def _clipped_event_row(
     }
 
 
-def _events_session_dict(
-    db: sqlite3.Connection,
-    task_id: str,
-    task: str,
-    chat_id: str,
-    extra: object,
-    with_events: bool = True,
-) -> dict[str, object]:
-    """Build the replay-session dict shared by both chat-events loaders.
+def _select_session_rows(
+    db: sqlite3.Connection, row: sqlite3.Row, with_events: bool,
+) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
+    """Pair a ``_HISTORY_SELECT`` *row* with its raw event rows.
 
-    Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``)
-    because this fetches the event rows via
-    :func:`_fetch_events_for_task_id`.
+    The locked half of every transcript loader: callers hold
+    ``_rw_lock.read_lock()`` and hand the pair to
+    :func:`_events_session_dict` after leaving it.
 
     Args:
         db: Active database connection.
-        task_id: Primary key of the ``task_history`` row.
-        task: The row's task text.
-        chat_id: The session's chat id (possibly ``""``).
-        extra: The raw ``extra`` column value.
-        with_events: ``False`` leaves ``events`` empty: the caller
+        row: A ``task_history`` row from ``_HISTORY_SELECT``.
+        with_events: ``False`` fetches no event rows: the caller
             wants the row's metadata only (a deferred replay).
+    """
+    return row, _select_event_rows(db, str(row["id"])) if with_events else []
+
+
+def _events_session_dict(
+    row: sqlite3.Row, event_rows: list[sqlite3.Row],
+) -> dict[str, object]:
+    """Build the replay-session dict shared by every chat-events loader.
+
+    Decodes the event rows of :func:`_select_session_rows` and needs
+    no lock: the loaders call it after leaving ``_rw_lock.read_lock()``
+    so the JSON work of a large transcript never blocks the writer.
+
+    Args:
+        row: A ``task_history`` row from ``_HISTORY_SELECT``.
+        event_rows: Its raw event rows (``[]`` for a deferred replay).
 
     Returns:
         Dict with ``task``, ``task_id``, ``events``, ``chat_id``, and
         ``extra`` keys.
     """
     return {
-        "task": task,
-        "task_id": task_id,
-        "events": _fetch_events_for_task_id(db, task_id) if with_events else [],
-        "chat_id": chat_id,
-        "extra": extra or "",
+        "task": row["task"],
+        "task_id": str(row["id"]),
+        "events": _decode_event_rows(event_rows),
+        "chat_id": str(row["chat_id"] or ""),
+        "extra": _row_to_extra_json(row) or "",
     }
 
 
@@ -5226,15 +5409,13 @@ def _load_events_session_row(
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` when no row matches.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         row = db.execute(_HISTORY_SELECT + where_sql, params).fetchone()
         if row is None:
             return None
-        return _events_session_dict(
-            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
-            _row_to_extra_json(row), with_events,
-        )
+        session_rows = _select_session_rows(db, row, with_events)
+    return _events_session_dict(*session_rows)
 
 
 def _load_latest_chat_events_by_chat_id(
@@ -5311,10 +5492,12 @@ def _load_all_chat_events_by_chat_id(
     parent's transcript, not as chat tasks of their own.
 
     The rows are walked newest first so a *max_json_bytes* budget can
-    stop BEFORE decoding an oversized chat's older transcripts — the
+    stop BEFORE fetching an oversized chat's older transcripts — the
     newest ones are the ones the page cannot redraw from its own
     DOM — instead of materializing every event and discarding the
-    surplus afterwards.
+    surplus afterwards.  Each task's rows are fetched under their own
+    read lock and decoded (and measured) outside it, so a long export
+    never holds the writer-preferring lock for more than one SELECT.
 
     Args:
         chat_id: The string chat session identifier.
@@ -5336,25 +5519,24 @@ def _load_all_chat_events_by_chat_id(
     out: list[dict[str, object]] = []
     truncated = False
     budget = max_json_bytes
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             _HISTORY_SELECT
             + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
             "ORDER BY timestamp DESC, rowid DESC",
             (chat_id,),
         ).fetchall()
-        for row in rows:
-            entry = _events_session_dict(
-                db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
-                _row_to_extra_json(row),
-            )
-            if budget is not None:
-                budget -= len(json.dumps(entry).encode("utf-8"))
-                if budget < 0:
-                    truncated = True
-                    break
-            out.append(entry)
+    for row in rows:
+        with _rw_lock.read_lock():
+            session_rows = _select_session_rows(db, row, True)
+        entry = _events_session_dict(*session_rows)
+        if budget is not None:
+            budget -= len(json.dumps(entry).encode("utf-8"))
+            if budget < 0:
+                truncated = True
+                break
+        out.append(entry)
     out.reverse()
     return out, truncated
 
@@ -5394,20 +5576,15 @@ def _load_subagent_rows_by_parent_task_id(
     """
     if not isinstance(parent_task_id, str) or not parent_task_id:
         return []
-    out: list[dict[str, object]] = []
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             _HISTORY_SELECT
             + "WHERE parent_task_id = ? ORDER BY rowid ASC",
             (parent_task_id,),
         ).fetchall()
-        for r in rows:
-            out.append(_events_session_dict(
-                db, str(r["id"]), r["task"], str(r["chat_id"] or ""),
-                _row_to_extra_json(r), with_events,
-            ))
-    return out
+        sessions = [_select_session_rows(db, r, with_events) for r in rows]
+    return [_events_session_dict(*session_rows) for session_rows in sessions]
 
 
 def _get_adjacent_task_by_chat_id(
@@ -5431,8 +5608,8 @@ def _get_adjacent_task_by_chat_id(
     """
     if not chat_id or current_task_id is None:
         return None
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         row = db.execute(
             "SELECT rowid, id, timestamp FROM task_history "
             "WHERE id = ? AND chat_id = ?",
@@ -5453,13 +5630,10 @@ def _get_adjacent_task_by_chat_id(
         ).fetchone()
         if not adj:
             return None
-
-        # The synthesized extra lets the replay reply builder attach
-        # a task_settings event for rows that predate the event.
-        return _events_session_dict(
-            db, str(adj["id"]), adj["task"], str(adj["chat_id"] or ""),
-            _row_to_extra_json(adj),
-        )
+        session_rows = _select_session_rows(db, adj, True)
+    # The synthesized extra lets the replay reply builder attach
+    # a task_settings event for rows that predate the event.
+    return _events_session_dict(*session_rows)
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
@@ -5487,8 +5661,8 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """
     if not chat_id:
         return []
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT task, result FROM task_history "
             f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
@@ -5523,8 +5697,8 @@ def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
     """
     if not task_id:
         return []
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         entries: list[_HistoryEntry] = []
         seen: set[str] = set()
         current = task_id
@@ -5596,8 +5770,8 @@ def _store_chat_context(chat_id: str, text: str, snapshot_gen: int) -> None:
 
 def _load_model_usage() -> dict[str, int]:
     """Return model usage counts as ``{model_name: count}``."""
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute("SELECT model, count FROM model_usage").fetchall()
         return {r["model"]: r["count"] for r in rows}
 
@@ -5606,7 +5780,8 @@ def _load_last_model() -> str:
     """Return the name of the most recently selected model, or ``""``.
 
     The last-selected model is a persistent **user preference** stored
-    in ``~/.kiss/config.json`` (under the ``last_model`` key) — *not*
+    in the brand home's ``config.json`` (see ``kiss.core.user_config``,
+    under the ``last_model`` key) — *not*
     in the SQLite ``model_usage`` table, which now tracks only per-model
     usage counts.
     """
@@ -5618,7 +5793,7 @@ def _load_last_model() -> str:
 def _save_last_model(model: str) -> None:
     """Persist the selected model name as a user preference.
 
-    Writes the ``last_model`` key to ``~/.kiss/config.json`` (atomic).
+    Writes the ``last_model`` key to the brand home's ``config.json`` (atomic).
     Does **not** touch the SQLite usage counters.
 
     Passes *only* the changed key to :func:`save_config` — whose
@@ -5658,8 +5833,8 @@ def _load_file_usage() -> dict[str, int]:
     The returned dict preserves insertion order so that callers can
     derive recency from key position.
     """
+    db = _get_db()
     with _rw_lock.read_lock():
-        db = _get_db()
         rows = db.execute(
             "SELECT path, count FROM file_usage ORDER BY last_used ASC"
         ).fetchall()
@@ -5667,22 +5842,23 @@ def _load_file_usage() -> dict[str, int]:
 
 
 def _record_file_usage(path: str) -> None:
-    """Increment the access count for a file path atomically."""
+    """Increment the access count for a file path atomically.
+
+    The table is capped at ``_MAX_FILE_USAGE_ENTRIES`` rows: a new
+    path at the cap evicts the least recently used one first (see
+    :func:`_evict_for_new_key`).
+    """
     db = _get_db()
     now = time.time()
     with _rw_lock.write_lock(), _immediate_txn(db):
+        _evict_for_new_key(
+            db, "file_usage", "path", path, _MAX_FILE_USAGE_ENTRIES, "last_used ASC",
+        )
         db.execute(
             "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
             "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
             (path, now, now),
         )
-        row = db.execute("SELECT COUNT(*) FROM file_usage").fetchone()
-        if row[0] > _MAX_FILE_USAGE_ENTRIES:
-            db.execute(
-                "DELETE FROM file_usage WHERE path NOT IN "
-                "(SELECT path FROM file_usage ORDER BY last_used DESC LIMIT ?)",
-                (_MAX_FILE_USAGE_ENTRIES,),
-            )
 
 
 def _record_frequent_task(task: str) -> None:

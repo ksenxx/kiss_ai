@@ -18,15 +18,17 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg} = require('./settings_helpers');
+const {makePage, send, click, byId} = require('./simplify2_harness');
+const {
+  lastMsg,
+  openSettings,
+  closeSettings,
+  typeInto,
+} = require('./settings_helpers');
 
 function typeAndSend(win, text) {
-  const inp = win.document.getElementById('task-input');
-  const sendBtn = win.document.getElementById('send-btn');
-  inp.value = text;
-  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
-  sendBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  typeInto(win, 'task-input', text);
+  click(win, byId(win, 'send-btn'));
 }
 
 function testClassifyTogglesAreGone() {
@@ -198,9 +200,7 @@ function testToggleStatePersistedOnSettingsClose() {
   mem.checked = false;
   mem.dispatchEvent(new win.Event('change', {bubbles: true}));
 
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  closeSettings(win);
 
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');
@@ -250,9 +250,7 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
   const {win, posted} = makePage();
   // Open the panel: no configData has arrived yet (configFormPopulated
   // stays false), the user unticks "Use persistent memory" right away.
-  win.document
-    .getElementById('settings-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  openSettings(win);
   const mem = win.document.getElementById('cfg-use-memory');
   mem.checked = false;
   mem.dispatchEvent(new win.Event('change', {bubbles: true}));
@@ -276,9 +274,7 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
     'the untouched #cfg-use-web-tools must still follow configData',
   );
 
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  closeSettings(win);
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');
   assert.strictEqual(
@@ -300,15 +296,11 @@ function testMemoryToggleFlushedAloneWithoutConfigData() {
   // Panel opened and closed before ANY configData reply: only the
   // edited field may be sent (the daemon merges), never a form full of
   // chat.html's hardcoded defaults.
-  win.document
-    .getElementById('settings-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  openSettings(win);
   const mem = win.document.getElementById('cfg-use-memory');
   mem.checked = false;
   mem.dispatchEvent(new win.Event('change', {bubbles: true}));
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  closeSettings(win);
 
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the panel after an edit must post saveConfig');
@@ -334,9 +326,7 @@ function testPartialSaveWhenPanelClosedBeforeConfigData() {
   budget.value = '77';
   budget.dispatchEvent(new win.Event('input', {bubbles: true}));
 
-  win.document
-    .getElementById('settings-panel-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  closeSettings(win);
 
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');

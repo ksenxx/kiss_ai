@@ -37,6 +37,9 @@ from kiss.agents.third_party_agents._composio_google import (
     ComposioSession,
     connected_account_id,
 )
+from kiss.agents.third_party_agents._composio_google import (
+    connection_status as composio_connection_status,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
     google_auth_prompt,
     make_google_auth_tools,
@@ -44,6 +47,15 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
 
 _SERVICE = "google_sheets"
 _TIMEOUT = 30
+
+
+def connection_status() -> str:
+    """Return the live Composio status of this service's account (the cron pre-flight hook).
+
+    ``""`` when no account is connected, ``"ACTIVE"`` / ``"EXPIRED"`` /
+    ... as Composio reports it, or ``"UNKNOWN"`` when the check failed.
+    """
+    return composio_connection_status(_SERVICE)
 
 
 class GsheetsSea(ChannelSea):

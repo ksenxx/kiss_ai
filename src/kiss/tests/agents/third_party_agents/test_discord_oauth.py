@@ -45,8 +45,7 @@ from kiss.agents.third_party_agents.discord.discord_sea import (
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
-    setup_muse_env,
-    teardown_muse_env,
+    loopback_policy,
     tools_by_name,
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -144,12 +143,11 @@ def _start(tools: dict[str, Any]) -> str:
     return str(tools["authenticate_discord"]())
 
 
-def _approve(answer: str, code: str = "the-code") -> dict[str, Any]:
+def _approve(answer: str) -> dict[str, Any]:
     """Play the browser: approve the consent URL in *answer*.
 
     Args:
         answer: The JSON returned by authenticate_discord().
-        code: Authorization code the "provider" hands back.
 
     Returns:
         The query parameters of the authorization URL.
@@ -159,7 +157,7 @@ def _approve(answer: str, code: str = "the-code") -> dict[str, Any]:
     query = {k: v[0] for k, v in parse_qs(urlsplit(started["verification_uri"]).query).items()}
     resp = requests.get(
         _oauth_apps.LOOPBACK_REDIRECT_URI,
-        params={"code": code, "state": query["state"]},
+        params={"code": "the-code", "state": query["state"]},
         timeout=10,
     )
     assert resp.status_code == 200
@@ -478,113 +476,92 @@ def test_prompt_describes_click_allow_sign_in() -> None:
     assert "Developer Portal" not in prompt and "developers/applications" not in prompt
 
 
-def test_muse_sign_in_uses_vault(
-    discord_server: _DiscordServer,
-    isolated_kiss_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+# ``muse_env`` is requested after ``discord_server`` so its ``KISS_MUSE_AUTH=1``
+# overrides the emulator fixture's legacy-mode ``0``.
+MUSE_POLICY = loopback_policy("discord")
+
+
+def test_muse_sign_in_uses_vault(discord_server: _DiscordServer, muse_env: Path) -> None:
     """In Muse mode the grant goes to the vault and only a surrogate stays here."""
     from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
 
-    setup_muse_env(
-        monkeypatch,
-        {
-            "defaults": {"read": "allow", "write": "ask"},
-            "services": {"discord": {"extra_hosts": ["127.0.0.1"]}},
-        },
-    )
-    try:
-        # A legacy user sign-in migrates into the vault as a bearer on
-        # first use: building the agent exposes the tools but wires
-        # nothing (no daemon round trip).
-        _config.save({"auth_mode": "user", "access_token": _USER_TOKEN})
-        migrated = DiscordAgent()
-        assert migrated._backend._user_auth and migrated._is_authenticated()
-        assert not migrated._backend._muse and not vault_has_credentials("discord")
-        # The status tool is the first use: it reports the signed-in
-        # account (wiring the surrogate) instead of asking to sign in.
-        status = json.loads(auth_tools(migrated)["check_discord_auth"]())
-        assert status["ok"] is True and status["auth"] == "user", status
-        assert migrated._backend._muse and vault_has_credentials("discord")
-        assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
-        # Cached tools keep working on retries with the one surrogate.
-        list_guilds = tools_by_name(migrated)["list_guilds"]
-        surrogate = migrated._backend._token
-        for _ in range(2):
-            assert json.loads(list_guilds())["ok"] is True
-            assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
-        assert migrated._backend._token == surrogate
-
-        agent = DiscordAgent()
-        tools = auth_tools(agent)
-        _approve(_start(tools))
-        assert json.loads(tools["finish_discord_auth"]())["ok"] is True
-        assert vault_has_credentials("discord")
-        assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
-        backend = agent._backend
-        assert backend._muse and backend._user_auth
-        assert backend._token.startswith("muse-sgt.discord.")
-        assert json.loads(backend.list_guilds())["ok"] is True
-        # The daemon swapped the surrogate for the real user token.
+    # A legacy user sign-in migrates into the vault as a bearer on
+    # first use: building the agent exposes the tools but wires
+    # nothing (no daemon round trip).
+    _config.save({"auth_mode": "user", "access_token": _USER_TOKEN})
+    migrated = DiscordAgent()
+    assert migrated._backend._user_auth and migrated._is_authenticated()
+    assert not migrated._backend._muse and not vault_has_credentials("discord")
+    # The status tool is the first use: it reports the signed-in
+    # account (wiring the surrogate) instead of asking to sign in.
+    status = json.loads(auth_tools(migrated)["check_discord_auth"]())
+    assert status["ok"] is True and status["auth"] == "user", status
+    assert migrated._backend._muse and vault_has_credentials("discord")
+    assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
+    # Cached tools keep working on retries with the one surrogate.
+    list_guilds = tools_by_name(migrated)["list_guilds"]
+    surrogate = migrated._backend._token
+    for _ in range(2):
+        assert json.loads(list_guilds())["ok"] is True
         assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
+    assert migrated._backend._token == surrogate
 
-        rewired = DiscordAgent()
-        assert rewired._backend._user_auth and rewired._is_authenticated()
-        assert json.loads(rewired._backend.list_guilds())["ok"] is True
-        assert rewired._backend._muse
+    agent = DiscordAgent()
+    tools = auth_tools(agent)
+    _approve(_start(tools))
+    assert json.loads(tools["finish_discord_auth"]())["ok"] is True
+    assert vault_has_credentials("discord")
+    assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
+    backend = agent._backend
+    assert backend._muse and backend._user_auth
+    assert backend._token.startswith("muse-sgt.discord.")
+    assert json.loads(backend.list_guilds())["ok"] is True
+    # The daemon swapped the surrogate for the real user token.
+    assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
 
-        assert tools["clear_discord_auth"]() == "Discord authentication cleared."
-        assert not vault_has_credentials("discord")
-    finally:
-        teardown_muse_env()
+    rewired = DiscordAgent()
+    assert rewired._backend._user_auth and rewired._is_authenticated()
+    assert json.loads(rewired._backend.list_guilds())["ok"] is True
+    assert rewired._backend._muse
+
+    assert tools["clear_discord_auth"]() == "Discord authentication cleared."
+    assert not vault_has_credentials("discord")
 
 
 def test_muse_migrates_refreshable_legacy_sign_in(
-    discord_server: _DiscordServer,
-    isolated_kiss_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    discord_server: _DiscordServer, muse_env: Path
 ) -> None:
     """A legacy sign-in with a refresh token becomes a daemon-refreshed vault entry."""
     from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
 
-    setup_muse_env(
-        monkeypatch,
+    expires_at = time.time() + 3600
+    _config.save(
         {
-            "defaults": {"read": "allow", "write": "ask"},
-            "services": {"discord": {"extra_hosts": ["127.0.0.1"]}},
-        },
+            "auth_mode": "user",
+            "access_token": _USER_TOKEN,
+            "refresh_token": "user-refresh-token",
+            "expires_at": str(expires_at),
+            "client_id": "kiss-discord-app",
+        }
     )
-    try:
-        expires_at = time.time() + 3600
-        _config.save(
-            {
-                "auth_mode": "user",
-                "access_token": _USER_TOKEN,
-                "refresh_token": "user-refresh-token",
-                "expires_at": str(expires_at),
-                "client_id": "kiss-discord-app",
-            }
-        )
-        agent = DiscordAgent()
-        assert agent._backend._user_auth and agent._is_authenticated()
-        # The migration runs on the first request, which the daemon
-        # serves by spending the migrated access token for the surrogate.
-        assert not agent._backend._muse
-        assert json.loads(agent._backend.list_guilds())["ok"] is True
-        assert agent._backend._muse
-        assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
-        stored = json.loads((muse_auth_dir() / "vault" / "discord.json").read_text())
-        info = stored["authorized_user_info"]
-        assert info["kind"] == "oauth2_refresh_token"
-        assert info["token_url"] == f"{discord_server.base_url}/api/oauth2/token"
-        assert info["client_id"] == "kiss-discord-app"
-        assert info["access_token"] == _USER_TOKEN
-        assert info["refresh_token"] == "user-refresh-token"
-        assert abs(float(info["expires_at"]) - expires_at) < 1
-        # Every secret and its refresh metadata left config.json.
-        assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
-        # The daemon spends the migrated access token for the surrogate.
-        assert json.loads(agent._backend.list_guilds())["ok"] is True
-        assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
-    finally:
-        teardown_muse_env()
+    agent = DiscordAgent()
+    assert agent._backend._user_auth and agent._is_authenticated()
+    # The migration runs on the first request, which the daemon
+    # serves by spending the migrated access token for the surrogate.
+    assert not agent._backend._muse
+    assert json.loads(agent._backend.list_guilds())["ok"] is True
+    assert agent._backend._muse
+    assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
+    stored = json.loads((muse_auth_dir() / "vault" / "discord.json").read_text())
+    info = stored["authorized_user_info"]
+    assert info["kind"] == "oauth2_refresh_token"
+    assert info["token_url"] == f"{discord_server.base_url}/api/oauth2/token"
+    assert info["client_id"] == "kiss-discord-app"
+    assert info["access_token"] == _USER_TOKEN
+    assert info["refresh_token"] == "user-refresh-token"
+    assert abs(float(info["expires_at"]) - expires_at) < 1
+    # Every secret and its refresh metadata left config.json.
+    assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
+    # The daemon spends the migrated access token for the surrogate.
+    assert json.loads(agent._backend.list_guilds())["ok"] is True
+    assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"

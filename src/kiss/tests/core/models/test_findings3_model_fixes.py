@@ -195,7 +195,7 @@ class TestFinding22GeminiMaxCompletionTokens:
             model_config={"max_completion_tokens": 123},
         )
         m.conversation = []
-        cfg = m._build_config()
+        cfg = m._build_config(m._chat_messages())
         assert cfg.max_output_tokens == 123
 
     def test_build_config_max_tokens_takes_precedence(self) -> None:
@@ -205,7 +205,7 @@ class TestFinding22GeminiMaxCompletionTokens:
             model_config={"max_tokens": 77, "max_completion_tokens": 123},
         )
         m.conversation = []
-        cfg = m._build_config()
+        cfg = m._build_config(m._chat_messages())
         assert cfg.max_output_tokens == 77
 
     def test_explicit_zero_max_tokens_still_takes_precedence(self) -> None:
@@ -215,7 +215,7 @@ class TestFinding22GeminiMaxCompletionTokens:
             api_key="k",
             model_config={"max_tokens": 0, "max_completion_tokens": 123},
         )
-        cfg = m._build_config()
+        cfg = m._build_config(m._chat_messages())
         assert cfg.max_output_tokens == 0
 
 

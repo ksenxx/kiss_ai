@@ -59,14 +59,56 @@ async function testConnectedTargetStillShowsItsTooltip() {
   console.log('  ok - a live hover target still shows its tooltip');
 }
 
+// An OPEN tooltip whose anchor is replaced by a re-render must close
+// too: a removed element fires neither focusout nor mouseout, so a
+// keyboard user who tabbed onto a Schedule row sees the row's prompt
+// stay on screen after the 30 s panel poll rebuilt the list.
+const cronJob = {
+  id: 'j1',
+  name: 'Digest',
+  schedule: 'every 5m',
+  kind: 'prompt',
+  what: 'summarize the inbox',
+  enabled: true,
+  running: false,
+  nextRunAt: 0,
+  lastRunAt: 0,
+  lastStatus: '',
+};
+
+async function testOpenTooltipClosesWhenItsAnchorIsReRendered() {
+  const win = makePage();
+  harness.send(win, {type: 'cronJobs', jobs: [cronJob]});
+  const list = win.document.getElementById('meta-schedule-list');
+  const row = list.querySelector('.sched-row');
+  assert.ok(row && row.dataset.tooltip, 'the schedule row carries a tooltip');
+  row.focus();
+  const tip = win.document.getElementById('custom-tooltip');
+  assert.ok(tip.classList.contains('visible'), 'focus opens the tooltip');
+  // The panel poll answers; renderCronJobs rebuilds every row.
+  harness.send(win, {type: 'cronJobs', jobs: [cronJob]});
+  assert.ok(!row.isConnected, 'the focused row was replaced');
+  await wait(0);
+  assert.ok(
+    !tip.classList.contains('visible'),
+    'the tooltip closes with the row it described',
+  );
+  // A fresh row still gets its tooltip afterwards.
+  list.querySelector('.sched-row').focus();
+  assert.ok(tip.classList.contains('visible'), 'the new row\'s tooltip opens');
+  win.close();
+  console.log('  ok - an open tooltip closes when its anchor is re-rendered');
+}
+
 async function runTests() {
   await testRemovedTargetShowsNoTooltip();
   await testConnectedTargetStillShowsItsTooltip();
+  await testOpenTooltipClosesWhenItsAnchorIsReRendered();
 }
 
 runTests().then(
   () => {
-    console.log('\n2 passed, 0 failed');
+    console.log('\n3 passed, 0 failed');
     process.exit(0);
   },
   err => {

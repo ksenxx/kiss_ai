@@ -10,6 +10,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const harness = require('./simplify2_harness');
+
 /**
  * The verified file links in `#output` whose `data-path` is exactly `p`.
  *
@@ -33,4 +36,47 @@ function findMissing(win, p) {
   ).filter(el => el.getAttribute('data-path-missing') === p);
 }
 
-module.exports = {findLinks, findMissing};
+/**
+ * A chat page whose working directory is `workDir` and whose launch
+ * animation is over, so path checks go out at once.
+ *
+ * @returns {{win: Window, posted: Array<object>}} The harness page.
+ */
+function makeWorkDirPage(workDir) {
+  const page = harness.makePage();
+  harness.send(page.win, {
+    type: 'configData',
+    config: {work_dir: workDir},
+    apiKeys: {},
+  });
+  page.win._testApi.endLaunch();
+  return page;
+}
+
+/**
+ * The page's pending file-link bookkeeping as `{spans, checks}`.  The
+ * probe's object is built in the JSDOM realm; it is copied into this one
+ * so deepStrictEqual compares values rather than prototypes.
+ */
+function pendingCounts(win) {
+  const c = win._testApi.pendingFileLinkCounts();
+  return {spans: c.spans, checks: c.checks};
+}
+
+/** Whether `p` is an existing file or directory on the real file system. */
+function existsOnRealFs(p) {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() || st.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+module.exports = {
+  findLinks,
+  findMissing,
+  makeWorkDirPage,
+  pendingCounts,
+  existsOnRealFs,
+};

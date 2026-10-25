@@ -91,6 +91,7 @@ from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,27 @@ LOCAL_MACHINE = "__local__"
 REQUEST_TIMEOUT = 8.0
 """Seconds one remote request may take before the machine counts as down."""
 DOWN_BACKOFF = 30.0
-"""Seconds a cached link waits after a failure before trying the machine again."""
+"""Seconds a cached link waits before trying a machine again, at most.
+
+The wait starts at :data:`FIRST_BACKOFF` and doubles with every
+failure in a row up to this, so a machine that is only briefly out
+of reach (the laptop just woke, Wi-Fi is not back yet) is tried again
+within seconds while one that is really down is not dialled on every
+CHATS refresh.  A rejected password waits the full time from the first
+failure: the remote daemon locks a client out after a few wrong
+passwords in a row."""
+FIRST_BACKOFF = 5.0
+"""Seconds a cached link waits after a first failure (see :data:`DOWN_BACKOFF`)."""
+SLEEP_GAP = 30.0
+"""Seconds the wall clock may run ahead of the monotonic clock before the host counts as slept.
+
+:func:`forget_after_sleep` compares the two clocks: the monotonic one
+(``mach_absolute_time`` on macOS, ``CLOCK_MONOTONIC`` on Linux) stops
+while the host sleeps and the wall clock does not, so the difference
+is the time slept.  Sleeps shorter than this leave the connections
+alone: the remote daemon closes a socket whose pings go unanswered
+for 25 s, so a shorter sleep may well have kept them.
+"""
 LINK_PING_INTERVAL = 20.0
 """Seconds between the keepalive pings a link's sockets send the remote daemon."""
 LINK_PING_TIMEOUT = 20.0
@@ -341,11 +362,8 @@ def save_machines(machines: list[Machine]) -> None:
     """Write the registry atomically (created 0600); drop the links of machines no longer in it."""
     path = machines_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{MACHINES_FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"machines": [asdict(m) for m in machines]}, handle, indent=2)
-    os.replace(tmp, path)
+    registry = {"machines": [asdict(m) for m in machines]}
+    atomic_write_text(path, json.dumps(registry, indent=2), mode=0o600)
     close_links(keep=machines)
 
 
@@ -569,8 +587,9 @@ def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None
     """Ping *machine* through *cert_file* until it answers or *deadline* passes.
 
     A failed attempt is tried again a second later on a fresh link (a
-    link backs off for :data:`DOWN_BACKOFF` seconds after a failure);
-    the last error is raised once the monotonic *deadline* has passed.
+    link backs off for :data:`FIRST_BACKOFF` seconds at least after a
+    failure); the last error is raised once the monotonic *deadline*
+    has passed.
 
     An SSH machine is pinged through a forward of these handshakes'
     own, closed on return: the login's shared forward
@@ -799,6 +818,27 @@ class SshTunnel:
         """Kill the ssh process, if any, and forget the port."""
         locked_call(self._lock, self._kill)
 
+    def close_unless_opening(self) -> None:
+        """:meth:`close`, unless the forward is being opened right now.
+
+        For a host back from sleep (:func:`forget_connections`): the
+        ssh process kept from before the sleep sits on a connection
+        the network may have dropped, and notices only after its own
+        keepalives go unanswered (45 s), while every forwarded
+        connection hangs; a login in progress is fresh and is left
+        alone rather than waited for.
+        """
+        # ``locked_call``'s shape with a non-blocking acquire (see
+        # :meth:`MachineLink.request`).
+        try:
+            if self._lock.acquire(blocking=False):
+                self._kill()
+        finally:
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass
+
     def _kill(self) -> None:
         """Kill the ssh process, if any, and forget the port (under the lock)."""
         if self.process is not None:
@@ -908,6 +948,8 @@ class LinkHealth:
 
     retry_at: float = 0.0
     last_error: str = ""
+    failures: int = 0
+    """Failures in a row; sets the next back-off (see :data:`DOWN_BACKOFF`)."""
 
 
 class MachineLink:
@@ -916,10 +958,13 @@ class MachineLink:
     Connects lazily on the first :meth:`request`, re-connects after a
     failure and serialises requests, so the daemon keeps one socket per
     machine across CHATS refreshes.  After a failure the link reports
-    the machine down without trying again for :data:`DOWN_BACKOFF`
-    seconds, so an offline machine does not add a connection timeout
-    to every CHATS refresh and a rejected password is not retried
-    often enough to trip the remote daemon's brute-force lockout.
+    the machine down without trying again for a while
+    (:data:`FIRST_BACKOFF` seconds, doubling with every failure in a
+    row up to :data:`DOWN_BACKOFF`), so an offline machine does not add
+    a connection timeout to every CHATS refresh, and a rejected
+    password waits :data:`DOWN_BACKOFF` from the first failure so it is
+    not retried often enough to trip the remote daemon's brute-force
+    lockout.
     """
 
     def __init__(
@@ -948,34 +993,66 @@ class MachineLink:
         """Monotonic time before which the link reports the last failure without dialling."""
         return self._health.retry_at
 
-    @_retry_at.setter
-    def _retry_at(self, value: float) -> None:
-        self._health.retry_at = value
-
     @property
     def _last_error(self) -> str:
         """The failure the link reports until :attr:`_retry_at`."""
         return self._health.last_error
 
     def _check_available(self) -> None:
-        """Raise the error a retired or backed-off link answers with, if any."""
+        """Raise the error a retired or backed-off link answers with, if any.
+
+        Drops the socket first when the host has slept since the last
+        check (:func:`forget_after_sleep`): the socket is dead and so is
+        the back-off a failed poll during the sleep may have left.
+        """
+        if forget_after_sleep():
+            self._drop()
         if self._retired:
             raise MachineError(f"{self.machine.name}: the machine registry changed, try again")
         if time.monotonic() < self._retry_at:
             raise MachineError(self._last_error)
 
-    def _fail(self, message: str) -> MachineError:
+    def _fail(self, message: str, backoff: float = 0.0) -> MachineError:
         """Record *message* as the link's failure, start the backoff, return the error.
 
-        The message is stored before the back-off: the machine's other
+        The back-off is *backoff* seconds when given, else
+        :data:`FIRST_BACKOFF` doubled for every failure in a row, up to
+        :data:`DOWN_BACKOFF`.  The message is stored before the back-off:
+        the machine's other
         lanes read :class:`LinkHealth` without a lock, in the order
         :meth:`_check_available` reads it, so one that sees the new
         back-off never reports the previous (on a first failure, empty)
         message.
         """
-        self._health.last_error = message
-        self._health.retry_at = time.monotonic() + DOWN_BACKOFF
+        health = self._health
+        health.last_error = message
+        health.failures += 1
+        # The exponent is capped: the ladder tops out at DOWN_BACKOFF
+        # after a few steps, and a machine down for days must not
+        # overflow the power.
+        doublings = min(health.failures - 1, 8)
+        wait = backoff or min(DOWN_BACKOFF, FIRST_BACKOFF * 2**doublings)
+        health.retry_at = time.monotonic() + wait
         return MachineError(message)
+
+    def abandon(self) -> None:
+        """Shut the socket's connection down and clear the back-off, without the lock.
+
+        For a host back from sleep (:func:`forget_connections`): the
+        daemon at the far end closed the socket while its pings went
+        unanswered, so a close handshake would only wait out
+        ``close_timeout`` on a dead connection.  The shutdown wakes a
+        request in flight on the socket with ``ConnectionClosed`` and
+        makes the next one find it closed; either reconnects
+        (:meth:`request`).  The socket is forgotten by whoever holds
+        the lock next.
+        """
+        ws = self._ws
+        if ws is not None:
+            with suppress(OSError):
+                ws.socket.shutdown(socket.SHUT_RDWR)
+        self._health.failures = 0
+        self._health.retry_at = 0.0
 
     def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:
         """Open and authenticate the socket; the handshake has *timeout* seconds.
@@ -1078,12 +1155,13 @@ class MachineLink:
             ws.close()
             raise self._fail(f"{where} did not complete the handshake: {exc}") from exc
         if isinstance(reply, dict) and reply.get("type") == "auth_ok":
+            self._health.failures = 0
             return ws
         ws.close()
         if machine.ssh:
             raise self._fail(f"{where} does not trust this daemon's certificate{enroll_again}")
         if isinstance(reply, dict) and reply.get("type") == "auth_required":
-            raise self._fail(f"{where} rejected the password")
+            raise self._fail(f"{where} rejected the password", DOWN_BACKOFF)
         raise self._fail(f"{where} refused the connection: {reply!r}")
 
     def request(
@@ -1111,7 +1189,9 @@ class MachineLink:
         (the daemon restarted, a network blip, its idle keepalive
         failed): the request is then sent again over a fresh socket
         before the machine counts as down, so a stale socket alone
-        never starts the back-off.
+        never starts the back-off.  One kept across a sleep of the
+        host is dropped before use (:func:`forget_after_sleep`): it is
+        dead, and a request on it would hang for its whole budget.
 
         The link's turn is waited for *timeout* seconds at most, too:
         a request queued behind a slow one on the same link (the
@@ -1155,6 +1235,8 @@ class MachineLink:
         no longer, and the long budget of a slow exchange must not keep
         the request's thread in a dial that will not succeed.
         """
+        if forget_after_sleep():
+            self._drop()
         kept = self._ws is not None
         if self._ws is None:
             self._ws = self._connect(min(timeout, REQUEST_TIMEOUT))
@@ -1231,7 +1313,8 @@ class MachineLink:
                 if msg.get("code") == "auth_failed":
                     self._drop()
                     raise self._fail(
-                        f"{self.machine.name} ({self.machine.address()}) rejected the password"
+                        f"{self.machine.name} ({self.machine.address()}) rejected the password",
+                        DOWN_BACKOFF,
                     )
                 # The daemon refused the command (a rejected custom
                 # model name, say): for a caller that asked for it,
@@ -1383,6 +1466,63 @@ def close_links(keep: Iterable[Machine] = ()) -> None:
 atexit.register(close_links)
 
 
+def forget_connections() -> None:
+    """Abandon every cached link's socket and ssh tunnel and clear the back-offs.
+
+    For a host back from sleep (:func:`forget_after_sleep`): every
+    socket to a remote daemon is dead (the daemon closed it when its
+    pings went unanswered) and so may be the ssh forward under it, but
+    nothing here can tell until a request has hung on it for its whole
+    budget and backed the machine off.  The links and tunnels stay
+    cached and dial afresh on their next use
+    (:meth:`MachineLink.abandon`, :meth:`SshTunnel.close_unless_opening`);
+    a stream through a closed forward ends and its tab reports the
+    machine lost, as it would have once the stream's keepalive noticed.
+    """
+    links: list[MachineLink] = locked_call(_links_lock, list, _links.values())
+    for link in links:
+        link.abandon()
+    tunnels: list[SshTunnel] = locked_call(_tunnels_lock, list, _tunnels.values())
+    for tunnel in tunnels:
+        tunnel.close_unless_opening()
+
+
+_clock_lock = threading.RLock()  # see SshTunnel: taken through locked_call
+_clocks = (time.time(), time.monotonic())
+"""The wall and monotonic clocks at the last :func:`forget_after_sleep` check."""
+
+
+def _slept(wall: float, mono: float) -> float:
+    """Return the wall clock's lead over the monotonic one since the last check (under the lock)."""
+    global _clocks
+    last_wall, last_mono = _clocks
+    _clocks = (wall, mono)
+    return (wall - last_wall) - (mono - last_mono)
+
+
+def forget_after_sleep() -> float:
+    """Drop every cached connection when the host slept since the last call.
+
+    The monotonic clock stops while the host sleeps and the wall clock
+    does not, so their drift since the last call is the time slept
+    (:data:`SLEEP_GAP` names how much counts).  Called before a link
+    uses a cached socket and from the daemon's watchdog, so a request
+    after a wake dials afresh instead of hanging on a dead socket for
+    its whole budget, and nothing a poll during the sleep failed on is
+    held against the machine.
+
+    Returns:
+        The seconds slept, 0.0 when the host did not sleep (or for
+        less than :data:`SLEEP_GAP`).
+    """
+    slept = locked_call(_clock_lock, _slept, time.time(), time.monotonic())
+    if slept < SLEEP_GAP:
+        return 0.0
+    logger.info("the host slept for %.0fs: dropping the cached links and ssh tunnels", slept)
+    forget_connections()
+    return slept
+
+
 # The short host name each registered machine's daemon last gave of
 # itself (registered name -> host), from the ``machine`` of its
 # ``pong`` and the ``localMachine`` of its ``history`` replies; kept
@@ -1456,12 +1596,38 @@ def _float_or_none(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+# The unfiltered history page each machine last answered with
+# (registered name -> the machine as then registered, its page),
+# shown while the machine does not answer.
+_last_pages: dict[str, tuple[Machine, HistoryPage]] = {}
+
+
 def _fetch_quietly(machine: Machine, query: str, tag: str, limit: int) -> HistoryPage:
+    """Return *machine*'s history page, or its last one while it does not answer.
+
+    A machine that cannot be queried (the host is down or asleep, the
+    SSH tunnel timed out, the link is backing off after a failure)
+    must not make its chats vanish from the CHATS panel for that
+    reply: the unfiltered view (no *query*, no *tag*; the one the panel
+    shows by default) is remembered per machine and served again,
+    trimmed to *limit*, while the machine does not answer (a warning is
+    logged).  A filtered view, or a machine that has never answered,
+    contributes nothing then; nor does a page answered under the same
+    name by a machine registered differently (another address or
+    login: another daemon's chats).
+    """
+    unfiltered = not query and not tag
     try:
-        return fetch_history(machine, query, tag, limit)
+        page = fetch_history(machine, query, tag, limit)
     except MachineError as exc:
         logger.warning("CHATS: %s", exc)
-        return HistoryPage()
+        last = _last_pages.get(machine.name) if unfiltered else None
+        if last is None or last[0] != machine:
+            return HistoryPage()
+        return HistoryPage(last[1].rows[:limit], last[1].date_min, last[1].date_max)
+    if unfiltered:
+        _last_pages[machine.name] = (machine, page)
+    return page
 
 
 def merged_history(
@@ -1478,8 +1644,9 @@ def merged_history(
     Because every source is itself ordered that way and the ranking of
     a copy never depends on what else is loaded, the page is the same
     whichever pages were loaded before it: a task never shows twice or
-    goes missing across pages.  An unreachable machine contributes
-    nothing (a warning is logged).
+    goes missing across pages.  A machine that does not answer
+    contributes the unfiltered page it last answered with, if any
+    (:func:`_fetch_quietly`; a warning is logged).
     """
     need = offset + limit
     with ThreadPoolExecutor(max_workers=max(1, len(machines))) as pool:

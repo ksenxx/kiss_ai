@@ -86,9 +86,15 @@ window instead (Chromium's process singleton opens the ``--app`` page
 in the running instance, which opens a new popup; the page opens none
 when the daemon tells it the popup is connected after all).
 
-``kiss-app`` starts the browser only once the daemon answers
-(:func:`wait_for_daemon`): the URL file outlives a reboot, and a
-browser started before the daemon serves shows an error page.
+``kiss-app`` waits for the daemon's URL file (:func:`wait_for_url`)
+but not for the daemon: the file outlives a reboot, and macOS
+relaunches the app at login a minute before the daemon's LaunchAgent
+is spawned.  While the daemon does not answer, the window opens on
+the packaged ``media/appStart.html`` (:func:`start_page_url`, a
+``file://`` page) which shows the app's name, asks the daemon every
+half second and replaces itself with the app at the first answer;
+a browser started on the daemon's URL that early would show an error
+page instead.
 """
 
 from __future__ import annotations
@@ -192,27 +198,48 @@ def daemon_answers(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def wait_for_daemon(url_file: Path, url: str | None, timeout: float) -> str | None:
-    """Wait up to *timeout* seconds for the daemon to answer; return its URL, or None.
+def wait_for_url(url_file: Path, url: str | None, timeout: float) -> str | None:
+    """Return *url*, else the loopback URL of *url_file* once it exists (None after *timeout* s).
 
-    The URL is *url*, else the loopback URL of *url_file*
-    (``remote-url.json``), which is polled for while it is missing.  A
-    URL alone is not enough to start the browser: the file survives a
-    reboot, and a browser started before the daemon serves shows an
-    error page in place of the app.  So the daemon is asked
-    (:func:`daemon_answers`) until it answers or the time is up.  The
-    URL is returned either way once it is known (the browser then
-    shows what is wrong, and reloads by itself once the daemon is up);
-    None only when no URL turned up in time.
+    The file (``remote-url.json``) is polled for while it is missing:
+    the daemon writes it as it starts.  Whether the daemon answers at
+    the URL is not waited for (:func:`start_page_url` shows a window
+    meanwhile).
     """
     deadline = time.monotonic() + timeout
     while True:
         url = url or read_loopback_url(url_file)
-        if url and daemon_answers(url):
-            return url
-        if time.monotonic() >= deadline:
+        if url or time.monotonic() >= deadline:
             return url
         time.sleep(0.5)
+
+
+APP_START_PAGE = MEDIA_DIR / "appStart.html"
+"""The packaged page the window shows while the daemon does not answer yet."""
+
+
+def start_page_url(
+    next_url: str, daemon_url: str, brand: dict[str, str] = BRAND, popup: bool = False,
+) -> str:
+    """Return the ``file://`` URL of :data:`APP_START_PAGE` set to wait for the daemon.
+
+    The page asks ``daemon_url``'s :data:`APP_WINDOW_API` until it
+    answers (with any status) and then replaces itself with
+    *next_url* (the app); the window is titled after *brand*.  With
+    *popup* (macOS, *next_url* the popup-opening page of
+    :func:`app_window_url`) the page first moves itself into the
+    popup window the app lives in there (a reopen from the Dock
+    finds that window; it would find no app window and open an empty
+    browser window).
+    """
+    query = {
+        "next": next_url,
+        "probe": urllib.parse.urljoin(daemon_url, APP_WINDOW_API),
+        "title": brand["product_name"],
+    }
+    if popup:
+        query["popup"] = "1"
+    return f"{APP_START_PAGE.as_uri()}?{urllib.parse.urlencode(query)}"
 
 
 @functools.cache
@@ -602,12 +629,15 @@ def macos_bundle_plist(
     version); the identity becomes the brand's, the executable the
     launcher script, the icon ``AppIcon.icns``; the keys in
     ``_MACOS_PLIST_DROPPED_KEYS`` and the Keystone ``KS*`` keys go.
+    An empty *browser_plist* (the launcher-only bundle, no browser
+    cloned) yields the brand's identity with version ``1.0``.
     """
-    info = {
-        key: value
+    info: dict[str, object] = {"CFBundleVersion": "1.0"}
+    info.update(
+        (key, value)
         for key, value in browser_plist.items()
         if key not in _MACOS_PLIST_DROPPED_KEYS and not key.startswith("KS")
-    }
+    )
     info.update(
         {
             "CFBundleName": brand["product_name"],
@@ -666,7 +696,25 @@ def macos_bundle_browser(bundle: Path, browser: Path) -> Path | None:
     return exe_copy
 
 
-def macos_bundle_processes(bundle: Path) -> list[tuple[int, str]]:
+PROBE_TIMEOUT_SECS = 10.0
+"""How long ``ps``, ``osascript`` and ``open`` get before a probe gives up on them.
+
+The probes run from the daemon's watchdog and the popup's close
+handler; a stuck command must not hang either.
+"""
+
+
+def _probe(command: list[str], timeout: float) -> subprocess.CompletedProcess[str] | None:
+    """Run *command* with *timeout*; None when it did not come back in time or cannot start."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def macos_bundle_processes(
+    bundle: Path, timeout: float = PROBE_TIMEOUT_SECS
+) -> list[tuple[int, str]] | None:
     """Return ``(pid, command)`` of every process running from *bundle*.
 
     Every executable of the clone sits under ``Contents/``: the browser
@@ -674,11 +722,14 @@ def macos_bundle_processes(bundle: Path) -> list[tuple[int, str]]:
     ``Contents/Frameworks/``.  A running one names that directory in
     its command line.  ``-ww`` keeps the whole command line: without it
     procps ``ps`` cuts each line at 80 columns when its output is piped
-    and ``TERM`` is unset, which drops a long bundle path.
+    and ``TERM`` is unset, which drops a long bundle path.  None (not
+    the empty list, which means no such process) when ``ps`` cannot
+    start or does not answer within *timeout* seconds: the callers
+    that would delete the bundle must not take that for "nothing runs".
     """
-    listing = subprocess.run(
-        ["ps", "-ww", "-axo", "pid=,command="], capture_output=True, text=True
-    )
+    listing = _probe(["ps", "-ww", "-axo", "pid=,command="], timeout)
+    if listing is None:
+        return None
     prefix = f"{bundle / 'Contents'}/"
     processes = []
     for line in listing.stdout.splitlines():
@@ -688,15 +739,16 @@ def macos_bundle_processes(bundle: Path) -> list[tuple[int, str]]:
     return processes
 
 
-def macos_bundle_in_use(bundle: Path) -> bool:
-    """Whether a process runs from *bundle*: the browser or one of its helpers."""
-    return bool(macos_bundle_processes(bundle))
+def macos_bundle_in_use(bundle: Path) -> bool | None:
+    """Whether the browser or a helper runs from *bundle*; None when ``ps`` cannot tell."""
+    processes = macos_bundle_processes(bundle)
+    return None if processes is None else bool(processes)
 
 
 def macos_bundle_pid(bundle: Path) -> int | None:
-    """Return the pid of the browser process started from *bundle*, or None."""
+    """Return the pid of the browser started from *bundle*; None when none or ``ps`` cannot tell."""
     prefix = f"{bundle / 'Contents' / 'MacOS'}/"
-    for pid, command in macos_bundle_processes(bundle):
+    for pid, command in macos_bundle_processes(bundle) or []:
         if command.startswith(prefix):
             return pid
     return None
@@ -720,21 +772,21 @@ function run(argv) {
 """
 
 
-def macos_windows_on_screen(pid: int) -> int | None:
+def macos_windows_on_screen(pid: int, timeout: float = PROBE_TIMEOUT_SECS) -> int | None:
     """Return how many windows process *pid* has on screen, or None when it cannot be told.
 
     The count comes from the window server (JXA over CoreGraphics),
     which needs no accessibility permission.  A minimized window is off
     screen and not counted; Chromium's hidden helper windows sit on
     other layers.  None when ``osascript`` fails (no window server
-    session, say).
+    session, say) or does not answer within *timeout* seconds.
     """
-    result = subprocess.run(
-        ["osascript", "-l", "JavaScript", "-e", _WINDOWS_ON_SCREEN_JXA, str(pid)],
-        capture_output=True,
-        text=True,
+    result = _probe(
+        ["osascript", "-l", "JavaScript", "-e", _WINDOWS_ON_SCREEN_JXA, str(pid)], timeout
     )
-    return int(result.stdout) if result.returncode == 0 and result.stdout.strip() else None
+    if result is None or result.returncode != 0 or not result.stdout.strip():
+        return None
+    return int(result.stdout)
 
 
 APP_WINDOW_API = "/api/app-window"
@@ -979,12 +1031,15 @@ def write_macos_launcher(
     bundle (no browser, a bare binary, a clone that failed) the bundle
     is the launcher alone and the Dock shows the browser's icon.
     *in_use* is whether a window runs from the bundle when the caller
-    already listed the processes (None: find out here).
+    already listed the processes (None: find out here).  A stale
+    bundle is also left alone when that cannot be found out (``ps``
+    does not answer): deleting a bundle a window may run from is worse
+    than one more launch under the browser's icon.
 
     Returns:
         The clone's main executable, kept or just written; None when
         the bundle is the launcher alone or a stale clone was left to
-        a window still running from it.
+        a window still (or possibly) running from it.
     """
     bundle = apps_dir / f"{brand['product_name']}.app"
     contents = bundle / "Contents"
@@ -998,29 +1053,19 @@ def write_macos_launcher(
     clone = macos_bundle_browser(bundle, source) if source else None
     if clone is None:
         # Anything but a current clone is rebuilt from scratch, unless a
-        # window still runs from the bundle.
-        if macos_bundle_in_use(bundle) if in_use is None else in_use:
-            print(f"{bundle} is in use; it is rewritten at the next launch.", file=sys.stderr)
+        # window still runs from the bundle, or might: an inconclusive
+        # listing does not authorize deleting it.
+        if in_use is None:
+            in_use = macos_bundle_in_use(bundle)
+        if in_use is not False:
+            print(f"{bundle} may be in use; it is rewritten at the next launch.", file=sys.stderr)
             return None
         shutil.rmtree(bundle, ignore_errors=True)
         if source:
             clone = clone_macos_browser(contents, source, identifier)
     (contents / "MacOS").mkdir(parents=True, exist_ok=True)
     (contents / "Resources").mkdir(exist_ok=True)
-    info: dict[str, object]
-    if clone and browser_info is not None:
-        info = macos_bundle_plist(brand, browser_info)
-    else:
-        info = {
-            "CFBundleName": brand["product_name"],
-            "CFBundleDisplayName": brand["product_name"],
-            "CFBundleIdentifier": identifier,
-            "CFBundleVersion": "1.0",
-            "CFBundlePackageType": "APPL",
-            "CFBundleExecutable": "launcher",
-            "CFBundleIconFile": "AppIcon",
-            "LSUIElement": False,
-        }
+    info = macos_bundle_plist(brand, browser_info if clone and browser_info else {})
     if not write_icns(icon, contents / "Resources" / "AppIcon.icns"):
         info.pop("CFBundleIconFile", None)
     with (contents / "Info.plist").open("wb") as f:
@@ -1176,7 +1221,9 @@ def macos_launch_browser(
     return clone or browser
 
 
-def macos_activate_running(bundle: Path, in_use: bool | None = None) -> bool:
+def macos_activate_running(
+    bundle: Path, in_use: bool | None = None, timeout: float = PROBE_TIMEOUT_SECS
+) -> bool:
     """Bring the window of the app running from *bundle* to the front; whether there was one.
 
     ``open -a`` on a bundle that is running does what a click on its
@@ -1184,11 +1231,13 @@ def macos_activate_running(bundle: Path, in_use: bool | None = None) -> bool:
     which focuses the window (see the module doc), so nothing else is
     started.  False when nothing runs from *bundle* (*in_use* when the
     caller already listed the processes, else
-    :func:`macos_bundle_in_use`) or ``open`` failed.
+    :func:`macos_bundle_in_use`) or ``open`` failed or did not return
+    within *timeout* seconds.
     """
     if not (macos_bundle_in_use(bundle) if in_use is None else in_use):
         return False
-    return subprocess.run(["open", "-a", str(bundle)], capture_output=True).returncode == 0
+    result = _probe(["open", "-a", str(bundle)], timeout)
+    return result is not None and result.returncode == 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1203,8 +1252,7 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=120.0,
         metavar="SECS",
-        help="how long to wait for the daemon's URL file and for the daemon to answer "
-        "(default 120)",
+        help="how long to wait for the daemon's URL file (default 120)",
     )
     parser.add_argument("--foreground", action="store_true", help="run the window in this process")
     parser.add_argument(
@@ -1249,11 +1297,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     url_file = kiss_home() / "remote-url.json"
-    # --print-command only shows the command: it does not wait for the daemon.
+    # --print-command only shows the command: it does not wait for the URL file.
     if args.print_command:
         url = args.url or read_loopback_url(url_file)
     else:
-        url = wait_for_daemon(url_file, args.url, args.wait)
+        url = wait_for_url(url_file, args.url, args.wait)
     if not url:
         print(
             f"{BRAND['product_name']} is not running: no URL in {url_file} after {args.wait:g}s.",
@@ -1272,12 +1320,19 @@ def main(argv: list[str] | None = None) -> int:
     sandbox = sandboxed(browser)
     macos = platform.system() == "Darwin"
     # One process listing serves both the bundle rewrite and the
-    # already-open check below.
-    running = macos and macos_bundle_in_use(macos_bundle_path())
+    # already-open check below (None, ``ps`` did not answer: the
+    # rewrite asks again and the check treats it as not running).
+    running = macos_bundle_in_use(macos_bundle_path()) if macos else False
     daemon_url = url
     if macos:
         browser = macos_launch_browser(browser, in_use=running)
         url = app_window_url(url)
+    # A daemon not answering yet (the app relaunched at login before
+    # the daemon's LaunchAgent spawned it) gets the packaged waiting
+    # page, which moves on to the app when the daemon answers; the
+    # printed command names the app itself.
+    if not args.print_command and not daemon_answers(daemon_url):
+        url = start_page_url(url, daemon_url, popup=macos)
     command = app_command(
         browser, url, kiss_home() / PROFILE_DIR_NAME, brand_slug(), sandbox=sandbox, popups=macos
     )

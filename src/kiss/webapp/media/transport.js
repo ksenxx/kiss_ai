@@ -249,6 +249,116 @@
     }
   } catch (_e) {}
 
+  // The daemon process this page first authenticated with, as GET
+  // /api/daemon names it (``DAEMON_INSTANCE`` in web_server.py).
+  // Reconnecting in place is right for a network blip but wrong after
+  // ``install.sh`` updated or reinstalled KISS Sorcar: the restarted
+  // daemon runs new code while the page still runs the JavaScript it
+  // loaded before, so a reconnect that reaches a DIFFERENT daemon
+  // process reloads the page once the new daemon is up.  Asked on
+  // every auth_ok, after the queued commands were flushed.
+  //
+  // The answer is acted on only while the connection it was asked for
+  // is still the live, authenticated one: a late answer after the
+  // socket dropped again would reload a page whose unconfirmed batch
+  // was just re-queued in memory (``_requeueUnconfirmed``) and lose it;
+  // the next auth_ok asks again.  For the same reason a reload waits
+  // for the ``pong`` that confirms the batch flushed on this
+  // connection.  A request that fails (the link, a proxy's 5xx while
+  // the daemon restarts) is retried with a bounded backoff for as long
+  // as the connection stays up, so one lost probe cannot leave the
+  // stale page running; an answer without a token (a daemon without
+  // the endpoint) is final.
+  let _daemonInstance = '';
+  // A token that differs from ``_daemonInstance``, seen while the
+  // flushed batch was still unconfirmed: reloaded on the ``pong``.
+  let _pendingDaemonInstance = '';
+  let _daemonCheckTimer = null;
+  let _daemonCheckDelayMs = 0;
+  const _DAEMON_RETRY_MIN_MS = 5000;
+  const _DAEMON_RETRY_MAX_MS = 60000;
+
+  function _checkDaemonInstance() {
+    if (typeof fetch !== 'function' || !_authenticated) return;
+    const sock = _ws;
+    let req;
+    try {
+      req = fetch('/api/daemon', {cache: 'no-store'});
+    } catch (_e) {
+      _retryDaemonCheck(sock);
+      return;
+    }
+    req
+      .then(res => {
+        if (res.ok) return res.json();
+        if (res.status >= 500) throw new Error('daemon probe ' + res.status);
+        return null;
+      })
+      .then(info => {
+        if (sock !== _ws || !_authenticated) return;
+        _daemonCheckDelayMs = 0;
+        const instance =
+          info && typeof info.instance === 'string' ? info.instance : '';
+        if (!instance) return;
+        if (!_daemonInstance) {
+          _daemonInstance = instance;
+          return;
+        }
+        if (instance === _daemonInstance) return;
+        _reloadForDaemon(instance);
+      })
+      .catch(() => _retryDaemonCheck(sock));
+  }
+
+  // Reload the page for the daemon process *instance*, once the batch
+  // flushed on this connection (if any) has been confirmed.
+  function _reloadForDaemon(instance) {
+    if (_inflight.length > 0) {
+      _pendingDaemonInstance = instance;
+      return;
+    }
+    _pendingDaemonInstance = '';
+    _daemonInstance = instance;
+    try {
+      window.location.reload();
+    } catch (_e) {}
+  }
+
+  function _retryDaemonCheck(sock) {
+    if (sock !== _ws || !_authenticated) return;
+    _daemonCheckDelayMs = Math.min(
+      _DAEMON_RETRY_MAX_MS,
+      _daemonCheckDelayMs > 0 ? _daemonCheckDelayMs * 2 : _DAEMON_RETRY_MIN_MS,
+    );
+    _clearDaemonCheckTimer();
+    _daemonCheckTimer = setTimeout(() => {
+      _daemonCheckTimer = null;
+      _checkDaemonInstance();
+    }, _daemonCheckDelayMs);
+  }
+
+  // Every timer cancel of the shim: tolerant of a clearTimeout that
+  // throws, because a cancel must never break a reconnect.
+  function _clearTimer(id) {
+    try {
+      clearTimeout(id);
+    } catch (_e) {}
+  }
+
+  function _clearDaemonCheckTimer() {
+    if (_daemonCheckTimer === null) return;
+    _clearTimer(_daemonCheckTimer);
+    _daemonCheckTimer = null;
+  }
+
+  // The connection is gone: its pending retry and deferred reload go
+  // with it (the next auth_ok asks the daemon again).
+  function _stopDaemonCheck() {
+    _clearDaemonCheckTimer();
+    _daemonCheckDelayMs = 0;
+    _pendingDaemonInstance = '';
+  }
+
   // Half-open sockets: when the network path dies silently (Wi-Fi to
   // cellular hand-over, a NAT entry expiring, the laptop lid closing)
   // the browser keeps reporting the socket OPEN and no ``onclose``
@@ -279,15 +389,11 @@
 
   function _stopStaleCheck() {
     if (_staleTimer !== null) {
-      try {
-        clearTimeout(_staleTimer);
-      } catch (_e) {}
+      _clearTimer(_staleTimer);
       _staleTimer = null;
     }
     if (_stableTimer !== null) {
-      try {
-        clearTimeout(_stableTimer);
-      } catch (_e) {}
+      _clearTimer(_stableTimer);
       _stableTimer = null;
     }
   }
@@ -390,12 +496,19 @@
     // after a daemon restart.
     const cap = window.name === 'kiss-app-window' ? 5000 : 30000;
     const base = Math.min(cap, 500 * Math.pow(2, _reconnectAttempt));
-    const delay = base + Math.floor(Math.random() * base);
     _reconnectAttempt++;
-    _reconnectTimer = setTimeout(() => {
-      _reconnectTimer = null;
-      connect();
-    }, delay);
+    _scheduleReconnectIn(base + Math.floor(Math.random() * base));
+  }
+
+  /** Replace the pending reconnect (if any) with one in *delayMs*. */
+  function _scheduleReconnectIn(delayMs) {
+    _clearTimer(_reconnectTimer);
+    _reconnectTimer = setTimeout(_reconnectTimerFired, delayMs);
+  }
+
+  function _reconnectTimerFired() {
+    _reconnectTimer = null;
+    connect();
   }
 
   function _reconnectNowIfNeeded() {
@@ -416,9 +529,7 @@
       return;
     }
     if (_reconnectTimer !== null) {
-      try {
-        clearTimeout(_reconnectTimer);
-      } catch (_e) {}
+      _clearTimer(_reconnectTimer);
       _reconnectTimer = null;
     }
     _reconnectAttempt = 0;
@@ -597,16 +708,18 @@
       _showPasswordNeeded();
       return;
     }
+    // Kept out of localStorage until ``auth_ok``: every other tab of
+    // this origin probes with the stored password on its next
+    // reconnect, and the server counts each non-empty wrong guess
+    // against the device's lockout, so a typo stored here would be
+    // replayed (and counted) once per open tab.
     _authPassword = pwd;
-    try {
-      localStorage.setItem('sorcar-remote-pwd', pwd);
-    } catch (_e) {}
     if (_ws && _ws.readyState === WebSocket.OPEN) {
       _sessionPassword = pwd;
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
     } else {
-      // The server dropped the idle socket while the user typed; the
-      // stored password goes out in ``onopen`` of the reconnect.
+      // The server dropped the idle socket while the user typed;
+      // ``_authPassword`` goes out in ``onopen`` of the reconnect.
       _reconnectNowIfNeeded();
     }
   }
@@ -665,6 +778,7 @@
     _authenticated = false;
     _requeueUnconfirmed();
     _stopStaleCheck();
+    _stopDaemonCheck();
     if (_lockedRetryMs > 0) {
       // This close follows an ``auth_locked`` frame: the server is
       // rate-limiting this IP after too many failed logins.  Keep
@@ -677,13 +791,7 @@
       const lockedDelay = _lockedRetryMs;
       _lockedRetryMs = 0;
       _dispatchToApp({type: 'daemonStatus', connected: false});
-      try {
-        clearTimeout(_reconnectTimer);
-      } catch (_e) {}
-      _reconnectTimer = setTimeout(() => {
-        _reconnectTimer = null;
-        connect();
-      }, lockedDelay);
+      _scheduleReconnectIn(lockedDelay);
       return;
     }
     if (_authPrompt || _authModalOpen()) {
@@ -771,6 +879,7 @@
       _dropSocket(_ws);
     }
     _stopStaleCheck();
+    _stopDaemonCheck();
     // Plain ``ws://`` on a plain ``http://`` page (the daemon's own
     // machine, http://127.0.0.1:PORT); ``wss://`` everywhere else.
     // The popup window of the macOS standalone app (kiss-app, named
@@ -782,11 +891,14 @@
     _authenticated = false;
 
     _ws.onopen = function () {
-      let pwd = '';
-      try {
-        pwd = localStorage.getItem('sorcar-remote-pwd') || '';
-      } catch (_e) {}
-      if (_authPassword !== pwd) _authPassword = '';
+      // A password typed while the socket was down (still pending,
+      // so not stored yet) wins over the stored one.
+      let pwd = _authPassword;
+      if (!pwd) {
+        try {
+          pwd = localStorage.getItem('sorcar-remote-pwd') || '';
+        } catch (_e) {}
+      }
       _sessionPassword = pwd;
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
       _lastFrameAt = Date.now();
@@ -798,6 +910,14 @@
       _lastFrameAt = Date.now();
       if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
+        // An interactive login the server accepted: store it for the
+        // next page load (the offline-shell reload below included) and
+        // for the other tabs of this origin.
+        if (_authPassword) {
+          try {
+            localStorage.setItem('sorcar-remote-pwd', _authPassword);
+          } catch (_e) {}
+        }
         if (_reloadOnFirstAuth) {
           // A page the service worker served from its offline cache
           // may run code older than the server's: reload it once, now
@@ -880,12 +1000,15 @@
         // page: it goes out after the batch above, so a queued change
         // is applied before the server replays state to this client.
         _dispatchToApp({type: 'daemonStatus', connected: true});
+        _checkDaemonInstance();
         return;
       }
       if (msg.type === 'pong') {
         // The server has taken the whole batch flushed on this
-        // connection; nothing is owed any more.
+        // connection; nothing is owed any more.  A reload that waited
+        // for this confirmation (a new daemon process) goes ahead.
         _inflight = [];
+        if (_pendingDaemonInstance) _reloadForDaemon(_pendingDaemonInstance);
         return;
       }
       if (msg.type === 'auth_required') {
@@ -986,6 +1109,7 @@
         _setOverlayAction(null, null);
         const text = (msg.text && String(msg.text)) || 'Something went wrong.';
         if (msg.code === 'auth_failed') {
+          _authPassword = '';
           try {
             localStorage.removeItem('sorcar-remote-pwd');
           } catch (_e) {}

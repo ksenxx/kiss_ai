@@ -64,7 +64,6 @@ function makePage() {
 }
 
 function checkSurface() {
-  const label = 'remote web app';
   const win = makePage();
   send(win, {type: 'recommendations', generatedAt: Date.now(), tasks: TASKS});
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
@@ -73,35 +72,27 @@ function checkSurface() {
       '#meta-recommendations-list .recommendation-row',
     ),
   );
-  assert.strictEqual(
-    rows.length,
-    TASKS.length,
-    `${label}: one row per suggestion`,
-  );
+  assert.strictEqual(rows.length, TASKS.length, 'one row per suggestion');
   for (const row of rows) {
     const cs = win.getComputedStyle(row);
-    assert.strictEqual(cs.borderTopStyle, 'solid', `${label}: top border`);
-    assert.strictEqual(cs.borderRightStyle, 'solid', `${label}: right border`);
-    assert.strictEqual(
-      cs.borderBottomStyle,
-      'solid',
-      `${label}: bottom border`,
-    );
-    assert.strictEqual(cs.borderLeftStyle, 'solid', `${label}: left border`);
-    assert.strictEqual(cs.borderTopWidth, '1px', `${label}: 1px border`);
-    assert.strictEqual(cs.borderLeftWidth, '1px', `${label}: 1px border`);
-    assert.notStrictEqual(cs.borderRadius, '0px', `${label}: rounded corners`);
-    assert.notStrictEqual(cs.borderRadius, '', `${label}: rounded corners`);
+    assert.strictEqual(cs.borderTopStyle, 'solid', 'top border');
+    assert.strictEqual(cs.borderRightStyle, 'solid', 'right border');
+    assert.strictEqual(cs.borderBottomStyle, 'solid', 'bottom border');
+    assert.strictEqual(cs.borderLeftStyle, 'solid', 'left border');
+    assert.strictEqual(cs.borderTopWidth, '1px', '1px border');
+    assert.strictEqual(cs.borderLeftWidth, '1px', '1px border');
+    assert.notStrictEqual(cs.borderRadius, '0px', 'rounded corners');
+    assert.notStrictEqual(cs.borderRadius, '', 'rounded corners');
   }
   const machine = win.document.querySelector(
     '#meta-machines-list .machine-row',
   );
-  assert.ok(machine, `${label}: a machine row to compare against`);
+  assert.ok(machine, 'a machine row to compare against');
   const machineStyle = win.getComputedStyle(machine);
   assert.strictEqual(
     machineStyle.borderTopStyle,
     'none',
-    `${label}: the border is specific to recommendation rows`,
+    'the border is specific to recommendation rows',
   );
   // An empty reply leaves nothing bordered behind.
   send(win, {type: 'recommendations', generatedAt: 0, tasks: []});
@@ -110,7 +101,7 @@ function checkSurface() {
       '#meta-recommendations-list .recommendation-row',
     ).length,
     0,
-    `${label}: an empty reply clears the rows`,
+    'an empty reply clears the rows',
   );
   win.close();
 }

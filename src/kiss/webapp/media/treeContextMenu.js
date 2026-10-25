@@ -181,11 +181,7 @@
     return el;
   }
 
-  function isOpen() {
-    return !!menu;
-  }
-
-  const api = {MENU_ID: MENU_ID, show: show, close: close, isOpen: isOpen};
+  const api = {show: show};
 
   if (root && typeof root === 'object') {
     root.TreeContextMenu = api;

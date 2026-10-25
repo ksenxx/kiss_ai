@@ -34,7 +34,9 @@ class TestDedupe:
         assert note.startswith("Unchanged since your earlier Read of a.py (lines 1-3 of 3)")
         assert "force=True" in note
         # A different window is new content; repeating it is deduped too.
-        assert tools.Read("a.py", start_line=2, max_lines=1) == "two\n\n[truncated: 1 more lines]"
+        assert tools.Read("a.py", start_line=2, max_lines=1) == (
+            "two\n\n[truncated: 1 more lines; Read(file_path, start_line=3, max_lines=N) continues]"
+        )
         assert tools.Read("a.py", start_line=2, max_lines=1).startswith("Unchanged")
         # force re-sends; a changed file re-sends and re-arms the dedupe.
         assert tools.Read("a.py", force=True) == "one\ntwo\nthree\n"
@@ -79,7 +81,8 @@ class TestOutline:
         # A range read still returns content, and the outline is not deduped
         # against it (different windows).
         assert tools.Read("big.py", start_line=2, max_lines=2) == (
-            "    x = 0\n    x = 1\n\n[truncated: 209 more lines]"
+            "    x = 0\n    x = 1\n\n[truncated: 209 more lines; "
+            "Read(file_path, start_line=4, max_lines=N) continues]"
         )
         # Explicitly asking for a bigger whole-file window is the same
         # request, and a repeated outline is deduped like any other window.

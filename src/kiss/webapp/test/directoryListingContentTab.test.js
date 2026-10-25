@@ -97,6 +97,8 @@ async function testPlainFileStillRendersHtml() {
     console.log('directoryListingContentTab.test.js: all tests passed');
   } catch (err) {
     console.error('FAIL:', err && err.message ? err.message : err);
-    process.exitCode = 1;
+    // A failed assertion leaves a page open whose main.js timers keep
+    // node alive; exit now so the runner sees the message, not a hang.
+    process.exit(1);
   }
 })();

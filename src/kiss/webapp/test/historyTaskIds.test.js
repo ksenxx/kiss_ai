@@ -6,16 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage,
   send,
   sendEmptyWorkDir,
   rowsByTitle,
+  loadMainCss,
 } = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 const WS = '/Users/koushik/work/repo';
 
@@ -146,13 +143,16 @@ function infoBlock(row) {
   return row.querySelector('.running-item-info');
 }
 
-function testIdsLineRendersAllCombinations() {
+/** Boot a page with main.css applied and the fixture rows rendered. */
+function renderedRows() {
   const {win} = makePage();
+  loadMainCss(win);
   sendEmptyWorkDir(win);
-
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  return {win, rows: rowsByTitle(win)};
+}
 
-  const rows = rowsByTitle(win);
+function testIdsLineRendersAllCombinations(rows) {
   const a = rows['ids row A — chat + task + parent'];
   const b = rows['ids row B — chat + task, no parent'];
   const c = rows['ids row C — chat only'];
@@ -212,19 +212,12 @@ function testIdsLineRendersAllCombinations() {
     'row F (no chat, no task, no parent) must NOT render a .running-item-ids span',
   );
 
-  win.close();
   console.log(
     '  ok - .running-item-ids renders the right text in every combination',
   );
 }
 
-function testIdsLineOrderingAndContainer() {
-  const {win} = makePage();
-  sendEmptyWorkDir(win);
-
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
-
-  const rows = rowsByTitle(win);
+function testIdsLineOrderingAndContainer(win, rows) {
   const a = rows['ids row A — chat + task + parent'];
   const b = rows['ids row B — chat + task, no parent'];
   assert.ok(a, 'row A must render');
@@ -278,61 +271,33 @@ function testIdsLineOrderingAndContainer() {
       row.lastElementChild,
       `row ${label}: .running-item-info must be the last child of the row`,
     );
+
+    // main.css: the info block drops onto its own line of the
+    // .sidebar-item flex row and stacks its three lines flush (a
+    // collapsed row hides it, so `display` is not checked here).
+    const style = win.getComputedStyle(info);
+    assert.strictEqual(style.flexBasis, '100%', `row ${label}: own line`);
+    assert.strictEqual(
+      style.flexDirection,
+      'column',
+      `row ${label}: lines stack vertically`,
+    );
+    assert.ok(
+      ['0', '0px'].includes(style.gap) || ['0', '0px'].includes(style.rowGap),
+      `row ${label}: no gap between the lines, got ${style.gap}/${style.rowGap}`,
+    );
   }
 
-  win.close();
   console.log(
-    '  ok - metrics / workspace / ids stack inside .running-item-info in the right order',
-  );
-}
-
-function testIdsLineLayoutEliminatesGap() {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-
-  const infoRe = /\.running-item-info\s*\{([^}]*)\}/g;
-  const infoMatch = infoRe.exec(css);
-  assert.ok(
-    infoMatch,
-    'main.css must define a .running-item-info rule that wraps ' +
-      'the metrics / workspace / ids lines',
-  );
-  const infoBody = infoMatch[1];
-  assert.match(
-    infoBody,
-    /flex-basis\s*:\s*100%/,
-    '.running-item-info must declare "flex-basis: 100%" so it ' +
-      'drops onto its own line in the .sidebar-item flex container',
-  );
-  assert.match(
-    infoBody,
-    /flex-direction\s*:\s*column/,
-    '.running-item-info must stack its children vertically ' +
-      '(flex-direction: column)',
-  );
-  assert.match(
-    infoBody,
-    /(^|[^-])(?:row-)?gap\s*:\s*0(?:px)?\b/,
-    '.running-item-info must declare gap: 0 (or row-gap: 0) so ' +
-      'metrics / workspace / ids render flush with no visual gap',
-  );
-
-  const idsRe = /\.running-item-ids\s*\{([^}]*)\}/g;
-  const idsMatch = idsRe.exec(css);
-  assert.ok(
-    idsMatch,
-    'main.css must define a .running-item-ids rule for the new ' +
-      'chat/task/parent ids line',
-  );
-
-  console.log(
-    '  ok - CSS eliminates the gap between metrics and workspace lines',
+    '  ok - metrics / workspace / ids stack flush inside .running-item-info',
   );
 }
 
 function main() {
-  testIdsLineRendersAllCombinations();
-  testIdsLineOrderingAndContainer();
-  testIdsLineLayoutEliminatesGap();
+  const {win, rows} = renderedRows();
+  testIdsLineRendersAllCombinations(rows);
+  testIdsLineOrderingAndContainer(win, rows);
+  win.close();
   console.log('historyTaskIds.test.js: all assertions passed.');
 }
 

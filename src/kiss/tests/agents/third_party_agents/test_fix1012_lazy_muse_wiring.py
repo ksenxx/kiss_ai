@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import base64
 import json
+import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -145,17 +145,19 @@ def _carried(request: dict[str, Any], where: str, key: str, value: str) -> bool:
     return value in str(request["path"])
 
 
-def _after_barrier(barrier: threading.Barrier, request: Any, agent: Any) -> Any:
-    """Wait for every thread, then issue the request; return its result or exception."""
-    barrier.wait()
+def _after_barrier(
+    barrier: threading.Barrier, request: Any, agent: Any, results: queue.Queue[Any]
+) -> None:
+    """Wait for every thread, then issue the request; queue its result or exception."""
     try:
-        return request(agent)
+        barrier.wait()
+        results.put(request(agent))
     except Exception as e:  # noqa: BLE001 - the test inspects every outcome
-        return e
+        results.put(e)
 
 
-def _fire_first_requests(request: Any, agent: Any, n: int = _THREADS) -> list[Any]:
-    """Fire *request* from *n* threads at once as the backend's very first request.
+def _fire_first_requests(request: Any, agent: Any) -> list[Any]:
+    """Fire *request* from ``_THREADS`` threads at once as the backend's very first request.
 
     ``spawn.lock`` is held while the threads start, so the first wiring
     (which spawns the daemon under that lock) cannot finish before the
@@ -172,18 +174,34 @@ def _fire_first_requests(request: Any, agent: Any, n: int = _THREADS) -> list[An
     Args:
         request: ``request(agent)`` issues one read through the backend.
         agent: A freshly built, still unwired channel agent.
-        n: Number of concurrent first requests.
 
     Returns:
         Every thread's result (or the exception it raised).
+
+    Raises:
+        AssertionError: A thread did not finish within the deadline.  The
+            workers are daemon threads, so a request stuck in the backend
+            fails the test instead of hanging it, and cannot keep the
+            interpreter alive at exit either (an executor's worker threads
+            are joined at shutdown; daemon threads are not).
     """
-    barrier = threading.Barrier(n)
-    futures: list[Future[Any]] = []
-    with ThreadPoolExecutor(max_workers=n) as pool:
-        with exclusive_file_lock(muse_auth_dir() / "spawn.lock"):
-            futures = [pool.submit(_after_barrier, barrier, request, agent) for _ in range(n)]
-            time.sleep(_SETTLE_SECONDS)
-        return [future.result(timeout=120) for future in futures]
+    barrier = threading.Barrier(_THREADS, timeout=30)
+    results: queue.Queue[Any] = queue.Queue()
+    with exclusive_file_lock(muse_auth_dir() / "spawn.lock"):
+        for _ in range(_THREADS):
+            threading.Thread(
+                target=_after_barrier, args=(barrier, request, agent, results), daemon=True
+            ).start()
+        time.sleep(_SETTLE_SECONDS)
+    deadline = time.monotonic() + 120
+    outcomes: list[Any] = []
+    while len(outcomes) < _THREADS:
+        try:
+            outcomes.append(results.get(timeout=max(0.0, deadline - time.monotonic())))
+        except queue.Empty:
+            missing = _THREADS - len(outcomes)
+            raise AssertionError(f"{missing} of {_THREADS} first requests never returned") from None
+    return outcomes
 
 
 # ------------------------------------------------------------ per-SEA setups

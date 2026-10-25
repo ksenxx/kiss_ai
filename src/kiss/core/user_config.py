@@ -44,10 +44,9 @@ _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # serializes access to _api_keys_store_flock(), so a single process never
 # flocks the store sidecar through two descriptors at once (which would
 # self-deadlock — see that function).  Holders call the ``_locked``
-# helpers, which take neither this lock nor the flock again; the one
-# nesting (``record_recent_work_dir`` holds it and calls
-# ``save_config``, which takes it again) is why this is an RLock, so a
-# nested acquisition of THIS lock can never be the thing that
+# helpers, which take neither this lock nor the flock again.  It is an
+# RLock so that a nested acquisition of THIS lock (``record_recent_work_dir``
+# once held it around ``save_config``) can never be the thing that
 # deadlocks.  The
 # writers a task thread reaches (``save_config`` behind the model
 # picker, ``save_api_key`` behind a tool) take it through
@@ -395,12 +394,18 @@ def setdefault_config(data: dict[str, Any]) -> dict[str, Any]:
     return locked_call(_config_lock, _save_config_locked, sanitize_config(data), True)
 
 
-def _save_config_locked(data: dict[str, Any], only_unset: bool) -> dict[str, Any]:
+def _save_config_locked(
+    data: dict[str, Any], only_unset: bool, recent_work_dir: str | None = None,
+) -> dict[str, Any]:
     """Merge *data* into ``config.json`` under its flock; the caller holds ``_config_lock``.
 
     With *only_unset*, an entry whose key already has a truthy stored
     value (as sanitized, i.e. as :func:`load_config` reads it) is
-    skipped.  Returns the stored configuration after the write.
+    skipped.  With *recent_work_dir*, that directory is moved to the
+    front of the stored ``recent_work_dirs`` list in the same write;
+    the list is read under the flock, so another process's rows cannot
+    be replaced by a stale copy.  Returns the stored configuration
+    after the write.
 
     Raises:
         OSError: ``config.json`` exists but could not be read; replacing
@@ -409,6 +414,14 @@ def _save_config_locked(data: dict[str, Any], only_unset: bool) -> dict[str, Any
     cfg_path = _config_path()
     with exclusive_file_lock(_config_dir() / ".config.lock", timeout=_LOCK_TIMEOUT_S):
         existing = _read_stored_config(cfg_path, strict=True)
+        if recent_work_dir is not None:
+            same = os.path.normpath(recent_work_dir)
+            entries = [
+                e for e in _parse_recent_work_dirs(existing)
+                if os.path.normpath(e["path"]) != same
+            ]
+            entries.insert(0, {"path": recent_work_dir, "ts": time.time()})
+            data = {**data, "recent_work_dirs": entries[:MAX_RECENT_WORK_DIRS]}
         readable = sanitize_config(existing) if only_unset else {}
         for k, v in data.items():
             if k not in API_KEY_ENV_VARS and not (only_unset and readable.get(k)):
@@ -441,7 +454,12 @@ def recent_work_dirs() -> list[dict[str, Any]]:
     directory no longer exists, and malformed entries from a hand-edited
     file, are skipped.
     """
-    raw = _read_stored_config(_config_path()).get("recent_work_dirs")
+    return _parse_recent_work_dirs(_read_stored_config(_config_path()))
+
+
+def _parse_recent_work_dirs(stored: dict[str, Any]) -> list[dict[str, Any]]:
+    """The usable ``recent_work_dirs`` rows of a stored config, most recent first."""
+    raw = stored.get("recent_work_dirs")
     if not isinstance(raw, list):
         return []
     result: list[dict[str, Any]] = []
@@ -466,26 +484,34 @@ def recent_work_dirs() -> list[dict[str, Any]]:
     return result
 
 
-def record_recent_work_dir(path: str) -> None:
+def record_recent_work_dir(path: str, extra: dict[str, Any] | None = None) -> None:
     """Move *path* to the front of the recently opened working directories.
 
     No-op when *path* is not an existing directory.  One row per
     directory: an earlier spelling of the same directory (a trailing
     separator, ``os.path.normpath`` equal) is replaced, the way the
     clients tell directories apart.  The list is capped at
-    :data:`MAX_RECENT_WORK_DIRS` entries and persisted through
-    :func:`save_config`, so every browser window shares one history.
+    :data:`MAX_RECENT_WORK_DIRS` entries and persisted in
+    ``config.json`` like :func:`save_config` does, so every browser
+    window shares one history.  The read-merge-write runs under the
+    cross-process ``.config.lock``, so two daemons on one ``KISS_HOME``
+    cannot drop each other's rows.
 
     Args:
         path: The directory that was just adopted as a working directory.
+        extra: Further config entries to store in the same write (the
+            ``work_dir`` that adoption also persists), as
+            :func:`save_config` would.
+
+    Raises:
+        TimeoutError: another process held ``.config.lock`` for longer
+            than :data:`_LOCK_TIMEOUT_S`; nothing was written.
+        OSError: ``config.json`` exists but could not be read; nothing
+            was written.
     """
     if not os.path.isdir(path):
         return
-    same = os.path.normpath(path)
-    with _config_lock:
-        entries = [e for e in recent_work_dirs() if os.path.normpath(e["path"]) != same]
-        entries.insert(0, {"path": path, "ts": time.time()})
-        save_config({"recent_work_dirs": entries[:MAX_RECENT_WORK_DIRS]})
+    locked_call(_config_lock, _save_config_locked, sanitize_config(extra or {}), False, path)
 
 
 def _get_user_shell() -> str:

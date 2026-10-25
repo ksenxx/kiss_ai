@@ -28,8 +28,6 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
@@ -37,7 +35,7 @@ const {
   send,
   clickTab,
   stubRaf,
-  MEDIA,
+  loadMainCss,
   readyTabId,
 } = require('./simplify2_harness');
 const {test, report} = makeRunner();
@@ -428,7 +426,6 @@ test('a background tab keeps its settings and shows them on switch', () => {
     infoText(win).includes('bg-model'),
     'switching back shows the settings the tab received: ' + infoText(win),
   );
-  clickTab(win, String(SECOND || win._testApi.getActiveTabId()));
 });
 
 test('share export gives every task panel its own settings info', () => {
@@ -770,10 +767,17 @@ test('share markup: the info block follows the task text', () => {
     !win.document.querySelector('#output .task-panel-info'),
     'no info block on the live task panel',
   );
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  assert.ok(
-    /\.task-panel-info:empty\s*\{\s*display:\s*none;/.test(css),
+  loadMainCss(dom.window);
+  assert.strictEqual(
+    dom.window.getComputedStyle(info).display,
+    'none',
     'the info block hides when empty',
+  );
+  info.textContent = 'model: m';
+  assert.notStrictEqual(
+    dom.window.getComputedStyle(info).display,
+    'none',
+    'a filled info block shows',
   );
 });
 

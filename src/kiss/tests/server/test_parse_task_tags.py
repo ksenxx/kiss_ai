@@ -13,7 +13,7 @@ No mocks — uses real functions and source inspection.
 
 import unittest
 
-from kiss.server.server import parse_task_tags
+from kiss.server.task_runner import parse_task_tags
 
 
 class TestParseTaskTagsNoTags(unittest.TestCase):

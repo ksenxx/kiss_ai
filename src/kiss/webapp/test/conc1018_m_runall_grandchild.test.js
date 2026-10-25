@@ -25,7 +25,7 @@
 // helper cannot wait for was reaped by the runner, its parent.
 //
 // The runner is copied into a scratch directory holding one suite, with
-// its 10-minute SUITE_TIMEOUT_MS lowered to 2 s (the constant is not
+// its 2-minute SUITE_TIMEOUT_MS lowered to 2 s (the constant is not
 // configurable, by design: the copy is the only knob).
 
 'use strict';
@@ -179,9 +179,13 @@ function assertTimedOutRun(r, message) {
     `output flushed\n${r.out}`,
   );
   assert.ok(r.out.includes('0/1 suites passed'), r.out);
+  // `status === 1` and the reaped fate already prove the runner acted on
+  // the timeout; the elapsed bound only guards against a runner that
+  // waits for the stalled suite anyway, so it allows for three process
+  // start-ups under a loaded 32-way parallel run.
   assert.ok(
-    r.elapsed < 4 * SHORT_TIMEOUT_MS,
-    `the runner reported within a few seconds of the timeout (${r.elapsed} ms)`,
+    r.elapsed < SHORT_TIMEOUT_MS + 30000,
+    `the runner reported soon after the timeout (${r.elapsed} ms)`,
   );
   assert.strictEqual(r.fates.suite, 'not-ours', 'the runner reaped the suite');
 }

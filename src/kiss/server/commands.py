@@ -22,7 +22,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
     _chat_task_tree,
@@ -288,6 +287,16 @@ class _CommandsMixin:
     # it valid on every ``AgentServer`` instance.
     _update_installing: bool = False
 
+    # History deletes in flight (``_delete_history``).  The delete's
+    # liveness check runs under ``_state_lock`` but its database write
+    # does not (it waits on the event writer, on readers and on SQLite's
+    # busy timeout, and must not stall every other command meanwhile);
+    # ``_cmd_run`` waits on the condition while the count is non-zero so
+    # a fresh task cannot insert a row the delete then sweeps away.
+    # Read and written only under ``_state_lock``.
+    _history_deletes: int = 0
+    _history_delete_done = threading.Condition(agent_state.STATE_LOCK)
+
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
@@ -311,6 +320,7 @@ class _CommandsMixin:
         tab_registry: TabRegistry
         browser_tabs: BrowserTabService
 
+        def _tab_chat_id_locked(self, tab_id: str) -> str: ...
         def _broadcast_tabs_state(self) -> None: ...
         def _publish_tabs_state(self) -> None: ...
 
@@ -398,7 +408,7 @@ class _CommandsMixin:
         """
         broadcast_to_conn(self.printer, event, conn_id)
 
-    def _apply_new_work_dir(self, new_dir: str) -> None:
+    def _apply_new_work_dir(self, new_dir: str) -> bool:
         """Adopt *new_dir* as the one global working directory.
 
         The working directory is a single daemon-wide value that every
@@ -424,18 +434,18 @@ class _CommandsMixin:
 
         Args:
             new_dir: The non-empty directory to adopt.
+
+        Returns:
+            ``True`` when *new_dir* is now the working directory (adopted
+            or already current), ``False`` when it was refused.
         """
         if not isinstance(new_dir, str) or not new_dir or is_root_dir(new_dir):
             logger.warning(
                 "Refusing %r as the daemon work dir; keeping %r",
                 new_dir, self.work_dir,
             )
-            return
-        from kiss.core.user_config import (
-            load_config,
-            record_recent_work_dir,
-            save_config,
-        )
+            return False
+        from kiss.core.user_config import record_recent_work_dir
 
         # One adoption at a time: two interleaved adoptions (a pick
         # racing a settings save) must end with the live value, the
@@ -451,15 +461,15 @@ class _CommandsMixin:
                     setattr(self.printer, "work_dir", new_dir)
             # Every surface's chat-header work-dir drop-down lists the
             # directories selected so far (most recent first); this is the
-            # one place every adopted directory passes through.
-            record_recent_work_dir(new_dir)
+            # one place every adopted directory passes through.  The
+            # persisted ``work_dir`` rides in the same locked write.
             with _CommandsMixin._save_config_lock:
-                if load_config().get("work_dir") != new_dir:
-                    save_config({"work_dir": new_dir})
+                record_recent_work_dir(new_dir, {"work_dir": new_dir})
             if changed:
                 self.printer.broadcast(
                     {"type": "workDirChanged", "workDir": new_dir},
                 )
+        return True
 
     def _refuse_run(self, tab_id: str, text: str) -> None:
         """Turn down a ``run`` on *tab_id* with an ``error`` broadcast.
@@ -550,6 +560,10 @@ class _CommandsMixin:
         # own from the command, after the run is registered.
         attachments = pending_attachments(cmd.get("attachments", []))
         with self._state_lock:
+            # A history delete in flight (``_delete_history``) writes
+            # outside this lock: admit no new task until it is over.
+            while self._history_deletes:
+                self._history_delete_done.wait()
             prev = agent_state.find_by_tab(tab_id)
             # A plain message typed into a tab that only VIEWS a task
             # whose agent is blocked in ``ask_user_question`` (a
@@ -629,7 +643,6 @@ class _CommandsMixin:
                     state_key,
                     chat_id=chat_id,
                     tab_id=tab_id,
-                    conn_id=str(cmd.get("connId", "") or ""),
                     server_owned=True,
                     stop_event=threading.Event(),
                 )
@@ -1019,19 +1032,8 @@ class _CommandsMixin:
         page is nudged to refresh its history once the rows are gone.
         """
         task_id = _opt_str(cmd.get("taskId"))
-        if not task_id:
-            return
-        # The liveness check and the delete form one critical section
-        # under ``_state_lock``: ``_cmd_run`` registers a new task's
-        # state under the same lock, so a run that starts after the
-        # check cannot lose its freshly inserted row.
-        with self._state_lock:
-            if _any_running(_task_tree(task_id)):
-                self._refuse_delete_while_running(cmd, "the task")
-                return
-            _race_delay()  # test hook: widens the check-to-delete window
-            _delete_task(task_id)
-        self.printer.broadcast({"type": "tasks_updated"})
+        if task_id:
+            self._delete_history(cmd, "the task", _task_tree(task_id), "", _delete_task, task_id)
 
     def _cmd_delete_chat(self, cmd: dict[str, Any]) -> None:
         """Delete a chat — all its tasks, their events and its title — from history.db.
@@ -1040,15 +1042,48 @@ class _CommandsMixin:
         (a task of the chat, or a sub-task of one) is running.
         """
         chat_id = _opt_str(cmd.get("chatId"))
-        if not chat_id:
-            return
-        # Same critical section as ``_cmd_delete_task``.
+        if chat_id:
+            self._delete_history(
+                cmd, "the chat", _chat_task_tree(chat_id), chat_id, _delete_chat, chat_id,
+            )
+
+    def _delete_history(
+        self,
+        cmd: dict[str, Any],
+        what: str,
+        task_ids: list[str],
+        chat_id: str,
+        delete: Callable[[str], int],
+        key: str,
+    ) -> None:
+        """Run ``delete(key)`` unless a task it would remove is running, then nudge every page.
+
+        The liveness check and the admission of new runs form one
+        critical section under ``_state_lock``: ``_cmd_run`` registers
+        a new task's state under the same lock and waits while
+        ``_history_deletes`` is up, so a run that starts after the
+        check cannot lose its freshly inserted row.  The database
+        delete itself runs outside the lock.
+
+        Args:
+            cmd: The ``deleteTask`` / ``deleteChat`` command (for the refusal notice).
+            what: What the refusal notice names ("the task" / "the chat").
+            task_ids: The persisted task ids the delete would remove.
+            chat_id: The chat being deleted, or ``""`` for a single task.
+            delete: ``persistence._delete_task`` or ``_delete_chat``.
+            key: The task or chat id passed to *delete*.
+        """
         with self._state_lock:
-            if _any_running(_chat_task_tree(chat_id), chat_id):
-                self._refuse_delete_while_running(cmd, "the chat")
+            if _any_running(task_ids, chat_id):
+                self._refuse_delete_while_running(cmd, what)
                 return
-            _race_delay()  # test hook: widens the check-to-delete window
-            _delete_chat(chat_id)
+            self._history_deletes += 1
+        try:
+            delete(key)
+        finally:
+            with self._state_lock:
+                self._history_deletes -= 1
+                self._history_delete_done.notify_all()
         self.printer.broadcast({"type": "tasks_updated"})
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
@@ -1216,8 +1251,9 @@ class _CommandsMixin:
         MUST be called while holding :data:`agent_state.STATE_LOCK`.
 
         Files attached to the message (*attachments*) follow the text:
-        a steering message's go to ``pending_user_attachments`` for the
-        live agent, a ``<task>`` follow-up's to
+        a steering message's go to ``pending_user_attachments`` (one
+        entry per message, so a message re-run after the agent's last
+        step carries only its own files), a ``<task>`` follow-up's to
         ``queued_followup_files`` (one entry per block, so each queued
         task runs with the message's files), and an answer to a
         pending question carries none (the composer never attaches
@@ -1252,7 +1288,7 @@ class _CommandsMixin:
             )
             return False
         owner.pending_user_messages.append(prompt)
-        owner.pending_user_attachments.extend(attachments or [])
+        owner.pending_user_attachments.append(list(attachments or []))
         return True
 
     def _queue_prompt_on_owner(
@@ -1949,13 +1985,7 @@ class _CommandsMixin:
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            chat_id = ""
-            if tab_id:
-                state = agent_state.find_by_tab(tab_id)
-                if state is not None:
-                    chat_id = state.chat_id
-                if not chat_id:
-                    chat_id = self._tab_chat_views.get(tab_id, "")
+            chat_id = self._tab_chat_id_locked(tab_id)
             if active_file == "":
                 # An explicit empty path means "no file open" (the
                 # browser client closed its last file tab): forget the
@@ -2035,10 +2065,7 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            adj_state = agent_state.find_by_tab(tab_id)
-            chat_id = adj_state.chat_id if adj_state is not None else ""
-            if not chat_id:
-                chat_id = self._tab_chat_views.get(tab_id, "")
+            chat_id = self._tab_chat_id_locked(tab_id)
         task_id = _opt_str(cmd.get("taskId"))
         self._get_adjacent_task(
             chat_id,
@@ -2546,27 +2573,41 @@ class _CommandsMixin:
         a ``getConfig`` once the directory is adopted: another daemon
         proxying a pick made for this machine in its chat header
         (``setWorkDir`` with ``machine``) reads the adopted ``work_dir``
-        and ``recent_work_dirs`` from it.
+        and ``recent_work_dirs`` from it.  A refused directory (a
+        filesystem root — blanked to ``""`` by ``ServerApi.dispatch`` or
+        turned down by :meth:`_apply_new_work_dir`) is reported to the
+        requesting connection with a ``notice`` and still answered,
+        with the unchanged configuration, so the proxying daemon does
+        not wait out its link timeout.
         """
         new_dir = cmd.get("workDir", "")
-        if not isinstance(new_dir, str) or not new_dir:
-            return
         conn_id = cmd.get("connId", "")
-        with self._state_lock:
-            self._last_active_file.pop(conn_id, None)
-            self._last_active_content.pop(conn_id, None)
-            # Invalidate any in-flight completion for this connection:
-            # a request computed against the OLD workspace's active
-            # file would otherwise pass the worker's post-computation
-            # freshness check (its seq still matches) and emit stale
-            # old-workspace identifiers after the switch.  Removing
-            # the entry makes both freshness checks in ``_complete``
-            # fail (``seq != -1``); the next ``complete`` command
-            # re-creates the entry with a fresh sequence number.
-            self._complete_seq_latest.pop(conn_id, None)
-        # Outside ``_state_lock``: the adoption takes ``_work_dir_lock``
-        # first (see its ordering note).
-        self._apply_new_work_dir(new_dir)
+        adopted = False
+        if isinstance(new_dir, str) and new_dir:
+            with self._state_lock:
+                self._last_active_file.pop(conn_id, None)
+                self._last_active_content.pop(conn_id, None)
+                # Invalidate any in-flight completion for this connection:
+                # a request computed against the OLD workspace's active
+                # file would otherwise pass the worker's post-computation
+                # freshness check (its seq still matches) and emit stale
+                # old-workspace identifiers after the switch.  Removing
+                # the entry makes both freshness checks in ``_complete``
+                # fail (``seq != -1``); the next ``complete`` command
+                # re-creates the entry with a fresh sequence number.
+                self._complete_seq_latest.pop(conn_id, None)
+            # Outside ``_state_lock``: the adoption takes ``_work_dir_lock``
+            # first (see its ordering note).
+            adopted = self._apply_new_work_dir(new_dir)
+        if not adopted:
+            self._broadcast_to_conn(
+                {
+                    "type": "notice",
+                    "text": "That folder cannot be used as the working directory;"
+                    f" keeping {self.work_dir}.",
+                },
+                conn_id,
+            )
         if cmd.get("reply"):
             self._cmd_get_config(cmd)
 

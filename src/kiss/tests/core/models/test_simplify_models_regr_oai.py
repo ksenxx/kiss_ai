@@ -28,7 +28,7 @@ from kiss.core.models.openai_compatible_model import (
     _stringify_tool_call_arguments,
     _tool_result_block_text,
 )
-from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2, _hoist
 
 BASE_URL = "http://localhost:1"
 
@@ -273,31 +273,31 @@ def test_chat_message_to_responses_items() -> None:
     assert conv({"role": "user", "content": "  "}) == []
 
 
-def test_flatten_tools_schema() -> None:
-    flat = OpenAICompatibleModel2._flatten_tools_schema(
-        [
-            {
-                "type": "function",
-                "function": {"name": "f", "description": "d", "parameters": {}, "strict": True},
-            },
-            {"type": "function", "name": "already-flat", "parameters": {}},
-        ]
-    )
-    assert flat[0] == {
+def test_hoist_flattens_tools_tool_choice_and_response_format() -> None:
+    assert _hoist(
+        {
+            "type": "function",
+            "function": {"name": "f", "description": "d", "parameters": {}, "strict": True},
+        },
+        "function",
+    ) == {
         "type": "function",
         "name": "f",
         "description": "d",
         "parameters": {},
         "strict": True,
     }
-    assert flat[1] == {"type": "function", "name": "already-flat", "parameters": {}}
-
-
-def test_flatten_tool_choice() -> None:
-    assert OpenAICompatibleModel2._flatten_tool_choice(
-        {"type": "function", "function": {"name": "f"}}
-    ) == {"type": "function", "name": "f"}
-    assert OpenAICompatibleModel2._flatten_tool_choice("auto") == "auto"
+    already_flat = {"type": "function", "name": "already-flat", "parameters": {}}
+    assert _hoist(already_flat, "function") is already_flat
+    assert _hoist({"type": "function", "function": {"name": "f"}}, "function") == {
+        "type": "function",
+        "name": "f",
+    }
+    assert _hoist("auto", "function") == "auto"
+    assert _hoist(
+        {"type": "json_schema", "json_schema": {"name": "s", "schema": {}}}, "json_schema"
+    ) == {"type": "json_schema", "name": "s", "schema": {}}
+    assert _hoist({"type": "json_object"}, "json_schema") == {"type": "json_object"}
 
 
 def test_normalize_input() -> None:
@@ -322,16 +322,6 @@ def test_normalize_input() -> None:
         {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
         "not-a-dict",
     ]
-
-
-def test_translate_response_format() -> None:
-    tr = OpenAICompatibleModel2._translate_response_format_for_responses
-    assert tr({"type": "json_schema", "json_schema": {"name": "s", "schema": {}}}) == {
-        "type": "json_schema",
-        "name": "s",
-        "schema": {},
-    }
-    assert tr({"type": "json_object"}) == {"type": "json_object"}
 
 
 def test_is_valid_json() -> None:
@@ -422,8 +412,8 @@ def test_v2_extract_token_counts_dict_usage() -> None:
             "input_tokens_details": {"cached_tokens": 30},
         }
     }
-    assert m.extract_input_output_token_counts_from_response(resp) == (70, 7, 30, 0)
-    assert m.extract_input_output_token_counts_from_response({}) == (0, 0, 0, 0)
+    assert m.extract_input_output_token_counts_from_response(resp) == (70, 7, 30, 0, 0)
+    assert m.extract_input_output_token_counts_from_response({}) == (0, 0, 0, 0, 0)
 
 
 def test_consume_stream_text_deltas() -> None:
@@ -441,7 +431,7 @@ def test_consume_stream_text_deltas() -> None:
             [{"type": "message", "content": [{"type": "output_text", "text": "Hello"}]}]
         ),
     ]
-    content, tool_calls, response = m._consume_stream(events)
+    content, tool_calls, response, _order = m._consume_stream(events)
     assert content == "Hello"
     assert tool_calls == []
     assert tokens == ["Hel", "lo"]
@@ -458,7 +448,7 @@ def test_consume_stream_done_only_text() -> None:
         ),
         _completed([]),
     ]
-    content, tool_calls, _resp = m._consume_stream(events)
+    content, tool_calls, _resp, _order = m._consume_stream(events)
     assert content == "Hi"
     assert tokens == ["Hi"]
     assert tool_calls == []
@@ -483,7 +473,7 @@ def test_consume_stream_reasoning_brackets() -> None:
             [{"type": "message", "content": [{"type": "output_text", "text": "ans"}]}]
         ),
     ]
-    content, _tcs, _resp = m._consume_stream(events)
+    content, _tcs, _resp, _order = m._consume_stream(events)
     assert content == "ans"
     assert tokens == ["mull", "ans"]
     assert thinking == [True, False]
@@ -528,7 +518,7 @@ def test_consume_stream_function_call() -> None:
         ),
         _completed([fc_final]),
     ]
-    content, tool_calls, _resp = m._consume_stream(events)
+    content, tool_calls, _resp, _order = m._consume_stream(events)
     assert content == ""
     assert len(tool_calls) == 1
     slot = tool_calls[0]

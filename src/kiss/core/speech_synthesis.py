@@ -28,11 +28,10 @@ reading it.
 """
 
 import base64
-import math
-import os
 import sys
 from typing import Any
 
+from kiss.core.config import env_float
 from kiss.core.kiss_agent import KISSAgent
 
 DEFAULT_AUDIO_TIMEOUT_SECONDS = 60.0
@@ -47,14 +46,8 @@ def _env_timeout_seconds(env_name: str, default: float) -> float:
     too — an infinite timeout would defeat the hard-timeout policy
     exactly like a missing one (it hangs the worker forever).
     """
-    raw = os.environ.get(env_name, "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    if not math.isfinite(value) or value <= 0:
-        return default
-    return value
+    value = env_float(env_name, default)
+    return value if value > 0 else default
 
 
 def audio_timeout_seconds() -> float:

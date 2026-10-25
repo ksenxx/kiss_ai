@@ -254,10 +254,12 @@ async function testSameScopeErrorStillClearsReloadFlag() {
 }
 
 // CAND-2: closing the content tab must remove its sticky conflict
-// toast from the DOM.
+// toast from the DOM (so its actions can never open a surprise content
+// tab for the dead tab), and the close itself must not ask the daemon
+// for the file again.
 async function testClosingTabRemovesConflictToast() {
   const ctx = makePage();
-  const {win} = ctx;
+  const {win, posted} = ctx;
   await openDirtyConflictedTab(ctx);
 
   // Close the (dirty) content tab, discarding the edits when asked.
@@ -265,8 +267,14 @@ async function testClosingTabRemovesConflictToast() {
   assert.ok(strip, 'the content tab must have a strip in the tab bar');
   const closeBtn = strip.querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the content tab strip must have a close button');
+  const opensBefore = posted.filter(m => m && m.type === 'openFile').length;
   click(win, closeBtn);
   discardEditsAndClose(win);
+  assert.strictEqual(
+    posted.filter(m => m && m.type === 'openFile').length,
+    opensBefore,
+    'closing the tab must not post an openFile for it',
+  );
   assert.strictEqual(
     contentTabStrips(win).length,
     0,
@@ -282,60 +290,11 @@ async function testClosingTabRemovesConflictToast() {
   console.log('  ok - closing the tab removes its conflict toast');
 }
 
-// CAND-2: once the tab is gone, the conflict actions are dead — they
-// must not open surprise content tabs. (Post-fix the toast is removed
-// and/or its actions are guarded; either way no openFile may be sent
-// for the closed tab and no new content tab may appear.)
-async function testDeadConflictActionsOpenNoSurpriseTabs() {
-  const ctx = makePage();
-  const {win, posted} = ctx;
-  await openDirtyConflictedTab(ctx);
-
-  const closeBtn = win.document.querySelector(
-    '.chat-tab.content-tab .chat-tab-close',
-  );
-  click(win, closeBtn);
-  discardEditsAndClose(win);
-  assert.strictEqual(contentTabStrips(win).length, 0);
-
-  // If the toast (wrongly) survived the close, exercise its actions
-  // the way a user facing the leftover toast would.
-  const opensBefore = posted.filter(m => m && m.type === 'openFile').length;
-  const leftover = conflictToast(win);
-  if (leftover) {
-    const overwriteBtn = toastActionButton(win, leftover, 'Overwrite');
-    if (overwriteBtn) click(win, overwriteBtn);
-    const reloadBtn = toastActionButton(win, leftover, 'Reload from disk');
-    if (reloadBtn) click(win, reloadBtn);
-  }
-  // Every openFile a dead action managed to send gets the reply the
-  // daemon would produce.
-  const opens = posted.filter(m => m && m.type === 'openFile');
-  for (let i = opensBefore; i < opens.length; i++) {
-    send(win, {
-      type: 'fileContent',
-      tabId: opens[i].tabId,
-      path: opens[i].path,
-      name: 'notes.txt',
-      content: 'v2 on disk',
-      version: 'ver-2',
-    });
-  }
-  assert.strictEqual(
-    contentTabStrips(win).length,
-    0,
-    "a closed tab's conflict actions must not open a surprise " + 'content tab',
-  );
-  win.close();
-  console.log('  ok - dead conflict actions open no surprise tabs');
-}
-
 (async () => {
   const tests = [
     testForeignScopeErrorMustNotSwallowReload,
     testSameScopeErrorStillClearsReloadFlag,
     testClosingTabRemovesConflictToast,
-    testDeadConflictActionsOpenNoSurpriseTabs,
   ];
   let failures = 0;
   for (const t of tests) {

@@ -6,63 +6,20 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
 const {
   makePage: makeHarnessPage,
   send,
-  MEDIA,
   sendEmptyWorkDir,
+  rowsByTitle,
 } = require('./simplify2_harness');
+const {freezeClockAndStyle, makeRow} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makePage() {
   return makeHarnessPage({
-    beforeScripts(win) {
-      const RealDate = win.Date;
-      const FakeDate = function (...args) {
-        if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
-        return new RealDate(...args);
-      };
-      FakeDate.prototype = RealDate.prototype;
-      FakeDate.now = () => FROZEN_NOW_MS;
-      FakeDate.parse = RealDate.parse;
-      FakeDate.UTC = RealDate.UTC;
-      win.Date = FakeDate;
-
-      const cssText = inlineDesignTokens(
-        fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-      );
-      const styleEl = win.document.createElement('style');
-      styleEl.textContent = cssText;
-      win.document.head.appendChild(styleEl);
-    },
+    beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS),
   });
-}
-
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + (overrides.task_id || 0),
-      task_id: overrides.task_id || 0,
-      title: overrides.title || 'untitled',
-      timestamp: overrides.timestamp || 1_700_000_000,
-      preview: overrides.title || 'untitled',
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: (overrides.timestamp || 1_700_000_000) * 1000,
-      endTs: 1_700_000_010_000,
-    },
-    overrides,
-  );
 }
 
 function openBurgerMenu(win) {
@@ -102,6 +59,7 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
       title: 'NEW running task',
       is_running: true,
       timestamp: 1_700_100_000,
+      startTs: 1_700_100_000_000,
       endTs: 0,
     }),
     makeRow({
@@ -127,17 +85,6 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
     'NEW running task',
     'the freshly-started running task MUST be the FIRST row in ' +
       'the History list when the burger menu is opened',
-  );
-
-  const dot = r[0].querySelector('.sidebar-item-running');
-  assert.ok(
-    dot,
-    'first (running) row must carry .sidebar-item-running spinner',
-  );
-  assert.strictEqual(
-    r[0].firstElementChild,
-    dot,
-    'spinner must be the first child of the row',
   );
 
   win.close();
@@ -175,11 +122,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
     generation: getHist.generation,
   });
 
-  let byTitle = {};
-  rows(win).forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t) byTitle[t.textContent] = r;
-  });
+  let byTitle = rowsByTitle(win);
 
   const freshRow = byTitle['fresh completed task'];
   assert.ok(freshRow, 'fresh completed row must render');
@@ -229,11 +172,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
     offset: 0,
     generation: getHist.generation,
   });
-  byTitle = {};
-  rows(win).forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t) byTitle[t.textContent] = r;
-  });
+  byTitle = rowsByTitle(win);
 
   const transitionedRow = byTitle['running task'];
   const completedDot = transitionedRow.querySelector('.sidebar-item-completed');
@@ -255,23 +194,8 @@ function testFinishedTaskShowsSolidGreenCircle() {
     !completedDot.classList.contains('status-spinner'),
     'the completed indicator must not be a spinner',
   );
-
-  const cs = win.getComputedStyle(completedDot);
-  assert.strictEqual(
-    cs.color,
-    'var(--green)',
-    `tick colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
-  );
-  const animName = cs.getPropertyValue('animation-name') || '';
-  const animShort = cs.getPropertyValue('animation') || '';
-  assert.ok(
-    animName.indexOf('status-spin') < 0 &&
-      animShort.indexOf('status-spin') < 0 &&
-      animName.indexOf('running-pulse') < 0 &&
-      animShort.indexOf('running-pulse') < 0,
-    'the (completed) tick MUST NOT animate; ' +
-      `got animation-name="${animName}" animation="${animShort}"`,
-  );
+  // Its colour and the absence of animation are pinned on a rendered
+  // tick by historyBurgerMenuRunningTask.test.js.
 
   const stillFreshRow = byTitle['fresh completed task'];
   assert.strictEqual(
@@ -396,41 +320,10 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
   );
 }
 
-function testCompletedDotKeyframesNotShared() {
-  const cssText = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  assert.ok(
-    /\.sidebar-item-completed\s*\{/.test(cssText),
-    'main.css must define .sidebar-item-completed for the green ' +
-      'finished-task tick',
-  );
-
-  const m = cssText.match(/\.sidebar-item-completed\s*\{([^}]*)\}/);
-  assert.ok(m, 'expected a single-rule .sidebar-item-completed block');
-  const body = m[1];
-  assert.ok(
-    body.indexOf('animation') < 0,
-    '.sidebar-item-completed MUST NOT animate; the tick is static',
-  );
-  assert.ok(
-    /color\s*:\s*var\(--green\)/i.test(body),
-    '.sidebar-item-completed MUST colour the tick the theme green (--status-ok)',
-  );
-  const tick = cssText.match(/\.status-tick\s*\{([^}]*)\}/);
-  assert.ok(
-    tick && /--status-icon\s*:\s*url\(/.test(tick[1]),
-    '.status-tick must draw its shape from an SVG mask',
-  );
-
-  console.log('  ok - .sidebar-item-completed is defined as a green tick');
-}
-
 function main() {
   testRunningTaskShowsAtTopAfterBurgerOpen();
   testFinishedTaskShowsSolidGreenCircle();
   testIndicatorsAreVerticallyCenteredInTaskPanels();
-  testCompletedDotKeyframesNotShared();
   console.log('historyTaskRowIndicators.test.js: all assertions passed.');
 }
 

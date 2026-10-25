@@ -15,6 +15,7 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {historyRows, visibleTitles, lastGetHistory} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({bodyClass: 'remote-chat'});
@@ -56,8 +57,7 @@ const WORK_DIRS = [KISS, PAPER];
 // The reply to the page's latest getHistory request: it must echo
 // that request's generation (a filter change bumps it and refetches).
 function historyReply(posted, sessions, workDirs) {
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  const last = requests[requests.length - 1];
+  const last = lastGetHistory(posted);
   const reply = {
     type: 'history',
     sessions,
@@ -66,26 +66,6 @@ function historyReply(posted, sessions, workDirs) {
   };
   if (workDirs) reply.workDirs = workDirs;
   return reply;
-}
-
-function lastHistoryRequest(posted) {
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  return requests[requests.length - 1];
-}
-
-function rows(win) {
-  return Array.from(
-    win.document
-      .getElementById('history-list')
-      .querySelectorAll('.sidebar-item'),
-  );
-}
-
-function visibleTitles(win) {
-  return rows(win)
-    .filter(r => r.style.display !== 'none')
-    .map(r => r.querySelector('.sidebar-item-text').textContent)
-    .sort();
 }
 
 function options(win) {
@@ -141,7 +121,7 @@ function testRowsCarryTheirWorkDir() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, WORK_DIRS));
   const seen = {};
-  rows(win).forEach(r => {
+  historyRows(win).forEach(r => {
     seen[r.querySelector('.sidebar-item-text').textContent] = r.dataset.workDir;
   });
   assert.deepStrictEqual(seen, {
@@ -160,7 +140,7 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
   assert.strictEqual(visibleTitles(win).length, 4, 'All shows every row');
   const pill = win.document.getElementById('hf-workdir').parentElement;
   assert.ok(!pill.classList.contains('active'));
-  assert.strictEqual(lastHistoryRequest(posted), undefined, 'no request yet');
+  assert.strictEqual(lastGetHistory(posted), undefined, 'no request yet');
 
   selectWorkDir(win, KISS);
   // The rows of other directories vanish at once, before the refetch.
@@ -168,7 +148,7 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
   assert.ok(pill.classList.contains('active'), 'pill takes the accent');
   // The daemon applies the directory too (a project's rows live beyond
   // the loaded page): the change refetches page one with workDir.
-  const request = lastHistoryRequest(posted);
+  const request = lastGetHistory(posted);
   assert.strictEqual(request.workDir, KISS);
   assert.strictEqual(request.offset, 0);
   assert.strictEqual(request.tag, '');
@@ -180,7 +160,7 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
   selectWorkDir(win, '');
   assert.strictEqual(visibleTitles(win).length, 4, 'All restores every row');
   assert.ok(!pill.classList.contains('active'));
-  assert.strictEqual(lastHistoryRequest(posted).workDir, '');
+  assert.strictEqual(lastGetHistory(posted).workDir, '');
 
   // The directory combines with the other client-side filters (SEA).
   const fixture = [
@@ -229,7 +209,7 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   assert.ok(!sel.parentElement.classList.contains('active'));
   assert.strictEqual(visibleTitles(win).length, 3, 'all rows after fallback');
   assert.strictEqual(
-    lastHistoryRequest(posted).workDir,
+    lastGetHistory(posted).workDir,
     '',
     'refetched for All',
   );
@@ -274,7 +254,7 @@ function testStaleReplyLeavesTheSelectionAlone() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, WORK_DIRS));
   selectWorkDir(win, PAPER);
-  const current = lastHistoryRequest(posted);
+  const current = lastGetHistory(posted);
   assert.strictEqual(current.workDir, PAPER);
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
   // A late reply of the previous view (an older generation) whose
@@ -320,7 +300,7 @@ function testADirectoryResetsAndLocksTheMachineFilter() {
   const machine = win.document.getElementById('hf-machine');
   machine.value = 'box';
   machine.dispatchEvent(new win.Event('change', {bubbles: true}));
-  assert.strictEqual(lastHistoryRequest(posted).machine, 'box');
+  assert.strictEqual(lastGetHistory(posted).machine, 'box');
   assert.strictEqual(visibleTitles(win).length, 0, 'no local row is a box row');
   // Choosing a directory (a path on this machine) resets the machine
   // to All and locks it: the daemon answers with its own rows, and
@@ -331,7 +311,7 @@ function testADirectoryResetsAndLocksTheMachineFilter() {
     machine.disabled,
     'machine filter locked while a directory is chosen',
   );
-  const request = lastHistoryRequest(posted);
+  const request = lastGetHistory(posted);
   assert.strictEqual(request.workDir, KISS);
   assert.strictEqual(request.machine, '');
   send(
@@ -439,7 +419,7 @@ function testAnAdoptedDirectoryJoinsTheOptionsAtOnce() {
     posted.filter(m => m.type === 'getHistory').length > requestsAfter,
     'refetched for All',
   );
-  assert.strictEqual(lastHistoryRequest(posted).workDir, '');
+  assert.strictEqual(lastGetHistory(posted).workDir, '');
   // The client's copy keeps the daemon's cap of 30 rows: adopting a
   // 31st directory drops the oldest, as the daemon does, so the next
   // reply changes nothing.

@@ -31,7 +31,7 @@ function makePage() {
   // Capture the Monaco loader's 10-second timeout so the test can fire it
   // deterministically; every other timer runs for real.
   const monacoTimeouts = [];
-  const {win, posted} = makeChatPage({
+  const {win} = makeChatPage({
     beforeScripts(win) {
       const origSetTimeout = win.setTimeout.bind(win);
       win.setTimeout = function (fn, ms, ...args) {
@@ -44,7 +44,7 @@ function makePage() {
     },
     sourceUrl: 'audit0911-monaco-main.js',
   });
-  return {win, posted, monacoTimeouts};
+  return {win, monacoTimeouts};
 }
 
 function loaderScripts(win) {

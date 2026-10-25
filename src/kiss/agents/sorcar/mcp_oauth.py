@@ -139,7 +139,6 @@ def build_provider(cfg: MCPServerConfig, redirect_handler: Any, callback_handler
         storage=storage,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
-        timeout=_LOGIN_TIMEOUT,
         client_metadata_url=os.environ.get("KISS_MCP_CLIENT_METADATA_URL", "").strip() or None,
     )
     provider.context.oauth_metadata = storage.get_oauth_metadata()
@@ -433,7 +432,7 @@ def resolve_server(name: str, url: str, transport: str, work_dir: str) -> MCPSer
         work_dir: Project directory (for project-scope configs).
 
     Returns:
-        The server configuration (saved to ``~/.kiss/mcp.json`` when new).
+        The server configuration (saved to ``$KISS_HOME/mcp.json`` when new).
 
     Raises:
         ValueError: When the server is unknown and no URL was given, the
@@ -523,7 +522,7 @@ def make_mcp_auth_tools(work_dir: str) -> list[Any]:
     def connect_mcp_server(name: str, url: str = "", transport: str = "") -> str:
         """Sign in to a remote MCP server (Notion, Linear, Asana, Zoom, or any URL).
 
-        Configures the server in ~/.kiss/mcp.json when it is new, then
+        Configures the server in $KISS_HOME/mcp.json when it is new, then
         starts the OAuth sign-in and opens its page for the user (the
         Browser tab on every KISS surface, else their default browser;
         see 'opened_in'): follow the returned 'instructions' so the user

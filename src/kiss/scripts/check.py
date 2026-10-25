@@ -6,12 +6,16 @@
 """Script to run all code quality checks: syntax check, lint, and type check."""
 
 import argparse
+import hashlib
+import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 """Repository root (``src/kiss/scripts/check.py`` is four levels deep)."""
@@ -55,44 +59,136 @@ def error_lines(lines: Iterable[str]) -> list[str]:
     return kept
 
 
-def _echo_lines(stream: Iterable[str]) -> Iterator[str]:
-    """Print every line of *stream* as it arrives and pass it on."""
+def _echo_lines(stream: Iterable[str], quiet: bool) -> Iterator[str]:
+    """Pass every line of *stream* on, printing it as it arrives unless *quiet*."""
     for line in stream:
-        print(line, end="", flush=True)
+        if not quiet:
+            print(line, end="", flush=True)
         yield line
 
 
-def run_command(cmd: list[str], description: str) -> list[str] | None:
-    """Run a command, streaming its output, and return its error lines when it fails.
+def run_command(cmd: list[str], description: str, quiet: bool = False) -> list[str] | None:
+    """Run a command and return its error lines when it fails.
 
     Args:
         cmd: List of command arguments to execute.
         description: Human-readable description of the command for logging.
+        quiet: Print one status line per stage instead of streaming
+            the stage's output; the error lines still reach the digest.
 
     Returns:
         ``None`` when the command exits with code 0, otherwise the
-        :func:`error_lines` of its combined stdout/stderr (already
-        printed) for the final digest.
+        :func:`error_lines` of its combined stdout/stderr for the
+        final digest.
     """
-    print(f"\n{'=' * 60}")
-    print(f"Running: {description}")
-    print(f"Command: {' '.join(cmd)}")
-    print(f"{'=' * 60}\n", flush=True)
+    if not quiet:
+        print(f"\n{'=' * 60}")
+        print(f"Running: {description}")
+        print(f"Command: {' '.join(cmd)}")
+        print(f"{'=' * 60}\n", flush=True)
 
     with subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
     ) as proc:
         assert proc.stdout is not None
-        digest = error_lines(_echo_lines(proc.stdout))
+        digest = error_lines(_echo_lines(proc.stdout, quiet))
         returncode = proc.wait()
     if returncode != 0:
-        print(f"\n❌ {description} failed with exit code {returncode}")
+        print(f"{'' if quiet else chr(10)}❌ {description} failed with exit code {returncode}")
         return digest
-    print(f"\n✅ {description} passed")
+    print(f"{'' if quiet else chr(10)}✅ {description} passed")
     return None
 
 
-def run_checks(checks: list[tuple[list[str], str]]) -> list[tuple[str, list[str]]]:
+FIXERS: list[tuple[list[str], str]] = [
+    (["uv", "run", "ruff", "check", "--fix", "src/"], "Auto-fix lint (ruff check --fix)"),
+]
+"""The auto-fixers ``--fix`` runs before the checks: what they fix never
+reaches the digest, so the digest holds only what a hand must fix.
+Only lint fixes: the tree is not ``ruff format``-ed, and running the
+formatter would rewrite every file in it."""
+
+CACHE_FILE = PROJECT_ROOT / "tmp" / "check-cache.json"
+"""Where the last run's verdict is kept, keyed by a fingerprint of the
+sources: a repeat run on an unchanged tree prints the kept digest
+instead of spending two minutes to recompute it (the 2026-10-24 audit
+counted 16 check runs where six were needed)."""
+_SKIP_DIRS = frozenset({"__pycache__", "node_modules", ".git", "tmp", "build", "dist"})
+CHECK_CONFIG_FILES = (
+    "pyproject.toml",
+    "uv.lock",
+    "pyrightconfig.json",
+    "mypy.ini",
+    "ruff.toml",
+    ".ruff.toml",
+    "setup.cfg",
+)
+"""Root files whose change must invalidate the cached verdict: the
+checks read their rules from them."""
+
+
+def tree_fingerprint(root: Path = PROJECT_ROOT) -> str:
+    """Return a hash of the path, size and mtime of every source file under *root*.
+
+    Covers ``src/`` and the root files that steer the checks
+    (:data:`CHECK_CONFIG_FILES`); caches, ``node_modules`` and ``tmp/``
+    are skipped.
+
+    Args:
+        root: The repository root.
+    """
+    digest = hashlib.sha256()
+    for name in CHECK_CONFIG_FILES:
+        top = root / name
+        if top.is_file():
+            stat = top.stat()
+            digest.update(f"{top.name}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
+    src = root / "src"
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = Path(dirpath) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            digest.update(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def cached_verdict(fingerprint: str, full: bool) -> dict[str, Any] | None:
+    """Return the cached ``{"exit_code", "log"}`` of the last run on this tree, or ``None``."""
+    try:
+        cached = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("fingerprint") != fingerprint or cached.get("full") != full:
+        return None
+    return cached
+
+
+def save_verdict(fingerprint: str, full: bool, exit_code: int, log: str) -> None:
+    """Record the verdict of a run on the tree *fingerprint* for :func:`cached_verdict`."""
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_FILE.write_text(
+            json.dumps(
+                {"fingerprint": fingerprint, "full": full, "exit_code": exit_code, "log": log}
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def run_checks(
+    checks: list[tuple[list[str], str]], quiet: bool = False,
+) -> list[tuple[str, list[str]]]:
     """Run every check and return the failed ones with their error lines.
 
     Every stage runs even after an earlier one fails, so a single
@@ -104,6 +200,7 @@ def run_checks(checks: list[tuple[list[str], str]]) -> list[tuple[str, list[str]
 
     Args:
         checks: ``(command, description)`` pairs, run in order.
+        quiet: Passed to :func:`run_command`.
 
     Returns:
         ``(description, error_lines)`` for each failed check, in run
@@ -115,7 +212,7 @@ def run_checks(checks: list[tuple[list[str], str]]) -> list[tuple[str, list[str]
     """
     failed: list[tuple[str, list[str]]] = []
     for cmd, description in checks:
-        digest = run_command(cmd, description)
+        digest = run_command(cmd, description, quiet)
         if digest is not None:
             failed.append((description, digest))
             if cmd[:2] == ["uv", "sync"]:
@@ -236,12 +333,32 @@ def main() -> int:
         action="store_true",
         help="Run additional checks including pyright type checking",
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "Run the auto-fixer (ruff check --fix) first, print one "
+            "status line per stage and only the residual errors at the end; a repeat "
+            "run on an unchanged tree prints the previous verdict"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.no_clean:
         clean_build_artifacts()
         if args.clean_only:
             return 0
+
+    fingerprint = ""
+    if args.fix:
+        for cmd, description in FIXERS:
+            run_command(cmd, description, quiet=True)
+        fingerprint = tree_fingerprint()
+        cached = cached_verdict(fingerprint, args.full)
+        if cached is not None:
+            print("(unchanged tree: the verdict of the previous run follows)")
+            print(cached["log"], end="")
+            return int(cached["exit_code"])
 
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),
@@ -263,24 +380,29 @@ def main() -> int:
 
     print("\n🔍 Running all code quality checks...\n")
 
-    failed = run_checks(checks)
+    failed = run_checks(checks, quiet=args.fix)
+    verdict = verdict_text(failed)
+    print(verdict, end="")
+    if args.fix:
+        save_verdict(fingerprint, args.full, 1 if failed else 0, verdict)
+    return 1 if failed else 0
+
+
+def verdict_text(failed: list[tuple[str, list[str]]]) -> str:
+    """Return the closing report: the failed stages and their error lines, or the all-clear.
+
+    Args:
+        failed: What :func:`run_checks` returned.
+    """
     if not failed:
-        print("\n" + "=" * 60)
-        print("✅ All checks passed!")
-        print("=" * 60 + "\n")
-        return 0
-    print("\n" + "=" * 60)
-    print("❌ Some checks failed. Please fix the errors above.")
-    for description, _lines in failed:
-        print(f"   ❌ {description}")
-    print("=" * 60)
-    print("Errors, repeated from each failed stage:")
-    for description, lines in failed:
-        print(f"\n--- {description} ---")
-        for line in lines:
-            print(line)
-    print("=" * 60 + "\n")
-    return 1
+        return "\n" + "=" * 60 + "\n✅ All checks passed!\n" + "=" * 60 + "\n\n"
+    lines = ["", "=" * 60, "❌ Some checks failed. Please fix the errors above."]
+    lines += [f"   ❌ {description}" for description, _lines in failed]
+    lines += ["=" * 60, "Errors, repeated from each failed stage:"]
+    for description, error_list in failed:
+        lines += ["", f"--- {description} ---", *error_list]
+    lines += ["=" * 60, "", ""]
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

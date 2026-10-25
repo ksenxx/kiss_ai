@@ -45,6 +45,7 @@ from kiss.agents.sorcar.persistence import (
     _queue_chat_event,
 )
 from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.agents.sorcar import rwlock_probe
 
 
 class _DBSandbox:
@@ -101,9 +102,9 @@ class TestA1WriteLockInterruptLeak:
             tw = threading.Thread(target=try_write, daemon=True)
             tw.start()
             deadline = time.monotonic() + 10
-            while lock._pending_writers != 1 and time.monotonic() < deadline:
+            while rwlock_probe.pending_writers(lock) != 1 and time.monotonic() < deadline:
                 time.sleep(0.005)
-            assert lock._pending_writers == 1
+            assert rwlock_probe.pending_writers(lock) == 1
             time.sleep(0.1)
             assert tw.ident is not None
             assert inject_async_exception(tw.ident, KeyboardInterrupt) == 1

@@ -44,8 +44,10 @@ const {
   stubRaf,
   fakeMatchMedia,
   ofType,
+  lastMsg,
   sendEmptyWorkDir,
 } = require('./simplify2_harness');
+const {gatewaySession} = require('./history_helpers');
 
 function makePage() {
   // jsdom has no scrollIntoView: record every call and its target.
@@ -62,11 +64,6 @@ function makePage() {
     },
   });
   return {win, posted, scrolled};
-}
-
-function lastMessage(posted, type) {
-  const msgs = ofType(posted, type);
-  return msgs.length ? msgs[msgs.length - 1] : null;
 }
 
 /** A booted page with the Chats drawer open (which asks for history). */
@@ -109,45 +106,24 @@ function showChatWithoutTask(win, chatId) {
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
-function session(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-1',
-      task_id: 1,
-      title: 'Refactor the payment gateway retries',
-      preview: 'Refactor the payment gateway retries',
-      has_events: true,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      timestamp: 1_700_000_000,
-      work_dir: '',
-    },
-    overrides || {},
-  );
-}
-
 // Two chats, three tasks, newest first as the daemon sends them.
 function threeSessions() {
   return [
-    session({
+    gatewaySession({
       id: 'chat-2',
       task_id: 3,
       title: 'chat two',
       preview: 'chat two',
       timestamp: 1_700_000_300,
     }),
-    session({
+    gatewaySession({
       id: 'chat-1',
       task_id: 2,
       title: 'chat one, second',
       preview: 'chat one, second',
       timestamp: 1_700_000_200,
     }),
-    session({
+    gatewaySession({
       id: 'chat-1',
       task_id: 1,
       title: 'chat one, first',
@@ -160,7 +136,7 @@ function threeSessions() {
 // renderHistory drops replies whose generation is stale, so always
 // answer the generation the page last asked for.
 function sendHistory(win, posted, sessions) {
-  const req = lastMessage(posted, 'getHistory');
+  const req = lastMsg(posted, 'getHistory');
   assert.ok(req, 'the page must have requested history');
   send(win, {
     type: 'history',

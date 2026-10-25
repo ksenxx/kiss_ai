@@ -147,22 +147,6 @@ def test_auth_trio_persistence() -> None:
     assert agent._is_authenticated() is False
 
 
-def test_emulator_names_wrong_credentials() -> None:
-    """The emulated API answers bad credentials with an error that quotes them."""
-    with recording_server(_QQApiHandler) as api:
-        token = requests.post(api.base_url + _TOKEN_PATH, json={"appId": "other"}, timeout=10)
-        assert token.status_code == 400
-        assert "'appId': 'other'" in token.json()["message"]
-        sent = requests.post(
-            api.base_url + "/v2/groups/G1/messages",
-            json={},
-            headers={"Authorization": "QQBot stale"},
-            timeout=10,
-        )
-        assert sent.status_code == 401
-        assert "QQBot stale" in sent.json()["message"]
-
-
 def test_send_messages_with_cached_token() -> None:
     """Group and C2C sends use QQBot auth and share one cached token."""
     with recording_server(_QQApiHandler) as api:

@@ -13,121 +13,63 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
 } = require('./simplify2_harness');
+const {makeRow} = require('./history_helpers');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
 const WS_D = '/Users/koushik/work/repo-D';
 
+/** A finished row titled `title` (its preview too), 1 s long. */
+function metaRow(id, title, timestamp, fields) {
+  return makeRow({
+    id,
+    task_id: timestamp,
+    title,
+    preview: title,
+    timestamp,
+    startTs: timestamp * 1000,
+    endTs: timestamp * 1000 + 1000,
+    ...fields,
+  });
+}
+
+// No work_dir key at all (an older row), as opposed to row F's ''.
+const ROW_H = metaRow(
+  'metaH',
+  'meta row H — workspace field missing',
+  1_700_000_700,
+);
+delete ROW_H.work_dir;
+
 const SESSIONS_FIXTURE = [
-  {
-    id: 'metaA',
-    task_id: 101,
-    title: 'meta row A — all flags on',
-    timestamp: 1_700_000_000,
-    preview: 'meta row A — all flags on',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 1234,
-    cost: 0.1234,
-    steps: 3,
-    is_favorite: false,
+  metaRow('metaA', 'meta row A — all flags on', 1_700_000_000, {
     work_dir: WS_A,
     model: 'gpt-5',
     is_parallel: true,
-    startTs: 1_700_000_000_000,
-    endTs: 1_700_000_010_000,
-  },
-  {
-    id: 'metaB',
-    task_id: 102,
-    title: 'meta row B — all flags off',
-    timestamp: 1_700_000_100,
-    preview: 'meta row B — all flags off',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 100,
-    cost: 0.01,
-    steps: 1,
-    is_favorite: false,
+  }),
+  metaRow('metaB', 'meta row B — all flags off', 1_700_000_100, {
     work_dir: WS_B,
     model: 'claude-3.7-sonnet',
     is_parallel: false,
-    startTs: 1_700_000_100_000,
-    endTs: 1_700_000_165_000,
-  },
-  {
-    id: 'metaC',
-    task_id: 103,
-    title: 'meta row C — model without workspace',
-    timestamp: 1_700_000_200,
-    preview: 'meta row C — model without workspace',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 7,
-    cost: 0,
-    steps: 1,
-    is_favorite: false,
-    work_dir: '',
+  }),
+  metaRow('metaC', 'meta row C — model without workspace', 1_700_000_200, {
     model: 'gpt-5-mini',
     is_parallel: false,
-    startTs: 1_700_000_200_000,
-    endTs: 1_700_000_201_000,
-  },
-  {
-    id: 'metaD',
-    task_id: 104,
-    title: 'meta row D — workspace without model',
-    timestamp: 1_700_000_300,
-    preview: 'meta row D — workspace without model',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
+  }),
+  metaRow('metaD', 'meta row D — workspace without model', 1_700_000_300, {
     work_dir: WS_D,
-    startTs: 1_700_000_300_000,
-    endTs: 1_700_000_301_000,
-  },
-  {
-    id: 'metaE',
-    task_id: 105,
-    title: 'meta row E — model only, flags missing',
-    timestamp: 1_700_000_400,
-    preview: 'meta row E — model only, flags missing',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 5,
-    cost: 0,
-    steps: 1,
-    is_favorite: false,
-    work_dir: '',
+  }),
+  metaRow('metaE', 'meta row E — model only, flags missing', 1_700_000_400, {
     model: 'legacy-model',
-    startTs: 1_700_000_400_000,
-    endTs: 1_700_000_401_000,
-  },
-  {
-    id: 'metaF',
-    task_id: 106,
-    title: 'meta row F — neither workspace nor model',
-    timestamp: 1_700_000_500,
-    preview: 'meta row F — neither workspace nor model',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_500_000,
-    endTs: 1_700_000_501_000,
-  },
+  }),
+  metaRow('metaF', 'meta row F — neither workspace nor model', 1_700_000_500),
+  metaRow(
+    'metaG',
+    'meta row G — windows workspace without model',
+    1_700_000_600,
+    {work_dir: WS_B},
+  ),
+  ROW_H,
 ];
 
 function workspaceSpan(row) {
@@ -151,12 +93,16 @@ function testWorkspaceLineMergesMetadata() {
   const d = rows['meta row D — workspace without model'];
   const e = rows['meta row E — model only, flags missing'];
   const f = rows['meta row F — neither workspace nor model'];
+  const g = rows['meta row G — windows workspace without model'];
+  const h = rows['meta row H — workspace field missing'];
   assert.ok(a, 'row A must render');
   assert.ok(b, 'row B must render');
   assert.ok(c, 'row C must render');
   assert.ok(d, 'row D must render');
   assert.ok(e, 'row E must render');
   assert.ok(f, 'row F must render');
+  assert.ok(g, 'row G must render');
+  assert.ok(h, 'row H must render');
 
   const aWs = workspaceSpan(a);
   const bWs = workspaceSpan(b);
@@ -211,6 +157,16 @@ function testWorkspaceLineMergesMetadata() {
     null,
     'row F (no workspace, no model) must NOT render a workspace span',
   );
+  assert.strictEqual(
+    workspaceSpan(g).textContent,
+    WS_B,
+    'row G (windows workspace, no model) must render the raw path',
+  );
+  assert.strictEqual(
+    workspaceSpan(h),
+    null,
+    'row H (work_dir key missing, no model) must NOT render a workspace span',
+  );
 
   for (const [label, row] of [
     ['A', a],
@@ -218,6 +174,7 @@ function testWorkspaceLineMergesMetadata() {
     ['C', c],
     ['D', d],
     ['E', e],
+    ['G', g],
   ]) {
     const metrics = metricsSpan(row);
     assert.ok(metrics, `row ${label} must keep its metrics span`);
@@ -235,6 +192,8 @@ function testWorkspaceLineMergesMetadata() {
     ['D', d],
     ['E', e],
     ['F', f],
+    ['G', g],
+    ['H', h],
   ]) {
     assert.strictEqual(
       row.querySelector('.running-item-meta'),

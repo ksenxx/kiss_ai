@@ -5,12 +5,14 @@
 
 'use strict';
 
-// Event panel headers are flat: no chevron in front of the title, no
-// background and no border of their own (the panel keeps its single
-// outer border).  The panels are rendered by the real media/main.js
-// with media/main.css injected, so the assertions are on the cascaded
-// values the page actually paints.  Where the panels sit (the user's
-// on the right, the rest on the left) is transcriptPanelAlignment's.
+// Event panel headers are flat and uniform: no chevron in front of the
+// title, no background and no border of their own (the panel keeps its
+// single outer border), and ONE quiet style for every header (the Bash
+// tool call is not singled out in the accent blue, no collapsible header
+// is bold).  The panels are rendered by the real media/main.js with
+// media/main.css injected, so the assertions are on the cascaded values
+// the page actually paints.  Where the panels sit (the user's on the
+// right, the rest on the left) is transcriptPanelAlignment's.
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
@@ -26,13 +28,11 @@ function makePage() {
 const send = harness.send;
 
 function renderTranscript(win) {
-  const ready = win.__posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page posts ready with a tabId');
   send(win, {
     type: 'task_events',
     events: [],
     task: 'Flatten the headers',
-    tabId: ready.tabId,
+    tabId: harness.readyTabId(win.__posted),
     chat_id: 'chat-flat-headers',
   });
   send(win, {type: 'status', running: true});
@@ -50,10 +50,8 @@ function testNoChevronInAnyHeader() {
   renderTranscript(win);
   const out = win.document.getElementById('output');
   assert.strictEqual(out.querySelectorAll('.collapse-chv').length, 0, 'no chevron span');
-  // The thinking tokens are plain text inside the Thoughts panel: no
-  // header of their own to flatten.
-  assert.strictEqual(out.querySelectorAll('.think .lbl').length, 0, 'no thinking header');
-  assert.ok(out.querySelector('.llm-panel > .think'), 'the thinking text block sits in the Thoughts panel');
+  // The thinking text having no header of its own is
+  // ui_antipattern_keyboard's.
   const headers = out.querySelectorAll('.collapse-header');
   assert.ok(headers.length >= 4, 'the transcript rendered its headers: ' + headers.length);
   for (const h of headers) {
@@ -116,14 +114,88 @@ function testToolCallHeaderIsFlat() {
   console.log('  ok - the tool call header has no background and no border of its own');
 }
 
+/** The .tc-h header whose tool name (its .tc-h-name span) is *name*. */
+function headerNamed(win, name) {
+  const headers = win.document.querySelectorAll('#output .tc-h');
+  for (const h of headers) {
+    const nameEl = h.querySelector('.tc-h-name');
+    const txt = ((nameEl || h).textContent || '').replace(/^[^A-Za-z]+/, '').trim();
+    if (txt === name) return h;
+  }
+  return null;
+}
+
+function testBashHeaderMatchesTheOtherToolHeaders() {
+  const win = makePage();
+  renderTranscript(win);
+  const bash = headerNamed(win, 'Bash');
+  const read = headerNamed(win, 'Read');
+  assert.ok(bash && read, 'both tool calls render a .tc-h header');
+  assert.ok(bash.classList.contains('tc-h-bash'), 'the Bash header keeps its tool hook');
+  assert.ok(!read.classList.contains('tc-h-bash'), 'only the Bash header has it');
+  const b = win.getComputedStyle(bash);
+  const r = win.getComputedStyle(read);
+  for (const prop of ['color', 'background-color', 'font-weight']) {
+    assert.strictEqual(
+      b.getPropertyValue(prop),
+      r.getPropertyValue(prop),
+      `the Bash header's ${prop} equals every other tool header's`,
+    );
+  }
+  assert.strictEqual(b.getPropertyValue('font-weight'), '400', 'headers are not bold');
+  assert.ok(
+    !/var\(\s*--accent/.test(b.getPropertyValue('color')),
+    'the Bash header is not painted in the accent: ' + b.getPropertyValue('color'),
+  );
+  win.close();
+  console.log('  ok - the Bash header matches the other tool headers');
+}
+
+// Every collapsible header the transcript renders, by its markup
+// (`.tr .rl` is the result label inside a tool-result panel).
+const HEADER_MARKUP = [
+  '<div class="tc-h">Read</div>',
+  '<div class="tr"><span class="rl">Result</span></div>',
+  '<div class="system-prompt-h">System prompt</div>',
+  '<div class="prompt-h">Prompt</div>',
+  '<div class="llm-panel-hdr">Thoughts</div>',
+  '<span class="ask-answer-label">Answer</span>',
+  '<div class="tc-h tc-h-bash">Bash</div>',
+];
+
+function testNoCollapsibleHeaderIsBold() {
+  const win = makePage();
+  const output = win.document.getElementById('output');
+  for (const markup of HEADER_MARKUP) {
+    output.insertAdjacentHTML('beforeend', markup);
+    const el = output.lastElementChild.matches('.tr')
+      ? output.lastElementChild.firstElementChild
+      : output.lastElementChild;
+    const style = win.getComputedStyle(el);
+    assert.strictEqual(
+      style.getPropertyValue('font-weight'),
+      '400',
+      `${markup} is not bold`,
+    );
+    assert.ok(
+      !/var\(\s*--accent/.test(style.getPropertyValue('color')),
+      `${markup} is not painted in the accent: ${style.getPropertyValue('color')}`,
+    );
+  }
+  win.close();
+  console.log('  ok - no collapsible panel header is bold');
+}
+
 function runTests() {
   testNoChevronInAnyHeader();
   testToolCallHeaderIsFlat();
+  testBashHeaderMatchesTheOtherToolHeaders();
+  testNoCollapsibleHeaderIsBold();
 }
 
 try {
   runTests();
-  console.log('\n2 passed, 0 failed');
+  console.log('\npanelHeadersFlat.test.js: all tests passed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

@@ -22,6 +22,10 @@ import unittest
 
 import pytest
 
+from kiss.agents.third_party_agents.imessage.imessage_sea import (
+    _build_send_attachment_script,
+    _build_send_message_script,
+)
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
 from kiss.tests.agents.third_party_agents.recording_http import (
     PhoneApiHandler,
@@ -69,39 +73,27 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
 
     def test_send_message_script_escapes_double_quotes(self) -> None:
         """A message like say "hi" must appear escaped in the generated script."""
-        from kiss.agents.third_party_agents.imessage.imessage_sea import _build_send_message_script
-
         script = _build_send_message_script("+14155238886", 'say "hi"')
         self.assertIn('send "say \\"hi\\"" to targetBuddy', script)
         self.assertNotIn('send "say "hi"" to targetBuddy', script)
 
     def test_send_message_script_escapes_backslashes(self) -> None:
         """Backslashes in the text must be doubled before quote escaping."""
-        from kiss.agents.third_party_agents.imessage.imessage_sea import _build_send_message_script
-
         script = _build_send_message_script("+14155238886", 'C:\\path "x"')
         self.assertIn('send "C:\\\\path \\"x\\"" to targetBuddy', script)
 
     def test_send_message_script_escapes_recipient(self) -> None:
         """The recipient is also interpolated and must be escaped."""
-        from kiss.agents.third_party_agents.imessage.imessage_sea import _build_send_message_script
-
         script = _build_send_message_script('evil" & quit -- ', "hello")
         self.assertIn('buddy "evil\\" & quit -- " of targetService', script)
 
     def test_send_attachment_script_escapes_file_path(self) -> None:
         """File paths with quotes/backslashes must be escaped in the attachment script."""
-        from kiss.agents.third_party_agents.imessage.imessage_sea import (
-            _build_send_attachment_script,
-        )
-
         script = _build_send_attachment_script("+14155238886", '/tmp/a "b"\\c.txt')
         self.assertIn('send POSIX file "/tmp/a \\"b\\"\\\\c.txt" to targetBuddy', script)
 
     def test_invalid_service_rejected(self) -> None:
         """A service value outside iMessage/SMS must be rejected, not interpolated."""
-        from kiss.agents.third_party_agents.imessage.imessage_sea import _build_send_message_script
-
         with self.assertRaises(ValueError):
             _build_send_message_script("+14155238886", "hi", service='x" & quit')
 

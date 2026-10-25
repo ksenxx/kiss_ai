@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests reproducing bugs in msteams/mattermost/googlechat backends.
+"""Integration tests reproducing bugs in the msteams/mattermost backends.
 
 Uses a real in-process HTTP server that returns Microsoft-Graph-shaped JSON and
 records every request path, so the tests verify actual wire behavior with no
@@ -11,7 +11,6 @@ mocks or test doubles.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 
 import pytest
@@ -91,9 +90,11 @@ def test_msteams_send_message_reply_targets_message_id(graph_server) -> None:
     """Threaded replies must POST to /channels/<chan>/messages/<msg-id>/replies."""
     backend = _make_backend(graph_server)
     backend.send_message("team1:chan1", "hi there", thread_ts="MSG1")
-    path = _paths(graph_server)[0]
-    assert "/teams/team1/channels/chan1/messages/MSG1/replies" in path
-    assert "third_party_agents" not in path
+    req = graph_server.requests[0]
+    assert "/teams/team1/channels/chan1/messages/MSG1/replies" in req["path"]
+    assert "third_party_agents" not in req["path"]
+    # The message id, not its timestamp, is the reply target.
+    assert "2024-05-01" not in req["path"] + str(req["query"])
 
 
 def test_msteams_send_message_without_thread(graph_server) -> None:
@@ -118,18 +119,7 @@ def test_msteams_tool_urls_use_channels(graph_server) -> None:
     assert all("third_party_agents" not in p for p in paths)
 
 
-def test_msteams_poll_channel_runner_contract(graph_server) -> None:
-    """ChannelRunner threads replies via thread_ts; verify the round trip works."""
-    backend = _make_backend(graph_server)
-    msgs, _ = backend.poll_messages("team1:chan1", "0", limit=50)
-    msg = msgs[0]
-    thread_ts = msg.get("thread_ts", msg.get("ts", ""))
-    backend.send_message("team1:chan1", "reply", thread_ts)
-    reply = graph_server.requests[-1]
-    assert "/messages/MSG1/replies" in reply["path"]
-    assert "2024-05-01" not in reply["path"] + str(reply["query"])
-
-
+@pytest.mark.usefixtures("isolated_kiss_home")
 def test_mattermost_connect_returns_false_on_malformed_port() -> None:
     """Regression: a malformed persisted port must not raise out of connect().
 
@@ -139,26 +129,7 @@ def test_mattermost_connect_returns_false_on_malformed_port() -> None:
     must swallow the error and record a helpful ``_connection_info``.
     """
     _mm_config.save({"url": "127.0.0.1", "token": "tok", "port": "not-a-number", "scheme": "http"})
-    try:
-        backend = MattermostChannelBackend()
-        assert backend.connect() is False
-        assert "Mattermost connection failed" in backend._connection_info
-        assert backend._driver is None
-    finally:
-        _mm_config.clear()
-
-
-@pytest.mark.skipif(
-    importlib.util.find_spec("mattermostdriver") is None,
-    reason="mattermostdriver not installed",
-)
-def test_mattermost_driver_channels_endpoint_exists() -> None:
-    """The fixed code calls driver.channels.*; verify those endpoints exist."""
-    driver_cls = importlib.import_module("mattermostdriver").Driver
-
-    driver = driver_cls({"url": "localhost", "token": "x", "port": 8065, "scheme": "http"})
-    assert hasattr(driver, "channels")
-    assert hasattr(driver.channels, "get_channels_for_user")
-    assert hasattr(driver.channels, "get_channel")
-    assert hasattr(driver.channels, "create_direct_message_channel")
-    assert not hasattr(driver, "third_party_agents")
+    backend = MattermostChannelBackend()
+    assert backend.connect() is False
+    assert "Mattermost connection failed" in backend._connection_info
+    assert backend._driver is None

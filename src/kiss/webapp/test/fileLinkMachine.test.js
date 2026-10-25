@@ -5,7 +5,7 @@
 
 'use strict';
 
-/* global require, __dirname, console */
+/* global require, console */
 
 // File links of a tab bound to a registered machine (main.js against
 // the real chat.html):
@@ -22,7 +22,8 @@
 // src/kiss/tests/server/test_remote_check_paths.py.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, pickMachine} = require('./simplify2_harness');
+const {findLinks} = require('./file_link_helpers');
 
 const BOX_TAB = 'tab-on-box';
 const HOME_TAB = 'tab-at-home';
@@ -83,9 +84,7 @@ function answer(win, check) {
 }
 
 function linkFor(win, p) {
-  return Array.from(win.document.querySelectorAll('#output [data-path]')).find(
-    el => el.dataset.path === p,
-  );
+  return findLinks(win, p)[0];
 }
 
 function testBoundTabChecksAndOpensOnTheMachine() {
@@ -209,10 +208,12 @@ function pickInDropDown(win, name) {
       {name: 'other', local: false, status: 'reachable'},
     ],
   });
-  const select = win.document.getElementById('chat-machine');
-  select.value = name;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-  assert.strictEqual(select.value, name, 'the drop-down shows the pick');
+  pickMachine(win, name);
+  assert.strictEqual(
+    win.document.getElementById('chat-machine').value,
+    name,
+    'the drop-down shows the pick',
+  );
 }
 
 function testLinksFollowTheBindingNotTheDropDown() {

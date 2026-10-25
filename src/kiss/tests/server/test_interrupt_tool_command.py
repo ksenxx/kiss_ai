@@ -30,8 +30,9 @@ from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 from kiss.server import agent_state
@@ -61,7 +62,8 @@ def _capture(server: Any) -> tuple[list[dict[str, Any]], threading.Lock]:
 
 def _run_tool(name: str, body: Callable[[], object]) -> str:
     """Run *body* as a registered tool call, the way ``_execute_tool`` does."""
-    token = begin_tool_call(name)
+    token = new_tool_call(name)
+    register_tool_call(token)
     try:
         try:
             result = str(body())

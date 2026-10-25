@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -158,6 +159,41 @@ class TestFilesRefreshFailure(unittest.TestCase):
         broken = self.db_path.with_name("broken-history.db")
         broken.mkdir(exist_ok=True)
         _persistence._DB_PATH = broken
+
+    def _worker_holds_a_connection(self) -> bool:
+        """True once a thread other than this one has opened the healthy database.
+
+        ``_open_conns`` registers a connection only after its
+        ``_init_tables`` ran, so from then on a dropped table stays
+        dropped for that connection.
+        """
+        with _persistence._init_tables_lock:
+            return any(
+                owner is not threading.current_thread() and path == str(self.db_path)
+                for _conn, owner, path in _persistence._open_conns.values()
+            )
+
+    def _drop_file_usage_table(self) -> None:
+        """Make the next ``file_usage`` read on an ALREADY-OPEN connection fail.
+
+        Readers open their connection before taking the persistence
+        read lock, so a reply parked behind the writer lock never
+        reopens the database and does not see ``_break_database``.
+        Dropping the table through a separate connection is a real
+        on-disk fault its pending ``SELECT`` trips over
+        (``sqlite3.OperationalError: no such table``).  Waits for the
+        worker's connection first: a connection opened AFTER the drop
+        would re-create the table.
+        """
+        self.assertTrue(
+            self._wait(self._worker_holds_a_connection),
+            "the worker never opened the database",
+        )
+        raw = sqlite3.connect(str(self.db_path), isolation_level=None)
+        try:
+            raw.execute("DROP TABLE file_usage")
+        finally:
+            raw.close()
 
     def _heal_database(self) -> None:
         _persistence._DB_PATH = self.db_path
@@ -425,7 +461,8 @@ class TestFilesRefreshFailure(unittest.TestCase):
                 })
                 newer = self._token_map().get(conn_id)
                 self.assertIsNotNone(newer)
-                self._break_database()
+                self._drop_file_usage_table()  # fails the parked (already-open) stale reply
+                self._break_database()  # fails the newer reply's fresh open
             # Lock released: the stale reply fails its database read,
             # sees a foreign token and stands down; the worker then
             # parks on the gate.

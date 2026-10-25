@@ -267,7 +267,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
-    ApiCommand("getHistory"),
+    ApiCommand("getHistory", handler="get_history"),
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("setChatSummary", required=("chatId", "summary")),
@@ -768,6 +768,9 @@ class ServerApi:
         # The latest dictation per connection (see ``voice_transcribe``):
         # the connection's next one is answered after it.
         self._pending_voice: dict[str, asyncio.Task[None]] = {}
+        # The latest history page asked for per connection (see
+        # ``get_history``): the connection's next one is answered after it.
+        self._pending_history: dict[str, asyncio.Task[None]] = {}
         # The brand's running ``signin login`` (see ``signin_login``).
         self.signin = SigninLogin()
         # Set by ``cancel_background_replies``: from then on no reply
@@ -817,9 +820,13 @@ class ServerApi:
            a settings command stamped ``machine`` (the settings
            sheet opened for the machine:
            :data:`kiss.server.sidebar_panels.MACHINE_SETTINGS_REPLIES`)
-           or a subpanel command stamped ``machine`` (the Schedule,
+           a subpanel command stamped ``machine`` (the Schedule,
            Apps, Spend and Recommendations subpanels shown for it:
            :data:`kiss.server.sidebar_panels.MACHINE_PANEL_REPLIES`)
+           or the task-info panel's ``getTaskUpdate`` stamped
+           ``machine`` (the Task update of the task such a tab runs
+           there:
+           :func:`kiss.server.sidebar_panels.machine_task_update_reply`)
            to the machine's daemon, answering the sender with its
            reply.
         7. Invokes the :class:`ServerApi` method named by the
@@ -894,26 +901,40 @@ class ServerApi:
         # the settings sheet opened for the machine shows and saves
         # its config, API keys and custom models, and the Schedule,
         # Apps, Spend and Recommendations subpanels show the machine
-        # the chat header has picked: a workspace, settings or subpanel
-        # command stamped ``machine`` is answered by that machine's
-        # daemon.  The subpanels poll, and a machine's app probe takes
+        # the chat header has picked, and the task-info panel's Task
+        # update subpanel reports on the task the tab runs there: a
+        # workspace, settings, subpanel or task-update command stamped
+        # ``machine`` is answered by that machine's daemon.  The
+        # subpanels poll, and a machine's app probe takes
         # seconds, as does its Codex device login: their replies are
         # produced in the background (and travel on link lanes of
         # their own, see
-        # :func:`~kiss.server.sidebar_panels.machine_panel_reply` and
-        # :func:`~kiss.server.sidebar_panels.machine_settings_reply`)
+        # :func:`~kiss.server.sidebar_panels.machine_panel_reply`,
+        # :func:`~kiss.server.sidebar_panels.machine_task_update_reply`
+        # and :func:`~kiss.server.sidebar_panels.machine_settings_reply`)
         # so a ``submit`` or ``stop`` sent right after them is not held
         # up behind them, on this connection or on the machine's link.
         machine = str(cmd.get("machine") or "")
         forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
         if forwarder is not None:
             forwarded = self._forwarded_reply(ctx.endpoint, forwarder, machine, cmd)
-            if name in ("cronAction", "startCodexLogin"):
-                # A user's own action, never dropped; slow (the device
-                # login's CLI may take a minute to print its code) but
-                # in the background, so it holds up none of the
-                # sender's later commands.
+            if name in ("cronAction", "startCodexLogin") or (
+                name == "getTaskUpdate" and cmd.get("refresh")
+            ):
+                # A user's own action (the Task update's refresh button
+                # included), never dropped; slow (the device login's
+                # CLI may take a minute to print its code) but in the
+                # background, so it holds up none of the sender's later
+                # commands.
                 self._spawn_reply(forwarded)
+            elif name == "getTaskUpdate":
+                # The Task update's 5 s poll, deduplicated per tab: a
+                # switch to another tab running on the same machine
+                # polls at once, while the left tab's pending poll
+                # (its reply outdated by the panel's token) is the one
+                # not repeated.
+                key = (cmd["connId"], f"{name}:{cmd.get('tabId', '')}", machine)
+                self._spawn_panel_reply(key, forwarded)
             elif name in sidebar_panels.MACHINE_PANEL_REPLIES:
                 self._spawn_panel_reply((cmd["connId"], name, machine), forwarded)
             else:
@@ -974,6 +995,11 @@ class ServerApi:
         assert task is not None
         pending[key] = task
         task.add_done_callback(functools.partial(self._forget_pending, pending, key))
+        # Cancelled before *reply* started (at shutdown: before its
+        # first step, or while still waiting on its predecessor), the
+        # task leaves *reply* unawaited; close it rather than let the
+        # GC warn.  A reply that did run is closed already: a no-op.
+        task.add_done_callback(functools.partial(self._close_reply, reply))
 
     @staticmethod
     async def _after(
@@ -983,6 +1009,11 @@ class ServerApi:
         if previous is not None:
             await asyncio.wait({previous})
         await reply
+
+    @staticmethod
+    def _close_reply(reply: Coroutine[Any, Any, None], task: asyncio.Task[None]) -> None:
+        """Close *reply* once *task*, the ``_after`` that was to await it, is done."""
+        reply.close()
 
     @staticmethod
     def _forget_pending(
@@ -1066,12 +1097,9 @@ class ServerApi:
         task = self._spawn_reply(reply)
         if task is not None:
             self._panel_replies[key] = task
-            task.add_done_callback(functools.partial(self._forget_panel_reply, key))
-
-    def _forget_panel_reply(self, key: tuple[str, str, str], task: asyncio.Task[None]) -> None:
-        """Drop the finished *task* from the in-flight subpanel forwards (if still *key*'s)."""
-        if self._panel_replies.get(key) is task:
-            del self._panel_replies[key]
+            task.add_done_callback(
+                functools.partial(self._forget_pending, self._panel_replies, key),
+            )
 
     async def cancel_background_replies(self) -> None:
         """Cancel and await every background reply and detached command (at shutdown).
@@ -1223,7 +1251,10 @@ class ServerApi:
         The web app opened at ``127.0.0.1`` on this machine itself needs
         no password, whatever its ``auth`` frame carries
         (:meth:`_is_loopback_browser`); the per-IP lockout protects the
-        password, which such a page is not guessing.
+        password, which such a page is not guessing.  A private daemon
+        (``local_only``) admits tokens only, so it never qualifies
+        there — on the locked path of :meth:`authenticate` as little as
+        on the normal one.
 
         Args:
             msg: The decoded first frame.
@@ -1233,7 +1264,7 @@ class ServerApi:
             The loopback :class:`Auth` after ``auth_ok`` was sent, or
             ``None`` when the frame or the peer does not qualify.
         """
-        if not isinstance(msg, dict) or msg.get("type") != "auth":
+        if self._backend.local_only or not isinstance(msg, dict) or msg.get("type") != "auth":
             return None
         token = msg.get("token", "")
         if (isinstance(token, str) and token) or not self._is_loopback_browser(websocket):
@@ -1499,7 +1530,9 @@ class ServerApi:
                     return _auth_result(
                         "remote" if stored_password else "loopback", msg,
                     )
-                if not is_retry and msg.get("type") != "auth":
+                if msg.get("type") != "auth":
+                    # No password was tried: close without the
+                    # "not correct" verdict, on either attempt.
                     await websocket.close()
                     return None
                 if client_pw or token:
@@ -1712,11 +1745,15 @@ class ServerApi:
         towards the task), later polls re-run it every 10 minutes, and
         a poll with ``refresh: true`` (the panel's refresh button)
         re-runs it at once.  The direct ``taskUpdate`` reply goes back
-        to the asking endpoint, local or remote.
+        to the asking endpoint, local or remote.  A poll stamped
+        ``machine`` (the tab is bound to a registered machine, where
+        its task runs) never reaches this handler: :meth:`dispatch`
+        forwards it to the machine's daemon and relays its reply
+        (:func:`~kiss.server.sidebar_panels.machine_task_update_reply`).
 
         Args:
             cmd: The ``getTaskUpdate`` command (``tabId``, optional
-                ``knownSig``, ``token``, ``refresh``).
+                ``knownSig``, ``token``, ``refresh``, ``machine``).
             ctx: The transport context of the current call.
         """
         await self._backend._handle_get_task_update(cmd, ctx.endpoint)
@@ -1911,12 +1948,14 @@ class ServerApi:
 
         The chat header's WORKDIR drop-down of a tab bound to a machine
         lists that machine's directories: its daemon's working
-        directory and the directories selected there so far.  The
-        direct reply is ``{"type": "machineWorkDirs", "machine":
-        <name>, "workDir": <dir>, "recentWorkDirs": [{"path", "ts"},
-        ...], "error": ""}`` from
-        :func:`kiss.server.sidebar_panels.machine_work_dirs` (an
-        unreachable or unknown machine answers with ``error``).
+        directory and the directories selected there so far; the
+        task-info panel shows the directory and the machine's default
+        task budget for a chat headed there whose task has no settings
+        yet.  The direct reply is ``{"type": "machineWorkDirs",
+        "machine": <name>, "workDir": <dir>, "recentWorkDirs":
+        [{"path", "ts"}, ...], "maxBudget": <number or null>, "error":
+        ""}`` from :func:`kiss.server.sidebar_panels.machine_work_dirs`
+        (an unreachable or unknown machine answers with ``error``).
 
         Args:
             cmd: The ``getMachineWorkDirs`` command (``machine``).
@@ -2187,6 +2226,28 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_share_chat_tasks(cmd, ctx.endpoint)
+
+    async def get_history(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Answer a CHATS panel page in the background, in the connection's order.
+
+        The page merges every registered machine's history
+        (:func:`kiss.agents.sorcar.machines.merged_history`): a second
+        or more over the machines' links, up to their timeout when one
+        is down.  Each connection's commands are dispatched one at a
+        time, so producing it inline would hold up a ``submit`` or
+        ``stop`` sent right after it, and the page would itself wait
+        behind the slow forwards in front of it (a transcript's
+        ``checkPaths`` on a remote machine, a panel poll).  The
+        connection's pages are answered in the order they were asked
+        for: a later page of a view extends the earlier one.
+
+        Args:
+            cmd: The ``getHistory`` command.
+            ctx: The transport context of the current call.
+        """
+        self._spawn_after(
+            self._pending_history, ctx.conn_state["conn_id"], self._forward_detached(cmd),
+        )
 
     async def voice_transcribe(
         self, cmd: dict[str, Any], ctx: ApiContext,

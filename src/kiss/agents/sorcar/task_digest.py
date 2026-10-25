@@ -4,7 +4,7 @@
 # add your name here
 """Compact digests of a persisted Sorcar task's transcript.
 
-The persisted event stream of a task (``~/.kiss/history.db``) is far
+The persisted event stream of a task (``$KISS_HOME/history.db``) is far
 too large to hand to an LLM raw: thousands of streamed ``text_delta``
 / ``thinking_delta`` chunks, multi-kilobyte tool arguments and shell
 output.  This module turns it into numbered *entries* (one per tool
@@ -62,7 +62,6 @@ _OVERVIEW_SUMMARIES_TAIL = 10
 _OVERVIEW_ASK_ANSWERS = 3
 _OVERVIEW_TAIL_ENTRIES = 30
 MAX_PAGE = 400
-MAX_DETAIL_CHARS = 100_000
 # Character budget of :func:`context` (~15-20k tokens): the whole
 # context fits a single cheap model call next to the question.
 MAX_CONTEXT_CHARS = 60_000
@@ -610,13 +609,12 @@ def _elision(count: int) -> str:
     return f"[... {count} older entries elided ...]"
 
 
-def entry_detail(task_id: str, index: int, max_chars: int = 20_000) -> str:
-    """Return one transcript entry of a task in full.
+def entry_detail(task_id: str, index: int) -> str:
+    """Return one transcript entry of a task in full (clipped at 20,000 characters).
 
     Args:
         task_id: The ``task_history`` row id (32 hex characters).
         index: The entry number shown in brackets by the other digests.
-        max_chars: Clip length for the entry text (at most :data:`MAX_DETAIL_CHARS`).
 
     Returns:
         ``[index] KIND: full text``; or an error line when the task or
@@ -629,5 +627,4 @@ def entry_detail(task_id: str, index: int, max_chars: int = 20_000) -> str:
     index = int(index)
     if not 0 <= index < len(entries):
         return f"Error: entry index {index} out of range (0..{len(entries) - 1})."
-    limit = max(1, min(int(max_chars), MAX_DETAIL_CHARS))
-    return f"[{index}] {entries[index].render(limit)}"
+    return f"[{index}] {entries[index].render(20_000)}"

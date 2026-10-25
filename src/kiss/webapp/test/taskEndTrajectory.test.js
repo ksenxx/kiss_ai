@@ -22,20 +22,11 @@ const {
   send,
   loadMainCss: injectCss,
   readyTabId,
+  isDisplayed,
 } = require('./simplify2_harness');
 
 function makePage() {
   return makeChatPage({sourceUrl: 'trajectory-main.js'});
-}
-
-/** Whether *el* and every ancestor up to #output is displayed. */
-function isDisplayed(win, el) {
-  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
-    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
-      return false;
-    if (n.id === 'output') break;
-  }
-  return true;
 }
 
 /** The direct children of *root* that are event panels. */

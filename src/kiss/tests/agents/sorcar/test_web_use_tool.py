@@ -4,8 +4,11 @@
 # add your name here
 """Tests for web_use_tool.py module."""
 
+import os
+import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -149,6 +152,45 @@ def web_tool():
     tool.close()
 
 
+def _in_own_thread(body: Any, timeout: float = 100) -> None:
+    """Run *body* in a fresh thread, as every real task has, and re-raise its failure.
+
+    A sync Playwright is one per thread and the module's ``web_tool``
+    already owns this one; a body that hangs fails instead of hanging
+    the session (the thread is a daemon).
+    """
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            body()
+        except BaseException as exc:  # noqa: BLE001 - reported in the test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run, name="web-tool-under-test", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), "the browser tool hung"
+    if errors:
+        raise errors[0]
+
+
+def _kill_driver(tool: WebUseTool) -> None:
+    """SIGKILL the Node driver behind *tool*'s Playwright (a driver crash)."""
+    os.kill(tool._playwright._impl_obj._connection._transport._proc.pid, signal.SIGKILL)
+
+
+def _assert_process_gone(pid: int, what: str, timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"{what} (pid {pid}) survived")
+
+
 class TestNavigation:
 
     def test_go_to_invalid_url(self, web_tool):
@@ -216,6 +258,75 @@ class TestCrashRecovery:
 
         assert not old_browser.is_connected()
 
+    @posix_only("SIGKILL of the driver process")
+    @pytest.mark.timeout(120)
+    def test_driver_crash_relaunches_instead_of_hanging(self, http_server):
+        """A dead Playwright driver must not wedge the tool; the next call relaunches.
+
+        Reproduces the hang seen when the Node driver crashed on an internal
+        assertion: ``_is_alive`` trusted ``page.is_closed()``, local state
+        the dead driver never updated, and the recovery's graceful
+        ``context.close()`` waited forever for a close event nobody sends
+        (the watchdog's kill of Chromium unwedges nothing without a
+        driver to observe it).  The tool must detect the dead driver,
+        discard it and come back with a fresh driver and browser.
+        """
+
+        def body() -> None:
+            tool = WebUseTool(user_data_dir=None, headless=True)
+            try:
+                assert "Test Form" in tool.go_to_url(http_server + "/")
+                old_playwright = tool._playwright
+                old_browser_pid = tool._browser_pid
+                assert old_browser_pid is not None
+                _kill_driver(tool)
+                # The call during which the driver dies may fail (like the
+                # one during a renderer crash); the one after it must succeed.
+                results = [tool.go_to_url(http_server + "/")]
+                if "Test Form" not in results[0]:
+                    results.append(tool.go_to_url(http_server + "/"))
+                assert "Test Form" in results[-1], results
+                assert tool._is_alive()
+                assert tool._playwright is not None
+                assert tool._playwright is not old_playwright
+                assert tool._browser_pid not in (None, old_browser_pid)
+                # The old Chromium (a child of the dead driver, reaped by
+                # init, never a zombie of this process) must be gone too.
+                _assert_process_gone(old_browser_pid, "old Chromium")
+            finally:
+                tool.close()
+
+        _in_own_thread(body)
+
+    @posix_only("SIGKILL of the driver process")
+    @pytest.mark.timeout(120)
+    def test_close_after_driver_died_while_idle_returns(self, http_server):
+        """``close()`` after a driver death nobody has observed yet must return.
+
+        The first close is what learns of the death (it fails); the second
+        object's close would never return.  Chromium must be gone after.
+        """
+
+        def body() -> None:
+            tool = WebUseTool(user_data_dir=None, headless=True)
+            assert "Test Form" in tool.go_to_url(http_server + "/")
+            browser_pid = tool._browser_pid
+            assert browser_pid is not None
+            _kill_driver(tool)
+            time.sleep(0.3)
+            started = time.monotonic()
+            assert tool.close() == "Browser closed."
+            assert time.monotonic() - started < 30
+            assert tool._playwright is None and tool._page is None
+            _assert_process_gone(browser_pid, "Chromium")
+            # And the tool is usable again afterwards.
+            try:
+                assert "Test Form" in tool.go_to_url(http_server + "/")
+            finally:
+                tool.close()
+
+        _in_own_thread(body)
+
 
 class TestSingletonLockCleanup:
     """Stale Singleton{Lock,Cookie,Socket} from a previously crashed Chromium
@@ -226,18 +337,12 @@ class TestSingletonLockCleanup:
         (tmp_path / _SINGLETON_FILES[1]).write_text("stale")
         tool = WebUseTool(user_data_dir=str(tmp_path), headless=True)
         try:
-            tool._clean_singleton_locks()
+            tool._clean_singleton_locks(str(tmp_path))
             for name in _SINGLETON_FILES:
                 assert not (tmp_path / name).exists()
                 assert not (tmp_path / name).is_symlink()
         finally:
             tool.close()
-
-    def test_clean_singleton_locks_no_profile(self):
-        """Called on an in-memory tool — no-op, does not raise."""
-        tool = WebUseTool(user_data_dir=None, headless=True)
-        tool._clean_singleton_locks()
-        tool.close()
 
 
 class TestFocusHelpers:

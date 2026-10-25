@@ -32,13 +32,28 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
-from kiss.agents.third_party_agents._composio_google import ComposioHttp, connected_account_id
+from kiss.agents.third_party_agents._composio_google import (
+    ComposioHttp,
+    connected_account_id,
+)
+from kiss.agents.third_party_agents._composio_google import (
+    connection_status as composio_connection_status,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
     google_auth_prompt,
     make_google_auth_tools,
 )
 
 _SERVICE = "gmail"
+
+
+def connection_status() -> str:
+    """Return the live Composio status of this service's account (the cron pre-flight hook).
+
+    ``""`` when no account is connected, ``"ACTIVE"`` / ``"EXPIRED"`` /
+    ... as Composio reports it, or ``"UNKNOWN"`` when the check failed.
+    """
+    return composio_connection_status(_SERVICE)
 
 
 class GmailSea(ChannelSea):

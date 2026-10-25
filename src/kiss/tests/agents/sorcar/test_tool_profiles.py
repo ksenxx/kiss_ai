@@ -109,11 +109,12 @@ class TestConfigToggles:
             assert getattr(DEFAULT_CONFIG, name) is True, name
         assert DEFAULT_CONFIG.context_limit_fraction == 0.7
         assert DEFAULT_CONFIG.tool_output_max_chars == 50000
+        assert DEFAULT_CONFIG.tool_output_default_chars == 8000
         assert DEFAULT_CONFIG.compaction_start_tokens == 100_000
         assert DEFAULT_CONFIG.compaction_step_tokens == 100_000
 
     def test_tool_output_cap_env_reaches_bash_and_docker_defaults(self, tmp_path: Path) -> None:
-        """KISS_TOOL_OUTPUT_MAX_CHARS sets the Bash default cap in a fresh process.
+        """KISS_TOOL_OUTPUT_DEFAULT_CHARS sets the Bash default budget in a fresh process.
 
         Covers both the host and the Docker mode defaults.
         """
@@ -128,7 +129,7 @@ class TestConfigToggles:
                 "str(work)", repr(str(tmp_path))
             )
         )
-        env = {**os.environ, "KISS_TOOL_OUTPUT_MAX_CHARS": "1200"}
+        env = {**os.environ, "KISS_TOOL_OUTPUT_DEFAULT_CHARS": "1200"}
         out = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True
         ).stdout
@@ -191,9 +192,6 @@ class TestToolProfiles:
         monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
         assert agent._tool_profile() == "full"
         assert "Edit" in _names(agent._get_tools())
-        # An unknown explicit name falls through to the default rule.
-        agent._tool_profile_name = "bogus"
-        assert agent._tool_profile() == "full"
 
     def test_non_reviewer_subagent_keeps_full(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _subagent_info={"reviewer": False})

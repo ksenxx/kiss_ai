@@ -42,8 +42,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-_SEA_PATH = Path(write_paper_sea.__file__).resolve()
-
 _ABSTRACT = " ".join(f"word{i}" for i in range(160))
 
 _SLOPPY_TEX = (
@@ -161,14 +159,6 @@ def test_sea_methods_follow_the_user_contract() -> None:
     # it, and the module defines none of the removed getters, which
     # nothing would read.
     assert_no_removed_getters(write_paper_sea)
-
-
-def test_slash_write_paper_resolves_to_the_bundled_sea() -> None:
-    """``/write_paper <instructions>`` resolves to the instructions and this file."""
-    assert sea_commands.get_command("write_paper") == _SEA_PATH
-    assert sea_commands.slash_command_task("/write_paper Write a paper on X") == (
-        "Write a paper on X", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([WritePaperSea()])
 
 
 def test_check_paper_flags_the_sloppy_prose_and_skips_non_prose(tmp_path: Path) -> None:
@@ -456,6 +446,39 @@ def test_build_paper_builds_a_clean_paper_with_bibtex(
     path.write_text(_BIBLATEX_TEX, encoding="utf-8")
     report = write_paper_sea.build_paper(str(path))
     assert re.search(r"^biber: exit (?:0|[1-9]\d* FAIL)$", report, flags=re.MULTILINE), report
+
+
+_FLOATS_TEX = r"""
+\documentclass{article}
+\begin{document}
+\section{A}\label{sec:a}
+Table~\ref{tab:one} and Figure~\ref{fig:two}.
+\begin{table}[h]\centering\begin{tabular}{c}x\end{tabular}\caption{T}\label{tab:one}\end{table}
+\newpage
+\begin{figure}[h]\centering\rule{1cm}{1cm}\caption{F}\label{fig:two}\end{figure}
+Short last page.
+\end{document}
+"""
+
+
+def test_build_paper_reports_last_page_fill_and_float_pages(tmp_path: Path) -> None:
+    """The layout numbers the SEA treats as the gate: page count, last-page fill, float pages."""
+    tex_bin = _tex_bin()
+    if not shutil.which("pdftotext"):
+        pytest.skip("pdftotext is not installed")
+    path = _write(tmp_path, _FLOATS_TEX, None)
+    report = write_paper_sea.build_paper(str(path), tex_bin=tex_bin)
+    assert "pages: 2" in report.splitlines()
+    fill = re.search(r"^last page fill: (\d+)%$", report, flags=re.MULTILINE)
+    assert fill is not None and 0 < int(fill.group(1)) < 100, report
+    assert gate(report, "floats (label: number on page)") == (
+        "floats (label: number on page): 2 (list only) CHECK"
+    )
+    assert "    tab:one: number 1 on page 1" in report
+    assert "    fig:two: number 1 on page 2" in report
+    # A paper without floats lists none; a missing PDF or aux is reported, not raised.
+    assert write_paper_sea.float_pages(tmp_path / "nope.aux") == []
+    assert write_paper_sea.last_page_fill(tmp_path / "nope.pdf") == "?"
 
 
 def test_build_paper_summarizes_errors_undefined_refs_and_overfull_boxes(tmp_path: Path) -> None:
