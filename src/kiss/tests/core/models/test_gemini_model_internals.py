@@ -41,7 +41,7 @@ class TestGeminiModelConversationConversion:
             {"role": "system", "content": "ignored"},
         ]
 
-        contents = model._convert_conversation_to_gemini_contents()
+        contents = model._convert_conversation_to_gemini_contents(model._chat_messages())
         assert len(contents) >= 4
         assert any(content.role == "model" for content in contents)
         assert any(content.role == "user" for content in contents)
@@ -65,3 +65,25 @@ class TestGeminiModelConversationConversion:
             )
         )
         assert model.extract_input_output_token_counts_from_response(response) == (0, 7, 20, 0)
+
+
+class TestGeminiClientReuse:
+    """``initialize()`` keeps one ``genai.Client`` across runs."""
+
+    def test_client_is_built_once_per_api_key(self):
+        model = GeminiModel("gemini-3-flash-preview", api_key="test")
+        assert model.client is None
+        model.initialize("first run")
+        client = model.client
+        assert client is not None
+        model.initialize("second run")
+        assert model.client is client
+        assert model.conversation == [{"role": "user", "content": "second run"}]
+
+        # A key overridden between construction and initialize() (the
+        # Sorcar agent's same-provider switch) must reach the client.
+        model.api_key = "other-key"
+        model.initialize("third run")
+        rebuilt = model.client
+        assert rebuilt is not None and rebuilt is not client
+        assert rebuilt._api_client.api_key == "other-key"

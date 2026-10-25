@@ -6,12 +6,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 const {
   subagentTabEls,
   togglePanel,
   clickClose,
   openSubTabIds,
+  tabEl,
+  clickTab,
 } = require('./subagent_tab_helpers');
 
 function runParallelPanels(win) {
@@ -19,11 +21,9 @@ function runParallelPanels(win) {
 }
 
 function switchToTabEl(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
+  const el = tabEl(win, tabId);
   assert.ok(el, 'tab ' + tabId + ' must be rendered in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, el);
 }
 
 function spawnSub(win, posted, parentId, taskId, desc, idx) {
@@ -80,9 +80,7 @@ function runParallelCall(win, posted, agentTabId, taskIds, descPrefix) {
 
 function bootRunningRoot() {
   const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const rootId = ready.tabId;
+  const rootId = readyTabId(posted);
   send(win, {
     type: 'status',
     running: true,
@@ -1037,7 +1035,7 @@ function testUserCloseOfRunningSubagentTab() {
   console.log('  ok - user close of a running sub-agent tab');
 }
 
-async function main() {
+function main() {
   const tests = [
     testThreeSequentialRunParallelCallsOpenTabs,
     testPerPanelExpandCollapseIndependence,
@@ -1055,13 +1053,13 @@ async function main() {
     testLateSpawnUnderFinishedParentOpensUnderAncestor,
     testUserCloseOfRunningSubagentTab,
   ];
-  for (const t of tests) {
-    await t();
-  }
+  for (const t of tests) t();
   console.log('runParallelMultiCallNested.test.js: all tests passed');
 }
 
-main().catch(err => {
+try {
+  main();
+} catch (err) {
   console.error(err && err.stack ? err.stack : err);
   process.exit(1);
-});
+}

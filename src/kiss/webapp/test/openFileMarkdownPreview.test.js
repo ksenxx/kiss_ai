@@ -16,23 +16,29 @@
 //  3. a path-only prompt is sent as a submit (the daemon decides it is a
 //     file and answers promptOpened + fileContent), which renders the
 //     same preview;
-//  4. a Python file still opens as text (the Monaco editor);
-//  5. .html still renders as HTML, not through the markdown converter;
-//  6. an existing .md path outside the work dir previews too;
-//  7. a missing .md path (the daemon replies with an error) opens
-//     nothing.
+//  4. .html still renders as HTML, not through the markdown converter;
+//  5. an existing .md path outside the work dir previews too.
+// Non-markdown files opening as text and a missing path opening nothing
+// are pinned by openFileHtmlTab.test.js.
 
 'use strict';
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage, send, waitFor} = require('./simplify2_harness.js');
+const {
+  makePage,
+  send,
+  waitFor,
+  activeFrameDoc,
+  stubMonaco,
+} = require('./simplify2_harness.js');
+const {contentTabs} = require('./subagent_tab_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
 function pageWithMarkedAndMonaco() {
-  const created = [];
+  let created = [];
   // The page's transport, so a test can read the state it persists
   // (the unsent drafts a reload hands back).
   let transport = null;
@@ -44,52 +50,10 @@ function pageWithMarkedAndMonaco() {
         return transport;
       };
       win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
-      win.monaco = {
-        editor: {
-          defineTheme: () => {},
-          setTheme: () => {},
-          create: (holder, opts) => {
-            const value = String(opts.value === undefined ? '' : opts.value);
-            const model = {
-              getAlternativeVersionId: () => 1,
-              getValue: () => value,
-              getLineCount: () => value.split('\n').length,
-            };
-            created.push({holder, value: opts.value, language: opts.language});
-            return {
-              getModel: () => model,
-              onDidChangeModelContent: () => {},
-              setPosition: () => {},
-              revealLineInCenter: () => {},
-              getDomNode: () => holder,
-              dispose: () => {},
-              layout: () => {},
-              focus: () => {},
-            };
-          },
-        },
-      };
+      created = stubMonaco(win);
     },
   });
   return Object.assign(page, {created, persistedState: () => transport.getState()});
-}
-
-function contentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
-}
-
-// The html frames of content views on screen (a background content
-// tab keeps its view in the DOM, hidden).
-function frames(win) {
-  return Array.from(
-    win.document.querySelectorAll('.content-html-frame'),
-  ).filter(f => f.closest('.content-tab-view').style.display !== 'none');
-}
-
-function activeFrameDoc(win) {
-  const fr = frames(win);
-  assert.strictEqual(fr.length, 1, 'exactly one html frame on screen');
-  return fr[0].srcdoc;
 }
 
 // The user clicks a link in the chat, so the chat is on screen when
@@ -186,41 +150,17 @@ async function main() {
   );
   console.log('  ok - path-only submit renders markdown like a click');
 
-  // 4. A Python file opens as text in the editor.
-  openFile(win, tabId, '/ws/proj/src/app.py', 'print(1)\n');
-  assert.strictEqual(frames(win).length, 0, 'no html frame for a .py file');
-  await waitFor(() => created.length === 1, 'the text editor was created');
-  assert.strictEqual(created[0].language, 'python');
-  console.log('  ok - non-markdown files still open as text');
-
-  // 5. .html renders as HTML, untouched by the markdown converter.
+  // 4. .html renders as HTML, untouched by the markdown converter.
   openFile(win, tabId, '/ws/proj/site/page.html', '<p># not a heading</p>');
   const htmlDoc = activeFrameDoc(win);
   assert.ok(htmlDoc.includes('<p># not a heading</p>'));
   assert.ok(!/<h1/.test(htmlDoc), 'html is not run through marked');
   console.log('  ok - .html still renders as HTML in its own tab');
 
-  // 6. An .md path outside the work dir previews too.
+  // 5. An .md path outside the work dir previews too.
   openFile(win, tabId, '/elsewhere/other.md', '# Outside\n');
   assertMarkdownPreview(win, 'Outside', 'outside work dir');
   console.log('  ok - outside-workspace md path previews like any other');
-
-  // 7. A missing .md path opens nothing: the daemon answers an error.
-  const count = contentTabs(win).length;
-  win._testApi.switchToTab(tabId);
-  send(win, {
-    type: 'fileContent',
-    path: 'no/such/notes.md',
-    name: 'notes.md',
-    tabId,
-    error: 'File not found: no/such/notes.md',
-  });
-  assert.strictEqual(contentTabs(win).length, count, 'missing md: no tab');
-  const toast = win.document.querySelector(
-    '.kiss-notification[data-notification-id="file-open-error"]',
-  );
-  assert.ok(toast && toast.textContent.includes('File not found'));
-  console.log('  ok - missing md path opens nothing');
   win.close();
 }
 

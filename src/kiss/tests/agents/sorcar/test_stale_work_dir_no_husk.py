@@ -150,13 +150,12 @@ class TestResetDoesNotResurrectWorktree:
     ) -> None:
         """A worktree removed mid-run must not come back as ``kiss_wt-*/tmp``.
 
-        ``_summarize_failed_session`` writes the failed executor's
-        trajectory under ``<work_dir>/tmp`` before summarizing.  The
-        agent is reset into a LIVE worktree, the worktree is removed
-        (a concurrent discard), and the summarizer runs with a model
-        name that cannot resolve, so it takes its ``"Agent failed"``
-        path without any LLM call — the trajectory write happens first
-        either way.
+        ``_summarize_failed_session`` works from an in-memory digest of
+        the failed executor's trajectory and must touch nothing under
+        ``<work_dir>``.  The agent is reset into a LIVE worktree, the
+        worktree is removed (a concurrent discard), and the summarizer
+        runs with a model name that cannot resolve, so it takes its
+        ``"Agent failed"`` path without any LLM call.
         """
         repo, _wt = torn_down_worktree
         live = repo / _WORKTREE_SUBDIR / f"{_WORKTREE_SLUG_PREFIX}1700000003-deadc0de"
@@ -174,7 +173,7 @@ class TestResetDoesNotResurrectWorktree:
 
         assert summary == "Agent failed: boom"
         assert not live.exists(), "the summarizer re-created the removed worktree"
-        assert (repo / "tmp").is_dir(), "the trajectory scratch dir landed elsewhere"
+        assert not (repo / "tmp").exists(), "the summarizer wrote scratch files"
 
 
 class _RecordingDaemon(_LocalDaemon):

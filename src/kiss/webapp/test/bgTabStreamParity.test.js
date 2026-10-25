@@ -41,6 +41,7 @@ const assert = require('assert');
 const path = require('path');
 const {spawnSync} = require('child_process');
 const harness = require('./simplify2_harness');
+const {bootParallelRun} = require('./subagent_tab_helpers');
 
 const {send, clickTab} = harness;
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
@@ -48,36 +49,45 @@ const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 // `JsonPrinter._filter_and_coalesce` is the function `stop_recording()`
 // and `peek_recording()` run every event list through on its way to the
 // database, so its answer IS what a reload, a history click or a
-// background tab's `task_events` gets back.
+// background tab's `task_events` gets back.  The probe records every run
+// of the list it is fed, so the suite spawns it exactly once.
 const RECORDER_PROBE = [
   'import json, sys',
   'from kiss.server.json_printer import JsonPrinter',
-  'json.dump(JsonPrinter._filter_and_coalesce(json.load(sys.stdin)), sys.stdout)',
+  'runs = json.load(sys.stdin)',
+  'json.dump([JsonPrinter._filter_and_coalesce(run) for run in runs], sys.stdout)',
 ].join('\n');
 
+let recordedRuns = null;
+
 /**
- * Record a run the way the daemon does and hand back what survived.
+ * Record the suite's two runs the way the daemon does, once per process,
+ * and hand back a fresh copy of what survived of the requested one.
  *
- * @param {Array<object>} events The events the agent broadcast.
+ * Four `uv run` spawns at 30 s each would equal the runner's two-minute
+ * cap on the suite, and `uv run` contends for the project lock with any
+ * concurrent `uv sync`; one spawn keeps a stalled `uv` reported by the
+ * assertion below instead of as a hung suite.
+ *
+ * @param {number} index 0 for `recordedRun()`, 1 for `parentFanOutRun()`.
  * @returns {Array<object>} The transcript the daemon would store.
  */
-function recordAsDaemon(events) {
-  // `uv run` takes the project lock, so a concurrent `uv sync` elsewhere
-  // can stall it; the probe itself runs in about a second.  The timeout
-  // stays well under the runner's two-minute cap on the whole suite, so a
-  // stalled `uv` is reported by the assertion below, not as a hung suite.
-  const res = spawnSync('uv', ['run', 'python', '-c', RECORDER_PROBE], {
-    cwd: REPO_ROOT,
-    input: JSON.stringify(events),
-    encoding: 'utf8',
-    timeout: 30000,
-  });
-  assert.ok(
-    !res.error && res.status === 0,
-    'the daemon\u2019s recorder must be runnable from the repo root: ' +
-      `${res.error || ''} ${res.stderr || ''}`,
-  );
-  return JSON.parse(res.stdout);
+function recordAsDaemon(index) {
+  if (recordedRuns === null) {
+    const res = spawnSync('uv', ['run', 'python', '-c', RECORDER_PROBE], {
+      cwd: REPO_ROOT,
+      input: JSON.stringify([recordedRun(), parentFanOutRun()]),
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    assert.ok(
+      !res.error && res.status === 0,
+      'the daemon\u2019s recorder must be runnable from the repo root: ' +
+        `${res.error || ''} ${res.stderr || ''}`,
+    );
+    recordedRuns = res.stdout;
+  }
+  return JSON.parse(recordedRuns)[index];
 }
 
 function makePage() {
@@ -135,10 +145,45 @@ function recordedRun() {
   ];
 }
 
+// A parent that fanned out one sub-agent and finished: the run
+// `testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers` replays.
+function parentFanOutRun() {
+  return [
+    {type: 'thinking_start', ts: TS},
+    {type: 'thinking_delta', text: 'fanning out', ts: TS},
+    {type: 'thinking_end', ts: TS},
+    {
+      type: 'tool_call',
+      name: 'run_parallel',
+      extras: {tasks: JSON.stringify(['sub 1'])},
+      ts: TS,
+    },
+    {type: 'tool_result', content: 'sub done', ts: TS},
+    {
+      type: 'usage_info',
+      text: 'Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00',
+      total_tokens: 12345,
+      cost: '$0.42',
+      total_steps: 7,
+      ts: TS,
+    },
+    {
+      type: 'result',
+      text: 'summary: Done.\nsuccess: true\n',
+      summary: 'Done.',
+      success: true,
+      total_tokens: 12345,
+      cost: '$0.42',
+      step_count: 7,
+      ts: TS,
+    },
+  ];
+}
+
 // What is left of that run once the daemon has recorded it: what a
 // reload, a history click or a background tab's `task_events` gets back.
 function persistedTranscript() {
-  const events = recordAsDaemon(recordedRun());
+  const events = recordAsDaemon(0);
   assert.ok(
     events.some(ev => ev.type === 'result'),
     'the daemon must keep the result event, or there is nothing to replay',
@@ -527,71 +572,13 @@ function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
 // status row. The numbers the replay painted must already be on the
 // parent tab by then -- captured after rendering, before collapsing.
 function testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers() {
-  const {win, posted} = makePage();
-  const tabA = win._testApi.getActiveTabId();
-
-  send(win, {type: 'status', running: true, tabId: tabA, startTs: TS});
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: tabA,
-    extras: {tasks: JSON.stringify(['sub 1'])},
-  });
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-1',
-    parent_tab_id: tabA,
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'sub-task-1');
-  assert.ok(resume, 'new_tab must make the page post resumeSession');
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: resume.tabId,
-    parent_tab_id: tabA,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-  });
-  clickTab(win, resume.tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), resume.tabId);
+  const {win, parentId: tabA, subTabIds: [subTab]} = bootParallelRun(1, makePage());
+  clickTab(win, subTab);
+  assert.strictEqual(win._testApi.getActiveTabId(), subTab);
 
   // The parent's finished transcript replays while the sub-agent tab
   // is on screen; its collapse pass closes that tab.
-  const parentRun = recordAsDaemon([
-    {type: 'thinking_start', ts: TS},
-    {type: 'thinking_delta', text: 'fanning out', ts: TS},
-    {type: 'thinking_end', ts: TS},
-    {
-      type: 'tool_call',
-      name: 'run_parallel',
-      extras: {tasks: JSON.stringify(['sub 1'])},
-      ts: TS,
-    },
-    {type: 'tool_result', content: 'sub done', ts: TS},
-    {
-      type: 'usage_info',
-      text: 'Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00',
-      total_tokens: 12345,
-      cost: '$0.42',
-      total_steps: 7,
-      ts: TS,
-    },
-    {
-      type: 'result',
-      text: 'summary: Done.\nsuccess: true\n',
-      summary: 'Done.',
-      success: true,
-      total_tokens: 12345,
-      cost: '$0.42',
-      step_count: 7,
-      ts: TS,
-    },
-  ]);
-  send(win, {type: 'task_events', tabId: tabA, events: parentRun});
+  send(win, {type: 'task_events', tabId: tabA, events: recordAsDaemon(1)});
 
   if (win._testApi.getActiveTabId() !== tabA) clickTab(win, tabA);
   const shown = snapshot(win);

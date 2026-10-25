@@ -364,8 +364,9 @@
   /**
    * Install a Copy / Select All context menu on *doc*.
    *
-   * Returns a handle with `close()` and `dispose()` so a caller can tear the
-   * menu down; `dispose()` also removes every listener it registered.
+   * Returns a handle with `close()` so a caller can dismiss an open menu
+   * (main.js closes it when a tree menu opens over it).  The listeners live
+   * as long as *doc* does.
    */
   function installContentContextMenu(doc, opts) {
     const options = opts || {};
@@ -476,9 +477,10 @@
       const model = buildMenuModel(doc, target);
       const editable = editableTarget(target);
       // Chromium truncates a multi-range Selection to its first range, so
-      // an untouched Select All is copied from the captured text instead.
+      // an untouched Select All is copied from the captured text instead
+      // (buildMenuModel always puts the Copy item first).
       const cached = cachedSelectAllText();
-      if (cached && model[0].id === 'copy' && model[0].enabled) {
+      if (cached && model[0].enabled) {
         model[0].text = cached;
       }
       menu = doc.createElement('div');
@@ -578,7 +580,7 @@
       }
     }
 
-    function onScrollOrBlur() {
+    function onWindowChange() {
       close();
     }
 
@@ -586,24 +588,11 @@
     doc.addEventListener('click', onDocClick);
     doc.addEventListener('keydown', onKeyDown);
     if (win) {
-      win.addEventListener('blur', onScrollOrBlur);
-      win.addEventListener('resize', onScrollOrBlur);
+      win.addEventListener('blur', onWindowChange);
+      win.addEventListener('resize', onWindowChange);
     }
 
-    return {
-      close: close,
-      open: open,
-      dispose: function () {
-        close();
-        doc.removeEventListener('contextmenu', onContextMenu);
-        doc.removeEventListener('click', onDocClick);
-        doc.removeEventListener('keydown', onKeyDown);
-        if (win) {
-          win.removeEventListener('blur', onScrollOrBlur);
-          win.removeEventListener('resize', onScrollOrBlur);
-        }
-      },
-    };
+    return {close: close};
   }
 
   /**
@@ -651,8 +640,8 @@
     insertIntoContentEditable.toString() +
     pasteInto.toString() +
     installContentContextMenu.toString() +
-    // The handle is published so the page (or a test) can tear the menu
-    // down again; installing twice would otherwise be undetectable.
+    // The handle is published so the page can tell the menu is installed
+    // and close it; installing twice would otherwise be undetectable.
     'window.__sorcarContentContextMenu=' +
     'installContentContextMenu(document,{});' +
     '})();';

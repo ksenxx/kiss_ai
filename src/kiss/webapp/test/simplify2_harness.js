@@ -64,12 +64,15 @@ function chatHtml(opts) {
  *
  * @param {string|{runScripts?: string, url?: string|null,
  *   userAgent?: string, bodyClass?: string, modelName?: string,
- *   placeholders?: object}} [opts] The jsdom `runScripts` mode (default
- *   `'dangerously'`), either alone or in an options bag with the
- *   `chatHtml` options, the page `url` (default `https://localhost/`;
- *   `null` opens an opaque `about:blank` origin whose `localStorage`
- *   throws) and the `navigator.userAgent` to report (jsdom ignores its
- *   own `userAgent` option, so it is defined on the navigator).
+ *   placeholders?: object, virtualConsole?: object}} [opts] The jsdom
+ *   `runScripts` mode (default `'dangerously'`), either alone or in an
+ *   options bag with the `chatHtml` options, the page `url` (default
+ *   `https://localhost/`; `null` opens an opaque `about:blank` origin
+ *   whose `localStorage` throws), the `navigator.userAgent` to report
+ *   (jsdom ignores its own `userAgent` option, so it is defined on the
+ *   navigator) and a jsdom `VirtualConsole` to receive the page's
+ *   console output and jsdom errors (a `location.reload()` surfaces
+ *   there as a "Not implemented: navigation" error).
  * @returns {object} The window.
  */
 function newDom(opts) {
@@ -78,9 +81,11 @@ function newDom(opts) {
     runScripts = 'dangerously',
     url = 'https://localhost/',
     userAgent,
+    virtualConsole,
   } = opts || {};
   const domOpts = {runScripts, pretendToBeVisual: true};
   if (url) domOpts.url = url;
+  if (virtualConsole) domOpts.virtualConsole = virtualConsole;
   const dom = new JSDOM(chatHtml(opts), domOpts);
   const win = dom.window;
   if (userAgent) {
@@ -467,6 +472,52 @@ function ofType(posted, type) {
   return posted.filter(m => m && m.type === type);
 }
 
+/** The last message of `type` the page posted, or null. */
+function lastMsg(posted, type) {
+  for (let i = posted.length - 1; i >= 0; i -= 1) {
+    if (posted[i] && posted[i].type === type) return posted[i];
+  }
+  return null;
+}
+
+/** A `tabs_state` entry as the daemon's registry snapshot carries it. */
+function snapshotEntry(tabId, title, chatId, workDir) {
+  return {
+    tabId: tabId,
+    chatId: chatId || '',
+    title: title || 'new chat',
+    workDir: workDir || '',
+  };
+}
+
+/** Resolve after `n` of the window's animation frames have run. */
+function nextFrames(win, n = 3) {
+  return new Promise(resolve => {
+    let left = n;
+    function step() {
+      if (--left <= 0) return resolve();
+      win.requestAnimationFrame(step);
+    }
+    win.requestAnimationFrame(step);
+  });
+}
+
+/** Set `el.value` and dispatch the bubbling `input` event a keystroke would. */
+function typeInto(win, el, value) {
+  el.value = value;
+  el.dispatchEvent(new win.Event('input', {bubbles: true}));
+}
+
+/** Whether `el` and every ancestor up to #output is displayed. */
+function isDisplayed(win, el) {
+  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
+      return false;
+    if (n.id === 'output') break;
+  }
+  return true;
+}
+
 /** The tabId main.js posted in its `ready` message. */
 function readyTabId(posted) {
   const ready = posted.find(m => m.type === 'ready');
@@ -507,7 +558,130 @@ function pickMachine(win, value) {
   select.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
+/**
+ * Open a chat on `task` the way the daemon does when the user submits a
+ * prompt: an empty `task_events` for the chat, `status running`, then the
+ * prompt echo.  `posted` is the page's ledger (for its ready tabId).
+ */
+function startTask(win, posted, task) {
+  send(win, {
+    type: 'task_events',
+    events: [],
+    task,
+    tabId: readyTabId(posted),
+    chat_id: 'chat-' + task.replace(/\W+/g, '-'),
+  });
+  send(win, {type: 'status', running: true});
+  send(win, {type: 'prompt', text: task});
+}
+
+/**
+ * What a collapse header reads as: its title and its preview span, which
+ * the stylesheet sets apart with a margin, joined by one space.
+ */
+function headerText(hdr) {
+  return Array.from(hdr.childNodes)
+    .map(n => n.textContent.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** Fold `panel` (the streaming sweep may have already) and read its header. */
+function collapsedHeaderText(panel) {
+  const hdr = panel.querySelector('.collapse-header');
+  if (!panel.classList.contains('collapsed')) hdr.click();
+  assert.ok(panel.classList.contains('collapsed'));
+  return headerText(hdr);
+}
+
+/**
+ * The transcript of `win` serialized the way a shared page is and
+ * re-driven by media/share.js in a fresh window, which is returned
+ * (close it when done).  `win` is closed.
+ */
+function shareTranscript(win) {
+  const html =
+    '<!doctype html><html><body><div id="output">' +
+    output(win).innerHTML +
+    '</div></body></html>';
+  win.close();
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: 'https://localhost/',
+  });
+  dom.window.eval(fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8'));
+  return dom.window;
+}
+
+/**
+ * The header text of every `.tc` panel on a shared page, each folded by
+ * share.js itself: a panel the live sweep had folded is opened first and
+ * its serialized preview overwritten, so the text is share.js's own.
+ */
+function foldedShareHeaders(sw) {
+  return Array.from(sw.document.querySelectorAll('.tc')).map(p => {
+    const hdr = p.querySelector('.collapse-header');
+    if (p.classList.contains('collapsed')) hdr.click();
+    hdr.querySelector('.collapse-preview').textContent = 'stale';
+    hdr.click();
+    assert.ok(p.classList.contains('collapsed'), 'share.js folds the panel');
+    return headerText(hdr);
+  });
+}
+
+/**
+ * The html frames of the content views on screen (a background content
+ * tab keeps its view in the DOM, hidden).
+ */
+function htmlFrames(win) {
+  return Array.from(
+    win.document.querySelectorAll('.content-html-frame'),
+  ).filter(f => f.closest('.content-tab-view').style.display !== 'none');
+}
+
+/** The srcdoc of the one html frame on screen. */
+function activeFrameDoc(win) {
+  const fr = htmlFrames(win);
+  assert.strictEqual(fr.length, 1, 'exactly one html frame on screen');
+  return fr[0].srcdoc;
+}
+
+/** A panel's time-spent label ("1m 2.5s", "2.5s", "40ms") in ms, else NaN. */
+function parsePanelTimeMs(text) {
+  const t = String(text || '').trim();
+  let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
+  if (m) return (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000;
+  m = t.match(/^(\d+(?:\.\d+)?)s$/);
+  if (m) return parseFloat(m[1]) * 1000;
+  m = t.match(/^(\d+)ms$/);
+  if (m) return parseInt(m[1], 10);
+  return NaN;
+}
+
+/** Open a second chat tab; `{api, first, second}` with `second` active. */
+function twoTabs(win) {
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
+  const first = api.getActiveTabId();
+  api.createNewTab();
+  const second = api.getActiveTabId();
+  assert.ok(second && second !== first, 'a fresh second tab must be active');
+  return {api, first, second};
+}
+
+/**
+ * Mount a tips sheet showing `tips` (markdown strings) the way tips.js
+ * does for the Tips button, and return its `<kiss-tips-panel>`.
+ */
+function showTips(win, tips) {
+  const el = win.document.createElement('kiss-tips-panel');
+  el.tips = tips;
+  win.document.body.appendChild(el);
+  return el;
+}
+
 module.exports = {
+  showTips,
   MEDIA,
   newDom,
   makePage,
@@ -532,4 +706,18 @@ module.exports = {
   rowsByTitle,
   answering,
   pickMachine,
+  lastMsg,
+  snapshotEntry,
+  nextFrames,
+  isDisplayed,
+  startTask,
+  headerText,
+  collapsedHeaderText,
+  shareTranscript,
+  foldedShareHeaders,
+  htmlFrames,
+  activeFrameDoc,
+  parsePanelTimeMs,
+  twoTabs,
+  typeInto,
 };

@@ -31,9 +31,10 @@ import pytest
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig, _connection_key
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -99,7 +100,8 @@ def _run_interrupted(name: str, work: object) -> tuple[dict[str, object], float]
     outcome: dict[str, object] = {}
 
     def run() -> None:
-        token = begin_tool_call(name)
+        token = new_tool_call(name)
+        register_tool_call(token)
         try:
             try:
                 outcome["result"] = work()  # type: ignore[operator]

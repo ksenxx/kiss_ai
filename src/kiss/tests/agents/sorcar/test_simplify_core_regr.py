@@ -7,9 +7,9 @@
 
 Split out of ``tests/core/test_simplify_core_regr.py``: these methods
 exercise ``kiss.agents.sorcar.relentless_agent`` for real (its ``finish``
-output through the core ConsolePrinter's result panel, ``coerce_bool``,
-and ``SorcarAgent._docker_bash``), so they belong in
-``tests/agents/sorcar`` per the placement invariants.  The shared
+output through the core ConsolePrinter's result panel and
+``coerce_bool``), so they belong in ``tests/agents/sorcar`` per the
+placement invariants.  The shared
 ``_make_printer`` helper stays in the lower-layer core file and is
 imported from there.  Uses only real objects (no mocks/patches/fakes).
 """
@@ -20,7 +20,6 @@ from typing import Any, cast
 import yaml
 
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.utils import coerce_bool
 from kiss.tests.core.test_simplify_core_regr import _make_printer
 
@@ -79,14 +78,6 @@ class RelentlessRegression(unittest.TestCase):
         self.assertEqual(data, {"success": True, "is_continue": False, "summary": "<p>sum</p>"})
         data2 = yaml.safe_load(relentless_finish(False))
         self.assertEqual(data2, {"success": False, "is_continue": False, "summary": ""})
-
-    def test_docker_bash_without_manager_raises(self) -> None:
-        from kiss.core.kiss_error import KISSError
-
-        agent = SorcarAgent("regr docker")
-        agent.docker_manager = None
-        with self.assertRaises(KISSError):
-            agent._docker_bash("echo hi", "desc")
 
 
 if __name__ == "__main__":

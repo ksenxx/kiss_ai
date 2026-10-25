@@ -197,8 +197,105 @@ async function testUpdateRebroadcastRefreshesMessageAndAriaLabel() {
   }
 }
 
+// A repaint of a transient toast (same id) while the pointer is on it
+// must not re-arm the auto-dismiss that the hover cleared; the timer
+// comes back when the pointer leaves.
+async function testRepaintUnderPointerKeepsDismissCleared() {
+  const wv = makeDomPage();
+  try {
+    const ev = {
+      type: 'notification',
+      id: 'review-hover-repaint',
+      severity: 'info',
+      message: 'first',
+      sticky: false,
+    };
+    send(wv.win, ev);
+    const toast = await waitFor(
+      () => wv.win.document.querySelector('.kiss-notification'),
+      'notification must render',
+    );
+    toast.dispatchEvent(new wv.win.MouseEvent('mouseenter', {bubbles: true}));
+    assert.ok(!timerDelays(wv).includes(5000), 'hover clears the timer');
+
+    send(wv.win, Object.assign({}, ev, {message: 'second'}));
+    assert.strictEqual(
+      wv.win.document.querySelectorAll('.kiss-notification').length,
+      1,
+      'the repaint reuses the toast',
+    );
+    assert.ok(
+      !timerDelays(wv).includes(5000),
+      'a repaint under the pointer must not re-arm the auto-dismiss',
+    );
+
+    toast.dispatchEvent(new wv.win.MouseEvent('mouseleave', {bubbles: true}));
+    assert.ok(
+      latestTimer(wv, 5000),
+      'leaving the toast arms the auto-dismiss again',
+    );
+  } finally {
+    wv.close();
+  }
+}
+
+// A focusout while the pointer still rests on the toast armed the
+// transient dismiss; the toast is then repainted as a sticky error.
+// That repaint must cancel the stale timer: the error stays.  The
+// timers are recorded, so "no live 5 s auto-dismiss remains" is checked
+// directly instead of sleeping past the 5 s dismiss.
+async function testStickyErrorRepaintCancelsStaleFocusoutTimer() {
+  const wv = makeDomPage();
+  const {win} = wv;
+  try {
+    send(win, {
+      type: 'notification',
+      id: 'review-sticky',
+      severity: 'info',
+      message: 'initial',
+      sticky: false,
+    });
+    const toast = await waitFor(
+      () => win.document.querySelector('.kiss-notification'),
+      'notification must render',
+    );
+    toast.dispatchEvent(new win.MouseEvent('mouseenter', {bubbles: true}));
+    toast.focus();
+    assert.strictEqual(win.document.activeElement, toast, 'toast focused');
+    win.document.getElementById('task-input').focus();
+    assert.notStrictEqual(win.document.activeElement, toast, 'focus left');
+
+    send(win, {
+      type: 'notification',
+      id: 'review-sticky',
+      severity: 'error',
+      message: 'something broke',
+      sticky: true,
+    });
+    assert.strictEqual(
+      win.document.querySelectorAll('.kiss-notification').length,
+      1,
+      'the repaint reuses the toast',
+    );
+    assert.ok(
+      !timerDelays(wv).includes(5000),
+      'a sticky error repainted over a hovered toast leaves no auto-dismiss armed',
+    );
+    assert.ok(toast.isConnected, 'the sticky error stays on screen');
+    assert.strictEqual(
+      toast.getAttribute('data-notification-sticky'),
+      'true',
+      'the repaint shows the sticky error',
+    );
+  } finally {
+    wv.close();
+  }
+}
+
 async function runTests() {
   await testStickyStateRefreshesAfterReusingNotificationId();
+  await testRepaintUnderPointerKeepsDismissCleared();
+  await testStickyErrorRepaintCancelsStaleFocusoutTimer();
   await testUpdateToastCloseDoesNotPostNotificationAction();
   await testUpdateRebroadcastRefreshesMessageAndAriaLabel();
 }

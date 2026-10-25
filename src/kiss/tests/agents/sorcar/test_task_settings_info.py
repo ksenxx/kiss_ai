@@ -171,6 +171,12 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert f"- Task id: {agent.last_task_id}" in body
         assert "- Is subagent: no" in body
         assert "- Parent task id:" not in body
+        assert f"- Scratch dir: ./tmp/{agent.last_task_id}/" in body
+        # A run with no built-in toolset gets the lite prompt, whose
+        # rules point at that scratch dir.
+        assert "<identity>" in body
+        assert "## Pre-flight Checks" not in body
+        assert "scratch directory (the \\\"Scratch dir\\\" of Task Settings" in body
         # Host-derived values may be JSON-escaped in the raw body, so
         # assert them against the decoded system-message text; the IP
         # is validated in place (not re-looked-up, which could differ
@@ -212,6 +218,7 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert f"- Task id: {'b' * 32}" in section
         assert "- Is subagent: yes" in section
         assert f"- Parent task id: {PARENT_ID}" in section
+        assert f"- Scratch dir: ./tmp/{'b' * 32}/" in section
 
     def test_base_agents_report_model_budget_and_time(self) -> None:
         """RelentlessAgent / SorcarAgent report their own settings."""
@@ -222,6 +229,8 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert "- Model name: claude-opus-4-6" in section
         assert "- Max budget (USD): $7.25" in section
         assert "- Starting time: " in section
+        # Local zone and UTC both given: a run never needs a ``date`` turn.
+        assert " UTC)" in section.split("- Starting time: ", 1)[1].split("\n", 1)[0]
         assert f"- User id: {_line(_nonempty(getpass.getuser()))}" in section
         assert "- IP address: " in section
         assert "- OS: " in section
@@ -463,7 +472,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
         agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="crashed early",
-            result_raw="",
+            parsed=None,
             result_summary="Task failed",
             usage=agent.usage_snapshot(),
         )
@@ -475,7 +484,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
         agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="crashed early",
-            result_raw="",
+            parsed=None,
             result_summary="Task failed",
             usage=agent.usage_snapshot(),
         )

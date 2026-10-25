@@ -25,8 +25,9 @@ from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
-from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
+from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
+    _output_budget,
     _stop_requested,
     _truncate_output,
     run_commands_pool,
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 #: Default cap on the characters a single command may return, matching
 #: ``UsefulTools.Bash``.  Without it an unbounded ``pip install`` log goes
 #: straight into the conversation and blows the model's context window.
-MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_max_chars
+MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_default_chars
 
 #: Last line of a ``Bash`` result whose command was killed by a task
 #: Stop or a tool-panel Stop; ``DockerTools`` reads it to know that a
@@ -593,11 +594,13 @@ class DockerManager:
             command: The bash command to execute
             description: A short description of the command in natural language
             timeout_seconds: Maximum time to wait before treating the command as hung.
-            max_output_chars: Maximum characters in output before truncation.
+            max_output_chars: Characters of output kept (head and tail),
+                up to the configured ceiling.
 
         Returns:
             The output of the command, including stdout, stderr, and exit code
         """
+        max_output_chars = _output_budget(max_output_chars)
         # ONE snapshot of the container reference: ``close()`` (under
         # the lifecycle lock, which command paths deliberately do not
         # take — a running command must not block a teardown) nulls
@@ -613,18 +616,17 @@ class DockerManager:
 
         print(f"{description}")
 
-        guard = destructive_command_guard(command, self.workdir)
+        guard, deadline = refuse_or_lift(command, self.workdir, timeout_seconds)
         if guard is not None:
             return guard
-        timeout_seconds = int(lift_install_timeout(command, timeout_seconds))
         exit_code, output = self._exec(
-            container, command, timeout_seconds, self.stop_event, self.stream_callback,
+            container, command, deadline, self.stop_event, self.stream_callback,
         )
         # A tool-panel Stop ended the wait cooperatively (the exec is
         # already killed): surface it as the interrupted result.
         tool_interrupt.raise_if_interrupted()
         if exit_code is None:
-            return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
+            return _truncate_output(_timeout_message(deadline, output), max_output_chars)
         return _truncate_output(
             _with_exit_code(output, exit_code), max_output_chars,
         )
@@ -707,10 +709,9 @@ class DockerManager:
             timeout, ``-1`` when the exec failed to run or was stopped),
             the output and the wall time spent.
         """
-        guard = destructive_command_guard(command, self.workdir)
+        guard, timeout_seconds = refuse_or_lift(command, self.workdir, timeout_seconds)
         if guard is not None:
             return -1, guard, 0.0
-        timeout_seconds = lift_install_timeout(command, timeout_seconds)
         started = time.monotonic()
         try:
             exit_code, output = self._exec(container, command, timeout_seconds, cancel)

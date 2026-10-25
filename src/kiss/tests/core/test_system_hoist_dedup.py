@@ -55,7 +55,7 @@ def _gemini_system(
     config = {"system_instruction": system_instruction} if system_instruction else {}
     m = GeminiModel("gemini-2.5-pro", api_key="test-key", model_config=config)
     m.conversation = list(conversation)
-    return m._resolve_system_instruction()
+    return m._resolve_system_instruction(m._chat_messages())
 
 
 _USER = {"role": "user", "content": "hello"}

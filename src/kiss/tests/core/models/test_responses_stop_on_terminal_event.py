@@ -119,5 +119,5 @@ class TestStopOnTerminalEvent:
             assert tokens == ["Hello"]
             billed = model.take_partial_usage_response()
             assert billed is not None, "the completed response's usage was dropped"
-            assert model.extract_input_output_token_counts_from_response(billed) == (7, 3, 0, 0)
+            assert model.extract_input_output_token_counts_from_response(billed) == (7, 3, 0, 0, 0)
             assert len(server.requests) == 1

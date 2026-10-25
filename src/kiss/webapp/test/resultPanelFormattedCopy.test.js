@@ -18,7 +18,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send} = harness;
+const {send, sleep, click} = harness;
 
 // The harness page plus a navigator.clipboard stub that records the
 // last text written; getClipboard() reads it back.
@@ -44,13 +44,12 @@ function clickCopy(win) {
   assert.ok(rc, 'expected a Result panel');
   const btn = rc.querySelector('.panel-copy-btn');
   assert.ok(btn, 'Result panel must have a copy button');
-  btn.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
+  click(win, btn);
 }
 
+// The copy handler awaits the clipboard promise before it is done.
 function flushMicrotasks() {
-  return new Promise(resolve => setImmediate(resolve));
+  return sleep(0);
 }
 
 async function testHtmlSummaryCopiesFormattedText() {

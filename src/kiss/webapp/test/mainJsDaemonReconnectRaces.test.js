@@ -34,35 +34,25 @@ const {
   send,
   stubRaf,
   fakeMatchMedia,
+  fakeIntervals,
+  ofType: msgsOf,
 } = require('./simplify2_harness');
+const {clickClose} = require('./subagent_tab_helpers');
 
-// Intervals are recorded, not run, so a test fires a poll tick by hand.
-function recordIntervals(win) {
-  const intervals = [];
-  win.setInterval = function (fn, ms) {
-    intervals.push({fn, ms});
-    return intervals.length;
-  };
-  win.clearInterval = function () {};
-  return intervals;
-}
-
-// `desktop` adds remote-desktop to the body, as the page does on a wide screen.
+// `desktop` adds remote-desktop to the body, as the page does on a wide
+// screen.  Intervals are recorded, not run, so a test fires a poll tick
+// by hand.
 function makePage(desktop) {
   let intervals;
   const {win, posted} = buildPage({
     bodyClass: 'remote-chat' + (desktop ? ' remote-desktop' : ''),
     beforeScripts: w => {
       stubRaf(w);
-      intervals = recordIntervals(w);
+      intervals = fakeIntervals(w).intervals;
       fakeMatchMedia(w, true);
     },
   });
   return {win, posted, intervals};
-}
-
-function msgsOf(posted, type) {
-  return posted.filter(m => m && m.type === type);
 }
 
 function daemon(win, connected) {
@@ -178,11 +168,12 @@ function testSubmitStillBlockedWhileDownOnColdStart() {
 
 // --- F2 ---------------------------------------------------------------------
 
+// speech_helpers.installAudio plus the `pause` main.js calls on a retired
+// player (the shared stand-in has none and would throw).
 function installAudio(win) {
   const players = [];
   win.Audio = function Audio(src) {
     this.src = src;
-    this.currentTime = 0;
     this.playCalls = 0;
     this.play = () => {
       this.playCalls++;
@@ -281,8 +272,8 @@ function testPollersPauseWhileDisconnected() {
   assert.ok(sidebarTick, 'the 30 s sidebar-panels interval is armed');
 
   posted.length = 0;
-  metaTick.fn();
-  sidebarTick.fn();
+  metaTick.cb();
+  sidebarTick.cb();
   assert.strictEqual(msgsOf(posted, 'getTaskUpdate').length, 1);
   assert.strictEqual(msgsOf(posted, 'getCronJobs').length, 1);
   assert.strictEqual(msgsOf(posted, 'getAppsStatus').length, 1);
@@ -292,8 +283,8 @@ function testPollersPauseWhileDisconnected() {
   send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
   posted.length = 0;
   for (let i = 0; i < 5; i++) {
-    metaTick.fn();
-    sidebarTick.fn();
+    metaTick.cb();
+    sidebarTick.cb();
   }
   assert.deepStrictEqual(
     posted.map(m => m.type),
@@ -306,8 +297,8 @@ function testPollersPauseWhileDisconnected() {
   // the next ticks post again.
   daemon(win, true);
   posted.length = 0;
-  metaTick.fn();
-  sidebarTick.fn();
+  metaTick.cb();
+  sidebarTick.cb();
   assert.strictEqual(msgsOf(posted, 'getTaskUpdate').length, 1);
   assert.strictEqual(msgsOf(posted, 'getCronJobs').length, 1);
   win.close();
@@ -320,11 +311,7 @@ function testPollersPauseWhileDisconnected() {
 // button) on the group strip, so the chat is brought on screen first.
 function closeTabViaUi(win, tabId) {
   win._testApi.switchToTab(tabId);
-  const btn = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + tabId + '"] .chat-tab-close',
-  );
-  assert.ok(btn, 'tab ' + tabId + ' has a close button');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickClose(win, tabId);
 }
 
 function testStaleSnapshotDoesNotResurrectClosedTab() {

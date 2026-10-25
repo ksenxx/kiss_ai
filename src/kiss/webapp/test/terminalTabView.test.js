@@ -11,13 +11,13 @@
 // reconnect, and dispose.  jsdom has no xterm.js, no ResizeObserver and
 // no animation frames, so the page is given a minimal Terminal /
 // FitAddon pair and synchronous stand-ins for the two browser APIs;
-// the real terminalTab.js drives them.
+// the real terminalTab.js drives them.  setTimeout is recorded too, so
+// the 100 ms resize debounce is fired by hand instead of slept past.
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -30,6 +30,8 @@ function makePage() {
   const terminals = [];
   const observers = [];
   const frames = [];
+  const timers = new Map();
+  let nextTimer = 0;
 
   class Terminal {
     constructor() {
@@ -87,8 +89,21 @@ function makePage() {
     frames.push(cb);
     return frames.length;
   };
+  win.setTimeout = (fn, ms) => {
+    nextTimer++;
+    timers.set(nextTimer, {fn, ms});
+    return nextTimer;
+  };
+  win.clearTimeout = id => timers.delete(id);
   win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
-  return {win, fits, terminals, observers, frames};
+  return {win, fits, terminals, observers, frames, timers};
+}
+
+/** Fire every timer still armed, as the clock would once they elapse. */
+function runTimers(page) {
+  const due = Array.from(page.timers.values());
+  page.timers.clear();
+  due.forEach(t => t.fn());
 }
 
 /** Create a view, show it and let xterm load (one microtask turn). */
@@ -129,11 +144,17 @@ async function testOpenFitAndResize() {
 
   // A surface resize refits after the debounce, only while visible.
   page.observers[0].cb();
-  await sleep(150);
+  assert.deepStrictEqual(
+    Array.from(page.timers.values(), t => t.ms),
+    [100],
+    'a resize arms the 100 ms debounce',
+  );
+  assert.strictEqual(page.fits.length, 1, 'no refit before the debounce');
+  runTimers(page);
   assert.strictEqual(page.fits.length, 2, 'refit after a resize');
   view.setVisible(false);
   page.observers[0].cb();
-  await sleep(150);
+  runTimers(page);
   assert.strictEqual(page.fits.length, 2, 'no refit while hidden');
 
   // Re-showing fits on the next frame.
@@ -232,7 +253,8 @@ async function testDispose() {
   view.dispose();
   assert.ok(term.disposed);
   assert.ok(page.observers[0].disconnected);
-  await sleep(150);
+  assert.strictEqual(page.timers.size, 0, 'dispose cancels the resize timer');
+  runTimers(page);
   assert.strictEqual(page.fits.length, 1, 'no refit after dispose');
   page.frames.forEach(cb => cb());
   view.setVisible(true);

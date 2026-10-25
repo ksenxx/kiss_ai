@@ -6,13 +6,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function initialTabId(posted) {
-  const ready = posted.find(m => m && m.type === 'ready' && m.tabId);
-  assert.ok(ready, 'page posted a ready message with its active tabId');
-  return ready.tabId;
-}
+const {
+  makePage,
+  send,
+  readyTabId: initialTabId,
+} = require('./simplify2_harness');
 
 // Chat tabs have no row of their own: the open tabs are read back
 // through the test API (a background root is not on the group strip).

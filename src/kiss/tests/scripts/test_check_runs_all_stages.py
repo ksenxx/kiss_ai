@@ -19,12 +19,20 @@ which takes minutes and depends on the state of the checkout.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
-from kiss.scripts.check import MAX_DIGEST_LINES, error_lines, run_checks
+from kiss.scripts import check
+from kiss.scripts.check import (
+    MAX_DIGEST_LINES,
+    error_lines,
+    run_checks,
+    tree_fingerprint,
+    verdict_text,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("sh") is None, reason="needs a POSIX shell"
@@ -104,3 +112,82 @@ def test_digest_is_capped() -> None:
     assert len(lines) == MAX_DIGEST_LINES + 1
     assert lines[-1] == "... 7 more"
     assert error_lines(["all good\n", "nothing here\n"]) == []
+
+
+def test_quiet_stage_prints_one_status_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--fix`` mode keeps a stage's output off the console but in the digest."""
+    failed = run_checks(
+        [(["sh", "-c", "echo noise; echo 'a.py:1: error: bad'; exit 1"], "lint")], quiet=True,
+    )
+    out = capsys.readouterr().out
+    assert "noise" not in out and "Running:" not in out
+    assert out.strip() == "❌ lint failed with exit code 1"
+    assert failed == [("lint", ["a.py:1: error: bad"])]
+
+
+def test_verdict_text_lists_failed_stages_and_their_errors() -> None:
+    assert verdict_text([]).strip().splitlines()[1] == "✅ All checks passed!"
+    text = verdict_text([("lint", ["a.py:1: E501 too long"]), ("types", ["b.py:2: error: x"])])
+    assert "   ❌ lint\n   ❌ types\n" in text
+    assert "--- lint ---\na.py:1: E501 too long\n\n--- types ---\nb.py:2: error: x\n" in text
+
+
+def test_tree_fingerprint_follows_source_edits_and_skips_caches(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "a.py").write_text("x = 1\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    before = tree_fingerprint(tmp_path)
+    assert tree_fingerprint(tmp_path) == before
+    (src / "__pycache__").mkdir()
+    (src / "__pycache__" / "a.cpython.pyc").write_bytes(b"\x00")
+    (tmp_path / "src" / "node_modules").mkdir()
+    (tmp_path / "src" / "node_modules" / "m.js").write_text("1")
+    assert tree_fingerprint(tmp_path) == before, "caches and node_modules change nothing"
+    (src / "a.py").write_text("x = 2\n")
+    # Same size; an edit a second later (the kernel's mtime tick can be
+    # coarser than this test) is what the fingerprint sees.
+    later = (src / "a.py").stat().st_mtime_ns + 10**9
+    os.utime(src / "a.py", ns=(later, later))
+    assert tree_fingerprint(tmp_path) != before
+
+
+def test_tree_fingerprint_follows_the_tool_configuration(tmp_path: Path) -> None:
+    """A new mypy/ruff/pyright setting or lock change invalidates the cached verdict."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1\n")
+    assert set(check.CHECK_CONFIG_FILES) >= {"pyproject.toml", "uv.lock", "pyrightconfig.json"}
+    seen = {tree_fingerprint(tmp_path)}
+    for name in check.CHECK_CONFIG_FILES:
+        (tmp_path / name).write_text(f"# {name}\n")
+        fingerprint = tree_fingerprint(tmp_path)
+        assert fingerprint not in seen, name
+        seen.add(fingerprint)
+    (tmp_path / "unrelated.cfg").write_text("ignored\n")
+    assert tree_fingerprint(tmp_path) in seen
+
+
+def test_cached_verdict_ignores_a_cache_that_is_not_an_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "tmp" / "check-cache.json")
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "tmp" / "check-cache.json").write_text("[1, 2]")
+    assert check.cached_verdict("f1", True) is None
+    check.save_verdict("f1", True, 0, "")
+    cached = check.cached_verdict("f1", True)
+    assert cached is not None and cached["exit_code"] == 0 and cached["log"] == ""
+
+
+def test_cached_verdict_round_trips_per_tree_and_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "tmp" / "check-cache.json")
+    assert check.cached_verdict("f1", True) is None
+    check.save_verdict("f1", True, 1, "the log\n")
+    cached = check.cached_verdict("f1", True)
+    assert cached is not None and cached["exit_code"] == 1 and cached["log"] == "the log\n"
+    assert check.cached_verdict("f2", True) is None, "another tree"
+    assert check.cached_verdict("f1", False) is None, "another mode"
+    (tmp_path / "tmp" / "check-cache.json").write_text("not json")
+    assert check.cached_verdict("f1", True) is None

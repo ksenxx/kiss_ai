@@ -11,7 +11,8 @@
 // timestamp.  Runs with: node test/historyCompletionOrder.test.js
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {makePage: makeChatPage} = require('./simplify2_harness');
+const {sendHistory, makeRow} = require('./history_helpers');
 
 function makePage(legacy) {
   const {win, posted} = makeChatPage({
@@ -27,33 +28,14 @@ const DAY = 86_400;
 const T0 = 1_700_000_000;
 
 function row(chat, taskId, launched, endSec, running) {
-  return {
+  return makeRow({
     id: chat,
     task_id: taskId,
     title: 'task ' + taskId,
-    preview: 'task ' + taskId,
     timestamp: launched,
     startTs: launched * 1000,
     endTs: endSec ? endSec * 1000 : 0,
-    has_events: false,
-    failed: false,
     is_running: !!running,
-    awaiting_answer: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-  };
-}
-
-function sendHistory(win, posted, sessions) {
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req ? req.generation : undefined,
-    sessions,
   });
 }
 

@@ -531,6 +531,8 @@ class TestOpenAICompatibleModelGenerateWithTools:
 
         fc, content, response = m.generate_and_process_with_tools({"finish": finish})
         assert isinstance(fc, list)
+        # The recorded turn drops the <think> block, as generate() does.
+        assert m.conversation[-1]["content"] == "The answer is 42"
 
     def test_deepseek_text_based_tools_with_tool_calls_in_response(
         self, fake_openai_server: str
@@ -554,6 +556,7 @@ class TestOpenAICompatibleModelGenerateWithTools:
         assert len(fc) == 1
         assert fc[0]["name"] == "finish"
         assert "tool_calls" in m.conversation[-1]
+        assert "<think>" not in m.conversation[-1]["content"]
 
     def test_streaming_with_reasoning_content(self, fake_openai_server: str) -> None:
         """Cover the reasoning_content branch in streaming."""

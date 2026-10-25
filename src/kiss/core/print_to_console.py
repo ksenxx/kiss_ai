@@ -17,6 +17,7 @@ from kiss.core.html_render import html_to_rich
 from kiss.core.locked import locked_call
 from kiss.core.printer import (
     Printer,
+    cost_fields,
     extract_extras,
     extract_path_and_lang,
     parse_result_yaml,
@@ -125,36 +126,6 @@ class ConsolePrinter(Printer):
     @_current_block_type.setter
     def _current_block_type(self, value: str) -> None:
         self._thread_state.block_type = value
-
-    def reset(self) -> None:
-        """Reset internal streaming state for a new turn."""
-        locked_call(self._lock, self._reset_locked)
-
-    def _reset_locked(self) -> None:
-        self._mid_line = False
-        self._bash_streamed = False
-        self._current_block_type = ""
-
-    def _apply_budget_offset(self, cost: Any) -> Any:
-        """Add the accumulated budget offset to a ``$x.xxxx`` cost string.
-
-        Mirrors ``JsonPrinter`` so the Result panel and usage line on the
-        console include sub-agent / continued-session spend.  Non-dollar
-        values (e.g. ``"N/A"``) are returned unchanged.
-
-        Args:
-            cost: The cost value, typically a ``"$<float>"`` string.
-
-        Returns:
-            The cost with ``budget_offset`` added when it is a dollar
-            string, otherwise the original value.
-        """
-        if isinstance(cost, str) and cost.startswith("$"):
-            try:
-                return f"${float(cost[1:]) + self.budget_offset:.4f}"
-            except ValueError:
-                return cost
-        return cost
 
     @staticmethod
     def _format_result_content(raw: str) -> Group | Markdown:
@@ -287,7 +258,9 @@ class ConsolePrinter(Printer):
             )
             return
         if type == "result":
-            cost = self._apply_budget_offset(kwargs.get("cost", "N/A"))
+            cost, _exact = cost_fields(
+                kwargs.get("cost", "N/A"), kwargs.get("cost_usd"), self.budget_offset
+            )
             total_tokens = kwargs.get("total_tokens", 0) + self.tokens_offset
             step_count = kwargs.get("step_count", 0) + self.steps_offset
             self._print_result_panel(

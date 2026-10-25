@@ -6,18 +6,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sleep} = require('./simplify2_harness');
-
-function parsePanelTimeMs(text) {
-  const t = String(text || '').trim();
-  let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
-  if (m) return (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000;
-  m = t.match(/^(\d+(?:\.\d+)?)s$/);
-  if (m) return parseFloat(m[1]) * 1000;
-  m = t.match(/^(\d+)ms$/);
-  if (m) return parseInt(m[1], 10);
-  return NaN;
-}
+const {
+  makePage,
+  send,
+  sleep,
+  parsePanelTimeMs,
+} = require('./simplify2_harness');
 
 async function runTests() {
   const wv = makePage();

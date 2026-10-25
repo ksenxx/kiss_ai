@@ -167,16 +167,11 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert_no_removed_getters(sync_sea)
 
 
-def test_slash_sync_resolves_bare_and_with_a_ref() -> None:
-    """``/sync`` alone and ``/sync <ref>`` both run this file; ``/sync help`` is answered."""
-    assert sea_commands.get_command("sync") == _SEA_PATH
+def test_slash_sync_resolves_bare() -> None:
+    """``/sync`` alone runs this file on the empty text; ``prompt()`` makes it the playbook."""
     assert sea_commands.slash_command_task("/sync") == ("", _SEA_PATH)
-    assert sea_commands.slash_command_task("/sync upstream/dev") == ("upstream/dev", _SEA_PATH)
-    assert sea_commands.slash_command_task("/sync help") is None
-    assert sea_commands.help_text_if_command("/sync help") == SyncSea().description()
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
     assert run.prompt == sync_sea.ADD_TO_PROMPT
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([SyncSea()])
 
 
 def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> None:

@@ -14,6 +14,11 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {
+  historyRows,
+  visibleTitles,
+  sendHistory,
+} = require('./history_helpers');
 const {send} = harness;
 
 function markRemoteChat(win) {
@@ -57,32 +62,6 @@ const SESSIONS = [
   session(5, 'legacy'),
 ];
 
-function historyReply(posted, sessions) {
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  const last = requests[requests.length - 1];
-  return {
-    type: 'history',
-    sessions,
-    offset: 0,
-    generation: last ? last.generation : 0,
-  };
-}
-
-function rows(win) {
-  return Array.from(
-    win.document
-      .getElementById('history-list')
-      .querySelectorAll('.sidebar-item'),
-  );
-}
-
-function visibleTitles(win) {
-  return rows(win)
-    .filter(r => r.style.display !== 'none')
-    .map(r => r.querySelector('.sidebar-item-text').textContent)
-    .sort();
-}
-
 function setChip(win, id, checked) {
   const box = win.document.getElementById(id);
   box.checked = checked;
@@ -98,9 +77,9 @@ function testChipIsOffByDefaultAndHidesCronRows() {
     box.closest('.history-filter-chips'),
     'the Cron chip sits with the other status chips',
   );
-  send(win, historyReply(posted, SESSIONS));
+  sendHistory(win, posted, SESSIONS);
   const seen = {};
-  rows(win).forEach(r => {
+  historyRows(win).forEach(r => {
     seen[r.querySelector('.sidebar-item-text').textContent] = r.dataset.cron;
   });
   assert.deepStrictEqual(seen, {
@@ -117,7 +96,7 @@ function testChipIsOffByDefaultAndHidesCronRows() {
 
 function testSwitchingTheChipShowsAndHidesCronRows() {
   const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS));
+  sendHistory(win, posted, SESSIONS);
   setChip(win, 'hf-cron', true);
   assert.deepStrictEqual(visibleTitles(win), [
     'cron failed',
@@ -139,7 +118,7 @@ function testSwitchingTheChipShowsAndHidesCronRows() {
   assert.deepStrictEqual(visibleTitles(win), ['legacy', 'plain one', 'plain two']);
   // A refreshed list keeps the chip's state.
   setChip(win, 'hf-cron', true);
-  send(win, historyReply(posted, SESSIONS));
+  sendHistory(win, posted, SESSIONS);
   assert.deepStrictEqual(visibleTitles(win), [
     'cron failed',
     'cron ok',
@@ -175,7 +154,7 @@ function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {
     cronPage.push(session(100 + i, 'tick ' + i, {is_cron: true}));
   }
   const before = posted.filter(m => m && m.type === 'getHistory').length;
-  send(win, historyReply(posted, cronPage));
+  sendHistory(win, posted, cronPage);
   assert.deepStrictEqual(visibleTitles(win), [], 'every row of the page is hidden');
   assert.ok(
     !win.document.querySelector('.sidebar-empty-filter'),
@@ -216,7 +195,7 @@ function testAFilledListDoesNotPageOnItsOwn() {
     page.push(session(300 + i, 'task ' + i, {is_cron: i % 2 === 0}));
   }
   const before = posted.filter(m => m && m.type === 'getHistory').length;
-  send(win, historyReply(posted, page));
+  sendHistory(win, posted, page);
   assert.strictEqual(visibleTitles(win).length, 25, 'half the rows show');
   assert.strictEqual(
     posted.filter(m => m && m.type === 'getHistory').length,

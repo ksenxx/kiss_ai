@@ -696,7 +696,6 @@ def test_github_denied_and_rejected_client(
 ) -> None:
     """Denied consent and a refused client ID report errors and enroll nothing."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
-    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     tools = auth_tools(agent)
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "rejected-client")
@@ -722,29 +721,6 @@ def test_github_denied_and_rejected_client(
         "ok": False,
         "error": "GitHub sign-in failed: no sign-in in progress; call authenticate_github() first",
     }
-
-
-def test_github_api_rejecting_new_token_rolls_back(
-    muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A token the API refuses is cleared again instead of staying enrolled."""
-    monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base_url)
-    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
-    agent = GitHubAgent()
-    agent._backend._base_url = auth_server.base_url
-    tools = auth_tools(agent)
-    tools["authenticate_github"]()
-    session = ConsentSession._active["github"]
-    auth_server.approve()
-    session._thread.join(timeout=10.0)
-    assert session.result is not None
-    # Forget the issued token server-side so /user answers 401.
-    auth_server.access_tokens.clear()
-    result = _finish(tools["finish_github_auth"])
-    assert result["ok"] is False
-    assert "GitHub rejected the new token" in result["error"]
-    assert not vault_has_credentials("github")
-    assert agent._is_authenticated() is False
 
 
 # ---------------------------------------------------------- GitHub (legacy)

@@ -6,6 +6,7 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 
@@ -13,12 +14,16 @@ const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
+// Every window made, closed once the run is over so node can exit.
+const openWindows = [];
+
 function makeWindow() {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     runScripts: 'dangerously',
     pretendToBeVisual: true,
   });
   const win = dom.window;
+  openWindows.push(win);
   let clipboardText = null;
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
@@ -29,14 +34,12 @@ function makeWindow() {
       },
     },
   });
-  const fs = require('fs');
   const src = fs.readFileSync(PANEL_COPY_PATH, 'utf-8');
   const scriptEl = win.document.createElement('script');
   scriptEl.textContent = src;
   win.document.head.appendChild(scriptEl);
   assert.ok(win.PanelCopy, 'panelCopy.js must expose window.PanelCopy');
   return {
-    window: win,
     document: win.document,
     PanelCopy: win.PanelCopy,
     getClipboard: () => clipboardText,
@@ -244,8 +247,8 @@ async function run() {
     assert.strictEqual(ancestorClicks, 0);
   });
 
+  for (const win of openWindows) win.close();
   report('panelCopy');
-  process.exit(0);
 }
 
 run().catch(e => {

@@ -214,11 +214,15 @@ def rc_dir() -> Path:
 
 
 def _write(path: Path, text: str) -> None:
-    """Write *text* to *path* unless it is there already."""
+    """Write *text* to *path* unless it is there already.
+
+    A file that cannot be read, or is not UTF-8 (truncated, edited by
+    hand), is simply rewritten.
+    """
     try:
         if path.read_text(encoding="utf-8") == text:
             return
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     # Staged and renamed into place (unique temp name, so two daemons
     # sharing the home never clobber each other's staging file); the

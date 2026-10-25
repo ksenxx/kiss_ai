@@ -8,7 +8,7 @@ const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
 
 function run() {
-  const {win, posted} = makePage();
+  const {win} = makePage();
   const doc = win.document;
   const btn = doc.getElementById('cfg-update-btn');
   assert.ok(btn, 'settings panel has the #cfg-update-btn button');
@@ -42,13 +42,8 @@ function run() {
     toast.textContent.includes('9.9.9') && toast.textContent.includes('1.0.0'),
     'notification mentions latest and current versions',
   );
-  const action = toast.querySelector('.kiss-notification-action');
-  assert.ok(action, 'notification has an Update action button');
-  action.click();
-  assert.ok(
-    posted.some(m => m.type === 'runUpdate'),
-    'clicking Update posts {type: runUpdate}',
-  );
+  // The toast's markup and its Update action posting `runUpdate` are
+  // updateNotification's and updateWhenIdleToast's.
 
   send(win, {
     type: 'update_available',

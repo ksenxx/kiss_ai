@@ -52,7 +52,7 @@ _PERSONAL = _rx(
     r"\b(grocer(?:y|ies)|recipes?|cook(?:ing)?|dinner|lunch|breakfast|restaurants?|"
     r"travel|flights?|hotels?|vacation|holidays?|trip|doctor|dentist|birthday|gifts?|"
     r"my (?:wife|husband|kids?|children|son|daughter|mom|dad|mother|father|family|"
-    r"friends?|car|house|apartment|health)|movies?|netflix|playlist|workout|fitness|"
+    r"friends?|house|apartment|health)|movies?|netflix|playlist|workout|fitness|"
     r"gym|diet|wedding|party|amazon|shopping|personal|car|shops?|stores?|near me|"
     r"within \d+ miles)\b"
 )
@@ -428,12 +428,9 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     return inferred
 
 
-_PATH_TOKEN = re.compile(r"\S*[/\\]\S*")
-
-
 def _dispatch_key(text: str) -> str:
     """Return *text* without path-like tokens and with whitespace collapsed."""
-    return " ".join(_PATH_TOKEN.sub("", text).split())
+    return " ".join(t for t in text.split() if "/" not in t and "\\" not in t)
 
 
 def trajectory_has_secret(

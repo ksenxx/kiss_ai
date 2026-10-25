@@ -119,6 +119,26 @@ def test_a_stale_rc_file_is_rewritten_and_a_current_one_left_alone(home: Path) -
     assert not (rc.parent / "bashrc.tmp").exists()
 
 
+def test_a_corrupt_rc_file_is_rewritten(home: Path) -> None:
+    # A start-up file that is not UTF-8 (truncated, edited by hand, a
+    # bad disk) must be replaced like a stale one, not raised about:
+    # the error would escape ``with_persistent_history`` and every
+    # later terminal tab would fail to start until the user deleted
+    # the file by hand.
+    rc = rc_dir() / "bashrc"
+    rc.parent.mkdir(parents=True)
+    rc.write_bytes(b"# broken \xff\xfe\n")
+    zshrc = rc_dir() / "zdotdir" / ".zshrc"
+    zshrc.parent.mkdir(parents=True)
+    zshrc.write_bytes(b"\xc3\x28")
+    assert with_persistent_history(["/bin/bash"]) == (
+        ["/bin/bash", "--rcfile", str(rc)], {},
+    )
+    assert rc.read_text(encoding="utf-8") == BASH_RC
+    assert with_persistent_history(["/bin/zsh"])[0] == ["/bin/zsh"]
+    assert zshrc.read_text(encoding="utf-8") == ZSH_ZSHRC
+
+
 def test_unwritable_rc_dir_leaves_the_shell_as_it_is(
     home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -25,9 +25,8 @@
 // * the report body is sanitized: HTML content (starting with '<') is
 //   rendered as-is through kissSanitize, anything else through marked;
 //   scripts and event-handler attributes never reach the DOM,
-// * a reply with no run yet but a dueAt (the daemon asks a minute
-//   after the task started) shows the "first update" paragraph and
-//   status "First update at HH:MM" with the refresh button enabled;
+// * a reply with neither content, run nor error hides the subpanel
+//   with the refresh button enabled;
 // * running:true without content shows the "Preparing the first
 //   update…" paragraph, status "Updating…" and a disabled, spinning
 //   #meta-info-refresh button; a finished run shows "Updated HH:MM" plus
@@ -55,6 +54,7 @@ const {
   readyTabId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {polls, lastPoll} = require('./remote_drawer_helpers');
 
 const {test, report} = makeRunner();
 
@@ -87,17 +87,6 @@ function setRunning(win, running) {
 /** Whether the #meta-info subpanel (header included) is shown. */
 function infoVisible(win) {
   return win.document.getElementById('meta-info').classList.contains('visible');
-}
-
-/** Every getTaskUpdate message posted so far, oldest first. */
-function polls(wv) {
-  return wv.posted.filter(m => m.type === 'getTaskUpdate');
-}
-
-function lastPoll(wv) {
-  const all = polls(wv);
-  assert.ok(all.length >= 1, 'a getTaskUpdate poll must have fired');
-  return all[all.length - 1];
 }
 
 function contentEl(win) {
@@ -154,7 +143,6 @@ function reply(win, poll, fields) {
         running: false,
         cost: 0,
         updatedAt: 0,
-        dueAt: 0,
       },
       fields,
     ),
@@ -231,6 +219,7 @@ async function main() {
       const poll = lastPoll(wv);
       assert.deepStrictEqual(Object.keys(poll).sort(), [
         'knownSig',
+        'machine',
         'refresh',
         'tabId',
         'token',
@@ -239,6 +228,7 @@ async function main() {
       assert.strictEqual(poll.tabId, TAB);
       assert.strictEqual(poll.knownSig, '');
       assert.strictEqual(poll.refresh, false);
+      assert.strictEqual(poll.machine, '', 'a local tab polls this machine');
       assert.ok(!('workDir' in poll), 'polls carry no workDir');
       const tok = poll.token;
       assert.ok(tok, 'polls must carry a request token');
@@ -327,43 +317,30 @@ async function main() {
   );
 
   await test(
-    'a task younger than a minute shows when its first update is due, ' +
-      'with the refresh button enabled',
+    'a task with no run yet hides the subpanel with the refresh button ' +
+      'enabled; a finished run shows it',
     () => {
       const wv = runningPage();
       const win = wv.win;
       const poll = lastPoll(wv);
-      const due = 1700000060000;
-      reply(win, poll, {sig: '0.000:0', dueAt: due});
-      const pending = contentEl(win).querySelector('p.meta-info-pending');
-      assert.ok(pending, 'first-update paragraph rendered');
-      assert.strictEqual(
-        pending.textContent,
-        'The first update is asked a minute after the task starts; ' +
-          'press refresh to ask now.',
-      );
-      assert.ok(infoVisible(win), 'the waiting state shows the subpanel');
-      assert.strictEqual(
-        statusText(win),
-        'First update at ' + clockLabel(win, due),
-      );
+      reply(win, poll, {sig: '0.000:0'});
+      assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
+      assert.strictEqual(statusText(win), '');
       const btn = refreshBtn(win);
       assert.strictEqual(btn.disabled, false, 'refresh may ask now');
       assert.ok(!btn.classList.contains('spinning'));
 
-      // A finished run supersedes the due time: dueAt then names the
-      // NEXT run, which the status line does not show.
       const at = 1700000090000;
       reply(win, poll, {
         sig: 'done-1',
         content: '<p>answer</p>',
         updatedAt: at,
-        dueAt: at + 600000,
       });
+      assert.ok(infoVisible(win), 'a finished run shows the subpanel');
       assert.strictEqual(statusText(win), updatedLabel(win, at));
       assert.ok(contentEl(win).textContent.includes('answer'));
 
-      // A reply with neither content, run, error nor due time hides it.
+      // A reply with neither content, run nor error hides it again.
       reply(win, poll, {sig: 'empty-1'});
       assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
       assert.strictEqual(statusText(win), '');
@@ -386,7 +363,7 @@ async function main() {
       assert.ok(pending, 'pending paragraph rendered');
       assert.strictEqual(
         pending.textContent,
-        'Preparing the first update\u2026',
+        'Asking the task\u2026',
       );
       assert.ok(infoVisible(win), 'a pending report shows the subpanel');
       assert.strictEqual(statusText(win), 'Updating\u2026');

@@ -20,19 +20,16 @@ repositories (no mocks, patches, fakes, or test doubles):
   shared ``_porcelain_entries`` parser (which splits on ``\\n`` only)
   — the same parser backing ``merge_flow._porcelain_paths``.
 
-* The canonical ``User prompt:`` / ``Result:`` commit-message block
-  format was spelled independently by the commit-message writer
-  and ``sorcar/git_worktree.py`` (dedup detector).  It is now
-  single-sourced via ``USER_PROMPT_HEADING`` / ``TASK_RESULT_HEADING``
-  constants; the tests pin the byte-exact writer/detector agreement.
+* The canonical ``User prompt:`` / ``Result:`` commit-message blocks
+  are written and recognised by one function,
+  ``git_worktree._ensure_task_metadata`` (the auto-commit path in
+  ``commit_message.py`` calls it too); the tests pin that stamping is
+  idempotent and composes blocks exactly as ``HEADING + text``.
 """
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.commit_message import (
-    _append_task_result,
-    _append_user_prompt,
-)
+from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
     USER_PROMPT_HEADING,
@@ -40,43 +37,39 @@ from kiss.agents.sorcar.git_worktree import (
 )
 
 
-def test_helpers_blocks_detected_as_duplicate_by_dedup() -> None:
-    """Blocks appended by the helpers.py writers must dedup byte-exactly.
+def test_stamped_blocks_detected_as_duplicate_by_dedup() -> None:
+    """A message the auto-commit path stamped must not be stamped twice.
 
-    ``_ensure_task_metadata`` (the git_worktree.py auto-commit dedup
-    detector) must recognise a message stamped by the helpers.py
-    writers as already carrying the current prompt/result blocks and
-    return it unchanged — pinning the byte-exact agreement that the
-    shared ``USER_PROMPT_HEADING`` / ``TASK_RESULT_HEADING`` constants
-    guarantee.
+    ``_ensure_task_metadata`` must recognise a message carrying the
+    current prompt/result blocks (as written by
+    ``fallback_commit_message`` / ``generate_commit_message_from_diff``)
+    and return it unchanged.
     """
     prompt = "Fix the flaky login test"
     result = "Stabilized the test by awaiting the redirect."
-    msg = _append_task_result(
-        _append_user_prompt("fix: stabilize login test", prompt), result
-    )
+    msg = fallback_commit_message(prompt, result)
     assert _ensure_task_metadata(msg, prompt, result) == msg
 
-    prompt_only = _append_user_prompt("fix: stabilize login test", prompt)
+    prompt_only = fallback_commit_message(prompt, None)
     assert _ensure_task_metadata(prompt_only, prompt, None) == prompt_only
 
-    result_only = _append_task_result("fix: stabilize login test", result)
+    result_only = fallback_commit_message(None, result)
     assert _ensure_task_metadata(result_only, None, result) == result_only
 
 
-def test_helpers_blocks_use_shared_heading_constants() -> None:
-    """The writers compose blocks exactly as ``HEADING + text``."""
-    msg = _append_user_prompt("subject", "  a prompt  ")
+def test_stamped_blocks_use_shared_heading_constants() -> None:
+    """The blocks are composed exactly as ``HEADING + text``."""
+    msg = _ensure_task_metadata("subject", "  a prompt  ", None)
     assert msg == f"subject{USER_PROMPT_HEADING}a prompt"
-    msg = _append_task_result("subject", "  a result  ")
+    msg = _ensure_task_metadata("subject", None, "  a result  ")
     assert msg == f"subject{TASK_RESULT_HEADING}a result"
 
 
-def test_missing_prompt_block_inserted_before_helper_result_block() -> None:
-    """A helpers-stamped result-only message gains the prompt block."""
+def test_missing_prompt_block_inserted_before_result_block() -> None:
+    """A result-only stamped message gains the prompt block."""
     result = "Done."
     prompt = "Do the thing"
-    msg = _append_task_result("chore: thing", result)
+    msg = _ensure_task_metadata("chore: thing", None, result)
     stamped = _ensure_task_metadata(msg, prompt, result)
     assert stamped == (
         f"chore: thing{USER_PROMPT_HEADING}{prompt}{TASK_RESULT_HEADING}{result}"

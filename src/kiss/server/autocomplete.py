@@ -265,6 +265,9 @@ class _AutocompleteMixin:
         the leading non-token portion of the query with each
         identifier.
         """
+        partial = trailing_identifier(query)
+        if not partial:
+            return []
         if snapshot_content is not None:
             # A live editor snapshot was supplied — honour it verbatim,
             # INCLUDING the empty string (an open but empty document).
@@ -275,9 +278,6 @@ class _AutocompleteMixin:
             content = read_active_file_head(snapshot_file)
         else:
             content = ""
-        partial = trailing_identifier(query)
-        if not partial:
-            return []
         chat_text = _load_chat_context_text(chat_id)
         if not content and not chat_text:
             return []
@@ -349,7 +349,7 @@ class _AutocompleteMixin:
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
-        if not query or len(query) < 2:
+        if len(query) < 2:
             self._emit_ghost("", query, conn_id, tab_id)
             self._emit_completions([], query, conn_id, tab_id)
             return

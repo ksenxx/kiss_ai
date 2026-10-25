@@ -34,23 +34,6 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     assert _coerce_id([5]) is None
 
 
-def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
-    """``active_task_history_ids`` must be a ``set[str]`` — no ``int(...)``.
-
-    Reproduces by reading the source and asserting the
-    ``set[int]``/``int(th_id)`` patterns are gone.  A direct functional
-    repro would require spinning up a live agent-state registry /
-    websocket / shutdown sequence — covered by the existing E2E test
-    suite's daemon-shutdown tests.
-    """
-    src = Path(
-        "src/kiss/server/web_server.py"
-    ).read_text()
-    assert "active_task_history_ids: set[int]" not in src
-    assert "active_task_history_ids: set[str]" in src
-    assert "active_task_history_ids.add(int(" not in src
-
-
 def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     """A non-string ``taskId`` payload must be dropped before SQL.
 

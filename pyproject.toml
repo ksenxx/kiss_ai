@@ -396,6 +396,7 @@ Repository = "https://github.com/ksen/kiss"
 
 [project.scripts]
 check = "kiss.scripts.check:main"
+impacted-tests = "kiss.scripts.impacted_tests:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
 sea = "kiss.agents.sorcar.sea_cli:main"
 sorcar = "kiss.agents.sorcar.sorcar_agent:main"

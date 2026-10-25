@@ -368,8 +368,8 @@ class ClaudeCodeModel(CLITextModel):
             model_name: Full model name including ``cc/`` prefix (e.g. ``cc/opus``).
             model_config: Optional configuration. Recognised keys:
                 - ``system_instruction`` (str): Passed to the CLI as
-                  ``--append-system-prompt`` (the CLI keeps its own native
-                  system prompt and appends this one).
+                  ``--system-prompt``, replacing Claude Code's own system
+                  prompt (see :meth:`_build_cli_args`).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
@@ -387,14 +387,19 @@ class ClaudeCodeModel(CLITextModel):
         # Usage of the finished assistant messages of the current
         # generate() call, kept on the instance so a run that raises
         # mid-stream can still be billed (see take_partial_usage_response),
-        # plus the cumulative usage of the message still streaming.
+        # plus the cumulative usage of the message still streaming, plus
+        # each finished message's own usage (one per API request) for the
+        # per-request long-context tier (see extract_cost_from_response).
         self._partial_usage: dict[str, Any] = {}
         self._open_message_usage: dict[str, Any] = {}
+        self._request_usages: list[dict[str, Any]] = []
         # What prices the current turn (see extract_cost_from_response):
-        # whether an API key pays for it, decided when the CLI is launched
-        # (_cli_env); the API model id the CLI resolved ``--model`` to
-        # (``cc/opus`` is an alias) and the number of API requests it
-        # made, both read from the stream.
+        # whether the subscription switch was on and whether an API key
+        # pays for it, both decided when the CLI is launched (_cli_env);
+        # the API model id the CLI resolved ``--model`` to (``cc/opus``
+        # is an alias) and the number of API requests it made, both read
+        # from the stream.
+        self._use_subscription: bool = False
         self._api_billed: bool = False
         self._api_model: str = ""
         self._request_count: int = 0
@@ -469,6 +474,7 @@ class ClaudeCodeModel(CLITextModel):
         self._stopped_for_tool_calls = False
         self._partial_usage = {}
         self._open_message_usage = {}
+        self._request_usages = []
         self._api_model = ""
         self._request_count = 0
         stop_on_tool_calls = self._tool_bearing_turn
@@ -501,20 +507,22 @@ class ClaudeCodeModel(CLITextModel):
         Called once per launch, so this is where the turn's billing is
         decided for good: an inherited environment that holds an API
         key variable makes the turn API spend, whatever the switch says
-        afterwards.
+        afterwards.  The same reading of the switch decides whether a
+        failure of this turn carries :data:`SUBSCRIPTION_HINT`.
         """
         env = claude_subscription_env()
+        self._use_subscription = env is not None
         self._api_billed = env is None and any(os.environ.get(v) for v in _API_KEY_ENV_VARS)
         return env
 
-    @staticmethod
-    def _with_auth_hint(error: KISSError, result_json: dict[str, Any]) -> KISSError:
+    def _with_auth_hint(self, error: KISSError, result_json: dict[str, Any]) -> KISSError:
         """Return *error* enriched with the CLI's own failure text.
 
         The ``result`` event of a failed turn carries ``is_error`` and
         the message the CLI would print (``Not logged in · Please run
         /login``, ``Invalid API key`` …).  That message is appended, and
-        when the subscription switch is on so is :data:`SUBSCRIPTION_HINT`.
+        when the turn was launched with the subscription switch on so is
+        :data:`SUBSCRIPTION_HINT`.
 
         Args:
             error: The exit-status error from ``raise_for_exit``.
@@ -524,13 +532,11 @@ class ClaudeCodeModel(CLITextModel):
             *error* itself when the turn carried no error text, else a
             new ``KISSError``.
         """
-        from kiss.core.config import DEFAULT_CONFIG
-
         detail = result_json.get("result") if result_json.get("is_error") else ""
         if not isinstance(detail, str) or not detail.strip():
             return error
         message = f"{error}\n{detail.strip()}"
-        if DEFAULT_CONFIG.claude_code_use_subscription:
+        if self._use_subscription:
             message = f"{message}\n{SUBSCRIPTION_HINT}"
         return KISSError(message)
 
@@ -543,6 +549,7 @@ class ClaudeCodeModel(CLITextModel):
         """
         if self._open_message_usage:
             _merge_usage(self._partial_usage, self._open_message_usage, add=True)
+            self._request_usages.append(self._open_message_usage)
             self._open_message_usage = {}
 
     def take_partial_usage_response(self) -> Any:
@@ -559,12 +566,13 @@ class ClaudeCodeModel(CLITextModel):
 
         Returns:
             ``{"usage": {...}}`` when partial usage was observed, else
-            ``None``.  The stored value is cleared so it is never counted
-            twice.
+            the completed response the base class staged (a turn whose
+            post-generation cleanup raised), else ``None``.  The stored
+            value is cleared so it is never counted twice.
         """
         self._close_open_message()
         if not self._partial_usage:
-            return None
+            return super().take_partial_usage_response()
         usage = self._partial_usage
         self._partial_usage = {}
         return self._stamp_billing({"usage": usage})
@@ -606,7 +614,6 @@ class ClaudeCodeModel(CLITextModel):
         content = ""
         thinking_content = ""
         result_json: dict[str, Any] = {}
-        current_block_type = ""
         saw_content_block = False
         seen_tool_calls_hint = False
         found_tool_calls = False
@@ -625,11 +632,11 @@ class ClaudeCodeModel(CLITextModel):
 
             if event_type == "assistant":
                 msg = event.get("message", {})
-                for block in msg.get("content", []):
+                # Once content_block events stream the text, the final
+                # assistant message only repeats it.
+                for block in [] if saw_content_block else msg.get("content", []):
                     block_type = block.get("type")
-                    if saw_content_block:
-                        continue
-                    elif block_type == "thinking":
+                    if block_type == "thinking":
                         thinking_text = block.get("thinking", "")
                         if thinking_text:
                             thinking_content += thinking_text
@@ -648,8 +655,6 @@ class ClaudeCodeModel(CLITextModel):
                         break
             elif event_type == "content_block_start":
                 saw_content_block = True
-                block = event.get("content_block", {})
-                current_block_type = block.get("type", "")
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
                 delta_type = delta.get("type", "")
@@ -688,9 +693,9 @@ class ClaudeCodeModel(CLITextModel):
                                     self._stopped_for_tool_calls = True
                                     break
             elif event_type == "content_block_stop":
-                if current_block_type == "thinking":
-                    self._close_thinking_if_open()
-                current_block_type = ""
+                # A no-op unless a thinking_delta opened the bracket, which
+                # only happens inside the thinking block that stops here.
+                self._close_thinking_if_open()
             elif event_type == "message_start":
                 # A new assistant message: its input and cache counts are
                 # known now; output_tokens is a placeholder the cumulative
@@ -743,12 +748,14 @@ class ClaudeCodeModel(CLITextModel):
         ``api_billed`` (an API key paid, decided at launch), ``model``
         (the API model id the stream named, if any) and ``requests``
         (the API requests the CLI made in the turn, counted from
-        ``message_start``; at least 1).  The price modifiers the API
+        ``message_start`` and finished messages; at least 1).  The price modifiers the API
         reported per message (``speed``, ``inference_geo``, folded into
         the per-message total by :func:`_merge_usage`) are copied into a
         ``usage`` that lacks them: the CLI's terminal ``result`` sums only
-        the counters.  A later settings change or turn cannot reprice a
-        response that carries these.
+        the counters.  ``request_usages`` lists each finished message's
+        own usage, so the per-request long-context tier can be priced.
+        A later settings change or turn cannot reprice a response that
+        carries these.
 
         Args:
             response: A response dict with the turn's ``usage``.
@@ -756,16 +763,19 @@ class ClaudeCodeModel(CLITextModel):
         Returns:
             The same dict.
         """
+        self._close_open_message()
         response["api_billed"] = self._api_billed
         if self._api_model:
             response["model"] = self._api_model
-        response["requests"] = max(1, self._request_count)
+        # A completed message_delta snapshot without a message_start is a
+        # request too.
+        response["requests"] = max(1, self._request_count, len(self._request_usages))
         usage = response.get("usage")
         if isinstance(usage, dict):
-            self._close_open_message()
             for field in PRICE_MODIFIER_FIELDS:
                 if field not in usage and field in self._partial_usage:
                     usage[field] = self._partial_usage[field]
+        response["request_usages"] = list(self._request_usages)
         return response
 
     def _note_api_model(self, event: dict[str, Any]) -> None:
@@ -806,8 +816,8 @@ class ClaudeCodeModel(CLITextModel):
         model's list price, cache tiers included, so its usage is priced
         through :func:`calculate_cost` under the API model id the stream
         reported (falling back to the name after ``cc/``); the
-        per-request long-context tier applies only to a single-request
-        turn (see ``single_request``), and the fast-mode and US-only
+        per-request long-context tier is priced per message of a
+        multi-request turn (``request_usages``), and the fast-mode and US-only
         inference modifiers the usage reports scale the whole turn
         (:func:`~kiss.core.models.anthropic_model.price_modifier_factor`).
         A model id the catalog does not
@@ -843,7 +853,17 @@ class ClaudeCodeModel(CLITextModel):
         several = isinstance(model_usage, dict) and len(model_usage) > 1
         if (several or not is_known_model(model)) and isinstance(reported, int | float):
             return float(reported)
-        cost = calculate_cost(model, *counts, single_request=response.get("requests", 1) <= 1)
+        single_request = response.get("requests", 1) <= 1
+        cost = calculate_cost(model, *counts, single_request=single_request)
+        if not single_request:
+            # The summed counters bill at short-context rates; add the
+            # long-context premium of each request that crossed the
+            # threshold on its own.
+            for usage in response.get("request_usages") or []:
+                request = self.extract_input_output_token_counts_from_response({"usage": usage})
+                cost += calculate_cost(model, *request) - calculate_cost(
+                    model, *request, single_request=False
+                )
         return cost * price_modifier_factor(response.get("usage") or {}, model)
 
     def _tool_call_text(self, content: str) -> str:

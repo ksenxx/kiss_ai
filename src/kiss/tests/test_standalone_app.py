@@ -155,8 +155,12 @@ def test_unusable_url_file_yields_no_url(tmp_path: Path, content: str) -> None:
 
 
 def test_wait_picks_up_a_url_file_written_late(tmp_path: Path) -> None:
-    """The daemon's file appearing after a second is found; a never-written one times out."""
-    httpd, url = _site()
+    """The daemon's file appearing after a second is found; a never-written one times out.
+
+    Only the file is waited for: the daemon answering at the URL is not
+    (the window opens on the start page meanwhile).
+    """
+    url = f"http://127.0.0.1:{find_free_port()}/"
     url_file = tmp_path / "remote-url.json"
 
     def write_late() -> None:
@@ -165,44 +169,26 @@ def test_wait_picks_up_a_url_file_written_late(tmp_path: Path) -> None:
 
     threading.Thread(target=write_late).start()
     started = time.monotonic()
-    try:
-        assert standalone_app.wait_for_daemon(url_file, None, 10) == url
-        assert time.monotonic() - started < 8
-        assert standalone_app.wait_for_daemon(tmp_path / "never.json", None, 0.6) is None
-        # --url skips the file.
-        assert standalone_app.wait_for_daemon(tmp_path / "never.json", url, 0) == url
-    finally:
-        httpd.shutdown()
+    assert not standalone_app.daemon_answers(url)
+    assert standalone_app.wait_for_url(url_file, None, 10) == url
+    assert 1.0 <= time.monotonic() - started < 8
+    started = time.monotonic()
+    assert standalone_app.wait_for_url(tmp_path / "never.json", None, 0.6) is None
+    assert 0.6 <= time.monotonic() - started < 4
+    # --url skips the file.
+    assert standalone_app.wait_for_url(tmp_path / "never.json", url, 0) == url
 
 
-def test_wait_lasts_until_the_daemon_answers(tmp_path: Path) -> None:
-    """A URL is not enough: the daemon must answer at it, as the file outlives a reboot.
-
-    Any HTTP answer counts, a 404 from a daemon without the app-window
-    route too; a refused connection does not.  Once the time is up the
-    URL is returned anyway (the browser then shows what is wrong).
-    """
+def test_daemon_answers_with_any_http_status(tmp_path: Path) -> None:
+    """Any HTTP answer counts, a 404 from a daemon without the app-window route too."""
     port = find_free_port()
     url = f"http://127.0.0.1:{port}/"
-    url_file = tmp_path / "remote-url.json"
-    url_file.write_text(json.dumps({"loopback": url}))
     assert not standalone_app.daemon_answers(url)
-    started = time.monotonic()
-    assert standalone_app.wait_for_daemon(url_file, None, 1.2) == url
-    assert 1.2 <= time.monotonic() - started < 4
-
-    late: list[http.server.HTTPServer] = []
-
-    def serve_late() -> None:
-        time.sleep(1.0)
-        late.append(_site(port)[0])
-
-    threading.Thread(target=serve_late).start()
-    started = time.monotonic()
-    assert standalone_app.wait_for_daemon(url_file, None, 10) == url
-    assert 1.0 <= time.monotonic() - started < 4
-    assert standalone_app.daemon_answers(url)
-    late[0].shutdown()
+    httpd = _site(port)[0]
+    try:
+        assert standalone_app.daemon_answers(url)
+    finally:
+        httpd.shutdown()
 
     class _NotFound(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - http.server API
@@ -217,6 +203,24 @@ def test_wait_lasts_until_the_daemon_answers(tmp_path: Path) -> None:
         assert standalone_app.daemon_answers(f"http://127.0.0.1:{httpd.server_port}/")
     finally:
         httpd.shutdown()
+
+
+def test_start_page_url_names_the_app_and_the_daemon_probe() -> None:
+    """The start page is the packaged file, told what to probe and where to go next."""
+    url = standalone_app.start_page_url("http://127.0.0.1:8787/x", "http://127.0.0.1:8787")
+    page, _sep, query = url.partition("?")
+    assert page == standalone_app.APP_START_PAGE.as_uri()
+    assert standalone_app.APP_START_PAGE.is_file()
+    assert urllib.parse.parse_qs(query) == {
+        "next": ["http://127.0.0.1:8787/x"],
+        "probe": ["http://127.0.0.1:8787/api/app-window"],
+        "title": [BRAND["product_name"]],
+    }
+    branded = urllib.parse.parse_qs(
+        standalone_app.start_page_url("http://h/", "http://h/", SEAMLESS_LOOP, popup=True)
+        .partition("?")[2]
+    )
+    assert (branded["title"], branded["popup"]) == ([SEAMLESS_LOOP["product_name"]], ["1"])
 
 
 def test_print_command_does_not_wait_for_the_daemon(tmp_path: Path) -> None:
@@ -379,12 +383,80 @@ def test_foreground_runs_the_browser_in_place(tmp_path: Path) -> None:
     """``--foreground`` execs the browser: its exit status is kiss-app's."""
     log = tmp_path / "browser.log"
     stub = _write_stub_browser(tmp_path / "bin" / "chrome", log, exit_code=7)
-    proc = _run(
-        ["--foreground", "--url", _LOOPBACK, "--wait", "0"],
-        _env(tmp_path, KISS_APP_BROWSER=str(stub)),
-    )
+    httpd, url = _site()
+    try:
+        proc = _run(
+            ["--foreground", "--url", url, "--wait", "0"],
+            _env(tmp_path, KISS_APP_BROWSER=str(stub)),
+        )
+    finally:
+        httpd.shutdown()
     assert proc.returncode == 7
-    assert _stub_calls(log)[0] == _app_flag(_LOOPBACK)
+    assert _stub_calls(log)[0] == _app_flag(url)
+
+
+def test_a_daemon_not_answering_yet_gets_the_start_page(tmp_path: Path) -> None:
+    """The window opens at once on the packaged start page, set to move on to the app.
+
+    After a reboot the app is relaunched before the daemon is spawned:
+    the URL file is there, nothing answers at its URL yet.  The browser
+    is started anyway, on ``media/appStart.html`` (a file:// page)
+    told to probe the daemon and then show the app's page (on macOS
+    the popup-opening page).
+    """
+    log = tmp_path / "browser.log"
+    stub = _write_stub_browser(tmp_path / "bin" / "chrome", log, exit_code=0)
+    url = f"http://127.0.0.1:{find_free_port()}"
+    started = time.monotonic()
+    proc = _run(["--url", url, "--wait", "0"], _env(tmp_path, KISS_APP_BROWSER=str(stub)))
+    assert proc.returncode == 0, proc.stderr
+    assert time.monotonic() - started < standalone_app.STARTUP_GRACE_SECS + 2
+    flag = _stub_calls(log)[0]
+    page, _sep, query = flag.partition("?")
+    assert page == f"--app={standalone_app.APP_START_PAGE.as_uri()}"
+    assert urllib.parse.parse_qs(query) == {
+        "next": [_app_flag(url).removeprefix("--app=")],
+        "probe": [f"{url}/api/app-window"],
+        "title": [BRAND["product_name"]],
+        **({"popup": ["1"]} if _MACOS else {}),
+    }
+    # --print-command names the app itself: it does not ask the daemon.
+    proc = _run(
+        ["--print-command", "--url", url], _env(tmp_path, KISS_APP_BROWSER=str(stub)),
+    )
+    assert proc.stdout.split()[1] == _app_flag(url)
+
+
+def test_the_start_page_waits_for_the_daemon_and_then_shows_the_app(tmp_path: Path) -> None:
+    """In a real Chromium the start page probes until the daemon answers, then navigates.
+
+    The page is a file:// origin asking an http://127.0.0.1 port: the
+    probe must be allowed from there (a no-cors fetch) and a refused
+    connection must keep the page waiting rather than fail it.
+    """
+    from playwright.sync_api import sync_playwright
+
+    port = find_free_port()
+    daemon = f"http://127.0.0.1:{port}"
+    url = standalone_app.start_page_url(f"{daemon}/landing", daemon)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(url)
+            assert page.title() == BRAND["product_name"]
+            assert page.text_content("#name") == BRAND["product_name"]
+            page.wait_for_timeout(1500)
+            assert page.url == url, "the page moved on without a daemon"
+            assert page.text_content("#dots")
+            httpd, _ = _site(port)
+            try:
+                page.wait_for_url(f"{daemon}/landing", timeout=5000)
+            finally:
+                httpd.shutdown()
+            assert "/landing" in _Hits.paths
+        finally:
+            browser.close()
 
 
 def test_browser_dying_at_once_is_a_failure_with_its_stderr(tmp_path: Path) -> None:
@@ -724,6 +796,98 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
     finally:
         subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False)
         httpd.shutdown()
+
+
+@pytest.mark.skipif(not _MACOS, reason="the brand bundle is macOS-only")
+def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a reboot the app is relaunched before the daemon: a window at once, the app later.
+
+    kiss-app starts the browser on the packaged start page while
+    nothing answers at the daemon's URL (the file survived the reboot):
+    a window is on screen within seconds, titled after the app.  Once
+    the site answers, the page moves on to the popup opener, which
+    opens the popup with the app and closes itself: one window, the
+    popup, as on a start with the daemon up.  A second kiss-app
+    meanwhile brings the waiting window to the front (the site cannot
+    be asked, so the window on screen decides) instead of opening
+    another.
+    """
+    browser = standalone_app.find_browser()
+    if browser is None or standalone_app.macos_browser_bundle(browser) is None:
+        pytest.skip("needs a Chromium-family browser in an application bundle")
+    port = find_free_port()
+    url = f"http://127.0.0.1:{port}/"
+    env = _browser_env(tmp_path, browser)
+    monkeypatch.setenv("HOME", env["HOME"])
+    profile = Path(env["KISS_HOME"]) / "webapp-profile"
+    bundle = tmp_path / "home" / "Applications" / f"{BRAND['product_name']}.app"
+    exe_copy = bundle / "Contents" / "MacOS" / browser.name
+    _Hits.paths = []
+    _Hits.app_window_open = False
+    _Hits.close = False
+    try:
+        started = time.monotonic()
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        assert time.monotonic() - started < 15, "kiss-app waited for the daemon"
+        pid = _macos_engine_pid(exe_copy, profile)
+        assert _wait_for(lambda: bool(standalone_app.macos_windows_on_screen(pid))), (
+            (Path(env["KISS_HOME"]) / "kiss-app.log").read_text()
+        )
+        assert _Hits.paths == [], "nothing served the site yet"
+        # The page moves itself into a popup right after its first
+        # paint (a reopen counts popups, not app windows): let the move
+        # settle (two windows for a moment on a slow first start of the
+        # clone) before a click on the icon, which brings the waiting
+        # window to the front and opens no second window.
+        time.sleep(3)
+        assert _wait_for(lambda: standalone_app.macos_windows_on_screen(pid) == 1)
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        assert "already open" in proc.stdout
+        time.sleep(3)
+        assert standalone_app.macos_windows_on_screen(pid) == 1
+        httpd, _ = _site(port)
+        try:
+            assert _wait_for(lambda: "/" in _Hits.paths), _Hits.paths
+            assert _Hits.paths[0] == standalone_app.APP_WINDOW_API, _Hits.paths
+            assert _Hits.paths[1].startswith("/media/appWindow.html?url="), _Hits.paths
+            assert _Hits.paths[2] == standalone_app.APP_WINDOW_API, _Hits.paths
+            _Hits.app_window_open = True
+            assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+            assert _Hits.paths.count("/") == 1, _Hits.paths
+            # The user closes the window and the daemon goes down (a
+            # restart).  The browser lives on without a window (no
+            # daemon sweeps it here), so the next kiss-app hands it the
+            # start page; once the daemon is back the popup shows the
+            # app where it was: the opener restores the bounds the
+            # page saved, the page itself moves only once per profile.
+            _Hits.close = True
+            assert _macos_windows(pid, []) == []
+            _Hits.close = False
+            _Hits.app_window_open = False
+        finally:
+            httpd.shutdown()
+            httpd.server_close()  # frees the port for the site's return below
+        proc = _run(["--url", url], env)
+        assert proc.returncode == 0, proc.stderr
+        assert "already open" not in proc.stdout
+        assert _wait_for(lambda: bool(standalone_app.macos_windows_on_screen(pid)))
+        time.sleep(3)
+        assert _wait_for(lambda: standalone_app.macos_windows_on_screen(pid) == 1)
+        httpd, _ = _site(port)  # starts a fresh path log
+        try:
+            assert _wait_for(lambda: "/" in _Hits.paths), _Hits.paths
+            assert _Hits.paths[0] == standalone_app.APP_WINDOW_API, _Hits.paths
+            assert _Hits.paths[1].startswith("/media/appWindow.html?url="), _Hits.paths
+            assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+            assert _Hits.paths.count("/") == 1, _Hits.paths
+        finally:
+            httpd.shutdown()
+    finally:
+        subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False)
 
 
 def _wait_for(condition: Callable[[], bool], timeout: float = 30) -> bool:
@@ -1462,7 +1626,7 @@ def test_macos_stale_clone_in_use_is_left_alone(tmp_path: Path) -> None:
     try:
         # Popen returns once the child has exec'd, but the kernel publishes
         # the new command line a moment later; `ps` can still miss it.
-        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle))
+        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle) is True)
         newer = _fake_browser_app(tmp_path / "newer", version="141.0.7400.1")
         launcher_before = (bundle / "Contents" / "MacOS" / "launcher").read_text()
         assert standalone_app.macos_launch_browser(newer, home=tmp_path) == newer
@@ -1526,7 +1690,7 @@ def test_macos_activate_running_needs_a_window_open_can_reach(tmp_path: Path) ->
     _write_stub_browser(exe, tmp_path / "log", sleep=30)
     window = subprocess.Popen([str(exe), "--app=http://127.0.0.1:1/"])
     try:
-        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle))
+        assert _wait_for(lambda: standalone_app.macos_bundle_in_use(bundle) is True)
         assert not standalone_app.macos_activate_running(bundle)
     finally:
         window.kill()

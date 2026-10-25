@@ -23,27 +23,18 @@ from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBacken
 class TestMatrixPersistentLoop:
     """Matrix backend must reuse one event loop across calls."""
 
-    def test_two_successive_calls_share_one_loop(self) -> None:
-        """Two successive coroutine runs succeed and reuse the same loop."""
-        backend = MatrixChannelBackend()
-        try:
-            assert backend._run(asyncio.sleep(0, result="first")) == "first"
-            loop = backend._loop
-            assert loop is not None
-            assert backend._run(asyncio.sleep(0, result="second")) == "second"
-            assert backend._loop is loop
-            assert loop.is_running()
-        finally:
-            backend.disconnect()
-
     def test_disconnect_stops_loop_and_allows_restart(self) -> None:
-        """disconnect() stops the loop; a later call lazily restarts it."""
+        """Successive calls share one running loop; disconnect() stops it and
+        a later call lazily restarts it."""
         backend = MatrixChannelBackend()
         try:
             assert backend._run(asyncio.sleep(0, result=1)) == 1
             loop = backend._loop
             thread = backend._loop_thread
             assert loop is not None and thread is not None
+            assert backend._run(asyncio.sleep(0, result=2)) == 2
+            assert backend._loop is loop
+            assert loop.is_running()
         finally:
             backend.disconnect()
         assert backend._loop is None

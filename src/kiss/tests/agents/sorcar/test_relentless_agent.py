@@ -75,9 +75,12 @@ class TestTemplateConstants(unittest.TestCase):
         )
 
     def test_continuation_prompt_placeholders(self) -> None:
-        """CONTINUATION_PROMPT has progress_text and continuation_number."""
-        formatted = CONTINUATION_PROMPT.format(progress_text="step 1 done", continuation_number=3)
+        """CONTINUATION_PROMPT has progress_text, state_text and continuation_number."""
+        formatted = CONTINUATION_PROMPT.format(
+            progress_text="step 1 done", continuation_number=3, state_text="worktree: wt-1",
+        )
         self.assertIn("step 1 done", formatted)
+        self.assertIn("worktree: wt-1", formatted)
         self.assertIn("Continuation 3", formatted)
         self.assertIn("Continue", formatted)
 

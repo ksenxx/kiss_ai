@@ -26,12 +26,8 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, loadMainCss} = require('./simplify2_harness');
 const {lastMsg, click, openSettings, closeSettings, typeInto} = require('./settings_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function boxValues(win) {
   const el = id => win.document.getElementById(id);
@@ -107,22 +103,22 @@ function testSubpanelsCollapsedByDefaultAndToggle() {
 }
 
 function testSettingsPanelIsCenteredNotSlidIn() {
-  const html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
-  assert.ok(html.includes('id="settings-panel"'), 'panel exists');
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const rule = css.match(/#settings-panel \{[^}]*\}/);
-  assert.ok(rule, 'main.css must style #settings-panel');
-  assert.ok(
-    rule[0].includes('translate(-50%, -50%)') &&
-      rule[0].includes('left: 50%') &&
-      rule[0].includes('top: 50%'),
+  const {win} = makePage({beforeScripts: loadMainCss});
+  openSettings(win);
+  const cs = win.getComputedStyle(win.document.getElementById('settings-panel'));
+  assert.strictEqual(cs.visibility, 'visible', 'the open panel is shown');
+  assert.deepStrictEqual(
+    [cs.position, cs.left, cs.top, cs.transform],
+    ['fixed', '50%', '50%', 'translate(-50%, -50%)'],
     'the settings panel is centered in the window',
   );
-  assert.ok(
-    !rule[0].includes('translateX(100%)') && !rule[0].includes('transition:'),
+  assert.strictEqual(
+    cs.getPropertyValue('transition'),
+    '',
     'the settings panel no longer slides in from the right',
   );
-  console.log('  ok - settings panel CSS centers without entry animation');
+  win.close();
+  console.log('  ok - settings panel is centered without entry animation');
 }
 
 function testMyModelsListRenderAndAdd() {

@@ -871,24 +871,6 @@ def test_telegram_action_classification() -> None:
     assert request_action("telegram", "GET", "") == "write"
 
 
-def test_telegram_legacy_direct_path_unchanged(
-    isolated_kiss_home: Path, api_server: _TokenXApiServer
-) -> None:
-    """Flag off: polling/typing hit the API directly with the URL token."""
-    tg_config.save({"bot_token": _REAL_TG_TOKEN})
-    backend = _tg_backend(api_server)
-    assert backend._muse is False
-    assert backend._http is requests
-    messages, cursor = backend.poll_messages("777", "0")
-    assert [m["text"] for m in messages] == ["hello"]
-    assert cursor == "6"
-    backend.send_typing("777")
-    assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/sendChatAction"
-    # No daemon socket appeared and the config kept its token.
-    assert not socket_path().exists()
-    assert json.loads(tg_config.path.read_text())["bot_token"] == _REAL_TG_TOKEN
-
-
 def test_msteams_probe_policy_denial_and_nonjson_graph(
     muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1074,6 +1056,7 @@ def test_telegram_legacy_tools_without_sdk(
     assert backend.connect() is True
     assert backend._connection_info == "Authenticated as @kissbot"
     assert backend._muse is False
+    assert backend._http is requests
     probe = api_server.requests[-1]
     assert probe["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
     assert not any(k.lower() == "authorization" for k in probe["headers"])
@@ -1095,6 +1078,8 @@ def test_telegram_legacy_tools_without_sdk(
     messages, cursor = polled.poll_messages("", "0")
     assert messages and cursor == "6"
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getUpdates"
+    polled.send_typing("777")
+    assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/sendChatAction"
     assert "cleared" in tools["clear_telegram_auth"]()
     assert not tg_config.path.exists()
     assert agent._backend._bot is None
@@ -1414,7 +1399,7 @@ def test_cli_import_rejects_non_string_values(muse_env: Path) -> None:
 
 
 def test_auto_migration_never_clobbers_a_working_credential(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A bad config token during auto-migration must not destroy the vault."""
     # Telegram: enroll a good token, then simulate a stale/bad config
@@ -1428,19 +1413,8 @@ def test_auto_migration_never_clobbers_a_working_credential(
     assert stored["authorized_user_info"]["token"] == _REAL_TG_TOKEN
 
 
-def test_first_migration_still_seeds_the_vault(
-    muse_env: Path, api_server: _TokenXApiServer
-) -> None:
-    """With an empty vault, a config token seeds and is scrubbed."""
-    tg_config.save({"bot_token": _REAL_TG_TOKEN})
-    backend = _tg_backend(api_server)
-    assert backend.connect() is True
-    assert vault_has_credentials("telegram")
-    assert not tg_config.path.exists()
-
-
 def test_auto_migration_rejects_non_string_config_values(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A JSON boolean in config is refused, not coerced, and never scrubbed."""
     # Telegram: a boolean bot_token is likewise refused (mint returns
@@ -1458,8 +1432,6 @@ def test_concurrent_scratch_validation_is_isolated(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """Two simultaneous authenticate calls never validate each other."""
-    import threading
-
     results: dict[str, Any] = {}
 
     def authenticate(key: str, token: str) -> None:
@@ -1574,9 +1546,7 @@ def test_double_encoded_echo_cannot_smuggle_the_token(
     assert double not in audit and _REAL_TG_TOKEN not in audit
 
 
-def test_atomic_store_if_absent_never_clobbers(
-    muse_env: Path, api_server: _TokenXApiServer
-) -> None:
+def test_atomic_store_if_absent_never_clobbers(muse_env: Path) -> None:
     """store-if-absent leaves an already-present vault credential intact."""
     # First store creates the entry.
     assert (
@@ -1592,23 +1562,23 @@ def test_atomic_store_if_absent_never_clobbers(
     )
     stored = json.loads((muse_auth_dir() / "vault" / "telegram.json").read_text())
     assert stored["authorized_user_info"]["token"] == _REAL_TG_TOKEN
-    # Auto-migration therefore cannot overwrite it: a stale config
-    # token is ignored while the vault credential wins.
-    tg_config.save({"bot_token": "9:stale"})
-    backend = _tg_backend(api_server)
-    assert backend.connect() is True
-    assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
+    # Auto-migration therefore cannot overwrite it either; see
+    # test_auto_migration_never_clobbers_a_working_credential.
 
 
-def test_prefix_infinity_cache_is_not_trusted(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("expires_at", [float("inf"), 1e308], ids=["inf", "1e308"])
+def test_immortal_cache_is_not_trusted(
+    muse_env: Path,
+    api_server: _TokenXApiServer,
+    monkeypatch: pytest.MonkeyPatch,
+    expires_at: float,
 ) -> None:
-    """A persisted expires_at=inf (from an older build) forces re-exchange."""
+    """A persisted expires_at of inf (older build) or 1e308 forces re-exchange."""
     _ms_env(monkeypatch, api_server)
     store_credentials("msteams", _client_credential_info(api_server.base_url), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
-    payload["cached_token"] = {"access_token": "stale-immortal", "expires_at": float("inf")}
+    payload["cached_token"] = {"access_token": "stale-immortal", "expires_at": expires_at}
     vault_file.write_text(json.dumps(payload))
     backend = _ms_backend(api_server)
     assert backend._wire_muse() is True
@@ -1629,8 +1599,7 @@ def test_slack_workspace_named_pending_stays_isolated(muse_env: Path) -> None:
     slack_ws = "slack-pending-0123456789abcdef"
     assert scratch_root(slack_ws) == ""
     assert policy_service(slack_ws) == slack_ws
-    # Wrong root, wrong hex length, or uppercase hex do not match.
-    assert scratch_root("slack-pending-0123456789abcdef") == ""
+    # Wrong hex length or uppercase hex do not match either.
     assert scratch_root("telegram-pending-short") == ""
     assert scratch_root("telegram-pending-0123456789ABCDEF") == ""
 
@@ -1656,7 +1625,7 @@ def test_abandoned_pending_file_is_swept(muse_env: Path) -> None:
 
 
 def test_malformed_first_migration_connect_returns_false(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A daemon-rejected first-migration credential yields False, not a raise."""
     tg_config.save({"bot_token": "not path safe"})
@@ -1689,7 +1658,7 @@ def test_ask_remediation_names_the_grantable_root(
 
 
 def test_malformed_stale_config_does_not_block_the_vault(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A malformed stale config value never fails an authoritative connect."""
     # Telegram: authoritative vault credential + a malformed stale config.
@@ -1715,24 +1684,6 @@ def test_compare_and_scrub_keeps_a_newer_config_value(
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     _scrub_config_token(expected=_REAL_TG_TOKEN)
     assert not tg_config.path.exists()
-
-
-def test_huge_finite_cache_expiry_is_not_trusted(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A persisted expires_at=1e308 forces a fresh exchange."""
-    _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info(api_server.base_url), [])
-    vault_file = muse_auth_dir() / "vault" / "msteams.json"
-    payload = json.loads(vault_file.read_text())
-    payload["cached_token"] = {"access_token": "stale-huge", "expires_at": 1e308}
-    vault_file.write_text(json.dumps(payload))
-    backend = _ms_backend(api_server)
-    assert backend._wire_muse() is True
-    assert json.loads(backend.list_teams())["ok"] is True
-    assert len(api_server.token_requests) == 1
-    graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
 
 
 def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:

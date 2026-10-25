@@ -6,47 +6,25 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeSharedPage,
   send,
-  MEDIA,
   sendEmptyWorkDir,
+  rowsByTitle: rowsByTaskId,
+  sleep,
 } = require('./simplify2_harness');
-const {inlineDesignTokens} = require('./designTokens');
+const {freezeClockAndStyle, makeRow} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makePage() {
-  const {win, posted} = makeSharedPage({beforeScripts: freezeClockAndStyle});
+  const {win, posted} = makeSharedPage({beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS)});
   return {win, posted};
-}
-
-/** Freeze the page's Date at FROZEN_NOW_MS and inline main.css. */
-function freezeClockAndStyle(win) {
-  const RealDate = win.Date;
-  const FakeDate = function (...args) {
-    if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
-    return new RealDate(...args);
-  };
-  FakeDate.prototype = RealDate.prototype;
-  FakeDate.now = () => FROZEN_NOW_MS;
-  FakeDate.parse = RealDate.parse;
-  FakeDate.UTC = RealDate.UTC;
-  win.Date = FakeDate;
-
-  const cssText = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = cssText;
-  win.document.head.appendChild(styleEl);
 }
 
 /** Let main.js's end-of-tick history refetch coalescing settle. */
 function tick() {
-  return new Promise(resolve => setTimeout(resolve, 0));
+  return sleep(0);
 }
 
 function openSidebar(win) {
@@ -54,41 +32,6 @@ function openSidebar(win) {
   if (sidebar && !sidebar.classList.contains('open')) {
     sidebar.classList.add('open');
   }
-}
-
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + (overrides.task_id || 0),
-      task_id: overrides.task_id || 0,
-      title: overrides.title || 'untitled',
-      timestamp: 1_700_000_000,
-      preview: overrides.title || 'untitled',
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 1_700_000_010_000,
-    },
-    overrides,
-  );
-}
-
-function rowsByTaskId(win) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  const map = {};
-  rows.forEach(r => {
-    const t = r.querySelector('.sidebar-item-text');
-    if (!t) return;
-    map[t.textContent] = r;
-  });
-  return map;
 }
 
 function dotOf(row) {
@@ -129,9 +72,9 @@ function testDotRendersForRunningRow() {
     'failed row must NOT carry .sidebar-item-running',
   );
 
+  // The row carrying `.sidebar-item-running` at all is
+  // historyTaskRowIndicators'; this suite pins what the indicator is.
   const dot = dotOf(running);
-  assert.ok(dot, 'running row must carry .sidebar-item-running spinner');
-
   assert.strictEqual(
     running.firstElementChild,
     dot,
@@ -165,14 +108,6 @@ function testDotRendersForRunningRow() {
     animName.indexOf('running-pulse') < 0 &&
       animShort.indexOf('running-pulse') < 0,
     'the running indicator must spin, not pulse',
-  );
-
-  const cssText = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  assert.ok(
-    /@keyframes\s+status-spin\b/.test(cssText),
-    'main.css must define @keyframes status-spin',
   );
 
   assert.strictEqual(running.dataset.category, 'running');
@@ -256,11 +191,15 @@ async function testDotDisappearsLiveOnStatusRunningFalse() {
 
   // Every status refetches history (main.js `case 'status'` calls
   // refreshHistory unconditionally); the one that matters here is the
-  // running:false that must drop the spinner.  A second refresh in the
-  // same tick folds into the end-of-tick refetch, so let that tick end
-  // before the status under test.
+  // running:false that must drop the spinner.  A refresh while the
+  // previous one's page is still in flight folds into it, so answer
+  // that page before the status under test.
   send(win, {type: 'status', running: true, tabId: undefined});
   await tick();
+  const pending = posted.find(m => m && m.type === 'getHistory');
+  send(win, {
+    type: 'history', sessions: initial, offset: 0, generation: pending.generation,
+  });
   posted.length = 0;
   send(win, {type: 'status', running: false, tabId: undefined});
   const sent = posted.find(m => m && m.type === 'getHistory');

@@ -19,39 +19,20 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness.js');
+const {
+  makePage,
+  send,
+  waitFor,
+  htmlFrames,
+  activeFrameDoc,
+  stubMonaco,
+} = require('./simplify2_harness.js');
 
 function pageWithMonaco() {
-  const created = [];
+  let created;
   const page = makePage({
     beforeScripts: win => {
-      // Monaco loads from a CDN jsdom never fetches; a window-level
-      // stub recording editor.create calls stands in for it.
-      win.monaco = {
-        editor: {
-          defineTheme: () => {},
-          setTheme: () => {},
-          create: (holder, opts) => {
-            const value = String(opts.value === undefined ? '' : opts.value);
-            const model = {
-              getAlternativeVersionId: () => 1,
-              getValue: () => value,
-              getLineCount: () => value.split('\n').length,
-            };
-            created.push({holder, value: opts.value, language: opts.language});
-            return {
-              getModel: () => model,
-              onDidChangeModelContent: () => {},
-              setPosition: () => {},
-              revealLineInCenter: () => {},
-              getDomNode: () => holder,
-              dispose: () => {},
-              layout: () => {},
-              focus: () => {},
-            };
-          },
-        },
-      };
+      created = stubMonaco(win);
     },
   });
   return Object.assign(page, {created});
@@ -59,20 +40,6 @@ function pageWithMonaco() {
 
 function contentTabs(win) {
   return win._testApi.openTabs().filter(t => t.isContentTab);
-}
-
-// The html frames of content views on screen (a background content
-// tab keeps its view in the DOM, hidden).
-function frames(win) {
-  return Array.from(
-    win.document.querySelectorAll('.content-html-frame'),
-  ).filter(f => f.closest('.content-tab-view').style.display !== 'none');
-}
-
-function activeFrameDoc(win) {
-  const fr = frames(win);
-  assert.strictEqual(fr.length, 1, 'exactly one html frame on screen');
-  return fr[0].srcdoc;
 }
 
 function closeActiveContentTab(win) {
@@ -156,7 +123,7 @@ async function main() {
   // 5. A Python file opens as text in the editor, not in a frame.
   openFile(win, tabId, '/ws/proj/src/app.py', 'print(1)\n');
   assert.strictEqual(contentTabs(win).length, 3);
-  assert.strictEqual(frames(win).length, 0, 'no html frame for a .py file');
+  assert.strictEqual(htmlFrames(win).length, 0, 'no html frame for a .py file');
   await waitFor(() => created.length === 1, 'the text editor was created');
   assert.strictEqual(created[0].value, 'print(1)\n');
   assert.strictEqual(created[0].language, 'python');

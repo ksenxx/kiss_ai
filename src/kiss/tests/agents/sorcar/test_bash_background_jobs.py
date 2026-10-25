@@ -40,9 +40,10 @@ from kiss.agents.sorcar.useful_tools import UsefulTools, _kill_process_group
 from kiss.core.processes import pid_alive
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 from kiss.tests.server.pause import Pause
@@ -339,7 +340,8 @@ class TestStop:
         outcome: dict[str, Any] = {}
 
         def run() -> None:
-            token = begin_tool_call("bash_job")
+            token = new_tool_call("bash_job")
+            register_tool_call(token)
             try:
                 try:
                     outcome["result"] = tools.bash_job(job_id, action="wait", timeout_seconds=60)

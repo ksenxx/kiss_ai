@@ -21,27 +21,22 @@ const path = require('path');
 // in jsdom. Replies are NOT automatic: the test answers each posted
 // `checkPaths` explicitly so it can swallow the one a disconnect would
 // swallow.
-const {makePage, send} = require('./simplify2_harness');
-const {findLinks, findMissing} = require('./file_link_helpers');
+const {makePage, send, ofType} = require('./simplify2_harness');
+const {
+  findLinks,
+  findMissing,
+  existsOnRealFs,
+} = require('./file_link_helpers');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtreconnect-'));
 
 function checkPathsPosts(posted) {
-  return posted.filter(m => m.type === 'checkPaths');
+  return ofType(posted, 'checkPaths');
 }
 
 function replyOnRealFs(win, msg) {
   const results = {};
-  for (const p of msg.paths) {
-    let ok = false;
-    try {
-      const st = fs.statSync(p);
-      ok = st.isFile() || st.isDirectory();
-    } catch {
-      ok = false;
-    }
-    results[p] = ok;
-  }
+  for (const p of msg.paths) results[p] = existsOnRealFs(p);
   send(win, {
     type: 'pathsExist',
     results,

@@ -36,8 +36,10 @@ is removed between that call and ``bounding_box()``.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -50,6 +52,7 @@ import pytest
 
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core.tool_interrupt import inject_async_exception
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux") or shutil.which("Xvfb") is None,
@@ -379,6 +382,65 @@ def test_broken_xvfb_binary_means_no_virtual_display(tool, tmp_path):
     assert web_stealth.virtual_display() is not None
 
 
+def test_stop_during_xvfb_startup_leaves_no_wrapper_behind(tool, tmp_path):
+    """A Stop landing while Xvfb starts up kills the wrapper instead of leaking it.
+
+    ``virtual_display`` runs on the task thread, where a Stop arrives as
+    an exception injected with ``PyThreadState_SetAsyncExc`` (the
+    runner's mechanism, used here directly).  Before the fix the
+    interrupted call closed its pipe ends but left the wrapper shell and
+    its Xvfb running for the rest of the process, with ``_XVFB_PROC``
+    still ``None`` so nothing could ever reap them.
+    """
+    tool.close()
+    web_stealth.stop_virtual_display()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pid_file = tmp_path / "xvfb.pid"
+    # Starts, reports its pid, and never writes the display number.
+    fake = fake_bin / "Xvfb"
+    fake.write_text(f"#!/bin/sh\necho $$ > {pid_file}\nexec sleep 300\n")
+    fake.chmod(0o755)
+    outcome: list[object] = []
+
+    def start_display() -> None:
+        try:
+            outcome.append(web_stealth.virtual_display())
+        except KeyboardInterrupt:
+            outcome.append(KeyboardInterrupt)
+
+    saved_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{fake_bin}:{saved_path}"
+    xvfb_pid = -1
+    try:
+        thread = threading.Thread(target=start_display, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (
+            pid_file.exists() and pid_file.read_text().strip()
+        ):
+            time.sleep(0.05)
+        xvfb_pid = int(pid_file.read_text())
+        assert os.path.exists(f"/proc/{xvfb_pid}")
+        time.sleep(0.2)  # the thread is now polling the displayfd pipe
+        assert inject_async_exception(thread.ident or -1, KeyboardInterrupt) == 1
+        thread.join(timeout=15)
+        assert not thread.is_alive()
+        assert outcome == [KeyboardInterrupt]
+        assert web_stealth._XVFB_PROC is None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and os.path.exists(f"/proc/{xvfb_pid}"):
+            time.sleep(0.1)
+        assert not os.path.exists(f"/proc/{xvfb_pid}"), "fake Xvfb leaked past the Stop"
+    finally:
+        os.environ["PATH"] = saved_path
+        if xvfb_pid > 0:  # on failure: do not leave the fake behind for real
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(xvfb_pid, signal.SIGTERM)
+    # The lock was released and a real display comes up afterwards.
+    assert web_stealth.virtual_display() is not None
+
+
 # ---------------------------------------------------------------------------
 # 2. Human-like input
 # ---------------------------------------------------------------------------
@@ -549,6 +611,54 @@ def test_mouse_path_shape_and_typing_chunks():
     assert all(35 <= d <= 115 for c, d in chunks if c != " ")
     assert web_stealth.typing_chunks("") == []
     assert web_stealth.typing_duration_secs([("ab", 100), (" ", 200)]) == 0.4
+
+
+@pytest.mark.timeout(120)
+def test_sync_api_fails_fast_once_the_driver_has_exited():
+    """Every sync API call after the driver process exits raises at once.
+
+    Unguarded, only the first call after the exit fails (its request dies
+    with the closed pipe) and every later one busy-spins forever on the
+    finished dispatcher greenlet (``BrowserContext.close`` hung 900 s in
+    the 2026-10-25 full-suite run).  Its own thread: a sync Playwright is
+    one per thread and the module's tool already owns this one.
+    """
+    api = web_stealth.playwright_api()
+    errors: list[BaseException] = []
+    elapsed: list[float] = []
+
+    def body() -> None:
+        pw = api.sync_playwright().start()
+        try:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto("data:text/html,<h1>x</h1>")
+            assert page.evaluate("1 + 1") == 2
+            os.kill(pw._impl_obj._connection._transport._proc.pid, signal.SIGKILL)
+            time.sleep(0.3)
+            with pytest.raises(Exception, match="closed|exited"):
+                page.evaluate("1")
+            started = time.monotonic()
+            for call in (browser.close, page.title, page.context.close):
+                with pytest.raises(api.Error, match=web_stealth.DRIVER_EXITED_MESSAGE):
+                    call()
+            elapsed.append(time.monotonic() - started)
+        finally:
+            pw.stop()
+
+    def run() -> None:
+        try:
+            body()
+        except BaseException as exc:  # noqa: BLE001 - reported in the test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, name="dead-driver-sync-api", daemon=True)
+    thread.start()
+    thread.join(60)
+    assert not thread.is_alive(), "a sync API call hung on the dead driver"
+    if errors:
+        raise errors[0]
+    assert elapsed and elapsed[0] < 5
 
 
 # ---------------------------------------------------------------------------

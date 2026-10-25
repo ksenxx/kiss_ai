@@ -13,6 +13,7 @@ const {fakeIntervals, sleep} = require('./simplify2_harness');
 const {
   installFakeWebSocket,
   readShimJs,
+  bootShim,
   waitForSocket,
 } = require('./transport_page_helpers');
 
@@ -23,20 +24,6 @@ const MEDIA = path.resolve(__dirname, '..', 'media');
 // any stylesheet or script.
 function readAssetGuardJs() {
   return fs.readFileSync(path.join(MEDIA, 'assetLoadGuard.js'), 'utf-8');
-}
-
-function evalShim(window, shimJs) {
-  // chat.html defines the brand before the shim script; the overlay text
-  // is built from it (the bare-window fallback is exercised separately).
-  window.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
-  window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
-  // The shim defers app-bound dispatches until the parser finishes
-  // (DOMContentLoaded) so none are lost while main.js is still being
-  // fetched; jsdom keeps readyState 'loading' until a later macrotask,
-  // so fire it now to switch the shim to direct dispatch.
-  window.document.dispatchEvent(
-    new window.Event('DOMContentLoaded', {bubbles: true}),
-  );
 }
 
 function ok(msg) {
@@ -104,12 +91,24 @@ function wireOverlayContract(window) {
   });
 }
 
+/**
+ * A page with the overlay contract and a fake WebSocket wired, ready for
+ * `bootShim`; *opts* are `buildDom`'s switches.
+ */
+function page(opts) {
+  const {window} = buildDom(opts);
+  const sockets = [];
+  installFakeWebSocket(window, sockets, {connecting: true});
+  wireOverlayContract(window);
+  return {window, sockets};
+}
+
 function isVisible(el) {
   return el.style.display !== 'none';
 }
 
 function tick() {
-  return new Promise(resolve => setTimeout(resolve, 5));
+  return sleep(5);
 }
 
 // Frames dispatched into the page arrive as jsdom objects whose
@@ -145,7 +144,7 @@ async function run() {
     installFakeWebSocket(window, sockets, {connecting: true});
     installFakeServiceWorker(window, mode, swCalls);
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     await tick();
     try {
       // (objects cross the jsdom realm boundary: compare fields, not
@@ -180,7 +179,7 @@ async function run() {
     window.addEventListener('message', ev => {
       if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
     });
-    evalShim(window, shimJs);
+    bootShim(window);
     sockets[0].fireOpen();
     sockets[0].fireClose();
     sockets[0].fireOpen();
@@ -204,12 +203,8 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
@@ -229,12 +224,8 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -270,12 +261,8 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
@@ -302,12 +289,8 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
@@ -351,11 +334,7 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
 
     const forwarded = [];
     window.addEventListener('message', ev => {
@@ -363,7 +342,7 @@ async function run() {
       if (d && d.type && d.type !== 'daemonStatus') forwarded.push(d);
     });
 
-    evalShim(window, shimJs);
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'history', items: [{secret: 'leak'}]});
@@ -411,7 +390,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
 
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     try {
@@ -646,7 +625,7 @@ async function run() {
     installFakeWebSocket(window, sockets, {connecting: true});
     const FakeWebSocket = window.WebSocket;
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     const s0 = sockets[0];
     s0.fireOpen();
@@ -731,7 +710,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const sock = sockets[0];
 
     sock.fireOpen();
@@ -786,12 +765,8 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     const focusInput = window.document.getElementById('auth-modal-input');
@@ -826,17 +801,26 @@ async function run() {
         isVisible(modal),
         'Enter keeps the modal open until the server answers',
       );
+      // Not stored until the server accepts it (other tabs probe with
+      // the stored value, and a wrong guess per tab is counted).
       assert.strictEqual(
         window.localStorage.getItem('sorcar-remote-pwd'),
-        'pw2',
-        'Enter must save the typed password for the reconnect',
+        null,
+        'Enter must not store the typed password before auth_ok',
       );
       assert.deepStrictEqual(
         sock.sent,
         [],
         'nothing must be sent on a closed socket',
       );
-      ok('Enter saves the password; a dead socket receives nothing');
+      assert.strictEqual(sockets.length, 2, 'Enter reconnects at once');
+      sockets[1].fireOpen();
+      assert.deepStrictEqual(
+        JSON.parse(sockets[1].sent[0]),
+        {type: 'auth', password: 'pw2'},
+        'the reconnect carries the typed password',
+      );
+      ok('Enter keeps the password for the reconnect; a dead socket gets nothing');
     } catch (err) {
       fail('Enter-key submit path broken', err);
     }
@@ -844,12 +828,16 @@ async function run() {
   }
 
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    // Record the shim's timers instead of sleeping across the 1 s
+    // lockout: the reconnect it arms is fired by hand below, so the
+    // check does not depend on the wall clock under a loaded runner.
+    const timers = [];
+    window.setTimeout = function (fn, ms) {
+      timers.push({fn, ms});
+      return timers.length;
+    };
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
 
@@ -875,6 +863,7 @@ async function run() {
     window.clearTimeout = function () {
       throw new Error('clearTimeout blocked');
     };
+    const armedBeforeClose = timers.length;
     sock.fireClose();
     try {
       assert.strictEqual(
@@ -889,18 +878,20 @@ async function run() {
       fail('lockout label overwritten by the close handler', err);
     }
 
-    await sleep(400);
+    const armedByClose = timers.slice(armedBeforeClose);
     try {
-      assert.strictEqual(
-        sockets.length,
-        1,
-        'locked shim must NOT reconnect on the fast backoff',
+      assert.strictEqual(sockets.length, 1, 'no reconnect before the timer');
+      assert.deepStrictEqual(
+        armedByClose.map(t => t.ms),
+        [1000],
+        'the close must arm exactly one reconnect, delayed by retry_after ' +
+          '(the fast backoff is 500-999 ms)',
       );
       ok('locked shim skips the fast reconnect backoff');
     } catch (err) {
       fail('locked shim reconnected too early', err);
     }
-    await sleep(900);
+    armedByClose[0].fn();
     try {
       assert.strictEqual(
         sockets.length,
@@ -926,21 +917,23 @@ async function run() {
   }
 
   {
-    const dom = buildDom({noModal: true});
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page({noModal: true});
+    const timers = [];
+    window.setTimeout = function (fn, ms) {
+      timers.push({fn, ms});
+      return timers.length;
+    };
+    bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_locked'});
+    const armedBeforeClose = timers.length;
     sock.fireClose();
-    await sleep(400);
     try {
-      assert.strictEqual(
-        sockets.length,
-        1,
+      assert.strictEqual(sockets.length, 1, 'no instant retry');
+      assert.deepStrictEqual(
+        timers.slice(armedBeforeClose).map(t => t.ms),
+        [60000],
         'invalid retry_after must default to 60s, not instant retry',
       );
       ok('missing retry_after defaults to a 60s wait; no msg node is fine');
@@ -956,11 +949,7 @@ async function run() {
     // flushed at DOMContentLoaded, not lost.  The lost dispatch left
     // the "KISS Sorcar Server is starting ..." overlay up forever
     // whenever auth_ok beat the main.js fetch.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     // Eval the shim WITHOUT the parser-finished simulation: jsdom
     // keeps readyState 'loading' here, exactly like a real page whose
     // later body scripts are still being fetched.
@@ -1010,11 +999,7 @@ async function run() {
     // reached main.js out of order.  jsdom flips readyState and fires
     // DOMContentLoaded in one step, so the gap is reproduced by
     // reporting 'interactive' before the event is dispatched.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const seen = [];
     window.addEventListener('message', ev => seen.push(ev.data.type));
     window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
@@ -1053,11 +1038,7 @@ async function run() {
     // A copy of the shim evaluated in a document that already finished
     // parsing never gets a DOMContentLoaded, so it must dispatch
     // directly from the start instead of queueing forever.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     await tick();
     try {
       assert.strictEqual(
@@ -1087,12 +1068,8 @@ async function run() {
     // dies first re-sends them), and a confirmed batch is never sent
     // again; the page itself is never reloaded along the way.
     const reloads = [];
-    const dom = buildDom({reloads});
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page({reloads});
+    bootShim(window);
     const api = window.acquireTransport();
     const types = sock => sock.sent.map(d => JSON.parse(d).type);
     sockets[0].fireOpen();
@@ -1169,7 +1146,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     try {
       // The worker's copy exists because the server was reachable
@@ -1233,7 +1210,7 @@ async function run() {
     const socketsQ = [];
     installFakeWebSocket(wq, socketsQ, {connecting: true});
     wireOverlayContract(wq);
-    evalShim(wq, shimJs);
+    bootShim(wq);
     socketsQ[0].fireOpen();
     Object.defineProperty(wq.Storage.prototype, 'setItem', {
       configurable: true,
@@ -1263,7 +1240,7 @@ async function run() {
     const sockets2 = [];
     installFakeWebSocket(w2, sockets2, {connecting: true});
     wireOverlayContract(w2);
-    evalShim(w2, shimJs);
+    bootShim(w2);
     sockets2[0].fireOpen();
     sockets2[0].fireMessage({type: 'auth_ok'});
     try {
@@ -1300,7 +1277,7 @@ async function run() {
     const w3 = dom3.window;
     w3.sessionStorage.setItem('sorcar-offline-reloaded', '1');
     installFakeWebSocket(w3, [], {connecting: true});
-    evalShim(w3, shimJs);
+    bootShim(w3);
     try {
       assert.strictEqual(
         w3.sessionStorage.getItem('sorcar-offline-reloaded'),
@@ -1334,7 +1311,7 @@ async function run() {
     window.clearTimeout = function () {};
     let now = 1000000;
     window.Date.now = () => now;
-    evalShim(window, shimJs);
+    bootShim(window);
     const s0 = sockets[0];
     s0.fireOpen();
     s0.fireMessage({type: 'auth_ok'});
@@ -1454,7 +1431,7 @@ async function run() {
       window.addEventListener = realAddEventListener;
     }
     newDocumentGuard();
-    evalShim(window, shimJs);
+    bootShim(window);
     function failLoad(tag, attrs) {
       const el = doc.createElement(tag);
       for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
@@ -1569,11 +1546,7 @@ async function run() {
   // long it has been trying, hint at the fix and offer "Retry now",
   // which reconnects immediately; a server answer removes the button.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     // Real timers drive the 1 s overlay tick; the wrappers only record
     // which setTimeout ids the shim arms and clears, so the backoff
     // cancellation below is checked by id instead of by sleeping
@@ -1592,7 +1565,7 @@ async function run() {
       return realClearTimeout(id);
     };
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     try {
@@ -1668,7 +1641,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     try {
       sockets[0].fireClose();
       const realNow = window.Date.now;
@@ -1693,12 +1666,8 @@ async function run() {
   // spinner that pretends the server is starting: the overlay says a
   // password is needed and "Enter password" re-opens the dialog.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     sock.fireOpen();
@@ -1799,12 +1768,8 @@ async function run() {
   // the typed text so the user can retype at once, and the socket close
   // that follows keeps the dialog as it is.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     sock.fireOpen();
@@ -1818,8 +1783,16 @@ async function run() {
         type: 'auth',
         password: 'wrong',
       });
+      // The typed guess is not stored until the server accepts it.
+      assert.strictEqual(
+        window.localStorage.getItem('sorcar-remote-pwd'),
+        null,
+        'a pending guess is not stored',
+      );
       // A browser that forbids storage (private mode) must not turn the
-      // wrong-password report into a script error.
+      // wrong-password report into a script error (a stale stored
+      // password stands in for what the refusal must forget).
+      window.localStorage.setItem('sorcar-remote-pwd', 'stale');
       const realRemoveItem = window.Storage.prototype.removeItem;
       window.Storage.prototype.removeItem = function () {
         throw new Error('SecurityError');
@@ -1842,7 +1815,7 @@ async function run() {
       assert.strictEqual(input.value, 'wrong', 'the typed text is kept');
       assert.strictEqual(
         window.localStorage.getItem('sorcar-remote-pwd'),
-        'wrong',
+        'stale',
         'storage that throws is tolerated',
       );
       sock.fireMessage({
@@ -1872,12 +1845,8 @@ async function run() {
   // overlay text so the user learns why, and the close that follows
   // keeps that explanation instead of a spinner label.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     sock.fireOpen();
@@ -1933,7 +1902,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     wireOverlayContract(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const app = doc.getElementById('app');
     try {
@@ -1983,13 +1952,9 @@ async function run() {
   // never open): the overlay first returns to the plain label, then
   // escalates to "Still trying ..." + "Retry now" like any outage.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     const realNow = window.Date.now;
@@ -2079,13 +2044,9 @@ async function run() {
   // "Enter password" button (the state the cancel had set up), instead
   // of "0 s" forever.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     const realNow = window.Date.now;
@@ -2141,13 +2102,9 @@ async function run() {
   // about to answer): only the countdown ends; nothing is relabelled
   // and the server's auth_required opens the dialog as usual.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     const realNow = window.Date.now;
@@ -2184,13 +2141,9 @@ async function run() {
   // counted: when it expires offline the earlier outage clock is kept,
   // so the escalation follows from the original outage start.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const clock = fakeIntervals(window);
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     const realNow = window.Date.now;
@@ -2230,11 +2183,7 @@ async function run() {
   // handshake intact, and a silent reconnect with the cached password
   // never re-offers a save.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const stored = [];
     let ctorThrows = false;
     window.PasswordCredential = function PasswordCredential(data) {
@@ -2251,7 +2200,7 @@ async function run() {
         },
       },
     });
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     try {
       const s0 = sockets[0];
@@ -2329,11 +2278,7 @@ async function run() {
   // and throw in turn; none of these may block the login.  A reload that
   // reuses the stored password is a silent login and must not re-offer.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     const stored = [];
     let storeMode = 'resolve';
     window.PasswordCredential = function PasswordCredential(init) {
@@ -2353,7 +2298,7 @@ async function run() {
         },
       },
     });
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     const modal = doc.getElementById('auth-modal');
@@ -2403,11 +2348,7 @@ async function run() {
     window.close();
   }
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     window.localStorage.setItem('sorcar-remote-pwd', 'saved');
     const stored = [];
     window.PasswordCredential = function PasswordCredential() {};
@@ -2420,7 +2361,7 @@ async function run() {
         },
       },
     });
-    evalShim(window, shimJs);
+    bootShim(window);
     const sock = sockets[0];
     try {
       sock.fireOpen();
@@ -2451,13 +2392,9 @@ async function run() {
   // stale password is forgotten so the reconnect probes with the
   // uncounted empty one and gets the dialog, not a counted wrong guess.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     window.localStorage.setItem('sorcar-remote-pwd', 'rotated-away');
-    evalShim(window, shimJs);
+    bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     try {
@@ -2539,13 +2476,9 @@ async function run() {
   // for the reconnect; a page admitted without a password (loopback)
   // keeps sending bare frames; a storage that throws is tolerated.
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
+    const {window, sockets} = page();
     window.localStorage.setItem('sorcar-remote-pwd', 'old-pw');
-    evalShim(window, shimJs);
+    bootShim(window);
     const sock = sockets[0];
     try {
       sock.fireOpen();
@@ -2612,12 +2545,8 @@ async function run() {
     window.close();
   }
   {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
-    evalShim(window, shimJs);
+    const {window, sockets} = page();
+    bootShim(window);
     const sock = sockets[0];
     try {
       sock.fireOpen();
@@ -2651,7 +2580,7 @@ async function run() {
     const sockets = [];
     installFakeWebSocket(window, sockets, {connecting: true});
     window.name = 'kiss-app-window';
-    evalShim(window, shimJs);
+    bootShim(window);
     try {
       assert.strictEqual(
         sockets[0].url,
@@ -2666,7 +2595,7 @@ async function run() {
     const bare = buildDom();
     const bareSockets = [];
     installFakeWebSocket(bare.window, bareSockets, {connecting: true});
-    evalShim(bare.window, shimJs);
+    bootShim(bare.window);
     try {
       assert.strictEqual(
         bareSockets[0].url,
@@ -2696,7 +2625,7 @@ async function run() {
         return timers.length;
       };
       window.clearTimeout = function () {};
-      evalShim(window, shimJs);
+      bootShim(window);
       const delays = [];
       for (let i = 0; i < 10; i++) {
         sockets[sockets.length - 1].fireClose();

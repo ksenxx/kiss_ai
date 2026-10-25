@@ -10,7 +10,9 @@ const {
   makePage: makeChatPage,
   send,
   fakeMatchMedia,
+  ofType,
 } = require('./simplify2_harness');
+const {lastGetHistory, rowByTitle} = require('./history_helpers');
 
 function makePage(opts) {
   const {desktopMatches = false} = opts || {};
@@ -23,12 +25,7 @@ function makePage(opts) {
 }
 
 function getHistoryMsgs(posted) {
-  return posted.filter(m => m.type === 'getHistory');
-}
-
-function lastGetHistory(posted) {
-  const msgs = getHistoryMsgs(posted);
-  return msgs.length ? msgs[msgs.length - 1] : null;
+  return ofType(posted, 'getHistory');
 }
 
 function openDrawer(win) {
@@ -40,38 +37,9 @@ function openDrawer(win) {
   );
 }
 
-function rowByTitle(win, title) {
-  const rows = win.document.querySelectorAll('#history-list .sidebar-item');
-  for (const r of rows) {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t && t.textContent === title) return r;
-  }
-  return null;
-}
-
-function testDesktopReconnectRefetchesHistory() {
-  const {win, posted} = makePage({desktopMatches: true});
-  const sidebar = win.document.getElementById('sidebar');
-  assert.ok(
-    sidebar.classList.contains('open'),
-    'remote desktop docks the sidebar open on load',
-  );
-  assert.ok(
-    getHistoryMsgs(posted).length >= 1,
-    'docking on load posts the initial getHistory',
-  );
-  posted.length = 0;
-  send(win, {type: 'daemonStatus', connected: false});
-  send(win, {type: 'daemonStatus', connected: true});
-  assert.ok(
-    lastGetHistory(posted),
-    'REGRESSION: reconnect (daemonStatus connected:true) must refetch ' +
-      'history for the open docked sidebar — a task started while the ' +
-      'socket was down is otherwise invisible forever',
-  );
-  win.close();
-  console.log('PASS remote-desktop reconnect refetches history');
-}
+// The reconnect refetch of an open sidebar and the idle tasks_updated
+// refetch are pinned by historyRefreshSingleFlight.test.js; docking on
+// load by remoteDesktopSidebar.test.js.
 
 function testDisconnectDoesNotFetch() {
   const {win, posted} = makePage({desktopMatches: true});
@@ -242,22 +210,8 @@ function testStaleGenerationReplyIsDropped() {
   console.log('PASS stale-generation history reply is dropped');
 }
 
-function testTasksUpdatedStillRefetches() {
-  const {win, posted} = makePage({desktopMatches: true});
-  posted.length = 0;
-  send(win, {type: 'tasks_updated', taskId: ''});
-  assert.ok(
-    lastGetHistory(posted),
-    'tasks_updated must still refetch history while the sidebar is open',
-  );
-  win.close();
-  console.log('PASS tasks_updated still refetches while open');
-}
-
-testDesktopReconnectRefetchesHistory();
 testDisconnectDoesNotFetch();
 testClosedSidebarReconnectNoFetch();
 testMobileLifecycleShowsTaskStartedWhileDisconnected();
 testStaleGenerationReplyIsDropped();
-testTasksUpdatedStillRefetches();
 console.log('All remoteHistoryReconnectRefresh tests passed.');

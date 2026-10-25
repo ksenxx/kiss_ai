@@ -27,7 +27,6 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents.webhook.webhook_sea import (
-    _RATE_LIMIT_EVENTS,
     _RATE_LIMIT_WINDOW_SECONDS,
     WebhookAgent,
     WebhookChannelBackend,
@@ -302,25 +301,6 @@ def test_filter_mismatch_dropped() -> None:
         backend.disconnect()
 
 
-def test_rate_limit_429_after_60_events() -> None:
-    """The 61st accepted event within a minute is rejected with 429."""
-    backend, base = _start_backend(name="rl", secret=_SECRET, kind="github")
-    try:
-        body = b'{"n": 1}'
-        headers = _github_headers(body)
-        with requests.Session() as session:
-            for i in range(60):
-                resp = session.post(f"{base}/hook/rl", data=body, headers=headers, timeout=10)
-                assert resp.status_code == 200, f"event {i} -> {resp.status_code}"
-            assert (
-                session.post(f"{base}/hook/rl", data=body, headers=headers, timeout=10).status_code
-                == 429
-            )
-        assert len(backend.poll_messages("rl", "0", limit=100)[0]) == 60
-    finally:
-        backend.disconnect()
-
-
 def test_unknown_route_and_path_404() -> None:
     """Unknown route names and non-/hook/ paths return 404."""
     backend, base = _start_backend(name="known", secret=_SECRET, kind="github")
@@ -444,13 +424,15 @@ def _make_backend():
 
 
 def test_malformed_content_length_rejected_without_read() -> None:
-    """Negative/non-decimal Content-Length -> 400, missing -> 411; server stays up."""
+    """Negative/non-decimal/latin-1/overlong Content-Length -> 400, missing -> 411; stays up."""
     backend, base = _start_backend(name="cl", secret=_SECRET, kind="github")
     try:
         port = backend._bound_port
         assert raw_post_status(port, "Content-Length: -1\r\n", "/hook/cl") == 400
         assert raw_post_status(port, "Content-Length: nope\r\n", "/hook/cl") == 400
         assert raw_post_status(port, "Content-Length: +1\r\n", "/hook/cl", b"x") == 400
+        assert raw_post_status(port, "Content-Length: \u00b2\r\n", "/hook/cl") == 400
+        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n", "/hook/cl") == 400
         assert raw_post_status(port, "", "/hook/cl") == 411
         assert backend.poll_messages("cl", "0")[0] == []
 
@@ -486,21 +468,28 @@ def test_same_delivery_id_on_two_routes_both_processed() -> None:
 
 
 def test_rate_limited_event_retry_is_not_dropped_as_duplicate() -> None:
-    """A 429'd delivery id is not recorded as seen; its later retry is processed."""
+    """60 events per minute succeed, the 61st gets 429 and is not recorded as seen.
+
+    The limit is the documented contract (60 per source per minute), so it
+    is spelled out here rather than read from the production constant.
+    The rate-limited delivery id's later retry is processed once the
+    window has passed, and is then deduplicated like any other event.
+    """
     backend, base = _start_backend(name="rl2", secret=_SECRET, kind="github")
     try:
         filler = b'{"kind": "filler"}'
         filler_headers = _github_headers(filler)
         with requests.Session() as session:
-            for _ in range(_RATE_LIMIT_EVENTS):
+            for i in range(60):
                 resp = session.post(
                     f"{base}/hook/rl2", data=filler, headers=filler_headers, timeout=10
                 )
-                assert resp.status_code == 200
+                assert resp.status_code == 200, f"event {i} -> {resp.status_code}"
             body = b'{"kind": "important"}'
             headers = _github_headers(body, delivery="retry-me-1")
             resp = session.post(f"{base}/hook/rl2", data=body, headers=headers, timeout=10)
             assert resp.status_code == 429
+            assert len(backend.poll_messages("rl2", "0", limit=100)[0]) == 60
 
             with backend._state_lock:
                 window = backend._accept_times["rl2"]
@@ -616,22 +605,6 @@ def test_deliver_only_connect_failure_returns_502_and_disconnects(
         )
         assert resp.status_code == 502
         assert (tmp_path / f"{module_name}.log").read_text() == "disconnect\n"
-    finally:
-        backend.disconnect()
-
-
-def test_unicode_digit_and_overlong_content_length_rejected() -> None:
-    """A latin-1 ``²`` or a 5000-digit Content-Length gets 400, not a crash."""
-    backend, base = _start_backend(name="cl2", secret=_SECRET, kind="github")
-    try:
-        port = backend._bound_port
-        assert raw_post_status(port, "Content-Length: \u00b2\r\n", "/hook/cl2") == 400
-        assert raw_post_status(port, "Content-Length: " + "9" * 5000 + "\r\n", "/hook/cl2") == 400
-        body = json.dumps({"event": "ok"}).encode()
-        resp = requests.post(
-            f"{base}/hook/cl2", data=body, headers=_github_headers(body), timeout=10
-        )
-        assert resp.status_code == 200
     finally:
         backend.disconnect()
 

@@ -42,8 +42,11 @@ def _matrix_server(reply_status: int = 200) -> Iterator[JsonWebhookServer]:
         yield server
 
 
-def _backend_for(server_url: str, user_id: str = "@bot:example.org") -> MatrixChannelBackend:
-    """Build a Matrix backend whose client points at *server_url*.
+@contextmanager
+def _backend_for(
+    server_url: str, user_id: str = "@bot:example.org"
+) -> Iterator[MatrixChannelBackend]:
+    """Yield a Matrix backend whose client points at *server_url*; disconnect on exit.
 
     ``user_id`` is set the way ``_client_from_config`` sets it from the
     stored session: nio fills it from a login response, which never
@@ -54,7 +57,10 @@ def _backend_for(server_url: str, user_id: str = "@bot:example.org") -> MatrixCh
     client.access_token = "syt_secret_token"
     client.user_id = user_id
     backend._client = client
-    return backend
+    try:
+        yield backend
+    finally:
+        backend.disconnect()
 
 
 class TestSendTypingHappyPath:
@@ -62,8 +68,7 @@ class TestSendTypingHappyPath:
 
     def test_put_arrives_with_typing_true(self) -> None:
         """A real PUT with {"typing": true, "timeout": 15000} reaches the server."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url)
+        with _matrix_server() as server, _backend_for(server.base_url) as backend:
             backend.send_typing("!room123:example.org")
             assert len(server.requests) == 1
             req = server.requests[0]
@@ -79,8 +84,10 @@ class TestSendTypingHappyPath:
 
     def test_room_and_user_ids_are_url_encoded(self) -> None:
         """Room and user ids with reserved characters are fully percent-encoded."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url, user_id="@we ird/user:example.org")
+        with (
+            _matrix_server() as server,
+            _backend_for(server.base_url, user_id="@we ird/user:example.org") as backend,
+        ):
             backend.send_typing("!ro om/1:example.org")
             assert len(server.requests) == 1
             path = server.requests[0]["path"]
@@ -90,16 +97,14 @@ class TestSendTypingHappyPath:
 
     def test_bearer_token_and_content_type_sent(self) -> None:
         """The stored access token is sent as a Bearer Authorization header."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url)
+        with _matrix_server() as server, _backend_for(server.base_url) as backend:
             backend.send_typing("!room123:example.org")
             assert server.header("Authorization") == "Bearer syt_secret_token"
             assert server.header("Content-Type") == "application/json"
 
     def test_trailing_slash_homeserver_normalized(self) -> None:
         """A homeserver URL with a trailing slash yields no double slash in the path."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url + "/")
+        with _matrix_server() as server, _backend_for(server.base_url + "/") as backend:
             backend.send_typing("!room123:example.org")
             assert len(server.requests) == 1
             assert server.requests[0]["path"].startswith("/_matrix/client/v3/rooms/")
@@ -110,21 +115,19 @@ class TestSendTypingBestEffort:
 
     def test_server_error_500_is_swallowed(self) -> None:
         """A 500 reply from the homeserver does not raise."""
-        with _matrix_server(reply_status=500) as server:
-            backend = _backend_for(server.base_url)
+        with _matrix_server(reply_status=500) as server, _backend_for(server.base_url) as backend:
             backend.send_typing("!room123:example.org")
             assert len(server.requests) == 1
             assert server.requests[0]["method"] == "PUT"
 
     def test_unreachable_server_is_swallowed(self, refusing_port: int) -> None:
         """A connection-refused homeserver does not raise."""
-        backend = _backend_for(f"http://127.0.0.1:{refusing_port}")
-        backend.send_typing("!room123:example.org")
+        with _backend_for(f"http://127.0.0.1:{refusing_port}") as backend:
+            backend.send_typing("!room123:example.org")
 
     def test_missing_user_id_is_silent_noop(self) -> None:
         """No stored user id: return without raising and without any request."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url, user_id="")
+        with _matrix_server() as server, _backend_for(server.base_url, user_id="") as backend:
             backend.send_typing("!room123:example.org")
             assert server.requests == []
 
@@ -136,8 +139,7 @@ class TestSendTypingBestEffort:
 
     def test_thread_ts_argument_is_ignored(self) -> None:
         """The parity thread_ts argument does not alter the request."""
-        with _matrix_server() as server:
-            backend = _backend_for(server.base_url)
+        with _matrix_server() as server, _backend_for(server.base_url) as backend:
             backend.send_typing("!room123:example.org", thread_ts="1234.5678")
             assert len(server.requests) == 1
             assert server.requests[0]["json"] == {"typing": True, "timeout": 15000}

@@ -307,6 +307,22 @@ class TestDelegateCallbacksFollowTheModel:
         )
 
 
+class TestDelegateFollowsTheStallTimeout:
+    """The delegate streams under its owner's current stall tolerance."""
+
+    def test_stall_timeout_is_resynced_every_turn(self) -> None:
+        """A changed owner tolerance reaches the cached delegate."""
+        with ScriptedOpenAIServer(_ToolTurnPolicy()) as server:
+            model = _make_chat_model(server.base_url)
+            _run_tool_turn(model)
+            delegate = model._responses_delegate
+            assert delegate is not None
+            assert delegate._stream_stall_timeout == model._stream_stall_timeout
+            model._stream_stall_timeout = 7.5
+            _run_tool_turn(model)
+        assert delegate._stream_stall_timeout == 7.5
+
+
 class TestDelegateReusesItsConnection:
     """I5: the delegate must not rebuild its client on every step."""
 
@@ -376,6 +392,21 @@ class TestDelegateRawItemsAreBounded:
             _run_tool_turn(model)
             assert len(model._delegate_raw_items) == 1
 
+    def test_initialize_alone_empties_the_cache(self) -> None:
+        """``initialize()`` starts a new conversation: the old turns' items go.
+
+        A model reused across sessions is re-initialised, not reset, and
+        the next session may never take the delegated path that prunes
+        the cache, so the previous session's payloads would otherwise
+        stay for the model's lifetime.
+        """
+        with ScriptedOpenAIServer(_ToolTurnPolicy()) as server:
+            model = _make_chat_model(server.base_url)
+            _run_tool_turn(model)
+            assert model._delegate_raw_items
+            model.initialize("Fresh start.")
+        assert model._delegate_raw_items == {}
+
 
 class TestResponsesModelResetsTurnState:
     """I4: ``reset_conversation()`` must clear per-turn Responses state."""
@@ -417,35 +448,30 @@ class TestResponsesModelResetsTurnState:
             content, _response = model.generate()
         assert content == _TEXT
 
-    def test_reset_clears_stream_indexes(self) -> None:
-        """Ordering learned while streaming must not outlive the reset."""
-        with ScriptedOpenAIServer(_ToolTurnPolicy()) as server:
-            model = self._make(server.base_url, streaming=True)
-            model.generate_and_process_with_tools(
-                {"echo": echo}, tools_schema=_TOOLS
-            )
-            assert model._last_stream_item_indexes
-            model.reset_conversation()
-        assert model._last_stream_item_indexes == {}
-        assert model._last_stream_message_output_index is None
+    def test_non_streamed_turn_after_a_streamed_one(self) -> None:
+        """A non-streamed turn records its items in the response's own order.
 
-    def test_non_streamed_turn_does_not_inherit_stream_order(self) -> None:
-        """A non-streamed turn must not reuse the previous turn's indexes."""
+        The ordering a streamed turn reveals travels with that turn's
+        result and nothing of it is left on the model, so the next turn,
+        streamed or not, lays out its message and function_call items
+        exactly as its terminal response lists them.
+        """
         with ScriptedOpenAIServer(_ToolTurnPolicy()) as server:
             model = self._make(server.base_url, streaming=True)
             model.generate_and_process_with_tools(
                 {"echo": echo}, tools_schema=_TOOLS
             )
-            assert model._last_stream_message_output_index is not None
+            streamed_tail = [item.get("type") for item in model.conversation[-2:]]
             model.add_function_results_to_conversation_and_return(
                 [("echo", {"result": "hi"})]
             )
             model.token_callback = None
-            model.generate_and_process_with_tools(
+            _calls, content, _response = model.generate_and_process_with_tools(
                 {"echo": echo}, tools_schema=_TOOLS
             )
-        assert model._last_stream_message_output_index is None
-        assert model._last_stream_item_indexes == {}
+        assert content == _TEXT
+        assert streamed_tail == ["message", "function_call"]
+        assert [item.get("type") for item in model.conversation[-2:]] == streamed_tail
 
 
 class TestDelegateStateSurvivesReuse:

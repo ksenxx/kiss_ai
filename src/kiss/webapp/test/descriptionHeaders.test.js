@@ -15,53 +15,22 @@
 // page toggles it.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {
   makePage: makeChatPage,
   send,
   loadMainCss,
-  MEDIA,
-  readyTabId,
   output,
+  headerText,
+  collapsedHeaderText,
+  shareTranscript,
+  foldedShareHeaders,
+  startTask,
 } = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted} = makeChatPage({modelName: ''});
   loadMainCss(win);
-  win.__posted = posted;
-  return win;
-}
-
-function startTask(win, task) {
-  send(win, {
-    type: 'task_events',
-    events: [],
-    task,
-    tabId: readyTabId(win.__posted),
-    chat_id: 'chat-' + task.replace(/\W+/g, '-'),
-  });
-  send(win, {type: 'status', running: true});
-  send(win, {type: 'prompt', text: task});
-}
-
-/**
- * What a header reads as: its title and its preview span, which the
- * stylesheet sets apart with a margin, joined by one space.
- */
-function headerText(hdr) {
-  return Array.from(hdr.childNodes)
-    .map(n => n.textContent.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join(' ');
-}
-
-function collapsedHeaderText(panel) {
-  const hdr = panel.querySelector('.collapse-header');
-  if (!panel.classList.contains('collapsed')) hdr.click();
-  assert.ok(panel.classList.contains('collapsed'));
-  return headerText(hdr);
+  return {win, posted};
 }
 
 /** The three fan-out / batch tool calls, as the daemon's tool_call events. */
@@ -89,8 +58,8 @@ const CALLS = [
 ];
 
 function testCollapsedHeaderIsDescription() {
-  const win = makePage();
-  startTask(win, 'Description headers');
+  const {win, posted} = makePage();
+  startTask(win, posted, 'Description headers');
   for (const call of CALLS) send(win, Object.assign({type: 'tool_call'}, call));
   const panels = Array.from(output(win).querySelectorAll('.tc'));
   assert.strictEqual(panels.length, CALLS.length, 'one panel per call');
@@ -141,8 +110,8 @@ function testCollapsedHeaderIsDescription() {
 }
 
 function testWithoutDescriptionPreviewsBody() {
-  const win = makePage();
-  startTask(win, 'No description');
+  const {win, posted} = makePage();
+  startTask(win, posted, 'No description');
   send(win, {
     type: 'tool_call',
     name: 'run_commands_parallel',
@@ -174,8 +143,8 @@ const GCAL_HEADER =
   'event_id: event-123 summary: Renamed meeting';
 
 function testOtherToolsDescriptionIsNotATitle() {
-  const win = makePage();
-  startTask(win, 'Calendar description');
+  const {win, posted} = makePage();
+  startTask(win, posted, 'Calendar description');
   send(win, Object.assign({type: 'tool_call'}, GCAL_CALL));
   const panel = output(win).querySelector('.tc');
   assert.ok(
@@ -194,41 +163,17 @@ function testOtherToolsDescriptionIsNotATitle() {
 }
 
 function testSharePagePreviewMatches() {
-  const win = makePage();
-  startTask(win, 'Share preview');
+  const {win, posted} = makePage();
+  startTask(win, posted, 'Share preview');
   for (const call of CALLS) send(win, Object.assign({type: 'tool_call'}, call));
-  send(win, {
-    type: 'tool_call',
-    name: 'Bash',
-    command: 'ls',
-    description: 'list files',
-  });
   send(win, Object.assign({type: 'tool_call'}, GCAL_CALL));
-  const html =
-    '<!doctype html><html><body><div id="output">' +
-    output(win).innerHTML +
-    '</div></body></html>';
-  win.close();
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    url: 'https://localhost/',
-  });
-  const sw = dom.window;
-  sw.eval(fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8'));
-  const panels = Array.from(sw.document.querySelectorAll('.tc'));
-  assert.strictEqual(panels.length, CALLS.length + 2);
-  const expect = CALLS.map(c => c.name + ' ' + c.description).concat([
-    'Bash list files',
-    GCAL_HEADER,
-  ]);
-  panels.forEach((p, i) => {
-    const hdr = p.querySelector('.collapse-header');
-    if (p.classList.contains('collapsed')) hdr.click();
-    hdr.querySelector('.collapse-preview').textContent = 'stale';
-    hdr.click();
-    assert.ok(p.classList.contains('collapsed'), 'share.js folds the panel');
-    assert.strictEqual(headerText(hdr), expect[i], 'shared page header ' + i);
-  });
+  // (A plain Bash panel on the shared page is panelHeadersBriefMixedCase's.)
+  const sw = shareTranscript(win);
+  assert.deepStrictEqual(
+    foldedShareHeaders(sw),
+    CALLS.map(c => c.name + ' ' + c.description).concat([GCAL_HEADER]),
+    'shared page headers',
+  );
   sw.close();
   console.log('  ok - a shared page folds the panels to the same headers');
 }

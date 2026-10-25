@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {makePage: makeChatPage, send, showTips} = require('./simplify2_harness');
 
 const TIPS = ['## First tip\n\nUse **KISS Sorcar** like a pro.'];
 
@@ -175,12 +175,12 @@ function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
       'blank overlay',
   );
 
-  const empty = win.__kissShowTipsPanel([]);
+  const empty = showTips(win, []);
   assert.strictEqual(panels(win).length, 1, 'empty panel still mounts');
   empty.shadowRoot.querySelector('.tips-close').click();
   assert.strictEqual(panels(win).length, 0, 'empty panel closes');
 
-  win.__kissShowTipsPanel(TIPS);
+  showTips(win, TIPS);
   assert.strictEqual(panels(win).length, 1, 'real panel still mounts');
   assert.ok(panelBodyText(panels(win)[0]).includes('Use KISS Sorcar'));
   win.close();

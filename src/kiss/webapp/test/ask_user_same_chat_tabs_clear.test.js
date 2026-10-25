@@ -6,19 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf, answering} = require('./simplify2_harness');
-
-// The Chats-panel pick: chat tabs have no row of their own any more, so a
-// chat is shown through the test API; a sub-agent or content tab still on
-// the group strip is clicked there.
-function clickTab(win, tabId) {
-  const tabEl = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
-  if (tabEl) tabEl.click();
-  else win._testApi.switchToTab(tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
-}
+const {
+  makePage,
+  send,
+  stubRaf,
+  answering,
+  clickTab,
+} = require('./simplify2_harness');
 
 // The Question panel of the tab on screen while it is awaiting an answer.
 function visibleAskText(win) {
@@ -105,6 +99,11 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   assert.ok(
     !answering(win),
     'the answering tab composer must leave answer mode immediately',
+  );
+  const firstRec = api.openTabs().find(t => t.id === firstTab);
+  assert.ok(
+    firstRec && !firstRec.askPending,
+    'answering must also drop the "?" attention mark of the off-screen sibling',
   );
 
   clickTab(win, firstTab);

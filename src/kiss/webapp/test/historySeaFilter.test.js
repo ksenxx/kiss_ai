@@ -13,6 +13,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {visibleTitles} = require('./history_helpers');
 
 function session(id, title, sea, extra) {
   return Object.assign(
@@ -45,16 +46,6 @@ const SESSIONS_FIXTURE = [
   session(4, 'second paper task', ' write_paper_sea '),
   session(5, 'legacy row without sea field', undefined),
 ];
-
-function visibleTitles(win) {
-  const rows = win.document
-    .getElementById('history-list')
-    .querySelectorAll('.sidebar-item');
-  return Array.from(rows)
-    .filter(r => r.style.display !== 'none')
-    .map(r => r.querySelector('.sidebar-item-text').textContent)
-    .sort();
-}
 
 function optionValues(win) {
   return Array.from(win.document.getElementById('hf-sea').options).map(

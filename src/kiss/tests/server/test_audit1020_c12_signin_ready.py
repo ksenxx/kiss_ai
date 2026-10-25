@@ -24,7 +24,7 @@ import time
 import unittest
 
 from kiss.server import signin
-from kiss.tests.server.test_signin_window import NOT_LOGGED_IN, SigninHookCase
+from kiss.tests.server.test_signin_window import NOT_LOGGED_IN, SigninHookCase, forget_status
 
 
 class TestSigninReadyTail(SigninHookCase):
@@ -76,7 +76,7 @@ class TestStatusCache(SigninHookCase):
         self.assertEqual(self._status_runs(), 1)
         # After the TTL the hook is asked again, and a changed answer shows.
         signin.STATUS_CACHE_TTL = 0.2
-        signin.forget_status()
+        forget_status()
         _reader, events = await self._ready("tab-5")
         self.assertEqual(len(self._signin_events(events)), 1)
         self.assertEqual(self._status_runs(), 2)

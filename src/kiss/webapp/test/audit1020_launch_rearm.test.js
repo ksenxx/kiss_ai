@@ -19,14 +19,16 @@
 const assert = require('assert');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
-function makePage() {
+/** A page on chat tab-a; `connected: false` leaves the daemon status unsent. */
+function makePage(opts) {
+  const {connected = true} = opts || {};
   const {win} = makeChatPage({
     bodyClass: 'remote-chat',
     initialState: {chatId: 'tab-a'},
     beforeScripts: stubRaf,
     sourceUrl: 'launch-main.js',
   });
-  send(win, {type: 'daemonStatus', connected: true});
+  if (connected) send(win, {type: 'daemonStatus', connected: true});
   return win;
 }
 
@@ -82,12 +84,7 @@ function testTapBeforeNewsThenRestartKeepsTheTab() {
 // News that arrives before the backend is live (no launch yet) must not
 // spend the launch: the first launch after `connected` still switches.
 function testNewsBeforeConnectDoesNotSpendTheLaunch() {
-  const {win} = makeChatPage({
-    bodyClass: 'remote-chat',
-    initialState: {chatId: 'tab-a'},
-    beforeScripts: stubRaf,
-    sourceUrl: 'launch-main.js',
-  });
+  const win = makePage({connected: false});
   tabsState(win, TWO);
   send(win, {type: 'status', running: true, tabId: 'tab-b', startTs: 500});
   assert.strictEqual(

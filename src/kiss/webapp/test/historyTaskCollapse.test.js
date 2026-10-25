@@ -17,34 +17,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {makePage, send} = require('./simplify2_harness.js');
+const {makeSession, loadHistory} = require('./history_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-
-function makeSession() {
-  return {
-    id: 'chat-1',
-    task_id: 'task-1',
-    preview: 'refactor the parser',
-    title: 'refactor the parser',
-    has_events: true,
-    tokens: 1234,
-    cost: 0.5678,
-    steps: 7,
-    timestamp: 1700000000,
-    work_dir: '/home/user/proj',
-    model: 'test-model',
-    is_parallel: false,
-  };
-}
-
-function loadHistory(win, sessions) {
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: 0,
-    sessions: sessions,
-  });
-}
 
 function historyRow(win) {
   return win.document.querySelector('#history-list .sidebar-item');
@@ -173,11 +148,12 @@ function testExpandedStateSurvivesRerender() {
 
 function testCollapseStateIsPerTask() {
   const {win} = makePage();
-  const other = makeSession();
-  other.id = 'chat-9';
-  other.task_id = 'task-9';
-  other.preview = 'another task';
-  other.title = 'another task';
+  const other = makeSession({
+    id: 'chat-9',
+    task_id: 'task-9',
+    preview: 'another task',
+    title: 'another task',
+  });
   loadHistory(win, [makeSession(), other]);
   const rows = win.document.querySelectorAll('#history-list .sidebar-item');
   assert.strictEqual(rows.length, 2);

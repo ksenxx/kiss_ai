@@ -152,12 +152,12 @@ class TestAwaitUserResponse(_RegistryCleanupTestCase):
             q.put("the answer")
 
         threading.Thread(target=answer_later, daemon=True).start()
-        result = self.server._await_user_response()
+        result = self.server._await_user_response(q)
         assert result == "the answer"
 
     def test_raises_on_stop_event(self) -> None:
         """_await_user_response raises KeyboardInterrupt when stop is set."""
-        _register_state("6", "6", with_queue=True)
+        state = _register_state("6", "6", with_queue=True)
         self.server.printer._thread_local.task_id = "6"
         self.server.printer.subscribe_tab("6", "6")
         stop = threading.Event()
@@ -169,7 +169,7 @@ class TestAwaitUserResponse(_RegistryCleanupTestCase):
 
         threading.Thread(target=set_stop_later, daemon=True).start()
         with self.assertRaises(KeyboardInterrupt):
-            self.server._await_user_response()
+            self.server._await_user_response(state.user_answer_queue)
 
     def test_no_task_id_raises_keyboard_interrupt(self) -> None:
         """Without a task_id there is no queue — KeyboardInterrupt."""
@@ -178,7 +178,7 @@ class TestAwaitUserResponse(_RegistryCleanupTestCase):
         self.server.printer._thread_local.stop_event = stop
 
         with self.assertRaises(KeyboardInterrupt):
-            self.server._await_user_response()
+            self.server._ask_user_question("anyone?")
 
 
 class TestTabIdInjection(unittest.TestCase):

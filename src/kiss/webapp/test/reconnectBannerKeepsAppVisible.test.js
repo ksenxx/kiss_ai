@@ -36,6 +36,7 @@ const {
   waitFor,
   fakeMatchMedia,
   stubMonaco,
+  clickTab: activateTab,
 } = require('./simplify2_harness');
 
 function makePage(initialState) {
@@ -63,17 +64,6 @@ function uiState(win) {
 
 function clickSend(win) {
   click(win, win.document.getElementById('send-btn'));
-}
-
-// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
-// chat tabs any more), which retires nothing.
-function activateTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} is open`,
-  );
-  win._testApi.switchToTab(tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 // Objects persisted by the page live in the jsdom realm: compare by value.

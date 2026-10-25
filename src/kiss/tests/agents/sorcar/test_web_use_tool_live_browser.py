@@ -334,6 +334,61 @@ def test_close_browser_closes_the_tab_and_the_next_call_reopens_one(tool, servic
     assert tool._live_tab in svc._pages
 
 
+def _kill_agent_driver(tool: WebUseTool) -> None:
+    """SIGKILL the Node driver behind the agent's own Playwright client (a crash)."""
+    os.kill(tool._playwright._impl_obj._connection._transport._proc.pid, signal.SIGKILL)
+
+
+@posix_only("SIGKILL of the driver process")
+@pytest.mark.timeout(120)
+def test_agent_driver_death_while_idle_is_survived_in_the_tab(tool, service, server):
+    """The agent's Playwright driver dying between calls (a driver crash) is
+    noticed by the next call's liveness probe; the tool drops the driver, closes
+    the tab it can no longer drive and opens a fresh one over a fresh driver
+    instead of hanging on the dead one."""
+    svc, printer = service
+    svc.open(f"{server}/inert", "user")  # the user's own tab keeps the browser running
+    _wait(lambda: _events(printer, "openBrowserTab"), "user tab")
+    tool.show_browser()
+    first = tool._live_tab
+    old_playwright = tool._playwright
+    _kill_agent_driver(tool)
+    time.sleep(0.3)
+
+    assert not tool._is_alive()
+    tree = tool.go_to_url(f"{server}/inert")
+    assert tree.startswith("Page:"), tree
+    assert tool._playwright is not old_playwright
+    assert tool._live and tool._live_tab != first and tool._live_tab in svc._pages
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=first), "closeBrowserTab")
+    assert first not in svc._pages
+
+
+@posix_only("SIGKILL of the driver process")
+@pytest.mark.timeout(120)
+def test_close_browser_after_agent_driver_death_closes_the_tab(tool, service, server):
+    """``close_browser`` after the agent's driver died still closes the agent's
+    tab everywhere (through the daemon's service, the only way left) and
+    returns; browsing stays in the Browser tab afterwards."""
+    svc, printer = service
+    svc.open(f"{server}/inert", "user")
+    _wait(lambda: _events(printer, "openBrowserTab"), "user tab")
+    tool.show_browser()
+    tab_id = tool._live_tab
+    _kill_agent_driver(tool)
+    time.sleep(0.3)
+
+    started = time.monotonic()
+    assert tool.close_browser().startswith("Browser closed.")
+    assert time.monotonic() - started < 30
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "closeBrowserTab")
+    assert tool._live and tool._live_tab is None and tool._browser is None
+    assert tool._playwright is None
+    tool.go_to_url(f"{server}/inert")
+    assert tool._live_tab is not None and tool._live_tab != tab_id
+    assert tool._live_tab in svc._pages
+
+
 def test_service_shutdown_while_attached_is_reported_and_recoverable(tool, service, server):
     """The daemon browser exiting (the service shut down) drops the connection;
     the tool reports the error and ``show_browser(False)`` goes back to headless."""
@@ -462,6 +517,35 @@ def test_following_a_popup_moves_tab_ownership(tool, service, server):
     tool.close_browser()
 
     _wait(lambda: _events(printer, "closeBrowserTab", tab_id=popup), "popup closed")
+    assert first in svc._pages and not svc._pages[first].page.is_closed()
+
+
+@posix_only("SIGKILL of the driver process")
+@pytest.mark.timeout(120)
+def test_followed_popup_is_closed_even_after_the_driver_died(tool, service, server):
+    """A followed popup's target id is read when it is adopted, so ``close_browser``
+    after the agent's driver died right after the click still closes THAT tab
+    (the daemon maps the target id to the tab without the dead driver)."""
+    svc, printer = service
+    tool.show_browser()
+    first = tool._live_tab
+    tool.go_to_url(f"{server}/form")
+    tool.click(2)
+    _wait(lambda: tool._page.url == f"{server}/inert", "popup adopted")
+    assert tool._live_target is not None
+    _kill_agent_driver(tool)
+    time.sleep(0.3)
+
+    # No wait for the daemon to register the popup: the cleanup itself
+    # waits (bounded) for the target id to map to a tab.
+    tool.close_browser()
+
+    closed = _wait(
+        lambda: [e for e in _events(printer, "closeBrowserTab") if e.get("tab_id") != first],
+        "popup closed",
+    )
+    assert len(closed) == 1
+    assert tool._playwright is None and tool._live_tab is None
     assert first in svc._pages and not svc._pages[first].page.is_closed()
 
 

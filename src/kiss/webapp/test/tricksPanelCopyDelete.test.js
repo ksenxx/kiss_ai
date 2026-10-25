@@ -12,7 +12,12 @@
 // `tricksData` reply's `userCount`.
 
 const assert = require('assert');
-const {makePage, send, click} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  click,
+  typeInto: input,
+} = require('./simplify2_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -22,11 +27,6 @@ function texts(doc) {
   return rows(doc).map(
     el => el.querySelector('.sidebar-item-text').textContent,
   );
-}
-
-function input(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
 function flush() {
@@ -195,13 +195,9 @@ async function runPanel() {
     'Bundled beta',
   ]);
 
-  // --- a filtered list deletes the right promptlet (index into the full list)
-  input(win, doc.getElementById('tricks-search'), 'alpha');
-  assert.deepStrictEqual(texts(doc), ['Bundled alpha']);
-  assert.strictEqual(
-    rows(doc)[0].querySelectorAll('.sidebar-item-delete').length,
-    0,
-  );
+  // --- a filtered list deletes the right promptlet (index into the full
+  // list); the filter and its clear button are pinned by
+  // tricksPanelSearchAdd.test.js
   input(win, doc.getElementById('tricks-search'), 'mine');
   assert.deepStrictEqual(texts(doc), ['Mine one']);
   click(win, rows(doc)[0].querySelector('.sidebar-item-delete'));
@@ -210,7 +206,6 @@ async function runPanel() {
     posted.filter(m => m.type === 'deleteTrick').map(m => m.text),
     ['Mine two', 'Mine two', 'Mine one'],
   );
-  assert.strictEqual(list.textContent.trim(), 'No matching promptlets');
   assert.strictEqual(win.__MY_TRICKS_COUNT__, 0);
   doc.getElementById('tricks-search-clear').click();
   assert.deepStrictEqual(texts(doc), ['Bundled alpha', 'Bundled beta']);

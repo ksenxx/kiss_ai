@@ -18,7 +18,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
+const {bootParallelRun} = require('./subagent_tab_helpers');
 
 function subagentTabs(win) {
   return win._testApi.openTabs().filter(t => t.isSubagentTab);
@@ -45,26 +46,8 @@ function announce(win, parentId, tabId, taskId, extra) {
 // way the daemon drives the page: tool_call, new_tab (the page answers
 // with resumeSession), then the daemon's openSubagentTab reply.
 function bootOneChild() {
-  const {win, posted} = makePage();
-  const parentId = posted.find(m => m.type === 'ready').tabId;
-  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub 1'])},
-  });
-  const taskId = 'sub-task-1';
-  const before = posted.length;
-  send(win, {type: 'new_tab', task_id: taskId, parent_tab_id: parentId});
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-  assert.ok(resume, 'new_tab must make the page post resumeSession');
-  const subTabId = resume.tabId;
-  announce(win, parentId, subTabId, taskId);
-  assert.strictEqual(subagentTabs(win).length, 1, 'precondition: one sub tab');
-  return {win, posted, parentId, subTabId, taskId};
+  const {win, posted, parentId, subTabIds, taskIds} = bootParallelRun(1, makePage());
+  return {win, posted, parentId, subTabId: subTabIds[0], taskId: taskIds[0]};
 }
 
 function testStaleAnnouncementAfterDoneStaysClosed() {
@@ -140,7 +123,7 @@ function testFreshAnnouncementStillOpens() {
 // tab (rpAfterTabsClosed only books a close against a panel).
 function bootDeferredParent() {
   const {win, posted} = makePage();
-  const readyId = posted.find(m => m.type === 'ready').tabId;
+  const readyId = readyTabId(posted);
   const parentId = 'bg-parent';
   send(win, {
     type: 'tabs_state',

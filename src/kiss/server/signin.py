@@ -68,7 +68,7 @@ STATUS_CACHE_TTL = 60.0
 """Seconds one ``signin status`` answer serves every ``ready``: the hook is a process
 (a Python interpreter for Seamless Loop) that every page load and reconnect would
 otherwise run again, N at once after a daemon restart.  A sign-in through the window
-drops the answer at once (:func:`forget_status`); one made elsewhere (the brand's CLI)
+drops the answer at once (:func:`_signed_in`); one made elsewhere (the brand's CLI)
 shows after the TTL."""
 
 HOOK_END_TIMEOUT = 2.0
@@ -133,15 +133,6 @@ def send_signin(reply: StatusReply) -> None:
     if hook is None:
         return
     locked_call(_status_lock, _send_cached_status, hook, reply)
-
-
-def forget_status() -> None:
-    """Drop the cached ``status`` answer: the next ``ready`` asks the hook again.
-
-    Waits for a ``status`` run in flight, so its (now stale) answer is
-    what gets dropped rather than what gets kept.
-    """
-    locked_call(_status_lock, _drop_status)
 
 
 def _drop_status() -> None:

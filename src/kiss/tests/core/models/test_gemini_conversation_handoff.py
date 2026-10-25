@@ -159,7 +159,7 @@ class TestOpenAIToGemini:
     def test_json_string_arguments_become_dict_args(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assert len(contents) == 3
         assistant = contents[1]
         assert assistant.role == "model"
@@ -171,7 +171,7 @@ class TestOpenAIToGemini:
     def test_tool_message_becomes_function_response_with_name(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         tool_turn = contents[2]
         assert tool_turn.role == "user"
         fr = _parts(tool_turn)[0].function_response
@@ -182,7 +182,7 @@ class TestOpenAIToGemini:
     def test_system_message_is_hoisted_into_system_instruction(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
-        config = m._build_config()
+        config = m._build_config(m._chat_messages())
         assert config.system_instruction == "You are a concise assistant."
 
     def test_system_message_is_merged_with_configured_instruction(self) -> None:
@@ -192,7 +192,7 @@ class TestOpenAIToGemini:
             model_config={"system_instruction": "Always be polite."},
         )
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
-        config = m._build_config()
+        config = m._build_config(m._chat_messages())
         assert config.system_instruction == (
             "Always be polite.\n\nYou are a concise assistant."
         )
@@ -204,7 +204,7 @@ class TestOpenAIToGemini:
             model_config={"system_instruction": "You are a concise assistant."},
         )
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
-        config = m._build_config()
+        config = m._build_config(m._chat_messages())
         assert config.system_instruction == "You are a concise assistant."
 
     def test_image_url_data_url_becomes_inline_bytes(self) -> None:
@@ -221,7 +221,7 @@ class TestOpenAIToGemini:
                 ],
             }
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         parts = _parts(contents[0])
         assert parts[0].inline_data is not None
         assert parts[0].inline_data.data == b"hello"
@@ -235,7 +235,7 @@ class TestAnthropicToGemini:
     def test_thinking_dropped_text_and_tool_use_converted(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_ANTHROPIC_STYLE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assistant = contents[1]
         assert assistant.role == "model"
         texts = [p.text for p in _parts(assistant) if p.text]
@@ -248,7 +248,7 @@ class TestAnthropicToGemini:
     def test_tool_result_block_becomes_function_response(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_ANTHROPIC_STYLE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         tool_turn = contents[2]
         assert tool_turn.role == "user"
         fr = _parts(tool_turn)[0].function_response
@@ -270,7 +270,7 @@ class TestAnthropicToGemini:
                 ],
             }
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         fr = _parts(contents[0])[0].function_response
         assert fr is not None
         assert fr.response == {"sum": 5}
@@ -293,7 +293,7 @@ class TestAnthropicToGemini:
                 ],
             }
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         parts = _parts(contents[0])
         assert parts[0].inline_data is not None
         assert parts[0].inline_data.data == b"hello"
@@ -306,7 +306,7 @@ class TestGeminiNativeFormat:
     def test_dict_arguments_pass_through(self) -> None:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_GEMINI_STYLE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assistant = contents[1]
         fcs = _function_calls(assistant)
         assert fcs[0].args == {"a": 2, "b": 3}
@@ -323,7 +323,7 @@ class TestGeminiNativeFormat:
                 "attachments": [Attachment(data=b"hello", mime_type="image/png")],
             }
         ]
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         parts = _parts(contents[0])
         assert parts[0].inline_data is not None
         assert parts[0].inline_data.data == b"hello"

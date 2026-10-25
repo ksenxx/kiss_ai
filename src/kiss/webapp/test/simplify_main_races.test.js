@@ -25,7 +25,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {waitFor} = require('./simplify2_harness');
+const {waitFor, lastMsg: lastOfType} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -46,31 +46,12 @@ function tabsState(win, entries) {
   });
 }
 
-function lastOfType(posted, type) {
-  const all = h.ofType(posted, type);
-  return all[all.length - 1];
-}
-
 const FILE_PATH = '/shared/notes.txt';
 
 /** An editable content tab owned by chat a1 whose editor holds edits. */
 async function openDirtyTab(ctx) {
-  const {win, created} = ctx;
-  tabsState(win, [
-    {id: 'a1', workDir: '/ws/a', chat: 'chat-1'},
-    {id: 'b1', workDir: '/ws/b', chat: 'chat-2'},
-  ]);
-  h.send(win, {
-    type: 'fileContent',
-    tabId: 'a1',
-    path: FILE_PATH,
-    name: 'notes.txt',
-    content: 'v1 on disk',
-    version: 'ver-1',
-  });
-  await waitFor(() => created.length >= 1, 'the content tab creates an editor');
-  created[0].editor._type('v1 edited');
-  return win.document.querySelector('.content-save-btn');
+  await h.openDirtyContentTab(ctx);
+  return ctx.win.document.querySelector('.content-save-btn');
 }
 
 (async () => {

@@ -543,9 +543,10 @@ def test_tool_call_hook_applies_to_mcp_calls(
     assert SEEN_STOP_EVENTS == [], "a refused call must not run the tool"
     assert agent.tool_calls_made == 1
     tool_results = [(c, k["is_error"]) for t, c, k in printer.events if t == "tool_result"]
-    assert tool_results[0] == ("hook says no", True)  # then finish's own result
-    assert "shout=hook says no" in calls[1]["prompt"]
-    assert "[Tool Result]: hook says no" in calls[1]["prompt"]
+    refused = "REFUSED: the shout call did NOT run and had no effect. hook says no"
+    assert tool_results[0] == (refused, True)  # then finish's own result
+    assert f"shout={refused}" in calls[1]["prompt"]
+    assert f"[Tool Result]: {refused}" in calls[1]["prompt"]
 
 
 def test_stall_timeout_waits_while_a_bridged_tool_runs(

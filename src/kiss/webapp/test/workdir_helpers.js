@@ -46,11 +46,7 @@ function closeWindows() {
   while (openWindows.length) openWindows.pop().close();
 }
 
-const {send, byId} = harness;
-
-function msgs(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
+const {send, byId, ofType: msgs} = harness;
 
 // Messages are created inside the JSDOM realm, whose Object prototype is
 // not Node's, so structural equality goes through JSON.

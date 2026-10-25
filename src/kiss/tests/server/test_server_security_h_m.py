@@ -198,7 +198,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
         srv = FakeServer()
         t0 = time.time()
         with self.assertRaises(KeyboardInterrupt):
-            srv._await_user_response()
+            srv._await_user_response(None)
         dt = time.time() - t0
         self.assertLess(dt, 1.0,
                         f"_await_user_response took {dt:.2f}s with no queue — "

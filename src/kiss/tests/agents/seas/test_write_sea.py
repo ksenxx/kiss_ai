@@ -64,17 +64,14 @@ def test_description_is_one_sentence_naming_the_command() -> None:
     assert sea_commands.help_text_if_command("/write help") == text.strip()
 
 
-def test_slash_write_resolves_to_the_bundled_sea() -> None:
-    """``/write <task>`` resolves to the task text and this file, whose ``timeout`` is an hour.
+def test_dispatch_timeout_of_the_sea_is_an_hour() -> None:
+    """The file's ``timeout`` is an hour.
 
     The slash command runs the SEA directly (no ``run_agent`` relay), so
     the timeout matters on the ``run_agent`` path only: an empty
     ``timeout`` argument resolves to ``settings()["timeout"]`` and an
     explicit argument wins over it.
     """
-    assert sea_commands.get_command("write") == _SEA_PATH
-    assert sea_commands.slash_command_task("/write a release note from CHANGELOG.md") == (
-        "a release note from CHANGELOG.md", _SEA_PATH)
     assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(_SEA_PATH)

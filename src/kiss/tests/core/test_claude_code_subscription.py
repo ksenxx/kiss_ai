@@ -42,7 +42,11 @@ from typing import Any
 
 import pytest
 
-from kiss.core.config import DEFAULT_CONFIG
+# The singleton is read through the module at call time: some server tests
+# replace ``kiss.core.config.DEFAULT_CONFIG`` with a fresh ``Config()``, and
+# the adapters import it lazily, so a name bound at import time would patch
+# an object the code under test no longer reads.
+from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.claude_code_model import (
     SUBSCRIPTION_HINT,
@@ -57,13 +61,15 @@ from kiss.tests.conftest import install_cli_script, posix_only
 pytestmark = posix_only("the fake claude is a POSIX script")
 
 FINAL_TEXT = "SUBSCRIPTION-OK"
+_PANEL_TOKEN = "sk-ant-oat01-panel"
 
 # The fake ``claude``: ``auth status`` prints the JSON in $FAKE_AUTH_JSON
 # (exit per $FAKE_AUTH_EXIT) plus whether it saw an API key; any other
-# invocation records argv + the credential variables it sees, then
-# prints the turn in $FAKE_EVENTS_FILE and exits per $FAKE_TURN_EXIT.
+# invocation records argv + the credential variables it sees, waits for
+# the file $cfg[turn_gate] to exist when one is named, then prints the
+# turn in $FAKE_EVENTS_FILE and exits per $FAKE_TURN_EXIT.
 _FAKE_CLAUDE = """#!/usr/bin/env python3
-import json, os, sys, pathlib
+import json, os, sys, pathlib, time
 cfg = json.loads(pathlib.Path({cfg_path!r}).read_text())
 seen = {{k: os.environ.get(k) for k in
         ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")}}
@@ -76,6 +82,8 @@ if sys.argv[1:3] == ["auth", "status"]:
 prompt = sys.stdin.read()
 pathlib.Path({record_path!r}).write_text(
     json.dumps({{"argv": sys.argv[1:], "prompt": prompt, "env": seen}}))
+while cfg.get("turn_gate") and not os.path.exists(cfg["turn_gate"]):
+    time.sleep(0.01)
 for event in cfg["events"]:
     print(json.dumps(event), flush=True)
 sys.exit(cfg.get("turn_exit", 0))
@@ -129,8 +137,8 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _FakeClaude:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-test")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", True)
-    monkeypatch.setattr(DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", True)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", "")
     return _FakeClaude(tmp_path, monkeypatch)
 
 
@@ -142,16 +150,24 @@ def _run_turn(tmp_path: Path) -> str:
     return text
 
 
+def _run_turn_collecting(tmp_path: Path, errors: list[BaseException]) -> None:
+    """Thread target: run one turn and store the exception it raised in *errors*."""
+    try:
+        _run_turn(tmp_path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(e)
+
+
 def test_turn_hides_api_keys_and_passes_the_panel_token(
     fake_claude: _FakeClaude, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Switch on: no API key reaches the CLI, the setup-token does."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", _PANEL_TOKEN)
     assert _run_turn(tmp_path) == FINAL_TEXT
     env = fake_claude.turn()["env"]
     assert env["ANTHROPIC_API_KEY"] is None
     assert env["ANTHROPIC_AUTH_TOKEN"] is None
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-panel"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == _PANEL_TOKEN
     # The daemon's own environment is untouched.
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
 
@@ -173,8 +189,8 @@ def test_switch_off_inherits_the_environment(
     fake_claude: _FakeClaude, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Switch off: the CLI sees the API key and no injected token."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
-    monkeypatch.setattr(DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", _PANEL_TOKEN)
     assert claude_subscription_env() is None
     assert _run_turn(tmp_path) == FINAL_TEXT
     env = fake_claude.turn()["env"]
@@ -203,7 +219,7 @@ def test_login_failure_with_the_switch_off_has_no_hint(
     fake_claude: _FakeClaude, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Off, the CLI's message is shown but the hint does not apply."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", False)
     fake_claude.configure(
         events=[{"type": "result", "is_error": True, "result": "Invalid API key"}],
         turn_exit=1,
@@ -212,6 +228,35 @@ def test_login_failure_with_the_switch_off_has_no_hint(
         _run_turn(tmp_path)
     assert "Invalid API key" in str(info.value)
     assert SUBSCRIPTION_HINT not in str(info.value)
+
+
+def test_hint_follows_the_switch_the_turn_was_launched_with(
+    fake_claude: _FakeClaude, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The switch is read once per launch: a settings flip while the CLI
+    runs must not change whether the failure carries the hint (the turn
+    ran without the API keys, so the hint is what explains the login
+    failure)."""
+    gate = tmp_path / "gate"
+    fake_claude.configure(
+        events=[{"type": "result", "is_error": True, "result": _LOGIN_FAILURE}],
+        turn_exit=1,
+        turn_gate=str(gate),
+    )
+    errors: list[BaseException] = []
+    worker = threading.Thread(target=_run_turn_collecting, args=(tmp_path, errors))
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not fake_claude.record_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake_claude.record_path.exists(), "the fake claude never started"
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    gate.touch()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], KISSError)
+    assert _LOGIN_FAILURE in str(errors[0])
+    assert SUBSCRIPTION_HINT in str(errors[0])
 
 
 def test_failure_without_a_result_text_keeps_the_exit_error(
@@ -229,7 +274,7 @@ def test_auth_status_reports_the_cli_json_in_the_stripped_env(
     fake_claude: _FakeClaude, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``claude auth status`` runs without the API key and its JSON is returned."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CLAUDE_CODE_OAUTH_TOKEN", _PANEL_TOKEN)
     status = claude_auth_status()
     assert status["installed"] is True
     assert status["loggedIn"] is True
@@ -246,7 +291,7 @@ def test_auth_status_with_the_switch_off_sees_the_api_key(
     fake_claude: _FakeClaude, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Off, the status check runs in the inherited environment."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", False)
     fake_claude.configure(auth={"loggedIn": True, "authMethod": "api_key"}, auth_exit=0)
     status = claude_auth_status()
     assert status["sawApiKey"] is True
@@ -298,11 +343,11 @@ def test_auth_status_when_the_cli_cannot_run(
 
 def test_apply_config_to_env_mirrors_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stored switch reaches ``DEFAULT_CONFIG``; a missing key means the default."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", True)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", True)
     apply_config_to_env({"max_budget": 1.0, "claude_code_use_subscription": False})
-    assert DEFAULT_CONFIG.claude_code_use_subscription is False
+    assert config_module.DEFAULT_CONFIG.claude_code_use_subscription is False
     apply_config_to_env({"max_budget": 1.0})
-    assert DEFAULT_CONFIG.claude_code_use_subscription is DEFAULTS[
+    assert config_module.DEFAULT_CONFIG.claude_code_use_subscription is DEFAULTS[
         "claude_code_use_subscription"
     ]
     assert DEFAULTS["claude_code_use_subscription"] is True

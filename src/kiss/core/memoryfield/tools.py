@@ -18,7 +18,7 @@ general memory, ``<memory>/<page>`` a page of that domain memory.
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,9 +30,12 @@ MEMORY_PROTOCOL = """\
 ## Memory
 You have a persistent memory: a directory of short Markdown pages with a semantic
 search index. Follow this protocol:
-1. Before starting work, call `memory_search` with a description of the task to
-   recall relevant lessons, corrections, decisions and past results. Use
-   `memory_pull` to read the matching pages in one call.
+1. The pages most relevant to the task are already listed at the end of the
+   task message ("Memory pages relevant to this task", name, date and summary):
+   read the ones you need with `memory_pull` or `memory_read`; call
+   `memory_search` only for a sub-topic that list does not cover. When a page
+   updated within the last 30 days answers a factual question, re-verify only
+   the facts that change (prices, versions, dates) on at most three sites.
 2. While working, record durable knowledge with `memory_write`: facts you had to
    look up, user preferences, project conventions, root causes of bugs, what
    worked and what did not. One topic per page, under ~8 KB, with source URLs or
@@ -69,6 +72,29 @@ are per-round working notes (36 of 260 pages in the 2026-09-19 audit)."""
 # Cap on characters returned by memory_pull so a broad query cannot flood the context.
 PULL_CHAR_LIMIT = 24_000
 
+# Pages listed in the block :meth:`MemoryTools.recall` appends to a task.
+RECALL_PAGES = 5
+# Characters of the task text embedded as the recall query; a longer
+# task keeps its head and its tail (a continuation puts the actual task
+# after the previous session's summary).
+RECALL_QUERY_CHARS = 4_000
+RECALL_HEADING = "# Memory pages relevant to this task"
+
+# How long the task thread blocks in one ``Future.result`` wait on a search
+# worker.  The runner's Stop injects ``KeyboardInterrupt`` with
+# ``PyThreadState_SetAsyncExc``, which lands only when the thread runs
+# bytecode: an unbounded wait would make a search deaf to Stop for the
+# whole of a first-time index build (minutes of embedding requests).
+_WAIT_POLL_SECONDS = 0.1
+
+
+def recall_query(task: str) -> str:
+    """Return the part of *task* embedded as the recall query: all of it, or its head and tail."""
+    if len(task) <= RECALL_QUERY_CHARS:
+        return task
+    half = RECALL_QUERY_CHARS // 2
+    return task[:half] + "\n...\n" + task[-half:]
+
 
 def _format_hits(hits: list[SearchHit]) -> str:
     lines = []
@@ -83,6 +109,23 @@ def _format_hits(hits: list[SearchHit]) -> str:
 def _qualified(memory: str, name: str) -> str:
     """The page name an agent sees: ``name`` in the general memory, else ``memory/name``."""
     return name if memory == GENERAL else f"{memory}/{name}"
+
+
+def _result[T](future: Future[T]) -> T:
+    """``future.result()`` in :data:`_WAIT_POLL_SECONDS` slices, so a Stop can land between them.
+
+    A ``TimeoutError`` from a slice means "keep waiting" only while the
+    future is still running: a worker whose own failure is a
+    ``TimeoutError`` (an embedder's socket read timing out) makes
+    ``future.result()`` raise that same class instantly, so it must be
+    re-raised, not polled for again.
+    """
+    while not future.done():
+        try:
+            return future.result(timeout=_WAIT_POLL_SECONDS)
+        except TimeoutError:
+            continue
+    return future.result()
 
 
 class MemoryTools:
@@ -203,14 +246,24 @@ class MemoryTools:
         return [replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)]
 
     def _search(self, query: str, k: int, memory: str) -> list[SearchHit]:
-        """Search the selected memories concurrently and merge the best *k* hits."""
+        """Search the selected memories concurrently and merge the best *k* hits.
+
+        Each memory's sync-and-search runs on its own worker thread; the
+        task thread waits in short slices (:func:`_result`) and does not
+        join the pool, so a Stop injected into it propagates at once while
+        a worker finishes its current embedding batch in the background
+        (safe: the index writes each batch in its own transaction).
+        """
         selected = self._selected(memory)
-        with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        pool = ThreadPoolExecutor(max_workers=len(selected))
+        try:
             futures = [
                 pool.submit(self._search_one, name, index, query, k)
                 for name, index in selected.items()
             ]
-            hits = [hit for future in futures for hit in future.result()]
+            hits = [hit for future in futures for hit in _result(future)]
+        finally:
+            pool.shutdown(wait=False)
         hits.sort(key=lambda hit: (-hit.score, hit.name))
         return hits[:k]
 
@@ -220,6 +273,43 @@ class MemoryTools:
             if all(index.count() == 0 for index in self._selected(memory).values())
             else "No matches."
         )
+
+    def recall(self, task: str, k: int = RECALL_PAGES) -> str:
+        """Return the block of pages relevant to *task* that is appended to the task message.
+
+        The search the memory protocol used to ask the model to make
+        as its first turn, made here instead: the full task text is the
+        query (a paraphrase missed the relevant page), and the result is
+        one line per page — name, last update date and summary — so the
+        model reads a body only when it wants one.
+
+        Args:
+            task: The task text (clipped to :data:`RECALL_QUERY_CHARS`).
+            k: Maximum pages listed.
+
+        Returns:
+            The Markdown block headed :data:`RECALL_HEADING`, or ``""``
+            when nothing matches or the search fails (an embedding
+            outage must not block the task).
+        """
+        try:
+            hits = self._search(recall_query(task), k, "")
+        except Exception:
+            return ""
+        if not hits:
+            return ""
+        lines = [RECALL_HEADING]
+        for hit in hits:
+            updated = str(hit.frontmatter.get("updated") or "")[:10]
+            line = f"- `{hit.name}`"
+            if updated:
+                line += f" ({updated})"
+            line += f": {hit.title}"
+            if hit.summary:
+                line += f" — {hit.summary}"
+            lines.append(line)
+        lines.append("Read a page with memory_read(name) or several with memory_pull(query).")
+        return "\n".join(lines)
 
     def memory_search(self, query: str, k: int = 5, memory: str = "") -> str:
         """Semantic search over memory pages; returns the best-matching page names with scores.
@@ -329,17 +419,25 @@ class MemoryTools:
             )
         return f"Wrote {_qualified(memory, page.name)}.md ({size} bytes).{note}"
 
-    def memory_list(self, memory: str = "") -> str:
+    def memory_list(self, memory: str = "", max_output_chars: int = 0) -> str:
         """List every memory page with its title and summary.
 
         Args:
             memory: List only this memory ('general' or a domain memory's
                 name); empty (default) lists every memory.
+            max_output_chars: Characters of listing kept (0 = the
+                configured default budget, 8,000); a longer listing is
+                cut and says how many pages it holds.  Capped at the
+                configured ceiling.
         """
+        from kiss.core.config import DEFAULT_CONFIG
+
         try:
             selected = self._selected(memory)
         except ValueError as e:
             return f"Error: {e}"
+        budget = max_output_chars or DEFAULT_CONFIG.tool_output_default_chars
+        budget = max(1, min(int(budget), DEFAULT_CONFIG.tool_output_max_chars))
         lines = []
         for memory_name, index in selected.items():
             for name in index.memory.page_names():
@@ -354,7 +452,16 @@ class MemoryTools:
                 lines.append(line)
         if not lines:
             return "No memory pages yet."
-        return "\n".join(lines)
+        listing = "\n".join(lines)
+        if len(listing) <= budget:
+            return listing
+        kept = listing[:budget].rsplit("\n", 1)[0]
+        shown = kept.count("\n") + 1
+        return (
+            f"{kept}\n... [{len(lines) - shown} more pages not shown: pass memory=<name> "
+            f"to list one memory, memory_search(query) to find a page, or "
+            f"max_output_chars up to {DEFAULT_CONFIG.tool_output_max_chars}]"
+        )
 
     def memory_refresh(
         self, stale_days: int = 30, duplicate_threshold: float = 0.9, memory: str = ""

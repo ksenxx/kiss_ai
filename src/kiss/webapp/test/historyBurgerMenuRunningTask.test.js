@@ -6,45 +6,26 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeSharedPage,
   send,
-  MEDIA,
   sendEmptyWorkDir,
 } = require('./simplify2_harness');
-const {inlineDesignTokens} = require('./designTokens');
+const {
+  freezeClockAndStyle,
+  makeRow,
+  rowByTitle,
+  lastGetHistory,
+} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 const pages = [];
 
 function makePage() {
-  const {win, posted} = makeSharedPage({beforeScripts: freezeClockAndStyle});
+  const {win, posted} = makeSharedPage({beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS)});
   pages.push(win);
   return {win, posted};
-}
-
-/** Freeze the page's Date at FROZEN_NOW_MS and inline main.css. */
-function freezeClockAndStyle(win) {
-  const RealDate = win.Date;
-  const FakeDate = function (...args) {
-    if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
-    return new RealDate(...args);
-  };
-  FakeDate.prototype = RealDate.prototype;
-  FakeDate.now = () => FROZEN_NOW_MS;
-  FakeDate.parse = RealDate.parse;
-  FakeDate.UTC = RealDate.UTC;
-  win.Date = FakeDate;
-
-  const cssText = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = cssText;
-  win.document.head.appendChild(styleEl);
 }
 
 function configureClientWorkDir(win, workDir) {
@@ -55,50 +36,10 @@ function configureClientWorkDir(win, workDir) {
   });
 }
 
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + (overrides.task_id || 0),
-      task_id: overrides.task_id || 0,
-      title: overrides.title || 'untitled',
-      timestamp: 1_700_000_000,
-      preview: overrides.title || 'untitled',
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 1_700_000_010_000,
-    },
-    overrides,
-  );
-}
-
-function rowByTitle(win, title) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  for (const r of rows) {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t && t.textContent === title) return r;
-  }
-  return null;
-}
-
 function clickBurgerMenu(win) {
   const btn = win.document.getElementById('menu-btn');
   assert.ok(btn, 'burger menu button (#menu-btn) must exist');
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function lastGetHistory(posted) {
-  for (let i = posted.length - 1; i >= 0; i--) {
-    if (posted[i] && posted[i].type === 'getHistory') return posted[i];
-  }
-  return null;
 }
 
 function findDot(row) {
@@ -128,7 +69,7 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   });
   assert.strictEqual(
     lastGetHistory(posted),
-    null,
+    undefined,
     'with sidebar closed, status running:true must NOT post getHistory; ' +
       'the burger click is what triggers the fetch',
   );

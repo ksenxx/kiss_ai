@@ -557,6 +557,29 @@ def test_global_profile_entry_copies_the_claude_prices_unchanged(monkeypatch, tm
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "tokens"),
+    [
+        ("gpt-audio", {"num_audio_input_tokens": 1000, "num_audio_output_tokens": 1000}),
+        ("gemini-2.5-flash-image", {"num_image_output_tokens": 1000}),
+    ],
+)
+def test_custom_entry_of_a_catalog_model_keeps_audio_and_image_prices(
+    monkeypatch, tmp_path, name, tokens
+) -> None:
+    """Saving a catalog model under Custom Models keeps its audio/image rates after reload.
+
+    The loaded entry replaces the catalog's, so a seed without these
+    fields would bill audio and image tokens at the text rates.
+    """
+    before = model_info.calculate_cost(name, 0, 0, **tokens)
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+    assert model_info.save_custom_model(name) is None
+    monkeypatch.setattr(model_info, "MODEL_INFO", _reloaded_catalog())
+    assert before > 0
+    assert model_info.calculate_cost(name, 0, 0, **tokens) == pytest.approx(before)
+
+
 def test_hot_added_geographic_entry_is_not_scaled_twice(monkeypatch, tmp_path) -> None:
     """A ``bedrock/`` entry saved after start-up bills its stored (already scaled) prices."""
     monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
@@ -640,14 +663,25 @@ def test_key_store_round_trip(tmp_path, monkeypatch) -> None:
 # Live Bedrock (only with real credentials in the environment)
 # --------------------------------------------------------------------------
 
-_LIVE_CREDENTIALS = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK")) or bool(
-    os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")
+_LIVE_AWS = {field: os.environ.get(field, "") for field in _AWS_FIELDS}
+"""The developer's real AWS credentials, captured before any test touches the process.
+
+The autouse ``no_ambient_aws_credentials`` fixture scrubs them from
+``os.environ`` for every test, and any earlier test that runs
+``save_api_key``/``load_api_keys`` re-syncs ``DEFAULT_CONFIG`` from that
+scrubbed environment — so the live test must pin its own credentials
+onto the config singleton instead of trusting what is left in it.
+"""
+
+_LIVE_CREDENTIALS = bool(_LIVE_AWS["AWS_BEARER_TOKEN_BEDROCK"]) or bool(
+    _LIVE_AWS["AWS_ACCESS_KEY_ID"] and _LIVE_AWS["AWS_SECRET_ACCESS_KEY"]
 )
 
 
 @pytest.mark.skipif(not _LIVE_CREDENTIALS, reason="no Bedrock credentials in the environment")
 def test_live_bedrock_generation(monkeypatch) -> None:
     """One real turn on Bedrock's Claude Haiku 4.5 cross-region profile."""
+    _set_aws(monkeypatch, **_LIVE_AWS)
     monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
     adapter = model_info.model("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
     assert isinstance(adapter, AnthropicModel) and adapter.bedrock

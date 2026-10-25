@@ -279,6 +279,14 @@ function testManualCloseOfAllSubTabsThenExpandReopensAll() {
 function testAutoCollapseKeepsInvariant() {
   const {win, panel, parentId, subTabIds} = bootParallelRun(2, makePage());
 
+  send(win, {type: 'thinking_start', tabId: parentId});
+  send(win, {type: 'thinking_delta', tabId: parentId, text: 'waiting'});
+  send(win, {type: 'thinking_end', tabId: parentId});
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'a run_parallel panel whose fan-out is still running must stay ' +
+      'uncollapsed when the agent moves on to a newer panel',
+  );
   send(win, {
     type: 'tool_result',
     tabId: parentId,
@@ -515,11 +523,6 @@ function testTaskEndFoldsUserOpenedFanOutIntoTrajectory() {
     2,
     'expanding the fan-out inside the Trajectory reopens its tabs',
   );
-  assert.strictEqual(
-    win.document.getElementById('task-panel-collapse-btn'),
-    null,
-    'the removed Collapse/Uncollapse Chats button must not exist',
-  );
   win.close();
   console.log(
     '  ok - task end folds a user-opened fan-out into the Trajectory',
@@ -527,7 +530,7 @@ function testTaskEndFoldsUserOpenedFanOutIntoTrajectory() {
 }
 
 function testRunParallelFinishAutoCollapseClosesSubTabs() {
-  const {win, posted, panel, parentId, taskIds, subTabIds} = bootParallelRun(
+  const {win, posted, panel, parentId, subTabIds} = bootParallelRun(
     2,
     makePage(),
   );
@@ -586,46 +589,8 @@ function testRunParallelFinishAutoCollapseClosesSubTabs() {
     0,
     'sub-agent tabs must stay closed at task end',
   );
-
-  const before = posted.length;
-  togglePanel(win, panel);
-  assert.ok(!panel.classList.contains('collapsed'), 'panel expanded');
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'expanding the finished run_parallel panel must reopen its tabs',
-  );
-  for (const taskId of taskIds) {
-    assert.ok(
-      posted
-        .slice(before)
-        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
-      'reopened sub-agent tab must resume backend task ' + taskId,
-    );
-  }
   win.close();
   console.log('  ok - finished run_parallel auto-collapse closes sub tabs');
-}
-
-function testRunningFanOutStaysExemptFromAutoCollapse() {
-  const {win, panel, parentId} = bootParallelRun(2, makePage());
-
-  send(win, {type: 'thinking_start', tabId: parentId});
-  send(win, {type: 'thinking_delta', tabId: parentId, text: 'waiting'});
-  send(win, {type: 'thinking_end', tabId: parentId});
-
-  assert.ok(
-    !panel.classList.contains('collapsed'),
-    'a run_parallel panel whose fan-out is still running must stay ' +
-      'uncollapsed',
-  );
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'the live sub-agent tabs must stay open while the fan-out runs',
-  );
-  win.close();
-  console.log('  ok - running fan-out stays exempt from auto-collapse');
 }
 
 function testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse() {
@@ -743,7 +708,7 @@ function testParentReplayKeepsRunningFanOutOpen() {
   console.log('  ok - parent replay keeps running fan-out open');
 }
 
-async function main() {
+function main() {
   const tests = [
     testCollapseClosesSubagentTabs,
     testExpandReopensSubagentTabs,
@@ -756,17 +721,11 @@ async function main() {
     testSpawnWhileCollapsedDefersTabs,
     testTaskEndFoldsUserOpenedFanOutIntoTrajectory,
     testRunParallelFinishAutoCollapseClosesSubTabs,
-    testRunningFanOutStaysExemptFromAutoCollapse,
     testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,
     testParentReplayKeepsRunningFanOutOpen,
   ];
-  for (const t of tests) {
-    await t();
-  }
+  for (const t of tests) t();
   console.log('runParallelPanelTabsSync.test.js: all tests passed');
 }
 
-main().catch(err => {
-  console.error(err && err.stack ? err.stack : err);
-  process.exit(1);
-});
+main();

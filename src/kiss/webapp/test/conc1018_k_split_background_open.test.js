@@ -5,7 +5,7 @@
 
 'use strict';
 
-/* global require, __dirname, console */
+/* global require, console */
 
 // Split layout (desktop remote page): a file opened in the background
 // ("Open to the Side", or a hidden chat's task opening a file) while the
@@ -16,41 +16,20 @@
 // open only adds a row (the shown file stays).
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {newDom, send} = require('./simplify2_harness');
+const {makePage, send, fakeMatchMedia} = require('./simplify2_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
-function makeSplitPage() {
-  const win = newDom();
-  win.document.body.classList.add('remote-chat');
+function stubDesktop(win) {
   win.Element.prototype.setPointerCapture = function () {};
   win.Element.prototype.releasePointerCapture = function () {};
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener() {},
-      removeEventListener() {},
-      addListener() {},
-      removeListener() {},
-    };
-  };
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  for (const name of ['panelCopy.js', 'api.js', 'browserTab.js', 'main.js']) {
-    win.eval(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
-  }
+  fakeMatchMedia(win, true);
+}
+
+function makeSplitPage() {
+  const {win} = makePage({
+    bodyClass: 'remote-chat',
+    extraScripts: ['browserTab.js'],
+    beforeScripts: stubDesktop,
+  });
   send(win, {
     type: 'tabs_state',
     tabs: [
@@ -61,7 +40,7 @@ function makeSplitPage() {
   send(win, {type: 'task_events', tabId: 'a1', task: 'the task', events: []});
   assert.ok(win.document.body.classList.contains('remote-desktop'));
   assert.strictEqual(win._testApi.getActiveTabId(), 'a1');
-  return {win, posted};
+  return {win};
 }
 
 function paneRows(win) {

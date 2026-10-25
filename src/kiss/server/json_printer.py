@@ -40,6 +40,7 @@ from kiss.core import stop_signal
 from kiss.core.models.model import Attachment
 from kiss.core.printer import (
     Printer,
+    cost_fields,
     extract_extras,
     extract_path_and_lang,
     parse_result_yaml,
@@ -504,10 +505,14 @@ def _unregister_bridge_state(agent: Any, key: str) -> None:
 def _take_pending_messages(
     state: agent_state.AgentState,
 ) -> tuple[list[str], list[Attachment], list[str]]:
-    """Under ``STATE_LOCK``: pop *state*'s queued prompts, their files and its deferred echoes."""
+    """Under ``STATE_LOCK``: pop *state*'s queued prompts, their files and its deferred echoes.
+
+    The files of every queued message are flattened into one list:
+    the live agent shows them as one user message after the texts.
+    """
     queued = list(state.pending_user_messages)
     state.pending_user_messages.clear()
-    attachments = list(state.pending_user_attachments)
+    attachments = [att for files in state.pending_user_attachments for att in files]
     state.pending_user_attachments.clear()
     deferred = list(state.unattributed_prompt_echoes)
     state.unattributed_prompt_echoes.clear()
@@ -546,6 +551,12 @@ class _BashState:
         self.capped: bool = False
         self.flush_lock = threading.RLock()
 
+    def cancel_timer(self) -> None:
+        """Under ``_bash_lock``: cancel the pending flush timer, if any."""
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+
     def take_fragment(self, fragment: str) -> str:
         """Return the part of *fragment* still within the stream cap.
 
@@ -574,55 +585,13 @@ def _clear_bash_state(bs: _BashState) -> None:
     """Under ``_bash_lock`` and *bs*'s ``flush_lock``: drop its buffer and pending timer."""
     bs.buffer.clear()
     bs.streamed = False
-    if bs.timer is not None:
-        bs.timer.cancel()
-        bs.timer = None
-
-
-def _cost_fields(
-    cost: Any, cost_usd: float | None, budget_offset: float
-) -> tuple[Any, float | None]:
-    """Add the task's *budget_offset* to a cost; return both renderings.
-
-    The ``"$x.xxxx"`` string is what the UI shows; the float is what a
-    ``run_agent`` / ``run_parallel`` parent charges to its ledger
-    (``daemon_client._net_totals``), so it must not go through the
-    four-decimal rounding of the string.  Non-dollar or malformed
-    costs (``"N/A"``, ``"$abc"``) without *cost_usd* pass through
-    verbatim so a junk value never raises out of the emitting agent
-    thread.
-
-    Args:
-        cost: The raw display cost (usually a ``"$1.2345"`` string).
-        cost_usd: The unrounded USD figure when the emitter knows it;
-            parsed from *cost* otherwise.
-        budget_offset: The task's banked USD total to add.
-
-    Returns:
-        ``(display, exact)``: the offset-adjusted cost string (or
-        *cost* unchanged) and the offset-adjusted USD float, ``None``
-        when neither input yields a number.
-    """
-    exact: float | None = None
-    if cost_usd is not None:
-        exact = float(cost_usd)
-    elif isinstance(cost, str) and cost.startswith("$"):
-        try:
-            exact = float(cost[1:])
-        except ValueError:
-            exact = None
-    if exact is None:
-        return cost, None
-    exact += budget_offset
-    return f"${exact:.4f}", exact
+    bs.cancel_timer()
 
 
 def _take_bash_text(bs: _BashState) -> str:
     """Under ``_bash_lock`` and *bs*'s ``flush_lock``: pop its buffered text, cancelling the
     timer."""
-    if bs.timer is not None:
-        bs.timer.cancel()
-        bs.timer = None
+    bs.cancel_timer()
     text = "".join(bs.buffer)
     bs.buffer.clear()
     bs.last_flush = time.monotonic()
@@ -1752,9 +1721,7 @@ class JsonPrinter(Printer):
         """Under ``_bash_lock``: remove *key*'s bash state, cancelling its flush timer."""
         bs = self._bash_states.pop(key, None)
         if bs is not None:
-            if bs.timer is not None:
-                bs.timer.cancel()
-            bs.buffer.clear()
+            _clear_bash_state(bs)
         return bs
 
     def _sweep_expired_subscribers(self) -> None:
@@ -1832,8 +1799,7 @@ class JsonPrinter(Printer):
             bs.buffer.append(fragment)
         flush_now = bool(fragment) and time.monotonic() - bs.last_flush >= 0.1
         if fragment and not flush_now and bs.timer is None:
-            owner_task = getattr(self._thread_local, "task_id", None)
-            bs.timer = threading.Timer(0.1, partial(self._timer_flush_for_task, owner_task))
+            bs.timer = threading.Timer(0.1, partial(self.flush_bash_output, key))
             bs.timer.daemon = True
             bs.timer.start()
         return bs, flush_now
@@ -1880,15 +1846,6 @@ class JsonPrinter(Printer):
         if key and key not in self._closed_tasks:
             self._image_b64_used[key] = used + size
         return True
-
-    def _timer_flush_for_task(self, task_id: str | None) -> None:
-        """Timer callback: flush the bash buffer of *task_id* (the current task when ``None``).
-
-        Args:
-            task_id: The task identifier that owns the bash buffer, or
-                ``None`` when no task context is available.
-        """
-        self.flush_bash_output(task_id or "")
 
     def _flush_bash(self) -> None:
         """Flush the current task's bash buffer (see :meth:`flush_bash_output`)."""
@@ -2194,9 +2151,11 @@ class JsonPrinter(Printer):
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append *event* to the live or retired recording for its task.
 
-        Looks up the recording list by the event's ``taskId``, falling
-        back to the thread-local ``task_id``.  A recording
-        ``stop_recording`` retired while the task's state is still
+        Looks up the recording list by the event's ``taskId``, which
+        :meth:`_inject_task_id` has already filled in from the thread
+        binding when the emitter left it unset; an explicit ``""``
+        (``tasks_updated``, ``new_tab``) means "no task" and is not
+        recorded.  A recording ``stop_recording`` retired while the task's state is still
         registered keeps receiving events: the task runner broadcasts
         the terminal ``result`` of a run that failed before its first
         step after the agent stopped recording, and a viewer attaching
@@ -2204,9 +2163,7 @@ class JsonPrinter(Printer):
         ``resumeSession``) replays the retired recording, which must
         hold it.  Must be called with ``self._lock`` held.
         """
-        key = self._coerce_task_id(
-            event.get("taskId") or getattr(self._thread_local, "task_id", None),
-        )
+        key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return
         rec = self._recording_ref(key)
@@ -2252,7 +2209,7 @@ class JsonPrinter(Printer):
         cost_usd: float | None = None,
     ) -> None:
         budget_offset, tokens_offset, steps_offset = self._usage_offsets()
-        cost, exact = _cost_fields(cost, cost_usd, budget_offset)
+        cost, exact = cost_fields(cost, cost_usd, budget_offset)
         total_tokens = total_tokens + tokens_offset
         step_count = step_count + steps_offset
         event: dict[str, Any] = {
@@ -2272,7 +2229,7 @@ class JsonPrinter(Printer):
         self.broadcast(event)
 
     def _check_stop(self) -> None:
-        ev = getattr(self._thread_local, "stop_event", None)
+        ev = self._thread_local.stop_event
         if ev is not None and ev.is_set():
             raise KeyboardInterrupt("Agent stop requested")
 
@@ -2347,7 +2304,7 @@ class JsonPrinter(Printer):
             budget_offset, tokens_offset, steps_offset = self._usage_offsets()
             total_tokens = raw_tokens + tokens_offset
             total_steps = raw_steps + steps_offset
-            total_cost, exact_cost = _cost_fields(raw_cost, kwargs.get("cost_usd"), budget_offset)
+            total_cost, exact_cost = cost_fields(raw_cost, kwargs.get("cost_usd"), budget_offset)
             event: dict[str, Any] = {
                 "type": "usage_info",
                 "text": str(content),
@@ -2378,6 +2335,10 @@ class JsonPrinter(Printer):
                     "cache_read": int(kwargs.get("cache_read", 0) or 0),
                     "cache_write": int(kwargs.get("cache_write", 0) or 0),
                     "cost": float(kwargs.get("cost", 0.0) or 0.0),
+                    # A routine turn (see ``KISSAgent._turn_effort``) and the
+                    # effort it ran at ("" = the model's own).
+                    "routine": bool(kwargs.get("routine", False)),
+                    "effort": str(kwargs.get("effort") or ""),
                 }
             )
             return

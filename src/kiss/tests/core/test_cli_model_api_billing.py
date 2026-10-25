@@ -104,6 +104,21 @@ def _codex_turn(text: str = "word") -> list[dict[str, Any]]:
     ]
 
 
+def _haiku_request(input_tokens: int, with_start: bool) -> list[dict[str, Any]]:
+    """One Claude Haiku 5.5 API request of *input_tokens* prompt and 200
+    output tokens, optionally without its ``message_start`` event."""
+    start = {
+        "type": "message_start",
+        "message": {"model": "claude-haiku-5-5", "usage": {"input_tokens": input_tokens}},
+    }
+    delta = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn"},
+        "usage": {"input_tokens": input_tokens, "output_tokens": 200},
+    }
+    return [start, delta] if with_start else [delta]
+
+
 @pytest.fixture
 def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake ``claude`` on PATH with an API key in the environment."""
@@ -288,6 +303,7 @@ def test_cc_usage_recovered_from_a_failed_turn_is_priced_like_a_whole_turn(
         "model": "claude-opus-5-5",
         "api_billed": True,
         "requests": 1,
+        "request_usages": [{"input_tokens": 10, "output_tokens": 20}],
     }
     assert model.extract_cost_from_response(partial) == pytest.approx(
         calculate_cost("claude-opus-5-5", 10, 20)
@@ -497,6 +513,49 @@ def test_cc_multi_request_turn_is_not_tiered_as_one_long_prompt(
     assert _run_agent("cc/haiku", tmp_path).budget_used == pytest.approx(long_rate)
 
 
+def test_cc_multi_request_turn_bills_the_long_context_tier_of_each_long_request(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each request crossing Haiku 5.5's 100K line bills 5x on its own; the
+    others stay at the short rate, whatever the turn's summed counters say."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    text = {"type": "assistant", "message": {"content": [{"type": "text", "text": "word"}]}}
+    result = {
+        "type": "result",
+        "result": "word",
+        "usage": {"input_tokens": 180_000, "output_tokens": 400},
+        "total_cost_usd": 0.0,
+    }
+    events = _haiku_request(120_000, True) + _haiku_request(60_000, True) + [text, result]
+    fake_claude.write_text(json.dumps(events))
+    expected = calculate_cost("claude-haiku-5-5", 120_000, 200) + calculate_cost(
+        "claude-haiku-5-5", 60_000, 200
+    )
+    assert expected > calculate_cost("claude-haiku-5-5", 180_000, 400, single_request=False)
+    agent = _run_agent("cc/haiku", tmp_path)
+    assert agent.budget_used == pytest.approx(expected)
+    assert agent.total_tokens_used == 180_400
+
+
+def test_cc_finished_messages_without_message_start_count_as_requests(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two short requests whose stream lacks ``message_start`` are two
+    requests, not one 120K prompt billed at Haiku 5.5's long-context rate."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    text = {"type": "assistant", "message": {"content": [{"type": "text", "text": "word"}]}}
+    result = {
+        "type": "result",
+        "result": "word",
+        "usage": {"input_tokens": 120_000, "output_tokens": 400},
+        "total_cost_usd": 0.0,
+    }
+    events = _haiku_request(60_000, False) + _haiku_request(60_000, False) + [text, result]
+    fake_claude.write_text(json.dumps(events))
+    agent = _run_agent("cc/claude-haiku-5-5", tmp_path)
+    assert agent.budget_used == pytest.approx(2 * calculate_cost("claude-haiku-5-5", 60_000, 200))
+
+
 # --- Codex -------------------------------------------------------------
 
 
@@ -582,6 +641,43 @@ def test_codex_multi_request_turn_is_not_tiered_as_one_long_prompt(
     reasoning_item = {"type": "item.completed", "item": {"type": "reasoning", "text": "hmm"}}
     fake_codex.write_text(json.dumps([reasoning_item, text_item, done]))
     assert _run_agent("codex/gpt-5.5", tmp_path).budget_used == pytest.approx(long_rate)
+
+
+def test_codex_usage_of_a_turn_that_fails_after_completing_is_billed_once(
+    fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI reports ``turn.completed`` and then exits non-zero: the
+    generation raises, but the usage it reported is real spend, recovered
+    exactly once.  A turn that succeeds leaves nothing to recover."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    fake_codex.write_text(json.dumps([*_codex_turn(), {"type": "exit", "code": 1}]))
+    model = CodexModel("codex/gpt-5.5", {"work_dir": str(tmp_path), "timeout": 30})
+    model.conversation = [{"role": "user", "content": TASK}]
+    with pytest.raises(KISSError):
+        model.generate()
+    partial = model.take_partial_usage_response()
+    assert model.extract_input_output_token_counts_from_response(partial) == _CODEX_COUNTS
+    assert model.extract_cost_from_response(partial) == pytest.approx(
+        calculate_cost("gpt-5.5", *_CODEX_COUNTS)
+    )
+    assert model.take_partial_usage_response() is None, "recovered once"
+
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    model.generate()
+    assert model.take_partial_usage_response() is None
+
+    fake_codex.write_text(json.dumps([*_codex_turn(), {"type": "exit", "code": 1}]))
+    agent = KISSAgent("codex failed turn")
+    with pytest.raises(KISSError):
+        agent.run(
+            model_name="codex/gpt-5.5",
+            prompt_template=TASK,
+            is_agentic=False,
+            verbose=False,
+            model_config={"work_dir": str(tmp_path), "timeout": 30},
+        )
+    assert agent.total_tokens_used == sum(_CODEX_COUNTS)
+    assert agent.budget_used == pytest.approx(calculate_cost("gpt-5.5", *_CODEX_COUNTS))
 
 
 def test_codex_api_key_turn_on_the_cli_default_model_warns_once_and_stays_free(
@@ -688,3 +784,42 @@ def test_codex_switch_off_with_a_chatgpt_login_is_free(
     _save_codex_login(tmp_path, {"auth_mode": "chatgpt", "tokens": {"id_token": "x"}})
     fake_codex.write_text(json.dumps(_codex_turn()))
     assert _run_agent("codex/gpt-5.5", tmp_path).budget_used == 0.0
+
+
+def _stop_on_token(token: str) -> None:
+    """A token callback that behaves like the user pressing Stop."""
+    raise KeyboardInterrupt
+
+
+def _finish(result: str) -> str:
+    """Finish the task with *result*."""
+    return result
+
+
+def test_turn_billed_when_the_tool_filter_flush_raises_after_generate(
+    fake_claude: Path, fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lone ``{`` is held as a possible ``tool_calls`` block until the
+    filter flushes it after generate() returned; Stop raises there, and
+    the completed turn's usage is still recovered, exactly once."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    fake_codex.write_text(json.dumps(_codex_turn("{")))
+    held = {"type": "assistant", "message": {"content": [{"type": "text", "text": "{"}]}}
+    result = {"type": "result", "result": "{", "usage": _CLAUDE_USAGE, "total_cost_usd": 0.0}
+    fake_claude.write_text(json.dumps([held, result]))
+    config = {"work_dir": str(tmp_path), "timeout": 30}
+    codex = CodexModel("codex/gpt-5.5", config, token_callback=_stop_on_token)
+    claude = ClaudeCodeModel("cc/claude-opus-5-5", config, token_callback=_stop_on_token)
+    cases = [
+        (codex, _CODEX_COUNTS, calculate_cost("gpt-5.5", *_CODEX_COUNTS)),
+        (claude, _CLAUDE_COUNTS, calculate_cost("claude-opus-5-5", *_CLAUDE_COUNTS)),
+    ]
+    for model, counts, cost in cases:
+        model.conversation = [{"role": "user", "content": TASK}]
+        with pytest.raises(KeyboardInterrupt):
+            model.generate_and_process_with_tools({"finish": _finish})
+        partial = model.take_partial_usage_response()
+        assert model.extract_input_output_token_counts_from_response(partial) == counts
+        assert model.extract_cost_from_response(partial) == pytest.approx(cost)
+        assert model.take_partial_usage_response() is None, "recovered once"

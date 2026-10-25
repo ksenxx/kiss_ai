@@ -385,7 +385,7 @@ class TestRepoMemoryDomains:
             verbose=False,
         )
         assert list(seen["tools"].domains) == ["kissy"]
-        monkeypatch.setattr(config_module, "artifact_dir", str(plain / "artifacts"))
+        monkeypatch.setattr(config_module, "_artifact_dir", str(plain / "artifacts"))
         monkeypatch.chdir(repo)
         SorcarAgent("default-dir-memory").run(
             model_name="claude-haiku-4-5", prompt_template="x", web_tools=False,

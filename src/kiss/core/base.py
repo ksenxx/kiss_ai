@@ -5,7 +5,6 @@
 
 """Base agent class with common functionality for all KISS agents."""
 
-import json
 import logging
 import re
 import shutil
@@ -181,14 +180,6 @@ class Base:
             dump_yaml(self._build_state_dict(), indent=2),
         )
 
-    def get_trajectory(self) -> str:
-        """Return the trajectory as JSON for visualization.
-
-        Returns:
-            str: A JSON-formatted string of all messages in the agent's history.
-        """
-        return json.dumps(self.messages, indent=2)
-
     def get_trajectory_path(self) -> Path:
         """Return the path where this agent's trajectory is/will be saved.
 
@@ -199,7 +190,7 @@ class Base:
         Returns:
             Path: The file path for the trajectory YAML file.
         """
-        folder_path = Path(config_module.artifact_dir) / "trajectories"
+        folder_path = Path(config_module.get_artifact_dir()) / "trajectories"
         # Agent names can carry arbitrary text (``run_parallel`` names
         # its workers after the task); every character that is not a
         # word character, dot or dash becomes ``_`` so the file name is

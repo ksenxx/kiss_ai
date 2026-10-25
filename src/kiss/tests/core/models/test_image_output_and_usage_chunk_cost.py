@@ -64,15 +64,16 @@ def _run_gemini_agent(
     monkeypatch: pytest.MonkeyPatch,
     endpoint: tuple[str, GeminiScript],
     image_tokens: int,
+    model: str = _IMAGE_MODEL,
 ) -> KISSAgent:
-    """Run one real non-agentic turn of the image model against *endpoint*."""
+    """Run one real non-agentic turn of the image *model* against *endpoint*."""
     base_url, script = endpoint
     script.play([chunk([text_part("hi")], usage=_image_usage(image_tokens))], after="close")
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     agent = KISSAgent("image-output-cost")
-    agent.model = GeminiModel(_IMAGE_MODEL, api_key="test-key")
+    agent.model = GeminiModel(model, api_key="test-key")
     agent.run(
-        _IMAGE_MODEL,
+        model,
         "Draw a cat.",
         is_agentic=False,
         printer=ConsolePrinter(file=io.StringIO()),
@@ -80,19 +81,52 @@ def _run_gemini_agent(
     return agent
 
 
+# Google's published image-output rates (USD per 1M image tokens) and
+# per-image equivalents, ai.google.dev/gemini-api/docs/pricing (2026-10-22).
+_GOOGLE_IMAGE_RATES = {
+    "gemini-nano-banana-2.1": (30.0, 1120, 0.0336),
+    "gemini-3.1-flash-image": (60.0, 1120, 0.067),
+    "gemini-3.1-flash-lite-image": (30.0, 1120, 0.0336),
+    "gemini-3-pro-image": (120.0, 1120, 0.134),
+    "gemini-2.5-flash-image": (30.0, 1290, 0.039),
+}
+
+
+@pytest.mark.parametrize(("model", "rate"), [(m, r[0]) for m, r in _GOOGLE_IMAGE_RATES.items()])
 def test_gemini_image_output_billed_at_image_rate(
-    monkeypatch: pytest.MonkeyPatch, gemini_endpoint: tuple[str, GeminiScript]
+    monkeypatch: pytest.MonkeyPatch,
+    gemini_endpoint: tuple[str, GeminiScript],
+    model: str,
+    rate: float,
 ) -> None:
-    agent = _run_gemini_agent(monkeypatch, gemini_endpoint, image_tokens=1290)
-    info = MODEL_INFO[_IMAGE_MODEL]
-    assert info.image_output_price_per_1M == 60.0
+    agent = _run_gemini_agent(monkeypatch, gemini_endpoint, image_tokens=1290, model=model)
+    info = MODEL_INFO[model]
+    assert info.image_output_price_per_1M == rate
     expected = (
-        100 * info.input_price_per_1M + 10 * info.output_price_per_1M + 1290 * 60.0
+        100 * info.input_price_per_1M + 10 * info.output_price_per_1M + 1290 * rate
     ) / 1e6
     assert agent.budget_used == pytest.approx(expected)
     assert agent.total_tokens_used == 1400
     assert agent.last_call_usage is not None
     assert agent.last_call_usage["output_tokens"] == 1300
+
+
+def test_every_direct_gemini_image_model_prices_images_like_google() -> None:
+    """Each image-generation Gemini entry bills one image at Google's advertised price.
+
+    ``gemini-nano-banana-2.1`` was added by a catalog refresh with only the
+    text prices, so a 1K image (1120 tokens) cost $0.0084 instead of $0.0336.
+    """
+    image_models = {
+        name for name in MODEL_INFO
+        if name.startswith("gemini") and ("image" in name or "banana" in name)
+    }
+    assert image_models == set(_GOOGLE_IMAGE_RATES)
+    for name, (rate, tokens_per_image, usd_per_image) in _GOOGLE_IMAGE_RATES.items():
+        assert MODEL_INFO[name].image_output_price_per_1M == rate, name
+        assert calculate_cost(name, 0, 0, num_image_output_tokens=tokens_per_image) == (
+            pytest.approx(usd_per_image, abs=0.0005)
+        ), name
 
 
 def test_gemini_text_only_turn_of_image_model_uses_text_rate(

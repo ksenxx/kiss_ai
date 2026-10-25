@@ -25,7 +25,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  nextFrames,
+} = require('./simplify2_harness');
 
 function makePage(opts) {
   opts = opts || {};
@@ -78,17 +83,6 @@ function fakeGeometry(el, geo) {
 
 function bottom(geo) {
   return Math.max(0, geo.sh - geo.ch);
-}
-
-function nextFrames(win, n = 3) {
-  return new Promise(resolve => {
-    let left = n;
-    function step() {
-      if (--left <= 0) return resolve();
-      win.requestAnimationFrame(step);
-    }
-    win.requestAnimationFrame(step);
-  });
 }
 
 function startRunningTask(win, posted) {

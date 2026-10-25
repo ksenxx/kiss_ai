@@ -3,8 +3,9 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the tab strip (renderTabBar in media/main.js)
-// now that chats are picked from the Chats panel rather than a row of tabs:
+// End-to-end (JSDOM) tests for the tab strip (renderTabBar in media/main.js).
+// The file name predates the Chats panel: chats are picked there rather
+// than from a two-row strip, and the strip only groups what is on screen:
 //
 //   * the strip (#tab-list) lists the chat on screen with its sub-agents;
 //   * content tabs share that strip on the mobile file screen, but stay
@@ -21,11 +22,16 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage: makeChatPage, send, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  clickTab,
+  MEDIA,
+} = require('./simplify2_harness');
 
 function makePage() {
-  const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
-  return {win, posted};
+  return makeChatPage({bodyClass: 'remote-chat'});
 }
 
 function entry(tabId, title) {
@@ -53,21 +59,10 @@ function stripShown(win) {
   return win.document.getElementById('tab-bar').style.display !== 'none';
 }
 
-function click(win, el, what) {
-  assert.ok(el, `cannot click a missing ${what}`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 function stripEl(win, tabId) {
   return win.document.querySelector(
     `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
   );
-}
-
-// The Chats panel's pick of a chat that is not on screen.
-function pick(win, tabId) {
-  assert.ok(openIds(win).includes(tabId), `cannot pick a closed tab ${tabId}`);
-  win._testApi.switchToTab(tabId);
 }
 
 function pressKey(win, el, key) {
@@ -132,7 +127,7 @@ function testLoneChatShowsNoStrip() {
     'a chat that is not on screen has no strip entry',
   );
 
-  pick(win, 'b');
+  clickTab(win, 'b');
   assert.strictEqual(
     stripActive(win),
     'b',
@@ -161,7 +156,7 @@ function testSubagentsAndFilesFormTheGroupStrip() {
   // A file opened for the chat on screen comes forward.
   assert.strictEqual(stripActive(win), fileId, 'the file is on screen');
   assert.ok(stripEl(win, fileId).classList.contains('content-tab'));
-  click(win, stripEl(win, 'a'), 'chat a strip entry');
+  click(win, stripEl(win, 'a'));
   assert.strictEqual(stripActive(win), 'a');
   assert.ok(stripEl(win, 'a-sub-1').classList.contains('subagent-tab'));
   assert.deepStrictEqual(
@@ -170,7 +165,7 @@ function testSubagentsAndFilesFormTheGroupStrip() {
     'mobile chat shows its sub-agent but no editor tabs',
   );
 
-  click(win, stripEl(win, 'a-sub-1'), 'sub-agent strip entry');
+  click(win, stripEl(win, 'a-sub-1'));
   assert.strictEqual(
     stripActive(win),
     'a-sub-1',
@@ -185,7 +180,7 @@ function testSubagentsAndFilesFormTheGroupStrip() {
 
   // Another chat: its own group replaces a's; content tabs stay off
   // the mobile chat screen even when they belong to a different chat.
-  pick(win, 'b');
+  clickTab(win, 'b');
   assert.strictEqual(stripActive(win), 'b');
   assert.deepStrictEqual(
     stripIds(win),
@@ -195,7 +190,7 @@ function testSubagentsAndFilesFormTheGroupStrip() {
   assert.ok(!stripShown(win));
 
   // Back to a: the pick lands on the chat itself.
-  pick(win, 'a');
+  clickTab(win, 'a');
   assert.strictEqual(
     stripActive(win),
     'a',
@@ -227,14 +222,14 @@ function testBackgroundChatsFileNeverStealsFocus() {
   assert.deepStrictEqual(stripIds(win), ['a']);
   assert.ok(!stripShown(win));
 
-  pick(win, 'b');
+  clickTab(win, 'b');
   assert.strictEqual(
     stripActive(win),
     'b',
     'a never-viewed chat opens on itself',
   );
   assert.deepStrictEqual(stripIds(win), ['b']);
-  pick(win, fileId);
+  clickTab(win, fileId);
   assert.ok(stripEl(win, fileId).classList.contains('content-tab'));
   assert.ok(stripEl(win, fileId).textContent.indexOf('report.html') >= 0);
   // Let queued DOM observers finish before destroying their document.
@@ -254,7 +249,7 @@ function testPendingQuestionFlagsTheSubagentEntry() {
     'no flag while the asking tab is on screen',
   );
 
-  click(win, stripEl(win, 'a'), 'chat a strip entry');
+  click(win, stripEl(win, 'a'));
   assert.ok(
     stripEl(win, 'a-sub-1').querySelector('.chat-tab-attention'),
     'on the strip the sub-agent itself carries the flag',
@@ -263,20 +258,20 @@ function testPendingQuestionFlagsTheSubagentEntry() {
 
   // Another chat on screen: the asking sub-agent is off the strip, and
   // the record still says it waits.
-  pick(win, 'b');
+  clickTab(win, 'b');
   assert.deepStrictEqual(stripIds(win), ['b']);
   assert.ok(
     win._testApi.openTabs().find(t => t.id === 'a-sub-1').askPending,
     'the sub-agent still waits for its answer',
   );
 
-  pick(win, 'a');
+  clickTab(win, 'a');
   assert.strictEqual(stripActive(win), 'a');
   assert.ok(
     stripEl(win, 'a-sub-1').querySelector('.chat-tab-attention'),
     'back in the group, the flag is on the strip again',
   );
-  click(win, stripEl(win, 'a-sub-1'), 'the asking sub-agent');
+  click(win, stripEl(win, 'a-sub-1'));
   assert.ok(
     !win.document.querySelector('.chat-tab-attention'),
     'the flag goes once the asking tab is on screen',
@@ -313,7 +308,7 @@ function testFinishedSubagentsFileMovesUpToTheChat() {
     ['a'],
     "the finished sub-agent's file stays off the mobile chat",
   );
-  pick(win, fileId);
+  clickTab(win, fileId);
   assert.deepStrictEqual(stripIds(win), ['a', fileId]);
   // Let queued DOM observers finish before destroying their document.
   queueMicrotask(win.close.bind(win));
@@ -325,7 +320,7 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
   send(win, {type: 'tabs_state', tabs: [entry('a'), entry('b')]});
   spawnSubagent(win, 'a', 'a-sub-1');
   const fileId = openFile(win, 'a', 'kept.md');
-  click(win, stripEl(win, 'a').querySelector('.chat-tab-close'), 'close a');
+  click(win, stripEl(win, 'a').querySelector('.chat-tab-close'));
   assert.deepStrictEqual(
     openIds(win),
     ['b', fileId],
@@ -342,7 +337,7 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
     'a top-level file is its own group',
   );
   assert.ok(!stripShown(win));
-  pick(win, 'b');
+  clickTab(win, 'b');
   assert.strictEqual(stripActive(win), 'b');
   assert.deepStrictEqual(
     stripIds(win),
@@ -350,7 +345,7 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
     'the orphaned file stays off the mobile chat screen',
   );
   assert.ok(!stripShown(win));
-  pick(win, fileId);
+  clickTab(win, fileId);
   assert.strictEqual(stripActive(win), fileId);
   // Let queued DOM observers finish before destroying their document.
   queueMicrotask(win.close.bind(win));
@@ -416,7 +411,7 @@ function testBrowserTabIsListedButOpensInTheBackground() {
     'a background browser tab stays off the mobile chat screen',
   );
   assert.strictEqual(stripActive(win), 'a', 'it opens in the background');
-  pick(win, 'browser__1');
+  clickTab(win, 'browser__1');
   assert.strictEqual(stripActive(win), 'browser__1');
   assert.deepStrictEqual(
     stripIds(win),

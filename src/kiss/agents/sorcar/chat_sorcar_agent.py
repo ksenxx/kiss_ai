@@ -38,11 +38,16 @@ from kiss.agents.sorcar.persistence import (
     _task_has_transcript_events,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    canonical_tool_profile,
+    classification_chooses_prompt,
+    resolve_tool_profile,
+)
 from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model import Attachment
-from kiss.core.printer import Printer, parse_result_yaml
+from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict
 
 logger = logging.getLogger(__name__)
@@ -128,21 +133,62 @@ def _safe_broadcast(broadcast: Any, event: dict[str, Any]) -> None:
         logger.warning("%s broadcast raised", event.get("type"), exc_info=True)
 
 
+def _parse_result(result: str) -> dict[str, Any] | None:
+    """Return a finished run's *result* as a mapping, or ``None``.
+
+    Args:
+        result: The raw string returned by the agent run.
+
+    Returns:
+        The YAML mapping, or ``None`` when *result* is not valid YAML or
+        not a mapping (a plain string, a list, a number).
+    """
+    try:
+        data = yaml.safe_load(result)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _result_summary_text(result: str, parsed: dict[str, Any] | None) -> str:
+    """Return the persistable summary text for a finished run's *result*.
+
+    Handles every shape LLMs emit:
+
+    * a mapping with a string ``summary`` — returned as-is;
+    * a mapping with ``summary: null`` (or no ``summary`` key) — ``""``;
+    * a mapping with a list/mapping/scalar ``summary`` — its YAML text
+      form (passing the raw object to ``_save_task_result`` would raise
+      ``sqlite3.ProgrammingError``, destroying the task's successful
+      return value);
+    * no mapping (valid YAML that is not a mapping, or unparseable
+      text) — the raw text capped at 500 characters (otherwise the task
+      history would record an empty result).
+
+    Args:
+        result: The raw string returned by the agent run.
+        parsed: :func:`_parse_result` of *result*.
+
+    Returns:
+        The summary text to persist (possibly empty, never ``None``).
+    """
+    if parsed is None:
+        return result[:500]
+    summary_val = parsed.get("summary", "")
+    if isinstance(summary_val, str):
+        return summary_val
+    if summary_val is None:
+        return ""
+    dumped: str = yaml.safe_dump(summary_val, sort_keys=False)
+    return dumped.strip()
+
+
 def _extract_result_summary(result: str) -> str:
     """Return the persistable summary text for a finished run's *result*.
 
-    Parses *result* as YAML and extracts its ``summary`` field for the
-    task-history record.  Handles every shape LLMs emit:
-
-    * dict with a string ``summary`` — returned as-is;
-    * dict with ``summary: null`` (or no ``summary`` key) — ``""``;
-    * dict with a list/mapping/scalar ``summary`` — its YAML text form
-      (passing the raw object to ``_save_task_result`` would raise
-      ``sqlite3.ProgrammingError``, destroying the task's successful
-      return value);
-    * valid YAML that is not a dict, or unparseable text — the raw
-      text capped at 500 characters (otherwise the task history would
-      record an empty result).
+    :func:`_result_summary_text` for a caller that holds only the raw
+    result (the task-update side channel); :meth:`ChatSorcarAgent.run`
+    parses once and shares the mapping with its persistence steps.
 
     Args:
         result: The raw string returned by the agent run.
@@ -150,19 +196,7 @@ def _extract_result_summary(result: str) -> str:
     Returns:
         The summary text to persist (possibly empty, never ``None``).
     """
-    try:
-        result_yaml = yaml.safe_load(result)
-        if isinstance(result_yaml, dict):
-            summary_val = result_yaml.get("summary", "")
-            if isinstance(summary_val, str):
-                return summary_val
-            if summary_val is None:
-                return ""
-            dumped: str = yaml.safe_dump(summary_val, sort_keys=False)
-            return dumped.strip()
-        return result[:500] if result else ""
-    except Exception:
-        return result[:500] if result else ""
+    return _result_summary_text(result, _parse_result(result))
 
 
 class ChatSorcarAgent(SorcarAgent):
@@ -188,15 +222,18 @@ class ChatSorcarAgent(SorcarAgent):
         # by the task runner and persisted in the ``task_history.is_cron``
         # column, which the CHATS list's Cron chip filters on.
         self.is_cron_job: bool = False
+        # The task runner's verdict on whether the task runs unattended
+        # (a cron prompt job or a sub-task of one, decided on the
+        # submitted text): ``ask_user_question`` then refuses instead of
+        # blocking.  None until stamped, when cron_agent.is_unattended
+        # falls back to the task text (a library run).
+        self.is_unattended: bool | None = None
         # The run's effective configuration beyond model / work dir /
         # budget (see kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS):
         # set per run by the task runner or the fan-out engine and
         # folded into the ``task_settings`` event.  Empty for a run
         # that is neither a daemon task nor a sub-agent.
         self.run_config: dict[str, Any] = {}
-        # The ``task_settings`` payload of the latest run (model, work
-        # dir, budget and ``run_config``); empty before the first run.
-        self.task_settings: dict[str, object] = {}
         self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
         self._last_result_summary: str = ""
@@ -397,6 +434,10 @@ class ChatSorcarAgent(SorcarAgent):
         parent_id = str((sub or {}).get("parent_task_id") or "")
         if parent_id:
             settings["Parent task id"] = parent_id
+        # One scratch directory per task, so concurrent siblings in the
+        # same work dir never share a file name (P12 of the 2026-10-24
+        # trajectory audit: two reviews read each other's tmp/paper.pdf).
+        settings["Scratch dir"] = f"./tmp/{self.last_task_id}/"
         return settings
 
     def _task_settings_payload(
@@ -407,7 +448,7 @@ class ChatSorcarAgent(SorcarAgent):
         max_budget: float | None,
         start_ts: int,
         task_id: str,
-        tool_profile: str = "",
+        tool_profile: str,
     ) -> dict[str, object]:
         """Build the ``task_settings`` display-event payload.
 
@@ -426,9 +467,8 @@ class ChatSorcarAgent(SorcarAgent):
             start_ts: The run's start timestamp (ms since epoch) — the
                 same value persisted as the row's ``startTs``.
             task_id: The freshly allocated ``task_history`` row id.
-            tool_profile: The effective tool profile (``"full"``, a
-                profile name or ``""`` when unknown); recorded whenever
-                it is known or the run carries a ``run_config``.
+            tool_profile: The effective tool profile (``"full"`` or a
+                profile name, as :meth:`_tool_profile` returns it).
 
         Returns:
             The settings dict carried by the event: the keys above,
@@ -440,28 +480,21 @@ class ChatSorcarAgent(SorcarAgent):
             the :attr:`run_config` keys (see
             :data:`kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS`).
         """
-        payload: dict[str, object] = {
-            "model": model,
-            "work_dir": strip_worktree_suffix(work_dir),
-            "is_parallel": is_parallel,
-            "start_ts": start_ts,
-            "chat_id": self._chat_id,
-            "task_id": task_id,
-            "is_subagent": self._subagent_info is not None,
-            "host": platform.node(),
-        }
-        if max_budget is not None:
-            payload["max_budget"] = max_budget
+        payload = self._build_extra_payload(model, work_dir, is_parallel, max_budget)
+        del payload["version"]
+        payload.pop("subagent", None)
+        payload.update(
+            start_ts=start_ts,
+            chat_id=self._chat_id,
+            task_id=task_id,
+            is_subagent=self._subagent_info is not None,
+            host=platform.node(),
+        )
         parent_id = str((self._subagent_info or {}).get("parent_task_id") or "")
         if parent_id:
             payload["parent_task_id"] = parent_id
-        if self.sea_name:
-            payload["sea"] = self.sea_name
-        if self.is_cron_job:
-            payload["is_cron"] = True
         payload.update(self.run_config)
-        if tool_profile != "" or "tool_profile" in payload:
-            payload["tool_profile"] = tool_profile
+        payload["tool_profile"] = tool_profile
         # Nobody named the profile and the reviewer rule chose
         # ``review``: say so (``tools=review(inferred)``), so the caller
         # can tell the inference from a profile it or a SEA asked for.
@@ -473,7 +506,7 @@ class ChatSorcarAgent(SorcarAgent):
         self,
         task_id: str,
         prompt: str,
-        result_raw: str,
+        parsed: dict[str, Any] | None,
         result_summary: str,
         usage: tuple[float, int, int],
     ) -> bool:
@@ -502,8 +535,9 @@ class ChatSorcarAgent(SorcarAgent):
             prompt: The prompt the agent actually ran with (chat-context
                 augmented), mirroring the ``prompt`` event a recording
                 printer would have persisted.
-            result_raw: The raw YAML result string returned by the run
-                (used to recover ``success`` / ``is_continue``).
+            parsed: The run's result mapping (:func:`_parse_result`;
+                used to recover ``success`` / ``is_continue``), or
+                ``None``.
             result_summary: The extracted human-readable summary text.
             usage: One coherent ``(budget_used, total_tokens_used,
                 total_steps)`` triple (:meth:`usage_snapshot`) to stamp
@@ -526,8 +560,7 @@ class ChatSorcarAgent(SorcarAgent):
             "cost_usd": cost,
             "step_count": steps,
         }
-        parsed = parse_result_yaml(result_raw) if result_raw else None
-        if parsed:
+        if parsed and "summary" in parsed:
             event["success"] = parsed.get("success")
             event["is_continue"] = bool(parsed.get("is_continue", False))
             event["summary"] = str(parsed["summary"])
@@ -669,8 +702,6 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        skip_persistence = _skip_persistence
-        on_task_id_allocated = _on_task_id_allocated
         # A caller (currently the slash-command dispatch in
         # ``TaskRunner._run_task_inner``) can supply the raw user text
         # to use for every history / display / frequent-task write,
@@ -736,19 +767,31 @@ class ChatSorcarAgent(SorcarAgent):
         # the user's config, which the picker may change between two
         # reads (see ``SorcarAgent._resolve_model_name``).
         resolved_model = self._resolve_model_name(model_name)
+        # The tool profile is the EFFECTIVE one (``SorcarAgent.run``
+        # resolves the same rule from the same name a moment later): a
+        # reviewer-marked sub-agent asked for no profile runs
+        # ``review``, not the full toolset.  It gates the classifier
+        # and is recorded in the task settings below.
+        self._tool_profile_name = canonical_tool_profile(tool_profile)
+        effective_profile = self._tool_profile(prompt_template)
         # The verdict is about the task as submitted, not about the
         # conversation ``agent_prompt`` prepends to it: classify the
         # raw task here, ahead of ``SorcarAgent.run`` (which reuses the
-        # verdict).  The reset first drops a verdict a previous run of
-        # this agent left behind by crashing before its own cleanup; a
-        # verdict the task runner pre-seeded survives it.
+        # verdict) — but only when the verdict can choose the prompt;
+        # a run that cannot edit files gets SYSTEM_LITE.md regardless.
+        # The reset first drops a verdict a previous run of this agent
+        # left behind by crashing before its own cleanup; a verdict the
+        # task runner pre-seeded survives it.
         self._reset_task_classification()
-        self._classify_task_once(
-            resolved_model,
-            prompt_template,
-            model_config,
-            arguments=arguments,
-        )
+        if classification_chooses_prompt(
+            resolve_tool_profile(effective_profile), append_basic_tools,
+        ):
+            self._classify_task_once(
+                resolved_model,
+                prompt_template,
+                model_config,
+                arguments=arguments,
+            )
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
         )
@@ -782,10 +825,11 @@ class ChatSorcarAgent(SorcarAgent):
             history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
         locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
-        run_printer = printer or getattr(self, "printer", None)
+        # ``_begin_task`` bound *printer* above, so this is the run's.
+        run_printer = self.printer
         task_key = str(task_id)
         result_summary = ""
-        result_raw = ""
+        parsed: dict[str, Any] | None = None
         # Whether ``super().run`` was reached.  Until then every live
         # setting the final save would read — ``_launch_model_name``,
         # ``model_name``, ``_is_parallel`` — is either unset (fresh
@@ -827,35 +871,30 @@ class ChatSorcarAgent(SorcarAgent):
                 if start_rec is not None:
                     start_rec()
                 _safe_broadcast(broadcast, {"type": "tasks_updated", "taskId": ""})
-            if on_task_id_allocated is not None:
+            if _on_task_id_allocated is not None:
                 try:
-                    on_task_id_allocated(task_id, self._chat_id)
+                    _on_task_id_allocated(task_id, self._chat_id)
                 except Exception:
                     logger.warning(
                         "on_task_id_allocated(%r) raised", task_id, exc_info=True,
                     )
-            # Kept on the agent too: a fan-out parent reads the child's
-            # settings back for the ``ran:`` line of its result.  The
-            # tool profile is the EFFECTIVE one (``SorcarAgent.run``
-            # resolves the same rule from the same name a moment later):
-            # a reviewer-marked sub-agent asked for no profile runs
-            # ``review``, not the full toolset.
-            self._tool_profile_name = str(tool_profile or "")
-            self.task_settings = self._task_settings_payload(
+            # A fan-out parent reads the child's settings back from the
+            # broadcast event for the ``ran:`` line of its result.
+            task_settings = self._task_settings_payload(
                 model=resolved_model,
                 work_dir=resolved_work_dir,
                 is_parallel=run_is_parallel,
                 max_budget=resolved_budget,
                 start_ts=start_ts_ms,
                 task_id=task_id,
-                tool_profile=self._tool_profile(prompt_template),
+                tool_profile=effective_profile,
             )
             if run_printer is None and task_id:
                 # Headless (a fan-out child without a printer): persist
                 # the event ourselves, as :meth:`_persist_replay_events_if_missing`
                 # does for the prompt and result.
                 _append_chat_event(
-                    {"type": "task_settings", "settings": self.task_settings},
+                    {"type": "task_settings", "settings": task_settings},
                     task_id=task_id,
                 )
             # Emitted AFTER on_task_id_allocated: the server's
@@ -866,7 +905,7 @@ class ChatSorcarAgent(SorcarAgent):
             # replays and shares repopulate the static task
             # panel's settings info.
             _safe_broadcast(
-                broadcast, {"type": "task_settings", "settings": self.task_settings},
+                broadcast, {"type": "task_settings", "settings": task_settings},
             )
             if self._subagent_info is None:
                 _record_frequent_task(history_prompt)
@@ -904,8 +943,8 @@ class ChatSorcarAgent(SorcarAgent):
                 tools_hook=tools_hook,
                 task_begun=True,
             )
-            result_raw = result if isinstance(result, str) else ""
-            result_summary = _extract_result_summary(result)
+            parsed = _parse_result(result)
+            result_summary = _result_summary_text(result, parsed)
             return result
         except Exception:
             result_summary = "Task failed"
@@ -933,12 +972,11 @@ class ChatSorcarAgent(SorcarAgent):
                 tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None and getattr(tl, "task_id", "") == task_key:
                     tl.task_id = previous_task_id
-            if not skip_persistence:
+            if not _skip_persistence:
                 # The agent's own verdict (sub-agents and CLI runs, which
                 # no server runner persists) rides on the row with the
                 # summary, so the history sidebar shows a
                 # finish(success=False) run as failed.
-                parsed = parse_result_yaml(result_raw) if result_raw else None
                 verdict = parsed.get("success") if parsed else None
                 _save_task_result(
                     task_id=task_id,
@@ -982,7 +1020,7 @@ class ChatSorcarAgent(SorcarAgent):
                 if self._persist_replay_events_if_missing(
                     task_id=task_id,
                     prompt=agent_prompt,
-                    result_raw=result_raw,
+                    parsed=parsed,
                     result_summary=result_summary,
                     usage=final_usage,
                 ):

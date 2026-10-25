@@ -17,7 +17,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, fakeIntervals} = require('./simplify2_harness');
 const {lastMsg, click, byId, openSettings, closeSettings} = require('./settings_helpers');
 const {runAgentSubpanelTests} = require('./settings_agent_subpanel');
 
@@ -216,28 +216,14 @@ function testRemoteSheetLinkErrorOutageAndPollGates() {
 }
 
 /**
- * Replace the page's interval timers with a manual clock: every
- * setInterval is recorded with its delay, and a test ticks them.
+ * Replace the booted page's interval timers with the harness's manual
+ * clock (installed after boot so main.js's own timers are left alone);
+ * `pending(ms)` lists the armed intervals of that period.
  */
 function installClock(win) {
-  const timers = new Map();
-  let nextId = 1;
-  win.setInterval = (fn, ms) => {
-    const id = nextId++;
-    timers.set(id, {fn, ms});
-    return id;
-  };
-  win.clearInterval = id => {
-    timers.delete(id);
-  };
-  return {
-    pending: ms => Array.from(timers.values()).filter(t => t.ms === ms),
-    tick: ms => {
-      for (const t of Array.from(timers.values())) {
-        if (t.ms === ms) t.fn();
-      }
-    },
-  };
+  const clock = fakeIntervals(win);
+  clock.pending = ms => clock.intervals.filter(iv => iv.ms === ms);
+  return clock;
 }
 
 const POLL_MS = 5000;

@@ -66,7 +66,12 @@ import yaml
 
 from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.daemon_client import TaskResult
-from kiss.agents.sorcar.fanout_guard import is_review_task, parse_tasks_json
+from kiss.agents.sorcar.fanout_guard import (
+    is_implementation_task,
+    is_review_task,
+    parse_tasks_json,
+    review_budget,
+)
 from kiss.agents.sorcar.machines import find_machine, is_local_machine, load_machines
 from kiss.agents.sorcar.run_config import (
     PROVENANCE_EXPLICIT,
@@ -480,6 +485,17 @@ def _squash(name: str) -> str:
     return re.sub(r"[\s\-_]+", "", name.strip().lower())
 
 
+def find_squashed(name: str, candidates: Iterable[str]) -> str | None:
+    """Return the first of *candidates* that is *name* up to case and separators, or ``None``.
+
+    Args:
+        name: A user- or model-supplied command or channel name.
+        candidates: The registered names (see :func:`_squash`).
+    """
+    squashed = _squash(name)
+    return next((candidate for candidate in candidates if _squash(candidate) == squashed), None)
+
+
 def _daemon_endpoint_file() -> str | None:
     """Return the endpoint file of the daemon hosting this process, if any.
 
@@ -628,9 +644,9 @@ def explicit_values(
 def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
     """Return the setting keys whose value *got* has and *asked* left empty.
 
-    The five settings :class:`Inherited` resolves outside ``options``
-    are compared on those attributes; the rest on the ``options``
-    fields.
+    The three settings :class:`Inherited` resolves outside ``options``
+    (model, budget, docker image) are compared on those attributes;
+    the rest, ``system_prompt`` included, on the ``options`` fields.
     """
     pairs = [
         ("model", asked.model_name, got.model_name),
@@ -695,7 +711,8 @@ def inherit_from_parent(
     options: RunOptions,
     script_picks_model: bool = False,
     siblings: int = 1,
-    reserving: Sequence[AgentJob] = (),
+    job: AgentJob | None = None,
+    budget_cap: float | None = None,
 ) -> Inherited:
     """Fill the empty ``run_agent`` arguments from the calling agent.
 
@@ -712,13 +729,15 @@ def inherit_from_parent(
       with ``set_model``, or one the script's ``model`` setting
       selects on the daemon) runs with default provider routing (see
       :func:`_parent_model_config`).
-    - ``budget``: the caller's remaining budget, less what its
-      still-running sub-tasks hold (*reserving*), shared among the
-      *siblings* sub-tasks the call starts plus the caller
-      (``_subagent_budget_share(siblings)``: half of what is left for
-      one sub-task, the other half reserved for the caller to process
-      the result), ``None`` (daemon default) when the caller has no
-      budget context yet.
+    - ``budget``: the caller's remaining budget, less what the
+      still-running sub-tasks of its other calls hold
+      (:func:`reserved_budget`), shared among the *siblings* sub-tasks
+      the call starts plus the caller (``_subagent_budget_share(siblings)``:
+      half of what is left for one sub-task, the other half reserved
+      for the caller to process the result), at most *budget_cap*;
+      ``None`` (daemon default) when the caller has no budget context
+      yet.  Resolved and recorded on *job* under the job registry's
+      lock, so overlapping calls of one caller see each other's share.
     - ``chat_id``: the caller's chat, so the sub-task starts with the
       conversation's earlier tasks and results as context.
     - ``system_prompt`` / ``add_to_system_prompt``: the caller's
@@ -764,11 +783,13 @@ def inherit_from_parent(
             a ``model`` in its ``settings()``, which blocks the
             ``model_config`` inheritance.
         siblings: How many sub-tasks the call starts at once.
-        reserving: The caller's sub-tasks that were running when the
-            call was planned (:func:`live_agent_jobs`, read once per
-            call by :func:`plan_run_agent`); what those still unfinished
-            now hold (:func:`reserved_budget`) is taken off the
-            remainder before the split.
+        job: The job the sub-task runs as; its ``budget`` records the
+            inherited share once resolved, and the jobs of the same
+            call (its siblings, same :attr:`AgentJob.call_id`) are not
+            taken off the remainder, which the split already divides
+            among them.  ``None`` records nothing.
+        budget_cap: An upper bound on the inherited share (the review
+            cap of :func:`dispatch_command`); ``None`` for none.
 
     Returns:
         The resolved values.
@@ -784,7 +805,7 @@ def inherit_from_parent(
     if parent_agent is None:
         return asked
     got = _inherit_from_parent(
-        parent_agent, model_name, budget, options, script_picks_model, siblings, reserving,
+        parent_agent, model_name, budget, options, script_picks_model, siblings, job, budget_cap,
     )
     return dataclasses.replace(got, fields=_filled_keys(asked, got))
 
@@ -816,6 +837,55 @@ def _unreserved_share(
     return left
 
 
+def _inherited_budget(
+    parent_agent: Any, siblings: int, job: AgentJob | None, budget_cap: float | None,
+) -> float | None:
+    """Resolve one sub-task's share of the caller's remainder and record it on *job*.
+
+    The caller's share (``_subagent_budget_share``, read from its
+    ledger) less what the live jobs of its OTHER calls hold, capped
+    at *budget_cap*.  Everything is read and the result recorded
+    under :data:`_AGENT_JOBS_LOCK`, so two sub-tasks of one caller
+    resolving at the same time cannot both find the other unrecorded:
+    the second one sees the first one's share.  A finishing sub-task
+    puts its spend on the ledger BEFORE its reservation lapses, so
+    the live jobs are read first and the ledger second: a sub-task
+    that finished before the first read is on the ledger, one still
+    live at it holds its budget, and one that settles in between
+    (live at the first read, finished afterwards) is detected and
+    both are read again, so it is counted exactly once, never dropped
+    from both.
+
+    Returns:
+        The budget, or ``None`` when the caller has no budget context.
+    """
+    share: Callable[[int], float | None] | None = getattr(
+        parent_agent, "_subagent_budget_share", None,
+    )
+    if not callable(share):
+        return None
+    with _AGENT_JOBS_LOCK:
+        while True:
+            others = _live_jobs_of_other_calls(job)
+            reserved = reserved_budget(others)
+            unreserved = share(siblings)
+            if not any(other.finished for other in others):
+                break
+        budget = _unreserved_share(parent_agent, unreserved, siblings, reserved)
+        if budget is not None and budget_cap is not None:
+            budget = min(budget, budget_cap)
+        if job is not None:
+            job.budget = budget
+    return budget
+
+
+def _live_jobs_of_other_calls(job: AgentJob | None) -> list[AgentJob]:
+    """Return the owner's live jobs started by calls other than *job*'s (none without a job)."""
+    if job is None:
+        return []
+    return [other for other in live_agent_jobs(job.owner) if other.call_id != job.call_id]
+
+
 def _inherit_from_parent(
     parent_agent: Any,
     model_name: str,
@@ -823,7 +893,8 @@ def _inherit_from_parent(
     options: RunOptions,
     script_picks_model: bool,
     siblings: int,
-    reserving: Sequence[AgentJob],
+    job: AgentJob | None,
+    budget_cap: float | None,
 ) -> Inherited:
     """:func:`inherit_from_parent` for a caller that exists, without the ``fields`` record."""
     model_name = model_name or str(getattr(parent_agent, "model_name", "") or "")
@@ -831,16 +902,7 @@ def _inherit_from_parent(
     if model_config is None:
         model_config = _parent_model_config(parent_agent, model_name, script_picks_model)
     if budget is None:
-        share: Callable[[int], float | None] | None = getattr(
-            parent_agent, "_subagent_budget_share", None,
-        )
-        if callable(share):
-            # The reservations before the ledger: a sub-task that
-            # finishes in between is then counted twice for this one
-            # call (its spend is on the ledger and its budget still
-            # held), never dropped from both.
-            reserved = reserved_budget(reserving)
-            budget = _unreserved_share(parent_agent, share(siblings), siblings, reserved)
+        budget = _inherited_budget(parent_agent, siblings, job, budget_cap)
     options = dataclasses.replace(
         options,
         chat_id=options.chat_id or str(getattr(parent_agent, "_chat_id", "") or ""),
@@ -951,7 +1013,6 @@ def dispatch_result(
     siblings: int = 1,
     machine: str = "",
     sea_command: str = "",
-    reserving: Sequence[AgentJob] = (),
 ) -> TaskResult | str:
     """Submit a SEA task to the kiss-web daemon and wait.
 
@@ -1030,9 +1091,9 @@ def dispatch_result(
             daemon a ``stop``, awaits its confirmation and returns an
             error string saying so), its ``running`` event is set when
             the sub-task's tab exists, and its ``budget`` records the
-            budget the sub-task was given so later calls of the same
-            caller take it off their share (*reserving*).  ``None``
-            (standalone use) never stops the sub-task.
+            budget the sub-task was given so other calls of the same
+            caller take it off their share (:func:`reserved_budget`).
+            ``None`` (standalone use) never stops the sub-task.
         timeout_explicit: Whether *timeout* was passed by the call
             (marked explicit in the run's ``provenance``) rather than
             taken from the script or the default.
@@ -1047,11 +1108,6 @@ def dispatch_result(
         sea_command: The registered command the machine runs its own
             copy of, instead of *sea_path* (see :func:`remote_sea`);
             empty sends *sea_path*.
-        reserving: The caller's sub-tasks that were running when the
-            call was planned (:func:`live_agent_jobs`, read once per
-            tool call by :func:`plan_run_agent`); what those still
-            unfinished hold when the budget is resolved is taken off
-            the caller's remainder before an inherited budget is split.
 
     Returns:
         The sub-task's :class:`TaskResult`, or an error message.
@@ -1068,13 +1124,8 @@ def dispatch_result(
     kwargs = dispatch_command(
         prompt, sea_path, work_dir, model_name, budget, timeout, parent_agent,
         scope_work_dir, options, inherit, settings, workspace, timeout_explicit, siblings,
-        machine, sea_command, reserving,
+        machine, sea_command, job,
     )
-    if job is not None:
-        # Reserved from here until the job finishes: a later call of
-        # the caller sees it in :func:`reserved_budget` before this
-        # sub-task's spend reaches the caller's ledger.
-        job.budget = kwargs["max_budget"]
     parent_task_id = kwargs["parent_task_id"]
     try:
         result = daemon_client.run(
@@ -1132,13 +1183,14 @@ def dispatch_command(
     siblings: int = 1,
     machine: str = "",
     sea_command: str = "",
-    reserving: Sequence[AgentJob] = (),
+    job: AgentJob | None = None,
 ) -> dict[str, Any]:
     """Build the keyword arguments of the ``run`` :func:`dispatch_result` sends.
 
-    The dispatcher's side of a sub-task's settings, as one pure step
-    (it reads *parent_agent* and writes nothing: the sub-task's
-    directory is created by :func:`dispatch_result` before this call):
+    The dispatcher's side of a sub-task's settings, as one step that
+    reads *parent_agent* and writes only *job*'s budget reservation
+    (:func:`inherit_from_parent`; the sub-task's directory is created
+    by :func:`dispatch_result` before this call):
     the explicit values of the call, what the empty ones inherit from
     *parent_agent* (:func:`inherit_from_parent`), the ``provenance``
     marks that tell the daemon which values were explicit, and the
@@ -1187,11 +1239,24 @@ def dispatch_command(
     explicit = list(explicit_values(model_name, budget, options))
     if timeout_explicit:
         explicit.append("timeout")
+    # A read-only review the caller gave no budget holds one sized by
+    # the diff it reads (:func:`review_budget`) rather than half of the
+    # caller's remainder, which the 2026-10-24 audit found 10 to 40x
+    # what reviews spend; the cap never raises the inherited share.  A
+    # task that reads as a review but asks for changes ("review and fix
+    # ...") is an implementation task and keeps the full share, as it
+    # keeps the full toolset (:meth:`SorcarAgent._tool_profile`).
+    is_review = options.tool_profile == "review" or (
+        not options.tool_profile
+        and is_review_task(prompt)
+        and not is_implementation_task(prompt)
+    )
+    budget_cap = review_budget(work_dir) if budget is None and inherit and is_review else None
     inherited = inherit_from_parent(
         parent_agent if inherit else None, model_name, budget, options,
         # The script's model applies only when the call names none.
         script_picks_model="model" in (settings or {}) and not model_name,
-        siblings=siblings, reserving=reserving,
+        siblings=siblings, job=job, budget_cap=budget_cap,
     )
     if machine:
         inherited = _without_cross_machine_inheritance(inherited, options)
@@ -1353,9 +1418,8 @@ def plan_run_agent(
         siblings: How many sub-tasks the call starts at once (the
             budget is shared among them, see
             :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._subagent_budget_share`,
-            after what the caller's running sub-tasks already hold is
-            taken off: ``reserving`` in the plan, :func:`live_agent_jobs`
-            read here, once per call).
+            after what the caller's other running sub-tasks hold is
+            taken off, see :func:`reserved_budget`).
         machine: The name or host/IP of a registered remote machine
             (:func:`~kiss.agents.sorcar.machines.find_machine`) the
             sub-task runs on; empty, or this machine's own name or
@@ -1447,7 +1511,6 @@ def plan_run_agent(
         "options": run_options, "inherit": inherit, "settings": settings,
         "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
         "siblings": siblings, "machine": machine_name, "sea_command": sea_command,
-        "reserving": live_agent_jobs(parent_agent),
         "alias": command_alias(resolved[0]) if is_sea_path(agent.strip()) else "",
     }
     return kwargs
@@ -1631,6 +1694,7 @@ def run_agents_parallel(
     """
     started: list[AgentJob] = []
     plan: dict[str, Any] | None = None
+    call_id = uuid.uuid4().hex
     try:
         for task in tasks:
             if plan is None:
@@ -1644,7 +1708,7 @@ def run_agents_parallel(
             else:
                 prompt = sub_task_prompt(task, parent_work_dir, plan["inherit"], plan["machine"])
                 kwargs = {**plan, "prompt": prompt}
-            started.append(start_agent_job(plan["name"], kwargs, parent_agent))
+            started.append(start_agent_job(plan["name"], kwargs, parent_agent, call_id))
         deadline = time.monotonic() + started[0].timeout
         for job in started:
             join_agent_job(job, max(0.0, deadline - time.monotonic()))
@@ -1682,13 +1746,17 @@ class AgentJob:
             (:func:`resolve_timeout`), shown on the ``ran`` line.
         workspace: The channel workspace the sub-task holds while it
             runs (channel SEAs), else ``""``.
-        budget: The USD budget the sub-task was given (the call's own
-            or its inherited share), recorded by :func:`dispatch_result`
-            once resolved and before the sub-task runs; ``None`` until
-            then or when the daemon default applies.  While the job is
-            unfinished it is reserved against the owner's remainder
-            (:func:`reserved_budget`); once finished the sub-task's
-            real spend is on the owner's ledger instead.
+        call_id: The id of the ``run_agent`` / ``run_parallel`` call
+            that started the job; the siblings of one fan-out share it
+            and never reserve budget against each other.
+        budget: The USD budget the sub-task was given: the call's own
+            from registration, or its inherited share once the job's
+            thread resolves it (:func:`inherit_from_parent`, under
+            :data:`_AGENT_JOBS_LOCK`) and before the sub-task runs;
+            ``None`` until then or when the daemon default applies.
+            While the job is unfinished it is reserved against the
+            owner's remainder (:func:`reserved_budget`); once finished
+            the sub-task's real spend is on the owner's ledger instead.
         outcome: What :func:`dispatch_result` returned (the sub-task's
             :class:`TaskResult`, or an error string); ``None`` while
             running.
@@ -1705,6 +1773,7 @@ class AgentJob:
     started: float = 0.0
     timeout: float = DEFAULT_DISPATCH_TIMEOUT_SECONDS
     workspace: str = ""
+    call_id: str = ""
     budget: float | None = None
     outcome: TaskResult | str | None = None
     result: str = ""
@@ -1733,7 +1802,9 @@ when its owner's run ends (:func:`kill_jobs_of`).  Guarded by
 _AGENT_JOBS_LOCK = threading.RLock()
 
 
-def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
+def start_agent_job(
+    name: str, kwargs: dict[str, Any], owner: Any, call_id: str = "",
+) -> AgentJob:
     """Start :func:`dispatch_result` with *kwargs* in a thread and register the job.
 
     The job is registered before its thread starts, so a Stop that
@@ -1748,8 +1819,12 @@ def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
         name: The agent's display name.
         kwargs: The keyword arguments of :func:`dispatch_result`, plus
             the ``alias`` :func:`format_dispatch_result` shows; the
-            job itself is added as ``job``.
+            job itself is added as ``job``.  The call's own ``budget``
+            is reserved from registration (:attr:`AgentJob.budget`).
         owner: The calling agent (``None`` for standalone use).
+        call_id: The :attr:`AgentJob.call_id` of the call starting the
+            job (``run_parallel`` gives its siblings one); empty for a
+            call of its own.
 
     Returns:
         The registered job.
@@ -1758,6 +1833,7 @@ def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
     job = AgentJob(
         job_id, name, owner, threading.Event(), threading.Event(),
         timeout=float(kwargs["timeout"]), workspace=str(kwargs.get("workspace") or ""),
+        call_id=call_id or uuid.uuid4().hex, budget=kwargs.get("budget"),
     )
     job.thread = threading.Thread(
         target=_finish_agent_job, args=(job, {**kwargs, "job": job}),
@@ -1921,15 +1997,15 @@ def live_agent_jobs(owner: Any) -> list[AgentJob]:
 def reserved_budget(jobs: Sequence[AgentJob]) -> float:
     """Return the USD the unfinished ones of *jobs* were given (:attr:`AgentJob.budget`).
 
-    *jobs* are the caller's live jobs :func:`plan_run_agent` read once
-    per ``run_agent`` / ``run_parallel`` call, on the calling thread:
-    the sub-tasks that call starts are not registered yet, so siblings
-    of one call never subtract each other, while a job of an earlier
-    call has recorded its budget before its ``running`` event (and so
-    before the earlier call returned).  Summed again when a job
-    thread resolves its budget (:func:`_inherit_from_parent`), so a
-    sub-task that finished in between — its spend is on the caller's
-    ledger by then — no longer holds anything.
+    *jobs* are the caller's live jobs of other calls, read under
+    :data:`_AGENT_JOBS_LOCK` when a job thread resolves its inherited
+    budget (:func:`_inherited_budget`): a job of another call that
+    resolved first has recorded its share by then, an explicit budget
+    is on its job from registration, and the siblings of one
+    ``run_parallel`` call (same :attr:`AgentJob.call_id`) are left
+    out, as the split already divides the remainder among them.  A
+    sub-task that finished — its spend is on the caller's ledger by
+    then — no longer holds anything.
     """
     return sum(job.budget or 0.0 for job in jobs if not job.finished)
 
@@ -2127,11 +2203,11 @@ def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
             return f"Error: {e}"
         return sea_path, script_name(sea_path)
     commands = sea_commands.list_commands()
-    for name in commands:
-        if _squash(name) == squashed:
-            command_path = sea_commands.get_command(name)
-            if command_path is not None:
-                return str(command_path), name
+    name = find_squashed(requested, commands)
+    if name is not None:
+        command_path = sea_commands.get_command(name)
+        if command_path is not None:
+            return str(command_path), name
     return _unknown_agent_error(agent, squashed, commands)
 
 

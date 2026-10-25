@@ -31,10 +31,31 @@ from __future__ import annotations
 import queue
 import threading
 import unittest
+from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+
+
+class _AnsweringPrinter(JsonPrinter):
+    """Real printer that answers the question the moment it is published.
+
+    ``_publish_ask`` drops stale answers and then broadcasts
+    ``askUser`` in one critical section, so an answer put on the queue
+    from that broadcast is never drained as stale and never early.
+    """
+
+    def __init__(self, answers: queue.Queue[str], answer: str) -> None:
+        super().__init__()
+        self.answers = answers
+        self.answer = answer
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        super().broadcast(event)
+        if event.get("type") == "askUser":
+            self.answers.put_nowait(self.answer)
 
 
 def _register_state(task_id: str, tab_id: str) -> AgentState:
@@ -129,7 +150,7 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         # Task 8301's queue is gone: the wait must abort rather than
         # consume the answer owned by the viewer tab's own task 8999.
         with self.assertRaisesRegex(KeyboardInterrupt, "queue is missing"):
-            self.server._await_user_response()
+            self.server._ask_user_question("which one?")
         self.assertEqual(viewer_queue.get_nowait(), "answer meant for 8999")
 
     def test_owner_queue_still_resolves(self) -> None:
@@ -140,12 +161,17 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         owner_state.is_task_active = True
         owner_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         owner_state.user_answer_queue = owner_queue
-        self.server.printer.subscribe_tab("8302", owner)
+        # Answered when the question is published (publishing drops
+        # stale answers first, so an answer put earlier would be lost).
+        printer = _AnsweringPrinter(owner_queue, "yes")
+        server = AgentServer(printer=printer)
+        self.addCleanup(setattr, printer._thread_local, "task_id", None)
+        self.addCleanup(setattr, printer._thread_local, "stop_event", None)
+        printer.subscribe_tab("8302", owner)
 
-        self.server.printer._thread_local.task_id = "8302"
-        self.server.printer._thread_local.stop_event = threading.Event()
-        owner_queue.put_nowait("yes")
-        self.assertEqual(self.server._await_user_response(), "yes")
+        printer._thread_local.task_id = "8302"
+        printer._thread_local.stop_event = threading.Event()
+        self.assertEqual(server._ask_user_question("ok?"), "yes")
 
 
 if __name__ == "__main__":

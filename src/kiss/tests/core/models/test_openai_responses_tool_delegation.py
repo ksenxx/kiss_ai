@@ -587,7 +587,7 @@ class TestUsageExtraction:
         _DelegationHandler.responses_queue = [_responses_text_json()]
         _, _, response = m.generate_and_process_with_tools({"echo": echo})
         counts = m.extract_input_output_token_counts_from_response(response)
-        assert counts == (6, 6, 4, 0)
+        assert counts == (6, 6, 4, 0, 0)
 
     def test_chat_usage_still_extracted(self, capture_server: str) -> None:
         """Chat-shaped usage keeps working after a delegated turn."""

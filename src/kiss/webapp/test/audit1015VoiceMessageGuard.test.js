@@ -18,8 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 
-const VOICE_JS_PATH =
-  process.env.KISS_VOICE_JS || path.join(__dirname, '..', 'media', 'voice.js');
+const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 

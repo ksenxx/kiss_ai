@@ -15,7 +15,7 @@ import re
 import socket
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 from uuid import uuid4
@@ -23,6 +23,7 @@ from uuid import uuid4
 import yaml
 
 from kiss.agents.sorcar._concurrency import locked_call
+from kiss.agents.sorcar.handoff_digest import handoff_digest
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core import config as config_module
 from kiss.core.base import Base
@@ -507,7 +508,7 @@ def resolve_work_dir(work_dir: str | None) -> str:
     Args:
         work_dir: The ``work_dir`` argument of :meth:`RelentlessAgent.run`.
     """
-    default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
+    default_work_dir = str(Path(config_module.get_artifact_dir()).resolve() / "kiss_workdir")
     resolved = Path(work_dir or default_work_dir).resolve()
     return str(remap_vanished_worktree(resolved))
 
@@ -528,7 +529,7 @@ CONTINUATION_PROMPT = """
 # Task Progress (Continuation {continuation_number})
 
 {progress_text}
-
+{state_text}
 # Continue
 - Complete the rest of the task.
 - **DON'T** redo completed work.
@@ -539,20 +540,23 @@ and rethink the strategy from scratch.
 SUMMARIZER_PROMPT = """
 # Summarizer
 
-The executor's trajectory is saved at: {trajectory_path}
+A session of a task ended before the task did ({reason}). The next session \
+continues from your summary. Below is a scripted digest of the ended session: \
+the task, the progress summaries it wrote, the files it wrote, its last failing \
+tool calls and its last tool calls with the start of each result.
 
-Read relevant portions of the file using your tools:
-- Read the first ~50 lines to understand the task and system instructions.
-- Read the last ~200 lines to see the most recent steps and outcomes.
-- Do NOT read the entire file; it may be very large.
+{digest}
 
 # Instructions
-- Analyze the trajectory file.
-- Return a precise chronologically-ordered list of things the agent did
-  with the reason for doing that along with relevant code snippets.
+- From the digest alone (you have no other tool), write a precise \
+chronologically-ordered account of what the session did and why, what is \
+done, what failed or is still open, and what the next session should do \
+first, with file paths and relevant code snippets.
 - Format the summary as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown.
-- Call finish(result="detailed summary of work done so far, in HTML").
+- Call finish(result="detailed summary of work done so far, in HTML") once.
 """
+
+SUMMARIZER_MAX_STEPS = 3
 
 
 class SummarizerFinish:
@@ -687,10 +691,11 @@ def _prior_sessions_section(summaries: list[str]) -> str:
 
 
 def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
-    """Compose the merged failure summary emitted on sub-session exhaustion.
+    """Compose the merged multi-session summary of a task's final result.
 
-    The exhaustion banner (``"Task failed after N sub-sessions"``) is
-    appended AFTER a "<h3>Previous Session N</h3>" section when any prior
+    The banner (``"Task failed after N sub-sessions"`` on exhaustion, the
+    ``<h3>Final Session</h3>`` summary on a normal finish) is appended
+    AFTER a "<h3>Previous Session N</h3>" section when any prior
     session summaries exist. This layout matches the front-end
     (``splitMultiSessionSummary`` in ``main.js``): it splits on the
     trailing ``\\n\\n---\\n\\n`` separator so the banner renders as the
@@ -702,7 +707,7 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
             returns), in chronological order. May be empty when the
             very first session was already exhausted (single-session
             exhaustion → banner-only).
-        banner: The short exhaustion message.
+        banner: The final session's own summary or the exhaustion message.
 
     Returns:
         The full summary string suitable for the ``summary`` field of a
@@ -848,10 +853,7 @@ class RelentlessAgent(Base):
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         # Whether the run has the built-in toolset (``SorcarAgent.run``'s
-        # *append_basic_tools*).  A restricted run (False) promises that
-        # no LLM session gets tools beyond ``finish`` and the caller's,
-        # so :meth:`perform_task` skips the Read/Bash-equipped
-        # trajectory summarizer for it.
+        # *append_basic_tools*).
         self._append_basic_tools: bool = True
 
     def _reset(
@@ -1246,10 +1248,7 @@ class RelentlessAgent(Base):
         """
         key = _session_key(agent)
         ledger = self._usage_ledger_object()
-        view = ledger.view
-        if view.seen.get(key) is not None or any(
-            event.source == key for event in ledger.records[view.fold_index :]
-        ):
+        if _ledger_totals_and_banked(ledger, key)[3]:
             return
         budget, tokens, steps = _session_usage(agent)
         self._commit_usage_event(ledger, _UsageEvent(key, 0, budget, tokens, steps))
@@ -1314,9 +1313,21 @@ class RelentlessAgent(Base):
         return {
             "Model name": self.model_name,
             "Max budget (USD)": f"${self.max_budget:.2f}",
-            "Starting time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+            # Local and UTC, so a run never spends a turn on ``date``.
+            "Starting time": (
+                datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+                + " (" + datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC") + ")"
+            ),
             **_host_settings(),
         }
+
+    def _continuation_state(self) -> str:
+        """Return the state block of a continuation's first message (``""`` for a plain agent).
+
+        A subclass that isolates the task (worktrees, files written)
+        describes it here so a resumed session does not rediscover it.
+        """
+        return ""
 
     def _task_settings_section(self) -> str:
         """The "# Task Settings" system-prompt section for this run.
@@ -1512,20 +1523,18 @@ class RelentlessAgent(Base):
                             cost_usd=executor.budget_used,
                         )
                     return error_result
-                if not self._append_basic_tools:
-                    # Restricted runs (``append_basic_tools=False``)
-                    # promise that NO LLM session of the task gets
-                    # tools beyond ``finish`` and the caller's own —
-                    # the trajectory summarizer's Read/Bash included —
-                    # so skip the summarizer and continue with the
-                    # plain failure text.
-                    result = finish(False, True, f"Agent failed: {exc}")
-                else:
-                    result = finish(
-                        False,
-                        True,
-                        self._summarize_failed_session(executor, session, exc),
-                    )
+                result = finish(
+                    False,
+                    True,
+                    self._summarize_failed_session(executor, session, exc),
+                )
+            except BaseException:
+                # The stop can land inside the ``finally``'s own bank,
+                # before its atomic append: bank the session again
+                # (exact-once by session key) before the stop propagates.
+                self._accumulate_usage(executor)
+                self._current_executor = None
+                raise
 
             try:
                 payload = yaml.safe_load(result)
@@ -1540,10 +1549,9 @@ class RelentlessAgent(Base):
 
             if not is_continue or success:
                 if summaries:
-                    payload["summary"] = (
-                        f"{_prior_sessions_section(summaries)}\n\n---\n\n"
-                        f"<h3>Final Session</h3>\n"
-                        f"{payload.get('summary', '') or '(no summary)'}"
+                    payload["summary"] = _build_exhaustion_summary(
+                        summaries,
+                        f"<h3>Final Session</h3>\n{payload.get('summary', '') or '(no summary)'}",
                     )
                     result = yaml.dump(payload, sort_keys=False)
                     self._emit_merged_result_event(payload)
@@ -1563,6 +1571,7 @@ class RelentlessAgent(Base):
 
                 progress_section = CONTINUATION_PROMPT.format(
                     progress_text=_capped_progress_text(summaries),
+                    state_text=self._continuation_state(),
                     continuation_number=session + 1,
                 )
             if zero_progress_streak >= MAX_ZERO_PROGRESS_SESSIONS:
@@ -1683,16 +1692,15 @@ class RelentlessAgent(Base):
         session: int,
         exc: Exception,
     ) -> str:
-        """Summarize a failed sub-session's trajectory with a helper LLM.
+        """Summarize a failed sub-session's trajectory with one helper LLM call.
 
-        Dumps *executor*'s trajectory to a temp file and asks a
-        Read/Bash-equipped summarizer :class:`KISSAgent` to condense it
-        into the progress text the next sub-session continues from.
-        The summarizer's spend is folded into this agent's totals.
-        Never called for restricted runs (``append_basic_tools=False``)
-        — they must not hand ANY of the task's LLM sessions tools
-        beyond ``finish`` and the caller's own, so
-        :meth:`perform_task` uses the plain failure text instead.
+        Builds the scripted :func:`~kiss.agents.sorcar.handoff_digest.handoff_digest`
+        of *executor*'s trajectory and asks a tool-less summarizer
+        :class:`KISSAgent` (``finish`` only) to write from it the
+        progress text the next sub-session continues from.  The
+        summarizer's spend is folded into this agent's totals.  Since
+        the summarizer gets no tool but ``finish``, restricted runs
+        (``append_basic_tools=False``) use it too.
 
         Args:
             executor: The failed sub-session's executor agent.
@@ -1703,19 +1711,10 @@ class RelentlessAgent(Base):
             The summary text, or the plain ``"Agent failed: ..."``
             fallback when summarization itself fails.
         """
-        trajectory_path: Path | None = None
         try:
-            # The worktree may have been torn down since ``_reset``
-            # (a concurrent discard/merge); never recreate it here.
-            tmp_dir = remap_vanished_worktree(Path(self.work_dir)) / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            trajectory_path = tmp_dir / f"trajectory_{session}.json"
-            trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
-            from kiss.agents.sorcar.useful_tools import UsefulTools
-
-            # The run's stop event (resolved once by ``_reset``), so
-            # Stop kills the summarizer's shell command too.
-            shell_tools = UsefulTools(stop_event=self._stop_event)
+            digest = handoff_digest(
+                executor.messages, sorted(self._files_written()), recaps=executor.recaps
+            )
             # The caller (``perform_task``'s failure handler) banked
             # the failed executor's spend into ``self.budget_used``
             # before calling here, so the remaining budget is a plain
@@ -1732,16 +1731,12 @@ class RelentlessAgent(Base):
                 summarizer_result = summarizer_agent.run(
                     model_name=self.model_name,
                     prompt_template=SUMMARIZER_PROMPT,
-                    tools=[
-                        shell_tools.Read,
-                        shell_tools.Bash,
-                        shell_tools.bash_job,
-                        SummarizerFinish.finish,
-                    ],
+                    tools=[SummarizerFinish.finish],
                     arguments={
-                        "trajectory_path": str(trajectory_path),
+                        "digest": digest,
+                        "reason": f"session {session + 1}: {exc}",
                     },
-                    max_steps=self.max_steps,
+                    max_steps=SUMMARIZER_MAX_STEPS,
                     max_budget=summarizer_budget,
                     model_config=self._executor_model_config(),
                     printer=self.printer,
@@ -1763,10 +1758,16 @@ class RelentlessAgent(Base):
         except Exception:  # pragma: no cover – requires summarizer LLM failure
             logger.debug("Exception caught", exc_info=True)
             summary_text = f"Agent failed: {exc}"
-        finally:
-            if trajectory_path and trajectory_path.exists():  # pragma: no branch
-                trajectory_path.unlink()
         return str(summary_text)
+
+    def _files_written(self) -> set[Path]:
+        """Return the files the task has written so far (``set()`` for a plain agent).
+
+        A subclass that tracks its file tools (Sorcar) reports them here;
+        the hand-off digest and the continuation message list them so a
+        resumed session does not re-read what it wrote.
+        """
+        return set()
 
     def _emit_merged_result_event(self, payload: dict[str, Any]) -> None:
         """Emit a ``type="result"`` event with merged multi-session totals.

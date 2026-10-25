@@ -18,6 +18,7 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {historyRows, visibleTitles, lastGetHistory} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
@@ -62,8 +63,7 @@ const MACHINES = ['box', 'lab'];
 // The reply to the page's latest getHistory request: it must echo
 // that request's generation (a filter change bumps it and refetches).
 function historyReply(posted, sessions, machines, machineLabels) {
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  const last = requests[requests.length - 1];
+  const last = lastGetHistory(posted);
   return {
     type: 'history',
     sessions,
@@ -73,26 +73,6 @@ function historyReply(posted, sessions, machines, machineLabels) {
     machineLabels,
     localMachine: 'myhost',
   };
-}
-
-function lastHistoryRequest(posted) {
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  return requests[requests.length - 1];
-}
-
-function rows(win) {
-  return Array.from(
-    win.document
-      .getElementById('history-list')
-      .querySelectorAll('.sidebar-item'),
-  );
-}
-
-function visibleTitles(win) {
-  return rows(win)
-    .filter(r => r.style.display !== 'none')
-    .map(r => r.querySelector('.sidebar-item-text').textContent)
-    .sort();
 }
 
 function options(win) {
@@ -141,7 +121,7 @@ function testRowsCarryTheirMachineAndChip() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, MACHINES));
   const seen = {};
-  rows(win).forEach(r => {
+  historyRows(win).forEach(r => {
     const chip = r.querySelector('.sidebar-item-machine');
     seen[r.querySelector('.sidebar-item-text').textContent] = {
       machine: r.dataset.machine,
@@ -207,7 +187,7 @@ function testAMachinesReplyRelabelsTheChipsAndTheFilter() {
   );
   send(win, historyReply(posted, SESSIONS, MACHINES));
   const chips = {};
-  rows(win).forEach(r => {
+  historyRows(win).forEach(r => {
     const chip = r.querySelector('.sidebar-item-machine');
     chips[r.querySelector('.sidebar-item-text').textContent] = chip
       ? [r.dataset.machine, chip.textContent, chip.title]
@@ -226,7 +206,7 @@ function testAMachinesReplyRelabelsTheChipsAndTheFilter() {
     ['lab', 'lab'],
   ]);
   selectMachine(win, 'box');
-  assert.strictEqual(lastHistoryRequest(posted).machine, 'box');
+  assert.strictEqual(lastGetHistory(posted).machine, 'box');
   // The same labels again: nothing to repaint.
   const again = posted.filter(m => m && m.type === 'getHistory').length;
   send(win, {type: 'machines', machines, checkedAt: 2});
@@ -275,14 +255,14 @@ function testTheHistoryReplysLabelsNameTheFilterAndTheChips() {
     ['lab', 'lab'],
   ]);
   const chips = {};
-  rows(win).forEach(r => {
+  historyRows(win).forEach(r => {
     const chip = r.querySelector('.sidebar-item-machine');
     if (chip) chips[r.dataset.machine] = chip.textContent;
   });
   assert.deepStrictEqual(chips, {box: 'box-host', lab: 'lab'});
   selectMachine(win, 'box');
   assert.strictEqual(
-    lastHistoryRequest(posted).machine,
+    lastGetHistory(posted).machine,
     'box',
     'the filter sends the registered name',
   );
@@ -312,7 +292,7 @@ function testSelectingAMachineFiltersRows() {
   assert.deepStrictEqual(visibleTitles(win), ['box task', 'box task two']);
   // The daemon applies the machine too (its rows may live beyond the
   // loaded page): the change refetches page one with the machine.
-  const request = lastHistoryRequest(posted);
+  const request = lastGetHistory(posted);
   assert.strictEqual(request.machine, 'box');
   assert.strictEqual(request.offset, 0);
 
@@ -364,7 +344,7 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   assert.strictEqual(win.document.getElementById('hf-machine').value, '');
   assert.strictEqual(visibleTitles(win).length, 4, 'All rows after fallback');
   assert.strictEqual(
-    lastHistoryRequest(posted).machine,
+    lastGetHistory(posted).machine,
     '',
     'refetched for All',
   );
@@ -376,7 +356,7 @@ function testStaleReplyLeavesTheSelectionAlone() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, MACHINES));
   selectMachine(win, 'lab');
-  const current = lastHistoryRequest(posted);
+  const current = lastGetHistory(posted);
   assert.strictEqual(current.machine, 'lab');
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
   // A late reply of the previous view (an older generation) whose
@@ -444,7 +424,7 @@ function testClickingARemoteRowResumesTheChatHere() {
   win.HTMLAnchorElement.prototype.click = function () {
     opened.push(this.href);
   };
-  const remoteRow = rows(win).find(
+  const remoteRow = historyRows(win).find(
     r => r.querySelector('.sidebar-item-text').textContent === 'box task',
   );
   posted.length = 0;
@@ -497,14 +477,14 @@ function testClickingARemoteRowResumesTheChatHere() {
     'the open tab is reused',
   );
   // The machine name is trimmed as the filter trims it.
-  const padded = rows(win).find(
+  const padded = historyRows(win).find(
     r => r.querySelector('.sidebar-item-text').textContent === 'box task two',
   );
   posted.length = 0;
   padded.click();
   assert.strictEqual(resumes(posted)[0].machine, 'box');
   // A local row's resume names no machine (nothing to bind).
-  const localRow = rows(win).find(r => r.dataset.machine === '');
+  const localRow = historyRows(win).find(r => r.dataset.machine === '');
   posted.length = 0;
   localRow.click();
   assert.deepStrictEqual(opened, []);
@@ -589,8 +569,8 @@ function testACopyOfTheChatOnAnotherMachineGetsItsOwnTab() {
     session(3, 'mixed chat, remote task', 'lab', {id: 'chat-m'}),
   ];
   send(win, historyReply(posted, fixture, MACHINES));
-  const localRow = rows(win).find(r => r.dataset.machine === '');
-  const remoteRow = rows(win).find(r => r.dataset.machine === 'lab');
+  const localRow = historyRows(win).find(r => r.dataset.machine === '');
+  const remoteRow = historyRows(win).find(r => r.dataset.machine === 'lab');
   posted.length = 0;
   localRow.click();
   const local = resumes(posted);
@@ -649,7 +629,7 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
     ],
   });
   send(win, historyReply(posted, SESSIONS, MACHINES));
-  const remoteRow = rows(win).find(
+  const remoteRow = historyRows(win).find(
     r => r.querySelector('.sidebar-item-text').textContent === 'box task',
   );
   // The remote chat shown, bound to box by the daemon.
@@ -667,7 +647,7 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
     ),
   );
   posted.length = 0;
-  rows(win)
+  historyRows(win)
     .find(
       r => r.querySelector('.sidebar-item-text').textContent === 'local one',
     )
@@ -680,7 +660,7 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
   select.dispatchEvent(new win.Event('change', {bubbles: true}));
   assert.strictEqual(select.value, 'box', 'the pick is shown');
   posted.length = 0;
-  rows(win)
+  historyRows(win)
     .find(
       r => r.querySelector('.sidebar-item-text').textContent === 'local one',
     )

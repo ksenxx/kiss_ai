@@ -18,6 +18,7 @@ const {
   waitFor,
   clickTab,
 } = require('./simplify2_harness');
+const {writeReport: writeReportAs} = require('./subagent_tab_helpers');
 
 const pages = [];
 
@@ -239,28 +240,7 @@ async function testVirtualAndDirectoryTabsAreNoEditorContext() {
 }
 
 function writeReport(win, filePath, content) {
-  const extra = {tabId: 'a1'};
-  send(
-    win,
-    Object.assign(
-      {type: 'tool_call', name: 'Write', path: filePath, content},
-      extra,
-    ),
-  );
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'tool_result',
-        content:
-          'Successfully wrote ' + content.length + ' characters to ' + filePath,
-        is_error: false,
-        tool_name: 'Write',
-        path: filePath,
-      },
-      extra,
-    ),
-  );
+  writeReportAs(win, filePath, content, {tabId: 'a1'});
 }
 
 async function testReportTabReportsItsMarkdownSource() {

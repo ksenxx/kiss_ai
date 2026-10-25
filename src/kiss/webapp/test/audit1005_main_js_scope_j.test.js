@@ -20,14 +20,14 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {sleep} = require('./simplify2_harness');
+const {installAudio} = require('./speech_helpers');
 
 function makePage() {
   const {win, posted} = harness.makePage({beforeScripts: harness.stubRaf});
   return {win, sent: posted};
 }
 
-const {send, clickTab} = harness;
+const {send, clickTab, sleep} = harness;
 
 // Every open tab, in tab order (copied into this realm's Array so
 // deepStrictEqual compares values, not realms' prototypes).
@@ -35,9 +35,6 @@ function tabIds(win) {
   return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
-// One event-loop turn: lets the theme MutationObserver callbacks a class
-// change queued run while the document still exists, so win.close() tears
-// down a quiet window.
 async function testRegistryRemovalKeepsContentTabs() {
   const {win, sent} = makePage();
   const T1 = 'tab-one';
@@ -112,26 +109,11 @@ async function testRegistryRemovalKeepsContentTabs() {
   // The file tab is still usable: switching to it shows its view.
   clickTab(win, fileTabId);
   assert.notStrictEqual(fileView.style.display, 'none');
+  // One event-loop turn: lets the theme MutationObserver callbacks a
+  // class change queued run while the document still exists, so
+  // win.close() tears down a quiet window.
   await sleep(0);
   win.close();
-}
-
-function installAudio(win) {
-  const players = [];
-  win.Audio = function Audio(src) {
-    this.src = src;
-    this.playCalls = 0;
-    this.play = () => {
-      this.playCalls++;
-      return Promise.resolve();
-    };
-    this.fire = type => {
-      const handler = this['on' + type];
-      if (typeof handler === 'function') handler({type});
-    };
-    players.push(this);
-  };
-  return players;
 }
 
 async function testTalkPlaysUnmutedAndSkipsMuted() {

@@ -36,8 +36,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-_SEA_PATH = Path(sh_sea.__file__).resolve()
-
 
 def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA's methods pin the run: Bash-only, no worktree, no extras."""
@@ -72,15 +70,6 @@ def test_sea_methods_follow_the_user_contract() -> None:
         "use_memory": False,
     }
     assert_no_removed_getters(sh_sea)
-
-
-def test_slash_sh_resolves_to_the_bundled_sea() -> None:
-    """``/sh <command>`` resolves to the command text and this file (run directly)."""
-    assert sea_commands.get_command("sh") == _SEA_PATH
-    assert sea_commands.slash_command_task("/sh git status --short") == (
-        "git status --short", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([ShSea()])
-    assert type(sea_commands.load_sea(_SEA_PATH)).__name__ == "ShSea"
 
 
 def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) -> None:

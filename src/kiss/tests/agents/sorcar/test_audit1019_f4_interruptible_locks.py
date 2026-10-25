@@ -24,12 +24,20 @@
   out of it.  A git alias starting such a descendant shows the read
   giving up ``_PIPE_GIVE_UP_SECONDS`` after the kill, and an empty
   ``PATH`` shows the "no output" return.
+* D2-1 — a re-entrant ``interruptible_locked_call`` (the thread already
+  owns the ``RLock``) used to enter its ``try`` before acquiring, so a
+  Stop landing between the two made the ``finally`` release the OUTER
+  hold (no ``RuntimeError``: the recursion count just dropped to 0).
+  It now runs the critical section directly when the thread owns the
+  lock.  A ``sys.settrace`` line hook forces the interrupt onto the
+  acquire line and a second thread checks the outer hold survived.
 """
 
 from __future__ import annotations
 
 import contextlib
 import functools
+import linecache
 import os
 import shlex
 import signal
@@ -40,9 +48,12 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar._concurrency import interruptible_locked_call, locked_call
 from kiss.agents.sorcar.git_worktree import (
     _PIPE_GIVE_UP_SECONDS,
     GitWorktree,
@@ -284,3 +295,58 @@ def test_stdout_head_without_git_on_the_path_reports_no_output(
     monkeypatch.setenv("PATH", str(empty))
     assert _git_stdout_head("status", cwd=repo, max_bytes=100) == ("", False)
     assert GitWorktreeOps.staged_diff(repo) == ""
+
+
+# --- D2-1: a Stop before a re-entrant acquire must not release the outer hold ---
+
+_INNER_CODE = interruptible_locked_call.__code__
+
+
+def _interrupt_at_acquire(frame: FrameType, event: str, arg: Any) -> Any:
+    """Trace hook: ``KeyboardInterrupt`` on the acquire line of ``interruptible_locked_call``."""
+    if frame.f_code is not _INNER_CODE:
+        return None
+    source_line = linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+    if event == "line" and "lock.acquire(" in source_line:
+        raise KeyboardInterrupt
+    return _interrupt_at_acquire
+
+
+def _inner() -> str:
+    return "ran"
+
+
+def _try_take(lock: threading.RLock, outcome: dict[str, bool]) -> None:
+    outcome["taken"] = lock.acquire(blocking=False)
+    if outcome["taken"]:
+        lock.release()
+
+
+def _other_thread_can_take(lock: threading.RLock) -> bool:
+    outcome: dict[str, bool] = {}
+    probe = threading.Thread(target=_try_take, args=(lock, outcome), daemon=True)
+    probe.start()
+    probe.join(timeout=5)
+    return outcome["taken"]
+
+
+def _outer(lock: threading.RLock, outcome: dict[str, object]) -> None:
+    """The outer critical section: a nested take, with a Stop landing before its acquire."""
+    sys.settrace(_interrupt_at_acquire)
+    try:
+        outcome["inner"] = interruptible_locked_call(lock, _inner)
+    except KeyboardInterrupt:
+        outcome["stopped"] = True
+    finally:
+        sys.settrace(None)
+    # Still inside the outer hold: no other thread may take the lock.
+    outcome["leaked"] = _other_thread_can_take(lock)
+
+
+def test_stop_before_a_reentrant_acquire_keeps_the_outer_hold(repo: Path) -> None:
+    lock = repo_lock(repo)
+    outcome: dict[str, object] = {}
+    locked_call(lock, _outer, lock, outcome)
+    assert outcome["leaked"] is False, outcome
+    assert outcome.get("inner") == "ran", outcome
+    assert _other_thread_can_take(lock)

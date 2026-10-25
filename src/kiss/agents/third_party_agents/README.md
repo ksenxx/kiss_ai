@@ -171,9 +171,10 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   defines a module-level `_make_backend()` factory returning its backend, which
   enables **gateway mode** (the channel itself becomes a
   prompt surface) and **scheduled delivery** (a cron job's result lands in the
-  channel). API-only services (GitHub, Notion, the Google Workspace agents, ...) are
-  outbound-only: they can be acted on, but cannot carry prompts in or receive
-  deliveries.
+  channel). API-only services (GitHub, Notion, Gmail, Google Calendar, Docs, Drive and
+  Sheets, ...) are outbound-only: they can be acted on, but cannot carry prompts in or
+  receive deliveries. Google Chat is the exception among the Google agents: it defines
+  `_make_backend()`, so it is a gateway-capable channel.
 
 ## Authenticate by chatting
 
@@ -185,10 +186,19 @@ conversation:
 You do not have to type such a prompt yourself. The right sidebar's **Apps** panel
 lists every channel agent with a connected /
 not-connected / unknown badge — the daemon probes them in a short-lived subprocess
-(`python -m kiss.agents.third_party_agents.auth_status`, 20-second deadline, result
-cached for 30 seconds; a probe that fails or times out shows as unknown; a service
-enrolled in the Muse vault counts as connected, except the six Google services, whose
-Composio connection is probed directly) — and clicking an app that is not connected
+(`python -m kiss.agents.third_party_agents.auth_status`; the result is cached for 30
+seconds). Inside that subprocess every channel is probed concurrently with a 20-second
+deadline: a channel still running when it expires gets an unknown badge ("status check
+timed out"), as does one whose agent cannot be built. The subprocess itself has 45
+seconds; if it fails or overruns, the daemon gets no list at all and serves the last
+good result; with none yet, the panel says "Could not check the apps. Press refresh to
+try again." A service enrolled in the Muse
+vault counts as connected, except the six Google services, for which the probe reads
+the local Composio connection record instead — it does not ask Composio whether the
+account is still active, `check_<service>_auth` does. Google Chat also counts as
+connected when its local `service_account.json` loads, with or without a Composio
+record — and
+clicking an app that is not connected
 opens a new chat that runs a "Connect my *X* app" task
 through `run_agent`, which drives the same auth tools described below.
 
@@ -248,6 +258,15 @@ turns that fallback off.
   you sign in to Google and click Allow there, and `finish_<service>_auth` records the
   connection (answering `pending` until you approve). Every API call then goes through
   Composio's proxy, which adds the Google token, so no Google token is stored locally.
+  Once a connection record exists, `check_<service>_auth` makes one live call to
+  Composio for the account's status (`_composio_google.connection_status`): `ACTIVE`
+  answers "connected", and so does a status Composio could not be asked for
+  (`UNKNOWN`); any other status (`EXPIRED`, `FAILED`, ...) instead tells the agent to run
+  `authenticate_<service>` and `finish_<service>_auth` again before touching any
+  other tool, so an expired connection is not worked against for several steps. The
+  same status is exposed as a module-level `connection_status()` in each of the six
+  `*_sea.py` modules, which the cron scheduler calls before a scheduled prompt job that
+  names the service (see [Schedules](#schedules-and-always-on-gateways)).
   One limit: Composio has no managed Google Chat app, so Chat user sign-in needs a custom
   Composio auth config whose ID you set in `KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT`.
   Google Chat can instead act as a Chat bot via
@@ -466,8 +485,9 @@ reply lands in that task's transcript as a persisted "Answer" panel that quotes 
 question. Files attached to the `/ask` message travel with the question to the
 answering run (the side channel passes them as the `attachments` of its
 `daemon_client.run` call), and the answering session's spend is charged to the task you
-asked about. The task-info panel's periodic progress update
-(`src/kiss/server/task_update.py`) is the same agent answering a fixed question.
+asked about. The task-info panel's refresh button (`src/kiss/server/task_update.py`)
+is the same agent answering a fixed question; the panel's live progress text between
+refreshes is read from the task's persisted events and costs no model call.
 No configuration or credentials are involved.
 
 > /ask Which files has this task modified so far, and why did the last test run fail?
@@ -694,6 +714,59 @@ again). Prompt jobs are unattended: every `run_agent` or `run_parallel` child th
 inherits the rule never to ask questions or wait for approval; when blocked, the child
 reports the blocker in its summary and finishes.
 
+What a prompt job's run is given, and what the scheduler does around it
+(`cron_agent.py`, `cron_prompt_sea.py`):
+
+- *Run context.* The prompt the run sees is the unattended preamble, then a
+  `# Run context` block, then your text. The block states the current time (in the
+  schedule zone, Pacific `America/Los_Angeles` (`SCHEDULE_TZ`), with the UTC time in
+  parentheses), the schedule, the **window start** the run is expected
+  to cover, the previous attempt's time and status, the tail (last 1,500 characters)
+  of the previous result, and that the runner itself appends the final summary to
+  `$KISS_HOME/cron/output/<job-id>.md` ("do not write a log"). A slash-command prompt
+  job (`Every morning run /slack ...`) gets the same block in front of its argument.
+- *Window start and the `covered_until` watermark.* Each job stores `covered_until`,
+  the moment up to which its runs have covered: set to the job's creation time when it
+  is created and moved to the run's start time after every run that ended ok or
+  `[SILENT]`. The window start is that watermark, so a run after a failed or missed
+  one covers everything since the last successful one, not just one interval; a job
+  stored before the watermark existed falls back to one schedule interval back (the
+  gap between its last and next run times; when that is unknown the block says "not
+  set"). A plain prompt job runs the bundled `cron_prompt_sea.py`, whose
+  system prompt is the short `SYSTEM_LITE` base plus the cron run rules rather than
+  the full `SYSTEM.md`.
+- *Connector pre-flight.* Before dispatching a prompt job whose text names a
+  Composio-backed Google service (gmail, google calendar/gcal, google docs/gdocs,
+  google drive/gdrive, google sheets/gsheets, google chat/googlechat), the scheduler
+  calls that SEA's `connection_status()`; unless the account is `ACTIVE` (or Composio
+  could not be asked), the run is skipped and a fixed message naming the state and
+  asking you to reconnect is delivered instead, so the job does not burn budget on a
+  dead connector. The check is skipped for `in_chat` jobs (ones that run as a message
+  in a new chat, where a person can finish an OAuth flow) and for prompts that are
+  themselves about signing in or reconnecting. Command jobs are not checked. For
+  Google Chat a stored service-account key
+  (`$KISS_HOME/third_party_agents/googlechat/service_account.json`, the Chat-bot
+  path) that parses as a service-account key wins, as it does when the agent loads
+  its credentials (`_service_account_credentials`, no network call):
+  `connection_status()` answers `ACTIVE` without asking Composio, so a
+  bot-authenticated job is never skipped as "not connected". A missing or
+  corrupt key file is ignored and the Composio status decides.
+- *Repeated-failure back-off.* A run that fails with the same first non-blank line
+  (whitespace-trimmed) as the previous failed run (a job's run ends `ok`, `silent` or
+  `error`; a timeout is an `error` too) is a repeat: it is not delivered again, the
+  job's `failure_streak` grows, and an enabled job's next run is pushed to at least
+  1 h × 2^(streak − 1) from now, capped at 24 h (`failure_backoff_seconds`). The
+  back-off is a lower bound, not a new schedule: `next_run_at` becomes the later of
+  its current value and now + back-off, so a run already scheduled further out stays
+  put, and a broken job pages you once and then retries no more often than hourly,
+  two-hourly, ... daily. A different failure, or a success, resets the streak and the
+  delivery. Command jobs get the same treatment.
+- *A damaged job store is never overwritten.* If `$KISS_HOME/cron/jobs.json` cannot be
+  parsed, creating or editing a job returns an error instead of replacing the file.
+  A run that ends while the store is damaged still delivers its result and appends it
+  to the job's output file; only the outcome (status, summary, watermark, back-off) is
+  not recorded: the scheduler logs a warning and leaves the store as it is.
+
 **16. Scheduled brief delivered where you already read** (Muse tips 6 and 7):
 
 > Every weekday at 9am, summarize today's HN front page in 10 bullets and deliver it
@@ -805,7 +878,11 @@ per-workspace under Muse). Name the workspace in the prompt:
 > in the sideproj workspace.
 
 Concurrent dispatches with different workspaces are serialized so one account's
-credentials never leak into the other's session.
+credentials never leak into the other's session: a run whose workspace differs from
+the one a running task holds waits for it (up to 15 minutes,
+`channel_workspace.WORKSPACE_WAIT_TIMEOUT_SECONDS`), then fails with "workspace ...
+could not be activated ... retry when it finishes" rather than running against the
+wrong account.
 
 **23. Cheap model for chatter, big model on demand.** Gateway ticks use the
 per-channel defaults from example 20; for a task that matters, pick the model in the

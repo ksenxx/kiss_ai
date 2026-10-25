@@ -187,11 +187,7 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
                 },
             }
             prev = out[-1] if out else None
-            if (
-                isinstance(prev, dict)
-                and prev.get("role") == "assistant"
-                and prev.get("tool_call_id") is None
-            ):
+            if isinstance(prev, dict) and prev.get("role") == "assistant":
                 merged = dict(prev)
                 merged["tool_calls"] = list(prev.get("tool_calls") or []) + [tc]
                 out[-1] = merged
@@ -782,14 +778,14 @@ def strip_system_cache_break(text: str) -> str:
     return text.replace(SYSTEM_CACHE_BREAK, "")
 
 
-# model_config keys the framework itself consumes: they configure this
-# framework's behaviour (routing, watchdogs, caching policy, the system
-# prompt) and are never request parameters of any provider, so every
-# adapter strips them before shaping a request.
 # The text of the follow-up user message that carries attachments a tool
 # returned, so the model knows where the bytes came from.
 TOOL_RESULT_ATTACHMENT_NOTE = "[attachments from previous tool result(s)]"
 
+# model_config keys the framework itself consumes: they configure this
+# framework's behaviour (routing, watchdogs, caching policy, the system
+# prompt) and are never request parameters of any provider, so every
+# adapter strips them before shaping a request.
 FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
     {
         "system_instruction",
@@ -1820,6 +1816,11 @@ class CLITextModel(Model):
         """
         with self._tools_prompt_installed(self._text_tools(function_map)):
             content, response = self.generate()
+            # Leaving the block flushes held text to the token callback,
+            # which raises KeyboardInterrupt on Stop: the completed turn is
+            # then billed through take_partial_usage_response().
+            self._rejected_response = response
+        self._rejected_response = None
         function_calls = _parse_text_based_tool_calls(self._tool_call_text(content))
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
@@ -2163,7 +2164,7 @@ class _CLIProcess:
             readers: The reader threads that did start, stdout's first.
         """
         self._signal_tree(SIGKILL)
-        self._proc.wait()
+        self._reap(_REAP_GRACE_SECONDS)
         for thread in readers:
             thread.join(timeout=_REAP_GRACE_SECONDS)
         owners = dict(zip((self._proc.stdout, self._proc.stderr), readers, strict=False))

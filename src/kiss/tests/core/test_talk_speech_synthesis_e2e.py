@@ -81,7 +81,7 @@ def test_synthesis_persists_no_trajectory_files() -> None:
 
     from kiss.core import config as config_module
 
-    traj_dir = Path(config_module.artifact_dir) / "trajectories"
+    traj_dir = Path(config_module.get_artifact_dir()) / "trajectories"
     pattern = "trajectory_talk-speech-synthesis_*.yaml"
     before = set(traj_dir.glob(pattern)) if traj_dir.exists() else set()
     assert synthesize_talk_audio("Quick trajectory check.") is not None

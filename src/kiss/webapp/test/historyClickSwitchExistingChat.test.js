@@ -10,7 +10,10 @@ const {
   makePage: makeChatPage,
   send,
   sendEmptyWorkDir,
+  readyTabId,
+  ofType,
 } = require('./simplify2_harness');
+const {historyRows, makeRow} = require('./history_helpers');
 
 function makePage(initialState) {
   return makeChatPage({initialState});
@@ -28,23 +31,15 @@ function activeTabLabel(win) {
   return tab ? tab.title : '';
 }
 
-function historyRows(win) {
-  return Array.from(
-    win.document.querySelectorAll('#history-list .sidebar-item'),
-  );
-}
-
 function countMessages(posted, type) {
-  return posted.filter(msg => msg && msg.type === type).length;
+  return ofType(posted, type).length;
 }
 
 function testHistoryClickSwitchesToExistingChatTab() {
   const {win, posted} = makePage();
   sendEmptyWorkDir(win);
 
-  const ready = posted.find(msg => msg && msg.type === 'ready');
-  assert.ok(ready && ready.tabId, 'main.js must announce the initial tab id');
-  const firstTabId = ready.tabId;
+  const firstTabId = readyTabId(posted);
 
   send(win, {
     type: 'task_events',
@@ -83,23 +78,14 @@ function testHistoryClickSwitchesToExistingChatTab() {
     offset: 0,
     generation: 0,
     sessions: [
-      {
+      makeRow({
         id: 'chat-existing',
         task_id: 101,
         title: 'Existing task opened already',
-        preview: 'Existing task opened already',
         has_events: true,
-        failed: false,
         is_running: true,
-        tokens: 0,
-        cost: 0,
-        steps: 0,
-        is_favorite: false,
-        timestamp: 1_700_000_000,
-        work_dir: '',
-        startTs: 1_700_000_000_000,
         endTs: 0,
-      },
+      }),
     ],
   });
 

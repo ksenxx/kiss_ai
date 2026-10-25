@@ -2,18 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Real-container regression: the STREAMING docker Bash start is bounded.
+"""Real-container regression: the docker Bash exec startup is bounded.
 
-Audit 2026-10-15 (sorcar-tools).  ``DockerManager`` ran two separate
-``Bash`` engines.  The streaming one (installed ``stream_callback``)
-called ``exec_create`` and ``exec_start`` on the task thread *before*
-its deadline started, so a daemon that stalled there blocked ``Bash``
-past its timeout, and a start delayed past the deadline ran the
-command after ``Bash`` had returned — the non-streaming engine had
-been fixed for both (committed-start guard + reaper) but the fix never
-reached the streaming one.  Both now share one engine; these tests
-drive the streaming path through the same latency shims the
-non-streaming tests use.  The exec, container and daemon are real.
+Audit 2026-10-15 (sorcar-tools).  ``DockerManager`` once ran two
+separate ``Bash`` engines, and the one used with an installed
+``stream_callback`` called ``exec_create`` and ``exec_start`` on the
+task thread *before* its deadline started: a daemon that stalled there
+blocked ``Bash`` past its timeout, and a start delayed past the
+deadline ran the command after ``Bash`` had returned.  There is one
+engine now (``_exec``; the callback is just its ``on_text``), so these
+tests, run with a callback installed, pin the committed-start guard and
+the reaper for every ``Bash`` call.  The latency shims sit in front of
+the real ``exec_create`` / ``exec_start``; the exec, container and
+daemon are real.
 """
 
 import threading
@@ -30,7 +31,7 @@ from kiss.tests.agents.sorcar.test_docker_nonstream_timeout_kill import (
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestStreamingStartBounded(unittest.TestCase):
-    """The streaming ``Bash`` honours its timeout during exec startup."""
+    """``Bash`` honours its timeout during exec startup."""
 
     env: DockerManager
 

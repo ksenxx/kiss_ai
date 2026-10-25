@@ -315,8 +315,6 @@ class TestPostgresLive:
         authenticate tool is exercised end to end against the live server.
         """
         config_dir = _config.path.parent
-        if config_dir.is_dir():  # earlier tests may have created it
-            shutil.rmtree(config_dir)
         config_dir.parent.mkdir(parents=True, exist_ok=True)
         config_dir.write_text("blocker", encoding="utf-8")
         try:
@@ -432,9 +430,9 @@ class TestPostgresLive:
         """A lowered _statement_timeout_ms cancels a pg_sleep server-side."""
         b = _backend(pg_uri, read_only=True)
         b._statement_timeout_ms = 200
-        start = time.monotonic()
         result = json.loads(b.pg_query("SELECT pg_sleep(2)"))
-        assert time.monotonic() - start < 2.0  # canceled well before the sleep ends
+        # The server's own cancel message proves the timeout fired; a
+        # wall-clock bound would only measure Docker connect latency.
         assert result["ok"] is False
         assert "statement timeout" in result["error"] or "canceling statement" in result["error"]
 

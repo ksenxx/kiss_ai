@@ -37,7 +37,6 @@ entry.
 
 from __future__ import annotations
 
-import contextlib
 import gc
 import hashlib
 import json
@@ -46,7 +45,6 @@ import os
 import posixpath
 import queue
 import sys
-import tempfile
 import threading
 import time
 from array import array
@@ -56,7 +54,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from kiss.core.utils import is_root_dir
+from kiss.core.utils import atomic_write_text, is_root_dir
 from kiss.server.helpers import SUGGESTION_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -831,20 +829,12 @@ def _load_listings(path: Path, root: str) -> Listings:
 def _save_listings(path: Path, root: str, listings: Listings) -> None:
     """Atomically persist *listings* of *root* to *path* (best effort)."""
     payload = {"version": _CACHE_VERSION, "root": root, "listings": listings}
-    tmp = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # A private temporary file: two daemons persisting the same root
-        # must not interleave their writes before the rename.
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(payload, separators=(",", ":")))
-        os.replace(tmp, path)
+        # Staged in a private temporary file: two daemons persisting
+        # the same root must not interleave their writes before the rename.
+        atomic_write_text(path, json.dumps(payload, separators=(",", ":")))
     except OSError:
         logger.debug("cannot persist file index to %s", path, exc_info=True)
-        if tmp is not None:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
 
 
 class FileIndexRegistry:
@@ -873,6 +863,7 @@ class FileIndexRegistry:
         self._cache_dir = cache_dir
         self._indexes: dict[str, FileIndex] = {}
         self._pending: set[str] = set()
+        self._building: str | None = None
         self._lock = threading.Lock()
         self._jobs: queue.Queue[tuple[str, float, Callable[[], object] | None] | None] = (
             queue.Queue()
@@ -914,12 +905,20 @@ class FileIndexRegistry:
 
         Serving an index older than :data:`STALE_AFTER` also queues a
         background refresh of its root, so the next request sees the
-        change without anyone waiting on the rescan.
+        change without anyone waiting on the rescan.  A root whose
+        rescan is already queued or running is left alone: the stale
+        index is still the one served until that rescan is published,
+        and queueing another walk behind it would scan the tree twice
+        for the same request.
         """
         with self._lock:
             index = self._indexes.get(root)
-        if index is not None and time.monotonic() - index.built_at > STALE_AFTER:
-            self._enqueue(root, None)
+            if (
+                index is not None
+                and root != self._building
+                and time.monotonic() - index.built_at > STALE_AFTER
+            ):
+                self._enqueue_locked(root, None)
         return index
 
     def picker_for(self, work_dir: str) -> Picker | None:
@@ -990,26 +989,30 @@ class FileIndexRegistry:
         duplicate counts: the pending job covers it).
         """
         with self._lock:
-            if self._stopped:
+            return self._enqueue_locked(root, on_ready)
+
+    def _enqueue_locked(self, root: str, on_ready: Callable[[], object] | None) -> bool:
+        """:meth:`_enqueue` with :attr:`_lock` held by the caller."""
+        if self._stopped:
+            return False
+        if on_ready is None and root in self._pending:
+            return True
+        if self._worker is None:
+            worker = threading.Thread(
+                target=self._worker_loop, name="file-index", daemon=True,
+            )
+            try:
+                worker.start()
+            except RuntimeError:
+                # Thread exhaustion: leave ``_worker`` unset so the
+                # next request tries again instead of queueing jobs
+                # nobody will ever run.
+                logger.exception("file index worker failed to start")
                 return False
-            if on_ready is None and root in self._pending:
-                return True
-            if self._worker is None:
-                worker = threading.Thread(
-                    target=self._worker_loop, name="file-index", daemon=True,
-                )
-                try:
-                    worker.start()
-                except RuntimeError:
-                    # Thread exhaustion: leave ``_worker`` unset so the
-                    # next request tries again instead of queueing jobs
-                    # nobody will ever run.
-                    logger.exception("file index worker failed to start")
-                    return False
-                self._worker = worker
-            self._pending.add(root)
-            # Under the lock, so no job can land behind the stop sentinel.
-            self._jobs.put((root, time.monotonic(), on_ready))
+            self._worker = worker
+        self._pending.add(root)
+        # Under the lock, so no job can land behind the stop sentinel.
+        self._jobs.put((root, time.monotonic(), on_ready))
         return True
 
     def stop(self) -> None:
@@ -1063,8 +1066,14 @@ class FileIndexRegistry:
             if job is None or self._stopped:
                 return
             root, queued_at, on_ready = job
+            # ``_pending`` is cleared here, not when the build ends, so
+            # a ``refresh`` during the walk (the tree changed after it
+            # started) still queues the rescan it needs; ``_building``
+            # keeps ``_current`` from queueing a walk for staleness
+            # alone while this one runs.
             with self._lock:
                 self._pending.discard(root)
+                self._building = root
                 current = self._indexes.get(root)
             if current is None or current.built_at < queued_at:
                 # The only worker: one failing build must not end it.
@@ -1072,6 +1081,8 @@ class FileIndexRegistry:
                     self._build(root)
                 except Exception:
                     logger.exception("file index build of %s failed", root)
+            with self._lock:
+                self._building = None
             if on_ready is not None:
                 try:
                     on_ready()

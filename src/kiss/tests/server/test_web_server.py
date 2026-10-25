@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable, Coroutine
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,6 @@ from kiss.server.web_server import (
     WebPrinter,
     _build_html,
     _create_ssl_context,
-    _discover_tunnel_url_from_metrics,
     _generate_self_signed_cert,
     _get_local_ips,
     _pick_free_local_port,
@@ -2236,15 +2236,6 @@ class TestReadVersion(unittest.TestCase):
         self.assertIsInstance(result, str)
 
 
-class TestDiscoverTunnelUrlFromMetrics(unittest.TestCase):
-    """Test _discover_tunnel_url_from_metrics."""
-
-    def test_returns_none_when_no_cloudflared(self) -> None:
-        """Returns None when no cloudflared process is running."""
-        result = _discover_tunnel_url_from_metrics()
-        self.assertTrue(result is None or isinstance(result, str))
-
-
 class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
     """Test WebPrinter broadcast edge cases."""
 
@@ -2596,39 +2587,45 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             self.assertTrue(len(url_events) > 0)
             self.assertEqual(url_events[0]["url"], "https://test.trycloudflare.com")
 
+    def _bind_foreign_metrics_in_scan_range(self) -> None:
+        """Serve a FOREIGN cloudflared's ``/quicktunnel`` on 20240-20259.
+
+        The port range the old machine-wide metrics scan probed; a
+        stand-in there makes a URL leak reproduce deterministically
+        even on a machine with no other cloudflared running.
+        """
+        for scan_port in range(20240, 20260):
+            try:
+                foreign = HTTPServer(
+                    ("127.0.0.1", scan_port), _ForeignMetricsHandler,
+                )
+            except OSError:
+                continue
+            threading.Thread(
+                target=foreign.serve_forever, daemon=True,
+            ).start()
+            self.addCleanup(foreign.shutdown)
+            return
+
     async def test_welcome_info_no_url_broadcasts_inactive(self) -> None:
         """No tunnel URL → remote_url is still broadcast, with an empty url.
 
         The page shows the welcome-page remote-password panel only
         when ``url`` is non-empty.
 
-        A tunnel-DISABLED server must not fall back to
-        ``_discover_tunnel_url_from_metrics``: the machine-wide scan
-        can adopt a FOREIGN daemon's tunnel URL that does not route
-        to this server.  A stand-in "foreign cloudflared" metrics
-        endpoint is bound inside the hardcoded 20240-20259 scan range
-        so the leak reproduces deterministically — pre-fix this test
-        broadcast ``https://foreign-daemon.trycloudflare.com`` (or,
-        on this dev machine, the production daemon's real tunnel URL)
-        instead of ``""``.
+        A tunnel-DISABLED server must not scan the machine for a
+        cloudflared: the machine-wide scan could adopt a FOREIGN
+        daemon's tunnel URL that does not route to this server.  A
+        stand-in "foreign cloudflared" metrics endpoint is bound
+        inside the old scan range so the leak reproduces
+        deterministically — pre-fix this test broadcast
+        ``https://foreign-daemon.trycloudflare.com`` (or, on this dev
+        machine, the production daemon's real tunnel URL) instead of
+        ``""``.
         """
         self.server._active_url = None
         _URL_FILE.unlink(missing_ok=True)
-
-        foreign = None
-        for scan_port in range(20240, 20260):
-            try:
-                foreign = HTTPServer(
-                    ("127.0.0.1", scan_port), _ForeignMetricsHandler,
-                )
-                break
-            except OSError:
-                continue
-        if foreign is not None:
-            threading.Thread(
-                target=foreign.serve_forever, daemon=True,
-            ).start()
-            self.addCleanup(foreign.shutdown)
+        self._bind_foreign_metrics_in_scan_range()
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -2648,6 +2645,41 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertEqual(len(url_events), 1)
             self.assertEqual(url_events[0].get("url"), "")
+
+    async def test_welcome_info_tunnel_server_does_not_adopt_foreign_url(self) -> None:
+        """A tunnel-ENABLED server with no URL yet reports ``""``, not a scan hit.
+
+        Before its own tunnel is up (``_active_url`` unset, no URL
+        file) the server used to scan every cloudflared on the machine
+        and report the first ``/quicktunnel`` hostname it found — a
+        FOREIGN daemon's URL that does not route here.  The client
+        gets the real URL pushed by ``_bind_listeners`` once the own
+        tunnel settles (``TestStartWithTunnel``).
+        """
+        self.server.use_tunnel = True
+        self.server._active_url = None
+        _URL_FILE.unlink(missing_ok=True)
+        self._bind_foreign_metrics_in_scan_range()
+
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=no_verify_ssl(),
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
+            events: list[dict] = []
+            for _ in range(10):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            url_events = [e for e in events if e.get("type") == "remote_url"]
+            self.assertEqual(len(url_events), 1)
+            self.assertEqual(url_events[0].get("url"), "")
+        self.assertFalse(_URL_FILE.exists())
 
     async def test_welcome_info_reports_tunnel_url(self) -> None:
         """When the active URL is a tunnel URL, the welcome reports it."""
@@ -3307,14 +3339,12 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
     A fake ``cloudflared`` is put first on ``PATH`` (``_start_quick_tunnel``
     always spawns its own process, so pre-seeding ``_tunnel_proc`` would
     just be overwritten and the real cloudflared on the host would start a
-    live trycloudflare tunnel) and the foreign-process metrics scan is
-    stubbed out so a cloudflared of another kiss-web on this host cannot
-    hand the test a URL.
+    live trycloudflare tunnel).  Only the spawned process's own metrics
+    port is polled, so a cloudflared of another kiss-web on this host
+    cannot hand the test a URL.
     """
 
     async def asyncSetUp(self) -> None:
-        import kiss.server.web_server as ws_mod
-
         self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
@@ -3323,8 +3353,6 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
-        self._orig_discover = ws_mod._discover_tunnel_url_from_metrics
-        ws_mod._discover_tunnel_url_from_metrics = lambda: None  # type: ignore[assignment]
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -3335,9 +3363,6 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         import shutil
 
-        import kiss.server.web_server as ws_mod
-
-        ws_mod._discover_tunnel_url_from_metrics = self._orig_discover  # type: ignore[assignment]
         os.environ["PATH"] = self._old_path
         self.server._terminate_tunnel_proc()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -4394,58 +4419,6 @@ class TestFocusInputSendFails(IsolatedAsyncioTestCase):
         await asyncio.sleep(0.5)
 
 
-class TestDiscoverTunnelUrlEdgeCases(unittest.TestCase):
-    """Test _discover_tunnel_url_from_metrics when cloudflared may be running."""
-
-    def test_returns_url_or_none(self) -> None:
-        """Returns either a URL string or None."""
-        result = _discover_tunnel_url_from_metrics()
-        if result is not None:
-            self.assertTrue(result.startswith("https://"))
-
-
-class TestDiscoverTunnelFakePgrep(unittest.TestCase):
-    """Test _discover_tunnel_url_from_metrics with a fake pgrep on PATH."""
-
-    def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._old_path = os.environ.get("PATH", "")
-
-    def tearDown(self) -> None:
-        os.environ["PATH"] = self._old_path
-        import shutil
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def _write_fake_pgrep(self, script_body: str) -> None:
-        pgrep_path = os.path.join(self._tmpdir, "pgrep")
-        with open(pgrep_path, "w") as f:
-            f.write("#!/bin/bash\n" + script_body + "\n")
-        os.chmod(pgrep_path, 0o755)
-        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
-
-    def test_pgrep_exception_returns_none(self) -> None:
-        """When pgrep is not on PATH at all, returns None (line 310-311)."""
-        os.environ["PATH"] = self._tmpdir
-        result = _discover_tunnel_url_from_metrics()
-        self.assertIsNone(result)
-
-    def test_bad_metrics_port_parsing(self) -> None:
-        """ValueError/IndexError in port parsing is caught (lines 320-323)."""
-        self._write_fake_pgrep(
-            'echo "1234 cloudflared tunnel --metrics not_a_port"'
-        )
-        result = _discover_tunnel_url_from_metrics()
-        if result is not None:
-            self.assertTrue(result.startswith("https://"))
-
-    def test_no_cloudflared_running(self) -> None:
-        """pgrep returns empty output → tries default ports (line 339)."""
-        self._write_fake_pgrep('echo ""')
-        result = _discover_tunnel_url_from_metrics()
-        if result is not None:
-            self.assertTrue(result.startswith("https://"))
-
-
 class TestReadVersionNoMatch(unittest.TestCase):
     """``_read_version`` reports the bundled ``_version.py``."""
 
@@ -4791,8 +4764,17 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
 class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
-    def _start_with_fake_cloudflared(self, script: str) -> tuple[str | None, str]:
+    def _start_with_fake_cloudflared(
+        self,
+        script: str,
+        during_start: Callable[[int], Coroutine[Any, Any, None]] | None = None,
+    ) -> tuple[str | None, str]:
         """Run ``start()`` on a thread with *script* as ``cloudflared`` on PATH.
+
+        *during_start*, when given, runs (``asyncio.run``) on the
+        calling thread with the server's port while ``_setup_server``
+        is still deciding the tunnel outcome (a client connecting in
+        that window).
 
         Returns ``(active_url, local_url)`` as they were once
         ``_setup_server`` had decided the tunnel outcome (shutdown resets
@@ -4836,6 +4818,8 @@ class TestStartWithTunnel(unittest.TestCase):
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
+        if during_start is not None:
+            asyncio.run(during_start(server.port))
         self.assertTrue(started.wait(timeout=60), "server setup did not finish")
         active_url, local_url = server._active_url, server._local_url
 
@@ -4869,6 +4853,43 @@ class TestStartWithTunnel(unittest.TestCase):
         active_url, local_url = self._start_with_fake_cloudflared("#!/bin/bash\nexit 1\n")
         self.assertEqual(active_url, local_url)
 
+    def test_client_connected_during_tunnel_start_gets_url_pushed(self) -> None:
+        """A page that connects while cloudflared is still starting gets the URL pushed.
+
+        The listeners are up before the tunnel settles, and a page
+        that asks for the welcome info in that window is told ``""``.
+        ``_bind_listeners`` used to only write the URL file once the
+        tunnel was up and never broadcast, so such a page showed no
+        remote URL until the user reloaded it.
+        """
+        pushed: list[str] = []
+
+        async def _watch(port: int) -> None:
+            deadline = time.monotonic() + 30
+            ws = None
+            while ws is None and time.monotonic() < deadline:
+                try:
+                    ws = await connect(f"wss://127.0.0.1:{port}/ws", ssl=no_verify_ssl())
+                except OSError:
+                    await asyncio.sleep(0.1)
+            assert ws is not None, "listener never came up"
+            async with ws:
+                await ws.send(json.dumps({"type": "auth", "password": "test-secret"}))
+                while time.monotonic() < deadline:
+                    event = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                    if event.get("type") == "remote_url" and event.get("url"):
+                        pushed.append(event["url"])
+                        return
+
+        self._start_with_fake_cloudflared(
+            "#!/bin/bash\n"
+            "sleep 2\n"
+            'echo "INF https://pushed.trycloudflare.com" >&2\n'
+            "exec sleep 300\n",
+            during_start=_watch,
+        )
+        self.assertEqual(pushed, ["https://pushed.trycloudflare.com"])
+
 
 class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
     """Test stop_async when wait_closed times out."""
@@ -4895,105 +4916,6 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
             await ws.__aexit__(None, None, None)
         except Exception:
             pass
-
-
-@_FAKE_SCRIPT_ON_PATH
-class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
-    """Test _start_quick_tunnel fallback that discovers URL from metrics."""
-
-    async def asyncSetUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self.port = find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-        )
-        self._old_path = os.environ.get("PATH", "")
-        self._metrics_port = find_free_port()
-
-        class _MetricsHandler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802
-                if self.path == "/quicktunnel":
-                    body = json.dumps(
-                        {"hostname": "fallback-test.trycloudflare.com"}
-                    ).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                else:
-                    self.send_error(404)
-
-            def log_message(self, format: str, *args: object) -> None:  # type: ignore[override]  # noqa: A002
-                pass
-
-        self._metrics_server = HTTPServer(
-            ("127.0.0.1", self._metrics_port), _MetricsHandler,
-        )
-        self._metrics_thread = threading.Thread(
-            target=self._metrics_server.serve_forever, daemon=True,
-        )
-        self._metrics_thread.start()
-
-    async def asyncTearDown(self) -> None:
-        self._metrics_server.shutdown()
-        os.environ["PATH"] = self._old_path
-        if self.server._tunnel_proc is not None:
-            self.server._tunnel_proc.terminate()
-            try:
-                self.server._tunnel_proc.wait(timeout=5)
-            except Exception:
-                self.server._tunnel_proc.kill()
-            self.server._tunnel_proc = None
-        import shutil
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    @pytest.mark.slow
-    async def test_fallback_finds_url_from_metrics(self) -> None:
-        """When stderr has no URL, fallback poll finds it (1536-1539)."""
-        cf = os.path.join(self._tmpdir, "cloudflared")
-        with open(cf, "w") as f:
-            f.write(
-                "#!/bin/bash\n"
-                'echo "starting up..." >&2\n'
-                # exec: SIGTERM to the tracked pid must end the whole
-                # fake cloudflared, not orphan a ``sleep`` child.
-                "exec sleep 300\n"
-            )
-        os.chmod(cf, 0o755)
-        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
-
-        import kiss.server.web_server as ws_mod
-
-        original_fn = ws_mod._discover_tunnel_url_from_metrics
-
-        def _fake_discover() -> str | None:
-            import urllib.request
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{self._metrics_port}/quicktunnel",
-                    headers={"User-Agent": "kiss-web"},
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = json.loads(resp.read())
-                    hostname = data.get("hostname", "")
-                    if hostname and not hostname.startswith("api."):
-                        return f"https://{hostname}"
-            except Exception:
-                pass
-            return None
-
-        ws_mod._discover_tunnel_url_from_metrics = _fake_discover  # type: ignore[assignment]
-        try:
-            result = self.server._start_quick_tunnel()
-            self.assertEqual(
-                result, "https://fallback-test.trycloudflare.com",
-            )
-        finally:
-            ws_mod._discover_tunnel_url_from_metrics = original_fn  # type: ignore[assignment]
 
 
 class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
@@ -5386,7 +5308,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
 
 
 
-class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
+class TestQueryQuicktunnelHostnameFiltersApi(unittest.TestCase):
     """``_query_quicktunnel_hostname`` must filter out api.trycloudflare.com.
 
     Runs the REAL production function against a local HTTP server that

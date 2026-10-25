@@ -236,41 +236,27 @@ def server_cert_names(
 def issue_server_cert(
     cert_path: Path,
     key_path: Path,
-    ca_cert_path: Path,
-    ca_key_path: Path,
-    extra_ips: Iterable[str] = (),
-) -> None:
-    """Issue the server certificate signed by the local CA.
-
-    ECDSA P-256 key, 820-day validity, ``digitalSignature`` key usage
-    (RFC 5480 forbids ``keyEncipherment`` on EC keys), ``serverAuth``
-    extended key usage, SAN from :func:`server_cert_names`.  The key is
-    written before the certificate (see :func:`generate_local_ca` for
-    why).
-
-    Args:
-        cert_path: Where to write the PEM server certificate.
-        key_path: Where to write the PEM server private key (0600).
-        ca_cert_path: The CA certificate to chain to.
-        ca_key_path: The CA private key that signs the certificate.
-        extra_ips: LAN IP addresses to include in the SAN.
-    """
-    dns_names, ips = server_cert_names(extra_ips)
-    _issue_server_leaf(
-        cert_path, key_path, _load_certificate(ca_cert_path), _load_private_key(ca_key_path),
-        dns_names, ips,
-    )
-
-
-def _issue_server_leaf(
-    cert_path: Path,
-    key_path: Path,
     ca_cert: x509.Certificate,
     ca_key: ec.EllipticCurvePrivateKey,
     dns_names: list[str],
     ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
 ) -> None:
-    """Write the ``serverAuth`` certificate whose SAN lists *dns_names* and *ips*."""
+    """Issue the server certificate signed by the local CA.
+
+    ECDSA P-256 key, 820-day validity, ``digitalSignature`` key usage
+    (RFC 5480 forbids ``keyEncipherment`` on EC keys), ``serverAuth``
+    extended key usage, SAN listing *dns_names* and *ips* (see
+    :func:`server_cert_names`).  The key is written before the
+    certificate (see :func:`generate_local_ca` for why).
+
+    Args:
+        cert_path: Where to write the PEM server certificate.
+        key_path: Where to write the PEM server private key (0600).
+        ca_cert: The CA certificate to chain to.
+        ca_key: The CA private key that signs the certificate.
+        dns_names: DNS names for the SAN; the first is the Common Name.
+        ips: IP addresses for the SAN.
+    """
     san = x509.SubjectAlternativeName(
         [x509.DNSName(n) for n in dns_names] + [x509.IPAddress(ip) for ip in ips],
     )
@@ -362,38 +348,24 @@ def _usable_ca(
 def server_cert_is_current(
     cert_path: Path,
     key_path: Path,
-    ca_cert_path: Path,
-    required_ips: Iterable[str] = (),
-) -> bool:
-    """Return True when the server certificate needs no re-issue.
-
-    The certificate is current when it and its key exist and match, it is
-    not expiring within :data:`RENEWAL_THRESHOLD_DAYS`, it was signed by
-    the CA at *ca_cert_path*, and its SAN covers every address in
-    *required_ips* (plus the names of :func:`server_cert_names`).
-
-    Args:
-        cert_path: PEM server certificate.
-        key_path: PEM server private key.
-        ca_cert_path: PEM CA certificate the server cert must chain to.
-        required_ips: IP addresses (strings) that must be in the SAN.
-    """
-    try:
-        ca_cert = _load_certificate(ca_cert_path)
-    except Exception:
-        return False
-    dns_names, ips = server_cert_names(required_ips)
-    return _server_cert_is_current(cert_path, key_path, ca_cert, dns_names, ips)
-
-
-def _server_cert_is_current(
-    cert_path: Path,
-    key_path: Path,
     ca_cert: x509.Certificate,
     dns_names: list[str],
     ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
 ) -> bool:
-    """:func:`server_cert_is_current` for a loaded CA and the names already computed."""
+    """Return True when the server certificate needs no re-issue.
+
+    The certificate is current when it and its key exist and match, it is
+    not expiring within :data:`RENEWAL_THRESHOLD_DAYS`, *ca_cert* signed
+    it, and its SAN covers every name in *dns_names* and every address
+    in *ips* (as computed by :func:`server_cert_names`).
+
+    Args:
+        cert_path: PEM server certificate.
+        key_path: PEM server private key.
+        ca_cert: The CA certificate the server cert must chain to.
+        dns_names: DNS names that must be in the SAN.
+        ips: IP addresses that must be in the SAN.
+    """
     cert = _current_leaf(cert_path, key_path, ca_cert)
     if cert is None:
         return False
@@ -427,8 +399,8 @@ def _current_leaf(
     return cert
 
 
-def ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:
-    """Return the CA pair's paths in *tls_dir*, generating the CA when unusable.
+def ensure_local_ca(tls_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+    """Return the loaded CA pair of *tls_dir*, generating the CA when unusable.
 
     A regenerated CA must be trusted again by every browser and machine
     that trusted the old one, so replacing an existing (expiring or
@@ -439,14 +411,8 @@ def ensure_local_ca(tls_dir: Path) -> tuple[Path, Path]:
         tls_dir: The directory holding ``ca.pem`` / ``ca-key.pem``.
 
     Returns:
-        The CA certificate's and private key's paths, in that order.
+        The CA certificate and its private key, in that order.
     """
-    _ensure_ca(tls_dir)
-    return tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
-
-
-def _ensure_ca(tls_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
-    """:func:`ensure_local_ca`, returning the loaded (or just generated) CA pair."""
     ca_cert_path, ca_key_path = tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
     pair = _usable_ca(ca_cert_path, ca_key_path)
     if pair is not None:
@@ -476,7 +442,7 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
     Returns:
         ``(cert_path, key_path)`` of the client certificate to present.
     """
-    ca_cert, ca_key = _ensure_ca(tls_dir)
+    ca_cert, ca_key = ensure_local_ca(tls_dir)
     cert_path, key_path = tls_dir / CLIENT_CERT_FILE, tls_dir / CLIENT_KEY_FILE
     if _current_leaf(cert_path, key_path, ca_cert) is None:
         logger.info("Issuing the machine-link client certificate in %s", tls_dir)
@@ -571,17 +537,17 @@ def ensure_local_tls_pair(
     Returns:
         ``(cert_path, key_path)`` of the server certificate to load.
     """
-    ca_cert, ca_key = _ensure_ca(tls_dir)
+    ca_cert, ca_key = ensure_local_ca(tls_dir)
     cert_path = tls_dir / SERVER_CERT_FILE
     key_path = tls_dir / SERVER_KEY_FILE
     lan_ips = list(lan_ips)
     dns_names, ips = server_cert_names(lan_ips)
-    if not _server_cert_is_current(cert_path, key_path, ca_cert, dns_names, ips):
+    if not server_cert_is_current(cert_path, key_path, ca_cert, dns_names, ips):
         logger.info(
             "Issuing TLS server certificate in %s for LAN IPs %s",
             tls_dir, sorted(lan_ips),
         )
-        _issue_server_leaf(cert_path, key_path, ca_cert, ca_key, dns_names, ips)
+        issue_server_cert(cert_path, key_path, ca_cert, ca_key, dns_names, ips)
     return cert_path, key_path
 
 

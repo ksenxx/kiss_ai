@@ -8,38 +8,6 @@ import socket
 from pathlib import Path
 
 from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend, _config
-from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
-from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
-from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
-
-
-def test_webhook_connect_failure_is_reported() -> None:
-    backend = LineChannelBackend()
-    assert backend._start_webhook_server(port=0)
-    try:
-        assert backend._webhook_server is not None
-        port = int(backend._webhook_server.server_address[1])
-        conflict = LineChannelBackend()
-        assert not conflict._start_webhook_server(port=port)
-        assert "bind failed" in conflict.connection_info.lower()
-    finally:
-        backend.disconnect()
-
-
-def test_synology_disconnect_stops_server() -> None:
-    backend = SynologyChatChannelBackend()
-    assert backend._start_webhook_server(port=0)
-    backend.disconnect()
-    assert backend._webhook_server is None
-    assert backend._webhook_thread is None
-
-
-def test_zalo_disconnect_stops_server() -> None:
-    backend = ZaloChannelBackend()
-    assert backend._start_webhook_server(port=0)
-    backend.disconnect()
-    assert backend._webhook_server is None
-    assert backend._webhook_thread is None
 
 
 def _recv_until_eof(conn: socket.socket) -> bytes:

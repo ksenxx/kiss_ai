@@ -15,7 +15,11 @@ const {
   click,
   answerCheckPaths,
 } = require('./simplify2_harness');
-const {findLinks, findMissing} = require('./file_link_helpers');
+const {
+  findLinks,
+  findMissing,
+  existsOnRealFs,
+} = require('./file_link_helpers');
 
 // End-to-end tests: worktree_created / worktree_done must re-verify the
 // tab's file links.  A result rendered while the host had no
@@ -37,18 +41,9 @@ function checkPathsLikeHost(msg) {
   const fallback = fallbackDirs[String(msg.tabId)];
   if (fallback) roots.push(fallback);
   for (const p of msg.paths) {
-    let ok = false;
-    for (const root of roots) {
-      const abs = path.isAbsolute(p) ? p : path.resolve(root, p);
-      try {
-        const st = fs.statSync(abs);
-        ok = st.isFile() || st.isDirectory();
-      } catch {
-        ok = false;
-      }
-      if (ok) break;
-    }
-    results[p] = ok;
+    results[p] = roots.some(root =>
+      existsOnRealFs(path.isAbsolute(p) ? p : path.resolve(root, p)),
+    );
   }
   return results;
 }

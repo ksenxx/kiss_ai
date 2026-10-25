@@ -20,7 +20,9 @@ client on the local connection:
   here again and announces the unbinding;
 * a run that fans out: the sub-agent's ``new_tab`` is relayed, a
   client's ``resumeSession`` of the sub-task is forwarded and answered
-  with the sub-agent's transcript and ``subagentDone``, a surface
+  with the sub-agent tab's binding (``tabMachine``: the chat header
+  shows the machine for it as for its parent), the sub-agent's
+  transcript and ``subagentDone``, a surface
   joining meanwhile gets the running sub-agent announced
   (``openSubagentTab``) after the parent's replay, and closing the
   sub-agent tab leaves the parent bound;
@@ -442,28 +444,37 @@ class TestRemoteTabs(RemoteTabsHarness):
         """Connect a surface, send ``ready``, and collect its replay of *tab*.
 
         Returns the first ``tabMachine``, ``task_events`` of *tab*,
-        ``openSubagentTab`` under it and ``task_events`` of that
-        sub-agent tab (``sub_task_events``), by key.
+        ``openSubagentTab`` under it, the ``tabMachine`` of that
+        sub-agent tab (``sub_tabMachine``, announced before it) and its
+        ``task_events`` (``sub_task_events``), by key.
         """
         reader, writer = await open_local_connection(self.server)
         try:
             writer.write(json.dumps({"type": "ready", "restoredTabs": []}).encode() + b"\n")
             await writer.drain()
             seen: dict[str, dict[str, Any]] = {}
+            bindings: dict[str, dict[str, Any]] = {}  # every tabMachine, by tab
             for _ in range(400):
                 line = await asyncio.wait_for(reader.readline(), timeout=90.0)
                 msg = json.loads(line.decode("utf-8"))
                 kind = str(msg.get("type"))
+                if kind == "tabMachine":
+                    bindings.setdefault(str(msg["tabId"]), msg)
                 if msg.get("tabId") == tab and kind in ("tabMachine", "task_events"):
                     seen.setdefault(kind, msg)
                 elif kind == "openSubagentTab" and msg.get("parent_tab_id") == tab:
                     seen.setdefault(kind, msg)
+                    self.assertIn(
+                        msg["tab_id"], bindings,
+                        "the sub-agent tab's binding precedes its announcement",
+                    )
+                    seen["sub_tabMachine"] = bindings[msg["tab_id"]]
                 elif (
                     kind == "task_events" and "openSubagentTab" in seen
                     and msg.get("tabId") == seen["openSubagentTab"]["tab_id"]
                 ):
                     seen.setdefault("sub_task_events", msg)
-                if len(seen) == 4:
+                if len(seen) == 5:
                     return seen
             raise AssertionError(f"incomplete replay: {sorted(seen)}")
         finally:
@@ -504,6 +515,16 @@ class TestRemoteTabs(RemoteTabsHarness):
                     self.server._server_api.remote_tabs.machine_of(sub_tab), "box",
                     "the announced sub-agent tab joined the stream",
                 )
+                self.assertEqual(
+                    late["sub_tabMachine"]["machine"], "box",
+                    "the surface shows box for the sub-agent tab too",
+                )
+                # A second surface: the stream knows the sub-agent tab
+                # now (nothing to adopt), so its binding is replayed
+                # with the ready, still ahead of its transcript.
+                second = await self._late_surface(tab)
+                self.assertEqual(second["openSubagentTab"]["tab_id"], sub_tab)
+                self.assertEqual(second["sub_tabMachine"]["machine"], "box")
             if msg.get("type") == "status" and msg.get("tabId") == tab and not msg["running"]:
                 break
         # This surface's own resume of the child answered with the child's
@@ -517,6 +538,15 @@ class TestRemoteTabs(RemoteTabsHarness):
         types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
         self.assertTrue(resumed, f"no new_tab among {types}")
         self.assertIn(("task_events", child), types, "the sub-agent's transcript replayed")
+        # The sub-agent tab's binding is announced when it joins the
+        # stream, before its transcript: switching to the tab shows box
+        # in the chat header, not this machine.
+        self.assertIn(("tabMachine", child), types, "the sub-agent tab's binding announced")
+        self.assertLess(types.index(("tabMachine", child)), types.index(("task_events", child)))
+        self.assertEqual(
+            [m["machine"] for m in seen if m["type"] == "tabMachine" and m["tabId"] == child],
+            ["box"],
+        )
         self.assertIn(("subagentDone", child), types, "the sub-agent's end reached the tab")
         self.assertEqual(self.server._server_api.remote_tabs.machine_of(child), "box")
         # Closing the sub-agent tab (never in the local registry, so no
@@ -724,8 +754,34 @@ class TestRemoteTabs(RemoteTabsHarness):
         await self._send({
             "type": "resumeSession", "taskId": child_task, "tabId": sub, "parentTabId": tab,
         })
-        events = await self._until("task_events", sub)
+        # The sub-agent tab's binding is announced before its transcript,
+        # as the parent's was: the chat header shows box for it too.
+        seen = await self._replay_of(sub)
+        self.assertEqual(seen["tabMachine"]["machine"], "box")
+        events = seen["task_events"]
         self.assertEqual(str(events["task_id"]), child_task)
         self.assertIn(SUMMARY, json.dumps(events["events"]))
         self.assertEqual(remote_tabs.machine_of(sub), "box", "the sub-agent tab joined the stream")
         self.assertEqual(remote_tabs.machine_of(tab), "box")
+        # A surface connecting now (a reload restoring both tabs) learns
+        # the sub-agent tab's binding along with the parent's.
+        bindings = await self._late_bindings(tab, sub)
+        self.assertEqual(bindings, {tab: "box", sub: "box"})
+
+    async def _late_bindings(self, *tabs: str) -> dict[str, str]:
+        """Connect a surface, send ``ready``, and return the machine its replay binds *tabs* to."""
+        reader, writer = await open_local_connection(self.server)
+        try:
+            writer.write(json.dumps({"type": "ready", "restoredTabs": []}).encode() + b"\n")
+            await writer.drain()
+            bindings: dict[str, str] = {}
+            for _ in range(400):
+                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
+                msg = json.loads(line.decode("utf-8"))
+                if msg.get("type") == "tabMachine" and msg.get("tabId") in tabs:
+                    bindings.setdefault(str(msg["tabId"]), str(msg["machine"]))
+                if len(bindings) == len(tabs):
+                    return bindings
+            raise AssertionError(f"incomplete replay: {sorted(bindings)}")
+        finally:
+            writer.close()

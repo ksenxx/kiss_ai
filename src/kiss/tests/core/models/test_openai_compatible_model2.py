@@ -1017,11 +1017,12 @@ class TestUsageExtraction:
         )
         m.initialize("hi")
         _, resp = m.generate()
-        ip, op, cr, cw = m.extract_input_output_token_counts_from_response(resp)
+        ip, op, cr, cw, cw12h = m.extract_input_output_token_counts_from_response(resp)
         assert ip == 3
         assert op == 4
         assert cr == 2
         assert cw == 0
+        assert cw12h == 0
 
     def test_usage_handles_missing_details(self, capture_server: str) -> None:
         """Missing details blocks must default to zero, not crash."""
@@ -1040,11 +1041,10 @@ class TestUsageExtraction:
         m = OpenAICompatibleModel2(
             "gpt-4o", base_url=capture_server, api_key="k"
         )
-        ip, op, cr, cw = m.extract_input_output_token_counts_from_response(_Resp())
-        assert ip == 7 and op == 3 and cr == 0 and cw == 0
+        assert m.extract_input_output_token_counts_from_response(_Resp()) == (7, 3, 0, 0, 0)
 
     def test_usage_no_usage_returns_zeros(self, capture_server: str) -> None:
-        """A response without ``usage`` returns (0, 0, 0, 0)."""
+        """A response without ``usage`` returns all-zero counts."""
 
         class _Resp:
             usage = None
@@ -1053,7 +1053,7 @@ class TestUsageExtraction:
             "gpt-4o", base_url=capture_server, api_key="k"
         )
         assert m.extract_input_output_token_counts_from_response(_Resp()) == (
-            0, 0, 0, 0,
+            0, 0, 0, 0, 0,
         )
 
 
@@ -1458,6 +1458,7 @@ class TestReviewBugReproductions:
             5,
             10,
             7,
+            0,
         )
 
     def test_empty_assistant_message_not_resent(
@@ -7397,6 +7398,7 @@ class TestReviewBugReproductions37:
             5,
             10,
             7,
+            0,
         )
 
 
@@ -7808,7 +7810,7 @@ class TestModelSwitchingOutOfV2:
         """Gemini's converter handles v2 items (regression: KeyError('role'))."""
         m = GeminiModel(model_name="gemini-2.5-pro", api_key="k")
         m.conversation = copy.deepcopy(_V2_NATIVE_CONVERSATION)
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assert [c.role for c in contents] == ["user", "model", "user"]
         model_parts = contents[1].parts or []
         fcs = [p.function_call for p in model_parts if p.function_call is not None]

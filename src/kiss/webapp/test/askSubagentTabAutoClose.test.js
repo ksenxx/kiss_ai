@@ -30,13 +30,11 @@ const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {subagentTabEls} = require('./subagent_tab_helpers');
 
-const {send} = harness;
+const {send, readyTabId} = harness;
 
 function makePage() {
   const {win, posted} = harness.makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return {win, posted, parentId: ready.tabId};
+  return {win, posted, parentId: readyTabId(posted)};
 }
 
 function askAnswerPanels(win) {

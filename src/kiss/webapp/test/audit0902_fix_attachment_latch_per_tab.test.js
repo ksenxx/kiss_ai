@@ -30,16 +30,7 @@ const {
   settle,
   failDecode,
 } = require('./attachment_helpers');
-
-// Chat tabs have no row of their own any more: the Chats panel's pick
-// (switchToTab) is how the user gets back to a chat.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} is still there`,
-  );
-  win._testApi.switchToTab(tabId);
-}
+const {clickTab} = require('./simplify2_harness');
 
 async function main() {
   // The sourceURL is what the .coverage.js gate of this suite keys on.

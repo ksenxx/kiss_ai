@@ -172,43 +172,6 @@ def test_thinking_block_style_is_not_shared_between_threads() -> None:
     assert f"{_THINKING_ANSI}b" not in text, "plain tokens were styled as thinking"
 
 
-def test_reset_does_not_clear_another_threads_block_state() -> None:
-    """One agent starting a new turn must not restyle another's tokens.
-
-    ``reset()`` is called per turn.  With the block type shared, a
-    sub-agent starting its next turn wiped the thinking state of every
-    other sub-agent mid-block; only the cursor position, which really is
-    shared, may be reset globally.
-    """
-    buf = TtyStringIO()
-    printer = ConsolePrinter(file=buf)
-    a_is_thinking = threading.Event()
-    b_has_reset = threading.Event()
-    tokens = 10
-
-    def thinking_agent() -> None:
-        printer.thinking_callback(True)
-        a_is_thinking.set()
-        assert b_has_reset.wait(timeout=30)
-        for _ in range(tokens):
-            printer.token_callback("a")
-
-    def resetting_agent() -> None:
-        assert a_is_thinking.wait(timeout=30)
-        printer.reset()
-        assert printer._bash_streamed is False
-        assert printer._current_block_type == ""
-        assert printer._mid_line is False
-        b_has_reset.set()
-
-    _run_threads([
-        threading.Thread(target=thinking_agent),
-        threading.Thread(target=resetting_agent),
-    ])
-
-    assert buf.getvalue().count(f"{_THINKING_ANSI}a") == tokens
-
-
 def test_raw_writes_never_land_inside_another_threads_panel(
     fast_thread_switching: None,
 ) -> None:
@@ -321,30 +284,6 @@ def test_usage_offsets_start_at_zero_in_every_thread() -> None:
     assert "tokens=7" in text
     assert "cost=$0.2000" in text
     assert "steps=2" in text
-
-
-def test_usage_offsets_survive_a_reset_within_the_same_thread() -> None:
-    """The offsets belong to the sub-session, not to a single print call.
-
-    ``reset()`` runs once per turn while a sub-session keeps spending,
-    so clearing the snapshot there would make the panel under-report
-    everything the earlier turns of that session cost.
-    """
-    buf = io.StringIO()
-    printer = ConsolePrinter(file=buf)
-    printer.tokens_offset = 100
-    printer.budget_offset = 1.0
-    printer.steps_offset = 10
-
-    printer.reset()
-    printer.print(
-        "same thread", type="result", total_tokens=10, cost="$0.1000", step_count=1
-    )
-
-    text = buf.getvalue()
-    assert "tokens=110" in text
-    assert "cost=$1.1000" in text
-    assert "steps=11" in text
 
 
 def test_result_panel_uses_this_threads_token_offset_after_a_sibling_wrote() -> None:

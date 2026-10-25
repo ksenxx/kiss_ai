@@ -39,27 +39,10 @@ const {
   stubRaf,
   fakeMatchMedia,
 } = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
-let failures = 0;
+const {test, report} = makeRunner();
 
-async function test(name, fn) {
-  try {
-    await fn();
-    console.log(`  ok - ${name}`);
-  } catch (e) {
-    failures++;
-    console.log(`  FAIL - ${name}`);
-    console.log(`      ${e.stack || e.message}`);
-  }
-}
-
-/**
- * Boot a chat page with the given body attributes.  *storage*
- * pre-seeds localStorage before main.js runs (so a stored collapse
- * state or height is restored at boot); `url: null` opens an OPAQUE
- * origin, where jsdom's localStorage throws SecurityError exactly as a
- * browser's does.
- */
 // A third panel, added the way chat.html documents it: one more
 // section (header with a toggle, a body) plus its resizer.
 const EXTRA_SECTION =
@@ -74,6 +57,13 @@ const EXTRA_SECTION =
 
 const pages = [];
 
+/**
+ * Boot a chat page.  *storage* pre-seeds localStorage before main.js
+ * runs (so a stored collapse state or height is restored at boot);
+ * `url: null` opens an OPAQUE origin, where jsdom's localStorage throws
+ * SecurityError exactly as a browser's does; *extraSection* adds a
+ * third section the way chat.html documents it.
+ */
 function makePage(opts) {
   const {
     storage = {},
@@ -838,12 +828,7 @@ async function main() {
   });
 
   for (const win of pages) win.close();
-  if (failures) {
-    console.log(`\n${failures} test(s) failed`);
-    process.exitCode = 1;
-    return;
-  }
-  console.log('\nall metaPanelSections tests passed');
+  report('metaPanelSections');
 }
 
 main();

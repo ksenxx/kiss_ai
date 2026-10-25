@@ -209,9 +209,12 @@ Rules for this round:
 - Never remove a negative result, inflate a claim, or mention a review, a round or an
   earlier version in the paper. State a point you cannot answer with evidence as a
   limitation in the paper.
-- Report back: the `.tex` and `.pdf` paths, the page count, the gate counts, each
-  experiment run with its numbers, and (for a revision) one line per weakness of the
-  review: fixed (where), experiment run (numbers), or declined (why).
+- Report back in at most 300 words: the `.tex` and `.pdf` paths, the page count, the
+  gate counts, each experiment run with its numbers, and (for a revision) one line per
+  weakness of the review: fixed (where), experiment run (numbers), or declined (why).
+  Longer detail (verified citations, full reviewer findings) goes to
+  `<paper dir>/tmp/writer-report-round<N>.md` on disk, not into the report: the
+  coordinator reads the report every round and keeps it in context.
 - Do not run a review of your own in this round; an independent reviewer follows.
 - Stay within this session's budget; when it runs short, finish with the paper building
   and report what is left undone.
@@ -337,7 +340,10 @@ End the review with the venue's score lines (one per line, as the venue's form n
 them) followed by one final line of exactly this form:
 Recommendation: <{choices}>
 Choose the recommendation the venue's area chair would read from your review; \
-"{TARGET_VERDICT}" only for a paper you would argue for at the meeting."""
+"{TARGET_VERDICT}" only for a paper you would argue for at the meeting.
+
+Report back in at most 150 words: the output path, the word count, the score lines and \
+the Recommendation line. The review text itself stays in the file; do not repeat it."""
 
 
 _RECOMMENDATION = re.compile(r"^\s*Recommendation\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)

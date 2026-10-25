@@ -25,36 +25,14 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {makeWorkDirPage, pendingCounts} = require('./file_link_helpers');
 const {clickTab} = harness;
 
 const {send} = harness;
 const WORK_DIR = '/tmp/kiss-link-reissue';
 
-function makePage() {
-  const page = harness.makePage();
-  send(page.win, {
-    type: 'configData',
-    config: {work_dir: WORK_DIR},
-    apiKeys: {},
-  });
-  page.win._testApi.endLaunch();
-  return page;
-}
-
-function sendToolResult(win, tabId, content, workDir) {
-  send(win, {
-    type: 'tool_result',
-    content,
-    tabId,
-    workDir: workDir === undefined ? WORK_DIR : workDir,
-  });
-}
-
-// The probe's object is built in the JSDOM realm; copy it into this one
-// so deepStrictEqual compares values rather than prototypes.
-function counts(win) {
-  const c = win._testApi.pendingFileLinkCounts();
-  return {spans: c.spans, checks: c.checks};
+function sendToolResult(win, tabId, content) {
+  send(win, {type: 'tool_result', content, tabId, workDir: WORK_DIR});
 }
 
 function checkPathCommands(posted) {
@@ -78,7 +56,7 @@ function reconnect(win) {
 // The task finished, so no further panel will ever mention the path
 // again: the reconnect is the last chance those links have.
 function testReconnectReissuesTheLostCheck() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
   const tabId = win._testApi.getActiveTabId();
 
   sendToolResult(win, tabId, 'wrote ./src/foo.py and ./src/bar.py');
@@ -121,7 +99,7 @@ function testReconnectReissuesTheLostCheck() {
     'and grey out the missing one',
   );
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 0, checks: 0},
     'the reissued round trip must leave nothing behind',
   );
@@ -133,7 +111,7 @@ function testReconnectReissuesTheLostCheck() {
 // under, and a reply only resolves spans stamped with the same pair.
 // The reissue must keep both stamps or it resolves nothing.
 function testReissueIsGroupedByTabAndWorkDir() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
@@ -171,7 +149,7 @@ function testReissueIsGroupedByTabAndWorkDir() {
     results: {'./src/b.py': true},
   });
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 1, checks: 1},
     "answering one tab must not clear the other tab's outstanding span",
   );
@@ -188,7 +166,7 @@ function testReissueIsGroupedByTabAndWorkDir() {
 // reconnects at once after a daemon restart, and a needless burst from
 // each of them is exactly what the backoff work was about.
 function testReconnectWithNothingOutstandingIsSilent() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
   const tabId = win._testApi.getActiveTabId();
 
   sendToolResult(win, tabId, 'wrote ./src/answered.py');
@@ -198,7 +176,7 @@ function testReconnectWithNothingOutstandingIsSilent() {
     workDir: WORK_DIR,
     results: {'./src/answered.py': true},
   });
-  assert.deepStrictEqual(counts(win), {spans: 0, checks: 0});
+  assert.deepStrictEqual(pendingCounts(win), {spans: 0, checks: 0});
 
   outage(win);
   posted.length = 0;
@@ -215,7 +193,7 @@ function testReconnectWithNothingOutstandingIsSilent() {
 // A tab closed during the outage took its spans with it; the reconnect
 // must not resurrect them.
 function testClosedTabIsNotReissued() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();

@@ -35,12 +35,14 @@ it runs in a short-lived subprocess
 result is cached for :data:`APPS_STATUS_TTL_SECONDS`; concurrent
 requests share one probe.  Probing the machines pings each one through
 its cached daemon link (concurrently, one thread per machine) and the
-result is cached for :data:`MACHINES_STATUS_TTL_SECONDS`.
+result is cached for :data:`MACHINES_STATUS_TTL_SECONDS` (for
+:data:`MACHINES_DOWN_TTL_SECONDS` while a machine is unreachable).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import socket
 import threading
 import time
@@ -61,6 +63,11 @@ logger = logging.getLogger(__name__)
 
 APPS_STATUS_TTL_SECONDS = 30.0
 MACHINES_STATUS_TTL_SECONDS = 60.0
+# How long a report with an unreachable machine is served before the
+# machines are pinged again: a laptop back from sleep has its machines
+# within seconds of the network returning, and the link's back-off
+# keeps a machine that is really down cheap to ask again.
+MACHINES_DOWN_TTL_SECONDS = 10.0
 # Longest a machine row waits for its host name to resolve (:func:`_resolve_ip`).
 DNS_TIMEOUT_SECONDS = 2.0
 # Seconds ``codex login --device-auth`` may take to print its code
@@ -282,7 +289,8 @@ def machines_report(
     and is always reachable.  The registered rows are pinged in
     parallel (each through its cached :class:`~kiss.agents.sorcar.machines.MachineLink`,
     whose backoff keeps an offline machine cheap) and cached for
-    :data:`MACHINES_STATUS_TTL_SECONDS`; *refresh* pings again, and
+    :data:`MACHINES_STATUS_TTL_SECONDS`, or :data:`MACHINES_DOWN_TTL_SECONDS`
+    when a machine was unreachable; *refresh* pings again, and
     so does a registry that changed since the cached ping (a machine
     a ``/machine add`` task or the CLI registered, which never goes
     through :func:`machine_action`).  Blocks for the slowest ping, so
@@ -305,8 +313,13 @@ def machines_report(
     requested_at = time.time()
     with _machines_lock:
         registered = machines.load_machines()
+        ttl = (
+            MACHINES_DOWN_TTL_SECONDS
+            if any(row["status"] == "unreachable" for _machine, row in _machines_cache)
+            else MACHINES_STATUS_TTL_SECONDS
+        )
         if (
-            time.time() - _machines_checked_at >= MACHINES_STATUS_TTL_SECONDS
+            time.time() - _machines_checked_at >= ttl
             or (refresh and _machines_checked_at < requested_at)
             or [machine for machine, _row in _machines_cache] != registered
         ):
@@ -368,7 +381,11 @@ def machine_work_dirs(name: str, work_dir: str = "") -> dict[str, Any]:
     (``setWorkDir`` with ``reply: true``, which answers with the same
     ``configData`` once adopted).  ``recent_work_dirs`` is the
     machine's own list: the directories that still exist there, most
-    recently selected first.
+    recently selected first.  ``maxBudget`` is the machine's configured
+    default task budget (``config.max_budget``): what a task submitted
+    to the machine without a budget of its own runs under, which the
+    task-info panel shows for a chat headed there before its task has
+    settings; ``None`` when the machine's config names no finite one.
 
     Args:
         name: The registered machine (its name or host).
@@ -377,11 +394,13 @@ def machine_work_dirs(name: str, work_dir: str = "") -> dict[str, Any]:
 
     Returns:
         ``{"machine": name, "workDir": ..., "recentWorkDirs": [{"path",
-        "ts"}, ...], "error": ""}``, or with ``error`` set (and the
-        other fields empty) when the machine is not registered, is
-        unreachable or refused.
+        "ts"}, ...], "maxBudget": <number or None>, "error": ""}``, or
+        with ``error`` set (and the other fields empty) when the
+        machine is not registered, is unreachable or refused.
     """
-    reply: dict[str, Any] = {"machine": name, "workDir": "", "recentWorkDirs": [], "error": ""}
+    reply: dict[str, Any] = {
+        "machine": name, "workDir": "", "recentWorkDirs": [], "maxBudget": None, "error": "",
+    }
     machine = machines.find_machine(name)
     if machine is None:
         reply["error"] = f"no machine named {name!r}"
@@ -399,6 +418,9 @@ def machine_work_dirs(name: str, work_dir: str = "") -> dict[str, Any]:
         row for row in config.get("recent_work_dirs") or []
         if isinstance(row, dict) and isinstance(row.get("path"), str)
     ]
+    budget = config.get("max_budget")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool) and math.isfinite(budget):
+        reply["maxBudget"] = budget
     return reply
 
 
@@ -489,9 +511,9 @@ def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     timeout, lane = machines.REQUEST_TIMEOUT, ""
     if reply_type == "codexLogin":
         timeout, lane = timeout + _CODEX_LOGIN_TIMEOUT_SECONDS, "login"
-    reply = _machine_reply(name, cmd, reply_type, {}, errors=True, timeout=timeout, lane=lane)
-    reply["forwarded"] = True
-    return reply
+    return _machine_reply(
+        name, cmd, reply_type, {}, errors=True, timeout=timeout, lane=lane, forwarded=True,
+    )
 
 
 MACHINE_PANEL_REPLIES: dict[str, str] = {
@@ -548,17 +570,42 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     timeout = machines.REQUEST_TIMEOUT
     if reply_type == "appsStatus":
         timeout += PROBE_PROCESS_TIMEOUT_SECONDS
-    reply = _machine_reply(
-        name, cmd, reply_type, refused, errors=True, timeout=timeout, lane="panels",
+    return _machine_reply(
+        name, cmd, reply_type, refused,
+        errors=True, timeout=timeout, lane="panels", forwarded=True,
     )
-    reply["forwarded"] = True
-    return reply
+
+
+def machine_task_update_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the task-info panel's ``getTaskUpdate`` *cmd* to registered machine *name*.
+
+    The panel's Task update subpanel polls for the update of the task
+    running in the visible tab.  A tab bound to a machine
+    (:mod:`kiss.server.remote_tabs`) runs its tasks there under the
+    same tab id, so the machine's daemon owns the update (it runs the
+    update agent, holds the report and answers the poll's
+    ``knownSig``/``refresh`` as it would for its own chat page); the
+    command is sent to it minus ``machine`` and this daemon's
+    ``connId``, on the ``panels`` link lane the sidebar subpanels' polls
+    use, so a submit to the machine never waits behind it.  The reply
+    comes back stamped ``machine``.
+
+    Returns:
+        The machine's ``taskUpdate``, or an ``exists: false`` one (the
+        subpanel hides, as for a tab without a running task) carrying
+        the command's ``tabId`` and ``token`` and the ``error`` when the
+        machine is not registered or unreachable.
+    """
+    refused: dict[str, Any] = {k: cmd[k] for k in ("tabId", "token") if k in cmd}
+    refused.update({"taskId": "", "exists": False, "sig": "", "content": ""})
+    return _machine_reply(name, cmd, "taskUpdate", refused, lane="panels")
 
 
 MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
     **dict.fromkeys(MACHINE_WORKSPACE_REPLIES, machine_workspace_reply),
     **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
+    "getTaskUpdate": machine_task_update_reply,
 }
 """Every command a registered machine answers when it carries ``machine``, by its forwarder."""
 
@@ -595,7 +642,11 @@ def machine_autocommit(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
 
 def _machine_reply(
     name: str, cmd: dict[str, Any], reply_type: str, refused: dict[str, Any],
-    *, errors: bool = False, timeout: float = machines.REQUEST_TIMEOUT, lane: str = "",
+    *,
+    errors: bool = False,
+    timeout: float = machines.REQUEST_TIMEOUT,
+    lane: str = "",
+    forwarded: bool = False,
 ) -> dict[str, Any]:
     """Forward *cmd* to registered machine *name* and return its *reply_type* reply.
 
@@ -610,21 +661,24 @@ def _machine_reply(
     Returns:
         The machine's reply, or *refused* completed with the
         ``type`` and the ``error`` when the machine is not registered
-        or unreachable; either stamped ``machine``.
+        or unreachable; either stamped ``machine`` (and ``forwarded``
+        when *forwarded*, for the panels that show where it came from).
     """
-    forwarded = {k: v for k, v in cmd.items() if k not in ("machine", "connId")}
+    payload = {k: v for k, v in cmd.items() if k not in ("machine", "connId")}
     machine = machines.find_machine(name)
     try:
         if machine is None:
             raise machines.MachineError(f"no machine named {name!r}")
         reply = machines.link_for(machine, lane).request(
-            forwarded, reply_type, timeout, errors=errors,
+            payload, reply_type, timeout, errors=errors,
         )
         if cmd["type"] == "saveConfig":
             _adopt_machine_password(machine, reply)
     except machines.MachineError as exc:
         reply = {**refused, "type": reply_type, "error": str(exc)}
     reply["machine"] = name
+    if forwarded:
+        reply["forwarded"] = True
     return reply
 
 

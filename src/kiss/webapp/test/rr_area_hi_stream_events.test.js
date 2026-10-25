@@ -13,18 +13,24 @@
 //   CANCELLED when its panel closes (tool_call / tool_result), not just
 //   zeroed — an orphaned callback fires against the NEXT tool's panel.
 
-/* global require, process, console, __dirname, global, setTimeout, clearTimeout */
-
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sleep, waitFor} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  waitFor,
+  captureTimers,
+} = require('./simplify2_harness');
 
 // main.js showSpinner() arms the wait spinner 250 ms after a transcript
-// event; a negative "the spinner was not re-armed" check has to outwait
-// that delay.
+// event; a negative "the spinner was not re-armed" check looks for that
+// timer instead of outwaiting it.
 const SPINNER_DELAY_MS = 250;
-const SPINNER_SETTLE_MS = SPINNER_DELAY_MS + 150;
+
+function spinnerTimers(timers) {
+  return timers.filter(t => t.ms === SPINNER_DELAY_MS).length;
+}
 
 function startRunningTask(win, posted, taskId) {
   const tabId = posted.find(m => m.type === 'ready').tabId;
@@ -52,6 +58,7 @@ async function testVoiceMessagesDoNotDisturbTranscript() {
   );
   spinner.classList.remove('active');
   const transcriptBefore = O.innerHTML;
+  const timers = captureTimers(win);
 
   for (const msg of [
     {type: 'voiceWake', roundId: 1},
@@ -62,27 +69,26 @@ async function testVoiceMessagesDoNotDisturbTranscript() {
   ]) {
     send(win, msg);
   }
-  // Negative check: outwait the spinner delay so a wrongly re-armed
-  // spinner would have come on by now.
-  await sleep(SPINNER_SETTLE_MS);
-
   assert.strictEqual(
     O.innerHTML,
     transcriptBefore,
     'non-transcript host messages must not touch the transcript',
   );
   assert.strictEqual(
-    spinner.classList.contains('active'),
-    false,
+    spinnerTimers(timers),
+    0,
     'non-transcript host messages must not re-arm the wait spinner',
   );
+  assert.ok(!spinner.classList.contains('active'));
 
-  // Transcript-bearing types still render through the same branch.
+  // Transcript-bearing types still render through the same branch, and
+  // do arm the spinner (the capture above sees the timer).
   send(win, {type: 'system_output', text: 'more output\n', tabId, taskId: '123'});
   assert.ok(
     O.textContent.includes('more output'),
     'whitelisted transcript types must keep rendering',
   );
+  assert.strictEqual(spinnerTimers(timers), 1, 'transcript output re-arms it');
   win.close();
   console.log('  ok - voice/unknown messages bypass the transcript pipeline');
 }

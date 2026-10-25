@@ -29,6 +29,7 @@ from kiss.agents.sorcar.docker_manager import (
 )
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.agents.sorcar.useful_tools import _truncate_output
+from kiss.core.config import DEFAULT_CONFIG
 
 
 def host_bash(command: str, description: str, timeout_seconds: float = 30) -> str:
@@ -224,8 +225,9 @@ class TestDockerManagerHelpers(unittest.TestCase):
         self.assertEqual(first.decode(raw[1:]), "\u00e9")
 
     def test_truncation_cap_matches_useful_tools(self) -> None:
-        """The docker default cap is the same 50 000 chars UsefulTools uses."""
-        self.assertEqual(MAX_OUTPUT_CHARS, 50000)
+        """The docker default cap is the configured default UsefulTools uses."""
+        self.assertEqual(MAX_OUTPUT_CHARS, DEFAULT_CONFIG.tool_output_default_chars)
+        self.assertEqual(MAX_OUTPUT_CHARS, 8000)
         truncated = _truncate_output("x" * 200000, MAX_OUTPUT_CHARS)
         self.assertLessEqual(len(truncated), MAX_OUTPUT_CHARS)
         self.assertIn("truncated", truncated)

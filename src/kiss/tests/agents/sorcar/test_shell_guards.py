@@ -30,6 +30,7 @@ from kiss.agents.sorcar.shell_guards import (
     INSTALL_TIMEOUT_SECONDS,
     destructive_command_guard,
     lift_install_timeout,
+    refuse_or_lift,
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.tests.agents.sorcar.docker_test_containers import (
@@ -67,6 +68,27 @@ BLOCKED = [
     "sudo -n sudo -n rm -rf {wd}",
     'rm -rf "{wd}"',
     "rm -rf \"some dir\" {wd}",
+    # spellings the coding SEA's harness used to pin on its own
+    "sleep 1; kill -1",
+    "pkill -9 -f .",
+    "pkill -f '.' && ls",
+    "cd /tmp && rm -rf {wd}/*",
+    "rm -rf /",
+    "(rm -r {wd})",
+    "/bin/kill -9 -1",
+    "kill -9 -1 >/dev/null",
+    "kill -9 -1 # stop all",
+    "kill -s KILL -1",
+    "/usr/bin/pkill -f .",
+    "pkill -f . 2>/dev/null",
+    "pkill --full .",
+    "pkill -f '.*'",
+    "rm -rf '{wd}'",
+    "/bin/rm -rf {wd}",
+    "rm -rf {wd} >/dev/null",
+    "rm -rf {wd} /tmp/x",
+    "sudo rm -rf {wd}/",
+    "FOO=1 kill -9 -1",
 ]
 
 ALLOWED = [
@@ -100,6 +122,17 @@ ALLOWED = [
     "rm -rf '/ backup'",
     "pkill -f '. server'",
     "env DEBUG=1 rm -rf {wd}/build",
+    # spellings the coding SEA's harness used to pin on its own
+    "kill -9 1234",
+    "kill -1 $(cat /tmp/pid)",
+    "kill -1 %1",
+    "pkill -f python3",
+    "rm -rf {wd}/*.o",
+    "ls {wd}",
+    "printf '%s\\n' 'kill -9 -1'",
+    'echo "pkill -f ."',
+    "grep -F 'rm -rf {wd}' README.md",
+    "echo ok # rm -rf {wd}",
 ]
 
 
@@ -158,6 +191,14 @@ def test_install_timeout_lift() -> None:
                     "pip list", "echo make", "uv run pytest tests/test_build.py",
                     "npm test # not a build", "go run build.go"]:
         assert lift_install_timeout(command, 30) == 30, command
+
+
+def test_refuse_or_lift_combines_both_guards(tmp_path: Path) -> None:
+    """``refuse_or_lift`` returns the verdict and the lifted deadline in one call."""
+    wd = str(tmp_path)
+    assert refuse_or_lift(f"rm -rf {wd}", wd, 30) == (DESTRUCTIVE_VERDICT, 30)
+    assert refuse_or_lift("pip install requests", wd, 30) == (None, INSTALL_TIMEOUT_SECONDS)
+    assert refuse_or_lift("echo hi", wd, 30) == (None, 30)
 
 
 def test_bash_refuses_destructive_commands_without_running_them(tmp_path: Path) -> None:

@@ -17,7 +17,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send, waitFor, captureTimers} = require('./simplify2_harness');
 
 const SIGNIN = {
   type: 'signin',
@@ -150,14 +150,20 @@ async function runTests() {
       assert.strictEqual(buttons(win).length, 2);
       // The daemon's focusInput (sent with the ready sequence, so right
       // around the signin) must not pull the keyboard from the window
-      // to the composer behind it.
+      // to the composer behind it, now or through its 100 / 300 ms
+      // retries (focusInputWithRetry in main.js), which it must not arm.
       buttons(win)[0].focus();
+      const timers = captureTimers(win);
       send(win, {type: 'focusInput'});
-      await new Promise(r => setTimeout(r, 450));
       assert.strictEqual(
         win.document.activeElement,
         buttons(win)[0],
         'focusInput leaves the keyboard on the sign-in window',
+      );
+      assert.deepStrictEqual(
+        timers.filter(t => t.ms === 100 || t.ms === 300),
+        [],
+        'focusInput arms no focus retry while the window is up',
       );
       // Once dismissed, a missing title falls back to "Sign in".
       win.document.getElementById('signin-modal-later').click();

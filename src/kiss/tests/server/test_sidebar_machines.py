@@ -165,6 +165,22 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             [row["status"] for row in refreshed["machines"]],
             ["reachable", "reachable", "unreachable", "unreachable"],
         )
+        # A report with an unreachable machine is served for
+        # MACHINES_DOWN_TTL_SECONDS only (not the full TTL): a machine
+        # back within seconds (the laptop woke) is not shown red for a
+        # minute.  Ageing the probe past the short window makes the
+        # next request ping again; the dead rows cost no dial (the links
+        # are backed off), so it answers at once.
+        with sidebar_panels._machines_lock:
+            sidebar_panels._machines_checked_at -= sidebar_panels.MACHINES_DOWN_TTL_SECONDS
+        started = time.monotonic()
+        repinged = await self._machines()
+        self.assertLess(time.monotonic() - started, mach.REQUEST_TIMEOUT)
+        self.assertGreater(repinged["checkedAt"], refreshed["checkedAt"])
+        self.assertEqual(
+            [row["status"] for row in repinged["machines"]],
+            ["reachable", "reachable", "unreachable", "unreachable"],
+        )
 
     async def _next_pushed(self, reply_type: str, timeout: float) -> dict[str, Any]:
         """Return the next *reply_type* message the daemon sends unasked."""

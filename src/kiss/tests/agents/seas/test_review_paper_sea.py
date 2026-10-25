@@ -44,8 +44,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-_SEA_PATH = Path(review_paper_sea.__file__).resolve()
-
 # Page one imitates a conference template: 24 margin line numbers in runs of 8 around
 # the text, plus a short table column (500, 501, 502) that must survive.
 _PAGE_ONE = (
@@ -188,14 +186,6 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert names[: len(write_paper_sea._GATES) - 1] == [
         g[0] for g in write_paper_sea._GATES if g[0] != "draft and review talk"
     ]
-
-
-def test_slash_review_paper_resolves_to_the_bundled_sea() -> None:
-    """``/review_paper <instructions>`` resolves to the instructions and this file."""
-    assert sea_commands.get_command("review_paper") == _SEA_PATH
-    assert sea_commands.slash_command_task("/review_paper Review x.pdf for ICLR") == (
-        "Review x.pdf for ICLR", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([ReviewPaperSea()])
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="poppler not installed")

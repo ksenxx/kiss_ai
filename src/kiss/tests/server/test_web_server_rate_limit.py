@@ -173,11 +173,12 @@ class TestStderrReaderLoopSignature(unittest.TestCase):
     """The optional ``rate_limit_flag`` parameter must be supported."""
 
     def test_stderr_reader_loop_accepts_rate_limit_flag(self) -> None:
+        # The thread target has one caller (``_read_url_from_stderr``)
+        # that always passes the flag, so it carries no default.
         sig = inspect.signature(_stderr_reader_loop)
         self.assertIn("rate_limit_flag", sig.parameters)
-        self.assertIsNone(
-            sig.parameters["rate_limit_flag"].default,
-            "rate_limit_flag must default to None",
+        self.assertIs(
+            sig.parameters["rate_limit_flag"].default, inspect.Parameter.empty,
         )
 
     def test_read_url_from_stderr_accepts_rate_limit_flag(self) -> None:

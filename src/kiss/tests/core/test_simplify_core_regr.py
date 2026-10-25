@@ -26,7 +26,7 @@ from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
-from kiss.core.printer import parse_result_yaml
+from kiss.core.printer import cost_fields, parse_result_yaml
 from kiss.core.utils import (
     config_to_dict,
 )
@@ -94,13 +94,10 @@ class BaseSaveRegression(unittest.TestCase):
             finally:
                 config_module._artifact_dir = original
 
-    def test_get_trajectory_json(self) -> None:
+    def test_add_message_records_timestamp(self) -> None:
         agent = Base("regr json")
         agent._add_message("user", "hi", timestamp=42)
-        import json
-
-        msgs = json.loads(agent.get_trajectory())
-        self.assertEqual(msgs[0]["timestamp"], 42)
+        self.assertEqual(agent.messages[0]["timestamp"], 42)
 
 
 def _make_printer() -> tuple[ConsolePrinter, io.StringIO]:
@@ -228,12 +225,20 @@ class ConsolePrinterRegression(unittest.TestCase):
         p2.print("", type="result")
         self.assertIn("(no result)", buf2.getvalue())
 
-    def test_apply_budget_offset_non_dollar(self) -> None:
-        p, _ = _make_printer()
+    def test_cost_fields_offsets_dollar_costs_only(self) -> None:
+        self.assertEqual(cost_fields("N/A", None, 1.0), ("N/A", None))
+        self.assertEqual(cost_fields("$bad", None, 1.0), ("$bad", None))
+        self.assertEqual(cost_fields("$1.0", None, 1.0), ("$2.0000", 2.0))
+        self.assertEqual(cost_fields("N/A", 0.5, 1.0), ("$1.5000", 1.5))
+
+    def test_result_panel_prefers_exact_cost_usd(self) -> None:
+        p, buf = _make_printer()
         p.budget_offset = 1.0
-        self.assertEqual(p._apply_budget_offset("N/A"), "N/A")
-        self.assertEqual(p._apply_budget_offset("$bad"), "$bad")
-        self.assertEqual(p._apply_budget_offset("$1.0"), "$2.0000")
+        p.print("done", type="result", cost="$0.1234", cost_usd=0.5)
+        self.assertIn("cost=$1.5000", buf.getvalue())
+        p2, buf2 = _make_printer()
+        p2.print("done", type="result", cost="N/A")
+        self.assertIn("cost=N/A", buf2.getvalue())
 
     def test_thinking_and_token_callbacks(self) -> None:
         p, buf = _make_printer()
@@ -245,14 +250,6 @@ class ConsolePrinterRegression(unittest.TestCase):
         self.assertIn("Thinking", out)
         self.assertIn("pondering", out)
         self.assertIn("answer text", out)
-
-    def test_reset_clears_state(self) -> None:
-        p, _ = _make_printer()
-        p.print("x", type="bash_stream")
-        p.reset()
-        self.assertFalse(p._bash_streamed)
-        self.assertFalse(p._mid_line)
-        self.assertEqual(p._current_block_type, "")
 
     def test_unknown_type_is_a_no_op(self) -> None:
         p, buf = _make_printer()

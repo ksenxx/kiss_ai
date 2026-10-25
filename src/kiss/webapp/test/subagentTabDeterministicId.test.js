@@ -32,16 +32,13 @@
 'use strict';
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, readyTabId} = require('./simplify2_harness');
 const {subagentTabEls} = require('./subagent_tab_helpers');
 const {makeWebappClient} = require('./transport_page_helpers');
 
 /** Boot a client, start the parent task, and return the parent tab id. */
 function bootParent(client) {
-  const posted = client.drain();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the client must post ready with a tabId');
-  const parentId = ready.tabId;
+  const parentId = readyTabId(client.drain());
   send(client.win, {
     type: 'status',
     running: true,

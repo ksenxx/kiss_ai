@@ -12,7 +12,10 @@
 // for the wake cooldown and a ledger of the page's safety timers.
 
 const assert = require('assert');
-const {makePage, sleep, stubRaf} = require('./simplify2_harness');
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require('jsdom');
+const {makePage, sleep, stubRaf, MEDIA} = require('./simplify2_harness');
 
 const VOICE_CFG = {
   voskSrc: '/media/vosk.js',
@@ -277,9 +280,33 @@ function fireTimer(page, ms) {
   live[0].cb();
 }
 
+/**
+ * A bare jsdom window running only media/voice.js: the mic button and
+ * the task textarea, `window.__VOICE__ = cfg`, then `beforeScript(win)`
+ * for the suite's stubs (fake mediaDevices, Vosk, timers, listeners)
+ * before the script is injected.  Returns the window.
+ */
+function makeBareVoiceWindow(cfg, beforeScript) {
+  const dom = new JSDOM(
+    '<!DOCTYPE html><html><body>' +
+      '<button id="voice-btn" class="toggle-btn"></button>' +
+      '<textarea id="task-input"></textarea>' +
+      '</body></html>',
+    {runScripts: 'dangerously', url: 'https://localhost/'},
+  );
+  const win = dom.window;
+  win.__VOICE__ = cfg;
+  if (beforeScript) beforeScript(win);
+  const script = win.document.createElement('script');
+  script.textContent = fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf-8');
+  win.document.body.appendChild(script);
+  return win;
+}
+
 module.exports = {
   VOICE_CFG,
   makeVoicePage,
+  makeBareVoiceWindow,
   micBtn,
   startMic,
   startPipeline,

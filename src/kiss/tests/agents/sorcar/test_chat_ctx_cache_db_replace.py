@@ -19,17 +19,24 @@ database's task/result text as ghost-text context — and because the
 cache is checked BEFORE any database access, no later ``_get_db()``
 reconnect could ever heal it for a cached ``chat_id``.
 
+The converse is pinned too: a TRANSIENT ``stat`` failure (identity
+``_FILE_ID_UNKNOWN``, "assume unchanged") must not reset the caches
+from this path either, exactly as ``_get_db()`` ignores it.
+
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import time
 import uuid
 from pathlib import Path
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
@@ -121,3 +128,37 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
         assert _load_chat_context_text(chat_id) == first
         th._invalidate_chat_context_cache(chat_id)
         assert "sneaky task" in _load_chat_context_text(chat_id)
+
+    @pytest.mark.skipif(
+        os.name != "posix" or os.geteuid() == 0,
+        reason="needs POSIX directory permissions that a non-root user cannot bypass",
+    )
+    def test_transient_stat_failure_keeps_caches(self) -> None:
+        """A ``stat`` that fails with EACCES is not a replaced database.
+
+        The ghost-text path checks the file identity on every
+        keystroke; an unsearchable parent directory makes that
+        ``os.stat`` raise ``PermissionError``, which
+        ``_db_file_identity`` reports as ``_FILE_ID_UNKNOWN``.  The seq
+        caches and the text cache must survive it.
+        """
+        task_id, chat_id = _add_task("stat task")
+        _save_task_result("stat result", task_id=task_id)
+        th._queue_chat_event({"type": "system_output", "text": "hi"}, task_id)
+        th._flush_chat_events(task_id)
+        first = _load_chat_context_text(chat_id)
+        assert "stat task" in first
+        key_before = th._caches_db_key
+        gen_before = th._chat_context_cache_gen
+        assert key_before is not None and th._next_seq_cache.get(task_id) == 1
+
+        kiss_dir = Path(self.tmpdir) / ".kiss"
+        kiss_dir.chmod(0)
+        try:
+            assert th._db_file_identity(str(th._DB_PATH)) is th._FILE_ID_UNKNOWN
+            assert _load_chat_context_text(chat_id) == first
+        finally:
+            kiss_dir.chmod(0o700)
+        assert th._caches_db_key == key_before
+        assert th._chat_context_cache_gen == gen_before
+        assert th._next_seq_cache.get(task_id) == 1

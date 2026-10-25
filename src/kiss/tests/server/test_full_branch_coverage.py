@@ -145,7 +145,7 @@ class TestAwaitUserResponseLoop:
         t = threading.Thread(target=delayed_answer, daemon=True)
         t.start()
         try:
-            result = server._await_user_response()
+            result = server._await_user_response(q)
         finally:
             agent_state.unregister(state.task_id, state)
             server.printer._thread_local.task_id = ""

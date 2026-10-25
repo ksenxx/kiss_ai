@@ -203,38 +203,36 @@ def test_missing_or_empty_messages_returns_400(
 def test_no_daemon_returns_502_fast(
     api_server: tuple[str, OpenAICompatChannelBackend],
 ) -> None:
-    """With no kiss-web daemon, a valid request gets a fast 502."""
-    url, _ = api_server
-    start = time.monotonic()
-    resp = requests.post(
-        f"{url}/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "hello"}]},
-        headers={"Authorization": f"Bearer {_API_KEY}"},
-        timeout=30,
-    )
-    elapsed = time.monotonic() - start
-    assert resp.status_code == 502
-    error = resp.json()["error"]
-    assert error["type"] == "api_error"
-    assert "daemon" in error["message"]
-    assert elapsed < 10.0
-    # No chat mapping is stored for a failed run.
-    assert not _chat_map_path().exists()
+    """With no kiss-web daemon, every valid request shape gets a fast JSON 502.
 
-
-def test_stream_request_no_daemon_returns_502(
-    api_server: tuple[str, OpenAICompatChannelBackend],
-) -> None:
-    """stream:true still gets the JSON 502 when the daemon is unreachable."""
+    A plain request, ``stream: true`` and a leading system message all
+    reach the daemon call (accepted and forwarded, not a crash or a 400)
+    and come back as the OpenAI-style 502.
+    """
     url, _ = api_server
-    resp = requests.post(
-        f"{url}/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
-        headers={"Authorization": f"Bearer {_API_KEY}"},
-        timeout=30,
-    )
-    assert resp.status_code == 502
-    assert resp.json()["error"]["type"] == "api_error"
+    user = {"role": "user", "content": "hello"}
+    for body in (
+        {"messages": [user]},
+        {"messages": [user], "stream": True},
+        {"messages": [{"role": "system", "content": "You are terse."}, user]},
+    ):
+        start = time.monotonic()
+        resp = requests.post(
+            f"{url}/v1/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {_API_KEY}"},
+            timeout=30,
+        )
+        elapsed = time.monotonic() - start
+        assert resp.status_code == 502, body
+        error = resp.json()["error"]
+        assert error["type"] == "api_error"
+        assert "daemon" in error["message"]
+        assert error["param"] is None
+        assert error["code"] is None
+        assert elapsed < 10.0
+        # No chat mapping is stored for a failed run.
+        assert not _chat_map_path().exists()
 
 
 def test_conversation_key_is_deterministic_and_canonical(isolated_home: Path) -> None:
@@ -362,36 +360,6 @@ def test_system_prompt_text_collects_system_and_developer_messages() -> None:
     assert _system_prompt_text(messages) == "Be brief.\n\nUse JSON.\n\nSecond rule."
     assert _system_prompt_text([{"role": "user", "content": "hi"}]) == ""
     assert _system_prompt_text([]) == ""
-
-
-def test_request_with_system_message_no_daemon_returns_502(
-    api_server: tuple[str, OpenAICompatChannelBackend],
-) -> None:
-    """A request carrying a system message reaches the daemon call.
-
-    With no daemon it still gets the OpenAI-style 502 (i.e. the
-    system message is accepted and forwarded, not a crash or a 400).
-    """
-    url, _ = api_server
-    resp = requests.post(
-        f"{url}/v1/chat/completions",
-        json={
-            "messages": [
-                {"role": "system", "content": "You are terse."},
-                {"role": "user", "content": "hello"},
-            ]
-        },
-        headers={"Authorization": f"Bearer {_API_KEY}"},
-        timeout=30,
-    )
-    assert resp.status_code == 502
-    error = resp.json()["error"]
-    assert error["type"] == "api_error"
-    assert "daemon" in error["message"]
-    assert error["param"] is None
-    assert error["code"] is None
-    # No chat mapping is stored for a failed run.
-    assert not _chat_map_path().exists()
 
 
 def _raw_post_chat(port: int, extra_headers: list[str]) -> tuple[int, dict]:

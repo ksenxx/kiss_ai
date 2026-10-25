@@ -152,3 +152,25 @@ def lift_install_timeout(command: str, timeout_seconds: float) -> float:
     if INSTALL_COMMANDS.search(command):
         return max(timeout_seconds, INSTALL_TIMEOUT_SECONDS)
     return timeout_seconds
+
+
+def refuse_or_lift(
+    command: str, work_dir: str | None, timeout_seconds: float,
+) -> tuple[str | None, float]:
+    """Apply :func:`destructive_command_guard` and :func:`lift_install_timeout` together.
+
+    Shared by the host ``Bash`` tool and the Docker ``Bash`` / parallel
+    exec so a command is refused, and its deadline raised, identically
+    on every path.
+
+    Args:
+        command: The shell command the model wants to run.
+        work_dir: The directory whose deletion is refused.
+        timeout_seconds: The caller's deadline.
+
+    Returns:
+        ``(refusal, timeout_seconds)``: the guard's error message (``None``
+        when the command may run) and the possibly lifted deadline.
+    """
+    guard = destructive_command_guard(command, work_dir)
+    return guard, lift_install_timeout(command, timeout_seconds)

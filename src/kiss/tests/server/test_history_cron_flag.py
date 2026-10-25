@@ -94,12 +94,14 @@ class TestHistoryCronFlag(unittest.TestCase):
         conn = sqlite3.connect(str(th._DB_PATH))
         # Not ``ALTER TABLE ... DROP COLUMN``: SQLite rewrites the stored
         # DDL textually, and with the comment lines that precede the
-        # column some versions (3.46) leave a dangling comma behind.
+        # column some versions (3.46) leave a dangling comma behind.  The
+        # column is dropped wherever it sits: later releases append
+        # columns after it.
         (ddl,) = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'task_history'"
         ).fetchone()
         legacy_ddl = re.sub(
-            r",\s*(?:--[^\n]*\n\s*)*is_cron INTEGER DEFAULT 0\s*\)", "\n)", ddl,
+            r",\s*(?:--[^\n]*\n\s*)*is_cron INTEGER DEFAULT 0(?=\s*[,)])", "", ddl,
         )
         self.assertNotIn("is_cron", legacy_ddl)
         conn.executescript(f"DROP TABLE task_history; {legacy_ddl};")

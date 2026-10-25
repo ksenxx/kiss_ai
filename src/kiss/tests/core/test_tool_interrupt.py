@@ -33,9 +33,10 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -310,7 +311,9 @@ class TestRegistry:
         gate = threading.Event()
 
         def target() -> None:
-            tokens.append(begin_tool_call("ghost"))
+            token = new_tool_call("ghost")
+            register_tool_call(token)
+            tokens.append(token)
             gate.wait(5)
             # Left registered on purpose: the thread dies with its token.
 
@@ -340,7 +343,8 @@ class TestRegistry:
         assert interrupt_tool_call(token.thread_ident, "ghost") is False
 
     def test_call_id_must_match_when_given(self) -> None:
-        token = begin_tool_call("Read")
+        token = new_tool_call("Read")
+        register_tool_call(token)
         try:
             assert token.call_id > 0
             assert interrupt_tool_call(token.thread_ident, "Read", token.call_id + 1) is False
@@ -357,7 +361,8 @@ class TestRegistry:
 
     def test_raise_if_interrupted_is_cooperative(self) -> None:
         tool_interrupt.raise_if_interrupted()  # no tool call: no-op
-        token = begin_tool_call("Wait")
+        token = new_tool_call("Wait")
+        register_tool_call(token)
         try:
             tool_interrupt.raise_if_interrupted()  # not interrupted: no-op
             assert interrupt_tool_call(token.thread_ident, "Wait") is True
@@ -371,7 +376,8 @@ class TestRegistry:
         assert token.injected is False, "a call that raised itself is never injected"
 
     def test_event_and_current_call_follow_the_thread(self) -> None:
-        token = begin_tool_call("probe")
+        token = new_tool_call("probe")
+        register_tool_call(token)
         try:
             assert tool_interrupt.current_tool_call() is token
             assert tool_interrupt.current_tool_interrupt_event() is token.event
@@ -385,7 +391,8 @@ class TestRegistry:
         end_tool_call(token)
 
     def test_end_tool_call_drains_an_injection_that_raced_the_return(self) -> None:
-        token = begin_tool_call("drainer")
+        token = new_tool_call("drainer")
+        register_tool_call(token)
         main_ident = threading.get_ident()
         gate = threading.Event()
         try:
@@ -417,7 +424,8 @@ class TestRegistry:
 
     def test_cooperative_signal_alone_leaves_a_returned_result_alone(self) -> None:
         """A tool that returned on its own before the grace period keeps its result."""
-        token = begin_tool_call("quick")
+        token = new_tool_call("quick")
+        register_tool_call(token)
         assert interrupt_tool_call(token.thread_ident, "quick") is True
         end_tool_call(token)  # no injection yet: nothing to raise
         assert token.closing is True
@@ -488,7 +496,8 @@ class TestBashMonitor:
         results: dict[str, object] = {}
 
         def target() -> None:
-            token = begin_tool_call("Bash")
+            token = new_tool_call("Bash")
+            register_tool_call(token)
             try:
                 try:
                     results["out"] = UsefulTools().Bash(
@@ -516,7 +525,8 @@ class TestBashMonitor:
         results: dict[str, object] = {}
 
         def target() -> None:
-            token = begin_tool_call("Bash")
+            token = new_tool_call("Bash")
+            register_tool_call(token)
             try:
                 results["out"] = UsefulTools(stop_event=stop).Bash(
                     "sleep 30; echo late", description="sleep",

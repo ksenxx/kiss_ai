@@ -18,8 +18,10 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.third_party_agents._composio_google import (
+    STATUS_UNKNOWN,
     clear_connection,
     composio_api_key,
+    connection_status,
     finish_connect,
     save_api_key,
     start_connect,
@@ -86,7 +88,17 @@ def make_google_auth_tools(
 
     def check_auth() -> str:
         if agent._is_authenticated():
-            return json.dumps({"ok": True, "message": f"{label} is connected."})
+            # The local state says connected; ask Composio whether the
+            # account is still ACTIVE so an expired one is not worked
+            # against for several steps before the first API error.
+            status = connection_status(service)
+            if status in ("ACTIVE", STATUS_UNKNOWN, ""):
+                return json.dumps({"ok": True, "message": f"{label} is connected."})
+            return (
+                f"The {label} connection is {status}, not ACTIVE: call "
+                f"authenticate_{service}() to get a new Composio Connect Link for the "
+                f"user, then finish_{service}_auth(). Do not try other {label} tools first."
+            )
         missing_key = "" if composio_api_key() else (
             " No Composio API key is configured: ask the user for a project "
             "API key (ak_...) from "

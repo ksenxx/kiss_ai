@@ -3,6 +3,13 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// A multi-session task ends with one merged Result (the "### Previous
+// Session N" / "### Final Session" summary).  The page renders it as a
+// Previous Sessions panel followed by the Result panel, and the stale
+// per-session Result panels of the earlier `is_continue` results are
+// removed when the merged one arrives (replayed or live).  The split
+// of a single merged summary is pinned by resultPanelHtml.test.js.
+
 'use strict';
 
 const assert = require('assert');
@@ -69,30 +76,21 @@ function assertRenderedSummaryOrdering(win, expectedFinalText) {
     'BUG: stale per-session Result panels must be removed when the merged multi-session Result arrives; got ' +
       headings.join(' -> '),
   );
-  const previousIdx = headings.lastIndexOf('Previous Sessions');
-  const resultIdx = headings.lastIndexOf('Result');
-  assert.ok(previousIdx >= 0, 'BUG: Previous Sessions panel did not render');
-  assert.ok(resultIdx >= 0, 'terminal Result panel did not render');
+  const [previous, result] = panels;
   assert.ok(
-    previousIdx < resultIdx,
-    'BUG: Previous Sessions panel must appear before terminal Result panel; got ' +
-      headings.join(' -> '),
-  );
-
-  assert.ok(
-    text(panels[previousIdx]).includes('session 1: prepared files'),
+    text(previous).includes('session 1: prepared files'),
     'Previous Sessions panel must contain prior session text',
   );
   assert.ok(
-    !text(panels[previousIdx]).includes('session 2: finished the fix'),
+    !text(previous).includes('session 2: finished the fix'),
     'Previous Sessions panel must not contain the final session text',
   );
   assert.ok(
-    text(panels[resultIdx]).includes(expectedFinalText),
+    text(result).includes(expectedFinalText),
     'terminal Result panel must contain final text',
   );
   assert.ok(
-    !text(panels[resultIdx]).includes('Previous Session'),
+    !text(result).includes('Previous Session'),
     'terminal Result panel must not duplicate previous-session headings',
   );
 }
@@ -104,15 +102,16 @@ function assertSummaryOrdering(summary, expectedFinalText, sendEvents) {
   win.close();
 }
 
+const FINAL_SESSION_SUMMARY =
+  '### Previous Session 1\n' +
+  'session 1: prepared files\n\n' +
+  '---\n\n' +
+  '### Final Session\n' +
+  'session 2: finished the fix';
+
 function testPreviousSessionsRenderBeforeTerminalResult() {
-  const finalSessionSummary =
-    '### Previous Session 1\n' +
-    'session 1: prepared files\n\n' +
-    '---\n\n' +
-    '### Final Session\n' +
-    'session 2: finished the fix';
   assertSummaryOrdering(
-    finalSessionSummary,
+    FINAL_SESSION_SUMMARY,
     'session 2: finished the fix',
     sendReplayedTaskEvents,
   );
@@ -120,14 +119,8 @@ function testPreviousSessionsRenderBeforeTerminalResult() {
 }
 
 function testLivePreviousSessionsRenderBeforeTerminalResult() {
-  const finalSessionSummary =
-    '### Previous Session 1\n' +
-    'session 1: prepared files\n\n' +
-    '---\n\n' +
-    '### Final Session\n' +
-    'session 2: finished the fix';
   assertSummaryOrdering(
-    finalSessionSummary,
+    FINAL_SESSION_SUMMARY,
     'session 2: finished the fix',
     sendLiveResultEvents,
   );

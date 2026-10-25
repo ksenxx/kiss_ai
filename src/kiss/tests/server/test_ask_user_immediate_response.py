@@ -85,7 +85,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
             self.server.printer._thread_local.task_id = "task-A"
             self.server.printer._thread_local.stop_event = stop
             entered.set()
-            result_holder["answer"] = self.server._await_user_response()
+            result_holder["answer"] = self.server._await_user_response(q)
             delivered.set()
 
         waiter = threading.Thread(target=wait_for_answer, daemon=True)
@@ -122,7 +122,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
             self.server.printer._thread_local.stop_event = stop
             entered.set()
             try:
-                self.server._await_user_response()
+                self.server._await_user_response(q)
             except KeyboardInterrupt:
                 raised.set()
 
@@ -173,7 +173,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
             self.server.printer._thread_local.task_id = "task-E"
             self.server.printer._thread_local.stop_event = stop
             entered.set()
-            result_holder["answer"] = self.server._await_user_response()
+            result_holder["answer"] = self.server._await_user_response(q)
             delivered.set()
 
         waiter = threading.Thread(target=wait_for_answer, daemon=True)
@@ -219,7 +219,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
             self.server.printer._thread_local.task_id = "task-V"
             self.server.printer._thread_local.stop_event = stop
             entered.set()
-            result_holder["answer"] = self.server._await_user_response()
+            result_holder["answer"] = self.server._await_user_response(owner_q)
             delivered.set()
 
         waiter = threading.Thread(target=wait_for_answer, daemon=True)

@@ -33,8 +33,15 @@ const {
   fakeMatchMedia,
   stubMonaco,
   pickMachine,
+  click: harnessClick,
 } = require('./simplify2_harness');
-const {all, showSection, menuItem} = require('./ui_antipattern_harness');
+const {
+  all,
+  showSection,
+  menuItem,
+  rightClick,
+  explorerRow,
+} = require('./ui_antipattern_harness');
 
 const openWindows = [];
 
@@ -60,7 +67,7 @@ function makePage() {
 
 function click(win, el) {
   assert.ok(el, 'the element to click exists');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  harnessClick(win, el);
 }
 
 function msgs(posted, type) {
@@ -89,28 +96,17 @@ function answerListing(win, posted, p, machine, entries) {
   return req;
 }
 
-function rightClick(win, el) {
-  assert.ok(el, 'the row to right-click exists');
-  el.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
-}
-
 function closeMenu(win) {
   win.document.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
   );
 }
 
+/** The Explorer row for path *p*, which must be listed. */
 function rowFor(win, p) {
-  return all(win, '.explorer-row[data-explorer-path]').find(
-    r => r.dataset.explorerPath === p,
-  );
+  const row = explorerRow(win, p);
+  assert.ok(row, 'the row for ' + p + ' exists');
+  return row;
 }
 
 /** Rename *p* through the Explorer's inline box; returns the fsAction sent. */

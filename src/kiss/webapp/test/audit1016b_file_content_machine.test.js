@@ -20,6 +20,8 @@
 const assert = require('assert');
 const H = require('./ui_antipattern_harness');
 
+const harness = require('./simplify2_harness');
+
 const {makePage, send, sleep, click} = H;
 
 const MACHINES = [
@@ -39,10 +41,12 @@ function setUp(ctx) {
 }
 
 function pickMachine(win, name) {
-  const sel = win.document.getElementById('chat-machine');
-  sel.value = name;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
-  assert.strictEqual(sel.value, name, 'the drop-down shows the pick');
+  harness.pickMachine(win, name);
+  assert.strictEqual(
+    harness.byId(win, 'chat-machine').value,
+    name,
+    'the drop-down shows the pick',
+  );
 }
 
 async function openEditAndSave(ctx, fileEvent) {

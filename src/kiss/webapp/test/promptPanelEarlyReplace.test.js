@@ -30,7 +30,11 @@ function testEarlyPanelsRenderImmediately() {
   console.log('  ok - early panels render immediately at submit');
 }
 
-function testAuthoritativeEventReplacesEarlyPanel() {
+// That the authoritative events replace the early panels (one panel each,
+// the authoritative text) is pinned by
+// promptPanelsCollapsedAndSummarized.test.js; here: the replaced panel
+// sheds its `early` mark and carries the authoritative raw text.
+function testReplacedPanelShedsEarlyMark() {
   const {win} = makePage();
 
   send(win, {type: 'system_prompt', text: 'early SYSTEM text', early: true});
@@ -40,27 +44,11 @@ function testAuthoritativeEventReplacesEarlyPanel() {
 
   const sys = panels(win, 'system-prompt');
   const pr = panels(win, 'prompt');
-  assert.strictEqual(
-    sys.length,
-    1,
-    'BUG: authoritative system_prompt appended a duplicate panel ' +
-      'instead of replacing the pending early one',
-  );
-  assert.strictEqual(
-    pr.length,
-    1,
-    'BUG: authoritative prompt appended a duplicate panel ' +
-      'instead of replacing the pending early one',
-  );
-  assert.ok(sys[0].textContent.includes('authoritative SYSTEM text'));
-  assert.ok(!sys[0].textContent.includes('early SYSTEM text'));
-  assert.ok(pr[0].textContent.includes('authoritative FULL prompt'));
-  assert.ok(!pr[0].textContent.includes('early USER text'));
   assert.strictEqual(sys[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.rawText, 'authoritative FULL prompt');
   win.close();
-  console.log('  ok - authoritative events replace early panels in place');
+  console.log('  ok - a replaced early panel sheds its early mark');
 }
 
 function testLaterSessionsStillAppend() {
@@ -98,16 +86,16 @@ function testReplayWithoutEarlyEventsUnchanged() {
   console.log('  ok - replay (no early events) renders unchanged');
 }
 
-function runTests() {
-  testEarlyPanelsRenderImmediately();
-  testAuthoritativeEventReplacesEarlyPanel();
-  testLaterSessionsStillAppend();
-  testReplayWithoutEarlyEventsUnchanged();
-}
+const TESTS = [
+  testEarlyPanelsRenderImmediately,
+  testReplacedPanelShedsEarlyMark,
+  testLaterSessionsStillAppend,
+  testReplayWithoutEarlyEventsUnchanged,
+];
 
 try {
-  runTests();
-  console.log('\n4 passed, 0 failed');
+  for (const test of TESTS) test();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

@@ -5,9 +5,7 @@
 """Tests for server audit round 8: redundancies, inconsistencies, bugs.
 
 Covers:
-- API_KEY_ENV_VARS type (should be frozenset, not dict)
-- _timer_flush closure removal (should be a proper method)
-- _timer_flush type annotation (tid should be str | None, not int | None)
+- the bash flush timer runs ``flush_bash_output`` keyed by the task
 - Dead re-exports in server.py
 """
 
@@ -16,30 +14,11 @@ from __future__ import annotations
 import time
 
 
-class TestTimerFlushNoClosure:
-    """_timer_flush must not be a closure; it should be a method."""
+class TestBashFlushTimer:
+    """The bash flush timer flushes the buffering task's output."""
 
-    def test_timer_flush_is_method_not_closure(self) -> None:
-        """Verify _timer_flush is a proper method on JsonPrinter."""
-        from kiss.server.json_printer import JsonPrinter
-
-        assert hasattr(JsonPrinter, "_timer_flush_for_task"), (
-            "JsonPrinter should have _timer_flush_for_task method"
-        )
-        method = getattr(JsonPrinter, "_timer_flush_for_task")
-        assert callable(method)
-
-
-    def test_timer_flush_for_task_type_annotation(self) -> None:
-        """Verify _timer_flush_for_task accepts str | None tab_id."""
-        from kiss.server.json_printer import JsonPrinter
-
-        hints = JsonPrinter._timer_flush_for_task.__annotations__
-        assert "task_id" in hints
-
-    def test_bash_timer_uses_method(self) -> None:
-        """Verify the bash_stream print path creates a timer using
-        _timer_flush_for_task (via functools.partial) instead of a closure."""
+    def test_bash_timer_flushes_buffered_output(self) -> None:
+        """The timer armed by a buffered ``bash_stream`` flushes it within its delay."""
         from functools import partial as functools_partial
 
         from kiss.server.json_printer import JsonPrinter
@@ -63,7 +42,8 @@ class TestTimerFlushNoClosure:
             assert isinstance(timer_func, functools_partial), (
                 f"Timer function should be functools.partial, got {type(timer_func)}"
             )
-            assert timer_func.func == printer._timer_flush_for_task
+            assert timer_func.func == printer.flush_bash_output
+            assert timer_func.args == ("",)
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             flush_events = [e for e in events if e.get("type") == "system_output"]

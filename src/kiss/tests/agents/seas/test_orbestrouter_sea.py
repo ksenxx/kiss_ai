@@ -61,8 +61,10 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     for phrase in (
         "Use 'openrouter/anthropic/claude-fable-5.1' model for all tasks, including software "
         "development.",
-        "Use openrouter/openai/gpt-6-astra (not codex) using `run_parallel` tool for a thorough "
-        "read-only review and debugging of the other model's work.",
+        "Use openrouter/openai/gpt-6-astra (not codex) through "
+        "`run_agent(model=\"openrouter/openai/gpt-6-astra\", tool_profile=\"review\", "
+        "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
+        "work,",
         "Use at most 75% of the task budget in openrouter/openai/gpt-6-astra,",
         "Use the model names literally without hallucinating new model names.",
     ):
@@ -79,17 +81,11 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert_no_removed_getters(orbestrouter_sea)
 
 
-def test_orbestrouter_is_a_model_picker_sea_and_a_slash_command() -> None:
-    """Registered under its command name in the picker registry and as ``/orbestrouter``."""
+def test_orbestrouter_is_a_model_picker_sea() -> None:
+    """Registered under its command name in the picker registry; its only setting is the model."""
     assert sea_commands.model_seas()["orbestrouter"] == _SEA_PATH
     assert sea_commands.model_sea("orbestrouter") == _SEA_PATH
-    assert sea_commands.get_command("orbestrouter") == _SEA_PATH
-    assert sea_commands.slash_command_task("/orbestrouter add a --json flag") == (
-        "add a --json flag", _SEA_PATH)
     assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.PRIMARY_MODEL}
-    assert sea_commands.help_text_if_command("/orbestrouter help") == (
-        OrbestrouterSea().description()
-    )
 
 
 def test_agent_file_loader_pins_the_openrouter_primary_model() -> None:

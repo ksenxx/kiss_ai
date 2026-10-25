@@ -6,9 +6,11 @@
 'use strict';
 
 // The daemon answers the page's `ready` with a `tipsData` event.  The
-// page opens the tips window on it exactly once per
-// version (tips.js's once-per-version guard), centered over the chat,
-// and a reconnect that re-sends tipsData does not open a second one.
+// page opens the tips window on it exactly once per version (tips.js's
+// once-per-version guard) and a reconnect that re-sends tipsData does
+// not open a second one.  The window itself (centering, markdown,
+// paging) is tipsWindow.test.js's; this only covers main.js's
+// message path into it.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -53,22 +55,13 @@ function tipsPanels(win) {
   return win.document.body.querySelectorAll('kiss-tips-panel').length;
 }
 
-test('the page opens the tips window once, centered over the chat', () => {
+test('the tipsData message opens the tips window once', () => {
   const win = loadChatDom();
   sendTips(win);
   assert.strictEqual(tipsPanels(win), 1);
   assert.strictEqual(
     win.localStorage.getItem('kissTipsSeenVersion'),
     '2026.10.1',
-  );
-  const host = win.document.body.querySelector('kiss-tips-panel');
-  const css = host.shadowRoot.querySelector('style').textContent;
-  const overlay = css.split('.tips-overlay {')[1].split('}')[0];
-  assert.ok(/position:\s*fixed/.test(overlay), 'overlay covers the page');
-  assert.ok(/align-items:\s*center/.test(overlay), 'panel centered vertically');
-  assert.ok(
-    /justify-content:\s*center/.test(overlay),
-    'panel centered horizontally',
   );
   // A reconnect re-sends tipsData: still one window.
   sendTips(win);

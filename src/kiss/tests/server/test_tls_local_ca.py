@@ -132,6 +132,12 @@ class TestTlsCerts(TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tls_dir.parent, ignore_errors=True)
 
+    def _current(self) -> bool:
+        """Whether the server cert needs no re-issue for the default names."""
+        return tls_certs.server_cert_is_current(
+            self.cert, self.key, _load(self.ca), *tls_certs.server_cert_names(),
+        )
+
     def test_first_run_creates_a_browser_acceptable_chain(self) -> None:
         cert_path, key_path = tls_certs.ensure_local_tls_pair(
             self.tls_dir, ["192.168.1.20", "10.0.0.5"],
@@ -211,7 +217,7 @@ class TestTlsCerts(TestCase):
         # Leaf signed by a different CA (e.g. the old self-signed cert).
         self.cert.write_bytes((other / tls_certs.SERVER_CERT_FILE).read_bytes())
         self.key.write_bytes((other / tls_certs.SERVER_KEY_FILE).read_bytes())
-        self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
+        self.assertFalse(self._current())
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         _load(self.cert).verify_directly_issued_by(_load(self.ca))
 
@@ -219,25 +225,22 @@ class TestTlsCerts(TestCase):
         # between the two writes).
         good_cert = self.cert.read_bytes()
         self.key.write_bytes((other / tls_certs.SERVER_KEY_FILE).read_bytes())
-        self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
+        self.assertFalse(self._current())
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         self.assertNotEqual(self.cert.read_bytes(), good_cert)
-        self.assertTrue(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
+        self.assertTrue(self._current())
 
         # Missing key, missing SAN, expiring leaf.
         self.key.unlink()
-        self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
+        self.assertFalse(self._current())
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         _write_cert_with_validity(
             self.cert, self.key, x509.Name([]), days=800, ca=False,
         )
-        self.assertFalse(
-            tls_certs.server_cert_is_current(self.cert, self.key, self.ca),
-            "a cert without a SAN is not current",
-        )
+        self.assertFalse(self._current(), "a cert without a SAN is not current")
         _write_cert_with_validity(self.cert, self.key, x509.Name([]), days=10, ca=False)
         self.assertTrue(tls_certs._expiring(_load(self.cert)))
-        self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
+        self.assertFalse(self._current())
 
     def test_unusable_ca_is_regenerated_with_a_warning(self) -> None:
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
@@ -274,7 +277,6 @@ class TestTlsCerts(TestCase):
         # Missing CA files, and a missing CA when checking the leaf.
         self.ca.unlink()
         self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
-        self.assertFalse(tls_certs.server_cert_is_current(self.cert, self.key, self.ca))
 
     def test_server_cert_names_skips_junk_and_dedups(self) -> None:
         dns_names, ips = tls_certs.server_cert_names(
@@ -521,7 +523,8 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         sibling_cert = cert_path.read_bytes()
         tls_certs.issue_server_cert(
             cert_path, tls_dir / tls_certs.SERVER_KEY_FILE,
-            ca_path, tls_dir / tls_certs.CA_KEY_FILE, ["10.99.88.77"],
+            *tls_certs.ensure_local_ca(tls_dir),
+            *tls_certs.server_cert_names(["10.99.88.77"]),
         )
         self.assertNotEqual(cert_path.read_bytes(), sibling_cert)
         await server._refresh_tls_cert()
@@ -533,7 +536,8 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         # next tick retries); nothing is loaded and nothing is recorded.
         tls_certs.issue_server_cert(
             cert_path, tls_dir / tls_certs.SERVER_KEY_FILE,
-            ca_path, tls_dir / tls_certs.CA_KEY_FILE, ["10.99.88.77"],
+            *tls_certs.ensure_local_ca(tls_dir),
+            *tls_certs.server_cert_names(["10.99.88.77"]),
         )
         loaded_before = server._tls_loaded_cert
         assert server._ssl_context is not None

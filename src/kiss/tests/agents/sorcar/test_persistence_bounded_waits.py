@@ -22,8 +22,14 @@ be the prune replacing the sidecar's inode or a replayer unlinking the
 snapshot it just claimed, and a record written into either inode is
 gone.  A final result (task thread) goes to a private spill file that
 the loader reads and the next prune folds in; a failed-events batch
-(writer thread) keeps waiting, because its rows must land in the live
-sidecar in order.
+(writer thread) waits longer, because its rows should land in the live
+sidecar in order, but past ``_JOURNAL_APPEND_TIMEOUT_S`` it is spilled
+to a private file that the next locked append or replay claims as a
+snapshot AFTER the live sidecar, so a wedged peer can never hang the
+task thread's final flush and the transcript order survives.
+
+Also here: ``_record_file_usage`` trims a ``file_usage`` table that is
+already past its cap back down to it.
 
 Also here: the metadata backfill honours the ``success`` column the
 live finalizer honours, so ``--refresh`` reproduces the daemon's tags.
@@ -169,7 +175,7 @@ def test_journal_appends_go_through_when_the_lock_holder_is_slow(kiss_home: Path
     try:
         persistence._journal_final_result("t1", "done", 1)
         assert not sidecar.exists()
-        assert len(persistence._final_results_spills(str(sidecar))) == 1
+        assert len(persistence._journal_spills(str(sidecar))) == 1
         assert persistence._load_final_results(str(sidecar)) == {
             "t1": {"result": "done", "success": 1},
         }
@@ -177,7 +183,7 @@ def test_journal_appends_go_through_when_the_lock_holder_is_slow(kiss_home: Path
         child.kill()
         child.wait()
     persistence._prune_final_results_journal(str(sidecar))
-    assert persistence._final_results_spills(str(sidecar)) == []
+    assert persistence._journal_spills(str(sidecar)) == []
     assert '"task_id": "t1"' in sidecar.read_text(encoding="utf-8")
     assert persistence._load_final_results(str(sidecar)) == {
         "t1": {"result": "done", "success": 1},
@@ -256,7 +262,7 @@ def test_a_timed_out_final_result_survives_a_concurrent_prune(kiss_home: Path) -
         "new": {"result": "new result", "success": 1},
     }
     persistence._prune_final_results_journal(str(sidecar))
-    assert persistence._final_results_spills(str(sidecar)) == []
+    assert persistence._journal_spills(str(sidecar)) == []
     assert persistence._load_final_results(str(sidecar)) == {
         "new": {"result": "new result", "success": 1},
     }
@@ -273,7 +279,7 @@ def test_a_later_record_in_the_sidecar_beats_an_earlier_spill(kiss_home: Path) -
         child.kill()
         child.wait()
     persistence._journal_final_result("t1", "second", 1)
-    assert sidecar.exists() and len(persistence._final_results_spills(str(sidecar))) == 1
+    assert sidecar.exists() and len(persistence._journal_spills(str(sidecar))) == 1
     assert persistence._load_final_results(str(sidecar)) == {
         "t1": {"result": "second", "success": 1},
     }
@@ -284,9 +290,9 @@ def test_a_later_record_in_the_sidecar_beats_an_earlier_spill(kiss_home: Path) -
 
 
 def test_a_batch_journalled_during_a_slow_replay_is_still_replayed(kiss_home: Path) -> None:
-    """The failed-events append waits for the replayer's lock however long
-    it takes: a batch written into the sidecar a replayer is consuming
-    would be unlinked with it."""
+    """The failed-events append waits out a replayer that lets go within
+    the append timeout and lands in the live sidecar: a batch written
+    into the sidecar a replayer is consuming would be unlinked with it."""
     persistence._get_db()
     task_id, _chat = persistence._add_task("slow replay task")
     sidecar = Path(persistence._failed_events_path(str(persistence._DB_PATH)))
@@ -329,6 +335,104 @@ def test_a_batch_journalled_during_a_slow_replay_is_still_replayed(kiss_home: Pa
     assert [json.loads(r[0])["text"] for r in rows] == ["late"]
     assert not opened_before_release, "the sidecar was opened while the replayer held the lock"
     assert elapsed >= persistence._JOURNAL_LOCK_TIMEOUT_S
+
+
+def failed_event_batch(
+    task_id: str, text: str, timestamp: float,
+) -> list[tuple[str, str, float, str]]:
+    """Return a one-event failed-events batch for *task_id* against the active database."""
+    origin = str(persistence._DB_PATH)
+    return [(task_id, json.dumps({"type": "text", "text": text}), timestamp, origin)]
+
+
+def test_a_failed_batch_spills_when_a_peer_keeps_the_journal_lock(kiss_home: Path) -> None:
+    """A peer wedged under the journal lock costs the writer thread at most
+    the append timeout; the batch lands in a spill file the next locked
+    append or replay folds in AFTER the rows already in the live sidecar
+    and BEFORE the rows appended later, so the flush that waits for the
+    writer returns and the transcript keeps its order."""
+    persistence._get_db()
+    task_id, _chat = persistence._add_task("wedged peer task")
+    sidecar = Path(persistence._failed_events_path(str(persistence._DB_PATH)))
+    persistence._journal_failed_events(failed_event_batch(task_id, "first", 1.0), 4)
+    live_before = sidecar.read_text(encoding="utf-8")
+    saved = persistence._JOURNAL_APPEND_TIMEOUT_S
+    persistence._JOURNAL_APPEND_TIMEOUT_S = 2.0
+    child = hold_journal_lock_in_subprocess(Path(str(sidecar) + ".lock"), 120.0)
+    appender = threading.Thread(
+        target=persistence._journal_failed_events,
+        args=(failed_event_batch(task_id, "second", 2.0), 4),
+    )
+    try:
+        started = time.monotonic()
+        appender.start()
+        appender.join(persistence._JOURNAL_APPEND_TIMEOUT_S + 5)
+        elapsed = time.monotonic() - started
+        stalled = appender.is_alive()
+    finally:
+        child.kill()
+        child.wait()
+        appender.join(30)
+        persistence._JOURNAL_APPEND_TIMEOUT_S = saved
+    assert not stalled, "the append waited on the wedged peer past the append timeout"
+    assert elapsed >= 2.0
+    assert sidecar.read_text(encoding="utf-8") == live_before, "sidecar written without the lock"
+    spills = persistence._journal_spills(str(sidecar))
+    assert len(spills) == 1
+    assert not [p for p in kiss_home.iterdir() if ".consumed-" in p.name]
+    # The peer is gone: this append takes the lock and must land after the spill.
+    persistence._journal_failed_events(failed_event_batch(task_id, "third", 3.0), 4)
+    persistence._flush_chat_events()
+    rows = persistence._get_db().execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq", (task_id,),
+    ).fetchall()
+    assert [json.loads(r[0])["text"] for r in rows] == ["first", "second", "third"]
+    assert not persistence._journal_has_pending_rows(str(sidecar))
+    assert not [p for p in kiss_home.iterdir() if ".spill-" in p.name or ".consumed-" in p.name]
+
+
+def test_a_spill_alone_is_found_and_replayed(kiss_home: Path) -> None:
+    """A spill left with no live sidecar (the peer replayed it) is still pending and replayed."""
+    persistence._get_db()
+    task_id, _chat = persistence._add_task("lone spill task")
+    sidecar = Path(persistence._failed_events_path(str(persistence._DB_PATH)))
+    saved = persistence._JOURNAL_APPEND_TIMEOUT_S
+    persistence._JOURNAL_APPEND_TIMEOUT_S = 0.2
+    child = hold_journal_lock_in_subprocess(Path(str(sidecar) + ".lock"), 120.0)
+    try:
+        persistence._journal_failed_events(failed_event_batch(task_id, "lone", 1.0), 4)
+    finally:
+        child.kill()
+        child.wait()
+        persistence._JOURNAL_APPEND_TIMEOUT_S = saved
+    assert not sidecar.exists()
+    assert persistence._journal_has_pending_rows(str(sidecar))
+    persistence._flush_chat_events()
+    rows = persistence._get_db().execute(
+        "SELECT event_json FROM events WHERE task_id = ?", (task_id,),
+    ).fetchall()
+    assert [json.loads(r[0])["text"] for r in rows] == ["lone"]
+    assert persistence._journal_spills(str(sidecar)) == []
+    assert not persistence._journal_has_pending_rows(str(sidecar))
+
+
+def test_an_oversized_file_usage_table_is_trimmed_to_the_cap(kiss_home: Path) -> None:
+    """A table already past the cap (an older daemon's database) shrinks
+    back to the cap on the first new path, evicting the least recently used."""
+    db = persistence._get_db()
+    cap = persistence._MAX_FILE_USAGE_ENTRIES
+    with persistence._immediate_txn(db):
+        db.executemany(
+            "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?)",
+            [(f"file-{i}", float(i)) for i in range(cap + 2)],
+        )
+    persistence._record_file_usage("file-0")  # an existing path: refreshed, nothing evicted
+    assert db.execute("SELECT COUNT(*) FROM file_usage").fetchone()[0] == cap + 2
+    persistence._record_file_usage("new-path")
+    assert db.execute("SELECT COUNT(*) FROM file_usage").fetchone()[0] == cap
+    kept = {row[0] for row in db.execute("SELECT path FROM file_usage").fetchall()}
+    assert "new-path" in kept and "file-0" in kept
+    assert {"file-1", "file-2", "file-3"}.isdisjoint(kept)
 
 
 def test_the_prune_is_skipped_while_a_peer_holds_the_journal_lock(kiss_home: Path) -> None:

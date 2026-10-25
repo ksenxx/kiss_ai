@@ -27,15 +27,7 @@ function makePage() {
 const send = harness.send;
 
 function startTask(win, task) {
-  send(win, {
-    type: 'task_events',
-    events: [],
-    task,
-    tabId: readyTabId(win.__posted),
-    chat_id: 'chat-' + task.replace(/\W+/g, '-'),
-  });
-  send(win, {type: 'status', running: true});
-  send(win, {type: 'prompt', text: task});
+  harness.startTask(win, win.__posted, task);
 }
 
 function sendStep(win, i) {
@@ -54,25 +46,6 @@ function sendStep(win, i) {
     output: String(i),
     success: true,
   });
-}
-
-/** The stylesheet rule whose selector list names *selector*. */
-function ruleFor(win, selector) {
-  const sheets = win.document.styleSheets;
-  for (let s = 0; s < sheets.length; s++) {
-    const rules = sheets[s].cssRules;
-    for (let r = 0; r < rules.length; r++) {
-      const sel = rules[r].selectorText || '';
-      if (
-        sel
-          .split(',')
-          .map(x => x.trim())
-          .includes(selector)
-      )
-        return rules[r];
-    }
-  }
-  return null;
 }
 
 function testSteerPromptRendersLikeTaskPanel() {
@@ -110,15 +83,9 @@ function testSteerPromptRendersLikeTaskPanel() {
     1,
     'the task prompt is still the one Prompt panel; the steer echo is not a second one',
   );
-  // Same accent look as the task panel: one stylesheet rule paints both.
+  // Same accent look as the task panel.
   const task = output(win).querySelector('.ev.task-panel');
   assert.ok(task, 'the task panel is on screen');
-  const rule = ruleFor(win, '.ev.user-msg');
-  assert.ok(
-    rule && rule.selectorText.includes('.ev.task-panel'),
-    'the task panel rule also names .ev.user-msg: ' +
-      (rule && rule.selectorText),
-  );
   assert.strictEqual(
     win.getComputedStyle(msg).backgroundColor,
     win.getComputedStyle(task).backgroundColor,
@@ -169,14 +136,11 @@ function testMessagePanelNeverAutoFolded() {
     output(win).querySelector('.tc-bash').classList.contains('collapsed'),
     'while the older tool panels fold',
   );
-  // A summary tool call adopts the tool panels but leaves the message.
+  // A summary tool call adopts the tool panels but leaves the message
+  // open (that it stays top-level is pinned by
+  // promptPanelsCollapsedAndSummarized.test.js).
   send(win, {type: 'tool_call', name: 'summary', description: 'five steps'});
   msg = output(win).querySelector('.ev.user-msg');
-  assert.ok(
-    !msg.closest('.summary-sub'),
-    'a summary does not adopt the message',
-  );
-  assert.strictEqual(msg.parentElement, output(win), 'it stays top-level');
   assert.ok(!msg.classList.contains('collapsed'));
   win.close();
 

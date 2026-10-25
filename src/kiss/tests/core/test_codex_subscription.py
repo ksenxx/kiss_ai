@@ -26,7 +26,11 @@ from typing import Any
 
 import pytest
 
-from kiss.core.config import DEFAULT_CONFIG
+# The singleton is read through the module at call time: some server tests
+# replace ``kiss.core.config.DEFAULT_CONFIG`` with a fresh ``Config()``, and
+# the adapters import it lazily, so a name bound at import time would patch
+# an object the code under test no longer reads.
+from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.codex_model import (
     API_KEY_LOGIN_ERROR,
@@ -48,7 +52,8 @@ FINAL_TEXT = "SUBSCRIPTION-OK"
 # exits per $cfg[status_exit]; ``login --device-auth`` prints the
 # device-code banner (ANSI colored like the real CLI), then sleeps
 # $cfg[login_sleep] and exits per $cfg[login_exit]; ``exec`` records argv
-# + the credential variables it sees, prints the events and exits per
+# + the credential variables it sees, waits for the file $cfg[turn_gate]
+# to exist when one is named, prints the events and exits per
 # $cfg[turn_exit].
 _FAKE_CODEX = """#!/usr/bin/env python3
 import json, os, sys, pathlib, time
@@ -74,6 +79,8 @@ if sys.argv[1:3] == ["login", "--device-auth"]:
 prompt = sys.stdin.read()
 pathlib.Path({record_path!r}).write_text(
     json.dumps({{"argv": sys.argv[1:], "prompt": prompt, "env": seen}}))
+while cfg.get("turn_gate") and not os.path.exists(cfg["turn_gate"]):
+    time.sleep(0.01)
 for event in cfg["events"]:
     print(json.dumps(event), flush=True)
 sys.exit(cfg.get("turn_exit", 0))
@@ -132,8 +139,8 @@ def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _FakeCodex:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
     monkeypatch.setenv("CODEX_API_KEY", "sk-codex-test")
     monkeypatch.delenv("CODEX_ACCESS_TOKEN", raising=False)
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", True)
-    monkeypatch.setattr(DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", True)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "")
     return _FakeCodex(tmp_path, monkeypatch)
 
 
@@ -145,11 +152,19 @@ def _run_turn(tmp_path: Path) -> str:
     return text
 
 
+def _run_turn_collecting(tmp_path: Path, errors: list[BaseException]) -> None:
+    """Thread target: run one turn and store the exception it raised in *errors*."""
+    try:
+        _run_turn(tmp_path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(e)
+
+
 def test_turn_hides_api_keys_and_passes_the_panel_token(
     fake_codex: _FakeCodex, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Switch on: no API key reaches the CLI, the access token does."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
     assert _run_turn(tmp_path) == FINAL_TEXT
     env = fake_codex.turn()["env"]
     assert env["OPENAI_API_KEY"] is None
@@ -173,8 +188,8 @@ def test_switch_off_inherits_the_environment(
     fake_codex: _FakeCodex, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Switch off: the CLI sees the API keys and no injected token."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
-    monkeypatch.setattr(DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
     assert codex_cli_env()["CODEX_API_KEY"] == "sk-codex-test"
     assert _run_turn(tmp_path) == FINAL_TEXT
     assert fake_codex.turn()["env"] == {
@@ -190,16 +205,16 @@ def test_switch_off_feeds_openai_api_key_to_the_cli(
     """Switch off, no ``CODEX_API_KEY``: the CLI (which reads only that
     variable) gets the ``OPENAI_API_KEY`` from the environment, else the
     one from the settings panel."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
     monkeypatch.delenv("CODEX_API_KEY")
     assert _run_turn(tmp_path) == FINAL_TEXT
     assert fake_codex.turn()["env"]["CODEX_API_KEY"] == "sk-openai-test"
     assert "CODEX_API_KEY" not in os.environ
 
     monkeypatch.delenv("OPENAI_API_KEY")
-    monkeypatch.setattr(DEFAULT_CONFIG, "OPENAI_API_KEY", "sk-openai-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENAI_API_KEY", "sk-openai-panel")
     assert codex_cli_env()["CODEX_API_KEY"] == "sk-openai-panel"
-    monkeypatch.setattr(DEFAULT_CONFIG, "OPENAI_API_KEY", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENAI_API_KEY", "")
     assert "CODEX_API_KEY" not in codex_cli_env()
 
 
@@ -239,7 +254,7 @@ def test_api_key_login_is_refused_with_the_switch_on(
     assert _run_turn(tmp_path) == FINAL_TEXT
 
     _write_auth_json(codex_home, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-saved"})
-    monkeypatch.setattr(DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
     assert _run_turn(tmp_path) == FINAL_TEXT
     assert fake_codex.turn()["env"]["CODEX_ACCESS_TOKEN"] == "codex-token-panel"
 
@@ -248,7 +263,7 @@ def test_api_key_login_is_fine_with_the_switch_off(
     fake_codex: _FakeCodex, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Switch off: the user chose per-token billing, so the saved key runs."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     _write_auth_json(codex_home, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-saved"})
@@ -267,12 +282,36 @@ def test_turn_failure_names_the_cause_and_the_fix(fake_codex: _FakeCodex, tmp_pa
 def test_turn_failure_with_the_switch_off_has_no_hint(
     fake_codex: _FakeCodex, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
     fake_codex.configure(events=[_UNAUTHORIZED], turn_exit=1)
     with pytest.raises(KISSError) as info:
         _run_turn(tmp_path)
     assert "401 Unauthorized" in str(info.value)
     assert SUBSCRIPTION_HINT not in str(info.value)
+
+
+def test_hint_follows_the_switch_the_turn_was_launched_with(
+    fake_codex: _FakeCodex, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The switch is read once per turn: a settings flip while ``codex exec``
+    runs must not change whether the failure carries the hint (the turn ran
+    without the API keys, so the hint is what explains the 401)."""
+    gate = tmp_path / "gate"
+    fake_codex.configure(events=[_UNAUTHORIZED], turn_exit=1, turn_gate=str(gate))
+    errors: list[BaseException] = []
+    worker = threading.Thread(target=_run_turn_collecting, args=(tmp_path, errors))
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not fake_codex.record_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake_codex.record_path.exists(), "the fake codex never started"
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
+    gate.touch()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], KISSError)
+    assert "401 Unauthorized" in str(errors[0])
+    assert SUBSCRIPTION_HINT in str(errors[0])
 
 
 @pytest.mark.parametrize(
@@ -301,7 +340,7 @@ def test_auth_status_runs_in_the_stripped_env(
     fake_codex: _FakeCodex, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The status reflects what a turn would see: no API keys, the token."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "CODEX_ACCESS_TOKEN", "codex-token-panel")
     status = codex_auth_status()
     assert status["useSubscription"] is True
     assert status["hasToken"] is True
@@ -315,7 +354,7 @@ def test_auth_status_runs_in_the_stripped_env(
 def test_auth_status_with_the_switch_off_sees_the_api_key(
     fake_codex: _FakeCodex, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", False)
     status = codex_auth_status()
     assert status["useSubscription"] is False
     assert status["hasToken"] is False
@@ -397,11 +436,13 @@ def test_device_login_that_prints_nothing_times_out(fake_codex: _FakeCodex) -> N
 
 def test_apply_config_to_env_mirrors_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stored switch reaches ``DEFAULT_CONFIG``; a missing key means the default."""
-    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", True)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "codex_use_subscription", True)
     apply_config_to_env({"max_budget": 1.0, "codex_use_subscription": False})
-    assert DEFAULT_CONFIG.codex_use_subscription is False
+    assert config_module.DEFAULT_CONFIG.codex_use_subscription is False
     apply_config_to_env({"max_budget": 1.0})
-    assert DEFAULT_CONFIG.codex_use_subscription is DEFAULTS["codex_use_subscription"]
+    assert config_module.DEFAULT_CONFIG.codex_use_subscription is DEFAULTS[
+        "codex_use_subscription"
+    ]
     assert DEFAULTS["codex_use_subscription"] is True
 
 

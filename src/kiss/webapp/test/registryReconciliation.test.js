@@ -25,8 +25,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
-const {ofType} = require('./simplify2_harness');
+const {makePage, send, ofType} = require('./simplify2_harness');
 
 function testBootAnnouncesOneNewChat() {
   const {win, posted} = makePage();

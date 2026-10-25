@@ -7,17 +7,7 @@
 
 const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
-
-function visibleTitles(win) {
-  const list = win.document.getElementById('history-list');
-  const out = [];
-  list.querySelectorAll('.sidebar-item').forEach(r => {
-    if (r.style.display !== 'none') {
-      out.push(r.querySelector('.sidebar-item-text').textContent);
-    }
-  });
-  return out;
-}
+const {visibleTitles} = require('./history_helpers');
 
 const SESSIONS_FIXTURE = [
   {
@@ -131,10 +121,8 @@ function testChipMarkup() {
       lead,
       `#${spec.id} chip must contain a leading "${spec.lead}" element`,
     );
-    const label = chip.querySelector('.hf-chip-label');
-    assert.ok(label, `#${spec.id} chip must contain a .hf-chip-label`);
     assert.strictEqual(
-      label.textContent.trim(),
+      chip.textContent.trim(),
       spec.label,
       `#${spec.id} chip label text`,
     );

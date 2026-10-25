@@ -25,37 +25,39 @@ external model.
 from __future__ import annotations
 
 from kiss.agents.sorcar.commit_message import (
-    _append_user_prompt,
+    FALLBACK_SUBJECT,
+    fallback_commit_message,
     generate_commit_message_from_diff,
 )
+from kiss.agents.sorcar.git_worktree import _ensure_task_metadata
 from kiss.tests.agents.sorcar.test_autocommit_user_prompt import (  # noqa: F401
     _LLMUnavailable,
 )
 
 
-class TestAppendUserPromptHelper:
-    """Pure-function tests for ``_append_user_prompt``."""
+class TestUserPromptTrailer:
+    """The ``User prompt:`` trailer ``fallback_commit_message`` appends."""
 
     def test_appends_under_user_prompt_heading(self) -> None:
-        msg = _append_user_prompt("subject", "fix the bug")
-        assert msg == "subject\n\nUser prompt:\nfix the bug"
+        msg = fallback_commit_message("fix the bug")
+        assert msg == f"{FALLBACK_SUBJECT}\n\nUser prompt:\nfix the bug"
 
     def test_trims_whitespace_around_prompt(self) -> None:
-        msg = _append_user_prompt("subject", "   fix the bug\n  ")
-        assert msg == "subject\n\nUser prompt:\nfix the bug"
+        msg = fallback_commit_message("   fix the bug\n  ")
+        assert msg == f"{FALLBACK_SUBJECT}\n\nUser prompt:\nfix the bug"
 
     def test_empty_prompt_returns_message_unchanged(self) -> None:
-        assert _append_user_prompt("subject", "") == "subject"
-        assert _append_user_prompt("subject", "   \n  ") == "subject"
+        assert fallback_commit_message("") == FALLBACK_SUBJECT
+        assert fallback_commit_message("   \n  ") == FALLBACK_SUBJECT
 
     def test_strips_trailing_whitespace_from_base_message(self) -> None:
-        msg = _append_user_prompt("subject\n\n", "do X")
+        msg = _ensure_task_metadata("subject\n\n", "do X", None)
         assert msg == "subject\n\nUser prompt:\ndo X"
 
     def test_multiline_prompt_preserved(self) -> None:
         prompt = "do X\n- step 1\n- step 2"
-        msg = _append_user_prompt("subject", prompt)
-        assert msg == f"subject\n\nUser prompt:\n{prompt}"
+        msg = fallback_commit_message(prompt)
+        assert msg == f"{FALLBACK_SUBJECT}\n\nUser prompt:\n{prompt}"
 
 
 class TestGenerateCommitMessageFromDiff:

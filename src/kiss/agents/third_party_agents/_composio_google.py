@@ -128,6 +128,34 @@ def connected_account_id(service: str) -> str:
     return str(_read_json(_state_path(service)).get("connected_account_id") or "")
 
 
+STATUS_UNKNOWN = "UNKNOWN"
+"""The :func:`connection_status` answer when Composio could not be asked."""
+
+
+def connection_status(service: str) -> str:
+    """Return the live Composio status of *service*'s connected account.
+
+    One real API call, so an account Composio marks ``EXPIRED`` or
+    ``FAILED`` is never reported as connected on the strength of the
+    local state file alone.
+
+    Args:
+        service: KISS service name (``"gmail"``, ``"google_calendar"`` ...).
+
+    Returns:
+        ``""`` when no connected account is recorded locally, else the
+        account's status (``"ACTIVE"``, ``"EXPIRED"``, ...), or
+        :data:`STATUS_UNKNOWN` when the SDK or the API call failed.
+    """
+    account_id = connected_account_id(service)
+    if not account_id:
+        return ""
+    try:
+        return str(_client().connected_accounts.get(account_id).status)
+    except Exception:
+        return STATUS_UNKNOWN
+
+
 def _client() -> Any:
     """Build a Composio SDK client from the configured API key.
 

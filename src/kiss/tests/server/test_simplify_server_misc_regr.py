@@ -18,8 +18,11 @@ No mocks or fakes: real functions are called on real objects and temp files.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from typing import Any
+
+import pytest
 
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.json_printer import JsonPrinter, _coalesce_events
@@ -31,6 +34,16 @@ class _AC(_AutocompleteMixin):
 
 def _server() -> _AC:
     return _AC()
+
+
+def _stale_atime_probe(directory: str, name: str) -> str:
+    """Write a small source file whose atime predates its mtime by two days."""
+    path = os.path.join(directory, name)
+    with open(path, "w") as f:
+        f.write("frobnicate_widget = 1\n")
+    mtime = os.stat(path).st_mtime
+    os.utime(path, (mtime - 86400 * 2, mtime))
+    return path
 
 
 class TestActiveFileIdentifierMatches:
@@ -76,6 +89,29 @@ class TestActiveFileIdentifierMatches:
             assert matches == ["frobnicate_widget"]
         finally:
             os.unlink(path)
+
+    def test_token_less_query_does_not_read_the_disk_file(self) -> None:
+        """A query with no completable token must not open the active file.
+
+        The on-disk fallback runs on the one autocomplete worker shared by
+        every connection, so the cheap token check has to come first.
+        Observed through the file's access time: each probe file gets an
+        atime older than its mtime, which ``relatime`` (the Linux default)
+        bumps on the next read.  A control read proves the mount tracks
+        atime at all; without that the check is skipped.
+        """
+        if sys.platform == "win32":
+            pytest.skip("atime tracking is unreliable on Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            control = _stale_atime_probe(tmp, "control.py")
+            before = os.stat(control).st_atime_ns
+            _server()._active_file_identifier_matches("frob", control, None)
+            if os.stat(control).st_atime_ns == before:
+                pytest.skip("this mount does not track atime")
+            probe = _stale_atime_probe(tmp, "probe.py")
+            before = os.stat(probe).st_atime_ns
+            assert _server()._active_file_identifier_matches("frob ", probe, None) == []
+            assert os.stat(probe).st_atime_ns == before
 
 
 class TestGhostSuffix:

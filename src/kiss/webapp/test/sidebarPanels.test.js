@@ -29,14 +29,12 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
   stubRaf,
   fakeMatchMedia,
-  MEDIA,
+  loadMainCss,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -1012,6 +1010,7 @@ async function main() {
 
   await test('a tooltip that would run off the bottom or right edge stays on screen', () => {
     const {win} = makePage();
+    loadMainCss(win);
     send(win, {
       type: 'cronJobs',
       jobs: [job({id: 'p', name: 'Tall', what: 'x'.repeat(2000)})],
@@ -1080,14 +1079,13 @@ async function main() {
     row.dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
     assert.strictEqual(tip.style.top, '0px', 'never above the top edge');
 
-    const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-    const rule = css.match(/#custom-tooltip \{[^}]*\}/)[0];
-    assert.match(
-      rule,
-      /max-height: calc\(100vh - 16px\)/,
+    const tipStyle = win.getComputedStyle(tip);
+    assert.strictEqual(
+      tipStyle.maxHeight,
+      'calc(100vh - 16px)',
       'capped at the viewport height',
     );
-    assert.match(rule, /overflow: hidden/);
+    assert.strictEqual(tipStyle.overflow, 'hidden');
   });
 
   await test('Machines: rows show the status, the name, a local badge, the tooltip and the buttons', async () => {

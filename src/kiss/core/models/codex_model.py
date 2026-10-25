@@ -556,11 +556,13 @@ class CodexModel(CLITextModel):
         # The MCP bridge serving the agent's tools, set for the duration
         # of a ``native_tools_exposed`` block.
         self._tool_bridge: ToolBridge | None = None
-        # The current turn's child environment and whether an API key
-        # pays for it, both decided at the top of generate
-        # (_prepare_turn_env), and whether extract_cost_from_response
-        # has logged that this API-billed model has no catalog price.
+        # The current turn's child environment, the subscription switch
+        # it was built from and whether an API key pays for it, all
+        # decided at the top of generate (_prepare_turn_env), and whether
+        # extract_cost_from_response has logged that this API-billed
+        # model has no catalog price.
         self._turn_env: dict[str, str] = {}
+        self._use_subscription = False
         self._api_billed = False
         self._warned_unpriced = False
 
@@ -715,6 +717,7 @@ class CodexModel(CLITextModel):
                 deadline.  Retryable, unlike ``KISSError``.
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
+        self._rejected_response = None
         self._turn_env = self._prepare_turn_env()
         prompt = self._build_prompt()
         preamble = CODEX_INSTRUCTIONS_PREAMBLE
@@ -742,15 +745,19 @@ class CodexModel(CLITextModel):
             if self._tool_bridge is not None:
                 self._replay_served_calls(self._tool_bridge)
 
+        # The turn completed: its usage is returned in result_json, so the
+        # partial-usage slot must not bill it a second time.
+        self._rejected_response = None
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
     def _prepare_turn_env(self) -> dict[str, str]:
         """Build the turn's child environment and decide its billing, once per turn.
 
-        One reading of the subscription switch shapes both the
-        environment (:func:`codex_cli_env`) and the verdict, so a settings
-        flip during the call cannot make them disagree.  The billing is
+        One reading of the subscription switch shapes the environment
+        (:func:`codex_cli_env`), the verdict and the hint a failure of
+        this turn carries (:meth:`_with_subscription_hint`), so a
+        settings flip during the call cannot make them disagree.  The billing is
         decided here for good: a ``CODEX_API_KEY`` in the child
         environment makes the turn API spend, whatever the switch says
         afterwards.  So does a key saved by ``codex login --with-api-key``
@@ -771,21 +778,18 @@ class CodexModel(CLITextModel):
         """
         from kiss.core.config import DEFAULT_CONFIG
 
-        use_subscription = bool(DEFAULT_CONFIG.codex_use_subscription)
-        env = _codex_cli_env_for(use_subscription)
+        self._use_subscription = bool(DEFAULT_CONFIG.codex_use_subscription)
+        env = _codex_cli_env_for(self._use_subscription)
         self._api_billed = bool(env.get("CODEX_API_KEY")) or (
             not env.get("CODEX_ACCESS_TOKEN") and codex_api_key_login()
         )
-        if use_subscription and self._api_billed:
+        if self._use_subscription and self._api_billed:
             raise KISSError(f"{API_KEY_LOGIN_ERROR}\n{SUBSCRIPTION_HINT}")
         return env
 
-    @staticmethod
-    def _with_subscription_hint(error: KISSError) -> KISSError:
-        """Append :data:`SUBSCRIPTION_HINT` to *error* when the switch is on."""
-        from kiss.core.config import DEFAULT_CONFIG
-
-        if not DEFAULT_CONFIG.codex_use_subscription:
+    def _with_subscription_hint(self, error: KISSError) -> KISSError:
+        """Append :data:`SUBSCRIPTION_HINT` to *error* when the turn ran with the switch on."""
+        if not self._use_subscription:
             return error
         return KISSError(f"{error}\n{SUBSCRIPTION_HINT}")
 
@@ -841,6 +845,10 @@ class CodexModel(CLITextModel):
                     result_json["requests"] += 1
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
+                # Billed spend from here on: a failure, timeout or Stop
+                # before generate() returns still bills it through
+                # take_partial_usage_response().
+                self._rejected_response = result_json
             elif event_type in ("error", "turn.failed"):
                 err = event.get("error") or {}
                 error_message = (

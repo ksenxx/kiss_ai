@@ -88,7 +88,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
@@ -250,7 +250,7 @@ def _jobs_lock(blocking: bool) -> Any:
     return exclusive_file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking)
 
 
-def load_jobs() -> list[dict[str, Any]]:
+def load_jobs(strict: bool = False) -> list[dict[str, Any]]:
     """Load all cron jobs from the JSON store.
 
     A gateway command job stored with a channel delivery target (by a
@@ -258,15 +258,29 @@ def load_jobs() -> list[dict[str, Any]]:
     ``deliver`` ``none``, so listing, duplicate detection and delivery
     all see the normalised job; the next save persists it.
 
+    Args:
+        strict: Raise instead of returning ``[]`` for a store that exists
+            but is damaged.  Every read-modify-write caller passes it:
+            saving what a damaged store reads as would replace the user's
+            schedules with the one job being saved.
+
     Returns:
         The list of job dicts; an empty list when the store does not
-        exist or is unreadable.
+        exist, or (``strict`` off) is unreadable or not a JSON list.
+
+    Raises:
+        ValueError: ``strict`` and the store exists but is unreadable or
+            not a JSON list.
     """
     try:
         data = json.loads(read_bytes_waiting_for_writer(_jobs_path()).decode("utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError):
+        data = None
     if not isinstance(data, list):
+        if strict:
+            raise ValueError("the cron job store is not a JSON list")
         return []
     jobs = [job for job in data if isinstance(job, dict) and job.get("id")]
     for job in jobs:
@@ -551,6 +565,181 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
     return notes
 
 
+FAILURE_BACKOFF_BASE_SECONDS = 3600.0
+FAILURE_BACKOFF_MAX_SECONDS = 86400.0
+
+
+def failure_backoff_seconds(streak: int) -> float:
+    """Return how long a job backs off after *streak* identical failures in a row.
+
+    The first repeat waits an hour, every further one doubles it, up to
+    a day: 1h, 2h, 4h ... 24h.  A streak of 0 (no repeat) backs off
+    nothing.
+
+    Args:
+        streak: The number of consecutive repeats of one failure.
+    """
+    if streak <= 0:
+        return 0.0
+    return float(min(FAILURE_BACKOFF_BASE_SECONDS * 2 ** (streak - 1), FAILURE_BACKOFF_MAX_SECONDS))
+
+
+def _same_failure(job: dict[str, Any], text: str | None) -> bool:
+    """Return whether *text* repeats the job's previous failed result (same first line)."""
+    if job.get("last_status") in (None, "ok", "silent") or not text:
+        return False
+    previous = str(job.get("last_summary") or "")
+    return _first_line(previous) == _first_line(text) != ""
+
+
+def _first_line(text: str) -> str:
+    """Return the first non-blank line of *text*, stripped."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+# Words of a prompt that name a Composio-backed connector, with the SEA
+# (``kiss.agents.third_party_agents.<sea>.<sea>_sea``) whose
+# ``connection_status()`` is checked before the run, and its label.
+CONNECTOR_WORDS: dict[str, tuple[str, str]] = {
+    "gmail": ("gmail", "Gmail"),
+    "google calendar": ("gcal", "Google Calendar"),
+    "gcal": ("gcal", "Google Calendar"),
+    "google docs": ("gdocs", "Google Docs"),
+    "gdocs": ("gdocs", "Google Docs"),
+    "google drive": ("gdrive", "Google Drive"),
+    "gdrive": ("gdrive", "Google Drive"),
+    "google sheets": ("gsheets", "Google Sheets"),
+    "gsheets": ("gsheets", "Google Sheets"),
+    "google chat": ("googlechat", "Google Chat"),
+    "googlechat": ("googlechat", "Google Chat"),
+}
+
+#: ``connection_status()`` values that let a run proceed: a live
+#: account, or a status the SEA could not determine (Composio down).
+CONNECTOR_OK_STATUSES = ("ACTIVE", "UNKNOWN")
+
+#: A prompt that (re)connects a connector is the fix, not a victim, of a
+#: dead connection: it is never held back by the pre-flight.
+CONNECTOR_AUTH_WORDS = ("authenticate", "reconnect", "re-connect", "log in", "login", "sign in")
+
+
+def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
+    """Return the fixed message to deliver when a connector the prompt names is not connected.
+
+    Checked before a prompt job is dispatched, so a run never spends
+    its steps discovering an expired Gmail connection: one live status
+    call per named connector, through the ``connection_status()`` of
+    its SEA module (resolved by name like the channel modules, since
+    the sorcar layer does not import third-party code).  A status the
+    SEA could not determine (``UNKNOWN``) lets the run proceed, and so
+    do an ``in_chat`` job (a person is there to finish an OAuth flow)
+    and a prompt that asks to authenticate or reconnect a connector.
+
+    Args:
+        prompt: The job's prompt text.
+        in_chat: Whether the job runs as a message in a new chat.
+
+    Returns:
+        ``None`` when every named connector is active (or none is
+        named), else the message — the same text on every repeat, so
+        the identical-failure back-off applies.
+    """
+    lowered = prompt.lower()
+    if in_chat or any(word in lowered for word in CONNECTOR_AUTH_WORDS):
+        return None
+    seen: set[str] = set()
+    for word, (sea, label) in CONNECTOR_WORDS.items():
+        if word not in lowered or sea in seen:
+            continue
+        seen.add(sea)
+        module = importlib.import_module(f"kiss.agents.third_party_agents.{sea}.{sea}_sea")
+        status = module.connection_status()
+        if status in CONNECTOR_OK_STATUSES:
+            continue
+        state = "not connected" if not status else f"in state {status}"
+        return (
+            f"{label} is {state}: this scheduled job cannot run until it is reconnected. "
+            f"Open the Apps panel (or /{sea} authenticate) to reconnect; the job retries "
+            "with growing back-off until the connection is active."
+        )
+    return None
+
+
+RUN_CONTEXT_HEADING = "# Run context"
+PREVIOUS_TAIL_CHARS = 1_500
+#: Run outcomes after which the window is covered: a reported result or
+#: a deliberate ``[SILENT]`` (nothing to report), never an error.
+COVERING_STATUSES = ("ok", "silent")
+
+
+def run_context(job: dict[str, Any], now: float | None = None) -> str:
+    """Return the context block a prompt job's run gets ahead of its prompt.
+
+    The current time (local schedule zone and UTC), the schedule, the
+    start of the window this run covers — the watermark ``covered_until``:
+    the last *successful* run, or the job's creation while none has
+    succeeded, since a failed attempt covers nothing and the window
+    must keep growing until one does; a job stored before the watermark
+    existed gets one schedule interval back — the previous attempt and
+    the tail of its result, so the run neither spends a turn on
+    ``date`` nor reads its own log to find where the last run stopped.
+    The runner appends the final summary to the job's log itself, which
+    the block says.
+
+    Args:
+        job: The job dict (``schedule``, ``covered_until``,
+            ``created_at``, ``previous_run_at``, ``last_run_at``,
+            ``next_run_at``, ``last_status``, ``last_summary``, ``id``).
+        now: The current time (epoch seconds; defaults to the clock).
+    """
+    now = time.time() if now is None else now
+    utc = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [RUN_CONTEXT_HEADING, f"- Now: {format_schedule_time(now)} ({utc})"]
+    schedule = str(job.get("schedule") or "")
+    if schedule:
+        lines.append(f"- Schedule: {schedule}")
+    covered = job.get("covered_until")
+    if covered:
+        why = (
+            "the job was created; no run has succeeded yet"
+            if covered == job.get("created_at")
+            else "the last successful run"
+        )
+        lines.append(
+            f"- Window start: {format_schedule_time(float(covered))} "
+            f"({why}; cover everything since)"
+        )
+    else:
+        started, upcoming = job.get("last_run_at"), job.get("next_run_at")
+        interval = float(upcoming) - float(started) if started and upcoming else 0.0
+        since = (
+            f"{format_schedule_time(now - interval)} (one schedule interval back)"
+            if interval > 0
+            else "not set (no successful run yet; use your judgement)"
+        )
+        lines.append(f"- Window start: {since}")
+    previous = job.get("previous_run_at")
+    if previous:
+        state = job.get("last_status") or "unknown"
+        lines.append(f"- Previous attempt: {format_schedule_time(float(previous))} ({state})")
+    else:
+        lines.append("- Previous attempt: none (first run)")
+    summary = str(job.get("last_summary") or "").strip()
+    if summary:
+        tail = summary[-PREVIOUS_TAIL_CHARS:]
+        lines.append(
+            f"- Previous result ({job.get('last_status') or 'unknown'}, tail):\n" + tail
+        )
+    lines.append(
+        f"- The runner appends your final summary to {_output_dir()}/{job.get('id', '')}.md "
+        "itself: do not write a log."
+    )
+    return "\n".join(lines)
+
+
 PROMPT_PREAMBLE = (
     # The first sentence is CRON_TASK_MARKER: the history migration
     # (history_columns.backfill_is_cron) recognises a prompt job's row by
@@ -605,13 +794,22 @@ def _current_task_text(agent: Any) -> str:
 def is_unattended(agent: Any) -> bool:
     """True when *agent* runs an unattended (cron) task or a sub-task of one.
 
-    The current task text must start with :data:`PROMPT_PREAMBLE` (a cron
-    prompt job) or end with :data:`UNATTENDED_CHILD_PREAMBLE` (a sub-task);
-    a prompt that merely quotes the sentence elsewhere is not unattended.
+    The daemon's verdict, stamped on the agent at launch
+    (``is_unattended``, decided by ``task_runner`` with
+    :func:`is_unattended_text` on the task text as SUBMITTED, before a
+    SEA's ``prompt()`` may have replaced it, as ``/recommendations``
+    does).  An agent the daemon did not launch (a library run) carries
+    no stamp: its current task text must then start with
+    :data:`PROMPT_PREAMBLE` (a cron prompt job) or end with
+    :data:`UNATTENDED_CHILD_PREAMBLE` (a sub-task); a prompt that merely
+    quotes the sentence elsewhere is not unattended.
 
     Args:
-        agent: A running agent (see :func:`_current_task_text`).
+        agent: A running agent (see :func:`_current_task_text`), or None.
     """
+    stamped = getattr(agent, "is_unattended", None)
+    if stamped is not None:
+        return bool(stamped)
     return is_unattended_text(_current_task_text(agent))
 
 
@@ -713,6 +911,12 @@ def _job_timeout(job: dict[str, Any], default: float) -> float:
     return float(job.get("timeout") or 0.0) or default
 
 
+def _job_budget(job: dict[str, Any]) -> float | None:
+    """Return the per-run USD budget of *job* (``max_budget``); ``None`` is the daemon default."""
+    raw_budget = job.get("max_budget")
+    return float(raw_budget) if raw_budget else None
+
+
 def _run_in_chat_job(
     job: dict[str, Any], prompt: str, run_dir: Path, timeout: float,
 ) -> tuple[str, str | None]:
@@ -750,13 +954,12 @@ def _run_in_chat_job(
     # :data:`_daemon_endpoint_file`).
     from kiss.agents.sorcar.agent_dispatch import _daemon_endpoint_file as daemon_endpoint_file
 
-    raw_budget = job.get("max_budget")
     try:
         result = daemon_client.run(
             prompt,
             work_dir=str(run_dir),
             model=str(job.get("model_name") or ""),
-            max_budget=float(raw_budget) if raw_budget else None,
+            max_budget=_job_budget(job),
             timeout=timeout,
             stop_on_timeout=True,
             endpoint_file=daemon_endpoint_file(),
@@ -769,7 +972,7 @@ def _run_in_chat_job(
             f"in-chat job timed out after {timeout:g}s; the stop was not confirmed, "
             f"so the task MAY STILL BE RUNNING (and spending) on the daemon: {exc}"
         ) from exc
-    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
     return _run_outcome(result.text, result.success)
 
@@ -846,17 +1049,19 @@ def _run_prompt_job(
     # text; any other prompt runs the generic cron prompt SEA.
     command = slash_command_task(prompt)
     sea_path = PROMPT_SEA_PATH if command is None else command[1]
-    task = PROMPT_PREAMBLE + (prompt if command is None else command[0])
+    task = PROMPT_PREAMBLE + run_context(job) + "\n\n" + (
+        prompt if command is None else command[0]
+    )
     options: dict[str, Any] = {"work_dir": str(run_dir)}
     if command is not None:
         options["auto_classify"] = False
     run_agent = make_run_agent_tool(str(scratch_dir))
-    raw_budget = job.get("max_budget")
+    budget = _job_budget(job)
     reply = run_agent(
         agent=str(sea_path),
         task=task,
         model=str(job.get("model_name") or ""),
-        max_budget=str(float(raw_budget)) if raw_budget else "",
+        max_budget="" if budget is None else str(budget),
         timeout=str(timeout),
         options=json.dumps(options),
     )
@@ -1067,8 +1272,10 @@ def _execute_job(job: dict[str, Any]) -> None:
     is kept and its path reported.
 
     Never raises: failures are recorded in the job's ``last_status`` /
-    ``last_summary`` fields.  Errors are still delivered (so the user
-    learns the automation broke), silent results are not.
+    ``last_summary`` fields (a damaged store is logged and left as it
+    is; the run's output file still holds the result).  Errors are
+    still delivered (so the user learns the automation broke), silent
+    results are not.
 
     Prompt jobs are submitted to the kiss-web daemon whose endpoint
     file :func:`start_scheduler_thread` recorded (standard resolution
@@ -1079,8 +1286,12 @@ def _execute_job(job: dict[str, Any]) -> None:
         job: The job dict to execute.
     """
     is_command = bool(str(job.get("command", "")).strip())
+    # The watermark a successful run leaves for the next run's window:
+    # its own start (``last_run_at`` is unset on a "run now").
+    started = time.time()
     work_dir: Path | None = None
     keep_work_dir = False
+    text: str | None
     try:
         # Inside the try: a scratch directory that cannot be created (a
         # file in the way of the runs directory, a read-only or full
@@ -1093,7 +1304,14 @@ def _execute_job(job: dict[str, Any]) -> None:
         timeout = _job_timeout(
             job, COMMAND_TIMEOUT_SECONDS if is_command else PROMPT_TIMEOUT_SECONDS,
         )
-        if is_command:
+        problem = (
+            None
+            if is_command
+            else connector_problem(str(job.get("prompt", "")), bool(job.get("in_chat")))
+        )
+        if problem is not None:
+            status, text = "error", problem
+        elif is_command:
             status, text = _run_command_job(job, run_dir, timeout)
         else:
             status, text = _run_prompt_job(job, work_dir, run_dir, timeout)
@@ -1110,7 +1328,17 @@ def _execute_job(job: dict[str, Any]) -> None:
         if work_dir is not None and not keep_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
     notes: list[str] = []
-    if text is not None:
+    repeated = status != "ok" and _same_failure(job, text)
+    streak = int(job.get("failure_streak") or 0) + 1 if repeated else 0
+    backoff = failure_backoff_seconds(streak)
+    if repeated:
+        # The run failed the same way as the last one (an expired
+        # connector, a dead host): the user has the message already,
+        # so it is not delivered again and the job backs off.
+        notes = [f"repeat of the previous failure ({streak}): not delivered again, "
+                 f"next run postponed by {timedelta(seconds=backoff)}"]
+        logger.warning("Cron job %s: %s", job["id"], notes[0])
+    elif text is not None:
         try:
             notes = _deliver(job, text)
         except Exception as e:
@@ -1124,12 +1352,25 @@ def _execute_job(job: dict[str, Any]) -> None:
         and not any(note.startswith("error") for note in notes)
     )
     with _jobs_lock(blocking=True):
-        jobs = load_jobs()
+        try:
+            jobs = load_jobs(strict=True)
+        except ValueError as exc:
+            logger.warning("cron job %r: outcome not recorded: %s", job["id"], exc)
+            return
         for stored in jobs:
             if stored["id"] == job["id"]:
                 stored["last_status"] = status
                 stored["last_summary"] = (text or "")[:MAX_STORED_SUMMARY_CHARS]
                 stored["last_delivery"] = notes
+                stored["failure_streak"] = streak
+                if status in COVERING_STATUSES:
+                    # The watermark the next run's window starts at: a
+                    # failed attempt covers nothing (see run_context).
+                    stored["covered_until"] = started
+                if backoff and stored.get("enabled") and stored.get("next_run_at"):
+                    stored["next_run_at"] = max(
+                        float(stored["next_run_at"]), time.time() + backoff
+                    )
                 if delivered and stored.get("until_delivered"):
                     # A "notify me when ..." poll has done its job.
                     stored["enabled"] = False
@@ -1196,6 +1437,8 @@ def tick(now: float | None = None, wait: bool = True) -> int:
     with _jobs_lock(blocking=False) as held:
         if not held:
             return 0
+        # Lenient is safe here: a damaged store reads as [], so nothing is
+        # due or changed and neither save_jobs below runs.
         jobs = load_jobs()
         running = running_job_ids()
         due = []
@@ -1232,6 +1475,7 @@ def tick(now: float | None = None, wait: bool = True) -> int:
                 job["last_summary"] = f"disabled: malformed job: {e}"
                 changed = True
                 continue
+            job["previous_run_at"] = job.get("last_run_at")
             job["last_run_at"] = now
             job["next_run_at"] = next_run
             if job.get("one_shot"):
@@ -1411,15 +1655,11 @@ def seed_default_jobs() -> list[str]:
         return []
     done: list[str] = []
     try:
-        # A store that exists but cannot be read or parsed is the user's
-        # schedules, not an empty store: creating into it (load_jobs()
-        # reads it as []) would replace them with the defaults.
-        if _jobs_path().exists() and not isinstance(
-            json.loads(read_bytes_waiting_for_writer(_jobs_path()).decode("utf-8")), list
-        ):
-            raise ValueError("the cron job store is not a JSON list")
         for spec in pending:
-            if any(_current_default_name(str(j.get("name"))) == spec["name"] for j in load_jobs()):
+            # A damaged store is the user's schedules, not an empty one:
+            # strict, so nothing is seeded into it.
+            jobs = load_jobs(strict=True)
+            if any(_current_default_name(str(j.get("name"))) == spec["name"] for j in jobs):
                 done.append(spec["name"])  # the user's own job under that name stands
                 continue
             result = _create_or_ensure(
@@ -1556,10 +1796,15 @@ def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
     return ""
 
 
+def _is_running(running: dict[str, threading.Thread], job_id: str) -> bool:
+    """``True`` when *running* holds a live thread for *job_id*."""
+    current = running.get(job_id)
+    return current is not None and current.is_alive()
+
+
 def _claim_run(running: dict[str, threading.Thread], job_id: str, me: threading.Thread) -> bool:
     """Register *me* as the thread running *job_id* in *running*; ``False`` when one is alive."""
-    current = running.get(job_id)
-    if current is not None and current.is_alive():
+    if _is_running(running, job_id):
         return False
     running[job_id] = me
     return True
@@ -1637,8 +1882,7 @@ def start_job(job: dict[str, Any]) -> str:
         already running in this process).
     """
     with _running_lock:
-        running = _running.get(job["id"])
-        if running is not None and running.is_alive():
+        if _is_running(_running, job["id"]):
             return f"job {job['id']!r} is already running"
         _launch(job)
     return ""
@@ -1687,7 +1931,10 @@ def apply_job_action(
         )
         return str(result.get("error") or "")
     with _jobs_lock(blocking=True):
-        jobs = load_jobs()
+        try:
+            jobs = load_jobs(strict=True)
+        except ValueError as exc:
+            return str(exc)
         match = [job for job in jobs if job["id"] == job_id]
         if not match:
             return f"no job with id {job_id!r}"
@@ -1815,6 +2062,7 @@ def _create_or_ensure(
         run_dir = str(Path(work_dir.strip()).expanduser().resolve())
         if not Path(run_dir).is_dir():
             return {"error": f"work_dir {work_dir!r} is not a directory"}
+    created_at = time.time()
     job = {
         "id": uuid.uuid4().hex[:8],
         "name": name,
@@ -1830,7 +2078,10 @@ def _create_or_ensure(
         "one_shot": is_one_shot(schedule),
         "until_delivered": bool(until_delivered),
         "in_chat": bool(in_chat),
-        "created_at": time.time(),
+        "created_at": created_at,
+        # The window the first run covers starts at creation and keeps
+        # growing until a run succeeds (see run_context).
+        "covered_until": created_at,
         "next_run_at": next_run,
         "last_run_at": None,
         "last_status": "",
@@ -1838,7 +2089,10 @@ def _create_or_ensure(
         "last_delivery": [],
     }
     with _jobs_lock(blocking=True):
-        jobs = load_jobs()
+        try:
+            jobs = load_jobs(strict=True)
+        except ValueError as exc:
+            return {"error": str(exc)}
         duplicate = _find_duplicate(jobs, job)
         if action == "ensure":
             named = [j for j in jobs if j.get("name") == name]
@@ -2213,20 +2467,20 @@ def gateway_command(
         string starting with ``error:`` when *channel* is unknown or
         has no gateway mode.
     """
-    from kiss.agents.sorcar.agent_dispatch import _squash, available_channels
+    from kiss.agents.sorcar.agent_dispatch import available_channels, find_squashed
 
-    matches = [name for name in available_channels() if _squash(name) == _squash(channel)]
-    if not matches:
+    matched = find_squashed(channel, available_channels())
+    if matched is None:
         return f"error: unknown channel {channel!r}"
-    channel = matches[0]
+    channel = matched
     module = importlib.import_module(
         f"kiss.agents.third_party_agents.{channel}.{channel}_sea"
     )
     if not callable(getattr(module, "_make_backend", None)):
-        return f"error: channel {matches[0]!r} has no gateway (poll) mode"
+        return f"error: channel {channel!r} has no gateway (poll) mode"
     if not chat.strip():
         return "error: chat is required (a chat id or channel name)"
-    parts = [_channel_cli_name(matches[0]), f"--channel={shlex.quote(chat.strip())}"]
+    parts = [_channel_cli_name(channel), f"--channel={shlex.quote(chat.strip())}"]
     if pairing:
         parts.append("--pairing")
     if workspace.strip():

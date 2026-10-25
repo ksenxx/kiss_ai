@@ -139,6 +139,7 @@ def simplex_server() -> Iterator[str]:
     finally:
         server.shutdown()
         thread.join(timeout=5.0)
+        assert not thread.is_alive(), "websocket server thread did not exit"
 
 
 def _authenticate(agent: SimpleXAgent, ws_url: str) -> dict[str, Callable[..., str]]:
@@ -150,16 +151,13 @@ def _authenticate(agent: SimpleXAgent, ws_url: str) -> dict[str, Callable[..., s
 
 
 def test_agent_unauthenticated_state() -> None:
-    """Fresh agent: correct name, unauthenticated, only the auth trio."""
+    """Fresh agent: correct name and a check message pointing at the auth tool.
+
+    The unauthenticated state and the auth-tool trio of a fresh agent are
+    pinned for every channel by ``test_base_channel_agent.py``.
+    """
     agent = SimpleXAgent()
     assert agent.name == "SimpleX Agent"
-    assert agent._is_authenticated() is False
-    names = sorted(t.__name__ for t in agent._get_tools())
-    assert names == [
-        "authenticate_simplex",
-        "check_simplex_auth",
-        "clear_simplex_auth",
-    ]
     tools = tools_by_name(agent)
     msg = tools["check_simplex_auth"]()
     assert "Not configured" in msg

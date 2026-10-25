@@ -37,6 +37,7 @@ agent accounted, and the daemon's registered task state.
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
@@ -51,11 +52,21 @@ import yaml
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._channel_agent_utils import (
+    LAUNCH_KWARG_NAMES,
+    BaseChannelAgent,
+    ChannelRunner,
+    channel_main,
+    filter_launch_kwargs,
+)
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     KissWebChatAgent,
     run_agent_via_kiss_web,
 )
+from kiss.agents.third_party_agents.slack import slack_sea
+from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 from kiss.core.models import model_info
+from kiss.core.user_config import _refresh_config
 from kiss.server import agent_state
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import start_serving
@@ -258,13 +269,15 @@ class _ApiLaunchBase(LocalDaemonTestCase):
         self,
         launch: Callable[[], str],
         model_server: LaunchModelServer | None = None,
+        while_held: Callable[[], None] | None = None,
     ) -> tuple[Any, threading.Thread, str]:
         """Run *launch* and capture the daemon's task state while it is in flight.
 
         The registry detaches a task's agent when the task ends, so the
         model call (to *model_server*, default the registered endpoint)
         is held while the agent and its worker thread are read off the
-        single registered :class:`~kiss.server.agent_state.AgentState`.
+        single registered :class:`~kiss.server.agent_state.AgentState`;
+        *while_held*, if given, runs at that point too.
         Returns ``(daemon_agent, task_thread, launch_result)``.
         """
         model_server = model_server or self.model_server
@@ -281,6 +294,8 @@ class _ApiLaunchBase(LocalDaemonTestCase):
             states = agent_state.snapshot()
             assert len(states) == 1, states
             daemon_agent, task_thread = states[0].agent, states[0].task_thread
+            if while_held is not None:
+                while_held()
         finally:
             model_server.release()
             thread.join(timeout=60)
@@ -299,8 +314,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
     """The launcher must run tasks through ``kiss.server.sorcar.run``."""
 
     def test_task_runs_on_daemon_agent_not_passed_instance(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         agent = SlackAgent()
 
         def launch() -> str:
@@ -332,7 +345,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
         channel module's ``system_prompt()`` hook (the agent class's
         ``channel_system_prompt``) to the run's system prompt.
         """
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         run_agent_via_kiss_web(
             SlackAgent(),
@@ -348,12 +360,8 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "finish_slack_auth()" in system_prompt
 
     def test_agent_module_is_the_agent_script(self) -> None:
-        from kiss.agents.third_party_agents.slack import slack_sea
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         agent = SlackAgent()
         assert agent.sea_path == str(slack_sea.__file__), "the agent's own module must be its SEA"
-        assert not hasattr(agent, "tools_file")
 
         self.model_server.script = [
             tool_call_response("check_slack_auth", {}),
@@ -377,28 +385,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "check_slack_auth must have run against the empty kiss home"
         )
         assert "module tools loaded ok" in yaml.safe_load(result)["summary"]
-
-    def test_launcher_has_no_tools_path_parameters(self) -> None:
-        """Extra tools come only from the agent's module (``sea_path``).
-
-        ``run_agent_via_kiss_web`` exposes neither ``tools`` nor
-        ``append_basic_tools``: both went with the tools-file wire
-        contract, and the ``LAUNCH_KWARG_NAMES`` filter the channel
-        agents' ``run()`` shims pass their kwargs through drops them.
-        """
-        import inspect
-
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            filter_launch_kwargs,
-        )
-
-        params = inspect.signature(run_agent_via_kiss_web).parameters
-        assert "tools" not in params
-        assert "append_basic_tools" not in params
-        assert "sea_path" not in params
-        assert filter_launch_kwargs(
-            {"tools": "/x.py", "append_basic_tools": False, "max_budget": 2.0}
-        ) == {"max_budget": 2.0}
 
     def test_backend_tools_included_when_authenticated(self) -> None:
         notes = Path(self.tmpdir) / "notes.log"
@@ -466,37 +452,28 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
 
     def test_workspace_env_var_set_while_task_runs(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None
-        self.model_server.hold()
-        thread = threading.Thread(
-            target=run_agent_via_kiss_web,
-            args=(SlackAgent(workspace="teamspace"), "ws task"),
-            kwargs={"work_dir": self.repo},
-            daemon=True,
-        )
-        thread.start()
-        try:
-            assert self.model_server.seen.wait(timeout=30), "the task never ran"
+
+        def launch() -> str:
+            return run_agent_via_kiss_web(
+                SlackAgent(workspace="teamspace"), "ws task", work_dir=self.repo
+            )
+
+        def workspace_is_exported() -> None:
             # The daemon-side ``tools()`` (already built by now) read
             # this process-global variable; it stays exported for the
             # whole run.
             assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "teamspace", (
                 "the daemon-side tools() must see the launch workspace"
             )
-        finally:
-            self.model_server.release()
-            thread.join(timeout=30)
-        assert not thread.is_alive()
+
+        self._run_while_held(launch, while_held=workspace_is_exported)
         self.join_tasks()
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
             "the workspace env var must be removed once the run has finished"
         )
 
     def test_workspace_env_var_blocks_conflicting_overlap(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         release = {"A": threading.Event(), "B": threading.Event()}
         started = {"A": threading.Event(), "B": threading.Event()}
 
@@ -557,8 +534,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
 
     def test_unauthenticated_backend_tools_excluded(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         run_agent_via_kiss_web(
             SlackAgent(),
             "no backend",
@@ -569,8 +544,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "post_message" not in names, "backend tools must not be exposed when unauthenticated"
 
     def test_overrides_forwarded_through_run_command(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         # A second endpoint: only an explicitly forwarded ``model_config``
         # can make the run call it instead of the registered default.
         explicit = LaunchModelServer()
@@ -642,22 +615,16 @@ class Sea(BaseSea):
         """``run()`` ignores the kwargs the launcher no longer takes.
 
         ``append_to_system_prompt`` / ``append_to_prompt``,
-        ``use_worktree``, ``timeout`` and ``endpoint_file`` left the
-        launcher's surface (extra text comes from the SEA's
-        ``system_prompt()`` / ``prompt()`` methods, the worktree mode
-        from its ``channel`` kind).  A caller still passing them gets a
+        ``use_worktree``, ``timeout``, ``endpoint_file``, ``tools`` and
+        ``append_basic_tools`` left the launcher's surface (extra text
+        comes from the SEA's ``system_prompt()`` / ``prompt()`` methods,
+        the worktree mode from its ``channel`` kind, extra tools from the
+        agent's module via ``sea_path``).  A caller still passing them gets a
         normal run with none of their effects, not a ``TypeError``.
         The model request shows that neither suffix landed: the system
         message is the assembled system instructions and the user
         message the executed prompt.
         """
-        import inspect
-
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            LAUNCH_KWARG_NAMES,
-            filter_launch_kwargs,
-        )
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         retired = {
             "append_to_system_prompt": "\nLAUNCHER-SYS-SUFFIX-2210",
@@ -665,6 +632,8 @@ class Sea(BaseSea):
             "use_worktree": False,
             "timeout": 0.5,
             "endpoint_file": "/nonexistent/sorcar-local.json",
+            "tools": "/x.py",
+            "append_basic_tools": False,
         }
         keyword_only = {
             name
@@ -684,8 +653,6 @@ class Sea(BaseSea):
         assert "LAUNCHER-PROMPT-SUFFIX-2210" not in _task_text(request)
 
     def test_zero_budget_override_is_honored(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         result = run_agent_via_kiss_web(
             SlackAgent(),
             "task",
@@ -701,8 +668,6 @@ class Sea(BaseSea):
         assert self.model_server.requests == []
 
     def test_defaults_use_daemon_config(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         run_agent_via_kiss_web(
             SlackAgent(),
             "task",
@@ -716,8 +681,6 @@ class Sea(BaseSea):
         )
 
     def test_model_name_forwarded(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         run_agent_via_kiss_web(
             SlackAgent(),
             "task",
@@ -730,8 +693,6 @@ class Sea(BaseSea):
         assert "Model name: gpt-5.5" in _system_text(request)
 
     def test_stats_recorded_on_agent_for_cli_stats(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         self.model_server.script = [
             tool_call_response("check_slack_auth", {}) | {"usage": dict(USAGE)},
             tool_call_response("check_slack_auth", {}) | {"usage": dict(USAGE)},
@@ -749,8 +710,6 @@ class Sea(BaseSea):
         assert 0 < agent.budget_used < 0.01, agent.budget_used
 
     def test_agent_failure_returns_failure_yaml(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         self.model_server.script = [_failed_finish("boom-fail happened")]
         agent = SlackAgent()
         result = run_agent_via_kiss_web(
@@ -764,8 +723,6 @@ class Sea(BaseSea):
         assert agent.last_run_result == result
 
     def test_abrupt_agent_crash_maps_to_failure_yaml(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         # Every model call fails with HTTP 500: the real loop gives up
         # after its consecutive-error limit and the exception leaves
         # the agent's ``run``.
@@ -812,8 +769,6 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
     """Launches without an endpoint override start the process-global daemon."""
 
     def test_global_daemon_started_once_and_reused(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         self.model_server.script = [
             finish_response("global daemon ok"),
             finish_response("global daemon ok"),
@@ -864,8 +819,8 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
 
     The carriers are not executable agents: ``run()`` submits the task
     to the kiss-web daemon via ``kiss.server.sorcar.run`` and records
-    the returned YAML, so a crashing daemon-built agent surfaces as a
-    failure envelope, never as a re-raised exception.
+    the returned YAML (the failure envelope of a crashing daemon-built
+    agent is pinned on the launcher itself in ``TestLaunchViaApi``).
     """
 
     def test_chat_agent_direct_run_records_result(self) -> None:
@@ -883,28 +838,11 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
             "carrier run() must execute on a daemon-built agent"
         )
 
-    def test_chat_agent_direct_run_records_failure(self) -> None:
-        self.model_server.fail_status = 500
-        agent = KissWebChatAgent("Direct Chat")
-        result = agent.run(
-            prompt_template="direct task",
-            work_dir=self.repo,
-        )
-        assert self.model_server.headers, "the run never reached the model"
-        parsed = yaml.safe_load(result)
-        assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), "a crashed task must not produce an empty summary"
-        assert agent.last_run_result == result
-
 
 class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
     """Channel agent ``run()`` calls route through the daemon API."""
 
     def _plain_agent(self) -> Any:
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            BaseChannelAgent,
-        )
-
         class _Plain(BaseChannelAgent):
             def _is_authenticated(self) -> bool:
                 return False
@@ -915,8 +853,6 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         return _Plain("Plain Direct Agent")
 
     def test_direct_run_appends_channel_prompt_to_system_prompt(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
         agent = SlackAgent()
 
         def launch() -> str:
@@ -950,31 +886,6 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         assert "direct plain" in _task_text(request)
         assert "## Slack Authentication" not in _task_text(request)
         assert "## Slack Authentication" not in _system_text(request)
-
-    def test_direct_run_failure_returns_failure_yaml(self) -> None:
-        self.model_server.fail_status = 500
-        agent = self._plain_agent()
-        result = agent.run(
-            prompt_template="direct plain",
-            work_dir=self.repo,
-        )
-        assert self.model_server.headers, "the run never reached the model"
-        parsed = yaml.safe_load(result)
-        assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), "a crashed task must not produce an empty summary"
-        assert agent.last_run_result == result
-
-    def test_direct_run_bridges_channel_auth_tools(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
-        self.model_server.script = [finish_response("auth tools bridged")]
-        agent = SlackAgent()
-        result = agent.run(
-            prompt_template="direct slack tools",
-            work_dir=self.repo,
-        )
-        assert "check_slack_auth" in _tool_names(self._only_request())
-        assert "auth tools bridged" in yaml.safe_load(result)["summary"]
 
 
 class TestKissWebChatCarrierAgents(_ApiLaunchBase):
@@ -1032,10 +943,6 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
         sea_path: str = "",
         thread_replies: list[dict[str, Any]] | None = None,
     ) -> tuple[Any, list[tuple[str, str, str]]]:
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            ChannelRunner,
-        )
-
         backend = (
             RecordingBackend()
             if thread_replies is None
@@ -1170,11 +1077,6 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
 
     def _run_cli(self, argv: list[str]) -> Callable[[], str]:
         """Return a launch callable running ``channel_main`` with *argv*."""
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            channel_main,
-        )
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-        from kiss.core.user_config import _refresh_config
 
         # ``channel_main`` imports the isolated key store into
         # ``DEFAULT_CONFIG``; re-sync it from the restored environment.

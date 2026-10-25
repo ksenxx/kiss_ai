@@ -26,6 +26,7 @@ import json
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -147,6 +148,68 @@ def test_overlapping_non_blocking_children_split_what_is_left(
         _settle(parent, daemon)
 
 
+def _plan(parent: SorcarAgent, work_dir: Path, task: str, max_budget: str = "") -> dict[str, Any]:
+    """Plan a ``run_agent`` call of *parent* without starting it."""
+    plan = agent_dispatch.plan_run_agent(
+        str(work_dir), task, DUMMY_SEA, max_budget=max_budget, parent_agent=parent,
+    )
+    assert isinstance(plan, dict), plan
+    return plan
+
+
+def test_calls_planned_concurrently_still_see_each_others_reservation(
+    tmp_path: Path,
+    daemon: HoldingDaemon,
+) -> None:
+    """Two ``run_agent`` calls of one owner that overlap do not both take half.
+
+    Two tool calls executing at the same time (the Codex MCP bridge
+    runs each on its own thread) both plan before either job exists,
+    so a snapshot of the owner's live jobs taken at plan time is
+    empty for both and each would get half of the $10 remainder.
+    The reservation is read where the budget is resolved, under the
+    job registry's lock, so whichever job resolves second sees the
+    first one's $5 and gets half of the $5 left.
+    """
+    parent = _parent(10.0)
+    plans = [_plan(parent, tmp_path, task) for task in ("first", "second")]
+    try:
+        jobs = [agent_dispatch.start_agent_job(plan["name"], plan, parent) for plan in plans]
+        for job in jobs:
+            agent_dispatch.wait_until_started(job)
+            assert not job.finished, job.result
+        assert sorted(_budgets(daemon)) == pytest.approx([2.5, 5.0])
+    finally:
+        _settle(parent, daemon)
+
+
+def test_an_explicit_budget_is_reserved_from_registration(
+    tmp_path: Path,
+    daemon: HoldingDaemon,
+) -> None:
+    """A concurrent call with its own ``max_budget`` holds it before its job thread runs.
+
+    The explicit $1 child of a $1 parent is registered, and an
+    inherited sibling planned at the same time is started right after
+    it: the sibling's resolution finds the $1 already held and gets
+    the exhaustion error, not half of a remainder that is spoken for.
+    """
+    parent = _parent(1.0)
+    greedy = _plan(parent, tmp_path, "greedy", max_budget="1")
+    starved = _plan(parent, tmp_path, "starved")
+    try:
+        greedy_job = agent_dispatch.start_agent_job(greedy["name"], greedy, parent)
+        assert greedy_job.budget == pytest.approx(1.0)
+        starved_job = agent_dispatch.start_agent_job(starved["name"], starved, parent)
+        assert agent_dispatch.join_agent_job(starved_job, 30.0)
+        assert "reserve-parent has no remaining budget" in starved_job.result, starved_job.result
+        assert "$1.0000 of its remainder is reserved" in starved_job.result, starved_job.result
+        agent_dispatch.wait_until_started(greedy_job)
+        assert _budgets(daemon) == pytest.approx([1.0])
+    finally:
+        _settle(parent, daemon)
+
+
 def test_a_child_that_finished_between_planning_and_dispatch_is_not_charged_twice(
     tmp_path: Path,
     daemon: HoldingDaemon,
@@ -166,15 +229,13 @@ def test_a_child_that_finished_between_planning_and_dispatch_is_not_charged_twic
     daemon.result["cost"] = "5.000000"
     try:
         run_agent("first", DUMMY_SEA, wait="false", timeout="60")
-        plan = agent_dispatch.plan_run_agent(
-            str(tmp_path), "second", DUMMY_SEA, parent_agent=parent,
-        )
-        assert isinstance(plan, dict), plan
-        assert [job.budget for job in plan["reserving"]] == pytest.approx([5.0])
+        first = live_agent_jobs(parent)
+        assert [job.budget for job in first] == pytest.approx([5.0])
+        plan = _plan(parent, tmp_path, "second")
     finally:
         _settle(parent, daemon)
     assert parent._live_budget_used() == pytest.approx(5.0)
-    assert all(job.finished for job in plan["reserving"])
+    assert all(job.finished for job in first)
     daemon.gate.clear()
     job = agent_dispatch.start_agent_job(plan["name"], plan, parent)
     try:
@@ -182,6 +243,70 @@ def test_a_child_that_finished_between_planning_and_dispatch_is_not_charged_twic
         assert not job.finished, job.result
         assert _budgets(daemon) == pytest.approx([5.0, 2.5])
     finally:
+        _settle(parent, daemon)
+
+
+class PausingParent(SorcarAgent):
+    """A parent whose ledger read for a sub-task's share can be held open.
+
+    The real ``SorcarAgent`` ledger and share arithmetic are used; the
+    override only adds a synchronization point right after the ledger
+    was read, so a test can let another child settle in that window.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.pause = False
+        self.ledger_read = threading.Event()
+        self.resume = threading.Event()
+
+    def _subagent_budget_share(self, num_tasks: int) -> float | None:
+        share = super()._subagent_budget_share(num_tasks)
+        if self.pause:
+            self.ledger_read.set()
+            assert self.resume.wait(30.0)
+        return share
+
+
+def test_a_child_settling_between_the_ledger_and_reservation_reads_is_counted(
+    tmp_path: Path,
+    daemon: HoldingDaemon,
+) -> None:
+    """Review round 1, item 2: a child that finishes mid-resolution is never dropped from both.
+
+    A $10 parent runs a $5 child.  A second child resolves its share
+    while the first still runs; the first then settles (its $8 spend
+    lands on the ledger and its reservation lapses) before the second
+    child's resolution is done.  Reading the ledger first and the
+    reservations second saw the old ledger ($0 spent) and no
+    reservation, and handed the second child $5 of the $2 actually
+    left.  The reservations are now read first and the share is
+    re-resolved when a job settled in between, so the second child
+    gets half of the real remainder: $1.
+    """
+    parent = PausingParent("reserve-parent")
+    parent.max_budget = 10.0
+    parent.budget_used = 0.0
+    parent._current_executor = None
+    run_agent = make_run_agent_tool(str(tmp_path), parent)
+    daemon.result["cost"] = "8.000000"
+    try:
+        run_agent("first", DUMMY_SEA, wait="false", timeout="60")
+        first = live_agent_jobs(parent)
+        assert [job.budget for job in first] == pytest.approx([5.0])
+        plan = _plan(parent, tmp_path, "second")
+        parent.pause = True
+        second = agent_dispatch.start_agent_job(plan["name"], plan, parent)
+        assert parent.ledger_read.wait(30.0)
+        daemon.release()
+        assert agent_dispatch.join_agent_job(first[0], 30.0)
+        assert parent._live_budget_used() == pytest.approx(8.0)
+        parent.resume.set()
+        assert agent_dispatch.join_agent_job(second, 30.0)
+        assert _budgets(daemon) == pytest.approx([5.0, 1.0])
+        assert second.budget == pytest.approx(1.0)
+    finally:
+        parent.resume.set()
         _settle(parent, daemon)
 
 

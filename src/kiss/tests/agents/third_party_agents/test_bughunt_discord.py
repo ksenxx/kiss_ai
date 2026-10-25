@@ -118,31 +118,22 @@ class TestDiscordBackendBugs:
         assert "/guilds/G1/channels" in self._paths()
         assert not any("third_party_agents" in p for p in self._paths())
 
-    def test_poll_messages_uses_channels_path(self) -> None:
-        """poll_messages must GET /channels/{id}/messages."""
-        self.backend.poll_messages("111", "0", limit=50)
+    def test_poll_messages_zero_cursor(self) -> None:
+        """poll_messages GETs /channels/{id}/messages; oldest='0' is not
+        forwarded as after=0 (oldest-history fetch); each message's ts is its
+        snowflake id (usable as reply target); the cursor is the numerically
+        largest id ('10000' > '9999')."""
+        msgs, cursor = self.backend.poll_messages("111", "0", limit=50)
         assert self._paths() == ["/channels/111/messages"]
-
-    def test_poll_messages_treats_zero_as_no_cursor(self) -> None:
-        """oldest='0' must not be forwarded as after=0 (oldest-history fetch)."""
-        self.backend.poll_messages("111", "0", limit=50)
         assert self.server.requests[0]["query"].get("after") != ["0"]
+        assert [m["id"] for m in msgs] == ["9999", "10000"]
+        assert [m["ts"] for m in msgs] == ["9999", "10000"]
+        assert cursor == "10000"
 
     def test_poll_messages_forwards_real_cursor(self) -> None:
         """A genuine snowflake cursor must still be sent as the after param."""
         self.backend.poll_messages("111", "12345", limit=50)
         assert self.server.requests[0]["query"]["after"] == ["12345"]
-
-    def test_poll_messages_ts_is_snowflake_id(self) -> None:
-        """Each message's ts must be its snowflake id (usable as reply target)."""
-        msgs, _ = self.backend.poll_messages("111", "0", limit=50)
-        assert [m["ts"] for m in msgs] == ["9999", "10000"]
-
-    def test_poll_messages_sorts_snowflakes_numerically(self) -> None:
-        """Cursor must be the numerically largest id ('10000' > '9999')."""
-        msgs, cursor = self.backend.poll_messages("111", "0", limit=50)
-        assert [m["id"] for m in msgs] == ["9999", "10000"]
-        assert cursor == "10000"
 
     def test_send_message_posts_to_channel_with_reply_reference(self) -> None:
         """send_message must POST to /channels/{channel}/messages with the

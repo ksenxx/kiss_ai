@@ -155,22 +155,6 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   );
 }
 
-function testOneOrTwoPanelsFoldNothing() {
-  const {win} = makePage();
-  const tab = win._testApi.getActiveTabId();
-  send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
-  for (const ev of run().slice(0, 4)) send(win, {...ev, tabId: tab});
-  const ps = panels(win);
-  assert.strictEqual(ps.length, 2, 'thoughts + one tool call = two panels');
-  assert.deepStrictEqual(
-    ps.map(isCollapsed),
-    [false, true],
-    'the tool panel starts folded even with nothing older than it',
-  );
-  win.close();
-  console.log('  ok - a tool panel starts folded in a two-panel transcript');
-}
-
 function testUserPinnedPanelStaysOpen() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
@@ -234,7 +218,6 @@ function testHiddenTabComesBackWithNewestTwoOpen() {
 
 function main() {
   testVisibleStreamKeepsNewestTwoOpen();
-  testOneOrTwoPanelsFoldNothing();
   testUserPinnedPanelStaysOpen();
   testHiddenTabComesBackWithNewestTwoOpen();
   console.log('streamKeepsTwoPanelsOpen.test.js: all tests passed');

@@ -193,7 +193,7 @@ class DaemonRunApiHarness(unittest.TestCase):
                 the session, the call's ``arguments`` (the
                 task-executor calls carry ``task_description``, the
                 failure-path trajectory summarizer carries
-                ``trajectory_path``), the call's ``system_prompt``,
+                ``digest``), the call's ``system_prompt``,
                 and the ``llm_call_hook`` / ``tool_call_hook``
                 callables handed to the session (``None`` when the
                 run carries no SEA hook).
@@ -567,14 +567,15 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert "tools() of SEA" in persisted[result.task_id]
         assert "list of tool callables" in persisted[result.task_id]
 
-    def test_restricted_failure_skips_summarizer(self) -> None:
-        """A restricted run's failure path launches no Read/Bash summarizer.
+    def test_restricted_failure_uses_the_tool_less_summarizer(self) -> None:
+        """A restricted run's failure path gets the summarizer too: it has no tool but ``finish``.
 
-        ``RelentlessAgent.perform_task`` normally summarizes a failed
-        sub-session's trajectory with a helper ``KISSAgent`` equipped
-        with Read and Bash — tools a ``none``-profile run promised NO
-        LLM session would get.  The restricted run must
-        skip that summarizer and continue with the plain failure text.
+        A ``none``-profile run promises that NO LLM session gets tools
+        beyond ``finish`` and the caller's own.  The failed-session
+        summarizer writes from the scripted hand-off digest in its
+        prompt with ``finish`` as its only tool, so it keeps that
+        promise and the restricted run no longer continues from the
+        bare failure text.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls, fail_first_executor=True)
@@ -592,18 +593,18 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert len(executor_calls) == 2, calls
         for call in executor_calls:
             assert call["tool_names"] == ["finish"]
-        assert [
-            c for c in calls if "trajectory_path" in c["arguments"]
-        ] == [], "restricted run must not launch the Read/Bash summarizer"
+        summarizer_calls = [c for c in calls if "digest" in c["arguments"]]
+        assert len(summarizer_calls) == 1, calls
+        assert summarizer_calls[0]["tool_names"] == ["finish"]
 
     def test_default_failure_uses_summarizer(self) -> None:
         """The default (basic-tools) failure path keeps its summarizer.
 
-        Counterpart of the restricted test above: with no SEA
-        restricting the toolset, the failed first sub-session is
-        followed by the Read/Bash-equipped trajectory summarizer (whose
+        With no SEA restricting the toolset, the failed first
+        sub-session is followed by the one-call summarizer (its
         ``finish`` is ``SummarizerFinish.finish``, the structured
-        continuation result) before the second sub-session continues.
+        continuation result; the hand-off digest is in its prompt)
+        before the second sub-session continues.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls, fail_first_executor=True)
@@ -615,16 +616,10 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is True
-        summarizer_calls = [
-            c for c in calls if "trajectory_path" in c["arguments"]
-        ]
+        summarizer_calls = [c for c in calls if "digest" in c["arguments"]]
         assert len(summarizer_calls) == 1, calls
-        assert summarizer_calls[0]["tool_names"] == [
-            "Read",
-            "Bash",
-            "bash_job",
-            "finish",
-        ]
+        assert summarizer_calls[0]["tool_names"] == ["finish"]
+        assert "## Task\n" in summarizer_calls[0]["arguments"]["digest"]
 
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.

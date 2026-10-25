@@ -26,9 +26,10 @@ from kiss.agents.sorcar.mcp_oauth import MCPLoginSession, make_mcp_auth_tools
 from kiss.agents.sorcar.mcp_servers import MCPServerConfig
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -50,7 +51,8 @@ def _run_interrupted(fn: Callable[[], object], tool_name: str) -> tuple[dict[str
     outcome: dict[str, object] = {}
 
     def run() -> None:
-        token = begin_tool_call(tool_name)
+        token = new_tool_call(tool_name)
+        register_tool_call(token)
         try:
             try:
                 outcome["result"] = fn()

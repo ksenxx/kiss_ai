@@ -51,20 +51,37 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 
 import pytest
 import requests
 
-from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesChannelBackend
+from kiss.agents.third_party_agents.bluebubbles import bluebubbles_sea
+from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import (
+    BlueBubblesAgent,
+    BlueBubblesChannelBackend,
+    _muse_authenticate,
+)
 from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _config as bb_config
-from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
+from kiss.agents.third_party_agents.line import line_sea
+from kiss.agents.third_party_agents.line.line_sea import (
+    LineAgent,
+    LineChannelBackend,
+    _scrub_config_token,
+)
 from kiss.agents.third_party_agents.line.line_sea import _config as line_config
-from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
+from kiss.agents.third_party_agents.mattermost import mattermost_sea
+from kiss.agents.third_party_agents.mattermost.mattermost_sea import (
+    MattermostAgent,
+    MattermostChannelBackend,
+    _base_url_from_config,
+)
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import _config as mm_config
+from kiss.agents.third_party_agents.mattermost.mattermost_sea import _scrub_config_token as mm_scrub
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     PROTOCOL_VERSION,
+    insecure_origin_hosts,
     muse_auth_dir,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
@@ -78,14 +95,32 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkChannelBackend
+from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
+from kiss.agents.third_party_agents.nextcloud import nextcloud_sea
+from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import (
+    NextcloudTalkAgent,
+    NextcloudTalkChannelBackend,
+)
 from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import _config as nc_config
-from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
+from kiss.agents.third_party_agents.synology import synology_sea
+from kiss.agents.third_party_agents.synology.synology_sea import (
+    SynologyChatAgent,
+    SynologyChatChannelBackend,
+    _embedded_token,
+    _scrub_config_webhook_token,
+)
 from kiss.agents.third_party_agents.synology.synology_sea import _config as syno_config
-from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
+from kiss.agents.third_party_agents.synology.synology_sea import _muse_authenticate as syno_auth
+from kiss.agents.third_party_agents.twitch.twitch_sea import (
+    TwitchAgent,
+    TwitchChannelBackend,
+    _scrub_config_secrets,
+)
 from kiss.agents.third_party_agents.twitch.twitch_sea import _config as twitch_config
-from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
+from kiss.agents.third_party_agents.zalo import zalo_sea
+from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloAgent, ZaloChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import _config as zalo_config
+from kiss.agents.third_party_agents.zalo.zalo_sea import _scrub_config_token as zalo_scrub
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     MuseApiHandler,
     auth_tools,
@@ -379,7 +414,6 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """The authenticate tool enrolls/rotates/rolls back; clear empties the vault."""
-    from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostAgent
 
     agent = MattermostAgent()
     tools = auth_tools(agent)
@@ -478,7 +512,6 @@ def test_twitch_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """authenticate_twitch never persists secrets and rolls back bad tokens."""
-    from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
 
     agent = TwitchAgent()
     agent._backend._helix_base = api_server.base_url + "/helix"
@@ -569,7 +602,6 @@ def test_zalo_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """authenticate_zalo enrolls into the vault and rolls back bad tokens."""
-    from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloAgent
 
     monkeypatch.setenv("ZALO_API_BASE", api_server.base_url + "/v2.0/oa")
     agent = ZaloAgent()
@@ -629,7 +661,6 @@ def test_line_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """authenticate_line enrolls into the vault and rolls back bad tokens."""
-    from kiss.agents.third_party_agents.line.line_sea import LineAgent
 
     monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     agent = LineAgent()
@@ -717,7 +748,6 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """authenticate_nextcloud enrolls the Basic pair and rolls back."""
-    from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkAgent
 
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
@@ -931,7 +961,6 @@ def test_synology_muse_authenticate_and_clear(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """authenticate_synology scrubs the URL and enrolls the vault."""
-    from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatAgent
 
     agent = SynologyChatAgent()
     tools = auth_tools(agent)
@@ -979,7 +1008,6 @@ def test_query_kind_store_validation(muse_env: Path) -> None:
 
 def test_query_kind_vault_resolution(isolated_kiss_home: Path) -> None:
     """The vault resolves query-kind credentials with their placement."""
-    from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 
     vault = CredentialVault()
     vault.store("synology", {"kind": "query", "param": "token", "token": "qv"}, [])
@@ -993,7 +1021,8 @@ def test_query_kind_vault_resolution(isolated_kiss_home: Path) -> None:
 def test_daemon_protocol_is_current(muse_env: Path) -> None:
     """A freshly ensured daemon reports at least the v4 (query-kind) protocol."""
     ensure_daemon()
-    assert _daemon_protocol() == PROTOCOL_VERSION >= 4
+    assert PROTOCOL_VERSION >= 4
+    assert _daemon_protocol() == PROTOCOL_VERSION
 
 
 def test_underscore_header_kind_accepted(muse_env: Path) -> None:
@@ -1139,7 +1168,6 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
     # LINE: the SDK is not installed here, so the legacy constructor
     # fails and the authenticate tool reports the error (no config write).
-    from kiss.agents.third_party_agents.line.line_sea import LineAgent
 
     line_config.clear()
     agent = LineAgent()
@@ -1152,22 +1180,12 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
 def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> None:
     """Scrub helpers no-op on unreadable, non-dict, or secret-free files."""
     from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _scrub_config_password
-    from kiss.agents.third_party_agents.line.line_sea import _scrub_config_token
-    from kiss.agents.third_party_agents.mattermost.mattermost_sea import (
-        _scrub_config_token as mm_scrub,
-    )
-    from kiss.agents.third_party_agents.synology.synology_sea import (
-        _scrub_config_webhook_token,
-    )
-    from kiss.agents.third_party_agents.twitch.twitch_sea import _scrub_config_secrets
-    from kiss.agents.third_party_agents.zalo.zalo_sea import (
-        _scrub_config_token as zalo_scrub,
-    )
 
     for cfg, scrub in (
         (bb_config, _scrub_config_password),
         (line_config, _scrub_config_token),
         (mm_config, mm_scrub),
+        (nc_config, nextcloud_sea._scrub_config_password),
         (syno_config, _scrub_config_webhook_token),
         (twitch_config, _scrub_config_secrets),
         (zalo_config, zalo_scrub),
@@ -1197,6 +1215,9 @@ def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> N
     line_config.save({"channel_access_token": "t", "channel_secret": ""})
     _scrub_config_token()
     assert not line_config.path.exists()
+    nc_config.save({"password": "pw", "username": ""})
+    nextcloud_sea._scrub_config_password()
+    assert not nc_config.path.exists()
     bb_config.save({"server_url": "", "password": "pw"})
     _scrub_config_password()
     assert not bb_config.path.exists()
@@ -1204,7 +1225,6 @@ def test_scrub_helpers_tolerate_malformed_configs(isolated_kiss_home: Path) -> N
 
 def test_base_url_from_config_edge_cases(muse_env: Path) -> None:
     """Mattermost's composed base URL tolerates junk config values."""
-    from kiss.agents.third_party_agents.mattermost.mattermost_sea import _base_url_from_config
 
     assert _base_url_from_config({}) == ""
     assert _base_url_from_config({"url": "mm.example.com"}) == "https://mm.example.com:443"
@@ -1217,7 +1237,6 @@ def test_base_url_from_config_edge_cases(muse_env: Path) -> None:
 
 def test_embedded_token_helper(muse_env: Path) -> None:
     """Synology's embedded-token extraction handles all URL shapes."""
-    from kiss.agents.third_party_agents.synology.synology_sea import _embedded_token
 
     assert _embedded_token("http://nas:5001/webapi/entry.cgi?api=X&token=abc") == "abc"
     assert _embedded_token("http://nas:5001/webapi/entry.cgi?api=X") == ""
@@ -1247,12 +1266,6 @@ def test_make_backends_muse_mode(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every _make_backend wires the Muse boundary or exits when unenrolled."""
-    from kiss.agents.third_party_agents.bluebubbles import bluebubbles_sea
-    from kiss.agents.third_party_agents.line import line_sea
-    from kiss.agents.third_party_agents.mattermost import mattermost_sea
-    from kiss.agents.third_party_agents.nextcloud import nextcloud_sea
-    from kiss.agents.third_party_agents.synology import synology_sea
-    from kiss.agents.third_party_agents.zalo import zalo_sea
 
     for module in (
         bluebubbles_sea,
@@ -1311,10 +1324,10 @@ def test_zalo_remaining_reads_and_image_send(
     assert api_server.requests[-1]["path"].endswith("/message")
 
 
-def test_line_send_message_and_legacy_paths(
+def test_line_send_message_uses_adapter(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """send_message uses the adapter; legacy paths surface the missing SDK."""
+    """send_message goes through the Muse adapter, never the LINE SDK."""
     monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     line_config.save({"channel_access_token": _REAL_LINE_TOKEN})
     backend = LineChannelBackend()
@@ -1327,8 +1340,6 @@ def test_line_send_message_and_legacy_paths(
 
 def test_line_legacy_sdk_missing(isolated_kiss_home: Path, api_server: _MessagingApiServer) -> None:
     """Without the SDK, legacy LINE construction fails soft (or raises in poll mode)."""
-    from kiss.agents.third_party_agents.line import line_sea
-    from kiss.agents.third_party_agents.line.line_sea import LineAgent
 
     line_config.save({"channel_access_token": "tok", "channel_secret": ""})
     agent = LineAgent()  # constructor swallows the ImportError
@@ -1350,7 +1361,6 @@ def test_bluebubbles_muse_authenticate_rollbacks(
     rolled back — which is exactly the rollback path under test.  The
     macOS-only success return is documented in the module docstring.
     """
-    from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _muse_authenticate
 
     backend = BlueBubblesChannelBackend()
     result = json.loads(_muse_authenticate(backend, "http://bad..host", "pw"))
@@ -1367,7 +1377,6 @@ def test_bluebubbles_agent_init_and_clear_tool(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """The agent wires Muse on its first request; the clear tool empties the vault."""
-    from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesAgent
 
     bb_config.save({"server_url": api_server.base_url, "password": _REAL_BB_PASSWORD})
     agent = BlueBubblesAgent()
@@ -1410,7 +1419,6 @@ def test_query_kind_same_origin_redirect_reinjects(
 
 def test_insecure_origin_hosts_non_loopback(muse_env: Path) -> None:
     """Only plain-HTTP non-loopback bases enroll insecure origins."""
-    from kiss.agents.third_party_agents.muse_auth._common import insecure_origin_hosts
 
     assert insecure_origin_hosts("http://nas.lan:5001") == ("nas.lan:5001",)
     assert insecure_origin_hosts("http://127.0.0.1:5001") == ()
@@ -1424,23 +1432,6 @@ def test_cli_import_synology_empty_url(muse_env: Path) -> None:
     syno_config.path.write_text(json.dumps({"webhook_url": ""}))
     assert muse_cli.main(["import", "synology"]) == 1
     assert not vault_has_credentials("synology")
-
-
-def test_nextcloud_scrub_edge_cases(muse_env: Path) -> None:
-    """The Nextcloud scrub helper tolerates junk and deletes empty configs."""
-    from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import _scrub_config_password
-
-    _scrub_config_password()  # missing file
-    nc_config.path.parent.mkdir(parents=True, exist_ok=True)
-    nc_config.path.write_text("not json")
-    _scrub_config_password()
-    assert nc_config.path.read_text() == "not json"
-    nc_config.path.write_text('{"url": "https://c.example"}')
-    _scrub_config_password()  # nothing secret to remove
-    assert json.loads(nc_config.path.read_text()) == {"url": "https://c.example"}
-    nc_config.path.write_text('{"password": "pw", "username": ""}')
-    _scrub_config_password()  # only the secret was stored
-    assert not nc_config.path.exists()
 
 
 # ------------------------------------------------ review round-1 regressions
@@ -1486,7 +1477,6 @@ def test_query_kind_error_text_hides_encoded_credential(muse_env: Path, refusing
     exceeded with url: /x?password=a%2Fb"), so plain raw-value redaction
     is not enough.
     """
-    from urllib.parse import quote, quote_plus
 
     secret = "slash/plus+question?percent%"
     url = f"http://127.0.0.1:{refusing_port}/api/v1/server/info"
@@ -1514,7 +1504,6 @@ def test_synology_tokenless_rotation_never_revives_vault_token(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """Rotating to an explicitly tokenless webhook clears the stale vault entry."""
-    from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatAgent
 
     agent = SynologyChatAgent()
     tools = auth_tools(agent)
@@ -1587,9 +1576,6 @@ def test_synology_authenticate_invalid_embedded_token_keeps_config(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A doomed enrollment never mutates the stored configuration."""
-    from kiss.agents.third_party_agents.synology.synology_sea import (
-        _muse_authenticate as syno_auth,
-    )
 
     prev = {"webhook_url": api_server.base_url + "/webapi/entry.cgi?api=Y"}
     syno_config.save(prev)
@@ -1606,7 +1592,6 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """An HTTP 401 with an OCS failure envelope is a failure, not a success."""
-    from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkAgent
 
     nc_config.save({"url": api_server.base_url, "username": "bot", "password": "nc-bad-invalid"})
     backend = NextcloudTalkChannelBackend()
@@ -1652,8 +1637,8 @@ def test_nextcloud_non_json_failure_is_rejected(
     assert "None" in backend._connection_info  # no OCS statuscode at all
 
 
-def test_cli_import_mattermost_default_scheme_port_and_bad_port(muse_env: Path) -> None:
-    """Absent scheme/port default to https:443; a junk port is rejected."""
+def test_cli_import_mattermost_default_scheme_port(muse_env: Path) -> None:
+    """Absent scheme/port default to https:443 (junk ports: ``..._rejects_bad_ports``)."""
     mm_config.path.parent.mkdir(parents=True, exist_ok=True)
     mm_config.path.write_text(json.dumps({"url": "chat.example.com", "token": "tok"}))
     assert muse_cli.main(["import", "mattermost"]) == 0
@@ -1661,11 +1646,6 @@ def test_cli_import_mattermost_default_scheme_port_and_bad_port(muse_env: Path) 
     # The plaintext token was scrubbed after a successful import.
     assert "token" not in json.loads(mm_config.path.read_text())
     clear_credentials("mattermost")
-    mm_config.path.write_text(
-        json.dumps({"url": "chat.example.com", "port": "not-a-port", "token": "tok"})
-    )
-    assert muse_cli.main(["import", "mattermost"]) == 1
-    assert not vault_has_credentials("mattermost")
 
 
 def test_synology_marker_with_empty_vault_falls_back_direct(
@@ -1747,10 +1727,10 @@ def test_header_kind_allowlisted_cross_origin_redirect_keeps_header(
     assert rogue_server.header("access_token") == _REAL_ZALO_TOKEN
 
 
-def test_cli_import_mattermost_rejects_float_port(muse_env: Path) -> None:
-    """JSON float ports are malformed, never silently truncated."""
+def test_cli_import_mattermost_rejects_bad_ports(muse_env: Path) -> None:
+    """Junk and JSON float ports are malformed (never truncated); the token stays in place."""
     mm_config.path.parent.mkdir(parents=True, exist_ok=True)
-    for bad_port in (443.9, 443.0):
+    for bad_port in ("not-a-port", 443.9, 443.0):
         mm_config.path.write_text(
             json.dumps({"url": "chat.example.com", "port": bad_port, "token": "tok"})
         )

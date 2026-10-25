@@ -196,9 +196,14 @@ OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=de
 TOGETHER_MODELS_URL = "https://api.together.xyz/v1/models"
 
 
+# OpenRouter ``pricing`` fields (USD per token) carried into the catalog
+# beside the plain input/output prices: cache hits, cache writes and, for
+# image-generation models, the per-token rate of generated images
+# (gemini-nano-banana-2.1 bills images at $30/1M vs $7.50/1M for text).
 _OPENROUTER_CACHE_PRICE_FIELDS = (
     ("input_cache_read", "cache_read_price_per_1M"),
     ("input_cache_write", "cache_write_price_per_1M"),
+    ("image_output", "image_output_price_per_1M"),
 )
 _CACHE_PRICE_CATALOG_FIELDS = tuple(field for _api, field in _OPENROUTER_CACHE_PRICE_FIELDS)
 
@@ -222,23 +227,26 @@ def _price_changed(current: float, fetched: float) -> bool:
 
 
 def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
-    """Convert OpenRouter per-token cache prices to catalog per-1M fields.
+    """Convert OpenRouter per-token cache/image prices to catalog per-1M fields.
 
     OpenRouter publishes ``pricing.input_cache_read`` and
     ``pricing.input_cache_write`` (USD per token, as strings) for every
     model whose upstream bills cache hits / cache writes at a rate other
-    than the plain input price.  They are the billing authority for
-    ``openrouter/*`` models, so the catalog stores them verbatim as
-    ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` and
+    than the plain input price, and ``pricing.image_output`` for
+    image-generation models whose generated images cost more than text
+    output.  They are the billing authority for ``openrouter/*`` models,
+    so the catalog stores them verbatim as ``cache_read_price_per_1M`` /
+    ``cache_write_price_per_1M`` / ``image_output_price_per_1M`` and
     ``model_info._apply_cache_pricing`` leaves such entries alone.  A
     field OpenRouter omits (``None`` / ``""``) is left out of the result
-    so ``calculate_cost`` falls back to the input price for it.
+    so ``calculate_cost`` falls back to the input (or text output) price
+    for it.
 
     Args:
         pricing: The ``pricing`` object of one ``/api/v1/models`` entry.
 
     Returns:
-        Zero, one or two catalog fields, rounded to 6 decimals per 1M
+        Zero to three catalog fields, rounded to 6 decimals per 1M
         tokens (sub-cent cache rates such as $0.0083/M need the extra
         precision that the 3-decimal input/output rounding would drop).
     """
@@ -1807,9 +1815,10 @@ def _lookup_openrouter_pricing(
 
 
 def _cache_price_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[str, float | None]:
-    """Return the cache-price fields of ``fetched`` that differ from ``cur``.
+    """Return the cache/image-price fields of ``fetched`` that differ from ``cur``.
 
-    Compares ``cache_read_price_per_1M`` / ``cache_write_price_per_1M``
+    Compares ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
+    ``image_output_price_per_1M``
     (see :func:`openrouter_cache_prices`) with the catalog entry ``cur``
     (``{}`` for a brand-new model) and returns the fields whose values
     differ by more than a tenth of a cent per 1M tokens, so a sub-cent
@@ -1950,16 +1959,22 @@ def compute_changes(
             or_info = _lookup_openrouter_pricing(name, "gemini", openrouter)
             inp = or_info["input_price_per_1M"] if or_info else 0.0
             out = or_info["output_price_per_1M"] if or_info else 0.0
-            new_models.append(
-                {
-                    "name": name,
-                    "context_length": fetched["context_length"],
-                    "input_price_per_1M": inp,
-                    "output_price_per_1M": out,
-                    "source": "gemini",
-                    "needs_pricing": inp == 0,
-                }
-            )
+            new_model = {
+                "name": name,
+                "context_length": fetched["context_length"],
+                "input_price_per_1M": inp,
+                "output_price_per_1M": out,
+                "source": "gemini",
+                "needs_pricing": inp == 0,
+            }
+            # Image models bill generated images far above text output
+            # (nano-banana-2.1: $30/1M vs $7.50/1M); without the rate the
+            # catalog would price every image at the text rate.  Cache
+            # rates are not copied: model_info derives Google's from the
+            # input price.
+            if or_info and "image_output_price_per_1M" in or_info:
+                new_model["image_output_price_per_1M"] = or_info["image_output_price_per_1M"]
+            new_models.append(new_model)
 
     for name in anthropic:  # pragma: no branch
         if name not in current:  # pragma: no branch
@@ -2048,6 +2063,10 @@ def compute_changes(
         if not has_pricing and or_info.get("input_price_per_1M", 0) > 0:
             changed["input_price_per_1M"] = or_info["input_price_per_1M"]
             changed["output_price_per_1M"] = or_info["output_price_per_1M"]
+            # An image model's generated images cost more than its text
+            # output (see the new-Gemini-model branch above).
+            if "image_output_price_per_1M" in or_info:
+                changed["image_output_price_per_1M"] = or_info["image_output_price_per_1M"]
         if not has_context and "context_length" not in pending_changes:
             # Repair entries written with context 0: prefer the OpenRouter
             # twin's real window, else the vendor default.  A context the
@@ -2423,15 +2442,17 @@ def apply_updates_to_file(
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.
             ``changes`` may target ``context_length``, ``input_price_per_1M``,
             ``output_price_per_1M``, ``cache_read_price_per_1M``,
-            ``cache_write_price_per_1M``, ``fc``, ``emb``, ``gen``,
-            ``thinking``, ``use_responses_api``, ``dec``.  A ``thinking``
-            or cache-price value of ``None`` and a falsy
+            ``cache_write_price_per_1M``, ``image_output_price_per_1M``,
+            ``fc``, ``emb``, ``gen``, ``thinking``, ``use_responses_api``,
+            ``dec``.  A ``thinking`` or cache/image-price value of
+            ``None`` and a falsy
             ``use_responses_api`` / ``dec`` value remove their field.
         new_models: Each entry must carry at minimum ``name``,
             ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
             Optional flags: ``fc`` (default True), ``emb`` (False),
             ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``,
-            ``cache_read_price_per_1M``, ``cache_write_price_per_1M``.
+            ``cache_read_price_per_1M``, ``cache_write_price_per_1M``,
+            ``image_output_price_per_1M``.
         deprecated: ``[{"name": str, "reason": str}]``; removed by name.
             An update that targets a deprecated name is skipped so the
             removal is not undone in the same run.

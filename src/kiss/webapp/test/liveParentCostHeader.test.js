@@ -6,22 +6,10 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makePage, send, stubRaf, clickTab} = require('./simplify2_harness');
 
 function headerText(win, id) {
   return win.document.getElementById(id).textContent;
-}
-
-// The Chats-panel pick: chat tabs have no row of their own any more, so a
-// chat is shown through the test API; a sub-agent tab is still clicked on
-// the group strip.
-function switchToTab(win, api, tabId) {
-  const tabEl = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-  );
-  if (tabEl) tabEl.click();
-  else api.switchToTab(tabId);
-  assert.strictEqual(api.getActiveTabId(), tabId);
 }
 
 function testParentHeaderTracksLiveAggregateUsage() {
@@ -45,7 +33,7 @@ function testParentHeaderTracksLiveAggregateUsage() {
   api.createNewTab();
   const subTab = api.getActiveTabId();
   assert.ok(subTab !== parentTab);
-  switchToTab(win, api, parentTab);
+  clickTab(win, parentTab);
 
   send(win, {
     type: 'usage_info',
@@ -78,11 +66,11 @@ function testParentHeaderTracksLiveAggregateUsage() {
   );
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 7');
 
-  switchToTab(win, api, subTab);
+  clickTab(win, subTab);
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 30.0K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.30');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 5');
-  switchToTab(win, api, parentTab);
+  clickTab(win, parentTab);
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31.0K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.40');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 7');
@@ -120,36 +108,22 @@ function testMisroutedParentUsageForOtherTaskDropped() {
   console.log('  ok - misrouted usage_info for another task is dropped');
 }
 
-function testUsageInfoFallbackAndNABranches() {
+// The number formats themselves (text fallback, `N/A` cost, result
+// events) are metricFormatting.testHeaderCostTwoDecimalsOnAllPaths; this
+// pins what a frame WITHOUT a field leaves on the header.
+function testMissingFieldsKeepThePreviousNumbers() {
   const {win} = makePage({beforeScripts: stubRaf});
-
   send(win, {
     type: 'usage_info',
     text: 'Steps: 3/100, Tokens: 1,234/400,000, Budget: $0.5000/$10.00, ',
     taskId: 'parent-task',
   });
+  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
+
+  send(win, {type: 'usage_info', text: 'no metrics here', taskId: 'parent-task'});
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1.23K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
-
-  send(win, {
-    type: 'usage_info',
-    text: 'no metrics here',
-    taskId: 'parent-task',
-  });
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
-
-  send(win, {
-    type: 'usage_info',
-    text: '',
-    total_tokens: 2000,
-    cost: 'N/A',
-    total_steps: 4,
-    taskId: 'parent-task',
-  });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 2.00K');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
-  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 4');
 
   send(win, {
     type: 'usage_info',
@@ -158,30 +132,10 @@ function testUsageInfoFallbackAndNABranches() {
     cost: '$0.6000',
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 4');
+  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.60');
 
-  win.close();
-  console.log('  ok - usage_info fallback / N/A / missing-field branches');
-}
-
-function testResultEventHeaderBranches() {
-  const {win} = makePage({beforeScripts: stubRaf});
-
-  send(win, {
-    type: 'result',
-    text: 'success: true\nsummary: done',
-    summary: 'done',
-    success: true,
-    total_tokens: 42000,
-    cost: '$0.7000',
-    step_count: 12,
-    taskId: 'parent-task',
-  });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42.0K');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.70');
-  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 12');
-
+  // A result that ran nothing keeps the numbers already on the header.
   send(win, {
     type: 'result',
     text: 'success: true\nsummary: noop',
@@ -192,19 +146,18 @@ function testResultEventHeaderBranches() {
     step_count: 0,
     taskId: 'parent-task',
   });
-  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 42.0K');
-  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.70');
-  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 12');
+  assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 2.50K');
+  assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.60');
+  assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
 
   win.close();
-  console.log('  ok - result event header update / preserve branches');
+  console.log('  ok - frames without a field keep the previous header numbers');
 }
 
 function runTests() {
   testParentHeaderTracksLiveAggregateUsage();
   testMisroutedParentUsageForOtherTaskDropped();
-  testUsageInfoFallbackAndNABranches();
-  testResultEventHeaderBranches();
+  testMissingFieldsKeepThePreviousNumbers();
   console.log('liveParentCostHeader.test.js: all tests passed');
 }
 

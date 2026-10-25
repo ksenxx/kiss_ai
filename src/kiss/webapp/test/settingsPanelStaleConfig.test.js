@@ -192,35 +192,15 @@ function testClosedPanelIsStillRepainted() {
   console.log('  ok - a closed panel is still repainted by configData');
 }
 
-// Reopening the panel starts a new editing session: what was typed
-// before has been saved, so the fresh reply must win again.
-function testReopeningClearsTheEditedMarks() {
-  const {win} = makePage();
-  openSettings(win);
-  typeInto(win, 'cfg-custom-headers', 'X-A: 1');
-  closeSettings(win);
-
-  openSettings(win);
-  send(win, {
-    type: 'configData',
-    config: {...STORED, custom_headers: 'X-Stored: 1'},
-    apiKeys: {},
-  });
-  assert.strictEqual(
-    win.document.getElementById('cfg-custom-headers').value,
-    'X-Stored: 1',
-    'a new editing session must accept the stored value again',
-  );
-  win.close();
-  console.log('  ok - reopening the panel clears the edited marks');
-}
+// Reopening the panel (a new editing session accepts the stored value
+// again) is covered by settingsEditedGuardRepaint.test.js
+// (testReopenedPanelShowsTheServerValueNotTheOldEdit).
 
 function main() {
   testLateConfigDataDoesNotClobberTypedKey();
   testClosingBeforeTheReplyStillSavesTheEdit();
   testUntouchedPanelStillSavesNothing();
   testClosedPanelIsStillRepainted();
-  testReopeningClearsTheEditedMarks();
   console.log('settingsPanelStaleConfig.test.js: all tests passed');
 }
 

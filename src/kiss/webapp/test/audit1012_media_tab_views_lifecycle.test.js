@@ -88,7 +88,6 @@ function bundleFor(url) {
   return FAKE_XTERM_BUNDLE;
 }
 
-/** A macrotask turn: every promise chain started so far has settled. */
 /** Let the pending fetches succeed and the load chain settle. */
 async function completeDownloads(page) {
   const batch = page.fetches.splice(0);

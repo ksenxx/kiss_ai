@@ -161,9 +161,8 @@ class TerminalService:
         self._sessions: dict[str, _Session] = {}
         # Guards ``_sessions`` and ``_openings``; never held across a fork.
         self._lock = threading.Lock()
-        # One spawn at a time: the start-up files are written through
-        # one temporary name, and a fork must not run while another
-        # spawn is between its fork and its session's registration.
+        # One spawn at a time: a fork must not run while another spawn
+        # is between its fork and its session's registration.
         self._spawn_lock = threading.Lock()
         self._openings: list[_Opening] = []
 

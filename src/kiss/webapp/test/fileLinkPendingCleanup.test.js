@@ -21,20 +21,10 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {makeWorkDirPage, pendingCounts} = require('./file_link_helpers');
 
 const {send, clickTab} = harness;
 const WORK_DIR = '/tmp/kiss-link-cleanup';
-
-function makePage() {
-  const page = harness.makePage();
-  send(page.win, {
-    type: 'configData',
-    config: {work_dir: WORK_DIR},
-    apiKeys: {},
-  });
-  page.win._testApi.endLaunch();
-  return page;
-}
 
 function isOpen(win, tabId) {
   return win._testApi.openTabs().some(t => t.id === tabId);
@@ -64,13 +54,6 @@ function sendToolResult(win, tabId, content) {
   });
 }
 
-// The probe's object is built in the JSDOM realm; copy it into this one
-// so deepStrictEqual compares values rather than prototypes.
-function counts(win) {
-  const c = win._testApi.pendingFileLinkCounts();
-  return {spans: c.spans, checks: c.checks};
-}
-
 function checkPathCommands(posted) {
   return posted
     .filter(m => m && m.type === 'checkPaths')
@@ -81,7 +64,7 @@ function checkPathCommands(posted) {
 // Until it was handled, the in-flight key survived the outage and every
 // later panel mentioning that path sent nothing at all.
 function testLostReplyDoesNotWedgeThePathForEver() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
   const tabId = win._testApi.getActiveTabId();
 
   sendToolResult(win, tabId, 'wrote ./src/foo.py');
@@ -102,19 +85,12 @@ function testLostReplyDoesNotWedgeThePathForEver() {
     'a check already in flight must not be sent twice',
   );
 
-  // The daemon dies before answering, then comes back. The key of a
-  // check nothing can answer must not survive the outage, and the spans
-  // it was for must be asked about again -- see
-  // fileLinkReissueOnReconnect.test.js for the reissue itself.
+  // The daemon dies before answering, then comes back: the reconnect
+  // re-asks about the path (fileLinkReissueOnReconnect pins the reissue).
   send(win, {type: 'daemonStatus', connected: false});
   posted.length = 0;
   send(win, {type: 'daemonStatus', connected: true});
-  assert.deepStrictEqual(
-    checkPathCommands(posted).map(c => c.paths),
-    [['./src/foo.py']],
-    'a reply that can never arrive must not suppress the check for the ' +
-      'rest of the session — the path would stay inert for ever',
-  );
+  assert.strictEqual(checkPathCommands(posted).length, 1, 'precondition: reissued');
 
   // That reissue is itself in flight now, so a later panel mentioning
   // the same path is deduped against it rather than asking a third time.
@@ -144,7 +120,7 @@ function testLostReplyDoesNotWedgeThePathForEver() {
 }
 
 function testClosingATabReleasesItsPendingSpans() {
-  const {win} = makePage();
+  const {win} = makeWorkDirPage(WORK_DIR);
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
 
@@ -152,14 +128,14 @@ function testClosingATabReleasesItsPendingSpans() {
   for (let i = 0; i < 20; i += 1) {
     sendToolResult(win, tabB, `touched ./src/gen${i}.py`);
   }
-  const before = counts(win);
+  const before = pendingCounts(win);
   assert.strictEqual(before.spans, 20, 'twenty spans must be waiting');
   assert.strictEqual(before.checks, 20, 'twenty checks must be in flight');
 
   // "+" moves the user to a fresh chat (the transcript of B detaches
   // into its fragment) and closes the idle chat B behind them.
   leaveAndRetire(win, tabB);
-  const after = counts(win);
+  const after = pendingCounts(win);
   assert.strictEqual(
     after.spans,
     0,
@@ -176,7 +152,7 @@ function testClosingATabReleasesItsPendingSpans() {
 }
 
 function testClearingATranscriptReleasesItsPendingSpans() {
-  const {win} = makePage();
+  const {win} = makeWorkDirPage(WORK_DIR);
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
@@ -185,7 +161,7 @@ function testClearingATranscriptReleasesItsPendingSpans() {
   sendToolResult(win, tabA, 'visible ./src/a.py');
   sendToolResult(win, tabB, 'hidden ./src/b.py');
   assert.strictEqual(
-    counts(win).spans,
+    pendingCounts(win).spans,
     2,
     'both tabs must have a span waiting',
   );
@@ -193,7 +169,7 @@ function testClearingATranscriptReleasesItsPendingSpans() {
   // A new task starts in the hidden tab: its transcript is discarded.
   send(win, {type: 'clear', tabId: tabB});
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 1, checks: 1},
     "clearing a background tab must release exactly that tab's spans",
   );
@@ -201,7 +177,7 @@ function testClearingATranscriptReleasesItsPendingSpans() {
   // ...and now in the visible one.
   send(win, {type: 'clear', tabId: tabA});
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 0, checks: 0},
     'clearing the visible transcript must release its spans too',
   );
@@ -210,7 +186,7 @@ function testClearingATranscriptReleasesItsPendingSpans() {
 }
 
 function testShowWelcomeReleasesPendingSpans() {
-  const {win} = makePage();
+  const {win} = makeWorkDirPage(WORK_DIR);
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
@@ -221,7 +197,7 @@ function testShowWelcomeReleasesPendingSpans() {
 
   send(win, {type: 'showWelcome', tabId: tabB});
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 1, checks: 1},
     'resetting a background tab to the welcome screen must release its ' +
       'spans',
@@ -229,7 +205,7 @@ function testShowWelcomeReleasesPendingSpans() {
 
   send(win, {type: 'showWelcome', tabId: tabA});
   assert.deepStrictEqual(
-    counts(win),
+    pendingCounts(win),
     {spans: 0, checks: 0},
     'resetting the visible tab to the welcome screen must release its ' +
       'spans',
@@ -238,43 +214,14 @@ function testShowWelcomeReleasesPendingSpans() {
   console.log('  ok - showWelcome releases pending file links');
 }
 
-// Control: an ordinary answered round trip must still empty both sets,
-// and must not be disturbed by the new cleanup.
-function testAnsweredCheckStillEmptiesBothSets() {
-  const {win} = makePage();
-  const tabId = win._testApi.getActiveTabId();
-  sendToolResult(win, tabId, 'wrote ./src/ok.py and ./src/gone.py');
-  assert.strictEqual(counts(win).spans, 2);
-
-  send(win, {
-    type: 'pathsExist',
-    tabId,
-    workDir: WORK_DIR,
-    results: {'./src/ok.py': true, './src/gone.py': false},
-  });
-  assert.deepStrictEqual(
-    counts(win),
-    {spans: 0, checks: 0},
-    'an answered check must leave nothing behind',
-  );
-  assert.ok(
-    win.document.querySelector('#output [data-path="./src/ok.py"]'),
-    'an existing file must become a link',
-  );
-  assert.ok(
-    win.document.querySelector('#output [data-path-missing]'),
-    'a missing file must be greyed out',
-  );
-  win.close();
-  console.log('  ok - an answered round trip still empties both sets');
-}
+// An ordinary answered round trip emptying both sets is the tail of
+// fileLinkReissueOnReconnect.testReconnectReissuesTheLostCheck.
 
 function main() {
   testLostReplyDoesNotWedgeThePathForEver();
   testClosingATabReleasesItsPendingSpans();
   testClearingATranscriptReleasesItsPendingSpans();
   testShowWelcomeReleasesPendingSpans();
-  testAnsweredCheckStillEmptiesBothSets();
   console.log('fileLinkPendingCleanup.test.js: all tests passed');
 }
 

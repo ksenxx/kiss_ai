@@ -382,18 +382,6 @@ class TestSynologyChat:
         assert messages[0]["text"] == "hello bot"
         assert messages[0]["ts"] == "1700000000"
 
-    def test_webhook_port_from_config(self) -> None:
-        """``webhook_port`` is honoured (0 included); absent, non-numeric or
-        out-of-range values fall back to the default so a bad config still
-        starts the server."""
-        default = syno_mod._DEFAULT_WEBHOOK_PORT
-        assert syno_mod._webhook_port({}) == default
-        assert syno_mod._webhook_port({"webhook_port": ""}) == default
-        assert syno_mod._webhook_port({"webhook_port": "0"}) == 0
-        assert syno_mod._webhook_port({"webhook_port": "18090"}) == 18090
-        for bad in ("abc", "-1", "65536"):
-            assert syno_mod._webhook_port({"webhook_port": bad}) == default
-
     def test_send_message_posts_payload_in_body_without_channel_id(self) -> None:
         """send_message must send payload= in the POST body (not URL params)
         and must not include the unsupported channel_id key."""
@@ -435,3 +423,16 @@ class TestSynologyChat:
         assert [m["text"] for m in messages] == ["m0", "m1"]
         messages, _ = backend.poll_messages("chanA", "0", limit=10)
         assert [m["text"] for m in messages] == ["m2"]
+
+
+def test_synology_webhook_port_from_config() -> None:
+    """``webhook_port`` is honoured (0 included); absent, non-numeric or
+    out-of-range values fall back to the default so a bad config still
+    starts the server."""
+    default = syno_mod._DEFAULT_WEBHOOK_PORT
+    assert syno_mod._webhook_port({}) == default
+    assert syno_mod._webhook_port({"webhook_port": ""}) == default
+    assert syno_mod._webhook_port({"webhook_port": "0"}) == 0
+    assert syno_mod._webhook_port({"webhook_port": "18090"}) == 18090
+    for bad in ("abc", "-1", "65536"):
+        assert syno_mod._webhook_port({"webhook_port": bad}) == default

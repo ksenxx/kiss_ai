@@ -15,9 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage, send, stubRaf, MEDIA} = require('./simplify2_harness');
 
 // A real, valid 1x1 transparent PNG.
 const PNG_B64 =

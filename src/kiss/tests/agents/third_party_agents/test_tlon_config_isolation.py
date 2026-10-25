@@ -14,8 +14,6 @@ Fix verified here: ``ChannelConfig.path`` resolves lazily and honours
 ``$KISS_HOME``, so a test run under ``isolated_kiss_home`` (a fresh temp
 ``KISS_HOME`` per test) has fully isolated channel config state and a
 leftover config from another test cannot be seen at all.
-
-No mocks or test doubles: a real in-process HTTP server plays the Urbit ship.
 """
 
 from __future__ import annotations

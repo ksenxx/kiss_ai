@@ -87,7 +87,7 @@ const TS = 1767225600000;
 // Tab with a finished history task ('42') on screen, geometry faked so
 // edge overscroll can fire — same shape as adjacentTaskScroll.test.js.
 function setupWithHistoryTask(win, posted) {
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = harness.readyTabId(posted);
   const O = win.document.getElementById('output');
   fakeGeometry(O);
   send(win, {
@@ -337,7 +337,7 @@ function testDetachedLoaderRemovedOnRestore() {
 function testDaemonDisconnectClearsAdjacentLoading() {
   const {win, posted} = makePage();
   try {
-    const {tabId, O} = setupWithHistoryTask(win, posted);
+    const {O} = setupWithHistoryTask(win, posted);
     O.scrollTop = 0;
     wheel(win, O, -50, 10);
     assert.strictEqual(
